@@ -1889,6 +1889,7 @@ func main() {
 				Pool: deps.DB,
 			},
 			AccessResolver: audiobooks.NewABSAccessResolver(absUserRepo, userStoreProvider),
+			DownloadPolicy: audiobooks.NewABSDownloadPolicy(absUserRepo),
 			Recs:           recommendations.NewRepo(deps.DB),
 			Detail:         absDetailSvc,
 			SessionMgr:     sessionMgr,

@@ -46,6 +46,10 @@ type ABSHandlerDeps struct {
 	Settings       catalog.SettingsStore // encrypting decorator in production
 	Auth           absAuthAdapter        // see BuildABSHandler below
 	AccessResolver abs.AccessResolver
+	// DownloadPolicy gates the offline-save file routes on the account's
+	// download privilege (models.User.DownloadAllowed). When nil the ABS
+	// handler allows downloads, so production must supply a real resolver.
+	DownloadPolicy abs.DownloadPolicy
 	// Recs is the recommendations repository used to power the
 	// /items/{id}/similar endpoint via embedding nearest-neighbor search.
 	// Optional; when nil, ABSRecommender falls back to the shared-genre
@@ -150,6 +154,7 @@ func (s *Service) BuildABSHandler(deps ABSHandlerDeps) *abs.Handler {
 		TokenStore:           tokenStore,
 		CredValidator:        deps.Auth,
 		AccessResolver:       deps.AccessResolver,
+		DownloadPolicy:       deps.DownloadPolicy,
 		Config:               configProvider,
 		Publisher:            nil, // EventPublisher: no-op stub; Socket.io handles realtime
 		Recommender:          buildABSRecommender(deps),

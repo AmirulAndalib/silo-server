@@ -230,6 +230,18 @@ func (h *Handler) loginEnvelope(
 
 	nowMs := now.UnixMilli()
 
+	// Advertise the real download privilege so compliant ABS clients hide the
+	// offline-save UI for restricted users (the file routes enforce it
+	// server-side regardless). On a resolver error, fail closed to false: the
+	// server-side gate is the real guard, and hiding the UI when uncertain is
+	// the safe default. The remaining flags (update/delete/upload/
+	// accessExplicitContent) stay hardcoded true because this compat layer does
+	// not implement those mutations — deriving them is out of scope for #141.
+	downloadPerm, err := h.downloadAllowed(r.Context(), userID)
+	if err != nil {
+		downloadPerm = false
+	}
+
 	user := map[string]any{
 		"id":                              userID,
 		"username":                        name,
@@ -246,7 +258,7 @@ func (h *Handler) loginEnvelope(
 		"lastSeen":                        nowMs,
 		"createdAt":                       nowMs,
 		"permissions": map[string]any{
-			"download":                  true,
+			"download":                  downloadPerm,
 			"update":                    true,
 			"delete":                    true,
 			"upload":                    true,

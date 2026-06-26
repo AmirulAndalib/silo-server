@@ -49,3 +49,40 @@ func (r *ABSAccessResolver) ResolveABSAccess(ctx context.Context, userID, profil
 		ProfileID:          scope.ProfileID,
 	}, nil
 }
+
+// ABSDownloadPolicy reports whether an ABS-authenticated account may download
+// (offline-save) media, backing the abs.DownloadPolicy dependency. It mirrors
+// the native download service (internal/download/service.go), which loads the
+// user and checks models.User.DownloadAllowed — keeping the privilege decision
+// in one place rather than re-deriving it from the access filter.
+type ABSDownloadPolicy struct {
+	users access.UserRepository
+}
+
+// NewABSDownloadPolicy constructs the download-privilege resolver. Returns nil
+// when no user repository is available; abs.Handler treats a nil policy as
+// "allow", so callers must wire a real repository to enforce the gate.
+func NewABSDownloadPolicy(users access.UserRepository) *ABSDownloadPolicy {
+	if users == nil {
+		return nil
+	}
+	return &ABSDownloadPolicy{users: users}
+}
+
+// DownloadAllowed loads the account by its numeric ABS user ID and reports its
+// download privilege. A malformed ID or a load failure returns an error, which
+// the caller fails closed on (denying the download).
+func (p *ABSDownloadPolicy) DownloadAllowed(ctx context.Context, userID string) (bool, error) {
+	if p == nil || p.users == nil {
+		return true, nil
+	}
+	uid, err := strconv.Atoi(userID)
+	if err != nil {
+		return false, fmt.Errorf("invalid ABS user id %q: %w", userID, err)
+	}
+	user, err := p.users.GetByID(ctx, uid)
+	if err != nil {
+		return false, fmt.Errorf("loading user %d: %w", uid, err)
+	}
+	return user.DownloadAllowed, nil
+}

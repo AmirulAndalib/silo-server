@@ -59,6 +59,16 @@ func (h *Handler) handleFileStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enforce the account's download privilege. Both /file/{ino} variants are
+	// the offline-save surface (streaming uses the session-scoped public-track
+	// route), so a restricted user must be hard-gated here — mirrors the native
+	// download path's models.User.DownloadAllowed check. Fail closed: a
+	// resolution error denies rather than serving the file.
+	if ok, err := h.downloadAllowed(r.Context(), a.UserID); err != nil || !ok {
+		http.Error(w, "downloads are not permitted for this account", http.StatusForbidden)
+		return
+	}
+
 	contentID := chi.URLParam(r, "libraryItemId")
 	inoStr := chi.URLParam(r, "ino")
 

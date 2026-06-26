@@ -195,6 +195,22 @@ type Recommender interface {
 	Similar(ctx context.Context, contentID string, limit int) ([]string, error)
 }
 
+// DownloadPolicy reports whether an ABS-authenticated account may download
+// (offline-save) media. It mirrors the native download path, which loads the
+// user and rejects with download.ErrDownloadNotAllowed when
+// models.User.DownloadAllowed is false (see internal/download/service.go).
+//
+// The ABS file routes (/items/{id}/file/{ino} and the /download variant) are
+// the offline-save surface; streaming uses session-scoped track URLs and is
+// unaffected. May be nil in non-production wiring (e.g. tests), in which case
+// the handler preserves its prior allow-everything behavior — production wires
+// a real resolver so restricted users are gated.
+type DownloadPolicy interface {
+	// DownloadAllowed reports whether the account identified by the ABS user
+	// ID (the numeric users.id, as a string) may download media.
+	DownloadAllowed(ctx context.Context, userID string) (bool, error)
+}
+
 // ---------------------------------------------------------------------------
 // Config provider
 // ---------------------------------------------------------------------------
@@ -226,7 +242,11 @@ type Dependencies struct {
 	Config         ConfigProvider
 	Publisher      EventPublisher // may be nil
 	Recommender    Recommender    // may be nil
-	LoginLimiter   *LoginLimiter  // may be nil — one is created if absent
+	// DownloadPolicy gates the offline-save file routes on the account's
+	// download privilege. May be nil; when unset the handler allows downloads
+	// (preserving prior behavior in non-production wiring).
+	DownloadPolicy DownloadPolicy
+	LoginLimiter   *LoginLimiter // may be nil — one is created if absent
 	// InstallID returns the current plugin install ID for building
 	// host-proxy-routable URLs. Defaults to "silo.audiobooks" when nil.
 	InstallID func() string
@@ -569,6 +589,18 @@ func (h *Handler) accessFilterFromRequest(r *http.Request) (catalog.AccessFilter
 	}
 	filter, err := h.accessFilterForAuth(r.Context(), a)
 	return filter, true, err
+}
+
+// downloadAllowed reports whether the given ABS user may download (offline-save)
+// media. When no DownloadPolicy is wired (non-production), it allows downloads
+// to preserve the handler's prior behavior; production always supplies a real
+// resolver. Errors from the resolver propagate to the caller, which fails
+// closed (the file routes treat a resolution error as a denial).
+func (h *Handler) downloadAllowed(ctx context.Context, userID string) (bool, error) {
+	if h.deps.DownloadPolicy == nil {
+		return true, nil
+	}
+	return h.deps.DownloadPolicy.DownloadAllowed(ctx, userID)
 }
 
 func emptyAccessFilter() catalog.AccessFilter {
