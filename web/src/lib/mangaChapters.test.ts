@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { MangaChapter } from "@/api/types";
-import { buildMangaList, prettifyVolumeLabel } from "./mangaChapters";
+import { buildMangaList, prettifyVolumeLabel, resumeState } from "./mangaChapters";
 
 function chapter(partial: Partial<MangaChapter>): MangaChapter {
   return {
@@ -11,6 +11,8 @@ function chapter(partial: Partial<MangaChapter>): MangaChapter {
     title: partial.title ?? "Chapter",
     chapter_index: partial.chapter_index,
     volume: partial.volume,
+    read: partial.read,
+    progress: partial.progress,
   };
 }
 
@@ -153,5 +155,76 @@ describe("volume token normalization", () => {
       { content_id: "b", title: "v2", chapter_index: 2, volume: "v2" },
     ]);
     expect(entries).toHaveLength(2);
+  });
+});
+
+describe("resumeState", () => {
+  it("returns null for an empty list", () => {
+    expect(resumeState(buildMangaList([]))).toBeNull();
+  });
+
+  it("returns null once every chapter is read (caller restarts)", () => {
+    const entries = buildMangaList([
+      chapter({ content_id: "v01", chapter_index: 1, volume: "v01", read: true }),
+      chapter({ content_id: "v02", chapter_index: 2, volume: "v02", read: true }),
+    ]);
+    expect(resumeState(entries)).toBeNull();
+  });
+
+  it("targets the first volume with no earlier-read and no progress (Start Reading)", () => {
+    const entries = buildMangaList([
+      chapter({ content_id: "v01", chapter_index: 1, volume: "v01" }),
+      chapter({ content_id: "v02", chapter_index: 2, volume: "v02" }),
+    ]);
+    expect(resumeState(entries)).toEqual({
+      target: expect.objectContaining({ chapter: expect.objectContaining({ content_id: "v01" }) }),
+      hasEarlierRead: false,
+      targetInProgress: false,
+    });
+  });
+
+  it("flags the target in progress when it is part-read but unfinished (Resume Reading)", () => {
+    const entries = buildMangaList([
+      chapter({ content_id: "v01", chapter_index: 1, volume: "v01", progress: 0.18 }),
+      chapter({ content_id: "v02", chapter_index: 2, volume: "v02" }),
+    ]);
+    const state = resumeState(entries);
+    expect(state?.target.chapter.content_id).toBe("v01");
+    expect(state?.hasEarlierRead).toBe(false);
+    expect(state?.targetInProgress).toBe(true);
+  });
+
+  it("does not treat a fully read (progress 1, read true) earlier chapter as in-progress (Continue)", () => {
+    const entries = buildMangaList([
+      chapter({ content_id: "v01", chapter_index: 1, volume: "v01", read: true, progress: 1 }),
+      chapter({ content_id: "v02", chapter_index: 2, volume: "v02" }),
+    ]);
+    const state = resumeState(entries);
+    expect(state?.target.chapter.content_id).toBe("v02");
+    expect(state?.hasEarlierRead).toBe(true);
+    expect(state?.targetInProgress).toBe(false);
+  });
+
+  it("scopes hasEarlierRead to chapters before the target: a later read volume does not flip an in-progress target to Continue", () => {
+    const entries = buildMangaList([
+      chapter({ content_id: "v01", chapter_index: 1, volume: "v01", progress: 0.18 }),
+      chapter({ content_id: "v02", chapter_index: 2, volume: "v02", read: true }),
+    ]);
+    const state = resumeState(entries);
+    expect(state?.target.chapter.content_id).toBe("v01");
+    expect(state?.hasEarlierRead).toBe(false);
+    expect(state?.targetInProgress).toBe(true);
+  });
+
+  it("does not flag a full-progress (1.0) target with a stale/absent read flag as in-progress", () => {
+    // The server marks a chapter read past its finished threshold, so a target
+    // at full progress with read still unset is finished, not "Resume Reading".
+    const entries = buildMangaList([
+      chapter({ content_id: "v01", chapter_index: 1, volume: "v01", progress: 1 }),
+      chapter({ content_id: "v02", chapter_index: 2, volume: "v02" }),
+    ]);
+    const state = resumeState(entries);
+    expect(state?.target.chapter.content_id).toBe("v01");
+    expect(state?.targetInProgress).toBe(false);
   });
 });

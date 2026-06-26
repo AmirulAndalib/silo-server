@@ -139,6 +139,92 @@ describe("MangaContent", () => {
     expect(cta).toHaveAttribute("href", "/reader/ebook/v01?libraryId=7" + seriesBackTo);
   });
 
+  it("shows a Resume Reading hero CTA when the first volume is part-read but unfinished", () => {
+    render(
+      <MemoryRouter>
+        <MangaContent
+          item={mangaItem([
+            {
+              content_id: "v01",
+              title: "Railgun v01",
+              chapter_index: 1,
+              volume: "v01",
+              progress: 0.18,
+            },
+            { content_id: "v02", title: "Railgun v02", chapter_index: 2, volume: "v02" },
+          ])}
+          libraryId={7}
+        />
+      </MemoryRouter>,
+    );
+
+    // 18% into Volume 1 with read=false: the CTA must resume the in-progress
+    // volume rather than offer a fresh "Start Reading".
+    const cta = screen.getByRole("link", { name: /Resume Reading/i });
+    expect(cta).toHaveTextContent("Volume 1");
+    expect(cta).toHaveAttribute("href", "/reader/ebook/v01?libraryId=7" + seriesBackTo);
+    expect(screen.queryByRole("link", { name: /Start Reading/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps Resume Reading on an in-progress volume even when a later volume was read out of order", () => {
+    render(
+      <MemoryRouter>
+        <MangaContent
+          item={mangaItem([
+            {
+              content_id: "v01",
+              title: "Railgun v01",
+              chapter_index: 1,
+              volume: "v01",
+              progress: 0.18,
+            },
+            {
+              content_id: "v02",
+              title: "Railgun v02",
+              chapter_index: 2,
+              volume: "v02",
+              read: true,
+            },
+          ])}
+          libraryId={7}
+        />
+      </MemoryRouter>,
+    );
+
+    // Volume 2 read out of order must not relabel the part-read Volume 1 as
+    // "Continue": the resume target (V1) is in progress, so it stays "Resume
+    // Reading" and still points at V1.
+    const cta = screen.getByRole("link", { name: /Resume Reading/i });
+    expect(cta).toHaveTextContent("Volume 1");
+    expect(cta).toHaveAttribute("href", "/reader/ebook/v01?libraryId=7" + seriesBackTo);
+    expect(screen.queryByRole("link", { name: /Continue/i })).not.toBeInTheDocument();
+  });
+
+  it("shows Start Reading (not Resume) for a full-progress target whose read flag is stale", () => {
+    render(
+      <MemoryRouter>
+        <MangaContent
+          item={mangaItem([
+            {
+              content_id: "v01",
+              title: "Railgun v01",
+              chapter_index: 1,
+              volume: "v01",
+              progress: 1,
+            },
+            { content_id: "v02", title: "Railgun v02", chapter_index: 2, volume: "v02" },
+          ])}
+          libraryId={7}
+        />
+      </MemoryRouter>,
+    );
+
+    // progress 1 means finished, not part-read: a stale/absent read flag must
+    // not surface "Resume Reading".
+    expect(screen.getByRole("link", { name: /Start Reading/i })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Resume Reading/i })).not.toBeInTheDocument();
+  });
+
   it("shows a Continue hero CTA targeting the first unread chapter mid-series", () => {
     render(
       <MemoryRouter>

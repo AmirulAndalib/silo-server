@@ -151,3 +151,38 @@ export function firstUnreadChapter(entries: MangaListEntry[]): FlatMangaChapter 
   }
   return null;
 }
+
+// A MangaResumeState describes where the viewer is in a series and how to label
+// the resume CTA. `target` is the first unfinished chapter (the resume point);
+// `hasEarlierRead` is true when any chapter *before* the target is finished
+// (the viewer is genuinely mid-series → "Continue"); `targetInProgress` is true
+// when the target itself is part-read but not finished (→ "Resume Reading").
+// Null means every chapter is read or the list is empty, so the caller offers a
+// restart.
+export interface MangaResumeState {
+  target: FlatMangaChapter;
+  hasEarlierRead: boolean;
+  targetInProgress: boolean;
+}
+
+// resumeState walks the flat reading order once to resolve the resume target and
+// classify it. `hasEarlierRead` is derived only from chapters before the target,
+// so a chapter read out of order *after* an unfinished one (skip-ahead or a
+// manual mark-read) does not mislabel an in-progress target as "Continue".
+//
+// `targetInProgress` requires a reading position strictly inside (0, 1): the
+// server marks a chapter read once progress crosses its finished threshold, so a
+// finished position (>= 1, or a stale/absent read flag at full progress) must
+// not be surfaced as "Resume Reading".
+export function resumeState(entries: MangaListEntry[]): MangaResumeState | null {
+  let hasEarlierRead = false;
+  for (const flat of flattenMangaList(entries)) {
+    if (flat.chapter.read !== true) {
+      const { progress } = flat.chapter;
+      const targetInProgress = typeof progress === "number" && progress > 0 && progress < 1;
+      return { target: flat, hasEarlierRead, targetInProgress };
+    }
+    hasEarlierRead = true;
+  }
+  return null;
+}

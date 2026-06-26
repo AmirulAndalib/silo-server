@@ -33,8 +33,8 @@ import { buildItemHref, buildMediaPlayHref } from "@/lib/mediaNavigation";
 import {
   buildMangaList,
   chapterLabel,
-  firstUnreadChapter,
   flattenMangaList,
+  resumeState,
   type MangaListEntry,
 } from "@/lib/mangaChapters";
 import { cn } from "@/lib/utils";
@@ -252,7 +252,6 @@ export default function MangaContent({
   const entries = useMemo(() => buildMangaList(item.manga?.chapters ?? []), [item.manga?.chapters]);
   const year = item.year ? String(item.year) : "";
   const publisher = item.studios?.[0];
-  const chapterRows = item.manga?.chapters ?? [];
   // Derive the badge counts from the rendered list so they always match the
   // rows on screen: a volume/section entry is one volume (buildMangaList
   // already canonicalizes v01 ≡ 1), a loose chapter entry is one chapter.
@@ -265,14 +264,27 @@ export default function MangaContent({
     [entries],
   );
 
-  // The resume target is the first unfinished chapter in reading order. Any
-  // finished chapter before it means the viewer is mid-series ("Continue");
-  // a fully read series restarts from the beginning.
-  const anyRead = chapterRows.some((chapter) => chapter.read === true);
-  const resume = useMemo(() => firstUnreadChapter(entries), [entries]);
+  // The resume target is the first unfinished chapter in reading order. The CTA
+  // verb reflects how far along the viewer is:
+  //   - "Continue" when an earlier chapter is fully read (genuinely mid-series).
+  //   - "Resume Reading" when the resume target itself is part-read but not yet
+  //     finished (e.g. 18% into Volume 1) — its read flag is still false, so
+  //     this is detected from reading progress, not the read flag.
+  //   - "Start Reading" on a pristine series with no progress anywhere.
+  //   - "Read Again" from the start once every chapter is read.
+  // hasEarlierRead is scoped to chapters *before* the target, so a later volume
+  // read out of order doesn't relabel an in-progress earlier volume "Continue".
+  const resume = useMemo(() => resumeState(entries), [entries]);
   const fallbackStart = entries.length > 0 ? flattenFirst(entries) : null;
   const cta = resume
-    ? { ...resume, verb: anyRead ? "Continue" : "Start Reading" }
+    ? {
+        ...resume.target,
+        verb: resume.hasEarlierRead
+          ? "Continue"
+          : resume.targetInProgress
+            ? "Resume Reading"
+            : "Start Reading",
+      }
     : fallbackStart
       ? { ...fallbackStart, verb: "Read Again" }
       : null;
@@ -375,12 +387,12 @@ export default function MangaContent({
               className="text-muted-foreground gap-1.5"
               onClick={() => {
                 document
-                  .getElementById(`manga-chapter-${resume.chapter.content_id}`)
+                  .getElementById(`manga-chapter-${resume.target.chapter.content_id}`)
                   ?.scrollIntoView({ behavior: "smooth", block: "center" });
               }}
             >
               <CornerDownRight className="size-4" />
-              Jump to {resume.label}
+              Jump to {resume.target.label}
             </Button>
           </div>
         )}
