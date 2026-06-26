@@ -59,6 +59,15 @@ func (h *Handler) handleOpenItemFeed(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "feed store unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	// A public RSS feed exposes /feed/{slug}/file/{ino} enclosures that serve
+	// raw audio bytes without auth (the slug is the capability). That is an
+	// offline-save surface, so a restricted account must not be able to mint
+	// one — otherwise the handleFileStream download gate is trivially bypassed.
+	if ok, err := h.downloadAllowed(r.Context(), a.UserID); err != nil || !ok {
+		http.Error(w, "downloads are not permitted for this account", http.StatusForbidden)
+		return
+	}
+
 	itemID := chi.URLParam(r, "itemId")
 	access, err := h.accessFilterForAuth(r.Context(), a)
 	if err != nil {
@@ -165,6 +174,12 @@ func (h *Handler) handlePublicFeed(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "feed get failed", http.StatusInternalServerError)
 		return
 	}
+	// Mirror handlePublicFeedFile: hide the feed (and its enclosure URLs) once
+	// the owner's download privilege is gone, failing closed on resolver error.
+	if ok, derr := h.downloadAllowed(r.Context(), f.UserID); derr != nil || !ok {
+		http.Error(w, "feed not found", http.StatusNotFound)
+		return
+	}
 
 	item, err := h.deps.MediaStore.GetAudiobookByID(r.Context(), f.LibraryItemID, emptyAccessFilter())
 	if err != nil || item == nil {
@@ -222,6 +237,15 @@ func (h *Handler) handlePublicFeedFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		http.Error(w, "feed get failed", http.StatusInternalServerError)
+		return
+	}
+	// Fail closed if the feed owner's download privilege was revoked after the
+	// feed was created (or a resolver error occurs): an existing feed must not
+	// keep serving bytes once the account loses the download permission. Hide
+	// the feed (404) rather than 403 so the route does not confirm slug
+	// existence to an unauthenticated caller.
+	if ok, derr := h.downloadAllowed(r.Context(), f.UserID); derr != nil || !ok {
+		http.Error(w, "feed not found", http.StatusNotFound)
 		return
 	}
 	inoStr := chi.URLParam(r, "ino")
