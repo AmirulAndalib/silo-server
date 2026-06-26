@@ -56,14 +56,29 @@ func (h *FilesystemHandler) HandleBrowse(w http.ResponseWriter, r *http.Request)
 
 	result := make([]filesystemBrowseEntry, 0, len(entries))
 	for _, entry := range entries {
+		name := entry.Name()
+		childPath := filepath.Join(cleaned, name)
+
+		// entry.IsDir() reports the lstat type, so a symlink that points at a
+		// directory is reported as a non-directory and would be skipped here.
+		// For symlinks, follow the link with os.Stat and include the entry only
+		// when its target resolves to a directory; this keeps symlinked library
+		// folders browsable (issue #208) while excluding symlinks to files and
+		// dangling symlinks (os.Stat fails). Non-symlink, non-directory entries
+		// take the fast path with no extra syscall.
 		if !entry.IsDir() {
-			continue
+			if entry.Type()&os.ModeSymlink == 0 {
+				continue
+			}
+			target, err := os.Stat(childPath)
+			if err != nil || !target.IsDir() {
+				continue
+			}
 		}
 
-		name := entry.Name()
 		result = append(result, filesystemBrowseEntry{
 			Name: name,
-			Path: filepath.Join(cleaned, name),
+			Path: childPath,
 		})
 	}
 
