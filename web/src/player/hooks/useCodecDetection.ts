@@ -170,8 +170,13 @@ export function useCodecDetection() {
     // Detect max resolution via reported screen dimensions.
     const max_resolution = detectMaxResolutionFromScreen(screen.width, screen.height);
 
-    // HDR detection (best effort).
-    const hdr = typeof matchMedia !== "undefined" && matchMedia("(dynamic-range: high)").matches;
+    // HDR detection (best effort). Firefox (116+) does not report HDR via the
+    // standard `(dynamic-range: high)` query but does via `(video-dynamic-range: high)`,
+    // so check both.
+    const hdr =
+      typeof matchMedia !== "undefined" &&
+      (matchMedia("(dynamic-range: high)").matches ||
+        matchMedia("(video-dynamic-range: high)").matches);
 
     return { codecs_video, codecs_audio, containers, max_resolution, hdr };
   }, []);
