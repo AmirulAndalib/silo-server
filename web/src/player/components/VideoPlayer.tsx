@@ -54,6 +54,7 @@ import type {
   SubtitleMode,
 } from "../types";
 import { toMediaTime, toPlayerTime } from "../utils/mediaTimeline";
+import { videoElementClassName } from "../utils/videoElementClassName";
 import { buildWatchTogetherInviteUrl } from "@/lib/watchTogether";
 import { toast } from "sonner";
 
@@ -2279,7 +2280,7 @@ export function VideoPlayer({
           media timeline as restarted HLS playback. */}
       <video
         ref={videoRef}
-        className={isDetached ? "h-full w-full" : "absolute inset-0 h-full w-full"}
+        className={videoElementClassName(isDetached)}
         onClick={displayMode === "postroll" ? undefined : handlePlayPause}
         playsInline
         style={!isPlayerReady ? { visibility: "hidden" } : undefined}
