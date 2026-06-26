@@ -61,9 +61,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	subtitleai "github.com/Silo-Server/silo-server/internal/subtitles/ai"
-	"github.com/Silo-Server/silo-server/internal/subtitles/opensubtitles"
-	"github.com/Silo-Server/silo-server/internal/subtitles/subdl"
-	"github.com/Silo-Server/silo-server/internal/subtitles/subsource"
+	"github.com/Silo-Server/silo-server/internal/subtitles/providerregistry"
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
 	"github.com/Silo-Server/silo-server/internal/taskmanager/repository"
 	"github.com/Silo-Server/silo-server/internal/usercollections"
@@ -980,34 +978,15 @@ func NewRouter(deps Dependencies) chi.Router {
 	// Build subtitle search handler if we have DB and S3.
 	var subtitleSearchHandler *handlers.SubtitleSearchHandler
 	if deps.DB != nil && deps.S3Public != nil && subtitleRepo != nil {
-		subtitleManager = subtitles.NewManager(subtitleRepo, deps.S3Public, deps.S3Public.Bucket())
-
-		// Load provider configs from DB and register enabled providers.
-		providerConfigs, _ := subtitleRepo.ListProviderConfigs(deps.AppContext)
-		for _, cfg := range providerConfigs {
-			if !cfg.Enabled {
-				continue
-			}
-			switch cfg.ProviderName {
-			case "opensubtitles":
-				if cfg.Username == "" || cfg.Password == "" {
-					continue
-				}
-				subtitleManager.RegisterProvider(opensubtitles.New(opensubtitles.Config{
-					Username: cfg.Username,
-					Password: cfg.Password,
-				}))
-			case "subdl":
-				if cfg.APIKey == "" {
-					continue
-				}
-				subtitleManager.RegisterProvider(subdl.New(subdl.Config{APIKey: cfg.APIKey}))
-			case "subsource":
-				if cfg.APIKey == "" {
-					continue
-				}
-				subtitleManager.RegisterProvider(subsource.New(subsource.Config{APIKey: cfg.APIKey}))
-			}
+		var managerErr error
+		subtitleManager, managerErr = providerregistry.NewManagerFromRepository(
+			deps.AppContext,
+			subtitleRepo,
+			deps.S3Public,
+			deps.S3Public.Bucket(),
+		)
+		if managerErr != nil {
+			slog.Warn("subtitle provider configuration unavailable", "error", managerErr)
 		}
 
 		mediaResolver := &pgSubtitleMediaResolver{pool: deps.DB}

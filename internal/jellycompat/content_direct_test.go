@@ -171,6 +171,9 @@ type progressCountingStore struct {
 	forUserCalls           int
 	listProgressCalls      int
 	lastListedMediaItemIDs []string
+	profile                *userstore.Profile
+	updatedProfileID       string
+	updatedProfileInput    userstore.UpdateProfileInput
 }
 
 func (s *progressCountingStore) ListProgressByMediaItems(_ context.Context, _ string, mediaItemIDs []string) (map[string]userstore.WatchProgress, error) {
@@ -184,13 +187,34 @@ func (s *progressCountingStore) CreateProfile(context.Context, userstore.Profile
 	panic("unused")
 }
 func (s *progressCountingStore) GetProfile(context.Context, string) (*userstore.Profile, error) {
-	panic("unused")
+	if s.profile == nil {
+		return nil, nil
+	}
+	profile := *s.profile
+	return &profile, nil
 }
 func (s *progressCountingStore) ListProfiles(context.Context) ([]userstore.Profile, error) {
 	panic("unused")
 }
-func (s *progressCountingStore) UpdateProfile(context.Context, string, userstore.UpdateProfileInput) error {
-	panic("unused")
+func (s *progressCountingStore) UpdateProfile(_ context.Context, profileID string, input userstore.UpdateProfileInput) error {
+	s.updatedProfileID = profileID
+	s.updatedProfileInput = input
+	if s.profile == nil {
+		return nil
+	}
+	if input.Language != nil {
+		s.profile.Language = *input.Language
+	}
+	if input.SubtitleLanguage != nil {
+		s.profile.SubtitleLanguage = *input.SubtitleLanguage
+	}
+	if input.SubtitleMode != nil {
+		s.profile.SubtitleMode = *input.SubtitleMode
+	}
+	if input.ShowForcedSubtitles != nil {
+		s.profile.ShowForcedSubtitles = *input.ShowForcedSubtitles
+	}
+	return nil
 }
 func (s *progressCountingStore) DeleteProfile(context.Context, string) error { panic("unused") }
 func (s *progressCountingStore) VerifyPIN(context.Context, string, string) (bool, error) {

@@ -19,10 +19,24 @@ import (
 
 type fakeSubtitleRepository struct {
 	downloaded map[int][]subtitles.DownloadedSubtitle
+	byKey      map[string]*subtitles.DownloadedSubtitle
 }
 
-func (r fakeSubtitleRepository) InsertDownloadedSubtitle(context.Context, *subtitles.DownloadedSubtitle) error {
-	panic("unused")
+func (r fakeSubtitleRepository) InsertDownloadedSubtitle(_ context.Context, sub *subtitles.DownloadedSubtitle) error {
+	if sub == nil {
+		return nil
+	}
+	if sub.ID == 0 && r.byKey != nil {
+		sub.ID = len(r.byKey) + 1
+	}
+	if r.byKey != nil {
+		copy := *sub
+		r.byKey[sub.S3Key] = &copy
+	}
+	if r.downloaded != nil {
+		r.downloaded[sub.MediaFileID] = append(r.downloaded[sub.MediaFileID], *sub)
+	}
+	return nil
 }
 
 func (r fakeSubtitleRepository) GetDownloadedSubtitle(context.Context, int) (*subtitles.DownloadedSubtitle, error) {
@@ -41,8 +55,11 @@ func (r fakeSubtitleRepository) DeleteDownloadedSubtitle(context.Context, int) (
 	panic("unused")
 }
 
-func (r fakeSubtitleRepository) GetDownloadedSubtitleByS3Key(context.Context, string) (*subtitles.DownloadedSubtitle, error) {
-	panic("unused")
+func (r fakeSubtitleRepository) GetDownloadedSubtitleByS3Key(_ context.Context, s3Key string) (*subtitles.DownloadedSubtitle, error) {
+	if r.byKey == nil {
+		return nil, nil
+	}
+	return r.byKey[s3Key], nil
 }
 
 func (r fakeSubtitleRepository) ListProviderConfigs(context.Context) ([]subtitles.ProviderConfig, error) {

@@ -1,6 +1,7 @@
 package jellycompat
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/recommendations"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
+	"github.com/Silo-Server/silo-server/internal/subtitles/providerregistry"
 )
 
 // NewRouter builds the Jellyfin-compatibility router.
@@ -62,13 +64,26 @@ func NewRouter(deps Dependencies) chi.Router {
 	r.Use(middleware.Recoverer)
 
 	systemHandler := NewSystemHandler(deps.CurrentConfig)
-	authHandler := NewAuthHandler(deps.CurrentConfig, deps.LoginResolver, deps.Authenticator)
+	authHandler := NewAuthHandler(deps.CurrentConfig, deps.LoginResolver, deps.Authenticator, deps.UserStoreProvider)
 	nextUpRepo := catalog.NewNextUpRepository(deps.DB, deps.UserStoreProvider)
 	var subtitleRepo subtitles.Repository
 	if deps.SubtitleRepo != nil {
 		subtitleRepo = deps.SubtitleRepo
 	} else if deps.DB != nil {
 		subtitleRepo = subtitles.NewPgRepository(deps.DB, deps.SecretCipher)
+	}
+	subtitleManager := deps.SubtitleManager
+	if subtitleManager == nil && subtitleRepo != nil && deps.S3Client != nil {
+		var err error
+		subtitleManager, err = providerregistry.NewManagerFromRepository(
+			context.Background(),
+			subtitleRepo,
+			deps.S3Client,
+			deps.S3Bucket,
+		)
+		if err != nil {
+			slog.Warn("jellycompat subtitle provider configuration unavailable", "error", err)
+		}
 	}
 	itemsHandler := NewItemsHandler(deps.ContentService, deps.UserDataService, deps.IDCodec, deps.Config, deps.ImageCache, nextUpRepo, deps.BrowseRepo, deps.PersonRepo, deps.DetailSvc, deps.ItemRepo, deps.EpisodeRepo, deps.SeasonRepo, deps.AccessFilterFn, subtitleRepo)
 	itemsHandler.recommender = deps.Recommender
@@ -92,6 +107,7 @@ func NewRouter(deps Dependencies) chi.Router {
 	}
 	userDataHandler := NewUserDataHandler(deps.ContentService, deps.UserDataService, deps.IDCodec, deps.Config)
 	playbackHandler := NewPlaybackHandler(deps.Config, deps.ContentService, deps.IDCodec, deps.DeviceProfiles, deps.PlaybackStore, deps.SessionMgr, deps.FileResolver, deps.UserStoreProvider)
+	subtitleHandler := NewSubtitleHandler(deps.ContentService, deps.IDCodec, subtitleManager)
 	if deps.DB != nil {
 		playbackHandler.profileStaler = recommendations.NewRepo(deps.DB)
 	}
@@ -143,6 +159,7 @@ func NewRouter(deps Dependencies) chi.Router {
 			r.Use(RequireSessionOrAPIKeySession(deps.Authenticator, adminAPIKeyAuth))
 			r.Get("/Users/Me", authHandler.HandleCurrentUser)
 			r.Get("/Users", authHandler.HandleUsers)
+			r.Post("/Users/Configuration", authHandler.HandleUpdateConfiguration)
 			r.Get("/Users/{id}", authHandler.HandleUserByID)
 			r.Get("/UserViews", itemsHandler.HandleViews)
 			r.Get("/UserViews/GroupingOptions", itemsHandler.HandleGroupingOptionsStub)
@@ -215,6 +232,8 @@ func NewRouter(deps Dependencies) chi.Router {
 			r.Post("/Items/{id}/PlaybackInfo", playbackHandler.HandlePlaybackInfo)
 			r.Get("/Users/{userId}/Items/{id}/PlaybackInfo", playbackHandler.HandlePlaybackInfo)
 			r.Post("/Users/{userId}/Items/{id}/PlaybackInfo", playbackHandler.HandlePlaybackInfo)
+			r.Get("/Items/{itemId}/RemoteSearch/Subtitles/{language}", subtitleHandler.HandleSearchRemoteSubtitles)
+			r.Post("/Items/{itemId}/RemoteSearch/Subtitles/{subtitleId}", subtitleHandler.HandleDownloadRemoteSubtitle)
 			r.Post("/Sessions/Playing", playbackHandler.HandleSessionPlaying)
 			r.Post("/Sessions/Playing/Progress", playbackHandler.HandleSessionPlayingProgress)
 			r.Post("/Sessions/Playing/Stopped", playbackHandler.HandleSessionPlayingStopped)

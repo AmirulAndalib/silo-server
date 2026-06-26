@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/lang"
+	"github.com/Silo-Server/silo-server/internal/userstore"
 )
 
 type authenticateByNameRequest struct {
@@ -73,7 +76,9 @@ type userDTOResponse struct {
 }
 
 type userConfigurationResponse struct {
+	AudioLanguagePreference    string   `json:"AudioLanguagePreference,omitempty"`
 	PlayDefaultAudioTrack      bool     `json:"PlayDefaultAudioTrack"`
+	SubtitleLanguagePreference string   `json:"SubtitleLanguagePreference,omitempty"`
 	DisplayMissingEpisodes     bool     `json:"DisplayMissingEpisodes"`
 	GroupedFolders             []string `json:"GroupedFolders"`
 	SubtitleMode               string   `json:"SubtitleMode"`
@@ -118,15 +123,22 @@ type AuthHandler struct {
 	cfg           func() *config.Config
 	loginResolver loginResolver
 	authenticator *Authenticator
+	storeProvider userstore.UserStoreProvider
 }
 
 // NewAuthHandler creates a new auth handler. The config provider is invoked
 // per request so compat setting changes apply without restart.
-func NewAuthHandler(cfg func() *config.Config, loginResolver loginResolver, authenticator *Authenticator) *AuthHandler {
+func NewAuthHandler(
+	cfg func() *config.Config,
+	loginResolver loginResolver,
+	authenticator *Authenticator,
+	storeProvider userstore.UserStoreProvider,
+) *AuthHandler {
 	return &AuthHandler{
 		cfg:           cfg,
 		loginResolver: loginResolver,
 		authenticator: authenticator,
+		storeProvider: storeProvider,
 	}
 }
 
@@ -209,6 +221,65 @@ func (h *AuthHandler) HandleUserByID(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.userDTO(session))
 }
 
+// HandleUpdateConfiguration serves POST /Users/Configuration.
+func (h *AuthHandler) HandleUpdateConfiguration(w http.ResponseWriter, r *http.Request) {
+	session := SessionFromContext(r.Context())
+	if session == nil {
+		writeError(w, http.StatusUnauthorized, "Unauthorized", "Missing authentication token")
+		return
+	}
+	queryUserID := strings.TrimSpace(newCaseInsensitiveQuery(r.URL.Query()).Get("userId"))
+	if queryUserID != "" && queryUserID != session.PseudoUserID.String() {
+		writeError(w, http.StatusForbidden, "Forbidden", "User configuration update forbidden")
+		return
+	}
+	if h.storeProvider == nil {
+		writeError(w, http.StatusServiceUnavailable, "Unavailable", "User preferences are unavailable")
+		return
+	}
+
+	var req userConfigurationUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BadRequest", "Invalid request body")
+		return
+	}
+	update := userstore.UpdateProfileInput{}
+	if req.AudioLanguagePreference != nil {
+		value := lang.Canonical(*req.AudioLanguagePreference)
+		update.Language = &value
+	}
+	if req.SubtitleLanguagePreference != nil {
+		value := lang.Canonical(*req.SubtitleLanguagePreference)
+		update.SubtitleLanguage = &value
+	}
+	if req.SubtitleMode != nil {
+		mode, showForced, hasShowForced, ok := siloSubtitleModeFromJellyfin(*req.SubtitleMode)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "BadRequest", "Invalid SubtitleMode")
+			return
+		}
+		update.SubtitleMode = &mode
+		if hasShowForced {
+			update.ShowForcedSubtitles = &showForced
+		}
+	}
+	if update.Language == nil && update.SubtitleLanguage == nil && update.SubtitleMode == nil && update.ShowForcedSubtitles == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	store, err := h.storeProvider.ForUser(r.Context(), session.StreamAppUserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "ServerError", "Failed to access user store")
+		return
+	}
+	if err := store.UpdateProfile(r.Context(), session.ProfileID, update); err != nil {
+		writeError(w, http.StatusNotFound, "NotFound", "Profile not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // HandleLogout serves POST /Sessions/Logout.
 func (h *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	token, ok := ExtractToken(r)
@@ -222,6 +293,7 @@ func (h *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (h *AuthHandler) userDTO(session *Session) userDTOResponse {
 	name := session.Username
+	profile := h.currentProfile(context.Background(), session)
 
 	return userDTOResponse{
 		ID:                        session.PseudoUserID.String(),
@@ -234,7 +306,7 @@ func (h *AuthHandler) userDTO(session *Session) userDTOResponse {
 			IsAdministrator:                 false,
 			IsHidden:                        false,
 			EnableCollectionManagement:      false,
-			EnableSubtitleManagement:        false,
+			EnableSubtitleManagement:        true,
 			EnableLyricManagement:           false,
 			IsDisabled:                      false,
 			EnableUserPreferenceAccess:      true,
@@ -264,21 +336,87 @@ func (h *AuthHandler) userDTO(session *Session) userDTOResponse {
 			PasswordResetProviderID:         "silo-local",
 			SyncPlayAccess:                  "None",
 		},
-		Configuration: userConfigurationResponse{
-			PlayDefaultAudioTrack:      true,
-			DisplayMissingEpisodes:     false,
-			GroupedFolders:             []string{},
-			SubtitleMode:               "Smart",
-			DisplayCollectionsView:     true,
-			EnableLocalPassword:        false,
-			OrderedViews:               []string{},
-			LatestItemsExcludes:        []string{},
-			MyMediaExcludes:            []string{},
-			HidePlayedInLatest:         false,
-			RememberAudioSelections:    true,
-			RememberSubtitleSelections: true,
-			EnableNextEpisodeAutoPlay:  true,
-		},
+		Configuration: h.userConfiguration(profile),
+	}
+}
+
+type userConfigurationUpdateRequest struct {
+	AudioLanguagePreference    *string `json:"AudioLanguagePreference"`
+	SubtitleLanguagePreference *string `json:"SubtitleLanguagePreference"`
+	SubtitleMode               *string `json:"SubtitleMode"`
+}
+
+func (h *AuthHandler) currentProfile(ctx context.Context, session *Session) *userstore.Profile {
+	if h == nil || h.storeProvider == nil || session == nil || session.ProfileID == "" || session.StreamAppUserID == 0 {
+		return nil
+	}
+	store, err := h.storeProvider.ForUser(ctx, session.StreamAppUserID)
+	if err != nil {
+		return nil
+	}
+	profile, err := store.GetProfile(ctx, session.ProfileID)
+	if err != nil {
+		return nil
+	}
+	return profile
+}
+
+func (h *AuthHandler) userConfiguration(profile *userstore.Profile) userConfigurationResponse {
+	subtitleMode := "Smart"
+	audioLanguage := ""
+	subtitleLanguage := ""
+	if profile != nil {
+		audioLanguage = profile.Language
+		subtitleLanguage = profile.SubtitleLanguage
+		subtitleMode = jellyfinSubtitleModeFromProfile(*profile)
+	}
+	return userConfigurationResponse{
+		AudioLanguagePreference:    audioLanguage,
+		PlayDefaultAudioTrack:      true,
+		SubtitleLanguagePreference: subtitleLanguage,
+		DisplayMissingEpisodes:     false,
+		GroupedFolders:             []string{},
+		SubtitleMode:               subtitleMode,
+		DisplayCollectionsView:     true,
+		EnableLocalPassword:        false,
+		OrderedViews:               []string{},
+		LatestItemsExcludes:        []string{},
+		MyMediaExcludes:            []string{},
+		HidePlayedInLatest:         false,
+		RememberAudioSelections:    true,
+		RememberSubtitleSelections: true,
+		EnableNextEpisodeAutoPlay:  true,
+	}
+}
+
+func jellyfinSubtitleModeFromProfile(profile userstore.Profile) string {
+	switch strings.ToLower(strings.TrimSpace(profile.SubtitleMode)) {
+	case "always":
+		return "Always"
+	case "off":
+		if profile.ShowForcedSubtitles {
+			return "OnlyForced"
+		}
+		return "None"
+	case "", "auto":
+		return "Smart"
+	default:
+		return "Smart"
+	}
+}
+
+func siloSubtitleModeFromJellyfin(mode string) (string, bool, bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "default", "smart":
+		return "auto", false, false, true
+	case "always":
+		return "always", false, false, true
+	case "none":
+		return "off", false, true, true
+	case "onlyforced":
+		return "off", true, true, true
+	default:
+		return "", false, false, false
 	}
 }
 

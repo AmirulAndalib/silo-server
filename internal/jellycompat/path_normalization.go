@@ -48,6 +48,7 @@ var compatPathSegments = map[string]string{
 	"userplayeditems":    "UserPlayedItems",
 	"favoriteitems":      "FavoriteItems",
 	"playeditems":        "PlayedItems",
+	"remotesearch":       "RemoteSearch",
 	"search":             "Search",
 	"hints":              "Hints",
 	"sessions":           "Sessions",

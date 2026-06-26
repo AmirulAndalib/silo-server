@@ -81,6 +81,9 @@ type upstreamItemDetail struct {
 	Genres            []string                `json:"genres"`
 	RatingIMDB        *float64                `json:"rating_imdb"`
 	RatingTMDB        *float64                `json:"rating_tmdb"`
+	ImdbID            string                  `json:"imdb_id,omitempty"`
+	TmdbID            string                  `json:"tmdb_id,omitempty"`
+	TvdbID            string                  `json:"tvdb_id,omitempty"`
 	PosterURL         string                  `json:"poster_url"`
 	BackdropURL       string                  `json:"backdrop_url"`
 	LogoURL           string                  `json:"logo_url"`
