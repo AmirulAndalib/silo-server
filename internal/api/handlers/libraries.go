@@ -2495,10 +2495,17 @@ func (h *LibraryHandler) HandleListUnmatchedItems(w http.ResponseWriter, r *http
 		)`
 	}
 
+	// Manga chapters are type='ebook' rows linked into a manga series via
+	// manga_chapters. They are internal sub-units that keep a non-matched status,
+	// so without this guard they leak into the admin Unmatched queue (issue #204).
+	// Applied to both the count and the list query so the total stays consistent.
+	statusWhere := `WHERE mi.status IN ('unmatched', 'pending', 'ambiguous')
+			AND ` + catalog.MangaChapterExclusionWhere("mi")
+
 	countSQL := `
 		SELECT COUNT(*)
 		FROM media_items mi
-		WHERE mi.status IN ('unmatched', 'pending', 'ambiguous')`
+		` + statusWhere
 	countSQL += filter
 
 	var total int
@@ -2521,10 +2528,10 @@ func (h *LibraryHandler) HandleListUnmatchedItems(w http.ResponseWriter, r *http
 			WHERE mil.content_id = mi.content_id
 			LIMIT 1
 		) lib ON true
-		WHERE mi.status IN ('unmatched', 'pending', 'ambiguous')%s
+		%s%s
 		ORDER BY mi.title ASC, mi.content_id ASC
 		LIMIT $%d OFFSET $%d
-	`, filter, len(filterArgs)+1, len(filterArgs)+2)
+	`, statusWhere, filter, len(filterArgs)+1, len(filterArgs)+2)
 
 	rows, err := h.pool.Query(r.Context(), listSQL, listArgs...)
 	if err != nil {
