@@ -50,7 +50,7 @@ func (s *countingContentService) BrowseItems(context.Context, *Session, url.Valu
 	panic("unused")
 }
 
-func (s *countingContentService) SearchItems(context.Context, *Session, string, []string, int, int, *int) (*upstreamBrowseResponse, error) {
+func (s *countingContentService) SearchItems(context.Context, *Session, SearchItemsOptions) (*upstreamBrowseResponse, error) {
 	panic("unused")
 }
 
@@ -79,6 +79,20 @@ func (s *countingContentService) ListEpisodesBySeasonID(context.Context, *Sessio
 
 func (s *countingContentService) ListItemFilters(context.Context, *Session, url.Values) (*upstreamItemFiltersResponse, error) {
 	panic("unused")
+}
+
+type recordingSearchContentService struct {
+	countingContentService
+	options []SearchItemsOptions
+	result  *upstreamBrowseResponse
+}
+
+func (s *recordingSearchContentService) SearchItems(_ context.Context, _ *Session, opts SearchItemsOptions) (*upstreamBrowseResponse, error) {
+	s.options = append(s.options, opts)
+	if s.result != nil {
+		return s.result, nil
+	}
+	return &upstreamBrowseResponse{Items: []upstreamListItem{}}, nil
 }
 
 func TestHandleItems_SeriesParentSeasonFilterReturnsPagedSeasons(t *testing.T) {
@@ -137,6 +151,170 @@ func TestHandleItems_SeriesParentSeasonFilterReturnsPagedSeasons(t *testing.T) {
 	if item.ParentID != encodedSeriesID || item.SeriesID != encodedSeriesID {
 		t.Fatalf("ParentID/SeriesID = %q/%q, want %q/%q",
 			item.ParentID, item.SeriesID, encodedSeriesID, encodedSeriesID)
+	}
+}
+
+func TestHandleItemsSearchPropagatesEnableTotalRecordCount(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		querySuffix   string
+		wantSkipTotal bool
+	}{
+		{name: "default includes total", wantSkipTotal: false},
+		{name: "disabled skips total", querySuffix: "&EnableTotalRecordCount=false", wantSkipTotal: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			codec := NewResourceIDCodec()
+			contentSvc := &recordingSearchContentService{}
+			h := &ItemsHandler{
+				content:  contentSvc,
+				userData: &mockUserDataService{},
+				codec:    codec,
+				mapper:   newMapper(codec, &config.Config{}),
+				images:   NewImageCache(time.Hour, time.Now),
+			}
+
+			req := httptest.NewRequest("GET", "/Users/test/Items?SearchTerm=dune&Limit=5&StartIndex=2"+tc.querySuffix, nil)
+			req = req.WithContext(context.WithValue(req.Context(), compatSessionKey, &Session{
+				StreamAppUserID: 1,
+				ProfileID:       "profile-1",
+			}))
+
+			rec := httptest.NewRecorder()
+			h.HandleItems(rec, req)
+
+			if rec.Code != 200 {
+				t.Fatalf("expected status 200; got %d, body=%s", rec.Code, rec.Body.String())
+			}
+			if len(contentSvc.options) != 1 {
+				t.Fatalf("SearchItems calls = %d, want 1", len(contentSvc.options))
+			}
+			opts := contentSvc.options[0]
+			if opts.Query != "dune" || opts.Limit != 5 || opts.Offset != 2 {
+				t.Fatalf("SearchItems options = %#v", opts)
+			}
+			if opts.SkipTotal != tc.wantSkipTotal {
+				t.Fatalf("SkipTotal = %v, want %v", opts.SkipTotal, tc.wantSkipTotal)
+			}
+		})
+	}
+}
+
+// TestHandleSearchHints_PassesOnlyQueryAndLimit verifies that HandleSearchHints
+// calls SearchItems with a SearchItemsOptions that carries only Query and Limit
+// (no LibraryID, empty ItemTypes, and SkipTotal=false). The search-hints
+// endpoint does not scope by library and never specifies item types — returning
+// all video-compatible types — so it must not accidentally suppress the total
+// or restrict the result set.
+func TestHandleSearchHints_PassesOnlyQueryAndLimit(t *testing.T) {
+	codec := NewResourceIDCodec()
+	contentSvc := &recordingSearchContentService{
+		result: &upstreamBrowseResponse{
+			Items: []upstreamListItem{
+				{ContentID: "movie-1", Type: "movie", Title: "Dune"},
+			},
+			Total: 1,
+		},
+	}
+	h := &ItemsHandler{
+		content:  contentSvc,
+		userData: &mockUserDataService{},
+		codec:    codec,
+		mapper:   newMapper(codec, &config.Config{}),
+		images:   NewImageCache(time.Hour, time.Now),
+	}
+
+	req := httptest.NewRequest("GET", "/Search/Hints?SearchTerm=dune&Limit=7", nil)
+	req = req.WithContext(context.WithValue(req.Context(), compatSessionKey, &Session{
+		StreamAppUserID: 1,
+		ProfileID:       "profile-1",
+	}))
+	rec := httptest.NewRecorder()
+	h.HandleSearchHints(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("expected status 200; got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if len(contentSvc.options) != 1 {
+		t.Fatalf("SearchItems calls = %d, want 1", len(contentSvc.options))
+	}
+	opts := contentSvc.options[0]
+	if opts.Query != "dune" {
+		t.Errorf("Query = %q, want %q", opts.Query, "dune")
+	}
+	if opts.Limit != 7 {
+		t.Errorf("Limit = %d, want 7", opts.Limit)
+	}
+	if len(opts.ItemTypes) != 0 {
+		t.Errorf("ItemTypes = %#v, want empty (HandleSearchHints must not restrict types)", opts.ItemTypes)
+	}
+	if opts.LibraryID != nil {
+		t.Errorf("LibraryID = %v, want nil", opts.LibraryID)
+	}
+	if opts.SkipTotal {
+		t.Error("SkipTotal = true, want false for search hints")
+	}
+	if opts.Offset != 0 {
+		t.Errorf("Offset = %d, want 0", opts.Offset)
+	}
+}
+
+// TestHandleSearchHints_EmptyQueryReturnsEmptyWithoutCallingSearch verifies
+// that an empty or whitespace-only SearchTerm returns a 200 empty result
+// without invoking the ContentService at all.
+func TestHandleSearchHints_EmptyQueryReturnsEmptyWithoutCallingSearch(t *testing.T) {
+	codec := NewResourceIDCodec()
+	contentSvc := &recordingSearchContentService{}
+	h := &ItemsHandler{
+		content:  contentSvc,
+		userData: &mockUserDataService{},
+		codec:    codec,
+		mapper:   newMapper(codec, &config.Config{}),
+		images:   NewImageCache(time.Hour, time.Now),
+	}
+
+	req := httptest.NewRequest("GET", "/Search/Hints?SearchTerm=   ", nil)
+	req = req.WithContext(context.WithValue(req.Context(), compatSessionKey, &Session{
+		StreamAppUserID: 1,
+		ProfileID:       "profile-1",
+	}))
+	rec := httptest.NewRecorder()
+	h.HandleSearchHints(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("expected status 200; got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if len(contentSvc.options) != 0 {
+		t.Errorf("SearchItems called %d times, want 0 for empty query", len(contentSvc.options))
+	}
+}
+
+// TestHandleSearchHints_DefaultLimitIsTwenty verifies that when Limit is
+// omitted from the query string, HandleSearchHints uses a default of 20.
+func TestHandleSearchHints_DefaultLimitIsTwenty(t *testing.T) {
+	codec := NewResourceIDCodec()
+	contentSvc := &recordingSearchContentService{}
+	h := &ItemsHandler{
+		content:  contentSvc,
+		userData: &mockUserDataService{},
+		codec:    codec,
+		mapper:   newMapper(codec, &config.Config{}),
+		images:   NewImageCache(time.Hour, time.Now),
+	}
+
+	req := httptest.NewRequest("GET", "/Search/Hints?SearchTerm=inception", nil)
+	req = req.WithContext(context.WithValue(req.Context(), compatSessionKey, &Session{
+		StreamAppUserID: 1,
+		ProfileID:       "profile-1",
+	}))
+	rec := httptest.NewRecorder()
+	h.HandleSearchHints(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("expected status 200; got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if len(contentSvc.options) == 1 && contentSvc.options[0].Limit != 20 {
+		t.Errorf("Limit = %d, want 20 (default)", contentSvc.options[0].Limit)
 	}
 }
 
