@@ -271,6 +271,7 @@ describe("EbookReader", () => {
 
   afterEach(async () => {
     vi.useRealTimers();
+    window.history.replaceState(null, "");
     await act(async () => {
       root.unmount();
     });
@@ -335,6 +336,39 @@ describe("EbookReader", () => {
     // backTo wins over the default chapter-detail target, breaking the loop.
     expect(container.innerHTML).toContain('href="/item/manga-series-1?libraryId=7"');
     expect(container.innerHTML).not.toContain('href="/item/ebook-1?libraryId=7"');
+  });
+
+  // Regression test for issue #189: exiting the reader must consume the
+  // reader's history entry (history back) rather than pushing the series page
+  // on top of it — otherwise pressing back on the series page re-opens the
+  // reader. With in-app history present, clicking Back returns to the entry
+  // the reader was opened from, not to a fresh push of the backTo target.
+  it("goes back through history on Back instead of pushing the backTo target", async () => {
+    window.history.replaceState({ idx: 1 }, "");
+    const backTo = encodeURIComponent("/item/manga-series-1?libraryId=7");
+    await act(async () => {
+      root.render(
+        <MemoryRouter
+          initialEntries={["/came-from-here", `/reader/ebook/ebook-1?libraryId=7&backTo=${backTo}`]}
+          initialIndex={1}
+        >
+          <Routes>
+            <Route path="/came-from-here" element={<div data-testid="origin-page" />} />
+            <Route path="/item/:contentId" element={<div data-testid="pushed-series-page" />} />
+            <Route path="/reader/ebook/:contentId" element={<EbookReader />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    });
+
+    const back = container.querySelector('a[aria-label="Back"], [aria-label="Back"]');
+    expect(back).not.toBeNull();
+    await act(async () => {
+      back!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    expect(container.querySelector('[data-testid="origin-page"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="pushed-series-page"]')).toBeNull();
   });
 
   it("switches between multiple ebook files from the reader header", async () => {
