@@ -21,7 +21,9 @@ export const DEFAULT_SUBTITLE_APPEARANCE: SubtitleAppearance = {
   fontFamily: "sans-serif",
   fontColor: "#ffffff",
   backgroundColor: "#000000",
-  backgroundStyle: "shadow",
+  // Box matches the Apple clients' default so a profile with no saved
+  // appearance renders the same everywhere.
+  backgroundStyle: "box",
   backgroundOpacity: 75,
   textOutline: false,
   textOutlineColor: "#000000",
