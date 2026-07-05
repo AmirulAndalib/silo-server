@@ -17,6 +17,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/recommendations"
 	"github.com/Silo-Server/silo-server/internal/scantrigger"
 	"github.com/Silo-Server/silo-server/internal/secret"
+	"github.com/Silo-Server/silo-server/internal/streamrevoke"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchstate"
@@ -30,6 +31,9 @@ type Dependencies struct {
 	// periodic orphan-transcode sweep so it stops on shutdown; nil (tests) makes
 	// the sweep a single boot-time run instead of a long-lived ticker.
 	AppContext context.Context
+
+	// RevocationStore is the shared stream kill switch consulted by local serving.
+	RevocationStore *streamrevoke.Store
 	// LiveConfig returns the current hot-reloaded config. May be nil (tests,
 	// worker modes); read through CurrentConfig(), which falls back to Config.
 	LiveConfig       func() *config.Config

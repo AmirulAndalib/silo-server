@@ -50,7 +50,9 @@ func (w *loggingResponseWriter) Flush() {
 	}
 }
 
-// Unwrap returns the underlying ResponseWriter for http.ResponseController.
+// Unwrap exposes the wrapped ResponseWriter so http.ResponseController (used by
+// the stream kill switch's in-flight cut via SetWriteDeadline) can reach the
+// underlying socket instead of stopping at this wrapper and no-oping.
 func (w *loggingResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
@@ -156,7 +158,9 @@ func (w *debugResponseWriter) Flush() {
 	}
 }
 
-// Unwrap returns the underlying ResponseWriter for http.ResponseController.
+// Unwrap exposes the wrapped ResponseWriter so http.ResponseController (used by
+// the stream kill switch's in-flight cut via SetWriteDeadline) can reach the
+// underlying socket instead of stopping at this wrapper and no-oping.
 func (w *debugResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }

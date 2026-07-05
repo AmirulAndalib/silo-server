@@ -114,8 +114,9 @@ func (w *requestStatusWriter) Flush() {
 	}
 }
 
-// Unwrap lets http.ResponseController reach the underlying connection (e.g.
-// for the per-response write deadlines used by streaming handlers).
+// Unwrap exposes the wrapped ResponseWriter so http.ResponseController (used by
+// the stream kill switch's in-flight cut via SetWriteDeadline) can reach the
+// underlying socket instead of stopping at this wrapper and no-oping.
 func (w *requestStatusWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }

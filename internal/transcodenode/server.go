@@ -98,6 +98,7 @@ type Server struct {
 	reaperOnce sync.Once
 	mu         sync.RWMutex
 	activeJobs atomic.Int32
+	revocation revocationStore
 
 	// reconstructGroup single-flights node-side session reconstruction per session
 	// id so a post-restart wave of concurrent manifest/segment requests for the same
@@ -378,6 +379,31 @@ func (s *Server) SetRecipeStore(store recipeStore) {
 	s.recipeStore = store
 }
 
+// revocationStore is the subset of *streamrevoke.Store the node consults to
+// refuse serving (and rebuilding) killed sessions. IsRevoked is a pure in-memory
+// lookup. Nil disables enforcement. Defense-in-depth: the proxy in front already
+// enforces, but this guards the reconstruct path so a killed session is never
+// re-spawned after a node restart.
+type revocationStore interface {
+	IsRevoked(sessionID string, userID int, startedAt time.Time) bool
+	Refuse(w http.ResponseWriter, sessionID string, userID int, startedAt time.Time) bool
+}
+
+// SetRevocationStore wires the kill switch this node consults per request.
+func (s *Server) SetRevocationStore(store revocationStore) {
+	s.revocation = store
+}
+
+// refuseIfRevoked refuses (403) a serve request for a revoked session. It checks
+// the session key only (no per-segment token parse): the node is always fronted
+// by the proxy/central, which enforce per-user revocations, and the enforcer +
+// admin terminate revoke by session id. The reconstruct guard uses the verified
+// token's user id directly, so per-user kills still block a rebuild after a
+// node restart.
+func (s *Server) refuseIfRevoked(w http.ResponseWriter, sessionID string) bool {
+	return s.revocation != nil && s.revocation.Refuse(w, sessionID, 0, time.Time{})
+}
+
 // Handler returns the chi.Router with all transcode routes.
 func (s *Server) Handler() http.Handler {
 	s.startIdleReaper()
@@ -623,6 +649,11 @@ func (s *Server) reconstructFromToken(r *http.Request, sessionID string, request
 			"session", sessionID, "playback_session_id", sessionID)
 		return nil
 	}
+	// Never rebuild a killed session: without this guard a node restart would let
+	// reconstruction re-spawn ffmpeg for a session the kill switch already revoked.
+	if s.revocation != nil && s.revocation.IsRevoked(claims.SessionID, claims.UserID, claims.IssuedTime()) {
+		return nil
+	}
 	card := playback.RecipeCardFromClaims(claims)
 	// The token's recipe must be a transcode card for the session id in the URL: a
 	// mismatch is a forged or stale request, and direct/remux cards carry no encode
@@ -841,6 +872,10 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
 
+	if s.refuseIfRevoked(w, sessionID) {
+		return
+	}
+
 	// Lookup and liveness refresh happen atomically so the idle reaper can
 	// never unregister the job between them and tear down a session this
 	// request is about to serve from.
@@ -879,6 +914,10 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
 	name := chi.URLParam(r, "name")
+
+	if s.refuseIfRevoked(w, sessionID) {
+		return
+	}
 
 	// Lookup and liveness refresh happen atomically so the idle reaper can
 	// never unregister the job between them and tear down a session this
