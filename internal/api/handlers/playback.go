@@ -612,7 +612,9 @@ func (h *PlaybackHandler) signSessionToken(card playback.RecipeCard) string {
 	if h.JWTSecret == "" {
 		return ""
 	}
-	token, err := streamtoken.Sign(card.ToClaims(), h.JWTSecret, playback.MaxTokenTTL)
+	claims := card.ToClaims()
+	claims.Origin = playback.OriginNative // native-only mint site
+	token, err := streamtoken.Sign(claims, h.JWTSecret, playback.MaxTokenTTL)
 	if err != nil {
 		slog.Warn("sign stream token failed", "error", err, "session", card.SessionID, "playback_session_id", card.SessionID)
 		return ""
@@ -1952,6 +1954,8 @@ func (h *PlaybackHandler) handleStartPlaybackLegacy(w http.ResponseWriter, r *ht
 				UserID:      session.UserID,
 				ProfileID:   session.ProfileID,
 				MediaFileID: session.MediaFileID,
+				Origin:      playback.OriginNative,
+				ClientName:  session.ClientName,
 			}
 
 			// Resolve media path if possible.
@@ -2603,6 +2607,11 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 					SubtitleCodec:          subtitleCodec,
 					TotalDuration:          float64(file.Duration),
 					RequireReady:           atomicLegacyReplacement,
+					AuthUserID:             updatedSession.UserID,
+					ProfileID:              updatedSession.ProfileID,
+					MediaFileID:            updatedSession.MediaFileID,
+					Route:                  updatedSession.Origin(),
+					ClientName:             updatedSession.ClientName,
 				}
 				if strings.TrimSpace(nodeReq.HWAccel) == "" {
 					nodeReq.HWAccel = h.playbackConfig().HWAccel
@@ -2728,6 +2737,8 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 					// mode; a re-minted token must not silently shed either.
 					TranscodeTransportID: updatedSession.TranscodeTransportID,
 					RemuxDVMode:          string(updatedSession.RemuxDVMode),
+					Origin:               updatedSession.Origin(),
+					ClientName:           updatedSession.ClientName,
 				}
 				if plan.TranscodeNode != nil {
 					tokenClaims.TranscodeNode = plan.TranscodeNode.URL
@@ -3273,6 +3284,11 @@ func (h *PlaybackHandler) HandleStartTranscode(w http.ResponseWriter, r *http.Re
 			SubtitleCodec:          subtitleCodec,
 			TotalDuration:          float64(file.Duration),
 			RequireReady:           atomicLegacyReplacement,
+			AuthUserID:             session.UserID,
+			ProfileID:              session.ProfileID,
+			MediaFileID:            session.MediaFileID,
+			Route:                  session.Origin(),
+			ClientName:             session.ClientName,
 		}
 
 		nodeResp, status, err := h.startRemotePlaybackTransport(context.Background(), tcNode.URL, nodeReq)
@@ -3755,6 +3771,19 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 
 	w.Header().Set("Cache-Control", "no-store, max-age=0")
 	w.Header().Set("Pragma", "no-cache")
+	// Hold a transport marker for the whole segment pour so a slow client draining
+	// a single segment past the liveness grace cannot be reaped mid-serve and go
+	// invisible to the monitor — matching the direct-play/remux handlers. This is
+	// server-observed liveness: it keeps the session visible independent of any
+	// client progress report (the hidden-stream defense).
+	if err := h.sessionMgr.BeginTransport(sessionID); err == nil {
+		defer func() { _ = h.sessionMgr.EndTransport(sessionID) }()
+	} else {
+		// The marker is what keeps a slow single-segment drain visible; the
+		// segment is still served on failure, so log rather than fail — but log so
+		// the hidden-stream window is observable.
+		slog.Warn("begin transport marker failed", "session", sessionID, "segment", segmentPath, "error", err)
+	}
 	http.ServeFile(w, r, segmentPath)
 }
 

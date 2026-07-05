@@ -135,6 +135,14 @@ var ErrSessionReplacementSuperseded = errors.New("session replacement was supers
 
 type clientInfoContextKey struct{}
 
+// Origin identifies the protocol a playback session was started through, for
+// first-class monitoring attribution (a jellycompat session shares this manager
+// with native ones and is otherwise indistinguishable in the live snapshot).
+const (
+	OriginNative   = "native"
+	OriginJellyfin = "jellycompat"
+)
+
 // ClientInfo carries best-effort client metadata from request handling into
 // the playback session manager.
 type ClientInfo struct {
@@ -292,6 +300,17 @@ func normalizeClientMetadataValue(value string, maxLen int) string {
 		value = value[:maxLen]
 	}
 	return value
+}
+
+// Origin reports the protocol this session was started through, as the label
+// monitoring and stream tokens attribute by. It derives from the stored
+// IsJellyfinCompat identity so the two can never disagree; native is the
+// historical default for anything not minted through the compat layer.
+func (s *Session) Origin() string {
+	if s == nil || !s.IsJellyfinCompat {
+		return OriginNative
+	}
+	return OriginJellyfin
 }
 
 // StartSession creates a new playback session using the same file as both the

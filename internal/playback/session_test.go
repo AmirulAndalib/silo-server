@@ -864,6 +864,35 @@ func TestStartSessionWithFiles(t *testing.T) {
 	}
 }
 
+func TestSessionOriginFromContext(t *testing.T) {
+	mgr := playback.NewSessionManager(0, 0)
+
+	// A jellycompat-originated session records its origin for monitor attribution.
+	ctx := playback.WithClientInfo(context.Background(), playback.ClientInfo{
+		Name:     "Infuse",
+		IsCompat: true,
+	})
+	s, err := mgr.StartSessionWithContext(ctx, 1, "p1", 100, playback.PlayTranscode, false)
+	if err != nil {
+		t.Fatalf("StartSessionWithContext: %v", err)
+	}
+	if s.Origin() != playback.OriginJellyfin {
+		t.Errorf("Origin = %q, want %q", s.Origin(), playback.OriginJellyfin)
+	}
+	if s.ClientName != "Infuse" {
+		t.Errorf("ClientName = %q, want Infuse", s.ClientName)
+	}
+
+	// An unset origin defaults to native (historical behavior), never empty.
+	s2, err := mgr.StartSession(2, "p2", 101, playback.PlayDirect, false)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	if s2.Origin() != playback.OriginNative {
+		t.Errorf("default Origin = %q, want %q", s2.Origin(), playback.OriginNative)
+	}
+}
+
 func TestUpdateStreamState(t *testing.T) {
 	mgr := playback.NewSessionManager(0, 0)
 	session, err := mgr.StartSession(1, "profile-1", 100, playback.PlayRemux, false)
