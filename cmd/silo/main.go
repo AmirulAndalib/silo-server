@@ -1732,7 +1732,6 @@ func main() {
 		// revocations the edges enforce. Source is the authoritative monitoring
 		// picture — Redis for multi-node, the in-process session manager for
 		// integrated. Fails open on limit-lookup errors.
-		enforcerUserRepo := auth.NewUserRepository(deps.DB)
 		// Union of (a) the in-process session manager — authoritative for streams
 		// this node serves directly, integrated or not — and (b) the edge Redis
 		// records — authoritative for offloaded/edge-served streams. Deduped by
@@ -1750,12 +1749,15 @@ func main() {
 		if apiRedisClient != nil {
 			monitorSource = streammonitor.NewMultiSource(localSource, streammonitor.NewRedisSource(apiRedisClient))
 		}
+		// Resolve caps through the session manager so the enforcer and synchronous
+		// admission share one provider (installed by the API wiring) and can never
+		// disagree about a user's effective, group-merged cap.
 		streamenforcer.New(monitorSource, func(ctx context.Context, userID int) (int, error) {
-			u, err := enforcerUserRepo.GetByID(ctx, userID)
+			limits, err := sessionMgr.EffectiveLimits(ctx, userID)
 			if err != nil {
 				return 0, err
 			}
-			return u.MaxStreams, nil
+			return limits.MaxStreams, nil
 		}, streamRevocation, 0).Start(appCtx)
 
 		nodeURL := fmt.Sprintf("http://%s%s", nodeIdentity, cfg.Server.Listen)

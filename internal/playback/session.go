@@ -569,6 +569,19 @@ func (m *SessionManager) RegisterReconstructedWithLimits(ctx context.Context, s 
 	return s, nil
 }
 
+// EffectiveLimits resolves a user's admission limits through the installed
+// limit provider, falling back to the manager defaults when none is set.
+//
+// Out-of-band consumers — notably the async stream enforcer — must resolve caps
+// through here rather than reading users.max_streams directly: that column is 0
+// ("inherit from group") for standard accounts, which an enforcer treating
+// limit <= 0 as unlimited would read as "no cap". Going through the same
+// provider synchronous admission uses means the two can never disagree, and the
+// lookup is late-bound so it sees whatever provider the API wiring installed.
+func (m *SessionManager) EffectiveLimits(ctx context.Context, userID int) (SessionLimits, error) {
+	return m.limitsForUser(ctx, userID)
+}
+
 func (m *SessionManager) limitsForUser(ctx context.Context, userID int) (SessionLimits, error) {
 	m.mu.RLock()
 	provider := m.limitProvider
