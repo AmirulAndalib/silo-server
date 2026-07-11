@@ -119,7 +119,7 @@ func (r *ScanRegistry) CancelLibrary(libraryID int, completedAt time.Time) []Sca
 		}
 		run.Status = "cancelled"
 		run.CompletedAt = &completedAt
-		delete(r.entries, id)
+		r.entries[id] = run
 		cancelled = append(cancelled, run)
 	}
 	return cancelled
