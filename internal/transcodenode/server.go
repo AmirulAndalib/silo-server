@@ -1340,10 +1340,13 @@ func (s *Server) handleForceReload(w http.ResponseWriter, r *http.Request) {
 				slog.WarnContext(r.Context(), "delete transcode recipe on force reload", "component", "transcodenode", "error", err, "session", id, "playback_session_id", id)
 			}
 		}
+
+		// Drop only this victim from the tracker. A blanket Cleanup here would
+		// also wipe unrelated tracker-only work, such as an active download
+		// preparation, even though force reload does not stop that job.
+		s.tracker.Remove(r.Context(), victim.id)
 		unlock()
 	}
-
-	s.tracker.Cleanup(r.Context())
 
 	slog.InfoContext(r.Context(), "transcode force reload completed", slog.String("component", "transcodenode"))
 	w.WriteHeader(http.StatusNoContent)
