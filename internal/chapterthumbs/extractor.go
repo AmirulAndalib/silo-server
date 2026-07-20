@@ -143,6 +143,10 @@ func extractTimeoutForAttempt(hardware bool, hdr bool) time.Duration {
 	return cpuExtractTimeoutSDR
 }
 
+// cpuToneMapFilter is the software HDR→SDR chain, shared by the CPU path and
+// the VideoToolbox path (which decodes to system-memory frames).
+const cpuToneMapFilter = "zscale=t=linear:npl=100,format=gbrpf32le,tonemap=bt2390,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p"
+
 func buildCPUFrameExtractArgs(inputPath string, seekSeconds float64, toneMap bool) []string {
 	args := []string{
 		"-hide_banner",
@@ -151,7 +155,7 @@ func buildCPUFrameExtractArgs(inputPath string, seekSeconds float64, toneMap boo
 		"-i", inputPath,
 	}
 	if toneMap {
-		args = append(args, "-vf", "zscale=t=linear:npl=100,format=gbrpf32le,tonemap=bt2390,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p")
+		args = append(args, "-vf", cpuToneMapFilter)
 	}
 	args = append(args,
 		"-frames:v", "1",
@@ -189,6 +193,25 @@ func buildFrameExtractArgs(inputPath string, seekSeconds float64, hwAccel string
 			"-hwaccel", "vaapi",
 			"-hwaccel_output_format", "vaapi",
 		)
+	case "videotoolbox":
+		// VideoToolbox decode outputs system-memory frames, so the software
+		// filter chain — including the CPU tone-map for HDR sources — applies
+		// unchanged after hardware decode.
+		args = append(args,
+			"-hwaccel", "videotoolbox",
+			"-ss", fmt.Sprintf("%.3f", seekSeconds),
+			"-i", inputPath,
+		)
+		if toneMap {
+			args = append(args, "-vf", cpuToneMapFilter)
+		}
+		args = append(args,
+			"-frames:v", "1",
+			"-f", "image2pipe",
+			"-vcodec", "mjpeg",
+			"-",
+		)
+		return args, nil
 	default:
 		return buildCPUFrameExtractArgs(inputPath, seekSeconds, toneMap), nil
 	}

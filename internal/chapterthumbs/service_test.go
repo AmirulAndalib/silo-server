@@ -66,6 +66,31 @@ func TestBuildFrameExtractArgs(t *testing.T) {
 		}
 	})
 
+	t.Run("videotoolbox decodes in hardware with software filters", func(t *testing.T) {
+		args, err := buildFrameExtractArgs("/media/movie.mkv", 42.5, "videotoolbox", "", false)
+		if err != nil {
+			t.Fatalf("buildFrameExtractArgs() error = %v", err)
+		}
+		if !slices.Contains(args, "-hwaccel") || !slices.Contains(args, "videotoolbox") {
+			t.Fatalf("videotoolbox args missing hardware decode: %#v", args)
+		}
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "hwdownload") || strings.Contains(joined, "-hwaccel_output_format") {
+			t.Fatalf("videotoolbox extraction must use software frames: %#v", args)
+		}
+	})
+
+	t.Run("videotoolbox tone-maps HDR with the software chain", func(t *testing.T) {
+		args, err := buildFrameExtractArgs("/media/movie.mkv", 42.5, "videotoolbox", "", true)
+		if err != nil {
+			t.Fatalf("buildFrameExtractArgs() error = %v", err)
+		}
+		joined := strings.Join(args, " ")
+		if !strings.Contains(joined, cpuToneMapFilter) {
+			t.Fatalf("videotoolbox HDR extraction should use the CPU tone-map chain: %#v", args)
+		}
+	})
+
 	t.Run("unknown hw accel falls back to cpu args", func(t *testing.T) {
 		args, err := buildFrameExtractArgs("/media/movie.mkv", 42.5, "none", "", false)
 		if err != nil {
