@@ -48,6 +48,12 @@ describe("formatRelativeTime", () => {
     expect(formatRelativeTime(value, { rounding: "floor" })).toBe("1h ago");
   });
 
+  it("derives each tier from the raw delta, not the rounded coarser tier", () => {
+    // 89.5 minutes is 1.49h: rounding the minute count first (90m) would
+    // compound to "2h ago"; the raw delta keeps it at "1h ago".
+    expect(formatRelativeTime(ago(89.5 * MINUTE))).toBe("1h ago");
+  });
+
   it("supports a custom just-now label", () => {
     expect(formatRelativeTime(ago(10_000), { justNowLabel: "Just now" })).toBe("Just now");
   });

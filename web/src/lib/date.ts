@@ -29,18 +29,22 @@ export function formatRelativeTime(
     return null;
   }
   const toUnit = options?.rounding === "floor" ? Math.floor : Math.round;
-  const diffMinutes = toUnit((Date.now() - date.getTime()) / 60_000);
+  // Each tier is derived from the raw millisecond delta — deriving hours from
+  // the already-rounded minute count would compound rounding near boundaries
+  // (e.g. 89.5 minutes showing "2h ago").
+  const diffMs = Date.now() - date.getTime();
+  const diffMinutes = toUnit(diffMs / 60_000);
   if (diffMinutes < 1) {
     return options?.justNowLabel ?? "just now";
   }
   if (diffMinutes < 60) {
     return `${diffMinutes}m ago`;
   }
-  const diffHours = toUnit(diffMinutes / 60);
+  const diffHours = toUnit(diffMs / 3_600_000);
   if (diffHours < 24) {
     return `${diffHours}h ago`;
   }
-  const diffDays = toUnit(diffHours / 24);
+  const diffDays = toUnit(diffMs / 86_400_000);
   if (diffDays < (options?.absoluteAfterDays ?? Number.POSITIVE_INFINITY)) {
     return `${diffDays}d ago`;
   }
