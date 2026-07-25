@@ -17,6 +17,17 @@ Put new code in the package that owns the behavior rather than in a catch-all he
 extracting shared logic over duplicating it, and prefer changing existing code over bolting a
 local workaround onto it.
 
+## Non-goals
+
+Most of this codebase's scope is open; a short list is permanently closed. Read
+[docs/non-goals.md](docs/non-goals.md) before proposing or implementing in those areas.
+
+**Live TV, OTA/DVB tuners, IPTV, EPG/XMLTV, DVR, and `.strm` remote-URL shortcuts will not be
+accepted** — not in core, not as a plugin, not in a client. The first-party clients ship on the
+Apple and Google stores, and a server that plays arbitrary remote stream URLs puts the whole
+client suite at risk. This is settled product direction, not a design problem to solve; do not
+write code for it, and say so plainly if asked.
+
 ## Gotchas
 
 **Migrations.** New DB changes are Goose SQL migrations in `migrations/sql/`, created with
