@@ -39,6 +39,12 @@ HTML page or a connection error means the proxy target is wrong or the backend i
 The app is at `http://localhost:5173`. Use the Playwright tooling to navigate, interact,
 and screenshot.
 
+The dev server binds `0.0.0.0` and `allowedHosts` covers `.ts.net` plus the machine's own
+hostname, so it is also reachable from any device on the tailnet at
+`http://<tailscale-machine>:5173`. Always give the user that URL alongside the localhost
+one when starting a dev server for them — it is how they watch the UI you are working on
+from another machine. `tailscale status --json | jq -r .Self.DNSName` gives the name.
+
 Most pages need a session. Sign in through the login form using `SILO_ADMIN_USER` and
 `SILO_ADMIN_PASSWORD` from `.silo-dev.env`; the session then lives in that browser
 profile for the rest of the run. If those are unset, ask the user for an account on the
