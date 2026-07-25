@@ -74,8 +74,15 @@ make verify-local-paths
 
 Go stays `gofmt`/`goimports` clean; the frontend follows `web/.prettierrc`.
 
-For troubleshooting a live deployment — container health, playback failures, database state, log
-analysis, deploys — use the `dev-environment-debugging` skill.
+## Skills
+
+Task-specific guides live in `.claude/skills/`, also reachable as `.agents/skills/` for agents
+that look there. Read the one that matches the task instead of working from this file alone.
+
+They share one config file: copy `.silo-dev.env.example` to `.silo-dev.env` and fill in how to
+reach your Silo deployment — URL, SSH target, database, an account to debug with. That file is
+gitignored and is the only place hosts, passwords, and tokens belong. `scripts/silo-dev doctor`
+checks it end to end.
 
 ## v1 API rules
 
