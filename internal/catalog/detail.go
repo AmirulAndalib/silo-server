@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -614,6 +615,13 @@ type DetailService struct {
 	originalLangFn    func(context.Context, string) string
 	probeEnsurer      PlaybackProbeEnsurer
 	chapterThumbs     ChapterThumbnailQueuer
+	missingMarker     MissingFileMarker
+}
+
+// MissingFileMarker records that a file the catalog believed was present is
+// not on disk. Mirrors the playback preflight's marker.
+type MissingFileMarker interface {
+	MarkMissing(ctx context.Context, id int, since time.Time) error
 }
 
 // NewDetailService creates a new DetailService.
@@ -661,6 +669,13 @@ func (s *DetailService) SetProbeEnsurer(ensurer PlaybackProbeEnsurer) {
 
 func (s *DetailService) SetChapterThumbnailQueuer(queuer ChapterThumbnailQueuer) {
 	s.chapterThumbs = queuer
+}
+
+// SetMissingFileMarker enables the presence check in preparePlaybackFiles. When
+// unset the check still filters the response, it just cannot persist what it
+// found, so the next request repeats the work.
+func (s *DetailService) SetMissingFileMarker(marker MissingFileMarker) {
+	s.missingMarker = marker
 }
 
 func (s *DetailService) SetFolderRepository(repo interface {
@@ -3320,6 +3335,8 @@ func (s *DetailService) preparePlaybackFiles(ctx context.Context, files []*model
 		return files
 	}
 
+	files = s.dropVanishedFiles(ctx, files)
+
 	prepared := make([]*models.MediaFile, 0, len(files))
 	for _, file := range files {
 		if file == nil {
@@ -3335,6 +3352,69 @@ func (s *DetailService) preparePlaybackFiles(ctx context.Context, files []*model
 	}
 
 	return prepared
+}
+
+// vanishedCheckBudget caps how long the presence check may spend on one
+// request. Detail loads are on the interactive path, and a library root that
+// has become slow rather than absent must not turn every detail view into a
+// stall — past the budget the remaining files are returned unchecked and the
+// background sweep picks them up.
+const vanishedCheckBudget = 250 * time.Millisecond
+
+// vanishedCheckLimit caps how many files are checked per request. A movie has
+// a handful of versions, but an audiobook item can carry hundreds of files,
+// and the marginal value of checking the 300th one inline is nil.
+const vanishedCheckLimit = 32
+
+// dropVanishedFiles removes files that are no longer on disk and records the
+// removal so every other read path sees it too.
+//
+// The scanner and the background presence sweep are what keep the catalog
+// honest in bulk; this is the last check before a file is offered to a user as
+// something they can play. Without it a file deleted since the last sweep is
+// still listed as a version, and the user finds out by pressing play and
+// getting an error — which is the failure this is here to prevent.
+//
+// Only os.ErrNotExist drops a file. Any other stat error means the file's
+// state is unknown, and an unreadable-but-present file is still worth
+// offering: the playback preflight will produce a real error if it is not.
+func (s *DetailService) dropVanishedFiles(ctx context.Context, files []*models.MediaFile) []*models.MediaFile {
+	deadline := time.Now().Add(vanishedCheckBudget)
+	kept := make([]*models.MediaFile, 0, len(files))
+	var vanished []*models.MediaFile
+
+	for i, file := range files {
+		if file == nil {
+			continue
+		}
+		if i >= vanishedCheckLimit || time.Now().After(deadline) {
+			kept = append(kept, file)
+			continue
+		}
+		if _, err := os.Stat(file.FilePath); err != nil && errors.Is(err, os.ErrNotExist) {
+			vanished = append(vanished, file)
+			continue
+		}
+		kept = append(kept, file)
+	}
+
+	if len(vanished) == 0 {
+		return files
+	}
+
+	if s.missingMarker != nil {
+		since := time.Now().UTC()
+		for _, file := range vanished {
+			if err := s.missingMarker.MarkMissing(ctx, file.ID, since); err != nil {
+				slog.WarnContext(ctx, "failed to mark vanished file missing", "component", "catalog",
+					"file_id", file.ID, "path", file.FilePath, "error", err)
+			}
+		}
+	}
+
+	slog.InfoContext(ctx, "catalog: hid files missing from disk", "component", "catalog",
+		"count", len(vanished), "remaining", len(kept))
+	return kept
 }
 
 func (s *DetailService) queueWatchPlaybackFiles(

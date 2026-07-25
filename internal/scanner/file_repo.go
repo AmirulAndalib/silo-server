@@ -2640,6 +2640,59 @@ func claimRepresentativeWindow(limit int) int {
 	return window
 }
 
+// PresentFileRef is the minimal projection the presence sweep needs: enough to
+// stat a file and mark it missing. Deliberately not the full media_files row —
+// the sweep walks every live file in a library, so the per-row cost matters.
+type PresentFileRef struct {
+	ID   int
+	Path string
+}
+
+// ListPresentByFolder returns id/path for every file in the folder that the
+// catalog currently believes is on disk (missing_since IS NULL). Ordered by id
+// so a sweep interrupted partway through covers a stable prefix.
+func (r *FileRepository) ListPresentByFolder(ctx context.Context, folderID int) ([]PresentFileRef, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, file_path FROM media_files
+		 WHERE media_folder_id = $1 AND missing_since IS NULL
+		 ORDER BY id ASC`, folderID)
+	if err != nil {
+		return nil, fmt.Errorf("listing present files for folder %d: %w", folderID, err)
+	}
+	defer rows.Close()
+
+	refs := make([]PresentFileRef, 0)
+	for rows.Next() {
+		var ref PresentFileRef
+		if err := rows.Scan(&ref.ID, &ref.Path); err != nil {
+			return nil, fmt.Errorf("scanning present file for folder %d: %w", folderID, err)
+		}
+		refs = append(refs, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating present files for folder %d: %w", folderID, err)
+	}
+	return refs, nil
+}
+
+// MarkMissingByIDs sets missing_since on every given file that is not already
+// marked, in one statement. Returns the number of rows newly marked; ids that
+// were already missing (a concurrent scan beat us to them) are not counted and
+// keep their original timestamp, so the removal grace is measured from first
+// detection rather than being extended by every later sweep.
+func (r *FileRepository) MarkMissingByIDs(ctx context.Context, ids []int, since time.Time) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE media_files SET missing_since = $1, updated_at = NOW()
+		 WHERE id = ANY($2) AND missing_since IS NULL`, since, ids)
+	if err != nil {
+		return 0, fmt.Errorf("marking files missing: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // MarkMissing sets the missing_since timestamp for the given media file.
 func (r *FileRepository) MarkMissing(ctx context.Context, id int, since time.Time) error {
 	tag, err := r.pool.Exec(ctx,

@@ -1967,6 +1967,9 @@ func main() {
 		if deps.FolderRepo != nil && deps.LibraryScanQueue != nil {
 			taskMgr.Register(tasks.NewScanLibrariesTask(deps.FolderRepo, deps.LibraryScanQueue, deps.EventBus))
 		}
+		if deps.FolderRepo != nil && deps.Scanner != nil {
+			taskMgr.Register(tasks.NewVerifyFilePresenceTask(deps.FolderRepo, deps.Scanner, 0))
+		}
 		taskMgr.Register(tasks.NewCleanupOrphanedMediaItemsTask(catalog.NewOrphanedProvisionalCleaner(deps.DB)))
 		taskMgr.Register(tasks.NewBackfillMediaItemAliasesTask(catalog.NewItemAliasRepository(deps.DB)))
 		if deps.S3Public != nil {
@@ -2206,6 +2209,9 @@ func main() {
 		absDetailSvc := catalog.NewDetailService(absItemRepo, absEpisodeRepo, absSeasonRepo, absPersonRepo, absFileFetcher)
 		if deps.ImageResolver != nil {
 			absDetailSvc.SetImageResolver(deps.ImageResolver)
+		}
+		if deps.FileRepo != nil {
+			absDetailSvc.SetMissingFileMarker(deps.FileRepo)
 		}
 		var absScopeResolver scopeResolver
 		if policySystem != nil {
@@ -2499,6 +2505,9 @@ func main() {
 			detailSvc.SetGroupClaimRepository(catalog.NewGroupClaimRepository(deps.DB))
 			detailSvc.SetProbeEnsurer(deps.ProbeEnsurer)
 			detailSvc.SetChapterThumbnailQueuer(deps.ChapterThumbnailQueuer)
+			if deps.FileRepo != nil {
+				detailSvc.SetMissingFileMarker(deps.FileRepo)
+			}
 			if deps.ImageResolver != nil {
 				detailSvc.SetImageResolver(deps.ImageResolver)
 			}
