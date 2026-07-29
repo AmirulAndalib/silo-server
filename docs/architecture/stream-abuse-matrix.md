@@ -44,18 +44,12 @@ admission refusal (`ErrTooManyStreams`, `playback/session.go`) is **immediate**.
 The branch docs oversell three things. The stories below are scored against the
 **code**, not the plan.
 
-1. **The async enforcer does nothing for a *standard* user.** The enforcer's limit
-   comes from the **raw** `users.max_streams` column (`cmd/silo/main.go`, the
-   `LimitFunc`), and `limit <= 0` is treated as "unlimited → skip"
-   (`streamenforcer/enforcer.go`). Migrations `20260702180000` / `20260702190000`
-   set every standard user's `users.max_streams = 0` and delegate the real cap (5)
-   to the **Default Group**. So for a normal user the enforcer sees `limit 0` and
-   **never revokes**. The cap that actually holds is the *synchronous admission*
-   check, which uses the group-merged effective policy
-   (`access.EffectivePolicyForUser` → `strictestPositive`). The "async brain" only
-   bites users given an explicit per-user `max_streams > 0`. Treat this as a
-   **bug**, not a design choice — it means the branch's headline feature is
-   effectively dormant on a default install.
+1. **The async enforcer uses the effective, group-merged limit.** An earlier
+   audit found it reading raw `users.max_streams`, which is zero ("inherit") for
+   standard accounts. That is no longer true: its limit function calls
+   `SessionManager.EffectiveLimits`, the same group-merged policy used by
+   admission. Standard users therefore receive the Default Group cap instead
+   of being treated as unlimited.
 
 2. **The re-streaming heuristic does not exist.** The plan describes shipping
    `OverCapRule` + a disabled `RestreamHeuristicRule` behind a pluggable `Rule`
@@ -86,11 +80,11 @@ Jellyfin-compat surface is unthrottled (see Category E).
 | 1 | User opens N+1 concurrent **transcodes** (over cap) | ✅ | ✅ immediate | Admission refuses the N+1 start synchronously |
 | 2 | User opens N+1 concurrent **direct-play** streams | ✅ | ✅ immediate | Same admission gate; method-agnostic |
 | 3 | **Shared account**, many devices streaming at once | ✅ | ✅ / ⚠️ | Capped per-user on one process; leaks across replicas (#7) |
-| 4 | **Buffer-ahead then pause** fetches >45s to duck the cap | ❌ (window) | ❌ (window) | VERIFY-4 hole: transcode goes invisible 45s/60s, admits another |
+| 4 | **Buffer-ahead then pause** fetches >45s to duck the cap | ✅ | ✅ | Unpaused transcodes retain a 10m integrated / 180s edge server-observed grace |
 | 5 | **Withhold/falsify progress** to hide a stream | ✅ | ✅ | Existence is byte-observed; progress only moves a display field |
 | 6 | **Rapid session churn** between enforcer ticks | ⚠️ | ⚠️ | Admission blocks over-cap starts; no rate limit on `/start` |
-| 7 | Split streams across **multiple integrated replicas** | ⚠️ | ⚠️ | Admission is per-process; enforcer is the only cross-node backstop (and see correction #1) |
-| 8 | **Standard user** exceeds cap via the edge/multi-node path | ⚠️ | ⚠️ | Enforcer no-ops (`users.max_streams = 0`); only admission holds |
+| 7 | Split streams across **multiple integrated replicas** | ⚠️ | ⚠️ | Admission and integrated monitoring remain per-process (VERIFY-3) |
+| 8 | **Standard user** exceeds cap via the edge/multi-node path | ✅ | ✅ ~120s | Enforcer resolves the group-merged effective cap and trims the excess |
 
 ### Category B — Admin control / kill switch
 
@@ -116,6 +110,9 @@ Jellyfin-compat surface is unthrottled (see Category E).
 |---|---|---|---|---|
 | 17 | Rip whole library via **native download** endpoints | ⚠️ | ⚠️ | 3-concurrent gate only; **no volume cap**; loop create→complete defeats it |
 | 18 | Rip via **compat `/Items/{id}/Download`** (Infuse) | ❌ | ❌ | **No quota at all** — auth + library filter only. Widest hole |
+| 18a | Rip via authenticated **ABS file/download** route | ❌ | ⚠️ | Download-class and unquota'd/unmonitored, but user cutoff refuses and cuts pours |
+| 18b | Pull an **ABS public playback track** | ✅ | ✅ | Native session id is monitored/metered; session and owner kills land |
+| 18c | Pull a **public ABS RSS feed file** | ❌ | ⚠️ | No live record; owner cutoff uses feed creation time and cuts in-flight pours |
 | 19 | Rip via **sequential direct-play GETs** (one at a time) | ⚠️ | ❌ | Cap counts concurrency, not volume; stays at 1 forever |
 | 20 | Admin **stops an in-progress rip** mid-transfer | — | ⚠️ | Branch adds `WatchAndCut` on downloads (best-effort); admin must issue the revoke |
 
@@ -143,8 +140,8 @@ Jellyfin-compat surface is unthrottled (see Category E).
 The (N+1)th `StartSession` returns `ErrTooManyStreams` *synchronously* at admission
 (`playback/session.go`, `inlineAdmissionErrorLocked`), using the group-merged
 effective cap (5 for a standard user). The client never gets a session. The async
-enforcer is a redundant backstop *only* for users with an explicit
-`users.max_streams > 0` (correction #1). **Detection ✅ / Enforcement ✅ (immediate).**
+enforcer resolves the same effective cap as its redundant backstop.
+**Detection ✅ / Enforcement ✅ (immediate).**
 
 **A2. N+1 concurrent direct-play streams.**
 Direct-play sessions are `Track`-backed and counted identically at admission — the
@@ -157,17 +154,13 @@ to the effective `MaxStreams`. **Caveat:** the cap is per-process (see A7), so
 spreading devices across integrated replicas multiplies the allowance.
 **Detection ✅ / Enforcement ✅ on one process, ⚠️ across replicas.**
 
-**A4. Buffer-ahead then pause (VERIFY-4 hole). — REAL, UNFIXED.**
-A transcode client that pre-buffers far ahead and stops fetching segments for
->45s (integrated active grace, `session.go`) / >60s (edge `sessionTTL`,
-`nodesessions/tracker.go`) stops counting at admission
-(`countsTowardLimitsLocked`) and is reaped from the snapshot by `CleanStale` /
-idle-prune — while the client keeps playing from buffer. During that window the
-server admits *another* stream. Staggered pre-buffer/pause rotation across devices
-ducks the instantaneous cap. Direct-play/remux are immune (their `Track` records
-are never idle-timed). **Detection ❌ (during window) / Enforcement ❌ (during
-window).** Fix requires treating a running ffmpeg as liveness or a transcode-grace
-≥ client buffer.
+**A4. Buffer-ahead then pause (VERIFY-4 resolved).**
+An unpaused transcode now has a bounded 10-minute integrated grace, driven by
+server-observed `LastServedAt`, and ephemeral edge transcode records use a
+180-second idle window consistently in count, snapshot, and refresh. A genuinely
+paused session still receives the longer 30-minute paused grace. This covers
+local, completed copy-mode, and offloaded transcodes without probing local ffmpeg.
+**Detection ✅ / Enforcement ✅.**
 
 **A5. Withhold/falsify progress reports.**
 This *fails* as an evasion. Existence and liveness are **byte-observed**
@@ -187,16 +180,15 @@ different node and the enforcer only reconciles every ~120s.
 **A7. Split across multiple integrated replicas.**
 `activeCountLocked` counts only the local `SessionManager` map — there is no
 distributed admission counter. Two integrated replicas each admit up to the cap
-independently. The enforcer is the only cross-replica backstop, but (a) integrated
-replicas write no `silo:sessions:*` records, so a remote enforcer can't see them,
-and (b) per correction #1 it no-ops for standard users anyway.
+independently. The enforcer is the only cross-replica backstop, but integrated
+replicas write no `silo:sessions:*` records, so a remote enforcer cannot see them.
 **Detection ⚠️ / Enforcement ⚠️.** (VERIFY-3.)
 
 **A8. Standard user exceeds the cap on the edge path.**
-Direct consequence of correction #1. The enforcer — the component *specifically*
-built to enforce the cap across nodes — is dormant for `users.max_streams = 0`.
-On a single integrated node admission still holds; in multi-node, an over-cap edge
-situation that admission didn't catch locally will **not** be reconciled. **⚠️ / ⚠️.**
+The enforcer resolves `SessionManager.EffectiveLimits`, so a raw
+`users.max_streams = 0` inherits the group cap rather than meaning unlimited.
+The edge monitoring picture is grouped by resolved owner and excess victims are
+revoked on the async pass. **✅ / ✅ (~120s).**
 
 ### Category B — Admin control / kill switch
 
@@ -248,8 +240,7 @@ This *is* caught — but only as a raw over-count, not labeled as re-streaming.
 within ~120s (and admission refuses new over-cap starts immediately). Relies on
 correct owner attribution (jellycompat/edge records must carry the owner or they
 bucket under user 0 and are skipped — mitigated by `mergeStreams` owner-adoption).
-**Detection ⚠️ (as over-cap, not as restream) / Enforcement ✅ ~120s** — *subject to
-correction #1 if the user has no explicit per-user cap.*
+**Detection ⚠️ (as over-cap, not as restream) / Enforcement ✅ ~120s.**
 
 **C16. Mint & hoard 24h tokens, fan out later.**
 Stream tokens are signature-only 24h JWTs (`streamtoken/token.go`) with no `jti`,
@@ -396,30 +387,22 @@ visible, no CPU/process signal) / Enforcement ❌ (no aggregate cap).**
 - **API floods on the compat surface, `/auth/refresh`, and connection exhaustion**
   (E25–E28) — rate limiter has real coverage gaps.
 - **CPU/transcode exhaustion** (E29) — no aggregate cap.
-- **The enforcer being dormant for standard users** (correction #1 / A8) — a bug
-  that should be fixed before the async path is trusted.
 
 ## Recommended follow-ups (prioritized by exposure)
 
-1. **Fix the enforcer limit source** (correction #1): resolve the group-merged
-   effective cap in the `LimitFunc`, not the raw `users.max_streams` column, so the
-   async reconciler actually enforces the standard cap it was built for.
-2. **Quota the compat download route** (D18): bring `/Items/{id}/Download` under an
-   Infuse-compatible download quota (plain GET/Range, no download rows) — today's
-   only control is auth + library filter.
-3. **Add a per-user *volume* budget** (D17/D19): a rolling bytes-per-period cap that
+1. **Unify download-class accounting:** bring compat
+   `/Items/{id}/Download` and ABS `/items/{id}/file/{ino}` (including
+   `/download`) under the same quota and monitor record as native downloads.
+2. **Add a per-user *volume* budget** (D17/D19): a rolling bytes-per-period cap that
    spans downloads *and* direct-play, since concurrency caps can't bound a rip.
-4. **Close VERIFY-4** (A4): treat a running transcode ffmpeg as liveness (or a
-   transcode-specific grace ≥ max client buffer) so buffer-and-pause can't duck the
-   cap.
-5. **Extend rate limiting to the compat surface + `/auth/refresh`** and add a
+3. **Extend rate limiting to the compat surface + `/auth/refresh`** and add a
    connection cap / `LimitListener` (E25–E28).
-6. **Add a per-node concurrent-transcode cap** and wire `nodepool.MaxJobs` defaults
+4. **Add a per-node concurrent-transcode cap** and wire `nodepool.MaxJobs` defaults
    (E29).
-7. **Implement the restream heuristic** (C14/C16): the fingerprints already flow
+5. **Implement the restream heuristic** (C14/C16): the fingerprints already flow
    through `streammonitor`; a distinct-viewer-IP / distinct-title / throughput rule
    is the missing consumer. Ship disabled, tune against real traffic.
-8. **Per-client listing-load accounting** (E21–E24): attribute browse cost per
+6. **Per-client listing-load accounting** (E21–E24): attribute browse cost per
    device and add caching/singleflight to the general paged browse, not just the
    Latest/hub rails.
 

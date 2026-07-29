@@ -27,7 +27,8 @@
 - **Server layouts:** (A) integrated, no Redis · (B) integrated, with Redis ·
   (C) multi-node, with Redis (proxy/transcode edge nodes).
 - **Playback types:** direct play · remux · transcode (HLS).
-- **Routes:** native silo `/api/v1` · jellycompat (`:8096`).
+- **Routes:** native silo `/api/v1` · jellycompat (`:8096`) ·
+  Audiobookshelf-compatible (`/abs`, `/api`, and public feed/session paths).
 
 ## Key runtime facts (why cells collapse)
 
@@ -64,6 +65,9 @@ Legend: ✅ covered · ⚠️ covered with caveat · ❌ gap.
 | jellycompat | direct | `HandleVideoStream` → `ServeDirectPlay` (`streams.go:153`) | 302 → proxy `handleDirectPlay` |
 | jellycompat | remux | `HandleVideoStream` → `ServeRemux` (`streams.go:151`) | 302 → proxy `handleRemux` |
 | jellycompat | transcode | `HandleHLSSegment` → `ServeFile` (`streams.go:543`) | 302 → proxy → transcode node |
+| ABS | authenticated file/download | `handleFileStream` → `ServeDirectPlay` | same integrated handler |
+| ABS | public playback track | `handlePublicTrack` → `ServeDirectPlay` | same integrated handler |
+| ABS | public RSS feed file | `handlePublicFeedFile` → `ServeFile` | same integrated handler |
 
 ### Monitoring (server-observed existence, reported to central)
 
@@ -80,6 +84,9 @@ bytes but withholds/falsifies progress must still be counted.
 | jellycompat | direct | ✅ transport-count shield (`streams.go:129`) | ✅ edge tracker, owner+route carried |
 | jellycompat | remux | ✅ transport-count shield | ✅ edge tracker, owner+route carried |
 | jellycompat | transcode | ✅ per-segment transport marker around `ServeFile` (`streams.go:543`) | ✅ edge tracker, owner+route carried |
+| ABS | authenticated file/download | ⚠️ download-class exemption; no session/monitor record | same |
+| ABS | public playback track | ✅ native-session transport marker + metered bytes | same |
+| ABS | public RSS feed file | ⚠️ public download-class pour; no session/monitor record | same |
 
 - **Existence is server-observed on every cell.** Integrated: a session is
   unreapable while `activeTransportCount > 0`, and every byte-serving path now
@@ -91,13 +98,12 @@ bytes but withholds/falsifies progress must still be counted.
   the whole connection (direct/remux) or while segments are pulled (transcode),
   advanced only by real bytes. **No path requires a client progress report to stay
   visible or counted.**
-- **Timing is secondary and may trust the client.** Native fully trusts client
-  progress for position; the integrated `LastServedAt` is mapped from
-  `SessionManager.LastActivityAt` (`cmd/silo/main.go` FuncSource → `handlers.LiveLocalSessions`),
-  which client progress can advance. This never inflates the **count** (existence
-  is the transport shield, not a heartbeat), so the cap can't be bypassed; it only
-  affects which of a user's *own* over-cap sessions `selectVictims` trims first.
-  The edge advances `LastServedAt` only on real bytes.
+- **Timing is secondary and may trust the client only for position.**
+  `Session.LastServedAt` is deliberately distinct from `LastActivityAt` and is
+  advanced only by server-observed bytes or transport begin/end. Client progress
+  can still advance `LastActivityAt`, preserving reaping semantics, but cannot
+  influence the enforcer's victim ordering. Integrated `BytesServed` and
+  `LastServedAt` are mapped alongside the edge equivalents.
 - Report-to-central: **C** = async via Redis (edge writes `silo:sessions:*`,
   `streammonitor.RedisSource` reads). **A/B** = in-process SessionManager IS
   central; read via `streammonitor.FuncSource`. MultiSource unions both, deduped
@@ -123,7 +129,7 @@ Captured per live stream (`streammonitor.LiveStream` / `nodesessions.SessionInfo
 | node serving | NodeName/NodeURL | integrated stamps the local host |
 | client ip / client name | `Session.ClientIP/ClientName` (integrated) or edge request + `ClientName` claim | secondary; also the natural re-streaming fingerprint |
 | position | `Session.Position` | secondary timing |
-| bytes served | edge `AddBytes` | edge only; throughput signal |
+| bytes served | edge `AddBytes` / integrated `SessionMeteredWriter` | server-observed throughput signal |
 | hw/sw, resolution, codecs | Session / node record | secondary |
 
 - **Admin visibility:** `HandleListSessions` unions the Redis edge records with the
@@ -133,13 +139,14 @@ Captured per live stream (`streammonitor.LiveStream` / `nodesessions.SessionInfo
   stream tracked by both the central manager and the edge serving it shows as ONE
   row — matching the enforcer's count. A `node_id` filter targets
   an edge, so integrated sessions appear only in the unfiltered listing.
-- **Downloads are an intentional exemption — with one asymmetry.** `/downloads/*`
-  (native) and compat `/Items/{id}/Download` serve full media with no
+- **Downloads are an intentional exemption — with asymmetries.** `/downloads/*`
+  (native), compat `/Items/{id}/Download`, and ABS authenticated file/download
+  serves transfer full media with no
   session/monitor record and do NOT count against the live-stream cap. The native
   route requires a quota-checked download row (`internal/downloads`
-  concurrency/period limits); the compat route requires only compat auth — it is
-  covered by NO quota today (bringing it under an Infuse-compatible download
-  quota is an open follow-up). Both routes now arm the shared `WatchAndCut`, so a
+  concurrency/period limits); the compat and ABS routes are covered by NO quota
+  today. Unifying all three under one quota and one download monitor record is
+  explicit follow-up work. All three routes arm the shared `WatchAndCut`, so a
   per-user stream revocation cuts an in-flight download pour, and the same hook
   deletes every compat login so reconnects need re-auth. Documented at the
   handlers.
@@ -154,6 +161,9 @@ Captured per live stream (`streammonitor.LiveStream` / `nodesessions.SessionInfo
 | jellycompat | direct | ✅ `Refuse` + in-flight cut† (GAP-1/3 fixed) | ✅ via proxy; ✅ local fallback guarded |
 | jellycompat | remux | ✅ `Refuse` + in-flight cut† | ✅ via proxy; ✅ local fallback guarded |
 | jellycompat | transcode | ✅ `Refuse` per segment (GAP-1 fixed) | ✅ via proxy/node; ✅ local fallback guarded |
+| ABS | authenticated file/download | ✅ bearer JWT `iat` owner cutoff + in-flight cut | same |
+| ABS | public playback track | ✅ native session id + session `StartedAt` owner cutoff + cut | same |
+| ABS | public RSS feed file | ✅ feed `CreatedAt` owner cutoff + in-flight cut | same |
 
 † In-flight cut uses `streamrevoke.Store.WatchAndCut` (SetWriteDeadline, checked on
 entry then every 5s). Works at the edge (the proxy's metered writer implements
@@ -215,6 +225,17 @@ below.
   store and learn *new* kills only from Redis pub/sub + SCAN. While Redis is
   unreachable, already-cached kills persist but a kill issued *during* the outage
   does not reach the edge until Redis recovers — enforcement fails open there.
+- **Kills are operator-visible and undoable.** Admins can list, create, and
+  remove entries with `GET/POST /api/v1/admin/streams/revocations` and
+  `DELETE /api/v1/admin/streams/revocations/{kind}/{id}`. `Unrevoke` deletes the
+  local, durable, and Redis copies and publishes an unrevocation event. A bounded
+  tombstone prevents a delayed reconcile from resurrecting the removed kill,
+  while a later legitimate revoke clears the tombstone. If unrevocation publish
+  fails, other processes retain the kill until expiry: the residual failure is
+  safe (dead rather than unexpectedly live) and is reported as a warning.
+- **Durable self-heal compares expiry.** The maintenance pass re-upserts a local
+  entry when the durable copy is missing or expires earlier, repairing a failed
+  longer mirror instead of treating mere row presence as healthy.
 
 ## Findings
 
@@ -323,14 +344,13 @@ so a killed direct-play stops on its next request at worst.
   handlers and in the monitoring data model above. (Note: they also do not consult
   the kill switch — a per-user *stream* revocation does not stop an in-flight
   download. If a ban should also cut downloads, guard those handlers separately.)
-- [ ] **VERIFY-4 — transcode buffer-ahead evasion (HOLE 2).** A transcode client
-  (native or compat) that buffers far ahead and pauses segment fetches for >45s (the
-  active grace) is transiently reaped, then self-heals on the next fetch — so a
-  determined abuser could time buffer-pauses to duck under the cap at the enforcer's
-  tick. The per-segment transport marker fixes the mid-serve case but not the idle
-  gap between segments. Fix needs a reaper change: treat a running transcode ffmpeg
-  as liveness, or a transcode-specific grace ≥ the client's max buffer. Deferred
-  because it touches the sensitive session-reaping path (cf. #279).
+- [x] **VERIFY-4 — transcode buffer-ahead evasion — RESOLVED.** Unpaused
+  transcodes use a bounded 10-minute integrated grace measured from the same
+  activity resolution advanced by server-observed bytes/transports; paused
+  transcodes retain the longer 30-minute paused grace. Edge transcode records
+  use a 180-second idle window consistently in `ActiveCount`, `Snapshot`, and
+  refresh. This deliberately avoids a local ffmpeg liveness probe, which cannot
+  represent offloaded or completed copy-mode transcodes.
 - [ ] **VERIFY-3 — multi-replica central enforcement.** The async enforcer runs on
   every integrated/api process. Two *integrated* replicas behind a load balancer
   each see only their own in-process `FuncSource` (integrated mode writes no
@@ -383,8 +403,8 @@ separate:
   open). This is what makes it safe for `OnUserSessionsRevoked` — which fires
   on ANY admin edit of password/role/enabled/permissions/quality — to also
   write a stream kill: without the cutoff, a routine permission tweak 403'd
-  the user's playback for the full 24h TTL after re-login, with no unrevoke
-  path (expiry is deliberately monotonic).
+  the user's playback for the full 24h TTL after re-login unless an operator
+  explicitly removed the kill.
 - These two layers should NOT be merged — conflating "may log in" with "this
   stream must die" would couple auth and playback. They are chained in the same
   hook, which is the right seam.
@@ -399,25 +419,17 @@ Remaining work:
 1. **Operator config keys (small):** wire `auth.stream_revocation_poll` /
    `auth.stream_revocation_ttl` through the settings pipeline; defaults (60s / 24h)
    are currently hardcoded in `internal/streamrevoke/store.go`.
-2. **Transcode buffer-ahead liveness (VERIFY-4 / HOLE 2):** treat a running ffmpeg
-   as liveness (or a transcode-specific grace) so a buffered-ahead transcode isn't
-   transiently reaped and can't time buffer-pauses to duck the cap.
-3. **Media title enrichment:** resolve `MediaFileID → title` at admin display time
+2. **Media title enrichment:** resolve `MediaFileID → title` at admin display time
    so the view shows *what* is being watched, not just a numeric id (also enables a
    distinct-title re-streaming heuristic).
-4. **Multi-replica enforcement (VERIFY-3):** single-leader election for the async
+3. **Multi-replica enforcement (VERIFY-3, explicitly deferred):** single-leader election for the async
    enforcer, or have integrated nodes publish local sessions to the shared Redis
    picture so the cap holds across replicas.
-5. **Self-heal a failed durable write:** `Revoke` mirrors to Postgres best-effort;
-   a transient DB error at revoke time is logged but never repaired (the maintain
-   tick only reads *from* durable, never re-mirrors live in-memory kills *to* it),
-   so that one kill is lost on the next restart. Add a memory→durable re-mirror on
-   the poll tick.
-6. **Invariant guard test:** `defaultTTL >= playback.MaxTokenTTL` is coupled only by
+4. **Invariant guard test:** `defaultTTL >= playback.MaxTokenTTL` is coupled only by
    a prose comment (streamrevoke can't import playback — import cycle). Add a test
    in a package that can import both, so raising `MaxTokenTTL` can't silently
    violate it.
-7. **Transcode-node ghost records:** the node's session-backed `Track` record is
+5. **Transcode-node ghost records (explicitly deferred):** the node's session-backed `Track` record is
    refreshed forever until an explicit stop/cleanup; if central dies or loses the
    session without the stop reaching the node, an owner-attributed ghost persists
    in Redis indefinitely — permanently +1 in the user's live count (the enforcer's
@@ -425,9 +437,8 @@ Remaining work:
    enforcer re-revokes it every pass and the admin view overcounts). Needs a
    node-side idle sweep tied to real serve activity (`MarkServed` now provides the
    signal).
-8. **Compat download quota:** compat `/Items/{id}/Download` is exempt from the
-   stream cap AND covered by no download quota (native downloads require a
-   quota-checked download row; the compat route requires only compat auth). An
-   Infuse-compatible quota (plain GETs, Range requests, no download rows) is open
-   product/design work; today's controls are compat auth, the library access
-   filter, and the in-flight user-revocation cut.
+6. **Unified download quota and monitor:** compat `/Items/{id}/Download` and ABS
+   authenticated file/download routes are exempt from the stream cap and covered
+   by no download quota. Bring them under the native download policy with one
+   quota and one monitor-record model; today's controls are authentication,
+   library access, and the in-flight user-revocation cut.
