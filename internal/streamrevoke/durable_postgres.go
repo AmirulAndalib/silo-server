@@ -69,6 +69,14 @@ func (s *PostgresDurableStore) Upsert(ctx context.Context, r Revocation) error {
 	return nil
 }
 
+// Delete removes a revocation from the durable mirror.
+func (s *PostgresDurableStore) Delete(ctx context.Context, kind Kind, id string) error {
+	if _, err := s.pool.Exec(ctx, `DELETE FROM stream_revocations WHERE kind = $1 AND id = $2`, string(kind), id); err != nil {
+		return fmt.Errorf("streamrevoke delete: %w", err)
+	}
+	return nil
+}
+
 // ListActive returns every revocation not yet expired, for warming the hot-path
 // cache on startup and re-warming after a Redis flush.
 func (s *PostgresDurableStore) ListActive(ctx context.Context) ([]Revocation, error) {

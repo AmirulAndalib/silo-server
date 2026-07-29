@@ -36,6 +36,8 @@ const (
 	// EventStreamRevoked is the cache.Event.Type published on cache.ChannelAdmin
 	// when a revocation is created so other nodes apply it immediately.
 	EventStreamRevoked = "stream_revoked"
+	// EventStreamUnrevoked is published when an operator removes a revocation.
+	EventStreamUnrevoked = "stream_unrevoked"
 
 	defaultPollInterval = 60 * time.Second
 	// defaultTTL is intentionally >= the playback recipe-card lifetime
@@ -87,6 +89,7 @@ func (r Revocation) expired(now time.Time) bool {
 // the interface when one is provided.
 type DurableStore interface {
 	Upsert(ctx context.Context, r Revocation) error
+	Delete(ctx context.Context, kind Kind, id string) error
 	ListActive(ctx context.Context) ([]Revocation, error)
 	Prune(ctx context.Context) error
 }
@@ -108,8 +111,11 @@ type Store struct {
 	pollInterval time.Duration
 	defaultTTL   time.Duration
 
-	mu    sync.RWMutex
-	items map[Key]Revocation
+	opMu             sync.Mutex
+	mu               sync.RWMutex
+	items            map[Key]Revocation
+	tombstones       map[Key]time.Time
+	tombstoneExpires map[Key]time.Time
 }
 
 // New builds a Store, applying defaults for any unset Options.
@@ -121,12 +127,14 @@ func New(opts Options) *Store {
 		opts.DefaultTTL = defaultTTL
 	}
 	return &Store{
-		rdb:          opts.Redis,
-		bus:          opts.Bus,
-		durable:      opts.Durable,
-		pollInterval: opts.PollInterval,
-		defaultTTL:   opts.DefaultTTL,
-		items:        make(map[Key]Revocation),
+		rdb:              opts.Redis,
+		bus:              opts.Bus,
+		durable:          opts.Durable,
+		pollInterval:     opts.PollInterval,
+		defaultTTL:       opts.DefaultTTL,
+		items:            make(map[Key]Revocation),
+		tombstones:       make(map[Key]time.Time),
+		tombstoneExpires: make(map[Key]time.Time),
 	}
 }
 
@@ -207,14 +215,15 @@ func (s *Store) WatchAndCut(w http.ResponseWriter, sessionID string, userID int,
 //
 // startedAt is when the request's stream credential was issued: the stream
 // token's iat on token-bearing surfaces (edge proxy, transcode node, native
-// ?st=), or the request entry time on freshly-authenticated surfaces (native
-// session auth, jellycompat login). A user revocation is a CUTOFF, not a ban:
+// ?st=, ABS bearer), the persisted playback-session start for public ABS
+// tracks, or the feed creation time for public RSS capabilities. A user
+// revocation is a CUTOFF, not a ban:
 // it kills streams whose credential predates it, while a stream authorized
 // after it (which required passing auth that the revocation just reset) plays
 // normally. Without the cutoff, the OnUserSessionsRevoked hook — fired by any
 // admin edit of password/role/enabled/permissions/quality — would 403 the
-// user's playback for the full 24h TTL even after they re-authenticate, with
-// no unrevoke path (expiry is deliberately monotonic). A zero startedAt never
+// user's playback for the full 24h TTL even after they re-authenticate unless
+// an operator explicitly unrevoked it. A zero startedAt never
 // matches a user revocation (fail open, matching the enforcer's "never kill on
 // uncertainty"); session revocations are exact-id kills and ignore startedAt.
 func (s *Store) IsRevoked(sessionID string, userID int, startedAt time.Time) bool {
@@ -258,6 +267,14 @@ func (r Revocation) effectiveExpiry() time.Time {
 // not fight a freshly-applied one. The caller must not hold s.mu.
 func (s *Store) applyLocal(r Revocation) {
 	s.mu.Lock()
+	if issuedAt, ok := s.tombstones[r.key()]; ok {
+		if !r.RevokedAt.After(issuedAt) {
+			s.mu.Unlock()
+			return
+		}
+		delete(s.tombstones, r.key())
+		delete(s.tombstoneExpires, r.key())
+	}
 	if existing, ok := s.items[r.key()]; !ok || !existing.effectiveExpiry().After(r.effectiveExpiry()) {
 		s.items[r.key()] = r
 	}
@@ -273,11 +290,29 @@ func (s *Store) effective(k Key) Revocation {
 	return s.items[k]
 }
 
+func (s *Store) isTombstoned(k Key) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.tombstones[k]
+	return ok
+}
+
 // Revoke adds a revocation to the local cache, writes it to Redis (with a TTL
 // of until-now) when configured, mirrors it to the durable store when
 // configured, and publishes a pub/sub event so other nodes apply it
 // immediately.
 func (s *Store) Revoke(ctx context.Context, key Key, reason string, until time.Time) error {
+	_, err := s.RevokeWithWarnings(ctx, key, reason, until)
+	return err
+}
+
+// RevokeWithWarnings applies a revocation locally and reports propagation
+// failures without weakening the local kill. Revoke is the compatibility
+// wrapper used by existing callers that only need local-success semantics.
+func (s *Store) RevokeWithWarnings(ctx context.Context, key Key, reason string, until time.Time) ([]string, error) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
 	now := time.Now()
 	r := Revocation{
 		Kind:      key.Kind,
@@ -290,6 +325,7 @@ func (s *Store) Revoke(ctx context.Context, key Key, reason string, until time.T
 	// Local cache first: the hot path must reflect the kill immediately even if
 	// downstream propagation fails.
 	s.applyLocal(r)
+	var warnings []string
 
 	// Propagation must not die with the caller: an admin terminate rides its
 	// HTTP request's context, and an abort after applyLocal would strand the
@@ -301,6 +337,7 @@ func (s *Store) Revoke(ctx context.Context, key Key, reason string, until time.T
 	if s.durable != nil {
 		if err := s.durable.Upsert(ctx, r); err != nil {
 			slog.Warn("streamrevoke durable upsert failed", "error", err, "kind", r.Kind, "id", r.ID)
+			warnings = append(warnings, "durable mirror was not updated")
 		}
 	}
 
@@ -308,7 +345,9 @@ func (s *Store) Revoke(ctx context.Context, key Key, reason string, until time.T
 	// applyLocal kept (monotonic): a short over-cap re-revoke must not shorten a
 	// longer admin kill's Redis TTL, matching applyLocal and the durable upsert's
 	// GREATEST. Edges that warm from Redis in that window must see the later kill.
-	s.mirrorToRedis(ctx, s.effective(r.key()))
+	if err := s.mirrorToRedis(ctx, s.effective(r.key())); err != nil {
+		warnings = append(warnings, "Redis mirror was not updated")
+	}
 
 	// Pub/sub push so already-connected nodes apply the kill immediately (the
 	// warm loops deliberately skip this — SCAN reconcile handles late-joiners).
@@ -316,15 +355,16 @@ func (s *Store) Revoke(ctx context.Context, key Key, reason string, until time.T
 		data, err := json.Marshal(r)
 		if err != nil {
 			slog.Warn("streamrevoke marshal failed", "error", err, "kind", r.Kind, "id", r.ID)
-			return err
+			return warnings, err
 		}
 		evt := cache.Event{Type: EventStreamRevoked, Payload: string(data)}
 		if err := s.bus.Publish(ctx, cache.ChannelAdmin, evt); err != nil {
 			slog.Warn("streamrevoke publish failed", "error", err, "kind", r.Kind, "id", r.ID)
+			warnings = append(warnings, "revocation event was not published")
 		}
 	}
 
-	return nil
+	return warnings, nil
 }
 
 // mirrorToRedis writes (or deletes) the Redis mirror key for a revocation with a
@@ -334,14 +374,14 @@ func (s *Store) Revoke(ctx context.Context, key Key, reason string, until time.T
 // Redis, so re-arming Redis from the durable source of truth after a Redis flush
 // + central restart is what lets edges reconverge via their SCAN reconcile.
 // Best-effort: failures are logged, never returned. No-op when Redis is absent.
-func (s *Store) mirrorToRedis(ctx context.Context, r Revocation) {
+func (s *Store) mirrorToRedis(ctx context.Context, r Revocation) error {
 	if s.rdb == nil {
-		return
+		return nil
 	}
 	data, err := json.Marshal(r)
 	if err != nil {
 		slog.Warn("streamrevoke marshal failed", "error", err, "kind", r.Kind, "id", r.ID)
-		return
+		return err
 	}
 	if r.ExpiresAt.IsZero() {
 		// Permanent kill: set without a TTL, matching applyLocal/effectiveExpiry
@@ -349,25 +389,115 @@ func (s *Store) mirrorToRedis(ctx context.Context, r Revocation) {
 		// hugely negative and drop the key, so late-joining edges would miss it.
 		if err := s.rdb.Set(ctx, redisKey(r.key()), data, 0).Err(); err != nil {
 			slog.Warn("streamrevoke redis set failed", "error", err, "kind", r.Kind, "id", r.ID)
+			return err
 		}
-		return
+		return nil
 	}
 	ttl := time.Until(r.ExpiresAt)
 	if ttl <= 0 {
 		// Already expired: nothing to mirror in Redis.
 		if err := s.rdb.Del(ctx, redisKey(r.key())).Err(); err != nil {
 			slog.Debug("streamrevoke redis del failed", "error", err, "kind", r.Kind, "id", r.ID)
+			return err
 		}
-		return
+		return nil
 	}
 	if err := s.rdb.Set(ctx, redisKey(r.key()), data, ttl).Err(); err != nil {
 		slog.Warn("streamrevoke redis set failed", "error", err, "kind", r.Kind, "id", r.ID)
+		return err
 	}
+	return nil
+}
+
+type unrevocation struct {
+	Kind      Kind      `json:"kind"`
+	ID        string    `json:"id"`
+	IssuedAt  time.Time `json:"issued_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+func (u unrevocation) key() Key {
+	return Key{Kind: u.Kind, ID: u.ID}
+}
+
+// applyUnrevocation installs a bounded tombstone before deleting the local
+// kill. A delayed unrevoke event never removes a newer revocation.
+func (s *Store) applyUnrevocation(u unrevocation) {
+	k := u.key()
+	s.mu.Lock()
+	if existing, ok := s.items[k]; ok && existing.RevokedAt.After(u.IssuedAt) {
+		s.mu.Unlock()
+		return
+	}
+	if previous, ok := s.tombstones[k]; ok && previous.After(u.IssuedAt) {
+		s.mu.Unlock()
+		return
+	}
+	expiresAt := u.ExpiresAt
+	maxExpiry := u.IssuedAt.Add(s.defaultTTL)
+	if expiresAt.IsZero() || expiresAt.After(maxExpiry) {
+		expiresAt = maxExpiry
+	}
+	s.tombstones[k] = u.IssuedAt
+	s.tombstoneExpires[k] = expiresAt
+	delete(s.items, k)
+	s.mu.Unlock()
+}
+
+// Unrevoke removes a kill locally and from every configured mirror. A failed
+// publish fails safe: other processes may retain the kill until expiry.
+func (s *Store) Unrevoke(ctx context.Context, key Key) error {
+	_, err := s.UnrevokeWithWarnings(ctx, key)
+	return err
+}
+
+// UnrevokeWithWarnings is the admin-facing form of Unrevoke.
+func (s *Store) UnrevokeWithWarnings(ctx context.Context, key Key) ([]string, error) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
+	issuedAt := time.Now()
+	s.mu.RLock()
+	existing := s.items[key]
+	s.mu.RUnlock()
+	u := unrevocation{Kind: key.Kind, ID: key.ID, IssuedAt: issuedAt, ExpiresAt: existing.ExpiresAt}
+	s.applyUnrevocation(u)
+
+	ctx = context.WithoutCancel(ctx)
+	var warnings []string
+	if s.durable != nil {
+		if err := s.durable.Delete(ctx, key.Kind, key.ID); err != nil {
+			slog.WarnContext(ctx, "streamrevoke durable delete failed", "error", err, "kind", key.Kind, "id", key.ID)
+			warnings = append(warnings, "durable mirror was not deleted")
+		}
+	}
+	if s.rdb != nil {
+		if err := s.rdb.Del(ctx, redisKey(key)).Err(); err != nil {
+			slog.WarnContext(ctx, "streamrevoke redis delete failed", "error", err, "kind", key.Kind, "id", key.ID)
+			warnings = append(warnings, "Redis mirror was not deleted")
+		}
+	}
+	if s.bus != nil {
+		data, err := json.Marshal(u)
+		if err != nil {
+			return warnings, err
+		}
+		if err := s.bus.Publish(ctx, cache.ChannelAdmin, cache.Event{Type: EventStreamUnrevoked, Payload: string(data)}); err != nil {
+			slog.WarnContext(ctx, "streamrevoke unrevoke publish failed", "error", err, "kind", key.Kind, "id", key.ID)
+			warnings = append(warnings, "unrevocation event was not published; other processes may retain the kill until it expires")
+		}
+	}
+	return warnings, nil
 }
 
 // RevokeSession revokes a single session id for DefaultTTL.
 func (s *Store) RevokeSession(ctx context.Context, sessionID, reason string) error {
 	return s.Revoke(ctx, Key{Kind: KindSession, ID: sessionID}, reason, time.Now().Add(s.defaultTTL))
+}
+
+// RevokeSessionWithWarnings is the admin-facing form of RevokeSession.
+func (s *Store) RevokeSessionWithWarnings(ctx context.Context, sessionID, reason string) ([]string, error) {
+	return s.RevokeWithWarnings(ctx, Key{Kind: KindSession, ID: sessionID}, reason, time.Now().Add(s.defaultTTL))
 }
 
 // RevokeSessionFor revokes a single session id for a caller-chosen TTL. The
@@ -398,6 +528,15 @@ func (s *Store) RevokeUser(ctx context.Context, userID int, reason string) error
 	return s.Revoke(ctx, userKey(userID), reason, time.Now().Add(s.defaultTTL))
 }
 
+// RevokeUserWithWarnings applies the default TTL while preserving propagation
+// warnings for the admin API.
+func (s *Store) RevokeUserWithWarnings(ctx context.Context, userID int, reason string) ([]string, error) {
+	if userID <= 0 {
+		return nil, fmt.Errorf("streamrevoke: invalid userID %d", userID)
+	}
+	return s.RevokeWithWarnings(ctx, userKey(userID), reason, time.Now().Add(s.defaultTTL))
+}
+
 // List returns the currently-active revocations, pruning expired entries on
 // read.
 func (s *Store) List() []Revocation {
@@ -424,6 +563,12 @@ func (s *Store) pruneExpired() {
 			delete(s.items, k)
 		}
 	}
+	for k, expiresAt := range s.tombstoneExpires {
+		if !now.Before(expiresAt) {
+			delete(s.tombstones, k)
+			delete(s.tombstoneExpires, k)
+		}
+	}
 	s.mu.Unlock()
 }
 
@@ -448,7 +593,9 @@ func (s *Store) StartSync(ctx context.Context) {
 			for _, r := range revs {
 				if !r.expired(now) {
 					s.applyLocal(r)
-					s.mirrorToRedis(ctx, r)
+					if !s.isTombstoned(r.key()) {
+						_ = s.mirrorToRedis(ctx, s.effective(r.key()))
+					}
 				}
 			}
 		}
@@ -516,20 +663,43 @@ func (s *Store) maintain(ctx context.Context) {
 	// flush self-heals, re-arming Redis for edge nodes too, then physically
 	// reclaim expired rows.
 	if s.durable != nil {
+		s.opMu.Lock()
+
 		if revs, err := s.durable.ListActive(ctx); err != nil {
 			slog.Warn("streamrevoke durable reconcile failed", "error", err)
 		} else {
 			now := time.Now()
+			durable := make(map[Key]Revocation, len(revs))
 			for _, r := range revs {
 				if !r.expired(now) {
+					durable[r.key()] = r
 					s.applyLocal(r)
-					s.mirrorToRedis(ctx, r)
+					if !s.isTombstoned(r.key()) {
+						_ = s.mirrorToRedis(ctx, s.effective(r.key()))
+					}
+				}
+			}
+			s.mu.RLock()
+			local := make([]Revocation, 0, len(s.items))
+			for k, r := range s.items {
+				if _, tombstoned := s.tombstones[k]; !tombstoned && !r.expired(now) {
+					local = append(local, r)
+				}
+			}
+			s.mu.RUnlock()
+			for _, r := range local {
+				durableCopy, ok := durable[r.key()]
+				if !ok || durableCopy.effectiveExpiry().Before(r.effectiveExpiry()) {
+					if err := s.durable.Upsert(ctx, r); err != nil {
+						slog.WarnContext(ctx, "streamrevoke durable self-heal failed", "error", err, "kind", r.Kind, "id", r.ID)
+					}
 				}
 			}
 		}
 		if err := s.durable.Prune(ctx); err != nil {
 			slog.Warn("streamrevoke durable prune failed", "error", err)
 		}
+		s.opMu.Unlock()
 	}
 	s.pruneExpired()
 }
@@ -537,18 +707,24 @@ func (s *Store) maintain(ctx context.Context) {
 // handleEvent applies an EventStreamRevoked event to the local cache. Other
 // event types on the channel are ignored.
 func (s *Store) handleEvent(evt cache.Event) {
-	if evt.Type != EventStreamRevoked {
-		return
+	switch evt.Type {
+	case EventStreamRevoked:
+		var r Revocation
+		if err := json.Unmarshal([]byte(evt.Payload), &r); err != nil {
+			slog.Debug("streamrevoke event unmarshal failed", "error", err)
+			return
+		}
+		if !r.expired(time.Now()) {
+			s.applyLocal(r)
+		}
+	case EventStreamUnrevoked:
+		var u unrevocation
+		if err := json.Unmarshal([]byte(evt.Payload), &u); err != nil {
+			slog.Debug("streamrevoke unrevoke event unmarshal failed", "error", err)
+			return
+		}
+		s.applyUnrevocation(u)
 	}
-	var r Revocation
-	if err := json.Unmarshal([]byte(evt.Payload), &r); err != nil {
-		slog.Debug("streamrevoke event unmarshal failed", "error", err)
-		return
-	}
-	if r.expired(time.Now()) {
-		return
-	}
-	s.applyLocal(r)
 }
 
 // reconcileFromRedis SCANs the revocation namespace and applies every live

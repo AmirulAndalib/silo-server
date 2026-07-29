@@ -2,10 +2,14 @@ package streamrevoke
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Silo-Server/silo-server/internal/cache"
+	"github.com/redis/go-redis/v9"
 )
 
 // errFakeDurable is the error fakeDurable.ListActive returns while failNext > 0.
@@ -23,12 +27,31 @@ func newMemStore() *Store {
 // mutex-guarded. failNext, when > 0, makes ListActive return an error that many
 // times before succeeding, to exercise the bounded boot-warm retry.
 type fakeDurable struct {
-	mu       sync.Mutex
-	rows     map[Key]Revocation
-	upserts  int
-	prunes   int
-	failNext int
-	lists    int
+	mu            sync.Mutex
+	rows          map[Key]Revocation
+	upserts       int
+	prunes        int
+	deletes       int
+	failNext      int
+	lists         int
+	upsertStarted chan struct{}
+	unblockUpsert chan struct{}
+}
+
+type failingBus struct{}
+
+func (failingBus) Publish(context.Context, string, cache.Event) error {
+	return errors.New("publish failed")
+}
+func (failingBus) Subscribe(context.Context, string, cache.EventHandler) error { return nil }
+func (failingBus) Close() error                                                { return nil }
+
+func (f *fakeDurable) Delete(_ context.Context, kind Kind, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.rows, Key{Kind: kind, ID: id})
+	f.deletes++
+	return nil
 }
 
 func newFakeDurable() *fakeDurable {
@@ -36,6 +59,10 @@ func newFakeDurable() *fakeDurable {
 }
 
 func (f *fakeDurable) Upsert(_ context.Context, r Revocation) error {
+	if f.upsertStarted != nil {
+		close(f.upsertStarted)
+		<-f.unblockUpsert
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rows[r.key()] = r
@@ -218,6 +245,167 @@ func TestMaintainPrunesAndReWarmsFromDurable(t *testing.T) {
 	fake.mu.Unlock()
 	if deadStillThere {
 		t.Fatalf("expected expired durable row to be pruned")
+	}
+}
+
+func TestMaintainDurableSelfHealDoesNotRaceUnrevoke(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeDurable()
+	fake.upsertStarted = make(chan struct{})
+	fake.unblockUpsert = make(chan struct{})
+	s := New(Options{Durable: fake})
+	key := Key{Kind: KindSession, ID: "sess-maintain-unrevoke"}
+	s.applyLocal(Revocation{
+		Kind:      key.Kind,
+		ID:        key.ID,
+		RevokedAt: time.Now(),
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+
+	maintainDone := make(chan struct{})
+	go func() {
+		s.maintain(ctx)
+		close(maintainDone)
+	}()
+	<-fake.upsertStarted
+
+	unrevokeDone := make(chan error, 1)
+	go func() {
+		unrevokeDone <- s.Unrevoke(ctx, key)
+	}()
+
+	select {
+	case err := <-unrevokeDone:
+		t.Fatalf("Unrevoke completed before maintain released the operation lock: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(fake.unblockUpsert)
+	<-maintainDone
+	if err := <-unrevokeDone; err != nil {
+		t.Fatalf("Unrevoke: %v", err)
+	}
+
+	fake.mu.Lock()
+	_, exists := fake.rows[key]
+	fake.mu.Unlock()
+	if exists {
+		t.Fatal("durable self-heal resurrected the unrevoked row")
+	}
+}
+
+func TestUnrevokeTombstoneBlocksReconcileAndNewerRevokeClearsIt(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore()
+	key := Key{Kind: KindSession, ID: "sess-unrevoke"}
+	old := Revocation{Kind: key.Kind, ID: key.ID, RevokedAt: time.Now().Add(-time.Minute), ExpiresAt: time.Now().Add(time.Hour)}
+	s.applyLocal(old)
+
+	if err := s.Unrevoke(ctx, key); err != nil {
+		t.Fatalf("Unrevoke: %v", err)
+	}
+	s.applyLocal(old)
+	if s.IsRevoked(key.ID, 0, time.Time{}) {
+		t.Fatal("stale reconcile resurrected an unrevoked entry")
+	}
+
+	if err := s.Revoke(ctx, key, "new kill", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("newer Revoke: %v", err)
+	}
+	if !s.IsRevoked(key.ID, 0, time.Time{}) {
+		t.Fatal("newer revoke was suppressed by tombstone")
+	}
+	s.mu.RLock()
+	_, tombstoned := s.tombstones[key]
+	s.mu.RUnlock()
+	if tombstoned {
+		t.Fatal("newer revoke did not clear tombstone")
+	}
+}
+
+func TestConcurrentRevokeUnrevokeThenReconcileDoesNotResurrect(t *testing.T) {
+	ctx := context.Background()
+	s := newMemStore()
+	key := Key{Kind: KindSession, ID: "sess-race"}
+	var wg sync.WaitGroup
+	for range 25 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = s.Revoke(ctx, key, "race", time.Now().Add(time.Hour))
+		}()
+		go func() {
+			defer wg.Done()
+			_ = s.Unrevoke(ctx, key)
+		}()
+	}
+	wg.Wait()
+
+	stale := Revocation{Kind: key.Kind, ID: key.ID, RevokedAt: time.Now().Add(-time.Minute), ExpiresAt: time.Now().Add(time.Hour)}
+	if err := s.Unrevoke(ctx, key); err != nil {
+		t.Fatalf("final Unrevoke: %v", err)
+	}
+	s.applyLocal(stale)
+	if s.IsRevoked(key.ID, 0, time.Time{}) {
+		t.Fatal("stale reconcile resurrected entry after concurrent operations")
+	}
+}
+
+func TestDelayedUnrevokeEventDoesNotDeleteNewerRevoke(t *testing.T) {
+	s := newMemStore()
+	key := Key{Kind: KindSession, ID: "sess-order"}
+	issuedAt := time.Now().Add(-time.Minute)
+	s.applyLocal(Revocation{Kind: key.Kind, ID: key.ID, RevokedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)})
+	payload, err := json.Marshal(unrevocation{Kind: key.Kind, ID: key.ID, IssuedAt: issuedAt, ExpiresAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.handleEvent(cache.Event{Type: EventStreamUnrevoked, Payload: string(payload)})
+	if !s.IsRevoked(key.ID, 0, time.Time{}) {
+		t.Fatal("delayed unrevoke event deleted a newer revocation")
+	}
+}
+
+func TestUnrevokePropagationFailuresLeaveLocalStateUnrevoked(t *testing.T) {
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: 10 * time.Millisecond})
+	t.Cleanup(func() { _ = rdb.Close() })
+	s := New(Options{Redis: rdb, Bus: failingBus{}})
+	key := Key{Kind: KindSession, ID: "sess-local"}
+	s.applyLocal(Revocation{Kind: key.Kind, ID: key.ID, RevokedAt: time.Now().Add(-time.Minute), ExpiresAt: time.Now().Add(time.Hour)})
+
+	warnings, err := s.UnrevokeWithWarnings(context.Background(), key)
+	if err != nil {
+		t.Fatalf("UnrevokeWithWarnings: %v", err)
+	}
+	if len(warnings) != 2 {
+		t.Fatalf("warnings = %v, want Redis and publish failures", warnings)
+	}
+	if s.IsRevoked(key.ID, 0, time.Time{}) {
+		t.Fatal("local revocation remained after propagation failures")
+	}
+}
+
+func TestMaintainRepairsShorterDurableExpiry(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeDurable()
+	key := Key{Kind: KindSession, ID: "sess-short-durable"}
+	short := Revocation{Kind: key.Kind, ID: key.ID, RevokedAt: time.Now().Add(-time.Minute), ExpiresAt: time.Now().Add(time.Minute)}
+	long := Revocation{Kind: key.Kind, ID: key.ID, RevokedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)}
+	fake.rows[key] = short
+	s := New(Options{Durable: fake})
+	s.applyLocal(long)
+
+	s.maintain(ctx)
+
+	fake.mu.Lock()
+	got := fake.rows[key]
+	upserts := fake.upserts
+	fake.mu.Unlock()
+	if got.ExpiresAt.Before(long.ExpiresAt) {
+		t.Fatalf("durable expiry = %v, want at least %v", got.ExpiresAt, long.ExpiresAt)
+	}
+	if upserts == 0 {
+		t.Fatal("shorter durable row was not re-upserted")
 	}
 }
 

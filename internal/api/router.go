@@ -3103,6 +3103,12 @@ func NewRouter(deps Dependencies) chi.Router {
 								r.Post("/sessions/{session_id}/terminate", adminPlaybackControlHandler.HandleTerminateSession)
 								r.Post("/sessions/{session_id}/message", adminPlaybackControlHandler.HandleMessageSession)
 							}
+							if deps.RevocationStore != nil {
+								streamRevocationHandler := handlers.NewAdminStreamRevocationHandler(deps.RevocationStore)
+								r.Get("/streams/revocations", streamRevocationHandler.HandleList)
+								r.Post("/streams/revocations", streamRevocationHandler.HandleCreate)
+								r.Delete("/streams/revocations/{kind}/{id}", streamRevocationHandler.HandleDelete)
+							}
 
 							if deps.TaskManager != nil {
 								taskHistoryRepo := repository.NewPgExecutionRepository(deps.DB)
