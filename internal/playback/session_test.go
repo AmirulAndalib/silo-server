@@ -1092,6 +1092,7 @@ func TestSetRealtimeConnection(t *testing.T) {
 func TestSessionManager_LimitCountsIgnoreStaleSessions(t *testing.T) {
 	sm := playback.NewSessionManager(5, 2)
 	sm.SetLivenessGracePeriods(20*time.Millisecond, 40*time.Millisecond)
+	sm.SetTranscodeLivenessGrace(20 * time.Millisecond)
 
 	if _, err := sm.StartSession(1, "profile-1", 100, playback.PlayDirect, false); err != nil {
 		t.Fatalf("StartSession direct: %v", err)
@@ -1107,6 +1108,22 @@ func TestSessionManager_LimitCountsIgnoreStaleSessions(t *testing.T) {
 	}
 	if got := sm.TranscodeCount(1); got != 0 {
 		t.Fatalf("TranscodeCount after grace = %d, want 0", got)
+	}
+}
+
+func TestSessionManager_LivenessGraceDoesNotOverwriteTranscodeGrace(t *testing.T) {
+	sm := playback.NewSessionManager(5, 2)
+	sm.SetTranscodeLivenessGrace(time.Hour)
+	sm.SetLivenessGracePeriods(20*time.Millisecond, 40*time.Millisecond)
+
+	if _, err := sm.StartSession(1, "profile-1", 101, playback.PlayTranscode, false); err != nil {
+		t.Fatalf("StartSession transcode: %v", err)
+	}
+
+	time.Sleep(30 * time.Millisecond)
+
+	if got := sm.TranscodeCount(1); got != 1 {
+		t.Fatalf("TranscodeCount after active grace = %d, want 1", got)
 	}
 }
 
@@ -1366,6 +1383,7 @@ func TestSessionManager_CleanExpired_PausedGracePeriod(t *testing.T) {
 func TestCheckReplacementAllowedExcludesOnlyTheReplacedSession(t *testing.T) {
 	sm := playback.NewSessionManager(10, 2)
 	sm.SetLivenessGracePeriods(25*time.Millisecond, time.Hour)
+	sm.SetTranscodeLivenessGrace(25 * time.Millisecond)
 
 	failed, err := sm.StartSession(1, "profile-1", 100, playback.PlayTranscode, false)
 	if err != nil {

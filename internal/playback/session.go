@@ -56,6 +56,8 @@ type Session struct {
 	StartedAt                  time.Time
 	UpdatedAt                  time.Time
 	LastActivityAt             time.Time
+	BytesServed                int64
+	LastServedAt               time.Time
 	activeTransportCount       int
 	replacementPlayMethod      PlayMethod
 	streamRevision             uint64
@@ -179,6 +181,7 @@ type SessionManager struct {
 	admissionDecider AdmissionDecider
 	activeGrace      time.Duration
 	pausedGrace      time.Duration
+	transcodeGrace   time.Duration
 	expireHook       func(*Session)
 }
 
@@ -241,6 +244,10 @@ const (
 	// pressing Play after a long pause freeze the client (issue #243).
 	// Keep in sync with pausedSessionGrace in internal/worker/cleanup.go.
 	DefaultPausedSessionGrace = 30 * time.Minute
+
+	// DefaultTranscodeSessionGrace covers buffer-ahead gaps between segment
+	// requests without depending on local ffmpeg process state.
+	DefaultTranscodeSessionGrace = 10 * time.Minute
 )
 
 // NewSessionManager creates a SessionManager with the given concurrency limits.
@@ -248,11 +255,12 @@ const (
 // maxTranscodes limits concurrent transcode streams per user.
 func NewSessionManager(maxStreams, maxTranscodes int) *SessionManager {
 	return &SessionManager{
-		sessions:      make(map[string]*Session),
-		maxStreams:    maxStreams,
-		maxTranscodes: maxTranscodes,
-		activeGrace:   DefaultActiveSessionGrace,
-		pausedGrace:   DefaultPausedSessionGrace,
+		sessions:       make(map[string]*Session),
+		maxStreams:     maxStreams,
+		maxTranscodes:  maxTranscodes,
+		activeGrace:    DefaultActiveSessionGrace,
+		pausedGrace:    DefaultPausedSessionGrace,
+		transcodeGrace: DefaultTranscodeSessionGrace,
 	}
 }
 
@@ -283,6 +291,15 @@ func (m *SessionManager) SetLivenessGracePeriods(active, paused time.Duration) {
 	}
 	if paused > 0 {
 		m.pausedGrace = paused
+	}
+}
+
+// SetTranscodeLivenessGrace overrides the unpaused transcode idle window.
+func (m *SessionManager) SetTranscodeLivenessGrace(grace time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if grace > 0 {
+		m.transcodeGrace = grace
 	}
 }
 
@@ -1112,6 +1129,7 @@ func (m *SessionManager) BeginTransport(sessionID string) error {
 	}
 
 	s.activeTransportCount++
+	s.LastServedAt = time.Now()
 	m.touchSessionLocked(s)
 	return nil
 }
@@ -1130,6 +1148,25 @@ func (m *SessionManager) EndTransport(sessionID string) error {
 	if s.activeTransportCount > 0 {
 		s.activeTransportCount--
 	}
+	s.LastServedAt = time.Now()
+	m.touchSessionLocked(s)
+	return nil
+}
+
+// AddServedBytes records bytes observed by a server-side media pour. It never
+// recreates an unknown or already-reaped session.
+func (m *SessionManager) AddServedBytes(sessionID string, n int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[sessionID]
+	if !ok {
+		return ErrSessionNotFound
+	}
+	if n <= 0 {
+		return nil
+	}
+	s.BytesServed += n
+	s.LastServedAt = time.Now()
 	m.touchSessionLocked(s)
 	return nil
 }
@@ -1348,6 +1385,8 @@ func (m *SessionManager) sessionIsInactiveLocked(s *Session, now time.Time, acti
 	grace := activeIdle
 	if s.IsPaused {
 		grace = pausedIdle
+	} else if s.PlayMethod == PlayTranscode && m.transcodeGrace > grace {
+		grace = m.transcodeGrace
 	}
 	if grace <= 0 {
 		return !lastActivity.After(now)

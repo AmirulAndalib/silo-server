@@ -3784,7 +3784,10 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 		// the hidden-stream window is observable.
 		slog.Warn("begin transport marker failed", "session", sessionID, "segment", segmentPath, "error", err)
 	}
-	http.ServeFile(w, r, segmentPath)
+	recorder, _ := h.sessionMgr.(playback.ServedBytesRecorder)
+	metered := playback.NewSessionMeteredWriter(w, recorder, sessionID)
+	defer func() { _ = metered.Close() }()
+	http.ServeFile(metered, r, segmentPath)
 }
 
 // buildProxyManifestURL signs a stream token carrying the session's full

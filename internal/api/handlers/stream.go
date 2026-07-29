@@ -143,7 +143,10 @@ func (h *StreamHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 				_ = h.sessionMgr.EndTransport(sessionID)
 			}()
 		}
-		if err := playback.ServeDirectPlay(w, r, file.FilePath); err != nil {
+		recorder, _ := h.sessionMgr.(playback.ServedBytesRecorder)
+		metered := playback.NewSessionMeteredWriter(w, recorder, sessionID)
+		defer func() { _ = metered.Close() }()
+		if err := playback.ServeDirectPlay(metered, r, file.FilePath); err != nil {
 			h.handleTransportStartFailure(r.Context(), session, file, err)
 		}
 
@@ -153,13 +156,16 @@ func (h *StreamHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 				_ = h.sessionMgr.EndTransport(sessionID)
 			}()
 		}
+		recorder, _ := h.sessionMgr.(playback.ServedBytesRecorder)
+		metered := playback.NewSessionMeteredWriter(w, recorder, sessionID)
+		defer func() { _ = metered.Close() }()
 		seekSeconds := 0.0
 		if seekStr := r.URL.Query().Get("seek"); seekStr != "" {
 			if s, err := strconv.ParseFloat(seekStr, 64); err == nil && s >= 0 {
 				seekSeconds = s
 			}
 		}
-		if err := playback.ServeRemuxWithDVMode(w, r, file.FilePath, "mp4", seekSeconds, session.TranscodeAudio, session.AudioTrackIndex, file.PrimaryDVProfile(), session.RemuxDVMode, h.ffmpegPath()); err != nil {
+		if err := playback.ServeRemuxWithDVMode(metered, r, file.FilePath, "mp4", seekSeconds, session.TranscodeAudio, session.AudioTrackIndex, file.PrimaryDVProfile(), session.RemuxDVMode, h.ffmpegPath()); err != nil {
 			h.handleTransportStartFailure(r.Context(), session, file, err)
 		}
 

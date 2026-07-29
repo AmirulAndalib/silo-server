@@ -157,6 +157,9 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 		stop := h.Revocation.WatchAndCut(w, playSession.UpstreamSessionID, session.StreamAppUserID, time.Now())
 		defer stop()
 	}
+	recorder, _ := h.sessionMgr.(playback.ServedBytesRecorder)
+	metered := playback.NewSessionMeteredWriter(w, recorder, playSession.UpstreamSessionID)
+	defer func() { _ = metered.Close() }()
 
 	switch method {
 	case "remux":
@@ -164,9 +167,9 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 		if resolvedAudioTrackIndex, ok := compatAudioTrackIndex(*source); ok {
 			audioTrackIndex = resolvedAudioTrackIndex
 		}
-		_ = playback.ServeRemux(w, r, file.FilePath, "mp4", seekSeconds, source.TranscodeAudio, audioTrackIndex, file.PrimaryDVProfile())
+		_ = playback.ServeRemux(metered, r, file.FilePath, "mp4", seekSeconds, source.TranscodeAudio, audioTrackIndex, file.PrimaryDVProfile())
 	default:
-		_ = playback.ServeDirectPlay(w, r, file.FilePath)
+		_ = playback.ServeDirectPlay(metered, r, file.FilePath)
 	}
 }
 
@@ -617,7 +620,10 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	http.ServeFile(w, r, segmentPath)
+	recorder, _ := h.sessionMgr.(playback.ServedBytesRecorder)
+	metered := playback.NewSessionMeteredWriter(w, recorder, playSession.UpstreamSessionID)
+	defer func() { _ = metered.Close() }()
+	http.ServeFile(metered, r, segmentPath)
 }
 
 // hlsSegmentErrorResponse maps a segment-retrieval error to a Jellyfin-faithful

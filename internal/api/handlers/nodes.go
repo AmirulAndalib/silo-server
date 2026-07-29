@@ -34,6 +34,10 @@ func LiveLocalSessions(sm *playback.SessionManager, nodeName string) []nodesessi
 	live := sm.AllSessions()
 	out := make([]nodesessions.SessionInfo, 0, len(live))
 	for _, s := range live {
+		lastServedAt := s.LastServedAt
+		if lastServedAt.IsZero() {
+			lastServedAt = s.LastActivityAt
+		}
 		out = append(out, nodesessions.SessionInfo{
 			SessionID:    s.ID,
 			NodeName:     nodeName,
@@ -48,7 +52,8 @@ func LiveLocalSessions(sm *playback.SessionManager, nodeName string) []nodesessi
 			Resolution:   s.TargetResolution,
 			HWAccel:      s.TranscodeHWAccel,
 			StartedAt:    s.StartedAt.UTC().Format(time.RFC3339),
-			LastServedAt: s.LastActivityAt.UTC().Format(time.RFC3339),
+			LastServedAt: lastServedAt.UTC().Format(time.RFC3339),
+			BytesServed:  s.BytesServed,
 		})
 	}
 	return out

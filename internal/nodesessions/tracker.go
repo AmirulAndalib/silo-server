@@ -19,8 +19,10 @@ const (
 	// namespace this tracker writes instead of duplicating the literal.
 	KeyPrefix = "silo:sessions:"
 
-	sessionTTL = 60 * time.Second
-	refreshInt = 30 * time.Second
+	sessionTTL           = 60 * time.Second
+	refreshInt           = 30 * time.Second
+	transcodeIdleTTL     = 180 * time.Second
+	sessionTypeTranscode = "transcode"
 )
 
 // SessionInfo represents an active streaming session stored in Redis.
@@ -130,7 +132,7 @@ func (tr *Tracker) ActiveCount() int {
 		if _, dup := tr.sessions[id]; dup {
 			continue
 		}
-		if now.Sub(last) <= sessionTTL {
+		if now.Sub(last) <= idleTTLFor(tr.records[id]) {
 			count++
 		}
 	}
@@ -150,7 +152,7 @@ func (tr *Tracker) Snapshot() []SessionInfo {
 		// Session-backed entries are always live until Remove; only ephemeral
 		// (non-session) entries age out by idle timeout.
 		if _, isSession := tr.sessions[id]; !isSession {
-			if last, ok := tr.touched[id]; ok && now.Sub(last) > sessionTTL {
+			if last, ok := tr.touched[id]; ok && now.Sub(last) > idleTTLFor(rec) {
 				continue
 			}
 		}
@@ -373,7 +375,7 @@ func (tr *Tracker) refreshAll(ctx context.Context) {
 	}
 	for id, last := range tr.touched {
 		_, isSession := tr.sessions[id]
-		if !isSession && now.Sub(last) > sessionTTL {
+		if !isSession && now.Sub(last) > idleTTLFor(tr.records[id]) {
 			// Idle ephemeral session: stop refreshing and let the Redis key
 			// expire on its own. Session-backed entries (direct/remux) are pruned
 			// on Remove, never by idle timeout, so a quiet-but-open pour stays live.
@@ -413,4 +415,11 @@ func (tr *Tracker) refreshAll(ctx context.Context) {
 	if _, err := pipe.Exec(ctx); err != nil {
 		slog.DebugContext(ctx, "session refresh pipeline failed", "component", "nodesessions", "error", err)
 	}
+}
+
+func idleTTLFor(rec SessionInfo) time.Duration {
+	if rec.Type == sessionTypeTranscode {
+		return transcodeIdleTTL
+	}
+	return sessionTTL
 }
