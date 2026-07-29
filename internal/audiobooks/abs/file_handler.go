@@ -3,6 +3,7 @@ package abs
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -10,8 +11,10 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 )
 
 const publicTrackSessionTTL = 24 * time.Hour
@@ -54,9 +57,10 @@ func trackInoFor(contentID string, fileIdx int) string {
 //     browser save-to-disk / mobile offline-save behaviour.
 //
 // This is a download-class route: like native and Jellyfin-compatible
-// downloads it is exempt from the live-stream cap and streammonitor, and it is
-// not yet covered by a download quota. It is still revocable before and during
-// the file pour.
+// downloads it is exempt from the live-stream cap and never enters
+// streammonitor. Its active pour is exposed through the separate process-local
+// transfer registry. It is not yet covered by a download quota and remains
+// revocable before and during the file pour.
 func (h *Handler) handleFileStream(w http.ResponseWriter, r *http.Request) {
 	a, ok := absAuthFrom(r)
 	if !ok || a.UserID == "" {
@@ -128,9 +132,34 @@ func (h *Handler) handleFileStream(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", ct)
 	}
 
-	stop := h.deps.Revocation.WatchAndCut(w, "", userID, a.IssuedAt)
-	defer stop()
-	if err := playback.ServeDirectPlay(w, r, mediaFile.FilePath); err != nil {
+	route := "abs_file_stream"
+	if strings.HasSuffix(r.URL.Path, "/download") {
+		route = "abs_file_download"
+	}
+	transfer := transfers.Transfer{
+		ID:          uuid.NewString(),
+		UserID:      userID,
+		ProfileID:   a.ProfileID,
+		MediaFileID: mediaFile.ID,
+		Route:       route,
+		ClientIP:    requestClientIP(r),
+		ClientName:  r.UserAgent(),
+		StartedAt:   time.Now(),
+	}
+	if h.deps.Transfers != nil {
+		if err := h.deps.Transfers.Begin(transfer); err != nil {
+			slog.DebugContext(r.Context(), "ABS transfer not monitored", "component", "audiobooks", "transfer_id", transfer.ID, "error", err)
+		}
+	}
+	defer h.deps.Transfers.End(transfer.ID)
+	metered := playback.NewSessionMeteredWriter(w, h.deps.Transfers, transfer.ID)
+	defer func() { _ = metered.Close() }()
+
+	if h.deps.Revocation != nil {
+		stop := h.deps.Revocation.WatchAndCut(metered, "", userID, a.IssuedAt)
+		defer stop()
+	}
+	if err := playback.ServeDirectPlay(metered, r, mediaFile.FilePath); err != nil {
 		// ServeDirectPlay has already written an error response; just log.
 		return
 	}

@@ -756,6 +756,10 @@ func main() {
 		defer func() { _ = apiRedisClient.Close() }()
 	}
 
+	// One process-local registry is shared by every download-class serving
+	// surface and the admin view. It is intentionally separate from live streams.
+	transferMonitoring := newTransferRegistryComposition()
+
 	// Central-side kill switch: written by the async enforcer, admin terminate,
 	// and account revocation; edges enforce it via Redis pub/sub + poll. Memory-
 	// only when Redis is absent (single-node integrated). The Postgres durable
@@ -824,6 +828,7 @@ func main() {
 			configWatcher.RequestReload()
 		},
 	}
+	transferMonitoring.wireAPI(&deps)
 	accessGroupStore := access.NewGroupStore(pool)
 	audiobooksService := audiobooks.New(&audiobooksSettingsAdapter{repo: settingsRepo})
 	absCompatEnabled, err := audiobooksService.ABSCompatEnabled(appCtx)
@@ -2287,6 +2292,7 @@ func main() {
 			SessionSyncer:  deps.SessionSyncer,
 			Revocation:     streamRevocation,
 		}
+		transferMonitoring.wireABS(&absHDeps)
 		absH := audiobooksService.BuildABSHandler(absHDeps)
 		deps.ABSHandler = absH
 	}
@@ -2543,6 +2549,7 @@ func main() {
 			RecipeNodeStore: noderecipe.NewStore(apiRedisClient, 0),
 			SessionSyncer:   deps.SessionSyncer,
 		}
+		transferMonitoring.wireJellycompat(&compatDeps)
 
 		// Wire direct dependencies when DB is available.
 		if deps.DB != nil {

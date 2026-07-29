@@ -84,9 +84,9 @@ bytes but withholds/falsifies progress must still be counted.
 | jellycompat | direct | ✅ transport-count shield (`streams.go:129`) | ✅ edge tracker, owner+route carried |
 | jellycompat | remux | ✅ transport-count shield | ✅ edge tracker, owner+route carried |
 | jellycompat | transcode | ✅ per-segment transport marker around `ServeFile` (`streams.go:543`) | ✅ edge tracker, owner+route carried |
-| ABS | authenticated file/download | ⚠️ download-class exemption; no session/monitor record | same |
+| ABS | authenticated file/download | ✅ separate in-memory transfer record; cap-exempt | same process only |
 | ABS | public playback track | ✅ native-session transport marker + metered bytes | same |
-| ABS | public RSS feed file | ⚠️ public download-class pour; no session/monitor record | same |
+| ABS | public RSS feed file | ✅ separate in-memory transfer record; cap-exempt | same process only |
 
 - **Existence is server-observed on every cell.** Integrated: a session is
   unreapable while `activeTransportCount > 0`, and every byte-serving path now
@@ -139,14 +139,22 @@ Captured per live stream (`streammonitor.LiveStream` / `nodesessions.SessionInfo
   stream tracked by both the central manager and the edge serving it shows as ONE
   row — matching the enforcer's count. A `node_id` filter targets
   an edge, so integrated sessions appear only in the unfiltered listing.
+- **Download visibility is a separate sibling collection.** The same unfiltered
+  admin response includes `transfers`, sourced from a bounded process-local
+  registry. Transfer rows contain a unique per-pour id, optional download-row
+  correlation id, owner/profile, media file, route, client metadata, timestamps,
+  and server-observed bytes. A `node_id` filter excludes them because they belong
+  to this API process, not an edge. The byte timestamp advances in coarse metered
+  chunks (1 MiB or final close), and multi-replica deployments see only the
+  registry of the process answering the request.
 - **Downloads are an intentional exemption — with asymmetries.** `/downloads/*`
   (native), compat `/Items/{id}/Download`, and ABS authenticated file/download
-  serves transfer full media with no
-  session/monitor record and do NOT count against the live-stream cap. The native
-  route requires a quota-checked download row (`internal/downloads`
-  concurrency/period limits); the compat and ABS routes are covered by NO quota
-  today. Unifying all three under one quota and one download monitor record is
-  explicit follow-up work. All three routes arm the shared `WatchAndCut`, so a
+  and RSS feed serves transfer full media without a live-stream session and do NOT
+  count against the live-stream cap. They now create separate, in-memory transfer
+  records while a pour is active. Native download quotas run only when a download
+  row is created; neither `ServeDownload` nor `ServeDirect` gates a pour, and
+  compat/ABS routes have no shared download quota. All routes arm the shared
+  `WatchAndCut`, so a
   per-user stream revocation cuts an in-flight download pour, and the same hook
   deletes every compat login so reconnects need re-auth. Documented at the
   handlers.
@@ -338,12 +346,11 @@ so a killed direct-play stops on its next request at worst.
   native and a jellycompat single-long-GET direct-play, admin-terminate it, confirm
   the connection drops within ~5s rather than only on the next request.
 - [x] **VERIFY-2 — download routes vs the stream cap — RESOLVED (documented exemption).**
-  `/downloads/*` (native) and compat `/Items/{id}/Download` serve full media with no
-  session/monitor record; they are intentionally exempt from the live-stream cap and
-  governed by the separate download concurrency/period quota. Documented at both
-  handlers and in the monitoring data model above. (Note: they also do not consult
-  the kill switch — a per-user *stream* revocation does not stop an in-flight
-  download. If a ban should also cut downloads, guard those handlers separately.)
+  Native, compat, and ABS download-class routes remain intentionally exempt from
+  the live-stream cap but are visible in the sibling, process-local `transfers`
+  array. Native concurrency/period checks happen only at row creation, not at
+  serve time. A per-user revocation is a cutoff: it refuses/cuts older pours but
+  deliberately allows a new authenticated pour started after the cutoff.
 - [x] **VERIFY-4 — transcode buffer-ahead evasion — RESOLVED.** Unpaused
   transcodes use a bounded 10-minute integrated grace measured from the same
   activity resolution advanced by server-observed bytes/transports; paused
@@ -437,8 +444,10 @@ Remaining work:
    enforcer re-revokes it every pass and the admin view overcounts). Needs a
    node-side idle sweep tied to real serve activity (`MarkServed` now provides the
    signal).
-6. **Unified download quota and monitor:** compat `/Items/{id}/Download` and ABS
-   authenticated file/download routes are exempt from the stream cap and covered
-   by no download quota. Bring them under the native download policy with one
-   quota and one monitor-record model; today's controls are authentication,
-   library access, and the in-flight user-revocation cut.
+6. **Download controls phase 2:** add per-download kill and a standing per-user
+   download block (a user revocation is only a cutoff and permits newer
+   credentials/requests). Separately unify native, compat, and ABS under a shared
+   download quota and rolling volume budget. Also resolve the pre-existing native
+   completion semantics (`ServeContent` cannot report write failure), correlate
+   ABS playback sessions with duplicate `abs_file_stream` transfer rows, and make
+   transfer visibility multi-replica rather than process-local.

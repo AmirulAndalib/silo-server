@@ -13,10 +13,13 @@ import (
 
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamrevoke"
+	"github.com/Silo-Server/silo-server/internal/transfers"
+	"github.com/google/uuid"
 )
 
 // DownloadService is the interface that the download handler depends on. A
@@ -33,8 +36,8 @@ type DownloadService interface {
 	UpdateSubscription(ctx context.Context, userID int, profileID, deviceID, id string, patch downloads.SubscriptionPatch, filter catalog.AccessFilter) (*downloads.SubscriptionResult, error)
 	DeleteSubscription(ctx context.Context, userID int, profileID, deviceID, id string) error
 	SyncSubscriptions(ctx context.Context, userID int, profileID, deviceID string, filter catalog.AccessFilter) (int, error)
-	ServeDirect(ctx context.Context, w http.ResponseWriter, r *http.Request, userID, fileID int, format string, filter catalog.AccessFilter) error
-	ServeFile(ctx context.Context, w http.ResponseWriter, r *http.Request, userID int, profileID, deviceID, downloadID string, filter catalog.AccessFilter) error
+	ServeDirect(ctx context.Context, w http.ResponseWriter, r *http.Request, userID, fileID int, format string, filter catalog.AccessFilter, transfer transfers.Transfer) error
+	ServeFile(ctx context.Context, w http.ResponseWriter, r *http.Request, userID int, profileID, deviceID, downloadID string, filter catalog.AccessFilter, transfer transfers.Transfer) error
 	List(ctx context.Context, userID int, profileID, deviceID string) ([]*downloads.Download, error)
 	Delete(ctx context.Context, userID int, profileID, deviceID, downloadID string) error
 	PatchStatus(ctx context.Context, userID int, profileID, deviceID, downloadID, status string) error
@@ -48,6 +51,7 @@ type DownloadService interface {
 type DownloadHandler struct {
 	svc        DownloadService
 	revocation *streamrevoke.Store
+	transfers  *transfers.Registry
 }
 
 // NewDownloadHandler creates a new DownloadHandler.
@@ -57,12 +61,19 @@ func NewDownloadHandler(svc DownloadService) *DownloadHandler {
 
 // SetRevocationStore wires the stream kill switch so a per-user revocation cuts
 // an IN-FLIGHT download pour. Downloads stay exempt from the live-stream cap
-// (they have their own quota), but a user whose sessions were just revoked must
-// not keep pulling a multi-GB file on a pre-revocation connection. Optional;
-// nil keeps prior behavior.
+// (creation-time download quotas do not gate serving), but a user whose sessions
+// were just revoked must not keep pulling a multi-GB file on a pre-revocation
+// connection. Optional; nil keeps prior behavior.
 func (h *DownloadHandler) SetRevocationStore(store *streamrevoke.Store) {
 	if h != nil {
 		h.revocation = store
+	}
+}
+
+// SetTransferRegistry wires process-local monitoring for active file pours.
+func (h *DownloadHandler) SetTransferRegistry(registry *transfers.Registry) {
+	if h != nil {
+		h.transfers = registry
 	}
 }
 
@@ -408,11 +419,10 @@ func (h *DownloadHandler) HandlePatchDownload(w http.ResponseWriter, r *http.Req
 // HandleDownloadFile handles GET /downloads/{id}/file.
 //
 // This is an offline download, NOT a live stream: it creates no SessionManager
-// session and no monitor record, so it is intentionally EXEMPT from the
-// concurrent-stream cap and invisible to streammonitor. Downloads are bounded by
-// the separate download concurrency/period quota (see the download service's
-// ErrConcurrentLimitReached / ErrPeriodLimitReached). See the coverage matrix
-// "downloads" note before making downloads count against the live-stream cap.
+// session and no live-stream monitor record, so it is intentionally EXEMPT from the
+// concurrent-stream cap and never enters streammonitor. Active pours are exposed
+// separately through the in-memory transfer registry; creation-time download
+// quotas do not gate this serving request.
 func (h *DownloadHandler) HandleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	userID := apimw.GetUserID(r.Context())
 	if userID == 0 {
@@ -429,16 +439,20 @@ func (h *DownloadHandler) HandleDownloadFile(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// In-flight kill switch: a user revocation cuts this pour mid-transfer.
-	stop := h.cutDownloadOnUserRevocation(w, userID)
-	defer stop()
-
-	profileID, deviceID, _, _ := managedIdentity(r)
+	profileID, deviceID, deviceName, _ := managedIdentity(r)
 	filter := requestAccessFilter(r)
 	// Full media downloads outlive the server's absolute WriteTimeout; roll
 	// the write deadline with progress instead.
 	sw := httpstream.NewRollingDeadlineWriter(w)
-	if err := h.svc.ServeFile(r.Context(), sw, r, userID, profileID, deviceID, id, filter); err != nil {
+	transfer := h.newTransfer(r, userID, profileID, deviceName, "native_download")
+	defer h.transfers.End(transfer.ID)
+	metered := playback.NewSessionMeteredWriter(sw, h.transfers, transfer.ID)
+	defer func() { _ = metered.Close() }()
+	// In-flight kill switch: a user revocation cuts this pour mid-transfer.
+	stop := h.cutDownloadOnUserRevocation(metered, userID)
+	defer stop()
+
+	if err := h.svc.ServeFile(r.Context(), metered, r, userID, profileID, deviceID, id, filter, transfer); err != nil {
 		if errors.Is(err, downloads.ErrNotFound) || errors.Is(err, catalog.ErrItemNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "Download not found")
 			return
@@ -481,14 +495,34 @@ func (h *DownloadHandler) HandleDirectDownload(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	filter := requestAccessFilter(r)
+	profileID, _, deviceName, _ := managedIdentity(r)
+	transfer := h.newTransfer(r, userID, profileID, deviceName, "native_direct")
+	defer h.transfers.End(transfer.ID)
+	metered := playback.NewSessionMeteredWriter(w, h.transfers, transfer.ID)
+	defer func() { _ = metered.Close() }()
 	// In-flight kill switch: a user revocation cuts this pour mid-transfer.
-	stop := h.cutDownloadOnUserRevocation(w, userID)
+	stop := h.cutDownloadOnUserRevocation(metered, userID)
 	defer stop()
 
-	filter := requestAccessFilter(r)
-	if err := h.svc.ServeDirect(r.Context(), w, r, userID, fileID, r.URL.Query().Get("format"), filter); err != nil {
+	if err := h.svc.ServeDirect(r.Context(), metered, r, userID, fileID, r.URL.Query().Get("format"), filter, transfer); err != nil {
 		h.writeDownloadError(w, err)
 		return
+	}
+}
+
+func (h *DownloadHandler) newTransfer(r *http.Request, userID int, profileID, clientName, route string) transfers.Transfer {
+	if clientName == "" {
+		clientName = r.UserAgent()
+	}
+	return transfers.Transfer{
+		ID:         uuid.NewString(),
+		UserID:     userID,
+		ProfileID:  profileID,
+		Route:      route,
+		ClientIP:   clientip.FromContext(r.Context()),
+		ClientName: clientName,
+		StartedAt:  time.Now(),
 	}
 }
 

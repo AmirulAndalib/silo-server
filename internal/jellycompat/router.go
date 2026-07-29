@@ -109,6 +109,7 @@ func NewRouter(deps Dependencies) chi.Router {
 	playbackHandler.NodePlanner = deps.NodePlanner
 	playbackHandler.JWTSecret = deps.JWTSecret
 	playbackHandler.Revocation = deps.RevocationStore
+	playbackHandler.Transfers = deps.TransferRegistry
 	// Compat transcode reconstruct is driven by the recipe carried in the durable
 	// compat playback store (jellycompat_playback_sessions); no separate native
 	// recipe table is needed.

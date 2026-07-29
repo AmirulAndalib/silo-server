@@ -19,6 +19,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/secret"
 	"github.com/Silo-Server/silo-server/internal/streamrevoke"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchstate"
 	"github.com/Silo-Server/silo-server/internal/watchsync"
@@ -34,6 +35,8 @@ type Dependencies struct {
 
 	// RevocationStore is the shared stream kill switch consulted by local serving.
 	RevocationStore *streamrevoke.Store
+	// TransferRegistry exposes download-class pours separately from live streams.
+	TransferRegistry *transfers.Registry
 	// LiveConfig returns the current hot-reloaded config. May be nil (tests,
 	// worker modes); read through CurrentConfig(), which falls back to Config.
 	LiveConfig       func() *config.Config

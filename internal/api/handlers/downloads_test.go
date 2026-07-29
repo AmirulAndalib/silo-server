@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/downloads"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 )
 
 // fakeDownloadService is a programmable DownloadService for handler tests. It
@@ -54,6 +56,9 @@ type fakeDownloadService struct {
 	gotSubtitleRef   string
 	gotDirectFormat  string
 	gotDirectFileID  int
+	gotTransfer      transfers.Transfer
+	transferRegistry *transfers.Registry
+	beginTransfer    bool
 
 	// Season download + series-monitoring (subscription) fakes.
 	season       []*downloads.Download
@@ -154,9 +159,14 @@ func (f *fakeDownloadService) SyncSubscriptions(_ context.Context, userID int, p
 	return f.syncRegistered, nil
 }
 
-func (f *fakeDownloadService) ServeDirect(_ context.Context, w http.ResponseWriter, _ *http.Request, _, fileID int, format string, _ catalog.AccessFilter) error {
+func (f *fakeDownloadService) ServeDirect(_ context.Context, w http.ResponseWriter, _ *http.Request, _, fileID int, format string, _ catalog.AccessFilter, transfer transfers.Transfer) error {
 	f.gotDirectFileID = fileID
 	f.gotDirectFormat = format
+	f.gotTransfer = transfer
+	if f.beginTransfer && f.transferRegistry != nil {
+		transfer.MediaFileID = fileID
+		_ = f.transferRegistry.Begin(transfer)
+	}
 	if f.directErr != nil {
 		return f.directErr
 	}
@@ -164,8 +174,13 @@ func (f *fakeDownloadService) ServeDirect(_ context.Context, w http.ResponseWrit
 	return nil
 }
 
-func (f *fakeDownloadService) ServeFile(_ context.Context, w http.ResponseWriter, _ *http.Request, userID int, profileID, deviceID, downloadID string, _ catalog.AccessFilter) error {
+func (f *fakeDownloadService) ServeFile(_ context.Context, w http.ResponseWriter, _ *http.Request, userID int, profileID, deviceID, downloadID string, _ catalog.AccessFilter, transfer transfers.Transfer) error {
 	f.gotServe = identityCall{userID, profileID, deviceID, downloadID}
+	f.gotTransfer = transfer
+	if f.beginTransfer && f.transferRegistry != nil {
+		transfer.DownloadID = downloadID
+		_ = f.transferRegistry.Begin(transfer)
+	}
 	if f.serveErr != nil {
 		return f.serveErr
 	}
@@ -520,6 +535,39 @@ func TestHandleDirectDownloadMissingFileID(t *testing.T) {
 	h.HandleDirectDownload(rec, downloadTestRequest(http.MethodGet, "/direct-download", nil, 7, "", ""))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestDownloadTransferResolutionFailureNeverRegisters(t *testing.T) {
+	registry := transfers.New()
+	svc := &fakeDownloadService{directErr: catalog.ErrItemNotFound}
+	h := NewDownloadHandler(svc)
+	h.SetTransferRegistry(registry)
+	rec := httptest.NewRecorder()
+	h.HandleDirectDownload(rec, downloadTestRequest(http.MethodGet, "/direct-download?file_id=42", nil, 7, "p1", ""))
+
+	if got := registry.Snapshot(); len(got) != 0 {
+		t.Fatalf("failed resolution left transfers: %+v", got)
+	}
+	if svc.gotTransfer.ID == "" || svc.gotTransfer.Route != "native_direct" {
+		t.Fatalf("transfer context = %+v", svc.gotTransfer)
+	}
+}
+
+func TestDownloadTransferServingErrorStillDeregisters(t *testing.T) {
+	registry := transfers.New()
+	svc := &fakeDownloadService{
+		directErr:        errors.New("write failed"),
+		transferRegistry: registry,
+		beginTransfer:    true,
+	}
+	h := NewDownloadHandler(svc)
+	h.SetTransferRegistry(registry)
+	rec := httptest.NewRecorder()
+	h.HandleDirectDownload(rec, downloadTestRequest(http.MethodGet, "/direct-download?file_id=42", nil, 7, "p1", ""))
+
+	if got := registry.Snapshot(); len(got) != 0 {
+		t.Fatalf("serving error left transfers: %+v", got)
 	}
 }
 

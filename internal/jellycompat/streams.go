@@ -21,10 +21,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
 
@@ -180,8 +182,9 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 // this route must exist.
 // HandleDownload serves a full file for offline/download clients (e.g. Infuse
 // with CanDownload). By design it is NOT a live stream: it creates no
-// SessionManager session and no monitor record, so it is EXEMPT from the
-// concurrent-stream cap and invisible to streammonitor. NOTE: unlike the native
+// SessionManager session and never enters streammonitor, so it is EXEMPT from the
+// concurrent-stream cap. Its active pour is exposed through the separate,
+// process-local transfer registry. NOTE: unlike the native
 // /downloads/{id}/file route, this route is NOT covered by the download
 // concurrency/period quota either — it requires no download row, only compat
 // auth. Access control is compat authentication plus the library access filter;
@@ -226,21 +229,41 @@ func (h *PlaybackHandler) HandleDownload(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	file, err := h.fileResolver.GetByID(r.Context(), version.FileID)
-	if err != nil {
+	if err != nil || file == nil {
 		writeError(w, http.StatusNotFound, "NotFound", "Media file not found")
 		return
 	}
+
+	client := playback.ClientInfoFromContext(r.Context())
+	transfer := transfers.Transfer{
+		ID:          uuidNewString(),
+		UserID:      session.StreamAppUserID,
+		ProfileID:   session.ProfileID,
+		MediaFileID: file.ID,
+		Route:       "jellycompat_download",
+		ClientIP:    clientip.FromContext(r.Context()),
+		ClientName:  firstNonEmpty(client.Name, client.UserAgent),
+		StartedAt:   time.Now(),
+	}
+	if h.Transfers != nil {
+		if err := h.Transfers.Begin(transfer); err != nil {
+			slog.DebugContext(r.Context(), "compat transfer not monitored", "component", "jellycompat", "transfer_id", transfer.ID, "error", err)
+		}
+	}
+	defer h.Transfers.End(transfer.ID)
+	metered := playback.NewSessionMeteredWriter(w, h.Transfers, transfer.ID)
+	defer func() { _ = metered.Close() }()
 
 	// In-flight kill switch: sessionless pour, so only user-kind kills apply;
 	// the entry time predates any future revocation (the user-kill cutoff), so a
 	// revocation issued mid-transfer hangs this connection up.
 	if h.Revocation != nil {
-		stop := h.Revocation.WatchAndCut(w, "", session.StreamAppUserID, time.Now())
+		stop := h.Revocation.WatchAndCut(metered, "", session.StreamAppUserID, transfer.StartedAt)
 		defer stop()
 	}
 
 	w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(filepath.Base(file.FilePath)))
-	_ = playback.ServeDirectPlay(w, r, file.FilePath)
+	_ = playback.ServeDirectPlay(metered, r, file.FilePath)
 }
 
 // HandleMasterManifest serves the compat-owned HLS manifest route.

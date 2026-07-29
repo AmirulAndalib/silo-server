@@ -108,11 +108,11 @@ Jellyfin-compat surface is unthrottled (see Category E).
 
 | # | Abuse story | Detection | Enforcement | One-line verdict |
 |---|---|---|---|---|
-| 17 | Rip whole library via **native download** endpoints | ⚠️ | ⚠️ | 3-concurrent gate only; **no volume cap**; loop create→complete defeats it |
-| 18 | Rip via **compat `/Items/{id}/Download`** (Infuse) | ❌ | ❌ | **No quota at all** — auth + library filter only. Widest hole |
-| 18a | Rip via authenticated **ABS file/download** route | ❌ | ⚠️ | Download-class and unquota'd/unmonitored, but user cutoff refuses and cuts pours |
+| 17 | Rip whole library via **native download** endpoints | ⚠️ | ⚠️ | Active pours/bytes visible; creation-time gate only; **no volume cap** |
+| 18 | Rip via **compat `/Items/{id}/Download`** (Infuse) | ⚠️ | ❌ | Active pour visible, but **no quota at all** |
+| 18a | Rip via authenticated **ABS file/download** route | ⚠️ | ⚠️ | Active pour visible and user-cuttable; no quota |
 | 18b | Pull an **ABS public playback track** | ✅ | ✅ | Native session id is monitored/metered; session and owner kills land |
-| 18c | Pull a **public ABS RSS feed file** | ❌ | ⚠️ | No live record; owner cutoff uses feed creation time and cuts in-flight pours |
+| 18c | Pull a **public ABS RSS feed file** | ⚠️ | ⚠️ | Active pour visible; owner cutoff uses feed creation time |
 | 19 | Rip via **sequential direct-play GETs** (one at a time) | ⚠️ | ❌ | Cap counts concurrency, not volume; stays at 1 forever |
 | 20 | Admin **stops an in-progress rip** mid-transfer | — | ⚠️ | Branch adds `WatchAndCut` on downloads (best-effort); admin must issue the revoke |
 
@@ -254,21 +254,24 @@ everything. **Detection ❌ (at mint) / Enforcement ❌ (unless it becomes over-
 ### Category D — Ripping / bulk data exfiltration
 
 **D17. Rip via native download endpoints.**
-Bounded only by `download.max_concurrent_per_user` (default **3**,
-`internal/downloads/limiter.go`). `download.max_per_period` and both bandwidth
+Download record creation is bounded by `download.max_concurrent_per_user`
+(default **3**, `internal/downloads/limiter.go`). Serving and re-fetching an
+existing row is not gated. `download.max_per_period` and both bandwidth
 knobs default to **0 = unlimited** — and the bandwidth managers are *rate* throttles
 (token buckets), never *volume* caps. The concurrency check runs at record
 creation, so a `create → complete → create` loop pulls the entire library 3 files
-at a time forever. **No total-volume cap exists anywhere.** **Detection ⚠️
-(per-download rows, no cumulative signal) / Enforcement ⚠️ (weak concurrency gate).**
+at a time forever. Active pours and server-observed bytes are visible through the
+process-local admin `transfers` array, but disappear at completion and are not a
+cumulative signal. **No total-volume cap exists anywhere.** **Detection ⚠️ /
+Enforcement ⚠️ (creation-time gate only).**
 
 **D18. Rip via compat `/Items/{id}/Download`. — WIDEST HOLE.**
 `HandleDownload` (`jellycompat/streams.go`) requires only a compat session and the
 per-item library-access filter, then serves the raw file with full Range support.
-**No download row, no quota, no bandwidth throttle, no session/monitor record, no
-byte cap.** An Infuse-style client can GET/Range every original file back-to-back,
-unlimited, and the server keeps no record beyond generic HTTP logs. The branch's own
-doc comment admits this and files it as an open follow-up. **Detection ❌ /
+**No download row, no quota, no bandwidth throttle, and no byte cap.** An
+Infuse-style client can GET/Range every original file back-to-back. The active
+pour and served bytes are visible in the process-local admin transfer registry,
+but there is no durable history or automated consumer. **Detection ⚠️ /
 Enforcement ❌.**
 
 **D19. Rip via sequential direct-play GETs.**
@@ -279,14 +282,13 @@ attributable session, but nothing correlates sequential sessions into "this user
 ripping." **Detection ⚠️ / Enforcement ❌.**
 
 **D20. Admin stops an in-progress rip mid-transfer.**
-On `main`, impossible — `Refuse` only 403s *new* requests; an open multi-GB GET
-keeps pouring. The branch adds `streamrevoke.Store.WatchAndCut` (checks on entry +
+`streamrevoke.Store.WatchAndCut` (checks on entry +
 every 5s, forces the socket via `SetWriteDeadline`) and arms it on native downloads
 (`api/handlers/downloads.go`) and compat download/direct-play
 (`jellycompat/streams.go`). So a **user revocation now cuts an in-flight download**
 — best-effort (no-op if the writer chain lacks write-deadline support, then stops on
 next request). The admin still has to *decide* to revoke; nothing auto-detects the
-rip. **Enforcement ⚠️ (branch improves `main`'s ❌ to best-effort cut).**
+rip. **Enforcement ⚠️.**
 
 ### Category E — API / DB load abuse (branch is orthogonal)
 
@@ -390,11 +392,15 @@ visible, no CPU/process signal) / Enforcement ❌ (no aggregate cap).**
 
 ## Recommended follow-ups (prioritized by exposure)
 
-1. **Unify download-class accounting:** bring compat
-   `/Items/{id}/Download` and ABS `/items/{id}/file/{ino}` (including
-   `/download`) under the same quota and monitor record as native downloads.
-2. **Add a per-user *volume* budget** (D17/D19): a rolling bytes-per-period cap that
-   spans downloads *and* direct-play, since concurrency caps can't bound a rip.
+1. **Download controls phase 2:** add per-download kill and a standing per-user
+   download block. The existing user revocation is a cutoff, not a ban: it cuts
+   older pours but deliberately allows new ones.
+2. **Unify download quotas and add a per-user *volume* budget** (D17/D19): cover
+   native serving, compat, and ABS with a rolling bytes-per-period cap that spans
+   downloads and direct-play, since concurrency caps cannot bound a rip.
+   Also deferred: correct native completion semantics after partial/write-failed
+   responses, correlate duplicate ABS playback-session and `abs_file_stream`
+   views, and aggregate transfer visibility across API replicas.
 3. **Extend rate limiting to the compat surface + `/auth/refresh`** and add a
    connection cap / `LimitListener` (E25–E28).
 4. **Add a per-node concurrent-transcode cap** and wire `nodepool.MaxJobs` defaults

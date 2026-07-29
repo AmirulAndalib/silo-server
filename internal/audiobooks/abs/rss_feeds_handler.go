@@ -13,9 +13,12 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/oklog/ulid/v2"
 
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 )
 
 var slugRe = regexp.MustCompile(`^[a-z0-9-]{4,64}$`)
@@ -243,7 +246,28 @@ func (h *Handler) handlePublicFeedFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
 	}
-	stop := h.deps.Revocation.WatchAndCut(w, "", userID, f.CreatedAt)
-	defer stop()
-	http.ServeFile(w, r, mf.FilePath)
+	transfer := transfers.Transfer{
+		ID:          uuid.NewString(),
+		UserID:      userID,
+		ProfileID:   f.ProfileID,
+		MediaFileID: mf.ID,
+		Route:       "abs_feed",
+		ClientIP:    requestClientIP(r),
+		ClientName:  r.UserAgent(),
+		StartedAt:   time.Now(),
+	}
+	if h.deps.Transfers != nil {
+		if err := h.deps.Transfers.Begin(transfer); err != nil {
+			slog.DebugContext(r.Context(), "ABS feed transfer not monitored", "component", "audiobooks", "transfer_id", transfer.ID, "error", err)
+		}
+	}
+	defer h.deps.Transfers.End(transfer.ID)
+	metered := playback.NewSessionMeteredWriter(w, h.deps.Transfers, transfer.ID)
+	defer func() { _ = metered.Close() }()
+
+	if h.deps.Revocation != nil {
+		stop := h.deps.Revocation.WatchAndCut(metered, "", userID, f.CreatedAt)
+		defer stop()
+	}
+	http.ServeFile(metered, r, mf.FilePath)
 }

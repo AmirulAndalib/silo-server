@@ -22,6 +22,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/streamrevoke"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 )
 
 // ---------------------------------------------------------------------------
@@ -281,6 +282,8 @@ type Dependencies struct {
 	// Revocation makes ABS byte-serving routes obey the shared stream kill
 	// switch. Nil preserves compatibility for isolated tests.
 	Revocation *streamrevoke.Store
+	// Transfers tracks file pours separately from native playback sessions.
+	Transfers *transfers.Registry
 	// NativeSessionSyncer flushes native session-manager state into the shared
 	// admin live-session table after ABS play/sync/close events.
 	NativeSessionSyncer PlaybackSessionSyncer

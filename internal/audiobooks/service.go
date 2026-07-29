@@ -13,6 +13,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/recommendations"
 	"github.com/Silo-Server/silo-server/internal/scanner"
 	"github.com/Silo-Server/silo-server/internal/streamrevoke"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -62,6 +63,7 @@ type ABSHandlerDeps struct {
 	SessionMgr    *playback.SessionManager
 	SessionSyncer abs.PlaybackSessionSyncer
 	Revocation    *streamrevoke.Store
+	Transfers     *transfers.Registry
 }
 
 // absAuthAdapter is the narrow slice of internal/auth that BuildABSHandler
@@ -177,6 +179,7 @@ func (s *Service) BuildABSHandler(deps ABSHandlerDeps) *abs.Handler {
 		NativeSessions:       deps.SessionMgr,
 		NativeSessionSyncer:  deps.SessionSyncer,
 		Revocation:           deps.Revocation,
+		Transfers:            deps.Transfers,
 		CoverResolver: func(ctx context.Context, path, variant string) string {
 			if deps.Detail == nil {
 				return ""

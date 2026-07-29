@@ -18,6 +18,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streammonitor"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 	"github.com/go-chi/chi/v5"
 	"github.com/redis/go-redis/v9"
 )
@@ -74,6 +75,12 @@ type NodeListEnabled interface {
 	ListEnabled(ctx context.Context, nodeType string) ([]*nodepool.Node, error)
 }
 
+// TransferSnapshotSource is the narrow process-local monitoring view needed by
+// the admin endpoint.
+type TransferSnapshotSource interface {
+	Snapshot() []transfers.Transfer
+}
+
 // NodeHandler handles CRUD operations and health checks for stream nodes.
 type NodeHandler struct {
 	repo          NodeRepository
@@ -88,6 +95,7 @@ type NodeHandler struct {
 	// single-node streams (which never write Redis). Optional; nil in edge modes.
 	sessionMgr    *playback.SessionManager
 	localNodeName string
+	transfers     TransferSnapshotSource
 }
 
 // SetLocalSessionSource wires the in-process session manager so HandleListSessions
@@ -95,6 +103,12 @@ type NodeHandler struct {
 func (h *NodeHandler) SetLocalSessionSource(sm *playback.SessionManager, nodeName string) {
 	h.sessionMgr = sm
 	h.localNodeName = nodeName
+}
+
+// SetTransferSource wires process-local download monitoring into the unfiltered
+// admin response. Transfers do not belong to an edge node or live-stream source.
+func (h *NodeHandler) SetTransferSource(source TransferSnapshotSource) {
+	h.transfers = source
 }
 
 // NewNodeHandler creates a new NodeHandler.
@@ -419,9 +433,14 @@ func (h *NodeHandler) HandleListSessions(w http.ResponseWriter, r *http.Request)
 	}
 
 	type sessionsResponse struct {
-		Sessions []json.RawMessage `json:"sessions"`
+		Sessions  []json.RawMessage    `json:"sessions"`
+		Transfers []transfers.Transfer `json:"transfers"`
 	}
-	writeJSON(w, http.StatusOK, sessionsResponse{Sessions: sessions})
+	activeTransfers := []transfers.Transfer{}
+	if nodeFilter == "" && h.transfers != nil {
+		activeTransfers = h.transfers.Snapshot()
+	}
+	writeJSON(w, http.StatusOK, sessionsResponse{Sessions: sessions, Transfers: activeTransfers})
 }
 
 // reloadPools refreshes the in-memory proxy and transcode pools from the database.

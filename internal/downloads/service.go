@@ -19,6 +19,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/idgen"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 )
 
 // FileResolver looks up media files by various keys.
@@ -90,6 +91,7 @@ type Service struct {
 	groupProvider access.GroupPolicyProvider
 	itemAccess    ItemAccessChecker
 	settings      SettingsReader
+	transfers     *transfers.Registry
 
 	// Offline-manifest dependencies (Phase 2); nil until SetOfflineDeps wires them.
 	manifest       *ManifestBuilder
@@ -140,6 +142,11 @@ func (s *Service) SetArtifactManager(m *ArtifactManager) {
 // When unset, the subscription endpoints report unavailable.
 func (s *Service) SetSubscriptions(subRepo *SubscriptionRepository) {
 	s.subRepo = subRepo
+}
+
+// SetTransferRegistry wires process-local monitoring for active file pours.
+func (s *Service) SetTransferRegistry(registry *transfers.Registry) {
+	s.transfers = registry
 }
 
 // SetGroupPolicyProvider wires access-group policy composition into download
@@ -846,7 +853,7 @@ func (s *Service) List(ctx context.Context, userID int, profileID, deviceID stri
 
 // ServeDirect validates permissions and serves a file directly for browser
 // download. No persistent download record is created.
-func (s *Service) ServeDirect(ctx context.Context, w http.ResponseWriter, r *http.Request, userID, fileID int, format string, filter catalog.AccessFilter) error {
+func (s *Service) ServeDirect(ctx context.Context, w http.ResponseWriter, r *http.Request, userID, fileID int, format string, filter catalog.AccessFilter, transfer transfers.Transfer) error {
 	if _, _, err := s.downloadConfigForUser(ctx, userID, ""); err != nil {
 		return err
 	}
@@ -866,6 +873,8 @@ func (s *Service) ServeDirect(ctx context.Context, w http.ResponseWriter, r *htt
 	if !catalog.FileAllowedByAccess(file, filter) {
 		return catalog.ErrItemNotFound
 	}
+	transfer.MediaFileID = file.ID
+	s.beginTransfer(ctx, transfer)
 	return s.serveLocalFile(ctx, w, r, file.FilePath, userID)
 }
 
@@ -873,14 +882,14 @@ func (s *Service) ServeDirect(ctx context.Context, w http.ResponseWriter, r *htt
 // authorize on (user, profile, device) and re-check per-profile content access
 // before serving; ephemeral rows keep today's queued→downloading→completed
 // behavior. The ephemeral path never serves a managed row, and vice versa.
-func (s *Service) ServeFile(ctx context.Context, w http.ResponseWriter, r *http.Request, userID int, profileID, deviceID, downloadID string, filter catalog.AccessFilter) error {
+func (s *Service) ServeFile(ctx context.Context, w http.ResponseWriter, r *http.Request, userID int, profileID, deviceID, downloadID string, filter catalog.AccessFilter, transfer transfers.Transfer) error {
 	// Re-check policy — admin may have disabled downloads or revoked permission.
 	if _, _, err := s.downloadConfigForUser(ctx, userID, deviceID); err != nil {
 		return err
 	}
 
 	if deviceID != "" {
-		return s.serveManaged(ctx, w, r, userID, profileID, deviceID, downloadID, filter)
+		return s.serveManaged(ctx, w, r, userID, profileID, deviceID, downloadID, filter, transfer)
 	}
 
 	dl, err := s.repo.GetByID(ctx, downloadID)
@@ -909,7 +918,7 @@ func (s *Service) ServeFile(ctx context.Context, w http.ResponseWriter, r *http.
 		}
 	}
 
-	if err := s.serveDownloadBytes(ctx, w, r, dl, userID, filter); err != nil {
+	if err := s.serveDownloadBytes(ctx, w, r, dl, userID, filter, transfer); err != nil {
 		if dl.Format == FormatOriginal {
 			if updateErr := s.repo.UpdateStatus(ctx, dl.ID, StatusFailed, 0, nil); updateErr != nil {
 				slog.ErrorContext(ctx, "failed to mark download as failed", "component", "downloads", "download_id", dl.ID, "error", updateErr)
@@ -927,7 +936,7 @@ func (s *Service) ServeFile(ctx context.Context, w http.ResponseWriter, r *http.
 
 // serveManaged authorizes a managed entry on (user, profile, device), re-checks
 // per-profile content access (invariant 2), and streams the original source.
-func (s *Service) serveManaged(ctx context.Context, w http.ResponseWriter, r *http.Request, userID int, profileID, deviceID, downloadID string, filter catalog.AccessFilter) error {
+func (s *Service) serveManaged(ctx context.Context, w http.ResponseWriter, r *http.Request, userID int, profileID, deviceID, downloadID string, filter catalog.AccessFilter, transfer transfers.Transfer) error {
 	if profileID == "" {
 		return ErrProfileRequired
 	}
@@ -943,7 +952,7 @@ func (s *Service) serveManaged(ctx context.Context, w http.ResponseWriter, r *ht
 	if err := s.itemAccess.EnsureAccessible(ctx, dl.ContentID, filter); err != nil {
 		return err
 	}
-	return s.serveDownloadBytes(ctx, w, r, dl, userID, filter)
+	return s.serveDownloadBytes(ctx, w, r, dl, userID, filter, transfer)
 }
 
 // PatchStatus lets a client confirm a managed entry's local state
@@ -1044,7 +1053,7 @@ func (s *Service) resolveFile(ctx context.Context, req CreateRequest) (*models.M
 // original rows. Both paths mirror playback's per-file authorization
 // (catalog.FileAllowedByAccess): library scope and the profile's max playback
 // quality can change after a row was registered.
-func (s *Service) serveDownloadBytes(ctx context.Context, w http.ResponseWriter, r *http.Request, dl *Download, userID int, filter catalog.AccessFilter) error {
+func (s *Service) serveDownloadBytes(ctx context.Context, w http.ResponseWriter, r *http.Request, dl *Download, userID int, filter catalog.AccessFilter, transfer transfers.Transfer) error {
 	file, err := s.fileRepo.GetByID(ctx, dl.MediaFileID)
 	if err != nil {
 		return fmt.Errorf("loading media file: %w", err)
@@ -1070,6 +1079,9 @@ func (s *Service) serveDownloadBytes(ctx context.Context, w http.ResponseWriter,
 		if !catalog.FileAllowedByAccess(&served, filter) {
 			return catalog.ErrItemNotFound
 		}
+		transfer.DownloadID = dl.ID
+		transfer.MediaFileID = dl.MediaFileID
+		s.beginTransfer(ctx, transfer)
 		return s.serveLocalFile(ctx, w, r, artifact.OutputPath, userID)
 	}
 	if file.MissingSince != nil {
@@ -1078,7 +1090,19 @@ func (s *Service) serveDownloadBytes(ctx context.Context, w http.ResponseWriter,
 	if !catalog.FileAllowedByAccess(file, filter) {
 		return catalog.ErrItemNotFound
 	}
+	transfer.DownloadID = dl.ID
+	transfer.MediaFileID = dl.MediaFileID
+	s.beginTransfer(ctx, transfer)
 	return s.serveLocalFile(ctx, w, r, file.FilePath, userID)
+}
+
+func (s *Service) beginTransfer(ctx context.Context, transfer transfers.Transfer) {
+	if s.transfers == nil {
+		return
+	}
+	if err := s.transfers.Begin(transfer); err != nil {
+		slog.DebugContext(ctx, "download transfer not monitored", "component", "downloads", "transfer_id", transfer.ID, "error", err)
+	}
 }
 
 func (s *Service) serveLocalFile(ctx context.Context, w http.ResponseWriter, r *http.Request, path string, userID int) error {

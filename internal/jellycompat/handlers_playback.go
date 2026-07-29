@@ -29,6 +29,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
@@ -212,6 +213,8 @@ type PlaybackHandler struct {
 	// an admin terminate / over-cap / account revocation actually stops the bytes —
 	// the multi-node redirect path is already guarded by the proxy. Optional.
 	Revocation *streamrevoke.Store
+	// Transfers tracks download-class pours without entering live-stream limits.
+	Transfers *transfers.Registry
 }
 
 // recipeNodePutter persists and removes a remote transcode's reconstruction

@@ -73,6 +73,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/subtitles/subsource"
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
 	"github.com/Silo-Server/silo-server/internal/taskmanager/repository"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 	"github.com/Silo-Server/silo-server/internal/usercollections"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchstate"
@@ -172,6 +173,7 @@ type Dependencies struct {
 	// RevocationStore is the stream kill switch (may be nil). Admin terminate
 	// writes to it and integrated-mode serve paths consult it.
 	RevocationStore        *streamrevoke.Store
+	TransferRegistry       *transfers.Registry
 	OnServerSettingUpdated func(ctx context.Context, key, value string)
 	RequestServerRestart   func(ctx context.Context) error
 	ServerRestartStatus    *handlers.ServerRestartStatusTracker
@@ -1624,6 +1626,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		// devices sync on app open / background refresh; there is no server
 		// background worker.
 		downloadSvc.SetSubscriptions(downloads.NewSubscriptionRepository(deps.DB))
+		downloadSvc.SetTransferRegistry(deps.TransferRegistry)
 		downloadHandler = handlers.NewDownloadHandler(downloadSvc)
 		if profileHandler != nil {
 			// Profiles may live outside Postgres (sqlite userdb backend), so
@@ -1639,6 +1642,7 @@ func NewRouter(deps Dependencies) chi.Router {
 	// live-stream cap; this only closes the "revoked user keeps pulling a
 	// multi-GB file on a pre-revocation connection" hole).
 	downloadHandler.SetRevocationStore(deps.RevocationStore)
+	downloadHandler.SetTransferRegistry(deps.TransferRegistry)
 
 	var policyHandler *handlers.PolicyHandler
 	if deps.PolicySystem != nil && deps.DB != nil {
@@ -2940,6 +2944,7 @@ func NewRouter(deps Dependencies) chi.Router {
 								}
 								nodeHandler := handlers.NewNodeHandler(deps.NodeRepo, deps.ProxyPool, deps.TranscodePool, deps.NodeRepo, deps.EventBus, deps.RedisClient, jwtSecret)
 								nodeHandler.SetLocalSessionSource(deps.SessionMgr, deps.NodeID)
+								nodeHandler.SetTransferSource(deps.TransferRegistry)
 								r.Route("/nodes", func(r chi.Router) {
 									r.Get("/", nodeHandler.HandleListNodes)
 									r.Post("/", nodeHandler.HandleCreateNode)
