@@ -174,6 +174,40 @@ The shipped implementation follows this plan; a few names/shapes differ (the cov
 - **First-class monitoring fields.** Added a `Route` (native/jellycompat) dimension — seeded from `Session.Origin` and carried to edges via a token `Origin` claim — plus client IP/name and position, all surfaced through `SessionInfo`/`LiveStream`. The transcode node's start record is now owner+route+client attributed via `TranscodeStartRequest`. The admin session list unions the in-process integrated sessions (`LiveLocalSessions`) so single-node deployments aren't Redis-blind. Downloads remain an explicit cap exemption (separate quota).
 - `auth.stream_revocation_poll` / `auth.stream_revocation_ttl` operator config keys are not yet wired (defaults 60s / 24h are hardcoded) — remaining follow-up.
 
+### Later hardening pass (post-plan)
+
+A follow-up audit against the two goals — *no invisible streams* and *every stream
+killable* — found four more gaps this plan did not anticipate. All are shipped; the
+coverage matrix remains authoritative.
+
+- **Integrated byte accounting.** `BytesServed` was edge-only, so a single-node install
+  reported `bytes_served: 0` for every stream, and integrated `LastServedAt` was mapped
+  from `LastActivityAt` — which a client progress report advances, letting a client
+  influence which of its own streams the enforcer trims. `Session` now carries
+  `BytesServed` and a distinct `LastServedAt` advanced only by server-observed events, fed
+  by one shared `playback.SessionMeteredWriter` wired at every integrated pour (it forwards
+  `io.ReaderFrom` to keep sendfile and implements `Unwrap()` to keep the cut reaching the
+  socket).
+- **VERIFY-4 closed.** An unpaused transcode now gets a bounded 10m grace measured from
+  that server-observed clock, plus a 180s idle window for transcode records at the edge
+  tracker. This was chosen over an ffmpeg liveness probe, which sees only *local* processes
+  and reports false once a copy-mode encode completes ahead of playback. Paused sessions
+  keep their load-bearing 30m grace.
+- **The kill list gained an operator surface.** `Store.List()` existed but was reachable
+  from nowhere. Added `GET`/`POST`/`DELETE /api/v1/admin/streams/revocations` plus
+  `Store.Unrevoke` — the first way to undo a kill, since expiry is deliberately monotonic.
+  Unrevoke is tombstone-guarded so a concurrent poll reconcile cannot resurrect the row,
+  and `maintain` now shares the revoke/unrevoke lock so its durable self-heal cannot
+  re-`Upsert` a just-deleted kill.
+- **The Audiobookshelf surface was outside the design entirely** — three byte-serving
+  routes, none consulting the kill switch, one of them (`/feed/{slug}/file/{ino}`)
+  unauthenticated. All three now enforce revocation with their real credential-issue time
+  (ABS bearer JWTs are stateless and survive `OnUserSessionsRevoked`, so request-entry time
+  would have meant a user kill never refused a later ABS request).
+
+Still deferred, and deliberately so: multi-replica enforcement (VERIFY-3), the
+transcode-node ghost-record sweep, and a shared quota for the three download-class routes.
+
 ## AI-use disclosure
 
 This plan was drafted with AI assistance (Claude), based on a read-only audit of the current codebase. No behavior was changed by writing it. The Status banner and As-built deltas section were added after implementation.
