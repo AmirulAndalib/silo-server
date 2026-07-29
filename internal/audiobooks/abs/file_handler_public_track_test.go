@@ -88,7 +88,7 @@ func newPublicTrackHandler(t *testing.T, sid, contentID string, closed bool) (*H
 	t.Helper()
 	audioPath := makeTempAudio(t)
 	sessStore := &fakePlaybackSessionStore{}
-	sess := ABSPlaybackSession{ID: sid, UserID: "u1", ContentID: contentID}
+	sess := ABSPlaybackSession{ID: sid, UserID: "1", ContentID: contentID, StartedAt: time.Now()}
 	if closed {
 		now := time.Now()
 		sess.ClosedAt = &now

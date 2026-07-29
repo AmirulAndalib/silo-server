@@ -12,6 +12,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/recommendations"
 	"github.com/Silo-Server/silo-server/internal/scanner"
+	"github.com/Silo-Server/silo-server/internal/streamrevoke"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -60,6 +61,7 @@ type ABSHandlerDeps struct {
 	Detail        *catalog.DetailService
 	SessionMgr    *playback.SessionManager
 	SessionSyncer abs.PlaybackSessionSyncer
+	Revocation    *streamrevoke.Store
 }
 
 // absAuthAdapter is the narrow slice of internal/auth that BuildABSHandler
@@ -174,6 +176,7 @@ func (s *Service) BuildABSHandler(deps ABSHandlerDeps) *abs.Handler {
 		SocketIO:             socketServer,
 		NativeSessions:       deps.SessionMgr,
 		NativeSessionSyncer:  deps.SessionSyncer,
+		Revocation:           deps.Revocation,
 		CoverResolver: func(ctx context.Context, path, variant string) string {
 			if deps.Detail == nil {
 				return ""

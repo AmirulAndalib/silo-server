@@ -224,6 +224,14 @@ func (h *Handler) handlePublicFeedFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "feed get failed", http.StatusInternalServerError)
 		return
 	}
+	userID, parseUserErr := strconv.Atoi(f.UserID)
+	if parseUserErr != nil || userID <= 0 {
+		http.Error(w, "feed not found", http.StatusNotFound)
+		return
+	}
+	if h.deps.Revocation != nil && h.deps.Revocation.Refuse(w, "", userID, f.CreatedAt) {
+		return
+	}
 	inoStr := chi.URLParam(r, "ino")
 	ino, parseErr := strconv.Atoi(inoStr)
 	if parseErr != nil {
@@ -235,5 +243,7 @@ func (h *Handler) handlePublicFeedFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
 	}
+	stop := h.deps.Revocation.WatchAndCut(w, "", userID, f.CreatedAt)
+	defer stop()
 	http.ServeFile(w, r, mf.FilePath)
 }

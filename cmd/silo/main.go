@@ -2285,6 +2285,7 @@ func main() {
 			Detail:         absDetailSvc,
 			SessionMgr:     sessionMgr,
 			SessionSyncer:  deps.SessionSyncer,
+			Revocation:     streamRevocation,
 		}
 		absH := audiobooksService.BuildABSHandler(absHDeps)
 		deps.ABSHandler = absH

@@ -21,6 +21,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/streamrevoke"
 )
 
 // ---------------------------------------------------------------------------
@@ -277,6 +278,9 @@ type Dependencies struct {
 	// see Audiobookshelf-compatible clients. May be nil; ABS playback still
 	// functions, but admin live-session visibility is unavailable.
 	NativeSessions PlaybackSessionManager
+	// Revocation makes ABS byte-serving routes obey the shared stream kill
+	// switch. Nil preserves compatibility for isolated tests.
+	Revocation *streamrevoke.Store
 	// NativeSessionSyncer flushes native session-manager state into the shared
 	// admin live-session table after ABS play/sync/close events.
 	NativeSessionSyncer PlaybackSessionSyncer
@@ -569,6 +573,7 @@ type ctxAuth struct {
 	ProfileID string
 	JTI       string
 	Token     string // raw bearer token
+	IssuedAt  time.Time
 }
 
 // absAuthFrom extracts ABS auth from the request context. Returns (zero, false)
@@ -682,11 +687,16 @@ func (h *Handler) bearerAuth(next http.Handler) http.Handler {
 			return
 		}
 		_ = h.deps.TokenStore.TouchToken(r.Context(), claims.JTI)
+		var issuedAt time.Time
+		if claims.IssuedAt != nil {
+			issuedAt = claims.IssuedAt.Time
+		}
 		ctx := context.WithValue(r.Context(), ctxKey{}, ctxAuth{
 			UserID:    claims.UserID,
 			ProfileID: claims.ProfileID,
 			JTI:       claims.JTI,
 			Token:     raw,
+			IssuedAt:  issuedAt,
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

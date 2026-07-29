@@ -52,10 +52,23 @@ func trackInoFor(contentID string, fileIdx int) string {
 //   - Serve the bytes directly with Range-request support via playback.ServeDirectPlay.
 //   - Set Content-Disposition: attachment on /download paths to encourage
 //     browser save-to-disk / mobile offline-save behaviour.
+//
+// This is a download-class route: like native and Jellyfin-compatible
+// downloads it is exempt from the live-stream cap and streammonitor, and it is
+// not yet covered by a download quota. It is still revocable before and during
+// the file pour.
 func (h *Handler) handleFileStream(w http.ResponseWriter, r *http.Request) {
 	a, ok := absAuthFrom(r)
 	if !ok || a.UserID == "" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	userID, err := strconv.Atoi(a.UserID)
+	if err != nil || userID <= 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if h.deps.Revocation != nil && h.deps.Revocation.Refuse(w, "", userID, a.IssuedAt) {
 		return
 	}
 
@@ -115,6 +128,8 @@ func (h *Handler) handleFileStream(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", ct)
 	}
 
+	stop := h.deps.Revocation.WatchAndCut(w, "", userID, a.IssuedAt)
+	defer stop()
 	if err := playback.ServeDirectPlay(w, r, mediaFile.FilePath); err != nil {
 		// ServeDirectPlay has already written an error response; just log.
 		return
@@ -172,6 +187,14 @@ func (h *Handler) handlePublicTrack(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session expired", http.StatusGone)
 		return
 	}
+	userID, err := strconv.Atoi(sess.UserID)
+	if err != nil || userID <= 0 {
+		http.Error(w, "session owner invalid", http.StatusForbidden)
+		return
+	}
+	if h.deps.Revocation != nil && h.deps.Revocation.Refuse(w, sid, userID, sess.StartedAt) {
+		return
+	}
 	if h.beginNativePlaybackTransport(sid) {
 		defer h.endNativePlaybackTransport(sid)
 	}
@@ -196,7 +219,12 @@ func (h *Handler) handlePublicTrack(w http.ResponseWriter, r *http.Request) {
 	if ct := audioContentType(ext); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
-	_ = playback.ServeDirectPlay(w, r, mediaFile.FilePath)
+	recorder, _ := h.deps.NativeSessions.(playback.ServedBytesRecorder)
+	metered := playback.NewSessionMeteredWriter(w, recorder, sid)
+	defer func() { _ = metered.Close() }()
+	stop := h.deps.Revocation.WatchAndCut(metered, sid, userID, sess.StartedAt)
+	defer stop()
+	_ = playback.ServeDirectPlay(metered, r, mediaFile.FilePath)
 }
 
 func publicTrackSessionExpired(sess ABSPlaybackSession, now time.Time) bool {
