@@ -11,6 +11,7 @@ func TestRestartRequired(t *testing.T) {
 		{"server.listen", true},
 		{"auth.jwt_secret", true},
 		{"ratelimit.backend", true},
+		{"playback.over_cap_revocation_ttl", true},
 		// Prefix-covered namespaces.
 		{"database.max_connections", true},
 		{"userdb.backend", true},

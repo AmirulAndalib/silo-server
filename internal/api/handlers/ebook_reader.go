@@ -124,8 +124,7 @@ func (h *EbookReaderHandler) HandleReadFile(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	startedAt := time.Now()
-	// TODO(#305, A3): use the access token's iat as the revocation cutoff
-	// identity once credential identity is unified across serve surfaces.
+	credentialIssuedAt := apimw.CredentialIssuedAt(r.Context())
 	r = r.WithContext(httpstream.WithCutLatch(r.Context(), &httpstream.CutLatch{}))
 
 	contentID := strings.TrimSpace(chi.URLParam(r, "content_id"))
@@ -146,7 +145,7 @@ func (h *EbookReaderHandler) HandleReadFile(w http.ResponseWriter, r *http.Reque
 	}
 
 	userID := apimw.GetUserID(r.Context())
-	if h.Revocation != nil && h.Revocation.Refuse(w, "", userID, startedAt) {
+	if h.Revocation != nil && h.Revocation.Refuse(w, "", userID, credentialIssuedAt) {
 		return
 	}
 
@@ -177,7 +176,7 @@ func (h *EbookReaderHandler) HandleReadFile(w http.ResponseWriter, r *http.Reque
 	metered := playback.NewSessionMeteredWriter(w, h.Transfers, transfer.ID)
 	defer func() { _ = metered.Close() }()
 	if h.Revocation != nil {
-		stop := h.Revocation.WatchAndCutContext(r.Context(), metered, "", userID, startedAt)
+		stop := h.Revocation.WatchAndCutContext(r.Context(), metered, "", userID, credentialIssuedAt)
 		defer stop()
 	}
 

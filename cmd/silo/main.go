@@ -1757,13 +1757,24 @@ func main() {
 		// Resolve caps through the session manager so the enforcer and synchronous
 		// admission share one provider (installed by the API wiring) and can never
 		// disagree about a user's effective, group-merged cap.
-		streamenforcer.New(monitorSource, func(ctx context.Context, userID int) (int, error) {
+		overCapRevocationTTL, ttlErr := streamenforcer.ParseRevocationTTL(
+			settings[streamenforcer.RevocationTTLSetting],
+		)
+		if ttlErr != nil {
+			slog.Warn("invalid over-cap revocation TTL; using default",
+				"setting", streamenforcer.RevocationTTLSetting,
+				"value", settings[streamenforcer.RevocationTTLSetting],
+				"default", streamenforcer.DefaultRevocationTTL,
+				"error", ttlErr)
+			overCapRevocationTTL = streamenforcer.DefaultRevocationTTL
+		}
+		streamenforcer.NewWithRevocationTTL(monitorSource, func(ctx context.Context, userID int) (int, error) {
 			limits, err := sessionMgr.EffectiveLimits(ctx, userID)
 			if err != nil {
 				return 0, err
 			}
 			return limits.MaxStreams, nil
-		}, streamRevocation, 0).Start(appCtx)
+		}, streamRevocation, 0, overCapRevocationTTL).Start(appCtx)
 
 		nodeURL := fmt.Sprintf("http://%s%s", nodeIdentity, cfg.Server.Listen)
 		heartbeatWriter = worker.NewHeartbeatWriter(deps.DB, nodeIdentity, mode, nodeURL)

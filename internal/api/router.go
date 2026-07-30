@@ -3531,31 +3531,52 @@ func configJWTSecret(deps Dependencies) string {
 // no teeth on a single-node deployment. It refuses new/next requests (stopping
 // HLS on its next segment and refusing reconnects); cutting an in-flight native
 // direct-play pour is a follow-up.
+var errStreamTokenSessionMismatch = errors.New("stream token session does not match route")
+
 // streamRequestIdentity extracts the best-effort owner user id and the
 // credential-issue time for a native serve request. With a valid ?st= stream
 // token those are the token's uid and iat — the keys the user-kill cutoff in
 // streamrevoke compares (a token minted before a user revocation is killed; one
 // minted after re-auth plays). Without a token (legacy/bare URL or signing
 // disabled) these routes still run after API auth, so the authenticated user id
-// plus the request entry time apply: an entry request postdates any existing
-// user kill (fresh auth ⇒ allowed) while an in-flight pour predates a future
-// one (cut by WatchAndCut).
-func streamRequestIdentity(r *http.Request, secret string) (int, time.Time) {
+// plus the access credential's iat apply. API keys and legacy JWTs without iat
+// use zero and therefore fail open for user cutoffs by explicit policy.
+func streamRequestIdentity(r *http.Request, secret, routeSessionID string) (int, time.Time, error) {
 	if tok := r.URL.Query().Get("st"); tok != "" && secret != "" {
 		if claims, err := streamtoken.Verify(tok, secret); err == nil {
-			return claims.UserID, claims.IssuedTime()
+			if claims.SessionID != routeSessionID {
+				return 0, time.Time{}, errStreamTokenSessionMismatch
+			}
+			issuedAt := claims.IssuedTime()
+			if issuedAt.IsZero() {
+				slog.DebugContext(r.Context(), "stream token has no iat; user revocation cutoff fails open",
+					"component", "api", "session_id", routeSessionID, "user_id", claims.UserID)
+			}
+			return claims.UserID, issuedAt, nil
 		}
 	}
-	return apimw.GetUserID(r.Context()), time.Now()
+	return apimw.GetUserID(r.Context()), apimw.CredentialIssuedAt(r.Context()), nil
+}
+
+func rejectMismatchedStreamToken(w http.ResponseWriter, r *http.Request, err error) bool {
+	if !errors.Is(err, errStreamTokenSessionMismatch) {
+		return false
+	}
+	slog.WarnContext(r.Context(), "stream token session id does not match route",
+		"component", "api",
+		"route_session_id", chi.URLParam(r, "session_id"))
+	http.Error(w, "stream token does not authorize this session", http.StatusForbidden)
+	return true
 }
 
 func guardRevocation(store *streamrevoke.Store, secret string, next http.HandlerFunc) http.HandlerFunc {
-	if store == nil {
-		return next
-	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		userID, startedAt := streamRequestIdentity(r, secret)
-		if store.Refuse(w, chi.URLParam(r, "session_id"), userID, startedAt) {
+		sessionID := chi.URLParam(r, "session_id")
+		userID, startedAt, err := streamRequestIdentity(r, secret, sessionID)
+		if rejectMismatchedStreamToken(w, r, err) {
+			return
+		}
+		if store != nil && store.Refuse(w, sessionID, userID, startedAt) {
 			return
 		}
 		next(w, r)
@@ -3567,12 +3588,16 @@ func guardRevocation(store *streamrevoke.Store, secret string, next http.Handler
 // routes use plain guardRevocation — per-segment refusal already stops HLS within
 // one segment, so a per-segment watcher goroutine would be wasteful.
 func guardRevocationCut(store *streamrevoke.Store, secret string, next http.HandlerFunc) http.HandlerFunc {
-	if store == nil {
-		return next
-	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID := chi.URLParam(r, "session_id")
-		userID, startedAt := streamRequestIdentity(r, secret)
+		userID, startedAt, err := streamRequestIdentity(r, secret, sessionID)
+		if rejectMismatchedStreamToken(w, r, err) {
+			return
+		}
+		if store == nil {
+			next(w, r)
+			return
+		}
 		latch := &httpstream.CutLatch{}
 		r = r.WithContext(httpstream.WithCutLatch(r.Context(), latch))
 		if store.Refuse(w, sessionID, userID, startedAt) {

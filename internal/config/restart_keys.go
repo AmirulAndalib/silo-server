@@ -40,6 +40,7 @@ var restartRequiredKeys = map[string]bool{
 	"playback.hw_accel":                  true,
 	"playback.hw_device":                 true,
 	"playback.chapter_thumbnail_workers": true,
+	"playback.over_cap_revocation_ttl":   true,
 
 	// Scanner / matcher toggles captured at construction. Worker counts,
 	// batch size, metadata.cache_images, and mdblist.api_key hot-reload via

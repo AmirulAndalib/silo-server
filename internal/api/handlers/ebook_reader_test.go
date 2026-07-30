@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
 
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/auth"
@@ -30,6 +31,9 @@ func newEbookReaderAuthRequest(method, path string) *http.Request {
 		UserID:    1,
 		Role:      "user",
 		TokenType: auth.TokenTypeAccess,
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt: jwt.NewNumericDate(time.Now().Add(-time.Hour)),
+		},
 	})
 	ctx = apimw.SetProfileID(ctx, "profile-1")
 	return req.WithContext(ctx)
@@ -324,8 +328,15 @@ func TestEbookReaderRevocationCutsInFlightRealSocket(t *testing.T) {
 	})
 	handler.Revocation = store
 	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A real access token always carries iat (auth.GenerateToken sets it), and
+		// the cutoff must predate the revocation for a user kill to match it. With
+		// no iat CredentialIssuedAt deliberately returns the zero time and the
+		// cutoff fails open, so omitting it here would make this test vacuous.
 		ctx := apimw.SetClaims(r.Context(), &auth.Claims{
 			UserID: 1, Role: "user", TokenType: auth.TokenTypeAccess,
+			RegisteredClaims: jwt.RegisteredClaims{
+				IssuedAt: jwt.NewNumericDate(time.Now().Add(-time.Hour)),
+			},
 		})
 		ctx = apimw.SetProfileID(ctx, "profile-1")
 		routeCtx := chi.NewRouteContext()

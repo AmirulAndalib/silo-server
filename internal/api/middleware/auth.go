@@ -5,8 +5,10 @@ package middleware
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/activitylog"
 	"github.com/Silo-Server/silo-server/internal/auth"
@@ -256,6 +258,30 @@ func GetClaims(ctx context.Context) *auth.Claims {
 		return nil
 	}
 	return claims
+}
+
+// CredentialIssuedAt returns the authenticated access credential's iat. API
+// keys and legacy JWTs without iat deliberately return zero: streamrevoke's
+// documented fail-open contract means a user cutoff cannot cut pours owned by
+// those credentials. In particular, substituting time.Now would incorrectly
+// make every old API key appear newer than the cutoff.
+func CredentialIssuedAt(ctx context.Context) time.Time {
+	claims := GetClaims(ctx)
+	if claims == nil {
+		slog.DebugContext(ctx, "stream credential has no claims; user revocation cutoff fails open")
+		return time.Time{}
+	}
+	if claims.TokenType == auth.TokenTypeAPIKey {
+		slog.DebugContext(ctx, "API-key stream credential has no issue time; user revocation cutoff fails open",
+			"user_id", claims.UserID, "api_key_id", claims.APIKeyID)
+		return time.Time{}
+	}
+	if claims.IssuedAt == nil {
+		slog.DebugContext(ctx, "stream access credential has no iat; user revocation cutoff fails open",
+			"user_id", claims.UserID, "session_id", claims.SessionID)
+		return time.Time{}
+	}
+	return claims.IssuedAt.Time
 }
 
 // IsAdmin reports whether the context's authenticated user account has the

@@ -18,7 +18,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// errFakeDurable is the error fakeDurable.ListActive returns while failNext > 0.
+// errFakeDurable is the error fakeDurable.List returns while failNext > 0.
 var errFakeDurable = errors.New("fake durable failure")
 
 // newMemStore returns a memory-only Store (no Redis, no bus, no durable mirror).
@@ -130,19 +130,23 @@ func TestWatchAndCutLogsUnsupportedDeadlineOnlyOnce(t *testing.T) {
 // fakeDurable is an in-memory DurableStore double for exercising the durable
 // wiring (Upsert on revoke, warm on start, Prune on the poll tick) without a
 // live Postgres. StartSync's warm is synchronous, but the poll goroutine calls
-// ListActive/Prune concurrently with the test's own reads, so every field is
-// mutex-guarded. failNext, when > 0, makes ListActive return an error that many
+// List/Prune concurrently with the test's own reads, so every field is
+// mutex-guarded. failNext, when > 0, makes List return an error that many
 // times before succeeding, to exercise the bounded boot-warm retry.
 type fakeDurable struct {
-	mu            sync.Mutex
-	rows          map[Key]Revocation
-	upserts       int
-	prunes        int
-	deletes       int
-	failNext      int
-	lists         int
-	upsertStarted chan struct{}
-	unblockUpsert chan struct{}
+	mu              sync.Mutex
+	rows            map[Key]Revocation
+	tombstones      map[Key]Tombstone
+	upserts         int
+	prunes          int
+	failNext        int
+	lists           int
+	upsertStarted   chan struct{}
+	unblockUpsert   chan struct{}
+	upsertStartOnce sync.Once
+	listStarted     chan struct{}
+	unblockList     chan struct{}
+	listStartOnce   sync.Once
 }
 
 type failingBus struct{}
@@ -153,46 +157,133 @@ func (failingBus) Publish(context.Context, string, cache.Event) error {
 func (failingBus) Subscribe(context.Context, string, cache.EventHandler) error { return nil }
 func (failingBus) Close() error                                                { return nil }
 
-func (f *fakeDurable) Delete(_ context.Context, kind Kind, id string) error {
+type recordingBus struct {
+	mu     sync.Mutex
+	events []cache.Event
+}
+
+func (b *recordingBus) Publish(_ context.Context, _ string, event cache.Event) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.events = append(b.events, event)
+	return nil
+}
+func (*recordingBus) Subscribe(context.Context, string, cache.EventHandler) error { return nil }
+func (*recordingBus) Close() error                                                { return nil }
+
+type recordingRedisHook struct {
+	set chan struct{}
+}
+
+func (h *recordingRedisHook) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (h *recordingRedisHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "set" {
+			select {
+			case h.set <- struct{}{}:
+			default:
+			}
+			return nil
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (h *recordingRedisHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (f *fakeDurable) UpsertTombstone(_ context.Context, tombstone Tombstone) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.rows, Key{Kind: kind, ID: id})
-	f.deletes++
+	key := tombstone.key()
+	if r, ok := f.rows[key]; ok && r.RevokedAt.After(tombstone.UnrevokedAt) {
+		return nil
+	}
+	if previous, ok := f.tombstones[key]; ok && previous.UnrevokedAt.After(tombstone.UnrevokedAt) {
+		return nil
+	}
+	delete(f.rows, key)
+	f.tombstones[key] = tombstone
 	return nil
 }
 
 func newFakeDurable() *fakeDurable {
-	return &fakeDurable{rows: make(map[Key]Revocation)}
+	return &fakeDurable{
+		rows:       make(map[Key]Revocation),
+		tombstones: make(map[Key]Tombstone),
+	}
 }
 
-func (f *fakeDurable) Upsert(_ context.Context, r Revocation) error {
+func (f *fakeDurable) Upsert(ctx context.Context, r Revocation) error {
 	if f.upsertStarted != nil {
-		close(f.upsertStarted)
-		<-f.unblockUpsert
+		f.upsertStartOnce.Do(func() { close(f.upsertStarted) })
+		select {
+		case <-f.unblockUpsert:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.rows[r.key()] = r
+	key := r.key()
+	if tombstone, ok := f.tombstones[key]; ok {
+		if !time.Now().Before(tombstone.ExpiresAt) {
+			delete(f.tombstones, key)
+		} else if !r.RevokedAt.After(tombstone.UnrevokedAt) {
+			f.upserts++
+			return nil
+		} else {
+			delete(f.tombstones, key)
+		}
+	}
+	if existing, ok := f.rows[key]; ok {
+		if r.effectiveExpiry().After(existing.effectiveExpiry()) {
+			existing.ExpiresAt = r.ExpiresAt
+		}
+		if r.RevokedAt.After(existing.RevokedAt) {
+			existing.RevokedAt = r.RevokedAt
+			existing.Reason = r.Reason
+		}
+		r = existing
+	}
+	f.rows[key] = r
 	f.upserts++
 	return nil
 }
 
-func (f *fakeDurable) ListActive(_ context.Context) ([]Revocation, error) {
+func (f *fakeDurable) List(ctx context.Context) (DurableState, error) {
+	if f.listStarted != nil {
+		f.listStartOnce.Do(func() { close(f.listStarted) })
+		select {
+		case <-f.unblockList:
+		case <-ctx.Done():
+			return DurableState{}, ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lists++
 	if f.failNext > 0 {
 		f.failNext--
-		return nil, errFakeDurable
+		return DurableState{}, errFakeDurable
 	}
 	now := time.Now()
-	out := make([]Revocation, 0, len(f.rows))
+	state := DurableState{Revocations: make([]Revocation, 0, len(f.rows))}
 	for _, r := range f.rows {
 		if !r.expired(now) {
-			out = append(out, r)
+			state.Revocations = append(state.Revocations, r)
 		}
 	}
-	return out, nil
+	for _, tombstone := range f.tombstones {
+		if now.Before(tombstone.ExpiresAt) {
+			state.Tombstones = append(state.Tombstones, tombstone)
+		}
+	}
+	return state, nil
 }
 
 func (f *fakeDurable) Prune(_ context.Context) error {
@@ -202,6 +293,11 @@ func (f *fakeDurable) Prune(_ context.Context) error {
 	for k, r := range f.rows {
 		if r.expired(now) {
 			delete(f.rows, k)
+		}
+	}
+	for k, tombstone := range f.tombstones {
+		if !now.Before(tombstone.ExpiresAt) {
+			delete(f.tombstones, k)
 		}
 	}
 	f.prunes++
@@ -250,6 +346,163 @@ func TestRevokeMirrorsToDurable(t *testing.T) {
 	}
 }
 
+func TestApplyLocalMergesCutoffAndExpiryIndependently(t *testing.T) {
+	const secondReason = "second"
+	s := newMemStore()
+	key := Key{Kind: KindUser, ID: "7"}
+	firstCutoff := time.Now().Add(-2 * time.Minute)
+	secondCutoff := firstCutoff.Add(time.Minute)
+	longExpiry := time.Now().Add(12 * time.Hour)
+	s.applyLocal(Revocation{
+		Kind: key.Kind, ID: key.ID, Reason: "first",
+		RevokedAt: firstCutoff, ExpiresAt: longExpiry,
+	})
+	s.applyLocal(Revocation{
+		Kind: key.Kind, ID: key.ID, Reason: secondReason,
+		RevokedAt: secondCutoff, ExpiresAt: time.Now().Add(time.Hour),
+	})
+
+	got := s.effective(key)
+	if !got.ExpiresAt.Equal(longExpiry) {
+		t.Fatalf("expiry = %v, want longer %v", got.ExpiresAt, longExpiry)
+	}
+	if !got.RevokedAt.Equal(secondCutoff) || got.Reason != secondReason {
+		t.Fatalf("cutoff/reason = %v/%q, want %v/%s", got.RevokedAt, got.Reason, secondCutoff, secondReason)
+	}
+	between := firstCutoff.Add(30 * time.Second)
+	if !s.IsRevoked("session", 7, between) {
+		t.Fatal("credential between the two cutoffs was not refused")
+	}
+}
+
+func TestDurableMergeMatchesLocalMerge(t *testing.T) {
+	const secondReason = "second"
+	fake := newFakeDurable()
+	key := Key{Kind: KindUser, ID: "9"}
+	firstCutoff := time.Now().Add(-2 * time.Minute)
+	secondCutoff := firstCutoff.Add(time.Minute)
+	longExpiry := time.Now().Add(12 * time.Hour)
+	if err := fake.Upsert(context.Background(), Revocation{
+		Kind: key.Kind, ID: key.ID, Reason: "first",
+		RevokedAt: firstCutoff, ExpiresAt: longExpiry,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fake.Upsert(context.Background(), Revocation{
+		Kind: key.Kind, ID: key.ID, Reason: secondReason,
+		RevokedAt: secondCutoff, ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	got := fake.rows[key]
+	fake.mu.Unlock()
+	if !got.ExpiresAt.Equal(longExpiry) || !got.RevokedAt.Equal(secondCutoff) || got.Reason != secondReason {
+		t.Fatalf("durable merge = %+v", got)
+	}
+}
+
+func TestRevokePublishesMergedRecord(t *testing.T) {
+	bus := &recordingBus{}
+	s := New(Options{Bus: bus})
+	key := Key{Kind: KindUser, ID: "11"}
+	longExpiry := time.Now().Add(12 * time.Hour)
+	s.applyLocal(Revocation{
+		Kind: key.Kind, ID: key.ID, Reason: "old-long",
+		RevokedAt: time.Now().Add(-time.Hour), ExpiresAt: longExpiry,
+	})
+
+	if err := s.Revoke(context.Background(), key, "new-cutoff", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	bus.mu.Lock()
+	events := append([]cache.Event(nil), bus.events...)
+	bus.mu.Unlock()
+	if len(events) != 1 {
+		t.Fatalf("published events = %d, want 1", len(events))
+	}
+	var published Revocation
+	if err := json.Unmarshal([]byte(events[0].Payload), &published); err != nil {
+		t.Fatal(err)
+	}
+	if !published.ExpiresAt.Equal(longExpiry) || published.Reason != "new-cutoff" {
+		t.Fatalf("published record = %+v, want merged expiry and new reason", published)
+	}
+}
+
+func TestBlockedDurableDoesNotDelayRedisAndIsBounded(t *testing.T) {
+	fake := newFakeDurable()
+	fake.upsertStarted = make(chan struct{})
+	fake.unblockUpsert = make(chan struct{})
+	rdb := redis.NewClient(&redis.Options{Addr: "unused.invalid:6379"})
+	t.Cleanup(func() { _ = rdb.Close() })
+	redisSet := make(chan struct{}, 2)
+	rdb.AddHook(&recordingRedisHook{set: redisSet})
+	s := New(Options{
+		Redis: rdb, Durable: fake, PropagationTimeout: 25 * time.Millisecond,
+	})
+
+	start := time.Now()
+	warnings, err := s.RevokeWithWarnings(
+		context.Background(), Key{Kind: KindSession, ID: "bounded-1"},
+		"test", time.Now().Add(time.Hour),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-redisSet:
+	default:
+		t.Fatal("Redis mirror was not attempted before the durable store blocked")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("bounded revoke took %v", elapsed)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "durable") {
+		t.Fatalf("warnings = %v, want durable timeout warning", warnings)
+	}
+
+	secondDone := make(chan struct{})
+	go func() {
+		_, _ = s.RevokeWithWarnings(
+			context.Background(), Key{Kind: KindSession, ID: "bounded-2"},
+			"test", time.Now().Add(time.Hour),
+		)
+		close(secondDone)
+	}()
+	select {
+	case <-secondDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("second revoke remained blocked behind the timed-out durable store")
+	}
+}
+
+func TestAutomatedRevokeIfAbsentDoesNotWeakenAdminMerge(t *testing.T) {
+	s := newMemStore()
+	ctx := context.Background()
+	created, err := s.RevokeSessionForIfAbsent(ctx, "shared-key", "over-cap", time.Hour)
+	if err != nil || !created {
+		t.Fatalf("initial automated revoke = %v, %v", created, err)
+	}
+	first := s.effective(Key{Kind: KindSession, ID: "shared-key"})
+	created, err = s.RevokeSessionForIfAbsent(ctx, "shared-key", "over-cap", 12*time.Hour)
+	if err != nil || created {
+		t.Fatalf("second automated revoke = %v, %v; want skipped", created, err)
+	}
+	if got := s.effective(first.key()); !got.ExpiresAt.Equal(first.ExpiresAt) {
+		t.Fatalf("automated re-evaluation extended expiry from %v to %v", first.ExpiresAt, got.ExpiresAt)
+	}
+
+	adminUntil := time.Now().Add(12 * time.Hour)
+	if err := s.Revoke(ctx, first.key(), "admin", adminUntil); err != nil {
+		t.Fatal(err)
+	}
+	got := s.effective(first.key())
+	if got.ExpiresAt.Before(adminUntil) || got.Reason != "admin" {
+		t.Fatalf("admin merge = %+v, want longer admin kill", got)
+	}
+}
+
 // TestStartSyncWarmsFromDurable simulates a restart: a fresh Store must
 // repopulate its hot-path map from the durable mirror, and skip expired rows.
 func TestStartSyncWarmsFromDurable(t *testing.T) {
@@ -277,7 +530,7 @@ func TestStartSyncWarmsFromDurable(t *testing.T) {
 }
 
 // TestWarmFromDurableRetries proves the bounded boot-warm retry (Fix 2): a
-// transient ListActive failure at startup is retried rather than leaving the
+// transient List failure at startup is retried rather than leaving the
 // kill list empty until the first poll tick.
 func TestWarmFromDurableRetries(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -286,7 +539,7 @@ func TestWarmFromDurableRetries(t *testing.T) {
 	fake := newFakeDurable()
 	live := Revocation{Kind: KindSession, ID: "sess-retry", Reason: "x", RevokedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)}
 	_ = fake.Upsert(ctx, live)
-	// Fail the first two ListActive calls; the third (within the 3-attempt
+	// Fail the first two List calls; the third (within the 3-attempt
 	// bound) succeeds.
 	fake.mu.Lock()
 	fake.failNext = 2
@@ -297,10 +550,10 @@ func TestWarmFromDurableRetries(t *testing.T) {
 	s.StartSync(ctx)
 
 	if !s.IsRevoked("sess-retry", 0, time.Time{}) {
-		t.Fatalf("expected sess-retry warmed into cache after retried ListActive")
+		t.Fatalf("expected sess-retry warmed into cache after retried List")
 	}
 	if got := fake.listCount(); got != 3 {
-		t.Fatalf("ListActive calls = %d, want 3 (two failures + one success)", got)
+		t.Fatalf("List calls = %d, want 3 (two failures + one success)", got)
 	}
 }
 
@@ -318,7 +571,22 @@ func TestWarmFromDurableGivesUpBounded(t *testing.T) {
 		t.Fatalf("expected warmFromDurable to return an error when all attempts fail")
 	}
 	if got := fake.listCount(); got != 3 {
-		t.Fatalf("ListActive attempts = %d, want 3 (bounded)", got)
+		t.Fatalf("List attempts = %d, want 3 (bounded)", got)
+	}
+}
+
+func TestStartSyncDurableWarmHasDeadline(t *testing.T) {
+	fake := newFakeDurable()
+	fake.listStarted = make(chan struct{})
+	fake.unblockList = make(chan struct{})
+	s := New(Options{Durable: fake, PropagationTimeout: 25 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	start := time.Now()
+	s.StartSync(ctx)
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("StartSync durable warm took %v", elapsed)
 	}
 }
 
@@ -401,6 +669,38 @@ func TestMaintainDurableSelfHealDoesNotRaceUnrevoke(t *testing.T) {
 	}
 }
 
+func TestMaintainDurableTimeoutReleasesOperationLock(t *testing.T) {
+	fake := newFakeDurable()
+	fake.listStarted = make(chan struct{})
+	fake.unblockList = make(chan struct{})
+	s := New(Options{Durable: fake, PropagationTimeout: 25 * time.Millisecond})
+
+	maintainDone := make(chan struct{})
+	go func() {
+		s.maintain(context.Background())
+		close(maintainDone)
+	}()
+	<-fake.listStarted
+
+	revokeDone := make(chan error, 1)
+	go func() {
+		revokeDone <- s.RevokeSession(context.Background(), "after-maintain-timeout", "test")
+	}()
+	select {
+	case err := <-revokeDone:
+		if err != nil {
+			t.Fatalf("RevokeSession: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("revoke remained blocked behind timed-out durable maintenance")
+	}
+	select {
+	case <-maintainDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("durable maintenance did not return after its bounded context expired")
+	}
+}
+
 func TestUnrevokeTombstoneBlocksReconcileAndNewerRevokeClearsIt(t *testing.T) {
 	ctx := context.Background()
 	s := newMemStore()
@@ -427,6 +727,107 @@ func TestUnrevokeTombstoneBlocksReconcileAndNewerRevokeClearsIt(t *testing.T) {
 	s.mu.RUnlock()
 	if tombstoned {
 		t.Fatal("newer revoke did not clear tombstone")
+	}
+}
+
+func TestDurableTombstoneSurvivesRestartAndRejectsStaleReplica(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeDurable()
+	key := Key{Kind: KindSession, ID: "sess-durable-unrevoke"}
+	old := Revocation{
+		Kind: key.Kind, ID: key.ID, Reason: "old",
+		RevokedAt: time.Now().Add(-time.Minute), ExpiresAt: time.Now().Add(time.Hour),
+	}
+	first := New(Options{Durable: fake})
+	first.applyLocal(old)
+	if err := fake.Upsert(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Unrevoke(ctx, key); err != nil {
+		t.Fatalf("Unrevoke: %v", err)
+	}
+
+	// A stale replica that missed the unrevocation cannot overwrite its durable
+	// tombstone during self-heal.
+	if err := fake.Upsert(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+
+	syncCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	fresh := New(Options{Durable: fake})
+	fresh.StartSync(syncCtx)
+	if fresh.IsRevoked(key.ID, 0, time.Time{}) {
+		t.Fatal("fresh store resurrected a durably tombstoned revocation")
+	}
+	fake.mu.Lock()
+	_, rowExists := fake.rows[key]
+	_, tombstoneExists := fake.tombstones[key]
+	fake.mu.Unlock()
+	if rowExists || !tombstoneExists {
+		t.Fatalf("durable state row=%v tombstone=%v, want tombstone only", rowExists, tombstoneExists)
+	}
+}
+
+func TestDurableTombstoneAllowsGenuinelyNewerRevocation(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeDurable()
+	key := Key{Kind: KindSession, ID: "sess-new-after-unrevoke"}
+	unrevokedAt := time.Now().Add(-time.Minute)
+	tombstone := Tombstone{
+		Kind: key.Kind, ID: key.ID, UnrevokedAt: unrevokedAt, ExpiresAt: time.Now().Add(time.Hour),
+	}
+	if err := fake.UpsertTombstone(ctx, tombstone); err != nil {
+		t.Fatal(err)
+	}
+	newer := Revocation{
+		Kind: key.Kind, ID: key.ID, Reason: "new",
+		RevokedAt: unrevokedAt.Add(time.Second), ExpiresAt: time.Now().Add(2 * time.Hour),
+	}
+	if err := fake.Upsert(ctx, newer); err != nil {
+		t.Fatal(err)
+	}
+	state, err := fake.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Revocations) != 1 || len(state.Tombstones) != 0 {
+		t.Fatalf("durable state = %+v, want newer revocation only", state)
+	}
+}
+
+func TestDurableListDoesNotSurfaceTombstonedRow(t *testing.T) {
+	fake := newFakeDurable()
+	tombstone := Tombstone{
+		Kind: KindUser, ID: "13", UnrevokedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+	}
+	if err := fake.UpsertTombstone(context.Background(), tombstone); err != nil {
+		t.Fatal(err)
+	}
+	state, err := fake.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Revocations) != 0 || len(state.Tombstones) != 1 {
+		t.Fatalf("durable state = %+v", state)
+	}
+}
+
+func TestDurablePruneRemovesExpiredTombstone(t *testing.T) {
+	fake := newFakeDurable()
+	key := Key{Kind: KindSession, ID: "expired-tombstone"}
+	fake.tombstones[key] = Tombstone{
+		Kind: key.Kind, ID: key.ID,
+		UnrevokedAt: time.Now().Add(-2 * time.Hour), ExpiresAt: time.Now().Add(-time.Hour),
+	}
+	if err := fake.Prune(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	_, exists := fake.tombstones[key]
+	fake.mu.Unlock()
+	if exists {
+		t.Fatal("expired durable tombstone was not pruned")
 	}
 }
 
@@ -513,6 +914,33 @@ func TestMaintainRepairsShorterDurableExpiry(t *testing.T) {
 	}
 	if upserts == 0 {
 		t.Fatal("shorter durable row was not re-upserted")
+	}
+}
+
+func TestMaintainRepairsOlderDurableCutoffWithLongExpiry(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeDurable()
+	key := Key{Kind: KindUser, ID: "17"}
+	longExpiry := time.Now().Add(12 * time.Hour)
+	oldCutoff := time.Now().Add(-2 * time.Hour)
+	newCutoff := oldCutoff.Add(time.Hour)
+	fake.rows[key] = Revocation{
+		Kind: key.Kind, ID: key.ID, Reason: "old",
+		RevokedAt: oldCutoff, ExpiresAt: longExpiry,
+	}
+	s := New(Options{Durable: fake})
+	s.applyLocal(Revocation{
+		Kind: key.Kind, ID: key.ID, Reason: "new",
+		RevokedAt: newCutoff, ExpiresAt: time.Now().Add(time.Hour),
+	})
+
+	s.maintain(ctx)
+
+	fake.mu.Lock()
+	got := fake.rows[key]
+	fake.mu.Unlock()
+	if !got.RevokedAt.Equal(newCutoff) || got.Reason != "new" || !got.ExpiresAt.Equal(longExpiry) {
+		t.Fatalf("durable merge after maintain = %+v", got)
 	}
 }
 
@@ -714,7 +1142,7 @@ func TestMonotonicExpiry(t *testing.T) {
 	if err := s.Revoke(ctx, Key{Kind: KindSession, ID: "sess-1"}, "admin_terminate", long); err != nil {
 		t.Fatalf("Revoke long: %v", err)
 	}
-	// A shorter re-revoke (the enforcer's 5m self-heal TTL) must not win.
+	// A shorter re-revoke must not win.
 	short := time.Now().Add(5 * time.Minute)
 	if err := s.Revoke(ctx, Key{Kind: KindSession, ID: "sess-1"}, "over_cap", short); err != nil {
 		t.Fatalf("Revoke short: %v", err)

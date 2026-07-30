@@ -210,6 +210,8 @@ func TestNormalizeAdminSettingRejectsInvalidValues(t *testing.T) {
 		{key: "database.max_connections", value: "0"},
 		{key: "metadata.cache_images", value: "maybe"},
 		{key: "auth.access_token_expiry", value: "forever"},
+		{key: "playback.over_cap_revocation_ttl", value: "4m59s"},
+		{key: "playback.over_cap_revocation_ttl", value: "24h1s"},
 		{key: "recommendations.embeddings_cron", value: "not a cron"},
 		{key: "notifications.server_channels.batch_seconds", value: "119"},
 		{key: "catalog.search.meilisearch.semantic_ratio", value: "1.2"},
@@ -224,6 +226,16 @@ func TestNormalizeAdminSettingRejectsInvalidValues(t *testing.T) {
 				t.Fatalf("NormalizeAdminSetting(%q, %q) returned nil error", tc.key, tc.value)
 			}
 		})
+	}
+}
+
+func TestOverCapRevocationTTLDefaultAndValidation(t *testing.T) {
+	effective := EffectiveAdminSettings(nil)
+	if got := effective["playback.over_cap_revocation_ttl"]; got != "24h0m0s" {
+		t.Fatalf("default over-cap revocation TTL = %q, want 24h0m0s", got)
+	}
+	if got, err := NormalizeAdminSetting("playback.over_cap_revocation_ttl", "6h"); err != nil || got != "6h" {
+		t.Fatalf("valid over-cap revocation TTL = %q, %v", got, err)
 	}
 }
 

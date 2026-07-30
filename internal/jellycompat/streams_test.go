@@ -14,6 +14,18 @@ import (
 	"github.com/Silo-Server/silo-server/internal/playback"
 )
 
+func TestCompatCredentialIssuedAtUsesLoginCreationAndAPIKeyZero(t *testing.T) {
+	createdAt := time.Now().Add(-time.Hour)
+	session := &Session{Token: "compat-token", StreamAppUserID: 7, CreatedAt: createdAt}
+	if got := compatCredentialIssuedAt(context.Background(), session); !got.Equal(createdAt) {
+		t.Fatalf("normal compat credential time = %v, want %v", got, createdAt)
+	}
+	session.Token = "sa_test_key"
+	if got := compatCredentialIssuedAt(context.Background(), session); !got.IsZero() {
+		t.Fatalf("API-key compat credential time = %v, want zero", got)
+	}
+}
+
 // withCompatSession attaches a compat session carrying tok to req, so the
 // ActiveEncodings ownership guard (CompatToken == session.Token) is satisfied.
 func withCompatSession(req *http.Request, tok string) *http.Request {

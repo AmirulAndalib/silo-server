@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
+	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streammonitor"
 )
 
@@ -23,14 +24,28 @@ func (f fakeSource) Snapshot(context.Context) (streammonitor.Snapshot, error) {
 type fakeRevoker struct {
 	revoked []string
 	err     error
+	seen    map[string]struct{}
+	ttls    []time.Duration
 }
 
-func (f *fakeRevoker) RevokeSessionFor(_ context.Context, sessionID, _ string, _ time.Duration) error {
+func (f *fakeRevoker) RevokeSessionForIfAbsent(
+	_ context.Context,
+	sessionID, _ string,
+	ttl time.Duration,
+) (bool, error) {
 	if f.err != nil {
-		return f.err
+		return false, f.err
 	}
+	if f.seen == nil {
+		f.seen = make(map[string]struct{})
+	}
+	if _, ok := f.seen[sessionID]; ok {
+		return false, nil
+	}
+	f.seen[sessionID] = struct{}{}
 	f.revoked = append(f.revoked, sessionID)
-	return nil
+	f.ttls = append(f.ttls, ttl)
+	return true, nil
 }
 
 // stream builds a LiveStream whose StartedAt and LastServedAt are both ts.
@@ -152,5 +167,41 @@ func TestEvaluateOnceRevokesCanonicalLogicalSessionID(t *testing.T) {
 	}
 	if len(rev.revoked) != 1 || rev.revoked[0] != "logical-a" {
 		t.Fatalf("revoked = %v, want logical-a", rev.revoked)
+	}
+}
+
+func TestEvaluateOnceDoesNotExtendExistingAutomatedRevocation(t *testing.T) {
+	base := time.Now()
+	source := fakeSource{snap: streammonitor.Snapshot{Streams: []streammonitor.LiveStream{
+		stream("keep", 7, base.Add(time.Minute)),
+		stream("victim", 7, base),
+	}}}
+	rev := &fakeRevoker{}
+	e := New(source, func(context.Context, int) (int, error) { return 1, nil }, rev, 0)
+	if err := e.EvaluateOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.EvaluateOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(rev.revoked) != 1 {
+		t.Fatalf("revocation writes = %d, want 1", len(rev.revoked))
+	}
+	if len(rev.ttls) != 1 || rev.ttls[0] != playback.MaxTokenTTL {
+		t.Fatalf("revocation TTLs = %v, want [%v]", rev.ttls, playback.MaxTokenTTL)
+	}
+}
+
+func TestParseRevocationTTL(t *testing.T) {
+	if got, err := ParseRevocationTTL(""); err != nil || got != playback.MaxTokenTTL {
+		t.Fatalf("default = %v, %v; want %v", got, err, playback.MaxTokenTTL)
+	}
+	if got, err := ParseRevocationTTL("6h"); err != nil || got != 6*time.Hour {
+		t.Fatalf("valid = %v, %v; want 6h", got, err)
+	}
+	for _, raw := range []string{"bad", "4m59s", "24h1s"} {
+		if _, err := ParseRevocationTTL(raw); err == nil {
+			t.Fatalf("ParseRevocationTTL(%q) accepted invalid value", raw)
+		}
 	}
 }

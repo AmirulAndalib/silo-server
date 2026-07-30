@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	redisv9 "github.com/redis/go-redis/v9"
 	"github.com/robfig/cron/v3"
 )
@@ -57,6 +59,7 @@ var adminSettingDefaults = map[string]string{
 	"playback.chapter_thumbnail_execution":     "local",
 	"playback.chapter_thumbnail_node_capacity": "1",
 	"playback.chapter_thumbnail_hdr_policy":    "best_effort",
+	"playback.over_cap_revocation_ttl":         streamtoken.MaxTTL.String(),
 	"playback.watched_threshold":               "90",
 	"playback.min_resume_threshold":            "5",
 	"allow_4k_transcode":                       "false",
@@ -358,6 +361,8 @@ func NormalizeAdminSetting(key, raw string) (string, error) {
 		"download.period_duration", "jellyfin_compat.session_ttl",
 		"jellyfin_compat.playback_session_ttl":
 		return normalizeAdminDuration(key, value)
+	case "playback.over_cap_revocation_ttl":
+		return normalizeAdminDurationRange(key, value, 5*time.Minute, streamtoken.MaxTTL)
 
 	case "server.log_level":
 		return normalizeAdminEnum(key, value, "debug", "info", "warn", "error")
@@ -579,6 +584,14 @@ func normalizeAdminDuration(key, value string) (string, error) {
 	parsed, err := parseDuration(value)
 	if err != nil || parsed <= 0 {
 		return "", fmt.Errorf("%s must be a positive duration", key)
+	}
+	return value, nil
+}
+
+func normalizeAdminDurationRange(key, value string, minValue, maxValue time.Duration) (string, error) {
+	parsed, err := parseDuration(value)
+	if err != nil || parsed < minValue || parsed > maxValue {
+		return "", fmt.Errorf("%s must be a duration between %s and %s", key, minValue, maxValue)
 	}
 	return value, nil
 }

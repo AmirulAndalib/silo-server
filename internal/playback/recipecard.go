@@ -1,10 +1,6 @@
 package playback
 
-import (
-	"time"
-
-	"github.com/Silo-Server/silo-server/internal/streamtoken"
-)
+import "github.com/Silo-Server/silo-server/internal/streamtoken"
 
 // RecipeCard is the small, durable "recipe" needed to reconstruct a transcode
 // session after the server forgets its in-memory state (e.g. a restart). It
@@ -183,7 +179,7 @@ func (c RecipeCard) TranscodeOpts(outputDir, ffmpegPath string, logSink FFmpegLo
 // cleanup spares a dir that is not live in memory only until this age elapses:
 // past it, no surviving token could still reconstruct the session, so the dir is
 // safe to reap. It must comfortably outlast any realistic restart outage.
-const MaxTokenTTL = 24 * time.Hour
+const MaxTokenTTL = streamtoken.MaxTTL
 
 // ToClaims projects the reconstruction recipe into stream-token claims so the
 // card can travel with the client instead of a shared per-session store. The

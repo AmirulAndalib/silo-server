@@ -7,6 +7,10 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// MaxTTL is the absolute lifetime of a stream token and therefore the longest
+// a session can remain reconstructable.
+const MaxTTL = 24 * time.Hour
+
 // Claims holds everything a stateless proxy or transcode node needs
 // to serve a streaming session without database access.
 //

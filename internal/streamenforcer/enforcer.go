@@ -12,10 +12,12 @@ package streamenforcer
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streammonitor"
 )
 
@@ -23,18 +25,24 @@ import (
 // ~120s enforcement budget = this interval + the revocation propagation/poll.
 const DefaultInterval = 30 * time.Second
 
-// revocationTTL is how long an over-cap revocation lasts. It is deliberately
-// short: the enforcer re-evaluates every DefaultInterval, so a persistent abuser
-// is re-revoked long before this lapses (staying dead), while a transient
-// over-count — e.g. a ghost session lingering in the monitor next to a fresh
-// reconnect — self-heals within this window instead of banning the reconnect for
-// 24h. Must comfortably exceed DefaultInterval so re-revocation has slack.
-const revocationTTL = 5 * time.Minute
+const (
+	// RevocationTTLSetting controls the lifetime of future over-cap
+	// revocations. Changing it cannot shorten an existing monotonic kill; an
+	// explicit unrevoke is required to clear one.
+	RevocationTTLSetting = "playback.over_cap_revocation_ttl"
+	// MinRevocationTTL prevents a setting typo from making automated kills
+	// churn faster than the evaluation and propagation cadence.
+	MinRevocationTTL = 5 * time.Minute
+	// DefaultRevocationTTL matches the full reconstructable stream-token life.
+	// Derive it from the token contract instead of duplicating 24h here.
+	DefaultRevocationTTL = playback.MaxTokenTTL
+	MaxRevocationTTL     = playback.MaxTokenTTL
+)
 
 // Revoker is the subset of *streamrevoke.Store the enforcer needs. It uses the
-// TTL-scoped variant so an over-cap kill self-heals (see revocationTTL).
+// if-absent variant so recurring evaluation never slides its own kill expiry.
 type Revoker interface {
-	RevokeSessionFor(ctx context.Context, sessionID, reason string, ttl time.Duration) error
+	RevokeSessionForIfAbsent(ctx context.Context, sessionID, reason string, ttl time.Duration) (bool, error)
 }
 
 // LimitFunc returns the maximum concurrent streams allowed for a user. A return
@@ -46,28 +54,62 @@ type LimitFunc func(ctx context.Context, userID int) (maxStreams int, err error)
 
 // Enforcer periodically trims over-cap streams.
 type Enforcer struct {
-	source   streammonitor.Source
-	limits   LimitFunc
-	revoker  Revoker
-	interval time.Duration
-	now      func() time.Time
+	source        streammonitor.Source
+	limits        LimitFunc
+	revoker       Revoker
+	interval      time.Duration
+	revocationTTL time.Duration
+	now           func() time.Time
 }
 
 // New builds an enforcer. interval <= 0 uses DefaultInterval.
 func New(source streammonitor.Source, limits LimitFunc, revoker Revoker, interval time.Duration) *Enforcer {
+	return NewWithRevocationTTL(source, limits, revoker, interval, DefaultRevocationTTL)
+}
+
+// NewWithRevocationTTL builds an enforcer with the validated lifetime used for
+// future automated revocations.
+func NewWithRevocationTTL(
+	source streammonitor.Source,
+	limits LimitFunc,
+	revoker Revoker,
+	interval, revocationTTL time.Duration,
+) *Enforcer {
 	if interval <= 0 {
 		interval = DefaultInterval
 	}
+	if revocationTTL < MinRevocationTTL || revocationTTL > MaxRevocationTTL {
+		revocationTTL = DefaultRevocationTTL
+	}
 	return &Enforcer{
-		source:   source,
-		limits:   limits,
-		revoker:  revoker,
-		interval: interval,
-		now:      time.Now,
+		source:        source,
+		limits:        limits,
+		revoker:       revoker,
+		interval:      interval,
+		revocationTTL: revocationTTL,
+		now:           time.Now,
 	}
 }
 
-// Start runs the evaluation loop until ctx is cancelled. Non-blocking.
+// ParseRevocationTTL validates the server setting. Empty uses the long default.
+func ParseRevocationTTL(raw string) (time.Duration, error) {
+	if raw == "" {
+		return DefaultRevocationTTL, nil
+	}
+	ttl, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a duration: %w", RevocationTTLSetting, err)
+	}
+	if ttl < MinRevocationTTL || ttl > MaxRevocationTTL {
+		return 0, fmt.Errorf(
+			"%s must be between %s and %s",
+			RevocationTTLSetting, MinRevocationTTL, MaxRevocationTTL,
+		)
+	}
+	return ttl, nil
+}
+
+// Start runs the evaluation loop until ctx is canceled. Non-blocking.
 func (e *Enforcer) Start(ctx context.Context) {
 	if e == nil || e.source == nil || e.limits == nil || e.revoker == nil {
 		return
@@ -90,7 +132,7 @@ func (e *Enforcer) Start(ctx context.Context) {
 // Exported behavior is covered by EvaluateOnce for tests.
 func (e *Enforcer) evaluate(ctx context.Context) {
 	if err := e.EvaluateOnce(ctx); err != nil {
-		slog.Debug("stream enforcer evaluate failed", "error", err)
+		slog.DebugContext(ctx, "stream enforcer evaluate failed", "error", err)
 	}
 }
 
@@ -109,7 +151,7 @@ func (e *Enforcer) EvaluateOnce(ctx context.Context) error {
 		limit, err := e.limits(ctx, userID)
 		if err != nil {
 			// Fail open: a limit-lookup error must never kill legitimate streams.
-			slog.Debug("stream enforcer: limit lookup failed; skipping user",
+			slog.DebugContext(ctx, "stream enforcer: limit lookup failed; skipping user",
 				"user_id", userID, "error", err)
 			continue
 		}
@@ -117,12 +159,18 @@ func (e *Enforcer) EvaluateOnce(ctx context.Context) error {
 			continue
 		}
 		for _, victim := range e.selectVictims(streams, limit) {
-			if err := e.revoker.RevokeSessionFor(ctx, victim.SessionID, "over_concurrent_stream_limit", revocationTTL); err != nil {
-				slog.Warn("stream enforcer: revoke failed",
+			created, err := e.revoker.RevokeSessionForIfAbsent(
+				ctx, victim.SessionID, "over_concurrent_stream_limit", e.revocationTTL,
+			)
+			if err != nil {
+				slog.WarnContext(ctx, "stream enforcer: revoke failed",
 					"user_id", userID, "session_id", victim.SessionID, "error", err)
 				continue
 			}
-			slog.Info("stream enforcer: revoked over-cap session",
+			if !created {
+				continue
+			}
+			slog.InfoContext(ctx, "stream enforcer: revoked over-cap session",
 				"user_id", userID, "session_id", victim.SessionID,
 				"limit", limit, "live", len(streams))
 		}

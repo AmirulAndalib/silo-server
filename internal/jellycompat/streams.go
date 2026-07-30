@@ -36,6 +36,24 @@ import (
 // the near-head follow-up segments arrive quickly enough for browser playback.
 const compatSegmentDuration = 2
 
+// compatCredentialIssuedAt returns the issue time of the credential the client
+// actually presented. A normal compat login keeps its CreatedAt across bridged
+// Silo access-token refreshes, so refresh cannot escape a user cutoff.
+// Synthetic API-key sessions have no credential issue time and deliberately
+// return zero: by streamrevoke's fail-open contract, user cutoffs cannot cut an
+// API-key-owned pour.
+func compatCredentialIssuedAt(ctx context.Context, session *Session) time.Time {
+	if session == nil {
+		return time.Time{}
+	}
+	if strings.HasPrefix(session.Token, "sa_") {
+		slog.DebugContext(ctx, "jellycompat API-key stream has no issue time; user revocation cutoff fails open",
+			"component", "jellycompat", "user_id", session.StreamAppUserID)
+		return time.Time{}
+	}
+	return session.CreatedAt
+}
+
 // errUpstreamReplaced signals that a concurrent request attached a different
 // upstream session to the play session while this one was being created.
 var errUpstreamReplaced = errors.New("upstream session replaced concurrently")
@@ -57,7 +75,7 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusUnauthorized, "Unauthorized", "Missing authentication token")
 		return
 	}
-	startedAt := time.Now()
+	startedAt := compatCredentialIssuedAt(r.Context(), session)
 
 	routeID := chiURLParam(r, "id")
 	mediaSourceID := firstNonEmpty(r.URL.Query().Get("mediaSourceId"), r.URL.Query().Get("MediaSourceId"))
@@ -113,8 +131,8 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 	// The multi-node redirect path below is guarded by the proxy; this covers the
 	// integrated / local-fallback path that the proxy never sees. The request
 	// entry time is the credential time for the user-kill cutoff: a compat
-	// request only gets here on a live compat login, and user revocation deletes
-	// all compat logins, so reaching this line post-revocation means fresh auth.
+	// request uses the compat login's creation time, which remains stable when
+	// its bridged Silo access token refreshes.
 	if h.Revocation != nil && playSession.UpstreamSessionID != "" &&
 		h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, startedAt) {
 		return
@@ -262,7 +280,10 @@ func (h *PlaybackHandler) HandleDownload(w http.ResponseWriter, r *http.Request)
 	// revocation issued mid-transfer hangs this connection up.
 	if h.Revocation != nil {
 		r = r.WithContext(httpstream.WithCutLatch(r.Context(), &httpstream.CutLatch{}))
-		stop := h.Revocation.WatchAndCutContext(r.Context(), metered, "", session.StreamAppUserID, transfer.StartedAt)
+		stop := h.Revocation.WatchAndCutContext(
+			r.Context(), metered, "", session.StreamAppUserID,
+			compatCredentialIssuedAt(r.Context(), session),
+		)
 		defer stop()
 	}
 
@@ -298,7 +319,10 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	// even though every segment request is refused — the same resurrection hole
 	// the transcode node's reconstruct guard closes on the edge.
 	if h.Revocation != nil && playSession.UpstreamSessionID != "" &&
-		h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, time.Now()) {
+		h.Revocation.Refuse(
+			w, playSession.UpstreamSessionID, session.StreamAppUserID,
+			compatCredentialIssuedAt(r.Context(), session),
+		) {
 		return
 	}
 
@@ -414,7 +438,10 @@ func (h *PlaybackHandler) HandleHLSManifest(w http.ResponseWriter, r *http.Reque
 	// Kill switch: refuse before ensureTranscodeManifest can keep/restart the
 	// killed session's ffmpeg (see HandleMasterManifest).
 	if h.Revocation != nil && playSession.UpstreamSessionID != "" &&
-		h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, time.Now()) {
+		h.Revocation.Refuse(
+			w, playSession.UpstreamSessionID, session.StreamAppUserID,
+			compatCredentialIssuedAt(r.Context(), session),
+		) {
 		return
 	}
 	source := firstMediaSource(playSession)
@@ -472,7 +499,10 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 
 	// Kill switch (local serving): refuse a revoked session/user on every segment.
 	// Request entry time = credential time (compat auth is live, see HandleVideoStream).
-	if h.Revocation != nil && h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, time.Now()) {
+	if h.Revocation != nil && h.Revocation.Refuse(
+		w, playSession.UpstreamSessionID, session.StreamAppUserID,
+		compatCredentialIssuedAt(r.Context(), session),
+	) {
 		return
 	}
 
@@ -684,7 +714,7 @@ func (h *PlaybackHandler) HandleSubtitleStream(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	startedAt := time.Now()
+	startedAt := compatCredentialIssuedAt(r.Context(), session)
 	// Kill switch: a revoked session must not keep pulling subtitle bytes (or
 	// triggering server-side ffmpeg subtitle extraction below). Compat
 	// extraction is buffered, so a socket cut stops response delivery but does
