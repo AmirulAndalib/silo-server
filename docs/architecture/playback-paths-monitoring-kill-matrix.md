@@ -35,8 +35,22 @@
 > **Update 2026-07-30 — serve-path batch landed.** **GAP-10, GAP-11, GAP-12 and
 > GAP-13 are RESOLVED**; each is scored inline below. GAP-12 was pulled forward from
 > the revocation batch because it makes the GAP-10 fix inert (see its entry).
-> **GAP-14 and GAP-15 remain open** — GAP-14 to the liveness/replica batch under
-> decision A7 (fail closed + connection cap), GAP-15 to the tracker-lifecycle batch.
+>
+> **Update 2026-07-30 — tracker-lifecycle batch landed.** **GAP-15 is RESOLVED**
+> (edge visibility is now separate from served liveness, and only bytes written from a
+> 200/206 upstream response advance `LastServedAt`). Also closed in that batch: the
+> overlapping-request defect that let one finishing request delete another live
+> request's record, the async-tracking race that could leave a permanently
+> non-expiring ghost session, and the protocol-v3 logical-vs-transport identity split
+> that counted one stream twice — all three were sources of a **wrong over-cap
+> count**, which is why they precede the revocation batch. **GAP-14 remains open**, to
+> the liveness/replica batch under decision A7 (fail closed + connection cap).
+>
+> Monitoring projection is **not** uniformly async, and the claim has been corrected
+> rather than the code rushed: the first Redis write per session is synchronous, later
+> updates ride the refresh tick. An ordered, lifecycle-aware projection queue is
+> deliberately deferred rather than shipping a lossy or reorderable one — a naive
+> fire-and-forget projection is what caused the ghost-session defect above.
 >
 > Two claims elsewhere in this doc are therefore **still not true** and are called out
 > where they appear: the kill switch does not "keep a stream dead" (an over-cap kill
@@ -179,19 +193,19 @@ bytes but withholds/falsifies progress must still be counted.
   holds exactly: `Session.LastServedAt` is written only by `BeginTransport`,
   `EndTransport` and `AddServedBytes` (`playback/session.go:1132,1151,1169`) — no
   progress-report path touches it.
-  ⚠️ **One edge exception (GAP-15, open):** the proxy's transcode path calls
-  `touchTranscodeSession` immediately after token verification and *before* proxying
-  to the node (`proxy/server.go:308,317`), so `Touch` advances the edge record's
-  `LastServedAt` even when the node returns a 404 and no media byte is served. Edge
-  transcode liveness is therefore **request-observed, not byte-observed**. The blast
-  radius is bounded: the enforcer groups by user and keeps the freshest sessions
-  (`streamenforcer/enforcer.go:140`), so a client hammering dead segment URLs can
-  only change *which of its own* over-cap streams gets trimmed — it cannot exceed the
-  cap or shield another account. Worth fixing so the claim above is literally true.
-- Report-to-central: **C** = async via Redis (edge writes `silo:sessions:*`,
-  `streammonitor.RedisSource` reads). **A/B** = in-process SessionManager IS
-  central; read via `streammonitor.FuncSource`. MultiSource unions both, deduped
-  by session id.
+  **GAP-15 — RESOLVED.** The proxy now creates transcode visibility separately
+  from served liveness. Only bytes actually written from a 200/206 upstream
+  response advance `LastServedAt`; zero-byte responses, upstream failures, and
+  non-success error bodies do not.
+- Report-to-central: **C** = Redis-backed (edge writes `silo:sessions:*`,
+  `streammonitor.RedisSource` reads). The first projection write for a session is
+  synchronous so visibility is established before the request returns; later
+  liveness and byte updates are asynchronous on the refresh tick. Consequently,
+  a slow Redis adds latency to the first request of a stream. An ordered,
+  lifecycle-aware projection queue is deliberately deferred rather than making
+  this path lossy or reorderable. **A/B** = in-process SessionManager IS central;
+  read via `streammonitor.FuncSource`. MultiSource unions both, deduped by
+  canonical logical session identity when available.
 - Owner + attribution: the transcode node's start record now carries owner + route
   + client (threaded via `TranscodeStartRequest`), and `streammonitor.mergeStreams`
   additionally backfills any missing owner/route/client from another record for the

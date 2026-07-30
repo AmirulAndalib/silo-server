@@ -78,6 +78,16 @@ The branch docs oversell several things. The stories below are scored against th
 > durable lesson. Correction **8 (GAP-14) remains open**, now with decision A7
 > attached. See the follow-up list at the end for what is left.
 >
+> **Update 2026-07-30 — tracker-lifecycle batch landed.** GAP-15 is also fixed, along
+> with three defects that all produced a **wrong over-cap count**: overlapping edge
+> requests deleting a live record, an async-tracking race that could strand a
+> permanently non-expiring ghost session, and the protocol-v3 logical-vs-transport
+> identity split that counted one stream twice (masked until now because fresh v3
+> starts sent no owner at all, so the record landed under user 0, which the enforcer
+> skips — silently exempting the stream from the cap). These precede the revocation
+> batch on purpose: decision A1 removes the self-healing that limits the damage of a
+> miscount, so the count must be trustworthy first.
+>
 > Two claims this document makes elsewhere are **still false** and must not be
 > restored to blanket phrasing: the kill switch does not "keep a stream dead" (an
 > over-cap kill still reopens after 5m until the revocation batch lands), and
@@ -550,17 +560,23 @@ enhancements.** In rough fix-cost order:
     can never reach it. Hence the context side channel. The re-applying watcher was also
     kept, as belt-and-braces. (GAP-12)
 0d. ~~**Merge `BytesServed` as a max, not wholesale**~~ — **DONE** in both
-    `mergeStreams` and `DedupeSessionInfos` (GAP-13). **Still open:** advance the edge
-    transcode record from real bytes rather than request entry (GAP-15) — deferred to
-    the tracker-lifecycle batch, which also fixes the overlapping-request defect that
-    makes edge record lifecycle unsafe to touch piecemeal.
-0e. **Decide the registry-saturation policy explicitly** (GAP-14) — **DECIDED (A7),
+    `mergeStreams` and `DedupeSessionInfos` (GAP-13). **GAP-15 is also DONE:** edge
+    transcode visibility is created before proxying, while liveness and byte totals
+    advance only for bytes actually written from a 200/206 upstream response.
+0e. **Monitoring projection is not uniformly asynchronous.** The first Redis write
+    for each edge session remains synchronous so the record is visible before the
+    request returns; subsequent liveness and byte projection happens asynchronously
+    on the refresh tick. A slow Redis therefore adds latency to the first request of
+    a stream. The proposed ordered, bounded projection queue is deliberately deferred
+    until its startup, drain, cleanup ordering, backpressure, and refresh interaction
+    can be designed together.
+0f. **Decide the registry-saturation policy explicitly** (GAP-14) — **DECIDED (A7),
     not yet implemented:** fail *closed* for download-class pours once the registry is
     full, **and** add a per-user/credential concurrent-connection cap (E28) so
     saturation is unreachable by a single actor in the first place. Scheduled for the
     liveness/replica batch. Today it still fails open, logging at Debug at the call
     sites.
-0f. **Bound the kill-list propagation lock.** `RevokeWithWarnings` holds `opMu`
+0g. **Bound the kill-list propagation lock.** `RevokeWithWarnings` holds `opMu`
     across durable-Postgres and Redis I/O and strips the caller's deadline with
     `context.WithoutCancel` (`streamrevoke/store.go:313,330`). A hung Redis or an
     exhausted PG pool blocks every subsequent revoke/unrevoke indefinitely. The hot
