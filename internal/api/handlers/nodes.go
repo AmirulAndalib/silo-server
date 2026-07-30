@@ -443,6 +443,34 @@ func (h *NodeHandler) HandleListSessions(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, sessionsResponse{Sessions: sessions, Transfers: activeTransfers})
 }
 
+// nodeSessionsCapabilitiesResponse advertises the additive surface of
+// GET /admin/node-sessions so independently deployed clients (Android, Apple)
+// can feature-detect it instead of sniffing the server version.
+//
+// Schema support and runtime availability are deliberately separate booleans.
+// The transfers key is always present in the response shape once this endpoint
+// exists, but the process-local registry behind it is optional wiring — an edge
+// deployment can serve the field as an empty list forever. Collapsing the two
+// would advertise download monitoring that is not actually running.
+type nodeSessionsCapabilitiesResponse struct {
+	// Transfers reports that the node-sessions payload carries a transfers array.
+	Transfers bool `json:"transfers"`
+	// TransfersActive reports that a transfer registry is wired on this server,
+	// so the array reflects real in-flight download-class pours.
+	TransfersActive bool `json:"transfers_active"`
+}
+
+// HandleGetNodeSessionsCapabilities exposes additive feature support for the
+// live node-sessions payload (GET /admin/node-sessions/capabilities). It is
+// mounted alongside the endpoint it describes, so its presence tracks that
+// endpoint's availability rather than being advertised from an unrelated route.
+func (h *NodeHandler) HandleGetNodeSessionsCapabilities(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, nodeSessionsCapabilitiesResponse{
+		Transfers:       true,
+		TransfersActive: h.transfers != nil,
+	})
+}
+
 // reloadPools refreshes the in-memory proxy and transcode pools from the database.
 func (h *NodeHandler) reloadPools(ctx context.Context) {
 	if h.lister == nil {

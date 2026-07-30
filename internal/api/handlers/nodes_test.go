@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -97,4 +98,45 @@ func TestHandleListSessionsNodeFilterExcludesLocalTransfers(t *testing.T) {
 	if body.Transfers == nil || len(body.Transfers) != 0 {
 		t.Fatalf("filtered transfers = %+v, want non-nil empty array", body.Transfers)
 	}
+}
+
+// Schema support and runtime availability are separate claims: the transfers key
+// is always in the payload once this endpoint exists, but the registry behind it
+// is optional wiring. Advertising them as one value would promise download
+// monitoring an edge deployment is not actually running.
+func TestNodeSessionsCapabilitiesSeparatesSchemaFromRuntimeWiring(t *testing.T) {
+	t.Run("registry wired", func(t *testing.T) {
+		h := NewNodeHandler(nil, nil, nil, nil, nil, nil, "")
+		h.SetTransferSource(transfers.New())
+		rec := httptest.NewRecorder()
+		h.HandleGetNodeSessionsCapabilities(rec, httptest.NewRequest("GET", "/admin/node-sessions/capabilities", nil))
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		var body nodeSessionsCapabilitiesResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if !body.Transfers || !body.TransfersActive {
+			t.Fatalf("capabilities = %+v, want both transfers and transfers_active true", body)
+		}
+	})
+
+	t.Run("no registry wired", func(t *testing.T) {
+		h := NewNodeHandler(nil, nil, nil, nil, nil, nil, "")
+		rec := httptest.NewRecorder()
+		h.HandleGetNodeSessionsCapabilities(rec, httptest.NewRequest("GET", "/admin/node-sessions/capabilities", nil))
+
+		var body nodeSessionsCapabilitiesResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if !body.Transfers {
+			t.Error("transfers = false; the response shape carries the key regardless of wiring")
+		}
+		if body.TransfersActive {
+			t.Error("transfers_active = true with no registry wired; that advertises monitoring that is not running")
+		}
+	})
 }

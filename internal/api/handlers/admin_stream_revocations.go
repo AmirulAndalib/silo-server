@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -42,6 +43,56 @@ type streamRevocationRequest struct {
 type streamRevocationResponse struct {
 	streamrevoke.Revocation
 	Warnings []string `json:"warnings,omitempty"`
+}
+
+// streamRevocationKindsByWire is the single source of truth for the closed
+// {kind} vocabulary the revocation routes accept. Both the wire parser
+// (revocationKeyFromWire) and the capability advertisement (streamRevocationKinds)
+// read it, so adding a kind here automatically advertises it and the two cannot
+// drift apart. An earlier version duplicated the list in a switch statement,
+// which meant a newly-accepted kind could go unadvertised — clients would then
+// feature-detect an incomplete vocabulary.
+var streamRevocationKindsByWire = map[string]streamrevoke.Kind{
+	"session":                        streamrevoke.KindSession,
+	string(streamrevoke.KindSession): streamrevoke.KindSession,
+	string(streamrevoke.KindUser):    streamrevoke.KindUser,
+}
+
+// streamRevocationKinds returns the accepted {kind} values in sorted order.
+// Sorted because map iteration order is randomised and the advertisement is a
+// wire response that must be stable across calls.
+func streamRevocationKinds() []string {
+	kinds := make([]string, 0, len(streamRevocationKindsByWire))
+	for kind := range streamRevocationKindsByWire {
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	return kinds
+}
+
+// streamRevocationCapabilitiesResponse advertises the operator kill-list
+// endpoints so clients and operator tooling can feature-detect them rather than
+// probing for a 404. These routes are mounted only when a revocation store is
+// wired, which is why this endpoint is mounted in the same block.
+type streamRevocationCapabilitiesResponse struct {
+	// StreamRevocations reports that the admin kill-list endpoints exist.
+	StreamRevocations bool `json:"stream_revocations"`
+	// StreamRevocationKinds is the closed {kind} vocabulary accepted by
+	// DELETE /admin/streams/revocations/{kind}/{id}.
+	StreamRevocationKinds []string `json:"stream_revocation_kinds"`
+	// StreamRevocationUnrevoke reports that revocations can be lifted, not just
+	// listed and created.
+	StreamRevocationUnrevoke bool `json:"stream_revocation_unrevoke"`
+}
+
+// HandleGetCapabilities exposes additive feature support for the stream
+// kill list (GET /admin/streams/revocations/capabilities).
+func (h *AdminStreamRevocationHandler) HandleGetCapabilities(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, streamRevocationCapabilitiesResponse{
+		StreamRevocations:        true,
+		StreamRevocationKinds:    streamRevocationKinds(),
+		StreamRevocationUnrevoke: true,
+	})
 }
 
 func (h *AdminStreamRevocationHandler) HandleList(w http.ResponseWriter, _ *http.Request) {
@@ -129,14 +180,9 @@ func (h *AdminStreamRevocationHandler) HandleDelete(w http.ResponseWriter, r *ht
 }
 
 func revocationKeyFromWire(kind, id string) (streamrevoke.Key, error) {
-	var internalKind streamrevoke.Kind
-	switch kind {
-	case "session", string(streamrevoke.KindSession):
-		internalKind = streamrevoke.KindSession
-	case string(streamrevoke.KindUser):
-		internalKind = streamrevoke.KindUser
-	default:
-		return streamrevoke.Key{}, errors.New("kind must be session, sess, or user")
+	internalKind, ok := streamRevocationKindsByWire[kind]
+	if !ok {
+		return streamrevoke.Key{}, fmt.Errorf("kind must be one of %s", strings.Join(streamRevocationKinds(), ", "))
 	}
 
 	if internalKind == streamrevoke.KindSession {

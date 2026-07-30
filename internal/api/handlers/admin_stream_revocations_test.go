@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
@@ -120,5 +121,83 @@ func TestAdminStreamRevocationDeleteAbsentIsIdempotent(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestStreamRevocationCapabilitiesAdvertisesKillListSurface(t *testing.T) {
+	h := NewAdminStreamRevocationHandler(streamrevoke.New(streamrevoke.Options{}))
+	rr := httptest.NewRecorder()
+	h.HandleGetCapabilities(rr, httptest.NewRequest(http.MethodGet, "/revocations/capabilities", nil))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var got streamRevocationCapabilitiesResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode capabilities: %v", err)
+	}
+	if !got.StreamRevocations || !got.StreamRevocationUnrevoke {
+		t.Fatalf("capabilities did not advertise the kill list: %+v", got)
+	}
+	if len(got.StreamRevocationKinds) == 0 {
+		t.Fatal("no revocation kinds advertised")
+	}
+}
+
+// The advertised {kind} vocabulary must be exactly what the wire parser accepts,
+// in both directions. Sampling a handful of rejected strings is not enough: it
+// cannot catch a kind the parser starts accepting without advertising it. Since
+// both now read streamRevocationKindsByWire, the check is over the whole map.
+func TestAdvertisedRevocationKindsMatchWireParser(t *testing.T) {
+	advertised := streamRevocationKinds()
+	if len(advertised) != len(streamRevocationKindsByWire) {
+		t.Fatalf("advertised %d kinds but the parser accepts %d; the two have drifted",
+			len(advertised), len(streamRevocationKindsByWire))
+	}
+	for _, kind := range advertised {
+		if _, ok := streamRevocationKindsByWire[kind]; !ok {
+			t.Errorf("advertised kind %q is not in the parser vocabulary", kind)
+		}
+		if _, err := revocationKeyFromWire(kind, "1"); err != nil {
+			t.Errorf("advertised kind %q rejected by revocationKeyFromWire: %v", kind, err)
+		}
+	}
+	for kind := range streamRevocationKindsByWire {
+		if !slices.Contains(advertised, kind) {
+			t.Errorf("parser accepts kind %q but it is not advertised", kind)
+		}
+	}
+	for _, kind := range []string{"", "users", "sessions", "profile", "USER", "device"} {
+		if _, err := revocationKeyFromWire(kind, "1"); err == nil {
+			t.Errorf("kind %q outside the vocabulary was accepted", kind)
+		}
+	}
+}
+
+func TestAdvertisedRevocationKindsAreSortedAndStable(t *testing.T) {
+	first := streamRevocationKinds()
+	if !slices.IsSorted(first) {
+		t.Errorf("advertised kinds are not sorted: %v", first)
+	}
+	// Map iteration order is randomised, so an unsorted implementation would
+	// return a different order across calls for the same wire contract.
+	for i := 0; i < 20; i++ {
+		if got := streamRevocationKinds(); !slices.Equal(got, first) {
+			t.Fatalf("advertised kinds unstable across calls: %v then %v", first, got)
+		}
+	}
+}
+
+func TestCapabilitiesKindsAreNotAliasedToPackageState(t *testing.T) {
+	h := NewAdminStreamRevocationHandler(streamrevoke.New(streamrevoke.Options{}))
+	rr := httptest.NewRecorder()
+	h.HandleGetCapabilities(rr, httptest.NewRequest(http.MethodGet, "/revocations/capabilities", nil))
+	var got streamRevocationCapabilitiesResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode capabilities: %v", err)
+	}
+	got.StreamRevocationKinds[0] = "mutated"
+	if slices.Contains(streamRevocationKinds(), "mutated") {
+		t.Fatal("handler returned a slice aliasing package state; a caller can corrupt the vocabulary")
 	}
 }

@@ -2960,6 +2960,9 @@ func NewRouter(deps Dependencies) chi.Router {
 								// Live node sessions (reads from Redis)
 								// Note: /admin/sessions is already used for playback sessions from PostgreSQL.
 								r.Get("/node-sessions", nodeHandler.HandleListSessions)
+								// Mounted beside the endpoint it describes so the advertisement
+								// cannot outlive the route it advertises (both are gated on NodeRepo).
+								r.Get("/node-sessions/capabilities", nodeHandler.HandleGetNodeSessionsCapabilities)
 							}
 
 							// System inspection.
@@ -3114,6 +3117,7 @@ func NewRouter(deps Dependencies) chi.Router {
 							if deps.RevocationStore != nil {
 								streamRevocationHandler := handlers.NewAdminStreamRevocationHandler(deps.RevocationStore)
 								r.Get("/streams/revocations", streamRevocationHandler.HandleList)
+								r.Get("/streams/revocations/capabilities", streamRevocationHandler.HandleGetCapabilities)
 								r.Post("/streams/revocations", streamRevocationHandler.HandleCreate)
 								r.Delete("/streams/revocations/{kind}/{id}", streamRevocationHandler.HandleDelete)
 							}
