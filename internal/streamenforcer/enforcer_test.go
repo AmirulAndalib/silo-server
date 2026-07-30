@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/nodesessions"
 	"github.com/Silo-Server/silo-server/internal/streammonitor"
 )
 
@@ -134,5 +135,22 @@ func TestEvaluateOnceSourceError(t *testing.T) {
 	}
 	if len(rev.revoked) != 0 {
 		t.Fatalf("expected no revokes on source error, got %v", rev.revoked)
+	}
+}
+
+func TestEvaluateOnceRevokesCanonicalLogicalSessionID(t *testing.T) {
+	source := streammonitor.NewFuncSource(func(context.Context) ([]nodesessions.SessionInfo, error) {
+		return []nodesessions.SessionInfo{
+			{SessionID: "transport-a", LogicalSessionID: "logical-a", AuthUserID: 7, LastServedAt: "2026-07-30T01:00:00Z"},
+			{SessionID: "transport-b", LogicalSessionID: "logical-b", AuthUserID: 7, LastServedAt: "2026-07-30T02:00:00Z"},
+		}, nil
+	})
+	rev := &fakeRevoker{}
+	e := New(source, func(context.Context, int) (int, error) { return 1, nil }, rev, 0)
+	if err := e.EvaluateOnce(context.Background()); err != nil {
+		t.Fatalf("EvaluateOnce: %v", err)
+	}
+	if len(rev.revoked) != 1 || rev.revoked[0] != "logical-a" {
+		t.Fatalf("revoked = %v, want logical-a", rev.revoked)
 	}
 }

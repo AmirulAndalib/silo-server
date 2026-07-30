@@ -27,18 +27,22 @@ const (
 
 // SessionInfo represents an active streaming session stored in Redis.
 type SessionInfo struct {
-	SessionID   string `json:"session_id"`
-	NodeURL     string `json:"node_url"`
-	NodeName    string `json:"node_name"`
-	UserID      string `json:"user_id,omitempty"`
-	MediaItemID string `json:"media_item_id,omitempty"`
-	MediaTitle  string `json:"media_title,omitempty"`
-	Type        string `json:"type"` // "direct_play", "remux", "transcode"
-	CodecVideo  string `json:"codec_video,omitempty"`
-	CodecAudio  string `json:"codec_audio,omitempty"`
-	Resolution  string `json:"resolution,omitempty"`
-	HWAccel     string `json:"hw_accel,omitempty"`
-	StartedAt   string `json:"started_at"`
+	SessionID string `json:"session_id"`
+	// LogicalSessionID is the stable playback-session identity when SessionID is
+	// a replaceable transport generation. It is opaque monitoring metadata;
+	// SessionID remains the node-addressing key.
+	LogicalSessionID string `json:"logical_session_id,omitempty"`
+	NodeURL          string `json:"node_url"`
+	NodeName         string `json:"node_name"`
+	UserID           string `json:"user_id,omitempty"`
+	MediaItemID      string `json:"media_item_id,omitempty"`
+	MediaTitle       string `json:"media_title,omitempty"`
+	Type             string `json:"type"` // "direct_play", "remux", "transcode"
+	CodecVideo       string `json:"codec_video,omitempty"`
+	CodecAudio       string `json:"codec_audio,omitempty"`
+	Resolution       string `json:"resolution,omitempty"`
+	HWAccel          string `json:"hw_accel,omitempty"`
+	StartedAt        string `json:"started_at"`
 
 	// LastServedAt / BytesServed are the authoritative, server-observed liveness
 	// signals: they are refreshed only when the node actually serves bytes for this
@@ -69,6 +73,20 @@ type SessionInfo struct {
 	Position   float64 `json:"position,omitempty"`
 }
 
+// Lease identifies one request-scoped reference to a tracked session. Its
+// fields are deliberately private: only the Tracker that issued it can release
+// it, and stale leases from an invalidated generation are harmless.
+type Lease struct {
+	sessionID string
+	epoch     uint64
+	id        uint64
+}
+
+type sessionRefs struct {
+	epoch  uint64
+	leases map[uint64]struct{}
+}
+
 // Tracker manages session lifecycle in Redis for a single node.
 type Tracker struct {
 	rdb      *redis.Client
@@ -77,11 +95,14 @@ type Tracker struct {
 	nodeType string
 	nodeHash string // first 8 chars of SHA-256 of nodeURL
 
-	mu       sync.Mutex
-	sessions map[string]struct{}    // set of active (explicitly tracked) session IDs
-	touched  map[string]time.Time   // ephemeral sessions by last-activity time
-	records  map[string]SessionInfo // last-written record per session, for enriched refresh
-	bytes    map[string]int64       // cumulative bytes served per session (monitoring only)
+	mu        sync.Mutex
+	sessions  map[string]sessionRefs // explicitly tracked sessions and request leases
+	ephemeral map[string]time.Time   // ephemeral sessions by last-observed request time
+	touched   map[string]time.Time   // last successful serve time
+	records   map[string]SessionInfo // last-written record per session, for enriched refresh
+	bytes     map[string]int64       // cumulative bytes served per session (monitoring only)
+	nextEpoch uint64
+	nextLease uint64
 }
 
 // NewTracker creates a session tracker for the given node.
@@ -89,15 +110,16 @@ type Tracker struct {
 func NewTracker(rdb *redis.Client, nodeURL, nodeName, nodeType string) *Tracker {
 	h := sha256.Sum256([]byte(nodeURL))
 	return &Tracker{
-		rdb:      rdb,
-		nodeURL:  nodeURL,
-		nodeName: nodeName,
-		nodeType: nodeType,
-		nodeHash: hex.EncodeToString(h[:4]), // 8 hex chars
-		sessions: make(map[string]struct{}),
-		touched:  make(map[string]time.Time),
-		records:  make(map[string]SessionInfo),
-		bytes:    make(map[string]int64),
+		rdb:       rdb,
+		nodeURL:   nodeURL,
+		nodeName:  nodeName,
+		nodeType:  nodeType,
+		nodeHash:  hex.EncodeToString(h[:4]), // 8 hex chars
+		sessions:  make(map[string]sessionRefs),
+		ephemeral: make(map[string]time.Time),
+		touched:   make(map[string]time.Time),
+		records:   make(map[string]SessionInfo),
+		bytes:     make(map[string]int64),
 	}
 }
 
@@ -128,7 +150,7 @@ func (tr *Tracker) ActiveCount() int {
 	defer tr.mu.Unlock()
 	now := time.Now()
 	count := len(tr.sessions)
-	for id, last := range tr.touched {
+	for id, last := range tr.ephemeral {
 		if _, dup := tr.sessions[id]; dup {
 			continue
 		}
@@ -151,8 +173,8 @@ func (tr *Tracker) Snapshot() []SessionInfo {
 	for id, rec := range tr.records {
 		// Session-backed entries are always live until Remove; only ephemeral
 		// (non-session) entries age out by idle timeout.
-		if _, isSession := tr.sessions[id]; !isSession {
-			if last, ok := tr.touched[id]; ok && now.Sub(last) > idleTTLFor(rec) {
+		if refs, isSession := tr.sessions[id]; !isSession || len(refs.leases) == 0 {
+			if last, ok := tr.ephemeral[id]; !ok || now.Sub(last) > idleTTLFor(rec) {
 				continue
 			}
 		}
@@ -173,10 +195,12 @@ func (tr *Tracker) enrichLocked(id string, rec SessionInfo) SessionInfo {
 	return rec
 }
 
-// Track registers an active session in Redis with a TTL.
-func (tr *Tracker) Track(ctx context.Context, info SessionInfo) {
+// Track registers an active session in Redis with a TTL and returns a lease.
+// Request-scoped callers must release it exactly once. Lifecycle-owned callers
+// may instead use Remove for unconditional teardown.
+func (tr *Tracker) Track(ctx context.Context, info SessionInfo) Lease {
 	if tr.rdb == nil {
-		return
+		return Lease{}
 	}
 	now := time.Now()
 	if info.LastServedAt == "" {
@@ -190,21 +214,62 @@ func (tr *Tracker) Track(ctx context.Context, info SessionInfo) {
 	// is open.
 	tr.mu.Lock()
 	tr.preserveStartedAtLocked(&info)
-	tr.sessions[info.SessionID] = struct{}{}
+	refs, exists := tr.sessions[info.SessionID]
+	if !exists {
+		tr.nextEpoch++
+		refs = sessionRefs{epoch: tr.nextEpoch, leases: make(map[uint64]struct{})}
+	}
+	tr.nextLease++
+	lease := Lease{sessionID: info.SessionID, epoch: refs.epoch, id: tr.nextLease}
+	refs.leases[lease.id] = struct{}{}
+	tr.sessions[info.SessionID] = refs
+	delete(tr.ephemeral, info.SessionID)
 	tr.records[info.SessionID] = info
 	tr.touched[info.SessionID] = now
 	enriched := tr.enrichLocked(info.SessionID, info)
 	tr.mu.Unlock()
+	if exists {
+		return lease
+	}
 
 	data, err := json.Marshal(enriched)
 	if err != nil {
 		slog.DebugContext(ctx, "session track marshal failed", "component", "nodesessions", "error", err)
-		return
+		return lease
 	}
 	key := tr.redisKey(info.SessionID)
 	if err := tr.rdb.Set(ctx, key, data, sessionTTL).Err(); err != nil {
 		slog.DebugContext(ctx, "session track set failed", "component", "nodesessions", "error", err, "session", info.SessionID)
+	}
+	return lease
+}
+
+// EnsureEphemeral makes a short-lived session visible without claiming that any
+// bytes were served. The first write is synchronous; later liveness/byte updates
+// are flushed by the refresh loop.
+func (tr *Tracker) EnsureEphemeral(ctx context.Context, info SessionInfo) {
+	if tr.rdb == nil {
 		return
+	}
+	now := time.Now()
+	tr.mu.Lock()
+	tr.preserveStartedAtLocked(&info)
+	_, known := tr.records[info.SessionID]
+	tr.ephemeral[info.SessionID] = now
+	tr.records[info.SessionID] = info
+	enriched := tr.enrichLocked(info.SessionID, info)
+	tr.mu.Unlock()
+	if known {
+		return
+	}
+
+	data, err := json.Marshal(enriched)
+	if err != nil {
+		slog.DebugContext(ctx, "session ensure marshal failed", "component", "nodesessions", "error", err)
+		return
+	}
+	if err := tr.rdb.Set(ctx, tr.redisKey(info.SessionID), data, sessionTTL).Err(); err != nil {
+		slog.DebugContext(ctx, "session ensure set failed", "component", "nodesessions", "error", err, "session", info.SessionID)
 	}
 }
 
@@ -218,26 +283,12 @@ func (tr *Tracker) Touch(ctx context.Context, info SessionInfo) {
 	if tr.rdb == nil {
 		return
 	}
-	now := time.Now()
+	tr.EnsureEphemeral(ctx, info)
 	tr.mu.Lock()
-	tr.preserveStartedAtLocked(&info)
-	_, known := tr.touched[info.SessionID]
-	tr.touched[info.SessionID] = now
-	tr.records[info.SessionID] = info
-	enriched := tr.enrichLocked(info.SessionID, info)
+	if _, known := tr.records[info.SessionID]; known {
+		tr.touched[info.SessionID] = time.Now()
+	}
 	tr.mu.Unlock()
-	if known {
-		return
-	}
-
-	data, err := json.Marshal(enriched)
-	if err != nil {
-		slog.DebugContext(ctx, "session touch marshal failed", "component", "nodesessions", "error", err)
-		return
-	}
-	if err := tr.rdb.Set(ctx, tr.redisKey(info.SessionID), data, sessionTTL).Err(); err != nil {
-		slog.DebugContext(ctx, "session touch set failed", "component", "nodesessions", "error", err, "session", info.SessionID)
-	}
 }
 
 // preserveStartedAtLocked keeps the first-seen StartedAt when a record is
@@ -291,13 +342,52 @@ func (tr *Tracker) MarkServed(sessionID string) {
 	tr.mu.Unlock()
 }
 
-// Remove deletes a session from Redis and the in-memory set.
+// Release drops one request-scoped lease. A stale, duplicate, or already
+// invalidated release is a no-op. The final live lease tears the record down.
+func (tr *Tracker) Release(ctx context.Context, lease Lease) {
+	if tr.rdb == nil || lease.sessionID == "" {
+		return
+	}
+	tr.mu.Lock()
+	refs, ok := tr.sessions[lease.sessionID]
+	if !ok || refs.epoch != lease.epoch {
+		tr.mu.Unlock()
+		slog.DebugContext(ctx, "stale session lease release ignored", "component", "nodesessions", "session", lease.sessionID)
+		return
+	}
+	if _, ok := refs.leases[lease.id]; !ok {
+		tr.mu.Unlock()
+		slog.DebugContext(ctx, "duplicate session lease release ignored", "component", "nodesessions", "session", lease.sessionID)
+		return
+	}
+	delete(refs.leases, lease.id)
+	if len(refs.leases) > 0 {
+		tr.sessions[lease.sessionID] = refs
+		tr.mu.Unlock()
+		return
+	}
+	delete(tr.sessions, lease.sessionID)
+	delete(tr.ephemeral, lease.sessionID)
+	delete(tr.touched, lease.sessionID)
+	delete(tr.records, lease.sessionID)
+	delete(tr.bytes, lease.sessionID)
+	tr.mu.Unlock()
+
+	if err := tr.rdb.Del(ctx, tr.redisKey(lease.sessionID)).Err(); err != nil {
+		slog.DebugContext(ctx, "session release failed", "component", "nodesessions", "error", err, "session", lease.sessionID)
+	}
+}
+
+// Remove deletes a session unconditionally and invalidates every outstanding
+// lease for its generation.
 func (tr *Tracker) Remove(ctx context.Context, sessionID string) {
 	if tr.rdb == nil {
 		return
 	}
 	tr.mu.Lock()
+	tr.nextEpoch++
 	delete(tr.sessions, sessionID)
+	delete(tr.ephemeral, sessionID)
 	delete(tr.touched, sessionID)
 	delete(tr.records, sessionID)
 	delete(tr.bytes, sessionID)
@@ -314,16 +404,18 @@ func (tr *Tracker) Cleanup(ctx context.Context) {
 		return
 	}
 	tr.mu.Lock()
-	ids := make([]string, 0, len(tr.sessions)+len(tr.touched))
+	ids := make([]string, 0, len(tr.sessions)+len(tr.ephemeral))
 	for id := range tr.sessions {
 		ids = append(ids, id)
 	}
-	for id := range tr.touched {
+	for id := range tr.ephemeral {
 		if _, dup := tr.sessions[id]; !dup {
 			ids = append(ids, id)
 		}
 	}
-	tr.sessions = make(map[string]struct{})
+	tr.nextEpoch++
+	tr.sessions = make(map[string]sessionRefs)
+	tr.ephemeral = make(map[string]time.Time)
 	tr.touched = make(map[string]time.Time)
 	tr.records = make(map[string]SessionInfo)
 	tr.bytes = make(map[string]int64)
@@ -373,12 +465,13 @@ func (tr *Tracker) refreshAll(ctx context.Context) {
 	for id := range tr.sessions {
 		ids = append(ids, id)
 	}
-	for id, last := range tr.touched {
+	for id, last := range tr.ephemeral {
 		_, isSession := tr.sessions[id]
 		if !isSession && now.Sub(last) > idleTTLFor(tr.records[id]) {
 			// Idle ephemeral session: stop refreshing and let the Redis key
 			// expire on its own. Session-backed entries (direct/remux) are pruned
 			// on Remove, never by idle timeout, so a quiet-but-open pour stays live.
+			delete(tr.ephemeral, id)
 			delete(tr.touched, id)
 			delete(tr.records, id)
 			delete(tr.bytes, id)

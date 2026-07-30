@@ -181,14 +181,14 @@ func (s *Server) cutOnRevocation(ctx context.Context, w http.ResponseWriter, cla
 	return s.revocation.WatchAndCutContext(ctx, w, claims.SessionID, claims.UserID, claims.IssuedTime())
 }
 
-// removeTracked deletes the edge record with a bounded background context. The
+// releaseTracked releases one request lease with a bounded background context. The
 // request context is already canceled by the time this defer runs on a client
 // disconnect, which would skip the Redis DEL and leave a phantom session until
 // TTL — a false over-cap window.
-func (s *Server) removeTracked(sessionID string) {
+func (s *Server) releaseTracked(lease nodesessions.Lease) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	s.tracker.Remove(ctx, sessionID)
+	s.tracker.Release(ctx, lease)
 }
 
 func (s *Server) handleDirectPlay(w http.ResponseWriter, r *http.Request) {
@@ -199,8 +199,8 @@ func (s *Server) handleDirectPlay(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info := sessionInfo(s.tracker, claims, "direct_play", edgeClientIP(r))
-	s.tracker.Track(r.Context(), info)
-	defer s.removeTracked(claims.SessionID)
+	lease := s.tracker.Track(r.Context(), info)
+	defer s.releaseTracked(lease)
 
 	sw := &sessionByteWriter{ResponseWriter: w, tracker: s.tracker, sessionID: claims.SessionID}
 	defer sw.flush()
@@ -292,8 +292,8 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info := sessionInfo(s.tracker, claims, "remux", edgeClientIP(r))
-	s.tracker.Track(r.Context(), info)
-	defer s.removeTracked(claims.SessionID)
+	lease := s.tracker.Track(r.Context(), info)
+	defer s.releaseTracked(lease)
 
 	sw := &sessionByteWriter{ResponseWriter: w, tracker: s.tracker, sessionID: claims.SessionID}
 	defer sw.flush()
@@ -319,7 +319,7 @@ func (s *Server) handleTranscodeManifest(w http.ResponseWriter, r *http.Request)
 	if claims == nil {
 		return
 	}
-	s.touchTranscodeSession(r, claims)
+	s.ensureTranscodeSession(r, claims)
 	s.proxyToTranscodeNode(w, r, claims, "/transcode/"+transcodeTransportIDFromClaims(claims)+"/master.m3u8")
 }
 
@@ -328,7 +328,7 @@ func (s *Server) handleTranscodeSegment(w http.ResponseWriter, r *http.Request) 
 	if claims == nil {
 		return
 	}
-	s.touchTranscodeSession(r, claims)
+	s.ensureTranscodeSession(r, claims)
 	name := chi.URLParam(r, "name")
 	s.proxyToTranscodeNode(w, r, claims, "/transcode/"+transcodeTransportIDFromClaims(claims)+"/segment/"+name)
 }
@@ -343,12 +343,13 @@ func transcodeTransportIDFromClaims(claims *streamtoken.Claims) string {
 	return claims.SessionID
 }
 
-// touchTranscodeSession keeps HLS sessions visible in the active stream count.
+// ensureTranscodeSession keeps HLS sessions visible in the active stream count.
 // Unlike direct play and remux, transcode playback reaches the proxy as many
 // short manifest/segment requests, so the session is tracked by recent
-// activity instead of request lifetime.
-func (s *Server) touchTranscodeSession(r *http.Request, claims *streamtoken.Claims) {
-	s.tracker.Touch(r.Context(), sessionInfo(s.tracker, claims, "transcode", edgeClientIP(r)))
+// requests instead of request lifetime. Visibility is separate from served
+// liveness: only a successful upstream media response advances LastServedAt.
+func (s *Server) ensureTranscodeSession(r *http.Request, claims *streamtoken.Claims) {
+	s.tracker.EnsureEphemeral(r.Context(), sessionInfo(s.tracker, claims, "transcode", edgeClientIP(r)))
 }
 
 // sessionInfo builds the node-session tracker record for a verified token,
@@ -536,6 +537,10 @@ func (s *Server) proxyToTranscodeNode(w http.ResponseWriter, r *http.Request, cl
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
 	// Attribute served bytes to the session for authoritative monitoring —
 	// incrementally (~1 MiB granularity), not in one post-copy tally: a slow
 	// segment drain that outlives the 60s record TTL would otherwise go

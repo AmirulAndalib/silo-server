@@ -2589,6 +2589,7 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 				}
 				nodeReq := transcodenode.TranscodeStartRequest{
 					SessionID:              restartTransportID,
+					LogicalSessionID:       updatedSession.ID,
 					InputPath:              file.FilePath,
 					SourceVideoCodec:       file.CodecVideo,
 					SeekSeconds:            restartSeekSeconds,
@@ -3265,6 +3266,7 @@ func (h *PlaybackHandler) HandleStartTranscode(w http.ResponseWriter, r *http.Re
 		}
 		nodeReq := transcodenode.TranscodeStartRequest{
 			SessionID:              replacementTransportID,
+			LogicalSessionID:       session.ID,
 			InputPath:              file.FilePath,
 			SourceVideoCodec:       file.CodecVideo,
 			VideoBitstreamFilter:   videoBitstreamFilter,

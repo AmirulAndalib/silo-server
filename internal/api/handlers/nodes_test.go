@@ -118,8 +118,8 @@ func TestNodeSessionsCapabilitiesSeparatesSchemaFromRuntimeWiring(t *testing.T) 
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatalf("decode response: %v", err)
 		}
-		if !body.Transfers || !body.TransfersActive {
-			t.Fatalf("capabilities = %+v, want both transfers and transfers_active true", body)
+		if !body.LogicalSessionID || !body.Transfers || !body.TransfersActive {
+			t.Fatalf("capabilities = %+v, want schema flags and transfers_active true", body)
 		}
 	})
 
@@ -134,6 +134,9 @@ func TestNodeSessionsCapabilitiesSeparatesSchemaFromRuntimeWiring(t *testing.T) 
 		}
 		if !body.Transfers {
 			t.Error("transfers = false; the response shape carries the key regardless of wiring")
+		}
+		if !body.LogicalSessionID {
+			t.Error("logical_session_id = false; SessionInfo schema supports the field regardless of wiring")
 		}
 		if body.TransfersActive {
 			t.Error("transfers_active = true with no registry wired; that advertises monitoring that is not running")

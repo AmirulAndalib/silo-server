@@ -13,9 +13,9 @@ func TestTranscodeIdleTTLAgreesAcrossCountSnapshotAndRefresh(t *testing.T) {
 	t.Cleanup(func() { _ = rdb.Close() })
 	tr := NewTracker(rdb, "http://node", "node", "proxy")
 	idle := time.Now().Add(-90 * time.Second)
-	tr.touched[sessionTypeTranscode] = idle
+	tr.ephemeral[sessionTypeTranscode] = idle
 	tr.records[sessionTypeTranscode] = SessionInfo{SessionID: sessionTypeTranscode, Type: sessionTypeTranscode}
-	tr.touched["direct"] = idle
+	tr.ephemeral["direct"] = idle
 	tr.records["direct"] = SessionInfo{SessionID: "direct", Type: "direct_play"}
 
 	if got := tr.ActiveCount(); got != 1 {

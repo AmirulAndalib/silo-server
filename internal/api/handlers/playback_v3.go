@@ -766,7 +766,33 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 		videoCodec = "copy"
 	}
 	seekSeconds, startSegment := configureHLSTimelineV3(result.Plan, videoCodec, 2, float64(file.Duration))
-	req := transcodenode.TranscodeStartRequest{SessionID: transportID, InputPath: file.FilePath, SourceVideoCodec: file.CodecVideo, VideoBitstreamFilter: videoBitstreamFilterForPlanV3(result.Plan), SeekSeconds: seekSeconds, StartSegmentNumber: startSegment, TargetResolution: result.TargetResolution, TargetCodecVideo: videoCodec, TargetCodecAudio: result.TargetAudioCodec, TargetAudioChannels: result.TargetAudioChannels, TargetBitrateKbps: result.TargetBitrateKbps, SegmentDuration: 2, HWAccel: h.playbackConfig().HWAccel, AudioTrackIndex: plannedAudioTrackIndexV3(result, session.AudioTrackIndex), SubtitleTrackIndex: result.SubtitleTransportTrackIndex, SubtitleBurnIn: result.SubtitleBurnIn, SubtitleCodec: result.SubtitleCodec, TotalDuration: float64(file.Duration), RequireReady: true}
+	req := transcodenode.TranscodeStartRequest{
+		SessionID:            transportID,
+		LogicalSessionID:     session.ID,
+		InputPath:            file.FilePath,
+		SourceVideoCodec:     file.CodecVideo,
+		VideoBitstreamFilter: videoBitstreamFilterForPlanV3(result.Plan),
+		SeekSeconds:          seekSeconds,
+		StartSegmentNumber:   startSegment,
+		TargetResolution:     result.TargetResolution,
+		TargetCodecVideo:     videoCodec,
+		TargetCodecAudio:     result.TargetAudioCodec,
+		TargetAudioChannels:  result.TargetAudioChannels,
+		TargetBitrateKbps:    result.TargetBitrateKbps,
+		SegmentDuration:      2,
+		HWAccel:              h.playbackConfig().HWAccel,
+		AudioTrackIndex:      plannedAudioTrackIndexV3(result, session.AudioTrackIndex),
+		SubtitleTrackIndex:   result.SubtitleTransportTrackIndex,
+		SubtitleBurnIn:       result.SubtitleBurnIn,
+		SubtitleCodec:        result.SubtitleCodec,
+		TotalDuration:        float64(file.Duration),
+		RequireReady:         true,
+		AuthUserID:           session.UserID,
+		ProfileID:            session.ProfileID,
+		MediaFileID:          file.ID,
+		Route:                session.Origin(),
+		ClientName:           session.ClientName,
+	}
 	nodeResp, status, err := h.startRemotePlaybackTransport(r.Context(), node.URL, req)
 	if err != nil {
 		// A timeout can fire after the node actually started the job; the

@@ -1156,6 +1156,14 @@ func TestPrepareTransportV3RequiresRemoteManifestReadiness(t *testing.T) {
 	if !startRequest.RequireReady {
 		t.Fatal("protocol-v3 remote start did not require manifest readiness")
 	}
+	file := v3HandlerFixtureFile(t)
+	if startRequest.LogicalSessionID != "session-ready" ||
+		startRequest.AuthUserID != 7 ||
+		startRequest.ProfileID != "profile-1" ||
+		startRequest.MediaFileID != file.ID ||
+		startRequest.Route != playback.OriginNative {
+		t.Fatalf("protocol-v3 remote monitoring attribution = %+v", startRequest)
+	}
 }
 
 func TestHandleStartPlaybackUnknownProtocolUsesLegacyBranch(t *testing.T) {

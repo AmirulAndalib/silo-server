@@ -464,6 +464,7 @@ func (h *PlaybackHandler) startRemoteTranscode(
 
 	reqBody := transcodenode.TranscodeStartRequest{
 		SessionID:          upstreamSessionID,
+		LogicalSessionID:   playSessionID,
 		InputPath:          file.FilePath,
 		SeekSeconds:        initialSeekSeconds,
 		StartSegmentNumber: startSegmentNumber,

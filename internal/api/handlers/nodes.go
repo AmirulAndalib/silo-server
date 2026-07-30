@@ -23,43 +23,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// LiveLocalSessions maps the in-process playback sessions into monitoring
-// records (the same SessionInfo shape edge nodes write to Redis), so integrated
-// single-node streams — which never touch Redis — are still visible to the
-// monitor and the admin active-streams view. Shared by the enforcer's FuncSource
-// and the admin session list so there is exactly one Session→record mapping.
-func LiveLocalSessions(sm *playback.SessionManager, nodeName string) []nodesessions.SessionInfo {
-	if sm == nil {
-		return nil
-	}
-	live := sm.AllSessions()
-	out := make([]nodesessions.SessionInfo, 0, len(live))
-	for _, s := range live {
-		lastServedAt := s.LastServedAt
-		if lastServedAt.IsZero() {
-			lastServedAt = s.LastActivityAt
-		}
-		out = append(out, nodesessions.SessionInfo{
-			SessionID:    s.ID,
-			NodeName:     nodeName,
-			AuthUserID:   s.UserID,
-			ProfileID:    s.ProfileID,
-			Type:         string(s.PlayMethod),
-			Route:        s.Origin(),
-			MediaFileID:  s.MediaFileID,
-			ClientIP:     s.ClientIP,
-			ClientName:   s.ClientName,
-			Position:     s.Position,
-			Resolution:   s.TargetResolution,
-			HWAccel:      s.TranscodeHWAccel,
-			StartedAt:    s.StartedAt.UTC().Format(time.RFC3339),
-			LastServedAt: lastServedAt.UTC().Format(time.RFC3339),
-			BytesServed:  s.BytesServed,
-		})
-	}
-	return out
-}
-
 // NodeRepository defines the operations the NodeHandler needs on the node store.
 type NodeRepository interface {
 	List(ctx context.Context) ([]*nodepool.Node, error)
@@ -422,7 +385,7 @@ func (h *NodeHandler) HandleListSessions(w http.ResponseWriter, r *http.Request)
 	// Integrated single-node streams live only in the in-process session manager.
 	// Include them in the unfiltered listing (a node_id filter targets an edge).
 	if h.sessionMgr != nil && nodeFilter == "" {
-		infos = append(infos, LiveLocalSessions(h.sessionMgr, h.localNodeName)...)
+		infos = append(infos, streammonitor.LiveLocalSessions(h.sessionMgr, h.localNodeName)...)
 	}
 
 	sessions := []json.RawMessage{}
@@ -453,6 +416,9 @@ func (h *NodeHandler) HandleListSessions(w http.ResponseWriter, r *http.Request)
 // deployment can serve the field as an empty list forever. Collapsing the two
 // would advertise download monitoring that is not actually running.
 type nodeSessionsCapabilitiesResponse struct {
+	// LogicalSessionID reports that session records may carry the stable logical
+	// identity associated with a replaceable transport generation.
+	LogicalSessionID bool `json:"logical_session_id"`
 	// Transfers reports that the node-sessions payload carries a transfers array.
 	Transfers bool `json:"transfers"`
 	// TransfersActive reports that a transfer registry is wired on this server,
@@ -466,8 +432,9 @@ type nodeSessionsCapabilitiesResponse struct {
 // endpoint's availability rather than being advertised from an unrelated route.
 func (h *NodeHandler) HandleGetNodeSessionsCapabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, nodeSessionsCapabilitiesResponse{
-		Transfers:       true,
-		TransfersActive: h.transfers != nil,
+		LogicalSessionID: true,
+		Transfers:        true,
+		TransfersActive:  h.transfers != nil,
 	})
 }
 

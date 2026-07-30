@@ -1744,11 +1744,11 @@ func main() {
 		// fixes the case where integrated mode has Redis configured but writes no
 		// silo:sessions:* keys, which would otherwise blind the enforcer.
 		// The mapping (Session → monitoring record, carrying route + client identity
-		// + progress) is shared with the admin session list via handlers so there is
+		// + progress) is shared with the admin session list via streammonitor so there is
 		// one Session→record definition. NodeName marks the serving host so
 		// integrated streams aren't shown node-less.
 		localSource := streammonitor.NewFuncSource(func(ctx context.Context) ([]nodesessions.SessionInfo, error) {
-			return handlers.LiveLocalSessions(sessionMgr, nodeIdentity), nil
+			return streammonitor.LiveLocalSessions(sessionMgr, nodeIdentity), nil
 		})
 		var monitorSource streammonitor.Source = localSource
 		if apiRedisClient != nil {

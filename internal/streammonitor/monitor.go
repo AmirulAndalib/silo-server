@@ -29,6 +29,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
+	"github.com/Silo-Server/silo-server/internal/playback"
 )
 
 // sessionKeyPrefix is the Redis key prefix under which nodesessions.Tracker
@@ -42,21 +43,22 @@ const scanCount = 256
 
 // LiveStream is a normalized view of a single active streaming session.
 type LiveStream struct {
-	SessionID    string
-	UserID       int // from SessionInfo.AuthUserID
-	ProfileID    string
-	NodeName     string
-	NodeURL      string
-	Type         string // play method: direct_play | remux | transcode
-	Route        string // origin protocol: native | jellycompat
-	MediaFileID  int
-	ClientIP     string
-	ClientName   string
-	Position     float64 // last known playback position (seconds); secondary timing
-	HWAccel      string
-	LastServedAt time.Time // parsed from SessionInfo.LastServedAt (zero if absent)
-	BytesServed  int64
-	StartedAt    time.Time // parsed from SessionInfo.StartedAt (zero if unparseable)
+	SessionID        string
+	LogicalSessionID string
+	UserID           int // from SessionInfo.AuthUserID
+	ProfileID        string
+	NodeName         string
+	NodeURL          string
+	Type             string // play method: direct_play | remux | transcode
+	Route            string // origin protocol: native | jellycompat
+	MediaFileID      int
+	ClientIP         string
+	ClientName       string
+	Position         float64 // last known playback position (seconds); secondary timing
+	HWAccel          string
+	LastServedAt     time.Time // parsed from SessionInfo.LastServedAt (zero if absent)
+	BytesServed      int64
+	StartedAt        time.Time // parsed from SessionInfo.StartedAt (zero if unparseable)
 }
 
 // Snapshot is a point-in-time picture of the live streams.
@@ -117,7 +119,8 @@ func NewMultiSource(sources ...Source) *MultiSource {
 	return &MultiSource{sources: sources}
 }
 
-// Snapshot merges every sub-source's snapshot, de-duplicated by session id.
+// Snapshot merges every sub-source's snapshot, de-duplicated by canonical
+// logical session identity when available.
 func (m *MultiSource) Snapshot(ctx context.Context) (Snapshot, error) {
 	var all []LiveStream
 	for _, src := range m.sources {
@@ -139,22 +142,33 @@ func (m *MultiSource) Snapshot(ctx context.Context) (Snapshot, error) {
 // the zero time).
 func toLiveStream(info nodesessions.SessionInfo) LiveStream {
 	return LiveStream{
-		SessionID:    info.SessionID,
-		UserID:       info.AuthUserID,
-		ProfileID:    info.ProfileID,
-		NodeName:     info.NodeName,
-		NodeURL:      info.NodeURL,
-		Type:         info.Type,
-		Route:        info.Route,
-		MediaFileID:  info.MediaFileID,
-		ClientIP:     info.ClientIP,
-		ClientName:   info.ClientName,
-		Position:     info.Position,
-		HWAccel:      info.HWAccel,
-		LastServedAt: parseTime(info.LastServedAt),
-		BytesServed:  info.BytesServed,
-		StartedAt:    parseTime(info.StartedAt),
+		SessionID:        info.SessionID,
+		LogicalSessionID: info.LogicalSessionID,
+		UserID:           info.AuthUserID,
+		ProfileID:        info.ProfileID,
+		NodeName:         info.NodeName,
+		NodeURL:          info.NodeURL,
+		Type:             info.Type,
+		Route:            info.Route,
+		MediaFileID:      info.MediaFileID,
+		ClientIP:         info.ClientIP,
+		ClientName:       info.ClientName,
+		Position:         info.Position,
+		HWAccel:          info.HWAccel,
+		LastServedAt:     parseTime(info.LastServedAt),
+		BytesServed:      info.BytesServed,
+		StartedAt:        parseTime(info.StartedAt),
 	}
+}
+
+// sessionIdentity returns the stable identity used to merge and enforce a
+// playback stream. SessionID remains the transport-addressing key on raw node
+// records; a logical id, when present, takes precedence only in monitoring.
+func sessionIdentity(sessionID, logicalSessionID string) string {
+	if logicalSessionID != "" {
+		return logicalSessionID
+	}
+	return sessionID
 }
 
 // parseTime parses an RFC3339 timestamp, returning the zero time for empty or
@@ -171,11 +185,11 @@ func parseTime(s string) time.Time {
 	return t
 }
 
-// mergeStreams collapses records that share a SessionID (the same session can be
-// tracked by more than one node — e.g. a proxy record and a transcode-node
-// record), keeping the one with the most recent LastServedAt. Records with a
-// distinct SessionID are all retained. The relative order of the kept records is
-// not guaranteed.
+// mergeStreams collapses records that share a canonical identity (the logical
+// session id when present, otherwise the transport SessionID). The same stream
+// can be tracked by more than one node or transport generation. The freshest
+// record wins; genuinely distinct logical sessions are retained. The relative
+// order of kept records is not guaranteed.
 //
 // Ownership and attribution are carried forward independently of the freshness
 // pick: the transcode node's own start record has no resolved owner (UserID 0)
@@ -188,9 +202,11 @@ func parseTime(s string) time.Time {
 func mergeStreams(streams []LiveStream) []LiveStream {
 	bySession := make(map[string]LiveStream, len(streams))
 	for _, st := range streams {
-		existing, ok := bySession[st.SessionID]
+		key := sessionIdentity(st.SessionID, st.LogicalSessionID)
+		existing, ok := bySession[key]
 		if !ok {
-			bySession[st.SessionID] = st
+			st.SessionID = key
+			bySession[key] = st
 			continue
 		}
 		winner := existing
@@ -229,7 +245,8 @@ func mergeStreams(streams []LiveStream) []LiveStream {
 		}
 		// These are observers of one pour, not independent byte sources.
 		winner.BytesServed = max(winner.BytesServed, other.BytesServed)
-		bySession[st.SessionID] = winner
+		winner.SessionID = key
+		bySession[key] = winner
 	}
 	out := make([]LiveStream, 0, len(bySession))
 	for _, st := range bySession {
@@ -238,22 +255,21 @@ func mergeStreams(streams []LiveStream) []LiveStream {
 	return out
 }
 
-// DedupeSessionInfos collapses raw monitoring records that share a SessionID,
-// applying the same rules as mergeStreams — keep the most-recently-served copy,
-// carry a resolved owner forward, backfill missing attribution — but preserving
-// the SessionInfo shape for surfaces whose wire format IS the raw record (the
-// admin session list, which unions Redis edge records with the in-process
-// integrated sessions and would otherwise show the same stream twice). Kept as
-// a sibling of mergeStreams rather than a shared generic because mergeStreams
-// operates on the parsed LiveStream form; keep the two rule sets in sync.
+// DedupeSessionInfos collapses raw monitoring records that share a canonical
+// identity, applying the same rules as mergeStreams — keep the most-recently-
+// served copy, carry a resolved owner forward, backfill missing attribution —
+// but preserving the SessionInfo shape and transport SessionID for surfaces
+// whose wire format IS the raw record. Kept as a sibling of mergeStreams rather
+// than a shared generic because mergeStreams operates on parsed LiveStream.
 func DedupeSessionInfos(infos []nodesessions.SessionInfo) []nodesessions.SessionInfo {
 	bySession := make(map[string]nodesessions.SessionInfo, len(infos))
 	order := make([]string, 0, len(infos))
 	for _, in := range infos {
-		existing, ok := bySession[in.SessionID]
+		key := sessionIdentity(in.SessionID, in.LogicalSessionID)
+		existing, ok := bySession[key]
 		if !ok {
-			bySession[in.SessionID] = in
-			order = append(order, in.SessionID)
+			bySession[key] = in
+			order = append(order, key)
 			continue
 		}
 		winner, other := existing, in
@@ -281,11 +297,45 @@ func DedupeSessionInfos(infos []nodesessions.SessionInfo) []nodesessions.Session
 			winner.Position = other.Position
 		}
 		winner.BytesServed = max(winner.BytesServed, other.BytesServed)
-		bySession[in.SessionID] = winner
+		bySession[key] = winner
 	}
 	out := make([]nodesessions.SessionInfo, 0, len(bySession))
 	for _, id := range order {
 		out = append(out, bySession[id])
+	}
+	return out
+}
+
+// LiveLocalSessions maps in-process playback sessions into monitoring records
+// so integrated streams are visible to both the enforcer and admin view.
+func LiveLocalSessions(sm *playback.SessionManager, nodeName string) []nodesessions.SessionInfo {
+	if sm == nil {
+		return nil
+	}
+	live := sm.AllSessions()
+	out := make([]nodesessions.SessionInfo, 0, len(live))
+	for _, s := range live {
+		lastServedAt := s.LastServedAt
+		if lastServedAt.IsZero() {
+			lastServedAt = s.LastActivityAt
+		}
+		out = append(out, nodesessions.SessionInfo{
+			SessionID:    s.ID,
+			NodeName:     nodeName,
+			AuthUserID:   s.UserID,
+			ProfileID:    s.ProfileID,
+			Type:         string(s.PlayMethod),
+			Route:        s.Origin(),
+			MediaFileID:  s.MediaFileID,
+			ClientIP:     s.ClientIP,
+			ClientName:   s.ClientName,
+			Position:     s.Position,
+			Resolution:   s.TargetResolution,
+			HWAccel:      s.TranscodeHWAccel,
+			StartedAt:    s.StartedAt.UTC().Format(time.RFC3339),
+			LastServedAt: lastServedAt.UTC().Format(time.RFC3339),
+			BytesServed:  s.BytesServed,
+		})
 	}
 	return out
 }
@@ -302,8 +352,8 @@ func NewRedisSource(rdb *redis.Client) *RedisSource {
 }
 
 // Snapshot SCANs every silo:sessions:* record, decodes it, and returns the
-// deduped live picture. The same session appearing on multiple nodes is
-// collapsed to the record with the most recent LastServedAt.
+// deduped live picture. The same logical session appearing on multiple nodes or
+// transport generations is collapsed to the record with the newest liveness.
 func (r *RedisSource) Snapshot(ctx context.Context) (Snapshot, error) {
 	if r.rdb == nil {
 		return Snapshot{Streams: []LiveStream{}}, nil

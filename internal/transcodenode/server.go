@@ -28,6 +28,7 @@ import (
 // TranscodeStartRequest is the JSON body for POST /transcode/start.
 type TranscodeStartRequest struct {
 	SessionID              string  `json:"session_id"`
+	LogicalSessionID       string  `json:"logical_session_id,omitempty"`
 	InputPath              string  `json:"input_path"`
 	SourceVideoCodec       string  `json:"source_video_codec"`
 	VideoBitstreamFilter   string  `json:"video_bitstream_filter,omitempty"`
@@ -119,6 +120,11 @@ type Server struct {
 	lifecycleMu    sync.Mutex
 	lifecycleLocks map[string]*sessionLifecycleLock
 
+	// runTracker is a deterministic scheduling seam for lifecycle tests.
+	// Production leaves it nil and launches each write directly in a goroutine;
+	// this is not a projection queue.
+	runTracker func(func())
+
 	// recipeStore is the control-plane recipe store consulted when a forwarded
 	// token carries no recipe (the jellycompat node hop). Nil disables that path.
 	recipeStore recipeStore
@@ -158,6 +164,29 @@ func (s *Server) lockSessionLifecycle(sessionID string) func() {
 		}
 		s.lifecycleMu.Unlock()
 	}
+}
+
+// trackIfCurrent serializes the delayed monitoring write with stop/reap/start
+// lifecycle transitions. Once it owns the lifecycle lock, it verifies that the
+// exact session generation is still registered before writing; a stopped or
+// replaced generation can therefore never recreate a ghost record.
+func (s *Server) trackIfCurrent(ctx context.Context, sessionID string, expected *playback.TranscodeSession, info nodesessions.SessionInfo) {
+	run := func() {
+		unlock := s.lockSessionLifecycle(sessionID)
+		defer unlock()
+		s.mu.RLock()
+		current, ok := s.sessions[sessionID]
+		s.mu.RUnlock()
+		if !ok || current != expected {
+			return
+		}
+		s.tracker.Track(ctx, info)
+	}
+	if s.runTracker != nil {
+		s.runTracker(run)
+		return
+	}
+	go run()
 }
 
 // restartSessionLocked re-spawns session under the per-session lifecycle lock so
@@ -601,21 +630,22 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	// tracking write is monitoring-only.
 	effectiveHWAccel := session.Opts().HWAccel
 	trackCtx := context.WithoutCancel(r.Context())
-	go s.tracker.Track(trackCtx, nodesessions.SessionInfo{
-		SessionID:   req.SessionID,
-		NodeURL:     s.tracker.NodeURL(),
-		NodeName:    s.tracker.NodeName(),
-		Type:        "transcode",
-		CodecVideo:  req.TargetCodecVideo,
-		CodecAudio:  req.TargetCodecAudio,
-		Resolution:  req.TargetResolution,
-		HWAccel:     effectiveHWAccel,
-		StartedAt:   time.Now().UTC().Format(time.RFC3339),
-		AuthUserID:  req.AuthUserID,
-		ProfileID:   req.ProfileID,
-		MediaFileID: req.MediaFileID,
-		Route:       req.Route,
-		ClientName:  req.ClientName,
+	s.trackIfCurrent(trackCtx, req.SessionID, session, nodesessions.SessionInfo{
+		SessionID:        req.SessionID,
+		LogicalSessionID: req.LogicalSessionID,
+		NodeURL:          s.tracker.NodeURL(),
+		NodeName:         s.tracker.NodeName(),
+		Type:             "transcode",
+		CodecVideo:       req.TargetCodecVideo,
+		CodecAudio:       req.TargetCodecAudio,
+		Resolution:       req.TargetResolution,
+		HWAccel:          effectiveHWAccel,
+		StartedAt:        time.Now().UTC().Format(time.RFC3339),
+		AuthUserID:       req.AuthUserID,
+		ProfileID:        req.ProfileID,
+		MediaFileID:      req.MediaFileID,
+		Route:            req.Route,
+		ClientName:       req.ClientName,
 	})
 
 	w.WriteHeader(http.StatusAccepted)
@@ -781,21 +811,22 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	s.activeJobs.Add(1)
 
 	trackCtx := context.WithoutCancel(r.Context())
-	go s.tracker.Track(trackCtx, nodesessions.SessionInfo{
-		SessionID:   sessionID,
-		NodeURL:     s.tracker.NodeURL(),
-		NodeName:    s.tracker.NodeName(),
-		Type:        "transcode",
-		CodecVideo:  card.TargetCodecVideo,
-		CodecAudio:  card.TargetCodecAudio,
-		Resolution:  card.TargetResolution,
-		HWAccel:     session.Opts().HWAccel,
-		StartedAt:   time.Now().UTC().Format(time.RFC3339),
-		AuthUserID:  card.UserID,
-		ProfileID:   card.ProfileID,
-		MediaFileID: card.MediaFileID,
-		Route:       route,
-		ClientName:  clientName,
+	s.trackIfCurrent(trackCtx, sessionID, session, nodesessions.SessionInfo{
+		SessionID:        sessionID,
+		LogicalSessionID: card.SessionID,
+		NodeURL:          s.tracker.NodeURL(),
+		NodeName:         s.tracker.NodeName(),
+		Type:             "transcode",
+		CodecVideo:       card.TargetCodecVideo,
+		CodecAudio:       card.TargetCodecAudio,
+		Resolution:       card.TargetResolution,
+		HWAccel:          session.Opts().HWAccel,
+		StartedAt:        time.Now().UTC().Format(time.RFC3339),
+		AuthUserID:       card.UserID,
+		ProfileID:        card.ProfileID,
+		MediaFileID:      card.MediaFileID,
+		Route:            route,
+		ClientName:       clientName,
 	})
 
 	slog.InfoContext(r.Context(), "transcode node session reconstructed from token", "component", "transcodenode",

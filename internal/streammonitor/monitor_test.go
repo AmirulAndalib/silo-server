@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
+	"github.com/Silo-Server/silo-server/internal/playback"
 )
 
 func fakeFn(infos []nodesessions.SessionInfo) func(ctx context.Context) ([]nodesessions.SessionInfo, error) {
@@ -316,5 +317,65 @@ func TestDedupeSessionInfosKeepsLargestObservedByteTotal(t *testing.T) {
 				t.Fatalf("dedupe = %+v, want bytes %d", out, tc.want)
 			}
 		})
+	}
+}
+
+func TestLogicalAndTransportRecordsMergeWithOwnerResolved(t *testing.T) {
+	out := mergeStreams([]LiveStream{
+		{SessionID: "logical", UserID: 17, ProfileID: "p", LastServedAt: time.Unix(100, 0)},
+		{SessionID: "transport-a", LogicalSessionID: "logical", LastServedAt: time.Unix(200, 0)},
+	})
+	if len(out) != 1 {
+		t.Fatalf("merge len = %d, want 1", len(out))
+	}
+	if out[0].SessionID != "logical" || out[0].UserID != 17 || out[0].ProfileID != "p" {
+		t.Fatalf("canonical merged stream = %+v", out[0])
+	}
+}
+
+func TestDistinctLogicalStreamsStayDistinct(t *testing.T) {
+	out := mergeStreams([]LiveStream{
+		{SessionID: "transport-a", LogicalSessionID: "logical-a"},
+		{SessionID: "transport-b", LogicalSessionID: "logical-b"},
+	})
+	if len(out) != 2 {
+		t.Fatalf("distinct logical streams merged: %+v", out)
+	}
+}
+
+func TestTransportGenerationsOfOneLogicalSessionMerge(t *testing.T) {
+	out := DedupeSessionInfos([]nodesessions.SessionInfo{
+		{SessionID: "transport-a", LogicalSessionID: "logical", NodeName: "old", LastServedAt: "2026-07-30T01:00:00Z"},
+		{SessionID: "transport-b", LogicalSessionID: "logical", NodeName: "new", LastServedAt: "2026-07-30T02:00:00Z"},
+	})
+	if len(out) != 1 || out[0].SessionID != "transport-b" || out[0].LogicalSessionID != "logical" {
+		t.Fatalf("transport generation dedupe = %+v", out)
+	}
+}
+
+func TestLiveLocalSessionsMapping(t *testing.T) {
+	sm := playback.NewSessionManager(0, 0)
+	ctx := playback.WithClientInfo(context.Background(), playback.ClientInfo{
+		Name: "Silo TV",
+	})
+	session, err := sm.StartSessionWithContext(ctx, 42, "profile-1", 9, playback.PlayDirect, false)
+	if err != nil {
+		t.Fatalf("StartSessionWithContext: %v", err)
+	}
+	session.ClientIP = "192.0.2.10"
+	got := LiveLocalSessions(sm, "local")
+	if len(got) != 1 {
+		t.Fatalf("sessions = %+v", got)
+	}
+	info := got[0]
+	if info.SessionID != session.ID || info.NodeName != "local" ||
+		info.AuthUserID != 42 || info.ProfileID != "profile-1" ||
+		info.MediaFileID != 9 || info.Type != string(playback.PlayDirect) ||
+		info.Route != session.Origin() || info.ClientName != "Silo TV" ||
+		info.ClientIP != "192.0.2.10" {
+		t.Fatalf("mapped session = %+v", info)
+	}
+	if info.LastServedAt != session.LastActivityAt.UTC().Format(time.RFC3339) {
+		t.Fatalf("LastServedAt = %q, want LastActivityAt fallback", info.LastServedAt)
 	}
 }
