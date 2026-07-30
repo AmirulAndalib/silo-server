@@ -1453,6 +1453,79 @@ func TestEnricherRunLimitedEnforcesClaimLimitBelowWorkerCount(t *testing.T) {
 	}
 }
 
+// A locally complete ebook is the one terminal outcome that consults no
+// provider, so it is also the one path that used to skip the status
+// promotion entirely. Without it the item keeps media_items.status =
+// 'pending' forever and the library page reports a fully described book as
+// unmatched.
+func TestEnrichClaimedItemPromotesLocallyCompleteItem(t *testing.T) {
+	var promoted []string
+	e := &Enricher{
+		markMatchedLocallyFn: func(_ context.Context, contentID string) error {
+			promoted = append(promoted, contentID)
+			return nil
+		},
+	}
+
+	outcome, err := e.enrichClaimedItem(context.Background(), locallyCompleteEbookRow())
+	if err != nil {
+		t.Fatalf("enrichClaimedItem() error = %v", err)
+	}
+	if outcome != EnrichmentOutcomeSuccess {
+		t.Fatalf("outcome = %q, want %q", outcome, EnrichmentOutcomeSuccess)
+	}
+	if len(promoted) != 1 || promoted[0] != "ebook-local-1" {
+		t.Fatalf("promoted content ids = %v, want [ebook-local-1]", promoted)
+	}
+}
+
+// A failed promotion must not be reported as a clean success: the queue would
+// park the row with a refresh horizon and the item would stay 'pending'.
+func TestEnrichClaimedItemSurfacesPromotionFailure(t *testing.T) {
+	e := &Enricher{
+		markMatchedLocallyFn: func(context.Context, string) error {
+			return errors.New("promotion failed")
+		},
+	}
+
+	outcome, err := e.enrichClaimedItem(context.Background(), locallyCompleteEbookRow())
+	if err == nil {
+		t.Fatalf("promotion failure was swallowed, outcome = %q", outcome)
+	}
+	if outcome == EnrichmentOutcomeSuccess {
+		t.Fatal("failed promotion reported as success")
+	}
+}
+
+// The promotion deliberately leaves last_refreshed untouched: it gates the
+// admin quick-refresh sweep, and no provider was consulted here, so these
+// items must stay eligible for a later refresh.
+func TestMarkEbookMatchedLocallyQueryLeavesLastRefreshedAlone(t *testing.T) {
+	for _, want := range []string{
+		"status = CASE WHEN status = 'pending' THEN 'matched' ELSE status END",
+		"matched_at = COALESCE(matched_at, $1)",
+	} {
+		if !strings.Contains(markEbookMatchedLocallyQuery, want) {
+			t.Fatalf("query missing %q:\n%s", want, markEbookMatchedLocallyQuery)
+		}
+	}
+	if strings.Contains(markEbookMatchedLocallyQuery, "last_refreshed") {
+		t.Fatalf("promotion must not stamp last_refreshed:\n%s", markEbookMatchedLocallyQuery)
+	}
+}
+
+func locallyCompleteEbookRow() enrichmentItemRow {
+	return enrichmentItemRow{
+		ContentID:  "ebook-local-1",
+		FolderID:   7,
+		Title:      "A Book",
+		Author:     "An Author",
+		Overview:   "A useful description.",
+		PosterPath: "/library/A Book/cover.jpg",
+		Status:     "pending",
+	}
+}
+
 func TestEbookHasCompleteLocalMetadata(t *testing.T) {
 	complete := enrichmentItemRow{
 		Title:      "A Book",

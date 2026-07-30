@@ -145,8 +145,9 @@ type Enricher struct {
 	itemTimeout    time.Duration
 	queue          enrichmentQueue
 
-	loadClaimedItemsFn  func(context.Context, []EnrichmentJob) ([]enrichmentItemRow, error)
-	enrichClaimedItemFn func(context.Context, enrichmentItemRow) (EnrichmentOutcome, error)
+	loadClaimedItemsFn   func(context.Context, []EnrichmentJob) ([]enrichmentItemRow, error)
+	enrichClaimedItemFn  func(context.Context, enrichmentItemRow) (EnrichmentOutcome, error)
+	markMatchedLocallyFn func(context.Context, string) error
 }
 
 type literaryWorkLinker interface {
@@ -713,6 +714,15 @@ func (e *Enricher) enrichClaimedItem(ctx context.Context, item enrichmentItemRow
 			"component", "ebooks",
 			"content_id", item.ContentID,
 		)
+		// No provider is consulted here, but the item is identified all the
+		// same, so it still has to leave 'pending'. Skipping this promotion is
+		// what left locally complete ebooks counted as unmatched forever.
+		if err := requireEnrichmentClaim(ctx); err != nil {
+			return "", err
+		}
+		if err := e.markMatchedLocallyOrDefault(ctx, item.ContentID); err != nil {
+			return "", fmt.Errorf("promoting locally complete ebook %s: %w", item.ContentID, err)
+		}
 		return EnrichmentOutcomeSuccess, nil
 	}
 	slog.DebugContext(ctx, "ebook enrichment: remote metadata required",
@@ -1275,6 +1285,36 @@ func (e *Enricher) updateMetadataAndTimestamps(ctx context.Context, contentID st
 		return fmt.Errorf("UpdateMetadata: %w", err)
 	}
 	return e.stampLastRefreshed(ctx, contentID)
+}
+
+// markEbookMatchedLocallyQuery promotes an item whose embedded metadata already
+// satisfies every field enrichment would have fetched.
+//
+// last_refreshed is deliberately left alone: no provider was consulted, and the
+// column gates the admin quick-refresh sweep
+// (adminjob.PGLibraryRefreshItemLister), so stamping it here would make these
+// items permanently ineligible for a later refresh that could still attach a
+// provider identity.
+const markEbookMatchedLocallyQuery = `
+	UPDATE media_items
+	SET matched_at = COALESCE(matched_at, $1),
+	    status = CASE WHEN status = 'pending' THEN 'matched' ELSE status END
+	WHERE content_id = $2
+`
+
+func (e *Enricher) markMatchedLocallyOrDefault(ctx context.Context, contentID string) error {
+	if e.markMatchedLocallyFn != nil {
+		return e.markMatchedLocallyFn(ctx, contentID)
+	}
+	return e.markMatchedLocally(ctx, contentID)
+}
+
+func (e *Enricher) markMatchedLocally(ctx context.Context, contentID string) error {
+	if e.pool == nil {
+		return nil
+	}
+	_, err := e.pool.Exec(ctx, markEbookMatchedLocallyQuery, time.Now().UTC(), contentID)
+	return err
 }
 
 func (e *Enricher) stampLastRefreshed(ctx context.Context, contentID string) error {
