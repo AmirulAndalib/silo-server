@@ -208,6 +208,41 @@ coverage matrix remains authoritative.
 Still deferred, and deliberately so: multi-replica enforcement (VERIFY-3), the
 transcode-node ghost-record sweep, and a shared quota for the three download-class routes.
 
+### Post-plan hardening round 2 — 2026-07-30 (serve-path batch)
+
+A two-model adversarial review found six gaps the branch's own tests did not catch
+(GAP-10..GAP-15, all recorded in the companion coverage matrices). Four are now closed;
+the fixes changed two things this plan asserted:
+
+- **"Every byte-serving path is observed" was false**, and is now closer to true.
+  Ebook/comic/PDF reading had no meter, no transfer record, no `Refuse` and no in-flight
+  cut (GAP-11); it now has all four, cap-exempt per decision A4. Subtitle pours on all
+  three surfaces were entry-gated only and now carry a transport span, a meter and a
+  watcher. The no-proxy remote transcode hop now meters its media bodies. It is still not
+  literally *every* path: transfer-registry saturation (GAP-14) can still blind
+  download-class monitoring, and edge transcode liveness is still request-observed
+  (GAP-15).
+- **"The in-flight cut works" was false on the ABS surface and racy elsewhere.** ABS's
+  `statusRecorder` lacked `Unwrap()`, so `SetWriteDeadline` returned `ErrNotSupported`
+  and the cut was a silent no-op on every ABS route (GAP-10) — and the existing test
+  passed throughout because it called handlers directly, bypassing the middleware that
+  broke it. Fixing that alone was **not sufficient**: the same `Unwrap()` makes
+  `RollingDeadlineWriter.bump()` start working, and `bump()` pushed the cut deadline back
+  out (GAP-12). Both are fixed, the latter with a request-context `CutLatch`, because the
+  rolling writer is built *inside* the serve helpers and wraps the writer the watcher
+  holds — so it cannot be reached by `Unwrap()`, which walks the other way.
+
+**A bound this plan never stated:** the in-flight watcher polls, so a cut lands within
+one interval (**5s in production**), not instantly. Every "cuts the stream" claim in this
+plan should be read that way.
+
+Two of this plan's other claims remain **not yet true** and are tracked to later batches:
+an over-cap kill still reopens after 5m (decision A1), and monitoring still consults
+client-progress `LastActivityAt` as a liveness fallback, so "never trusts client
+progress" awaits decision A5.
+
 ## AI-use disclosure
 
 This plan was drafted with AI assistance (Claude), based on a read-only audit of the current codebase. No behavior was changed by writing it. The Status banner and As-built deltas section were added after implementation.
+
+The 2026-07-30 hardening round was a cross-model relay: Claude Opus 5 (`claude-opus-5[1m]`) planned, reconciled and reviewed; Codex `gpt-5.6-sol` at medium effort adversarially reviewed the plan, implemented it, and took one remediation round. Every design fork was decided by the maintainer. The adversarial findings on both sides and their resolution are recorded in [`stream-abuse-matrix.md`](../../architecture/stream-abuse-matrix.md) under "AI-use disclosure"; commands assume the repository root is the cwd.

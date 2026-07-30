@@ -39,10 +39,17 @@ admission refusal (`ErrTooManyStreams`, `playback/session.go`) is **immediate**.
 
 ---
 
-## Three corrections the investigation turned up (read first)
+## Corrections the investigations turned up (read first)
 
-The branch docs oversell three things. The stories below are scored against the
+The branch docs oversell several things. The stories below are scored against the
 **code**, not the plan.
+
+> **Round 2 — 2026-07-29, two-model review (Claude Opus 5 + Codex gpt-5.6-sol).**
+> Corrections 4–8 below were found by a second adversarial pass over the rebased
+> branch and are **open defects, not doc drift**. They matter because they hit the
+> two stated priorities directly: #1 "see all bytes, no invisible streams"
+> (corrections 5, 7, 8) and #2 "kill any stream" (corrections 4, 6). Affected rows in
+> the summary matrix have been downgraded accordingly.
 
 1. **The async enforcer uses the effective, group-merged limit.** An earlier
    audit found it reading raw `users.max_streams`, which is zero ("inherit") for
@@ -63,6 +70,75 @@ The branch docs oversell three things. The stories below are scored against the
    `max_transcodes` (default 2, `<=0` = unlimited) checked at admission. The one
    ffmpeg semaphore (`reconstructSem`, sized to `NumCPU`) guards **only** the
    restart-reconstruct path in `transcodenode/server.go`, **not** fresh starts.
+
+> **Update 2026-07-30 — serve-path batch landed.** Corrections **4, 5, 6 and 7 below
+> are now FIXED** (GAP-10, GAP-11, GAP-12, GAP-13); they are kept here with their
+> original wording because the summary-matrix rows and the follow-up list still
+> reference them, and because the *reason* each was invisible to the test suite is the
+> durable lesson. Correction **8 (GAP-14) remains open**, now with decision A7
+> attached. See the follow-up list at the end for what is left.
+>
+> Two claims this document makes elsewhere are **still false** and must not be
+> restored to blanket phrasing: the kill switch does not "keep a stream dead" (an
+> over-cap kill still reopens after 5m until the revocation batch lands), and
+> monitoring does not "never trust client progress" (the `LastActivityAt` fallback
+> survives until decision A5 lands). Also read every "cut" as "cut within ~5s" — the
+> in-flight watcher polls on a 5s interval.
+
+4. **The ABS in-flight kill switch does not work.** *(FIXED — `Unwrap()` added; the
+   replacement test drives the mounted router over a real socket and was confirmed to
+   fail without the fix.)* Every ABS route is wrapped by
+   `accessLog` (`audiobooks/abs/handler.go:334`), whose `statusRecorder`
+   (`audiobooks/abs/access_log.go:83`) implements `Write`, `WriteHeader` and `Hijack`
+   but **not** `Unwrap()`. `WatchAndCut` walks
+   `SessionMeteredWriter → statusRecorder` and dead-ends, so
+   `SetWriteDeadline` returns `ErrNotSupported` — an error `WatchAndCut` discards
+   (`streamrevoke/store.go:187`). The watcher then silently stops. A multi-GB
+   audiobook pour started before a `RevokeUser` runs to completion.
+   `audiobooks/abs/revocation_test.go` calls handlers directly, bypassing the
+   middleware, so the test suite reports this as working. (GAP-10)
+
+5. **Ebook, comic and PDF serving is invisible and un-killable.** *(FIXED — now
+   metered, registered in the transfer registry, refused on entry and cut in flight;
+   cap-exempt per decision A4. Note the fix does **not** reuse `guardRevocationCut` as
+   originally suggested — that wrapper keys on a `session_id` param and `?st=` token
+   this route does not carry, so it would have silently guarded nothing.)* The
+   `/api/v1/ebooks/{content_id}/files/{file_id}/read` group (`api/router.go:2417`)
+   carries only `apimw.RequireProfile`. Both `serveEbookInline`
+   (`ebook_reader.go:626`) and `serveConvertedEpub` (`ebook_convert_serve.go:160`)
+   pour whole files with no meter, no transfer record, no `Refuse` and no
+   `WatchAndCut`. `ebookReaderFormat` (`ebook_reader.go:675`) accepts `cbz`/`cbr`
+   comic archives and `pdf` — routinely 100 MB–1 GB+ each. (GAP-11)
+
+6. **The rolling write deadline can erase a revocation cut.** *(FIXED — a `CutLatch`
+   on the request context stops `bump()` from re-arming a cut socket, and the watcher
+   keeps re-applying. Pulled forward from the revocation batch because it makes
+   correction 4's fix inert: adding `Unwrap()` is what makes `SetWriteDeadline` start
+   working, which is also what makes `bump()` start working.)* `WatchAndCut` sets the
+   socket deadline to *now* once, then returns. On routes wrapped in
+   `httpstream.RollingDeadlineWriter` — native managed and direct downloads
+   (`api/handlers/downloads.go:447`) — `bump()`
+   (`httpstream/rolling_deadline.go:95`) runs before every write slice and, once the
+   15s `bumpStep` has elapsed, pushes the deadline back out to `now + 180s`. Nothing
+   re-arms the watcher. The cut is therefore reliable against a *stalled* pour and
+   unreliable against a *fast-draining* one — weakest against the ripping case it
+   exists to stop. (GAP-12)
+
+7. **Merged snapshots discard edge byte totals.** *(FIXED — merged as a max, not a sum,
+   since the two records are two observers of one pour; `DedupeSessionInfos` had the
+   same hole and was fixed too.)* `streammonitor.mergeStreams` takes
+   the record with the later `LastServedAt` wholesale and backfills owner, route,
+   client, HWAccel and position — but **not `BytesServed`**. When the central record
+   is fresher, a stream whose bytes were all poured at an edge reports `0` bytes to
+   the operator. (GAP-13)
+
+8. **Transfer-registry saturation serves unmonitored.** The registry caps at
+   `defaultMaxEntries = 10_000` (`transfers/registry.go:16`); past that `Begin`
+   returns `ErrRegistryFull` and all four call sites log at **Debug** and serve
+   anyway, discarding byte updates (`registry.go:122`). With no connection cap
+   anywhere (E28) and an unthrottled compat surface (E25/E27), an attacker can pin
+   the registry at its ceiling and blind download-class monitoring for everyone
+   else. (GAP-14)
 
 One thing the docs *under*-sell: `main` already ships a real general API rate
 limiter (`internal/ratelimit/`), enabled by default — but it is mounted only on
@@ -91,7 +167,7 @@ Jellyfin-compat surface is unthrottled (see Category E).
 | # | Abuse story | Detection | Enforcement | One-line verdict |
 |---|---|---|---|---|
 | 9 | Admin **terminates** a specific abusive live session | ✅ | ✅ | Terminate writes revocation first, keyed on sid; 202 even if no local session |
-| 10 | Admin **bans a user** (revoke all their streams) | ✅ | ✅ | `RevokeUser` cutoff kills pre-ban streams incl. in-flight |
+| 10 | Admin **bans a user** (revoke all their streams) | ✅ | ✅ | Cutoff refuses every *next* request; in-flight cut now lands on every surface within ~5s (GAP-10/GAP-12 fixed) |
 | 11 | Killed stream **reconnects** with the same token | ✅ | ✅ | Revocation outlives token; every reconnect `Refuse`d |
 | 12 | Killed stream **survives a server restart** | ✅ | ✅ | Durable Postgres mirror re-warms the kill list; monotonic expiry |
 | 13 | Kill issued **during an edge Redis outage** | ⚠️ | ⚠️ | Edge fails **open**: new kills don't reach edge until Redis recovers |
@@ -108,13 +184,14 @@ Jellyfin-compat surface is unthrottled (see Category E).
 
 | # | Abuse story | Detection | Enforcement | One-line verdict |
 |---|---|---|---|---|
-| 17 | Rip whole library via **native download** endpoints | ⚠️ | ⚠️ | Active pours/bytes visible; creation-time gate only; **no volume cap** |
+| 17 | Rip whole library via **native download** endpoints | ⚠️ | ⚠️ | Active pours/bytes visible *until the registry saturates* (GAP-14); creation-time gate only; **no volume cap** |
 | 18 | Rip via **compat `/Items/{id}/Download`** (Infuse) | ⚠️ | ❌ | Active pour visible, but **no quota at all** |
-| 18a | Rip via authenticated **ABS file/download** route | ⚠️ | ⚠️ | Active pour visible and user-cuttable; no quota |
+| 18a | Rip via authenticated **ABS file/download** route | ✅ | ⚠️ | Active pour visible and now cuttable in flight (GAP-10 fixed); still **no volume quota** |
 | 18b | Pull an **ABS public playback track** | ✅ | ✅ | Native session id is monitored/metered; session and owner kills land |
-| 18c | Pull a **public ABS RSS feed file** | ⚠️ | ⚠️ | Active pour visible; owner cutoff uses feed creation time |
+| 18c | Pull a **public ABS RSS feed file** | ✅ | ⚠️ | Active pour visible; owner cutoff uses feed creation time and the in-flight cut now lands (GAP-10 fixed); closing a feed still does not cut its current pour |
+| 18d | Rip via the **ebook/comic/PDF reader** route | ✅ | ⚠️ | Now metered, transfer-rowed, refused on entry and cut in flight (GAP-11 fixed); cap-exempt per A4 and still no volume quota |
 | 19 | Rip via **sequential direct-play GETs** (one at a time) | ⚠️ | ❌ | Cap counts concurrency, not volume; stays at 1 forever |
-| 20 | Admin **stops an in-progress rip** mid-transfer | — | ⚠️ | Branch adds `WatchAndCut` on downloads (best-effort); admin must issue the revoke |
+| 20 | Admin **stops an in-progress rip** mid-transfer | — | ✅ | `WatchAndCut` now lands on every download-class route within ~5s (GAP-10/GAP-12 fixed); admin must still issue the revoke |
 
 ### Category E — API / DB load abuse (non-stream; branch is orthogonal)
 
@@ -168,6 +245,14 @@ This *fails* as an evasion. Existence and liveness are **byte-observed**
 `LastServedAt`), never derived from client progress. Falsifying `Position` only
 corrupts a secondary display field and, at worst, changes which of the user's
 *own* over-cap sessions `selectVictims` trims first. **Detection ✅ / Enforcement ✅.**
+*Two round-2 caveats, both bounded:* (a) at the **edge**, `touchTranscodeSession`
+fires before the node is proxied (`proxy/server.go:308,317`), so hammering dead
+segment URLs advances `LastServedAt` without serving a byte — liveness there is
+request-observed, not byte-observed (GAP-15). Because the enforcer groups by user,
+this only lets an attacker choose *which of its own* streams gets trimmed. (b) the
+merged snapshot could report `0` bytes for an edge-served stream (GAP-13) — **fixed**;
+`BytesServed` is now merged as a max in both `mergeStreams` and `DedupeSessionInfos`,
+so the byte signal is sound as well as the existence signal.
 
 **A6. Rapid session churn between ticks.**
 No rate limit exists on `/start` or `/transcode/start` (the `ratelimit`
@@ -274,6 +359,25 @@ pour and served bytes are visible in the process-local admin transfer registry,
 but there is no durable history or automated consumer. **Detection ⚠️ /
 Enforcement ❌.**
 
+**D18d. Rip via the ebook/comic/PDF reader route. — SECOND-WIDEST HOLE.**
+`GET /api/v1/ebooks/{content_id}/files/{file_id}/read` (`api/router.go:2420`) is
+guarded only by `apimw.RequireProfile`. `serveEbookInline` (`ebook_reader.go:626`)
+opens the original file and hands it to `http.ServeContent` wrapped in nothing but a
+`RollingDeadlineWriter`; `serveConvertedEpub` (`ebook_convert_serve.go:160`) does the
+same for the converted EPUB. There is **no metered writer, no transfer registry
+entry, no `Refuse`, and no `WatchAndCut`** — none of the `guardRevocation*` wrappers
+used by `/stream/{session_id}` (`api/router.go:2541`) are applied. Full Range support
+is inherited from `ServeContent`. The accepted formats include `cbz`, `cbr` and `pdf`
+(`ebook_reader.go:675`), so this is a large-file path, not a text path. A user
+revoked for ripping previously kept pulling the entire comic/ebook library at full
+speed while the admin transfer list showed nothing and `BytesServed` never moved.
+
+**FIXED (GAP-11):** the route now registers a transfer record, meters its bytes,
+refuses a revoked reader on entry and cuts an in-flight pour within ~5s. It stays
+**cap-exempt** per decision A4, so reading never consumes a video stream slot, and
+there is still no *volume* quota — a patient single-threaded rip remains possible.
+**Detection ✅ / Enforcement ⚠️.**
+
 **D19. Rip via sequential direct-play GETs.**
 Playing items one at a time keeps `activeCountLocked == 1`, always under the cap.
 Because the cap counts concurrency and never cumulative bytes, sequential
@@ -369,11 +473,20 @@ visible, no CPU/process signal) / Enforcement ❌ (no aggregate cap).**
 ## What the branch genuinely delivers vs. what it does not
 
 **Delivers (and it's solid):**
-- Authoritative, **byte-observed** stream existence that a client cannot hide by
-  lying about or withholding progress (A5).
+- Authoritative, **byte-observed** stream existence on the *playback* surfaces that a
+  client cannot hide by lying about or withholding progress (A5) — with the two
+  bounded caveat GAP-15 noted there, and now **including** ebooks (GAP-11 fixed) and
+  subtitle pours. GAP-13 is fixed, so merged byte totals are trustworthy too. Still
+  **not** guaranteed under transfer-registry saturation (GAP-14, open).
 - A durable, restart-surviving, reconnect-proof **kill switch** for a *specific
-  session* or a *user*, enforced on every serve surface (native, compat, edge,
-  transcode node) via one shared `Refuse` + `WatchAndCut` (B9–B12, D20).
+  session* or a *user*, via one shared `Refuse` + `WatchAndCut` (B9–B12, D20).
+  `Refuse` — the next-request half — holds everywhere it is mounted. The
+  `WatchAndCut` half was weaker than previously documented — it no-op'd on all ABS
+  routes (GAP-10), was racy on rolling-deadline routes (GAP-12) and was absent from
+  ebooks (GAP-11) — and **all three are now fixed**, so it lands on every mounted
+  surface. Two honest bounds remain: the cut takes up to one **~5s** watch tick, and it
+  does **not** "keep a stream dead" — an over-cap kill still reopens after 5m until
+  decision A1 lands.
 - Immediate **synchronous admission** refusal of over-cap starts, and an async
   over-cap reconciler for the multi-node picture (A1, A2, C15) — *when a per-user
   cap is set*.
@@ -390,7 +503,72 @@ visible, no CPU/process signal) / Enforcement ❌ (no aggregate cap).**
   (E25–E28) — rate limiter has real coverage gaps.
 - **CPU/transcode exhaustion** (E29) — no aggregate cap.
 
+## Settled design decisions (2026-07-30)
+
+These were open forks blocking the remaining batches. All are now decided, so follow-up
+issues inherit them rather than re-litigating.
+
+| # | Question | Decision |
+|---|---|---|
+| **A1** | Over-cap enforcement model | **Long revocation** matching the token's reconstructable lifetime, so an over-cap kill stops reopening every 5m. **Must not ship before the tracker-lifecycle batch** — it removes the self-healing property that currently limits the damage of a wrong count, and every known source of a wrong count is in that batch. |
+| **A2** | Revocation state model | **Durable tombstones** — an independent `RevokedAt`/`ExpiresAt` merge *plus* a durable tombstone so an un-ban survives a restart and cannot be re-`Upsert`ed by a stale replica. One Goose migration. |
+| **A3** | Credential identity for the user cutoff | **Token `iat` everywhere.** Replace the fresh `time.Now()` that compat and native fallback paths pass at request entry with the token's issued-at, so a pre-cutoff login cannot look post-cutoff and escape the kill. Per-login logout cuts stay out of scope (they need the authorization-generation option). |
+| **A4** | What counts as a "stream" | **Observe + make killable, keep cap-exempt** for the ABS bare file route and ebook/comic/PDF reading. Neither consumes a video stream slot. **Implemented.** |
+| **A5** | Liveness source of truth | **Separate server-observed liveness entirely.** Client progress becomes UI metadata and never feeds enforcement or reaping; the `LastActivityAt` fallback for `LastServedAt` is removed. This is what makes "never trusts client progress" true — it is **not** true today. |
+| **A6** | Multi-replica visibility | **Publish every integrated stream to Redis** so all replica enforcers share one picture. Fixes the incomplete-input root cause; snapshot staleness handled by re-reading at kill time rather than a distributed lock. |
+| **A7** | Fail-open vs fail-closed monitoring | **Fail closed + connection cap.** See follow-up 0e. |
+| **A8** | Scope | **Split.** The serve-path, capability and docs work lands first; tracker lifecycle → revocation state → liveness/replicas → re-stream heuristic follow in that dependency order. |
+
+A new finding recorded while implementing A4, for the A3 batch: `streamRequestIdentity`
+verifies a stream token's signature but never checks that the token's `SessionID`
+matches the `session_id` in the URL, so a valid token for one session can supply
+identity on another session's route. It belongs with A3 rather than being fragmented
+across two batches.
+
 ## Recommended follow-ups (prioritized by exposure)
+
+**Round-2 defects come first — these are open bugs in shipped behavior, not
+enhancements.** In rough fix-cost order:
+
+0a. ~~**Add `Unwrap()` to `abs.statusRecorder`**~~ — **DONE.** Plus `WatchAndCut` now
+    logs (once per watcher) rather than discarding a failed `SetWriteDeadline`, and the
+    replacement test drives the *mounted* router over a real socket. Verified
+    non-vacuous: it fails if `Unwrap()` is removed again. (GAP-10)
+0b. ~~**Wire the ebook routes into the stream kill switch and the transfer registry**~~
+    — **DONE**, cap-exempt per decision A4. ⚠️ **The original advice in this line —
+    "reuse `guardRevocationCut`" — was wrong and was not followed.** That wrapper reads
+    `chi.URLParam(r, "session_id")`, which the ebook route does not have (it would pass
+    `""`), and takes identity from `streamRequestIdentity`, which looks for a `?st=`
+    stream token the route never carries. It compiles and silently guards nothing. The
+    ebook fix takes identity from the profile/auth context and otherwise follows the ABS
+    file-handler idiom. (GAP-11)
+0c. ~~**Make the revocation cut survive the rolling deadline**~~ — **DONE** via a
+    `CutLatch` on the request context. Note the sticky-flag-on-`RollingDeadlineWriter`
+    option suggested here could not be implemented as written: the rolling writer is
+    constructed *inside* `ServeDirectPlay`/`ServeRemux` and wraps the writer the watcher
+    holds, so it sits *above* the watcher and `Unwrap()` (which walks toward the socket)
+    can never reach it. Hence the context side channel. The re-applying watcher was also
+    kept, as belt-and-braces. (GAP-12)
+0d. ~~**Merge `BytesServed` as a max, not wholesale**~~ — **DONE** in both
+    `mergeStreams` and `DedupeSessionInfos` (GAP-13). **Still open:** advance the edge
+    transcode record from real bytes rather than request entry (GAP-15) — deferred to
+    the tracker-lifecycle batch, which also fixes the overlapping-request defect that
+    makes edge record lifecycle unsafe to touch piecemeal.
+0e. **Decide the registry-saturation policy explicitly** (GAP-14) — **DECIDED (A7),
+    not yet implemented:** fail *closed* for download-class pours once the registry is
+    full, **and** add a per-user/credential concurrent-connection cap (E28) so
+    saturation is unreachable by a single actor in the first place. Scheduled for the
+    liveness/replica batch. Today it still fails open, logging at Debug at the call
+    sites.
+0f. **Bound the kill-list propagation lock.** `RevokeWithWarnings` holds `opMu`
+    across durable-Postgres and Redis I/O and strips the caller's deadline with
+    `context.WithoutCancel` (`streamrevoke/store.go:313,330`). A hung Redis or an
+    exhausted PG pool blocks every subsequent revoke/unrevoke indefinitely. The hot
+    read path (`IsRevoked`) uses a different lock and stays fast, so playback is
+    unaffected — but the operator's ability to issue *new* kills is not. Give the
+    detached propagation its own bounded context.
+
+Then, as originally scoped:
 
 1. **Download controls phase 2:** add per-download kill and a standing per-user
    download block. The existing user revocation is a cutoff, not a ban: it cuts
@@ -414,7 +592,59 @@ visible, no CPU/process signal) / Enforcement ❌ (no aggregate cap).**
 
 ## AI-use disclosure
 
-This assessment was produced with AI assistance (Claude), from a read-only audit of
-the `feat/sauron-async-enforcer` branch and current `main`. No code behavior was
-changed. Findings cite the code as of the audit; the three corrections above are
-where the branch's own plan/coverage docs overstate what the shipped code does.
+This assessment was produced with AI assistance, from a read-only audit of the
+`feat/sauron-async-enforcer` branch and current `main`. No code behavior was changed.
+Findings cite the code as of the audit; the corrections above are where the branch's
+own plan/coverage docs overstate what the shipped code does.
+
+Round 1 (corrections 1–3) was produced with Claude. Round 2 (corrections 4–8, dated
+2026-07-29) was a **two-model** pass: Claude Opus 5 and Codex `gpt-5.6-sol` reviewed
+the rebased branch independently, and every finding recorded here was re-verified
+against the code by hand before being written down. Corrections 4, 6, 7 and the
+`opMu` follow-up (0f) originated with Codex; corrections 5 and 8 were found by both
+models independently. Two Codex claims were **rejected** on verification and are
+deliberately not recorded above: that chi's `middleware.Compress` wrapper breaks the
+`Unwrap` chain (chi v5.2.5 implements `Unwrap()` at `middleware/compress.go:374`),
+and that client progress reports advance the central `Session.LastServedAt` (only
+`BeginTransport`/`EndTransport`/`AddServedBytes` write it — the real mechanism is the
+edge `Touch`, recorded as GAP-15).
+
+Round 3 (2026-07-30) implemented corrections 4–7 as a **cross-model relay**: Claude
+Opus 5 (`claude-opus-5[1m]`) planned, reconciled and reviewed; Codex `gpt-5.6-sol` at
+medium effort adversarially reviewed the plan, implemented it, and took one remediation
+round. Involvement classification: **AI-assisted implementation with human-directed
+scope and AI cross-review**; every design fork (A1–A8) was decided by the maintainer,
+not by either model.
+
+Adversarial findings and their resolution, recorded because the disclosure standard
+requires it:
+
+- Codex's plan review found the decisive issue: fixing GAP-10 alone is **inert**,
+  because the same `Unwrap()` that makes `SetWriteDeadline` work also makes
+  `RollingDeadlineWriter.bump()` work, and `bump()` erases the cut. GAP-12 was pulled
+  forward from a later batch as a result. **Accepted.**
+- Codex correctly refuted two claims in the Claude plan: that native subtitle URLs carry
+  a `?st=` stream token (they do not — `subtitleStreamURL` emits only `file_id`), and
+  that the `transfers` capability belonged on `/admin/sessions/capabilities` (it belongs
+  to `/admin/node-sessions`, which is separately gated). It also correctly refuted a
+  claimed "latent nil bug" in the ABS transfer defer — `Registry.End` guards a nil
+  receiver. **All accepted; the plan was corrected before implementation.**
+- Claude's review of the Codex implementation found five defects, all confirmed by
+  reading or by running the tests: a **failing real-socket ebook test** (Codex's sandbox
+  could not run `httptest` listeners, so every real-socket test it wrote was
+  unexecuted); **GAP-12 left unfixed on the proxy edge remux path**; Warn-log spam every
+  5s from the now-perpetual watcher; `HandleVideoStream` still using three separate
+  `time.Now()` values — the exact race Codex itself had raised and fixed only in the
+  subtitle path; and subtitle metering counting error-response bodies. **All five fixed
+  in one remediation round and re-verified here.**
+- Claude's Batch-5 capability code was then reviewed by Codex, which found that the
+  vocabulary drift test was not genuinely bidirectional — it sampled rejected strings,
+  so a kind newly *accepted* by the parser could go unadvertised. **Accepted:** the
+  parser and the advertisement now read one shared map.
+
+Verification note: `pnpm` is absent on the host used for this round, so `make build`,
+`pnpm run lint` and `pnpm run format:check` could not be run locally and must come from
+CI. No frontend files were changed. The `internal/access` and `internal/jellycompat`
+test packages **do not compile on `main`** (stale `UserStore` doubles missing
+`GetOnboardingState`), so the compat changes in this round are **verified by reading
+only** — CI cannot exercise them either until that is fixed separately.
