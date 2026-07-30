@@ -335,7 +335,7 @@ func ServeRemux(w http.ResponseWriter, r *http.Request, filePath, outputFormat s
 func ServeRemuxWithDVMode(w http.ResponseWriter, r *http.Request, filePath, outputFormat string, seekSeconds float64, transcodeAudio bool, audioTrackIndex int, dvProfile int, mode RemuxDVMode, ffmpegPath string) error {
 	// Remux output streams for the length of the title; roll the write
 	// deadline with progress instead of the server's absolute WriteTimeout.
-	w = httpstream.NewRollingDeadlineWriter(w)
+	w = httpstream.NewRollingDeadlineWriterCtx(r.Context(), w)
 	// Check file exists before starting ffmpeg to return a proper 404.
 	// Headers must be written before streaming begins, so we can't detect
 	// ffmpeg errors after WriteHeader(200) has been sent.

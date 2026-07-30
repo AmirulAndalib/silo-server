@@ -1,14 +1,20 @@
 package streamrevoke
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/cache"
+	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -18,6 +24,107 @@ var errFakeDurable = errors.New("fake durable failure")
 // newMemStore returns a memory-only Store (no Redis, no bus, no durable mirror).
 func newMemStore() *Store {
 	return New(Options{})
+}
+
+type cutDeadlineWriter struct {
+	mu        sync.Mutex
+	header    http.Header
+	deadlines []time.Time
+}
+
+func (w *cutDeadlineWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *cutDeadlineWriter) Write(p []byte) (int, error) { return len(p), nil }
+func (w *cutDeadlineWriter) WriteHeader(int)             {}
+func (w *cutDeadlineWriter) SetWriteDeadline(deadline time.Time) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.deadlines = append(w.deadlines, deadline)
+	return nil
+}
+
+func (w *cutDeadlineWriter) deadlineCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.deadlines)
+}
+
+func TestImmediateCutLatchesBeforeRollingWriterConstruction(t *testing.T) {
+	s := newMemStore()
+	if err := s.RevokeSession(context.Background(), "already-cut", "test"); err != nil {
+		t.Fatal(err)
+	}
+	latch := &httpstream.CutLatch{}
+	ctx := httpstream.WithCutLatch(context.Background(), latch)
+	base := &cutDeadlineWriter{}
+
+	stop := s.WatchAndCutContext(ctx, base, "already-cut", 1, time.Now())
+	defer stop()
+	if !latch.IsCut() {
+		t.Fatal("immediate revocation did not latch the terminal cut")
+	}
+	if got := base.deadlineCount(); got != 1 {
+		t.Fatalf("cut deadlines = %d, want 1", got)
+	}
+
+	rolling := httpstream.NewRollingDeadlineWriterCtx(ctx, base)
+	if _, err := rolling.Write([]byte("must not rearm")); err != nil {
+		t.Fatal(err)
+	}
+	if got := base.deadlineCount(); got != 1 {
+		t.Fatalf("deadlines after rolling writer = %d, want cut only", got)
+	}
+}
+
+func TestWatchAndCutKeepsReapplyingUntilStopped(t *testing.T) {
+	const watchInterval = 5 * time.Millisecond
+	s := New(Options{WatchInterval: watchInterval})
+	if err := s.RevokeSession(context.Background(), "keep-cut", "test"); err != nil {
+		t.Fatal(err)
+	}
+	base := &cutDeadlineWriter{}
+	stop := s.WatchAndCutContext(context.Background(), base, "keep-cut", 1, time.Now())
+
+	deadline := time.Now().Add(time.Second)
+	for base.deadlineCount() < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := base.deadlineCount(); got < 3 {
+		stop()
+		t.Fatalf("deadline applications = %d, want immediate cut plus ticker reapplications", got)
+	}
+	stop()
+	stoppedAt := base.deadlineCount()
+	time.Sleep(3 * watchInterval)
+	if got := base.deadlineCount(); got != stoppedAt {
+		t.Fatalf("deadline applications after stop = %d, want %d", got, stoppedAt)
+	}
+}
+
+func TestWatchAndCutLogsUnsupportedDeadlineOnlyOnce(t *testing.T) {
+	const watchInterval = 5 * time.Millisecond
+	s := New(Options{WatchInterval: watchInterval})
+	if err := s.RevokeSession(context.Background(), "unsupported-cut", "test"); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	stop := s.WatchAndCutContext(context.Background(), httptest.NewRecorder(), "unsupported-cut", 1, time.Now())
+	time.Sleep(3 * watchInterval)
+	stop()
+
+	const message = "stream cut could not set write deadline; in-flight pour continues until its next request"
+	if got := strings.Count(logs.String(), message); got != 1 {
+		t.Fatalf("warning count = %d, want 1; logs: %s", got, logs.String())
+	}
 }
 
 // fakeDurable is an in-memory DurableStore double for exercising the durable

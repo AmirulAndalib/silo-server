@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/cache"
+	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -96,20 +97,22 @@ type DurableStore interface {
 
 // Options configures a Store.
 type Options struct {
-	Redis        *redis.Client  // nil => memory-only (integrated single-node)
-	Bus          cache.EventBus // nil => no push propagation
-	Durable      DurableStore   // nil => no durable mirror
-	PollInterval time.Duration  // default 60s
-	DefaultTTL   time.Duration  // default 24h
+	Redis         *redis.Client  // nil => memory-only (integrated single-node)
+	Bus           cache.EventBus // nil => no push propagation
+	Durable       DurableStore   // nil => no durable mirror
+	PollInterval  time.Duration  // default 60s
+	WatchInterval time.Duration  // default 5s
+	DefaultTTL    time.Duration  // default 24h
 }
 
 // Store holds the in-memory revocation cache and its propagation plumbing.
 type Store struct {
-	rdb          *redis.Client
-	bus          cache.EventBus
-	durable      DurableStore
-	pollInterval time.Duration
-	defaultTTL   time.Duration
+	rdb           *redis.Client
+	bus           cache.EventBus
+	durable       DurableStore
+	pollInterval  time.Duration
+	defaultTTL    time.Duration
+	watchInterval time.Duration
 
 	opMu             sync.Mutex
 	mu               sync.RWMutex
@@ -126,12 +129,16 @@ func New(opts Options) *Store {
 	if opts.DefaultTTL <= 0 {
 		opts.DefaultTTL = defaultTTL
 	}
+	if opts.WatchInterval <= 0 {
+		opts.WatchInterval = 5 * time.Second
+	}
 	return &Store{
 		rdb:              opts.Redis,
 		bus:              opts.Bus,
 		durable:          opts.Durable,
 		pollInterval:     opts.PollInterval,
 		defaultTTL:       opts.DefaultTTL,
+		watchInterval:    opts.WatchInterval,
 		items:            make(map[Key]Revocation),
 		tombstones:       make(map[Key]time.Time),
 		tombstoneExpires: make(map[Key]time.Time),
@@ -174,24 +181,44 @@ func (s *Store) Refuse(w http.ResponseWriter, sessionID string, userID int, star
 // jellycompat), so the cut logic lives in one place. HLS/transcode paths don't
 // need it — per-segment Refuse stops them within one segment.
 //
-// Best-effort: if the ResponseWriter chain doesn't support write deadlines the
-// deadline set is a no-op and the stream still stops on its next request via
-// Refuse. Never wraps the writer, so it does not disable sendfile.
+// If the ResponseWriter chain doesn't support write deadlines, the failure is
+// logged and the stream still stops on its next request via Refuse. A context
+// cut latch also prevents rolling deadline writers from re-arming the socket.
+// This helper never wraps the writer, so it does not disable sendfile.
 // startedAt follows IsRevoked's contract; a pour in flight when a user kill
 // lands always predates that kill, so passing the request's credential/entry
 // time makes mid-pour user kills cut correctly on every surface.
 func (s *Store) WatchAndCut(w http.ResponseWriter, sessionID string, userID int, startedAt time.Time) func() {
+	return s.WatchAndCutContext(context.Background(), w, sessionID, userID, startedAt)
+}
+
+// WatchAndCutContext is WatchAndCut with the request context used for logging
+// and for resolving the rolling-deadline cut latch.
+func (s *Store) WatchAndCutContext(ctx context.Context, w http.ResponseWriter, sessionID string, userID int, startedAt time.Time) func() {
 	if s == nil {
 		return func() {}
 	}
-	cut := func() { _ = http.NewResponseController(w).SetWriteDeadline(time.Now()) }
+	latch := httpstream.CutLatchFrom(ctx)
+	var warnOnce sync.Once
+	cut := func() {
+		latch.Cut()
+		if err := http.NewResponseController(w).SetWriteDeadline(time.Now()); err != nil {
+			warnOnce.Do(func() {
+				slog.WarnContext(ctx, "stream cut could not set write deadline; in-flight pour continues until its next request",
+					"component", "streamrevoke",
+					"session", sessionID,
+					"user", userID,
+					"error", err,
+				)
+			})
+		}
+	}
 	if s.IsRevoked(sessionID, userID, startedAt) {
 		cut()
-		return func() {}
 	}
 	done := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(5 * time.Second)
+		ticker := time.NewTicker(s.watchInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -200,7 +227,6 @@ func (s *Store) WatchAndCut(w http.ResponseWriter, sessionID string, userID int,
 			case <-ticker.C:
 				if s.IsRevoked(sessionID, userID, startedAt) {
 					cut()
-					return
 				}
 			}
 		}

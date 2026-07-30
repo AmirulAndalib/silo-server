@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -70,30 +71,76 @@ type RollingDeadlineWriter struct {
 	step     time.Duration
 	lastBump time.Time
 	disabled bool
+	latch    *CutLatch
 
 	statusCode    int
 	bytesWritten  int64
 	firstWriteErr error
 }
 
+// CutLatch records that a stream has been terminally cut. Once latched, a
+// RollingDeadlineWriter must never push the write deadline back out again: the
+// cut is a deliberate hang-up, not a stall.
+type CutLatch struct {
+	cut atomic.Bool
+}
+
+func (l *CutLatch) Cut() {
+	if l != nil {
+		l.cut.Store(true)
+	}
+}
+
+func (l *CutLatch) IsCut() bool {
+	return l != nil && l.cut.Load()
+}
+
+type cutLatchContextKey struct{}
+
+// WithCutLatch carries l on ctx so rolling writers constructed inside serving
+// helpers can observe a cut made by a watcher around an inner writer.
+func WithCutLatch(ctx context.Context, l *CutLatch) context.Context {
+	return context.WithValue(ctx, cutLatchContextKey{}, l)
+}
+
+// CutLatchFrom returns the stream cut latch carried by ctx, if any.
+func CutLatchFrom(ctx context.Context) *CutLatch {
+	if ctx == nil {
+		return nil
+	}
+	l, _ := ctx.Value(cutLatchContextKey{}).(*CutLatch)
+	return l
+}
+
 // NewRollingDeadlineWriter wraps w with the configured stall window.
 func NewRollingDeadlineWriter(w http.ResponseWriter) *RollingDeadlineWriter {
-	return newRollingDeadlineWriter(w, StallWindow(), bumpStep)
+	return newRollingDeadlineWriterWithLatch(w, StallWindow(), bumpStep, nil)
+}
+
+// NewRollingDeadlineWriterCtx wraps w and observes a terminal cut latch carried
+// by ctx. Callers without a revocable request can use NewRollingDeadlineWriter.
+func NewRollingDeadlineWriterCtx(ctx context.Context, w http.ResponseWriter) *RollingDeadlineWriter {
+	return newRollingDeadlineWriterWithLatch(w, StallWindow(), bumpStep, CutLatchFrom(ctx))
 }
 
 func newRollingDeadlineWriter(w http.ResponseWriter, window, step time.Duration) *RollingDeadlineWriter {
+	return newRollingDeadlineWriterWithLatch(w, window, step, nil)
+}
+
+func newRollingDeadlineWriterWithLatch(w http.ResponseWriter, window, step time.Duration, latch *CutLatch) *RollingDeadlineWriter {
 	s := &RollingDeadlineWriter{
 		w:      w,
 		rc:     http.NewResponseController(w),
 		window: window,
 		step:   step,
+		latch:  latch,
 	}
 	s.bump()
 	return s
 }
 
 func (s *RollingDeadlineWriter) bump() {
-	if s.disabled {
+	if s.disabled || s.latch.IsCut() {
 		return
 	}
 	now := time.Now()
@@ -102,6 +149,13 @@ func (s *RollingDeadlineWriter) bump() {
 	}
 	if err := s.rc.SetWriteDeadline(now.Add(s.window)); err != nil {
 		s.disabled = true
+		return
+	}
+	// Close the check/set race with a concurrent cut: if the watcher latched
+	// after the first check but before the future deadline landed, immediately
+	// restore the terminal deadline instead of leaving the socket re-armed.
+	if s.latch.IsCut() {
+		_ = s.rc.SetWriteDeadline(time.Now())
 		return
 	}
 	s.lastBump = now

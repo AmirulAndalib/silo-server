@@ -57,7 +57,7 @@ func MimeFromExtension(name string) string {
 func ServeDirectPlay(w http.ResponseWriter, r *http.Request, filePath string) error {
 	// Media bodies routinely take longer than the server's absolute
 	// WriteTimeout; roll the write deadline with progress instead.
-	streamWriter := httpstream.NewRollingDeadlineWriter(w)
+	streamWriter := httpstream.NewRollingDeadlineWriterCtx(r.Context(), w)
 	w = streamWriter
 	f, err := os.Open(filePath)
 	if err != nil {

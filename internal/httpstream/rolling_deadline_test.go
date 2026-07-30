@@ -211,6 +211,49 @@ func TestWriteOutcomeCompletedAndCounted(t *testing.T) {
 	}
 }
 
+type recordingDeadlineWriter struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (w *recordingDeadlineWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines = append(w.deadlines, deadline)
+	return nil
+}
+
+func TestRollingDeadlineWriterNeverRearmsAfterCut(t *testing.T) {
+	base := &recordingDeadlineWriter{ResponseRecorder: httptest.NewRecorder()}
+	latch := &CutLatch{}
+	sw := newRollingDeadlineWriterWithLatch(base, time.Minute, 0, latch)
+	if got := len(base.deadlines); got != 1 {
+		t.Fatalf("constructor deadlines = %d, want 1", got)
+	}
+
+	latch.Cut()
+	sw.bump()
+	if _, err := sw.Write([]byte("post-cut")); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(base.deadlines); got != 1 {
+		t.Fatalf("deadlines after cut = %d, want constructor deadline only", got)
+	}
+}
+
+func TestRollingDeadlineWriterStartsLatchedWithoutBump(t *testing.T) {
+	base := &recordingDeadlineWriter{ResponseRecorder: httptest.NewRecorder()}
+	latch := &CutLatch{}
+	latch.Cut()
+	ctx := WithCutLatch(context.Background(), latch)
+
+	sw := newRollingDeadlineWriterWithLatch(base, time.Minute, 0, CutLatchFrom(ctx))
+	if _, err := sw.Write([]byte("still no bump")); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(base.deadlines); got != 0 {
+		t.Fatalf("deadlines = %d, want 0 for pre-latched writer", got)
+	}
+}
+
 func TestServeContentReadFromOutcomeCompletedAndCounted(t *testing.T) {
 	const totalSize = 2 << 20
 	filePath := filepath.Join(t.TempDir(), "source.bin")
