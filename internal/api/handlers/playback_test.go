@@ -1,17 +1,21 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -34,6 +38,32 @@ import (
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type recordingProxySessionManager struct {
+	*playback.SessionManager
+	events []string
+}
+
+func (m *recordingProxySessionManager) BeginTransport(sessionID string) error {
+	m.events = append(m.events, "begin")
+	return m.SessionManager.BeginTransport(sessionID)
+}
+
+func (m *recordingProxySessionManager) EndTransport(sessionID string) error {
+	m.events = append(m.events, "end")
+	return m.SessionManager.EndTransport(sessionID)
+}
+
+func (m *recordingProxySessionManager) AddServedBytes(sessionID string, n int64) error {
+	m.events = append(m.events, fmt.Sprintf("bytes:%d", n))
+	return m.SessionManager.AddServedBytes(sessionID, n)
+}
 
 type testUserStoreProvider struct {
 	store userstore.UserStore
@@ -1978,6 +2008,96 @@ func TestHandleChangeAudioTrack_RemoteTranscodeNodeUnreachableSurfacesError(t *t
 	// never lies to the client about an audio switch that didn't happen.
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("change status = %d, want %d, body = %s", rr.Code, http.StatusBadGateway, rr.Body.String())
+	}
+}
+
+func TestProxyToTranscodeNodeMetersOnlyMediaBodiesAndFlushesBeforeTransportEnd(t *testing.T) {
+	const body = "segment-bytes"
+	previousTransport := http.DefaultClient.Transport
+	http.DefaultClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(body)),
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultClient.Transport = previousTransport })
+
+	for _, tc := range []struct {
+		name       string
+		path       string
+		wantBytes  int64
+		wantEvents []string
+	}{
+		{
+			name:       "segment",
+			path:       "/transcode/s/segment/part.m4s",
+			wantBytes:  int64(len(body)),
+			wantEvents: []string{"begin", fmt.Sprintf("bytes:%d", len(body)), "end"},
+		},
+		{name: "playlist body", path: "/transcode/s/master.m3u8"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := &recordingProxySessionManager{SessionManager: playback.NewSessionManager(0, 0)}
+			session, err := manager.StartSession(1, "profile-1", 42, playback.PlayTranscode, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler := NewPlaybackHandler(manager)
+			handler.JWTSecret = "test-secret"
+			req := httptest.NewRequest(http.MethodGet, "/stream/"+session.ID, nil)
+			routeCtx := chi.NewRouteContext()
+			routeCtx.URLParams.Add("session_id", session.ID)
+			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+			rec := httptest.NewRecorder()
+
+			handler.proxyToTranscodeNode(rec, req, "http://transcode.test", tc.path)
+
+			got, err := manager.GetSession(session.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.BytesServed != tc.wantBytes {
+				t.Fatalf("bytes served = %d, want %d", got.BytesServed, tc.wantBytes)
+			}
+			if !slices.Equal(manager.events, tc.wantEvents) {
+				t.Fatalf("events = %v, want %v", manager.events, tc.wantEvents)
+			}
+		})
+	}
+}
+
+type failingCopyBody struct{}
+
+func (failingCopyBody) Read([]byte) (int, error) { return 0, errors.New("copy failed") }
+func (failingCopyBody) Close() error             { return nil }
+
+func TestProxyToTranscodeNodeLogsCopyFailure(t *testing.T) {
+	previousTransport := http.DefaultClient.Transport
+	http.DefaultClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       failingCopyBody{},
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultClient.Transport = previousTransport })
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	handler := NewPlaybackHandler(failingSessionManager{})
+	req := httptest.NewRequest(http.MethodGet, "/stream/session-1", nil)
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("session_id", "session-1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+
+	handler.proxyToTranscodeNode(httptest.NewRecorder(), req, "http://transcode.test", "/transcode/session-1/segment/part.m4s")
+
+	if !strings.Contains(logs.String(), "copy transcode node response") || !strings.Contains(logs.String(), "copy failed") {
+		t.Fatalf("copy failure log missing: %s", logs.String())
 	}
 }
 

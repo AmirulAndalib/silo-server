@@ -157,7 +157,7 @@ func serveConvertedEpub(w http.ResponseWriter, r *http.Request, file *models.Med
 
 	name := strings.TrimSuffix(filepath.Base(file.FilePath), filepath.Ext(file.FilePath)) + ".epub"
 	setConvertedEpubHeaders(w, file, key)
-	http.ServeContent(httpstream.NewRollingDeadlineWriter(w), r, name, stat.ModTime(), f)
+	http.ServeContent(httpstream.NewRollingDeadlineWriterCtx(r.Context(), w), r, name, stat.ModTime(), f)
 	return nil
 }
 

@@ -227,6 +227,8 @@ func mergeStreams(streams []LiveStream) []LiveStream {
 		if winner.Position == 0 {
 			winner.Position = other.Position
 		}
+		// These are observers of one pour, not independent byte sources.
+		winner.BytesServed = max(winner.BytesServed, other.BytesServed)
 		bySession[st.SessionID] = winner
 	}
 	out := make([]LiveStream, 0, len(bySession))
@@ -278,6 +280,7 @@ func DedupeSessionInfos(infos []nodesessions.SessionInfo) []nodesessions.Session
 		if winner.Position == 0 {
 			winner.Position = other.Position
 		}
+		winner.BytesServed = max(winner.BytesServed, other.BytesServed)
 		bySession[in.SessionID] = winner
 	}
 	out := make([]nodesessions.SessionInfo, 0, len(bySession))

@@ -3889,9 +3889,26 @@ func (h *PlaybackHandler) proxyToTranscodeNode(w http.ResponseWriter, r *http.Re
 	}
 	// Proxied transcode output can stream past the server's absolute
 	// WriteTimeout; roll the write deadline with progress instead.
-	sw := httpstream.NewRollingDeadlineWriter(w)
+	dst := w
+	var metered *playback.SessionMeteredWriter
+	if !strings.HasSuffix(path, ".m3u8") {
+		if err := h.sessionMgr.BeginTransport(sessionID); err == nil {
+			defer func() { _ = h.sessionMgr.EndTransport(sessionID) }()
+		}
+		recorder, _ := h.sessionMgr.(playback.ServedBytesRecorder)
+		metered = playback.NewSessionMeteredWriter(w, recorder, sessionID)
+		defer func() { _ = metered.Close() }()
+		dst = metered
+	}
+	sw := httpstream.NewRollingDeadlineWriterCtx(r.Context(), dst)
 	sw.WriteHeader(resp.StatusCode)
-	io.Copy(sw, resp.Body)
+	if _, copyErr := io.Copy(sw, resp.Body); copyErr != nil {
+		slog.DebugContext(r.Context(), "copy transcode node response",
+			"component", "api",
+			"playback_session_id", sessionID,
+			"error", copyErr,
+		)
+	}
 }
 
 // maybeStartThrottler reads throttle settings and starts the throttler if enabled.

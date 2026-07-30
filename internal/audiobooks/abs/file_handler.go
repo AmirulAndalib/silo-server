@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/transfers"
 )
@@ -56,11 +57,10 @@ func trackInoFor(contentID string, fileIdx int) string {
 //   - Set Content-Disposition: attachment on /download paths to encourage
 //     browser save-to-disk / mobile offline-save behaviour.
 //
-// This is a download-class route: like native and Jellyfin-compatible
-// downloads it is exempt from the live-stream cap and never enters
-// streammonitor. Its active pour is exposed through the separate process-local
-// transfer registry. It is not yet covered by a download quota and remains
-// revocable before and during the file pour.
+// Both forms serve real playback bytes, but per A4 they are deliberately
+// exempt from the live-stream cap and absent from streammonitor. Each active
+// pour is still metered, registered in the process-local transfer registry,
+// and revocable before and during transfer.
 func (h *Handler) handleFileStream(w http.ResponseWriter, r *http.Request) {
 	a, ok := absAuthFrom(r)
 	if !ok || a.UserID == "" {
@@ -72,6 +72,7 @@ func (h *Handler) handleFileStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	r = r.WithContext(httpstream.WithCutLatch(r.Context(), &httpstream.CutLatch{}))
 	if h.deps.Revocation != nil && h.deps.Revocation.Refuse(w, "", userID, a.IssuedAt) {
 		return
 	}
@@ -156,7 +157,7 @@ func (h *Handler) handleFileStream(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = metered.Close() }()
 
 	if h.deps.Revocation != nil {
-		stop := h.deps.Revocation.WatchAndCut(metered, "", userID, a.IssuedAt)
+		stop := h.deps.Revocation.WatchAndCutContext(r.Context(), metered, "", userID, a.IssuedAt)
 		defer stop()
 	}
 	if err := playback.ServeDirectPlay(metered, r, mediaFile.FilePath); err != nil {
@@ -221,6 +222,7 @@ func (h *Handler) handlePublicTrack(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session owner invalid", http.StatusForbidden)
 		return
 	}
+	r = r.WithContext(httpstream.WithCutLatch(r.Context(), &httpstream.CutLatch{}))
 	if h.deps.Revocation != nil && h.deps.Revocation.Refuse(w, sid, userID, sess.StartedAt) {
 		return
 	}
@@ -251,7 +253,7 @@ func (h *Handler) handlePublicTrack(w http.ResponseWriter, r *http.Request) {
 	recorder, _ := h.deps.NativeSessions.(playback.ServedBytesRecorder)
 	metered := playback.NewSessionMeteredWriter(w, recorder, sid)
 	defer func() { _ = metered.Close() }()
-	stop := h.deps.Revocation.WatchAndCut(metered, sid, userID, sess.StartedAt)
+	stop := h.deps.Revocation.WatchAndCutContext(r.Context(), metered, sid, userID, sess.StartedAt)
 	defer stop()
 	_ = playback.ServeDirectPlay(metered, r, mediaFile.FilePath)
 }

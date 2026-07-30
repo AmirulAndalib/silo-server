@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/oklog/ulid/v2"
 
+	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/transfers"
@@ -232,6 +233,7 @@ func (h *Handler) handlePublicFeedFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "feed not found", http.StatusNotFound)
 		return
 	}
+	r = r.WithContext(httpstream.WithCutLatch(r.Context(), &httpstream.CutLatch{}))
 	if h.deps.Revocation != nil && h.deps.Revocation.Refuse(w, "", userID, f.CreatedAt) {
 		return
 	}
@@ -266,7 +268,7 @@ func (h *Handler) handlePublicFeedFile(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = metered.Close() }()
 
 	if h.deps.Revocation != nil {
-		stop := h.deps.Revocation.WatchAndCut(metered, "", userID, f.CreatedAt)
+		stop := h.deps.Revocation.WatchAndCutContext(r.Context(), metered, "", userID, f.CreatedAt)
 		defer stop()
 	}
 	http.ServeFile(metered, r, mf.FilePath)

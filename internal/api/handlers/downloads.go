@@ -81,11 +81,11 @@ func (h *DownloadHandler) SetTransferRegistry(registry *transfers.Registry) {
 // Sessionless (downloads have no stream session), so only user-kind kills apply;
 // the request entry time predates any future revocation, which is exactly the
 // user-kill cutoff contract. Returns a stop func the caller must defer.
-func (h *DownloadHandler) cutDownloadOnUserRevocation(w http.ResponseWriter, userID int) func() {
+func (h *DownloadHandler) cutDownloadOnUserRevocation(ctx context.Context, w http.ResponseWriter, userID int, startedAt time.Time) func() {
 	if h.revocation == nil {
 		return func() {}
 	}
-	return h.revocation.WatchAndCut(w, "", userID, time.Now())
+	return h.revocation.WatchAndCutContext(ctx, w, "", userID, startedAt)
 }
 
 // downloadRequest represents the JSON body for POST /downloads.
@@ -441,15 +441,17 @@ func (h *DownloadHandler) HandleDownloadFile(w http.ResponseWriter, r *http.Requ
 
 	profileID, deviceID, deviceName, _ := managedIdentity(r)
 	filter := requestAccessFilter(r)
+	startedAt := time.Now()
+	r = r.WithContext(httpstream.WithCutLatch(r.Context(), &httpstream.CutLatch{}))
 	// Full media downloads outlive the server's absolute WriteTimeout; roll
 	// the write deadline with progress instead.
-	sw := httpstream.NewRollingDeadlineWriter(w)
+	sw := httpstream.NewRollingDeadlineWriterCtx(r.Context(), w)
 	transfer := h.newTransfer(r, userID, profileID, deviceName, "native_download")
 	defer h.transfers.End(transfer.ID)
 	metered := playback.NewSessionMeteredWriter(sw, h.transfers, transfer.ID)
 	defer func() { _ = metered.Close() }()
 	// In-flight kill switch: a user revocation cuts this pour mid-transfer.
-	stop := h.cutDownloadOnUserRevocation(metered, userID)
+	stop := h.cutDownloadOnUserRevocation(r.Context(), metered, userID, startedAt)
 	defer stop()
 
 	if err := h.svc.ServeFile(r.Context(), metered, r, userID, profileID, deviceID, id, filter, transfer); err != nil {
@@ -497,12 +499,14 @@ func (h *DownloadHandler) HandleDirectDownload(w http.ResponseWriter, r *http.Re
 
 	filter := requestAccessFilter(r)
 	profileID, _, deviceName, _ := managedIdentity(r)
+	startedAt := time.Now()
+	r = r.WithContext(httpstream.WithCutLatch(r.Context(), &httpstream.CutLatch{}))
 	transfer := h.newTransfer(r, userID, profileID, deviceName, "native_direct")
 	defer h.transfers.End(transfer.ID)
 	metered := playback.NewSessionMeteredWriter(w, h.transfers, transfer.ID)
 	defer func() { _ = metered.Close() }()
 	// In-flight kill switch: a user revocation cuts this pour mid-transfer.
-	stop := h.cutDownloadOnUserRevocation(metered, userID)
+	stop := h.cutDownloadOnUserRevocation(r.Context(), metered, userID, startedAt)
 	defer stop()
 
 	if err := h.svc.ServeDirect(r.Context(), metered, r, userID, fileID, r.URL.Query().Get("format"), filter, transfer); err != nil {

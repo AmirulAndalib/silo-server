@@ -22,6 +22,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Silo-Server/silo-server/internal/clientip"
+	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -56,6 +57,7 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusUnauthorized, "Unauthorized", "Missing authentication token")
 		return
 	}
+	startedAt := time.Now()
 
 	routeID := chiURLParam(r, "id")
 	mediaSourceID := firstNonEmpty(r.URL.Query().Get("mediaSourceId"), r.URL.Query().Get("MediaSourceId"))
@@ -97,7 +99,7 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 	// stream URL. (User-kind kills don't need this: they match by user id either
 	// side of the ensure.)
 	if h.Revocation != nil && playSession.UpstreamSessionID != "" &&
-		h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, time.Now()) {
+		h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, startedAt) {
 		return
 	}
 
@@ -114,7 +116,7 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 	// request only gets here on a live compat login, and user revocation deletes
 	// all compat logins, so reaching this line post-revocation means fresh auth.
 	if h.Revocation != nil && playSession.UpstreamSessionID != "" &&
-		h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, time.Now()) {
+		h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, startedAt) {
 		return
 	}
 
@@ -155,8 +157,9 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 	// In-flight cut: hang up a long local direct-play/remux pour the moment it is
 	// revoked. The Refuse check above only covers new/reconnect requests; a single
 	// long GET needs the connection cut to stop mid-stream.
+	r = r.WithContext(httpstream.WithCutLatch(r.Context(), &httpstream.CutLatch{}))
 	if h.Revocation != nil && playSession.UpstreamSessionID != "" {
-		stop := h.Revocation.WatchAndCut(w, playSession.UpstreamSessionID, session.StreamAppUserID, time.Now())
+		stop := h.Revocation.WatchAndCutContext(r.Context(), w, playSession.UpstreamSessionID, session.StreamAppUserID, startedAt)
 		defer stop()
 	}
 	recorder, _ := h.sessionMgr.(playback.ServedBytesRecorder)
@@ -258,7 +261,8 @@ func (h *PlaybackHandler) HandleDownload(w http.ResponseWriter, r *http.Request)
 	// the entry time predates any future revocation (the user-kill cutoff), so a
 	// revocation issued mid-transfer hangs this connection up.
 	if h.Revocation != nil {
-		stop := h.Revocation.WatchAndCut(metered, "", session.StreamAppUserID, transfer.StartedAt)
+		r = r.WithContext(httpstream.WithCutLatch(r.Context(), &httpstream.CutLatch{}))
+		stop := h.Revocation.WatchAndCutContext(r.Context(), metered, "", session.StreamAppUserID, transfer.StartedAt)
 		defer stop()
 	}
 
@@ -680,12 +684,18 @@ func (h *PlaybackHandler) HandleSubtitleStream(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	startedAt := time.Now()
 	// Kill switch: a revoked session must not keep pulling subtitle bytes (or
-	// triggering server-side ffmpeg subtitle extraction below). Mirrors the
-	// guarded native subtitle routes.
+	// triggering server-side ffmpeg subtitle extraction below). Compat
+	// extraction is buffered, so a socket cut stops response delivery but does
+	// not interrupt extraction already in progress.
 	if h.Revocation != nil && playSession != nil && playSession.UpstreamSessionID != "" &&
-		h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, time.Now()) {
+		h.Revocation.Refuse(w, playSession.UpstreamSessionID, session.StreamAppUserID, startedAt) {
 		return
+	}
+	if h.Revocation != nil && playSession != nil && playSession.UpstreamSessionID != "" {
+		stop := h.Revocation.WatchAndCutContext(r.Context(), w, playSession.UpstreamSessionID, session.StreamAppUserID, startedAt)
+		defer stop()
 	}
 
 	if h.fileResolver == nil {

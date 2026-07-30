@@ -213,6 +213,27 @@ func TestMergeStreamsBackfillsAttribution(t *testing.T) {
 	}
 }
 
+func TestMergeStreamsKeepsLargestObservedByteTotal(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		older, newer int64
+		want         int64
+	}{
+		{name: "freshest has zero", older: 8192, newer: 0, want: 8192},
+		{name: "stale has zero", older: 0, newer: 8192, want: 8192},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := mergeStreams([]LiveStream{
+				{SessionID: "s", BytesServed: tc.older, LastServedAt: time.Unix(100, 0)},
+				{SessionID: "s", BytesServed: tc.newer, LastServedAt: time.Unix(200, 0)},
+			})
+			if len(out) != 1 || out[0].BytesServed != tc.want {
+				t.Fatalf("merge = %+v, want bytes %d", out, tc.want)
+			}
+		})
+	}
+}
+
 func TestFuncSourceNilFn(t *testing.T) {
 	snap, err := NewFuncSource(nil).Snapshot(context.Background())
 	if err != nil {
@@ -272,5 +293,28 @@ func TestDedupeSessionInfos(t *testing.T) {
 	}
 	if s2 := byID["s2"]; s2.AuthUserID != 8 {
 		t.Errorf("s2 mangled by dedupe: %+v", s2)
+	}
+}
+
+func TestDedupeSessionInfosKeepsLargestObservedByteTotal(t *testing.T) {
+	older := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	newer := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, tc := range []struct {
+		name         string
+		older, newer int64
+		want         int64
+	}{
+		{name: "freshest has zero", older: 4096, newer: 0, want: 4096},
+		{name: "stale has zero", older: 0, newer: 4096, want: 4096},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := DedupeSessionInfos([]nodesessions.SessionInfo{
+				{SessionID: "s", BytesServed: tc.older, LastServedAt: older},
+				{SessionID: "s", BytesServed: tc.newer, LastServedAt: newer},
+			})
+			if len(out) != 1 || out[0].BytesServed != tc.want {
+				t.Fatalf("dedupe = %+v, want bytes %d", out, tc.want)
+			}
+		})
 	}
 }

@@ -87,6 +87,14 @@ type statusRecorder struct {
 	bytes  int
 }
 
+// Unwrap exposes the wrapped ResponseWriter to http.NewResponseController so
+// write-deadline control — the revocation in-flight cut — reaches the real
+// socket. Without this, SetWriteDeadline returns ErrNotSupported and a
+// RevokeUser cannot hang up an in-flight multi-GB audiobook pour.
+func (s *statusRecorder) Unwrap() http.ResponseWriter {
+	return s.ResponseWriter
+}
+
 func (s *statusRecorder) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)

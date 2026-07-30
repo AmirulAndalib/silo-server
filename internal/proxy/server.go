@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 
+	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -26,7 +28,7 @@ import (
 type revocationStore interface {
 	IsRevoked(sessionID string, userID int, startedAt time.Time) bool
 	Refuse(w http.ResponseWriter, sessionID string, userID int, startedAt time.Time) bool
-	WatchAndCut(w http.ResponseWriter, sessionID string, userID int, startedAt time.Time) func()
+	WatchAndCutContext(ctx context.Context, w http.ResponseWriter, sessionID string, userID int, startedAt time.Time) func()
 }
 
 // Server is the HTTP handler for proxy mode.
@@ -172,14 +174,25 @@ func (s *Server) verifyToken(w http.ResponseWriter, r *http.Request) *streamtoke
 // cutOnRevocation watches a long-lived pour (direct play / remux) and hangs up
 // the socket the moment the session/user is revoked, via the shared store helper.
 // Returns a stop func to cancel the watcher when the request finishes normally.
-func (s *Server) cutOnRevocation(w http.ResponseWriter, claims *streamtoken.Claims) func() {
+func (s *Server) cutOnRevocation(ctx context.Context, w http.ResponseWriter, claims *streamtoken.Claims) func() {
 	if s.revocation == nil {
 		return func() {}
 	}
-	return s.revocation.WatchAndCut(w, claims.SessionID, claims.UserID, claims.IssuedTime())
+	return s.revocation.WatchAndCutContext(ctx, w, claims.SessionID, claims.UserID, claims.IssuedTime())
+}
+
+// removeTracked deletes the edge record with a bounded background context. The
+// request context is already canceled by the time this defer runs on a client
+// disconnect, which would skip the Redis DEL and leave a phantom session until
+// TTL — a false over-cap window.
+func (s *Server) removeTracked(sessionID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s.tracker.Remove(ctx, sessionID)
 }
 
 func (s *Server) handleDirectPlay(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(httpstream.WithCutLatch(r.Context(), &httpstream.CutLatch{}))
 	claims := s.verifyToken(w, r)
 	if claims == nil {
 		return
@@ -187,12 +200,12 @@ func (s *Server) handleDirectPlay(w http.ResponseWriter, r *http.Request) {
 
 	info := sessionInfo(s.tracker, claims, "direct_play", edgeClientIP(r))
 	s.tracker.Track(r.Context(), info)
-	defer s.tracker.Remove(r.Context(), claims.SessionID)
+	defer s.removeTracked(claims.SessionID)
 
 	sw := &sessionByteWriter{ResponseWriter: w, tracker: s.tracker, sessionID: claims.SessionID}
 	defer sw.flush()
 
-	stop := s.cutOnRevocation(sw, claims)
+	stop := s.cutOnRevocation(r.Context(), sw, claims)
 	defer stop()
 
 	http.ServeFile(sw, r, claims.MediaPath)
@@ -272,6 +285,7 @@ func (w *sessionByteWriter) Unwrap() http.ResponseWriter {
 }
 
 func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(httpstream.WithCutLatch(r.Context(), &httpstream.CutLatch{}))
 	claims := s.verifyToken(w, r)
 	if claims == nil {
 		return
@@ -279,12 +293,12 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 
 	info := sessionInfo(s.tracker, claims, "remux", edgeClientIP(r))
 	s.tracker.Track(r.Context(), info)
-	defer s.tracker.Remove(r.Context(), claims.SessionID)
+	defer s.removeTracked(claims.SessionID)
 
 	sw := &sessionByteWriter{ResponseWriter: w, tracker: s.tracker, sessionID: claims.SessionID}
 	defer sw.flush()
 
-	stop := s.cutOnRevocation(sw, claims)
+	stop := s.cutOnRevocation(r.Context(), sw, claims)
 	defer stop()
 
 	seekSeconds := 0.0
@@ -369,10 +383,21 @@ func edgeClientIP(r *http.Request) string {
 }
 
 func (s *Server) handleSubtitle(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(httpstream.WithCutLatch(r.Context(), &httpstream.CutLatch{}))
 	claims := s.verifyToken(w, r)
 	if claims == nil {
 		return
 	}
+	// Attribute subtitle bytes only when the session already has a tracker
+	// record. Do not take lifecycle ownership here: Track/Remove per subtitle
+	// request can delete a concurrently active media request until Batch 2 adds
+	// reference-counted edge tracking.
+	metered := &sessionByteWriter{ResponseWriter: w, tracker: s.tracker, sessionID: claims.SessionID}
+	defer metered.flush()
+	stop := s.cutOnRevocation(r.Context(), metered, claims)
+	defer stop()
+	w = metered
+
 	cfg := s.watcher.Config()
 	trackParam := chi.URLParam(r, "track")
 	trackIndex, requestedFormat, err := playback.ParseSubtitleTrackParam(trackParam)

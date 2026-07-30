@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"mime"
 	"net/http"
 	"os"
@@ -20,8 +21,12 @@ import (
 
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/streamrevoke"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 )
 
 // EbookReaderProgress is the persisted reader position for one profile and ebook.
@@ -100,6 +105,8 @@ type EbookReaderHandler struct {
 	// Conversion, when set and enabled, transparently converts Kindle-family
 	// files to EPUB on read. Nil means the feature is off.
 	Conversion *EbookConversion
+	Transfers  *transfers.Registry
+	Revocation *streamrevoke.Store
 }
 
 func NewEbookReaderHandler(authorizer *MediaFileAuthorizer) *EbookReaderHandler {
@@ -116,6 +123,10 @@ func (h *EbookReaderHandler) HandleReadFile(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "Ebook reader is not configured")
 		return
 	}
+	startedAt := time.Now()
+	// TODO(#305, A3): use the access token's iat as the revocation cutoff
+	// identity once credential identity is unified across serve surfaces.
+	r = r.WithContext(httpstream.WithCutLatch(r.Context(), &httpstream.CutLatch{}))
 
 	contentID := strings.TrimSpace(chi.URLParam(r, "content_id"))
 	fileID, err := strconv.Atoi(chi.URLParam(r, "file_id"))
@@ -134,7 +145,43 @@ func (h *EbookReaderHandler) HandleReadFile(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if err := h.serveEbook(w, r, file); err != nil {
+	userID := apimw.GetUserID(r.Context())
+	if h.Revocation != nil && h.Revocation.Refuse(w, "", userID, startedAt) {
+		return
+	}
+
+	route := "ebook_read"
+	if h.Conversion.active(r.Context()) && isKindleReaderFile(file) {
+		route = "ebook_convert"
+	}
+	transfer := transfers.Transfer{
+		ID:          uuid.NewString(),
+		UserID:      userID,
+		ProfileID:   apimw.GetProfileID(r.Context()),
+		MediaFileID: file.ID,
+		Route:       route,
+		ClientIP:    clientip.FromContext(r.Context()),
+		ClientName:  r.UserAgent(),
+		StartedAt:   startedAt,
+	}
+	if h.Transfers != nil {
+		if err := h.Transfers.Begin(transfer); err != nil {
+			slog.DebugContext(r.Context(), "ebook transfer not monitored",
+				"component", "ebooks",
+				"transfer_id", transfer.ID,
+				"error", err,
+			)
+		}
+	}
+	defer h.Transfers.End(transfer.ID)
+	metered := playback.NewSessionMeteredWriter(w, h.Transfers, transfer.ID)
+	defer func() { _ = metered.Close() }()
+	if h.Revocation != nil {
+		stop := h.Revocation.WatchAndCutContext(r.Context(), metered, "", userID, startedAt)
+		defer stop()
+	}
+
+	if err := h.serveEbook(metered, r, file); err != nil {
 		if errors.Is(err, catalog.ErrItemNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "Ebook file not found")
 			return
@@ -623,7 +670,7 @@ func serveEbookInline(w http.ResponseWriter, r *http.Request, file *models.Media
 	// Ebook files are served inline on the API origin (and reachable via the
 	// ?token= query fallback), so browsers must never content-sniff them.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	http.ServeContent(httpstream.NewRollingDeadlineWriter(w), r, stat.Name(), stat.ModTime(), f)
+	http.ServeContent(httpstream.NewRollingDeadlineWriterCtx(r.Context(), w), r, stat.Name(), stat.ModTime(), f)
 	return nil
 }
 

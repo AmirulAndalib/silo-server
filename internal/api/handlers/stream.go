@@ -224,6 +224,20 @@ func (h *StreamHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "Media file not found")
 		return
 	}
+	beginTransport := func() (http.ResponseWriter, func()) {
+		transportStarted := false
+		if err := h.sessionMgr.BeginTransport(sessionID); err == nil {
+			transportStarted = true
+		}
+		recorder, _ := h.sessionMgr.(playback.ServedBytesRecorder)
+		metered := playback.NewSessionMeteredWriter(w, recorder, sessionID)
+		return metered, func() {
+			_ = metered.Close()
+			if transportStarted {
+				_ = h.sessionMgr.EndTransport(sessionID)
+			}
+		}
+	}
 
 	externalCount := len(file.ExternalSubtitles)
 	if trackIndex < externalCount {
@@ -237,7 +251,9 @@ func (h *StreamHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request) {
 					"Failed to load external subtitle")
 				return
 			}
-			playback.ServeSubtitle(w, data, "ass")
+			streamWriter, finish := beginTransport()
+			defer finish()
+			playback.ServeSubtitle(streamWriter, data, "ass")
 			return
 		}
 
@@ -247,7 +263,9 @@ func (h *StreamHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request) {
 				"Failed to load external subtitle")
 			return
 		}
-		playback.ServeSubtitle(w, vttData, "vtt")
+		streamWriter, finish := beginTransport()
+		defer finish()
+		playback.ServeSubtitle(streamWriter, vttData, "vtt")
 		return
 	}
 
@@ -270,7 +288,9 @@ func (h *StreamHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request) {
 		// demuxed, so the first byte lands within ~1s even on network
 		// storage. Works identically for direct-play, remux, and
 		// transcode because it doesn't depend on any other ffmpeg.
-		h.streamEmbeddedSubtitle(w, r, file, embeddedIndex, session, requestedFormat)
+		streamWriter, finish := beginTransport()
+		defer finish()
+		h.streamEmbeddedSubtitle(streamWriter, r, file, embeddedIndex, session, requestedFormat)
 		return
 	}
 
@@ -302,13 +322,17 @@ func (h *StreamHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request) {
 
 			// Serve ASS/SSA downloaded subtitles as raw data.
 			if playback.IsASS(string(dl.Format)) && requestedFormat != "vtt" {
-				playback.ServeSubtitle(w, data, "ass")
+				streamWriter, finish := beginTransport()
+				defer finish()
+				playback.ServeSubtitle(streamWriter, data, "ass")
 				return
 			}
 
 			// If the subtitle is already VTT, serve directly.
 			if dl.Format == subtitles.FormatVTT {
-				playback.ServeSubtitle(w, data, "vtt")
+				streamWriter, finish := beginTransport()
+				defer finish()
+				playback.ServeSubtitle(streamWriter, data, "vtt")
 				return
 			}
 
@@ -318,7 +342,9 @@ func (h *StreamHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, "convert_error", "Failed to convert subtitle")
 				return
 			}
-			playback.ServeSubtitle(w, vttData, "vtt")
+			streamWriter, finish := beginTransport()
+			defer finish()
+			playback.ServeSubtitle(streamWriter, vttData, "vtt")
 			return
 		}
 	}
@@ -425,6 +451,14 @@ func (h *StreamHandler) HandleSubtitleFonts(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "font_extract_failed", "Failed to extract subtitle fonts")
 		return
 	}
+
+	if err := h.sessionMgr.BeginTransport(sessionID); err == nil {
+		defer func() { _ = h.sessionMgr.EndTransport(sessionID) }()
+	}
+	recorder, _ := h.sessionMgr.(playback.ServedBytesRecorder)
+	metered := playback.NewSessionMeteredWriter(w, recorder, sessionID)
+	defer func() { _ = metered.Close() }()
+	w = metered
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")

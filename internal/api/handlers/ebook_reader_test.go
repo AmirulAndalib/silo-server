@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"mime"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +20,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/streamrevoke"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 )
 
 func newEbookReaderAuthRequest(method, path string) *http.Request {
@@ -199,6 +203,163 @@ func TestEbookReaderServesEbookInlineWithRangeSupport(t *testing.T) {
 	}
 	if rr.Body.String() != "2345" {
 		t.Fatalf("body = %q", rr.Body.String())
+	}
+}
+
+type blockingEbookWriter struct {
+	header  http.Header
+	reached chan struct{}
+	release chan struct{}
+	once    sync.Once
+	written int
+}
+
+func (w *blockingEbookWriter) Header() http.Header { return w.header }
+func (w *blockingEbookWriter) WriteHeader(int)     {}
+func (w *blockingEbookWriter) SetWriteDeadline(time.Time) error {
+	return nil
+}
+func (w *blockingEbookWriter) Write(p []byte) (int, error) {
+	w.written += len(p)
+	if w.written >= (1<<20)+(64<<10) {
+		w.once.Do(func() { close(w.reached) })
+		<-w.release
+	}
+	return len(p), nil
+}
+
+func TestEbookReaderTracksBytesWhilePourIsActiveAndFlushesBeforeRemoval(t *testing.T) {
+	filePath := writePlaybackTestMediaFile(t, "large.epub")
+	if err := os.WriteFile(filePath, make([]byte, 2<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := transfers.New()
+	handler := NewEbookReaderHandler(&MediaFileAuthorizer{
+		FileResolver: stubMediaFileResolver{file: &models.MediaFile{
+			ID: 42, ContentID: "ebook-1", FilePath: filePath, Container: "epub", BaseType: "ebook",
+		}},
+		ItemAccess: stubItemAccessChecker{},
+	})
+	handler.Transfers = registry
+	req := withEbookReaderRouteParams(newEbookReaderAuthRequest(http.MethodGet, "/ebooks/ebook-1/files/42/read"), "ebook-1", "42")
+	writer := &blockingEbookWriter{
+		header:  make(http.Header),
+		reached: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.HandleReadFile(writer, req)
+	}()
+
+	select {
+	case <-writer.reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ebook pour did not reach the blocking writer")
+	}
+	active := registry.Snapshot()
+	if len(active) != 1 || active[0].Route != "ebook_read" || active[0].BytesServed == 0 {
+		t.Fatalf("active transfer = %+v, want metered ebook_read pour", active)
+	}
+	close(writer.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ebook pour did not finish")
+	}
+	if got := registry.Snapshot(); len(got) != 0 {
+		t.Fatalf("registry after completed pour = %+v, want empty", got)
+	}
+}
+
+type revokingEbookResolver struct {
+	file   *models.MediaFile
+	revoke func()
+}
+
+func (r revokingEbookResolver) GetByID(context.Context, int) (*models.MediaFile, error) {
+	r.revoke()
+	return r.file, nil
+}
+
+func TestEbookReaderRefusesRevocationLandingBeforePour(t *testing.T) {
+	filePath := writePlaybackTestMediaFile(t, "book.epub")
+	store := streamrevoke.New(streamrevoke.Options{})
+	handler := NewEbookReaderHandler(&MediaFileAuthorizer{
+		FileResolver: revokingEbookResolver{
+			file: &models.MediaFile{
+				ID: 42, ContentID: "ebook-1", FilePath: filePath, Container: "epub", BaseType: "ebook",
+			},
+			revoke: func() {
+				if err := store.RevokeUser(context.Background(), 1, "test"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		ItemAccess: stubItemAccessChecker{},
+	})
+	handler.Revocation = store
+	req := withEbookReaderRouteParams(newEbookReaderAuthRequest(http.MethodGet, "/ebooks/ebook-1/files/42/read"), "ebook-1", "42")
+	rr := httptest.NewRecorder()
+
+	handler.HandleReadFile(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d body = %q, want 403", rr.Code, rr.Body.String())
+	}
+}
+
+func TestEbookReaderRevocationCutsInFlightRealSocket(t *testing.T) {
+	filePath := writePlaybackTestMediaFile(t, "large-cut.epub")
+	if err := os.Truncate(filePath, 128<<20); err != nil {
+		t.Fatal(err)
+	}
+	store := streamrevoke.New(streamrevoke.Options{WatchInterval: 50 * time.Millisecond})
+	handler := NewEbookReaderHandler(&MediaFileAuthorizer{
+		FileResolver: stubMediaFileResolver{file: &models.MediaFile{
+			ID: 42, ContentID: "ebook-1", FilePath: filePath, Container: "epub", BaseType: "ebook",
+		}},
+		ItemAccess: stubItemAccessChecker{},
+	})
+	handler.Revocation = store
+	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := apimw.SetClaims(r.Context(), &auth.Claims{
+			UserID: 1, Role: "user", TokenType: auth.TokenTypeAccess,
+		})
+		ctx = apimw.SetProfileID(ctx, "profile-1")
+		routeCtx := chi.NewRouteContext()
+		routeCtx.URLParams.Add("content_id", "ebook-1")
+		routeCtx.URLParams.Add("file_id", "42")
+		ctx = context.WithValue(ctx, chi.RouteCtxKey, routeCtx)
+		handler.HandleReadFile(w, r.WithContext(ctx))
+	})
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/ebooks/ebook-1/files/42/read")
+	if err != nil {
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		t.Fatal(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if err := store.RevokeUser(context.Background(), 1, "test"); err != nil {
+		t.Fatal(err)
+	}
+	readDone := make(chan error, 1)
+	go func() {
+		_, readErr := io.Copy(io.Discard, response.Body)
+		readDone <- readErr
+	}()
+	select {
+	case readErr := <-readDone:
+		if readErr == nil {
+			t.Fatal("client reached EOF; ebook revocation did not hang up the socket")
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("revocation did not cut the in-flight ebook pour")
 	}
 }
 

@@ -36,6 +36,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/historyimport"
+	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/Silo-Server/silo-server/internal/intromarkers"
 	"github.com/Silo-Server/silo-server/internal/invitations"
 	"github.com/Silo-Server/silo-server/internal/libraryingest"
@@ -687,6 +688,8 @@ func NewRouter(deps Dependencies) chi.Router {
 			if conv := buildEbookConversion(deps, settingsRepo); conv != nil {
 				ebookReaderHandler.Conversion = conv
 			}
+			ebookReaderHandler.Transfers = deps.TransferRegistry
+			ebookReaderHandler.Revocation = deps.RevocationStore
 		}
 		catalogResourceHandler = handlers.NewCatalogResourceHandler(itemsHandler)
 		catalogHandler = handlers.NewCatalogHandler(
@@ -2540,8 +2543,8 @@ func NewRouter(deps Dependencies) chi.Router {
 				if streamHandler != nil {
 					r.Get("/stream/{session_id}", guardRevocationCut(deps.RevocationStore, configJWTSecret(deps), streamHandler.HandleStream))
 					r.Head("/stream/{session_id}", guardRevocationCut(deps.RevocationStore, configJWTSecret(deps), streamHandler.HandleStream))
-					r.Get("/stream/{session_id}/subtitles/{track}", guardRevocation(deps.RevocationStore, configJWTSecret(deps), streamHandler.HandleSubtitle))
-					r.Get("/stream/{session_id}/subtitles/{track}/fonts", guardRevocation(deps.RevocationStore, configJWTSecret(deps), streamHandler.HandleSubtitleFonts))
+					r.Get("/stream/{session_id}/subtitles/{track}", guardRevocationCut(deps.RevocationStore, configJWTSecret(deps), streamHandler.HandleSubtitle))
+					r.Get("/stream/{session_id}/subtitles/{track}/fonts", guardRevocationCut(deps.RevocationStore, configJWTSecret(deps), streamHandler.HandleSubtitleFonts))
 				}
 
 				// Download routes.
@@ -3566,10 +3569,12 @@ func guardRevocationCut(store *streamrevoke.Store, secret string, next http.Hand
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID := chi.URLParam(r, "session_id")
 		userID, startedAt := streamRequestIdentity(r, secret)
+		latch := &httpstream.CutLatch{}
+		r = r.WithContext(httpstream.WithCutLatch(r.Context(), latch))
 		if store.Refuse(w, sessionID, userID, startedAt) {
 			return
 		}
-		stop := store.WatchAndCut(w, sessionID, userID, startedAt)
+		stop := store.WatchAndCutContext(r.Context(), w, sessionID, userID, startedAt)
 		defer stop()
 		next(w, r)
 	}

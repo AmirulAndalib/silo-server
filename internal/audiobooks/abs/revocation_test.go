@@ -2,16 +2,90 @@ package abs
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/streamrevoke"
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 )
+
+var _ interface{ Unwrap() http.ResponseWriter } = (*statusRecorder)(nil)
+
+func TestStatusRecorderLetsResponseControllerReachSocketDeadline(t *testing.T) {
+	base := &deadlineResponseRecorder{ResponseRecorder: httptest.NewRecorder()}
+	wrapped := &statusRecorder{ResponseWriter: base}
+	if err := http.NewResponseController(wrapped).SetWriteDeadline(time.Now()); err != nil {
+		t.Fatalf("SetWriteDeadline through statusRecorder: %v", err)
+	}
+	if base.deadlines != 1 {
+		t.Fatalf("underlying deadline calls = %d, want 1", base.deadlines)
+	}
+}
+
+func TestMountedAccessLogMiddlewareLetsRevocationCutRealSocket(t *testing.T) {
+	store := streamrevoke.New(streamrevoke.Options{WatchInterval: 50 * time.Millisecond})
+	startedAt := time.Now()
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	h := &Handler{}
+	router := chi.NewRouter()
+	router.Use(h.accessLog)
+	router.Get("/pour", func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(httpstream.WithCutLatch(r.Context(), &httpstream.CutLatch{}))
+		stop := store.WatchAndCutContext(r.Context(), w, "abs-mounted", 1, startedAt)
+		defer stop()
+		sw := httpstream.NewRollingDeadlineWriterCtx(r.Context(), w)
+		sw.WriteHeader(http.StatusOK)
+		chunk := make([]byte, 32<<10)
+		for {
+			if _, err := sw.Write(chunk); err != nil {
+				return
+			}
+			sw.Flush()
+			startedOnce.Do(func() { close(started) })
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/pour")
+	if err != nil {
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		t.Fatal(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("mounted ABS pour did not start")
+	}
+	if err := store.RevokeSession(context.Background(), "abs-mounted", "test"); err != nil {
+		t.Fatal(err)
+	}
+	readDone := make(chan error, 1)
+	go func() {
+		_, readErr := io.Copy(io.Discard, response.Body)
+		readDone <- readErr
+	}()
+	select {
+	case readErr := <-readDone:
+		if readErr == nil {
+			t.Fatal("client reached EOF; revocation did not hang up the socket")
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("revocation did not cut the mounted ABS pour")
+	}
+}
 
 func TestBearerAuthCarriesJWTTimestampForUserCutoff(t *testing.T) {
 	const accessTokenType = "access"
