@@ -198,7 +198,7 @@ Jellyfin-compat surface is unthrottled (see Category E).
 | 18 | Rip via **compat `/Items/{id}/Download`** (Infuse) | ⚠️ | ❌ | Active pour visible, but **no quota at all** |
 | 18a | Rip via authenticated **ABS file/download** route | ✅ | ⚠️ | Active pour visible and now cuttable in flight (GAP-10 fixed); still **no volume quota** |
 | 18b | Pull an **ABS public playback track** | ✅ | ✅ | Native session id is monitored/metered; session and owner kills land |
-| 18c | Pull a **public ABS RSS feed file** | ✅ | ⚠️ | Active pour visible; owner cutoff uses feed creation time and the in-flight cut now lands (GAP-10 fixed); closing a feed still does not cut its current pour |
+| 18c | Pull a **public ABS RSS feed file** | ✅ | ⚠️ | Active pour visible; owner cutoff uses feed creation time and the in-flight cut now lands (GAP-10 fixed). Closing a feed still does not cut its current pour; that needs a separately designed, collision-safe feed capability revocation id and is deferred. |
 | 18d | Rip via the **ebook/comic/PDF reader** route | ✅ | ⚠️ | Now metered, transfer-rowed, refused on entry and cut in flight (GAP-11 fixed); cap-exempt per A4 and still no volume quota |
 | 19 | Rip via **sequential direct-play GETs** (one at a time) | ⚠️ | ❌ | Cap counts concurrency, not volume; stays at 1 forever |
 | 20 | Admin **stops an in-progress rip** mid-transfer | — | ✅ | `WatchAndCut` now lands on every download-class route within ~5s (GAP-10/GAP-12 fixed); admin must still issue the revoke |
@@ -306,9 +306,10 @@ credential is refused. "Stays dead." **✅ / ✅.**
 
 **B12. Killed stream survives a restart.**
 The durable Postgres mirror (`streamrevoke/durable_postgres.go`, table
-`stream_revocations`) is warmed on boot and re-armed on the poll tick, and expiry
-is monotonic (`GREATEST`) so the enforcer's short 5m self-heal TTL can't shorten a
-24h admin kill. This closes GAP-4, where PR #174's restart-resilient playback would
+`stream_revocations`) is warmed on boot and re-armed on the poll tick. Revocation
+expiry and cutoff merge independently, and durable unrevocation tombstones prevent
+restart or stale-replica resurrection. This closes GAP-4, where PR #174's
+restart-resilient playback would
 otherwise reconstruct and re-serve a killed stream. **✅ / ✅.** *Transient boot
 caveat:* if the durable warm exhausts its bounded retry **and** Redis is empty, the
 kill list is empty until the first poll tick (≤60s) — fails **open** by design.
@@ -522,7 +523,7 @@ issues inherit them rather than re-litigating.
 |---|---|---|
 | **A1** | Over-cap enforcement model | **Long revocation** matching the token's reconstructable lifetime, so an over-cap kill stops reopening every 5m. **Must not ship before the tracker-lifecycle batch** — it removes the self-healing property that currently limits the damage of a wrong count, and every known source of a wrong count is in that batch. |
 | **A2** | Revocation state model | **Durable tombstones** — an independent `RevokedAt`/`ExpiresAt` merge *plus* a durable tombstone so an un-ban survives a restart and cannot be re-`Upsert`ed by a stale replica. One Goose migration. |
-| **A3** | Credential identity for the user cutoff | **Token `iat` everywhere.** Replace the fresh `time.Now()` that compat and native fallback paths pass at request entry with the token's issued-at, so a pre-cutoff login cannot look post-cutoff and escape the kill. Per-login logout cuts stay out of scope (they need the authorization-generation option). |
+| **A3** | Credential identity for the user cutoff | **Presented credential time.** Native access uses token `iat`; normal Jellyfin compatibility sessions use their stable login `CreatedAt`, not the refreshed bridged token. API keys and valid JWTs without `iat` use zero and deliberately fail open, so a user cutoff cannot cut their pours. Per-login logout cuts stay out of scope (they need authorization-generation/per-login identity in the stream credential). |
 | **A4** | What counts as a "stream" | **Observe + make killable, keep cap-exempt** for the ABS bare file route and ebook/comic/PDF reading. Neither consumes a video stream slot. **Implemented.** |
 | **A5** | Liveness source of truth | **Separate server-observed liveness entirely.** Client progress becomes UI metadata and never feeds enforcement or reaping; the `LastActivityAt` fallback for `LastServedAt` is removed. This is what makes "never trusts client progress" true — it is **not** true today. |
 | **A6** | Multi-replica visibility | **Publish every integrated stream to Redis** so all replica enforcers share one picture. Fixes the incomplete-input root cause; snapshot staleness handled by re-reading at kill time rather than a distributed lock. |
@@ -576,13 +577,12 @@ enhancements.** In rough fix-cost order:
     saturation is unreachable by a single actor in the first place. Scheduled for the
     liveness/replica batch. Today it still fails open, logging at Debug at the call
     sites.
-0g. **Bound the kill-list propagation lock.** `RevokeWithWarnings` holds `opMu`
-    across durable-Postgres and Redis I/O and strips the caller's deadline with
-    `context.WithoutCancel` (`streamrevoke/store.go:313,330`). A hung Redis or an
-    exhausted PG pool blocks every subsequent revoke/unrevoke indefinitely. The hot
-    read path (`IsRevoked`) uses a different lock and stays fast, so playback is
-    unaffected — but the operator's ability to issue *new* kills is not. Give the
-    detached propagation its own bounded context.
+0g. ~~**Bound the kill-list propagation lock.**~~ **DONE.** Redis and pub/sub run
+    before the durable mirror, and detached propagation/startup warm use bounded
+    contexts. `opMu` deliberately remains held across propagation so a same-process
+    unrevoke cannot interleave with an older mirror write. Two central replicas can
+    still race the unconditional Redis `SET`; an atomic cross-replica merge remains
+    deferred to A6/Batch 4.
 
 Then, as originally scoped:
 

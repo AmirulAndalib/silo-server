@@ -360,21 +360,19 @@ tick (≤60s). This fails *open* by design — see the "Warm is async-tolerant" 
 below.
 
 - **Hot path unchanged.** `IsRevoked` is still a pure in-memory map read. Postgres
-  is touched only on write (`Upsert`), on warm/reconcile (`ListActive` at
+  is touched only on write (`Upsert`), on warm/reconcile (`List` at
   `StartSync` and on the poll tick), and on trim (`Prune`) — never per request.
 - **Central-side only.** The durable mirror is wired into the integrated/api
   `streamrevoke.Store` (`cmd/silo/main.go`), not the edge/proxy/transcode nodes,
   which have no app DB and enforce via Redis pub/sub + poll.
 - **Bounded growth.** Rows are keyed by `(kind, id)`, so the async enforcer
   re-revoking every pass UPSERTs one row rather than accumulating; expired rows are
-  physically reclaimed by `Prune` on the poll tick, and `ListActive` filters on
-  `expires_at > now()`.
-- **Expiry is monotonic.** Both the in-memory `applyLocal` and the durable
-  `Upsert` keep whichever copy expires LATER (`GREATEST`), never shortening an
-  existing kill. This matters because the async over-cap enforcer re-revokes with a
-  short 5m self-heal TTL on the same `KindSession` key an admin may have killed for
-  24h; without monotonic expiry the enforcer would silently shrink the admin kill
-  to 5m and reopen the restart-resurrection window this whole axis defends against.
+  physically reclaimed by `Prune` on the poll tick. `List` filters active rows
+  with `unrevoked_at IS NULL` and returns live tombstones separately.
+- **Expiry and cutoff merge independently.** Both the in-memory `applyLocal` and
+  durable `Upsert` keep the later expiry while advancing `RevokedAt` (and its
+  reason) to the later cutoff. A newer user cutoff with a shorter requested
+  horizon therefore cannot be suppressed by an older long-lived record.
 - **Warm is async-tolerant.** By product decision, a just-reconstructed revoked
   stream may serve a few seconds before the durable warm/next Refuse tick cuts it;
   no blocking startup ordering is required. Edge caveat: if the boot durable warm
@@ -387,10 +385,11 @@ below.
   does not reach the edge until Redis recovers — enforcement fails open there.
 - **Kills are operator-visible and undoable.** Admins can list, create, and
   remove entries with `GET/POST /api/v1/admin/streams/revocations` and
-  `DELETE /api/v1/admin/streams/revocations/{kind}/{id}`. `Unrevoke` deletes the
-  local, durable, and Redis copies and publishes an unrevocation event. A bounded
-  tombstone prevents a delayed reconcile from resurrecting the removed kill,
-  while a later legitimate revoke clears the tombstone. If unrevocation publish
+  `DELETE /api/v1/admin/streams/revocations/{kind}/{id}`. `Unrevoke` removes the
+  local and Redis copies, durably changes the Postgres row into a bounded
+  tombstone, and publishes an unrevocation event. The tombstone survives restart
+  and prevents a delayed reconcile or stale replica from resurrecting the removed
+  kill, while a later legitimate revoke clears it. If unrevocation publish
   fails, other processes retain the kill until expiry: the residual failure is
   safe (dead rather than unexpectedly live) and is reported as a warning.
 - **Durable self-heal compares expiry.** The maintenance pass re-upserts a local
@@ -433,8 +432,10 @@ Postgres, `StartSync` warms from it on boot, and the poll tick re-warms (heals a
 Redis flush) and `Prune`s expired rows. The `defaultTTL` (24h) is held `>=` the
 recipe-card `MaxTokenTTL` (24h) as an invariant so a kill cannot expire before its
 session can be reconstructed, and expiry is **monotonic** on every write (in-memory
-`applyLocal` + durable `Upsert` `GREATEST`) so the async enforcer's short 5m
-re-revoke can never shorten a longer admin kill on the same session key. Hot path
+`applyLocal` + durable `Upsert` `GREATEST`). The async enforcer uses a
+revoke-if-absent write with a default TTL derived from `playback.MaxTokenTTL`, so
+repeated evaluation neither reopens the token after five minutes nor slides a
+false positive forever. Hot path
 (`IsRevoked`) stays an in-memory read.
 
 **GAP-5 — RESOLVED (post-review).** User-kind revocations were a blanket ban:
@@ -554,12 +555,13 @@ separate:
 - **A user kill is a CUTOFF, not a ban (GAP-5 fix).** `IsRevoked` matches a
   `KindUser` entry only when the stream's credential predates the revocation:
   the stream token's `iat` on token-bearing surfaces (edge proxy, transcode
-  node, native `?st=`), the request entry time on freshly-authenticated
-  surfaces (native session auth, compat login — every pre-revocation login is
-  reset by the same hook, so reaching a serve path afterward proves fresh
-  auth). An in-flight pour always predates a later revocation, so mid-pour
-  user kills still cut. An unknown (zero) credential time never matches (fail
-  open). This is what makes it safe for `OnUserSessionsRevoked` — which fires
+  node, native `?st=`), the access-token `iat` on native authenticated routes,
+  and the compat login's stable `CreatedAt` on normal Jellyfin sessions. An
+  unknown (zero) credential time never matches (fail open). API keys have no
+  issue time, so a user cutoff cannot cut an API-key-owned pour; this is an
+  accepted, logged limitation. Per-login logout cuts remain out of scope until
+  stream credentials carry per-login identity. This is what makes it safe for
+  `OnUserSessionsRevoked` — which fires
   on ANY admin edit of password/role/enabled/permissions/quality — to also
   write a stream kill: without the cutoff, a routine permission tweak 403'd
   the user's playback for the full 24h TTL after re-login unless an operator
@@ -575,9 +577,11 @@ hardening not to re-do: `Revoke` propagation uses `context.WithoutCancel`, so an
 aborted admin request can no longer strand a kill in central memory only.
 Remaining work:
 
-1. **Operator config keys (small):** wire `auth.stream_revocation_poll` /
-   `auth.stream_revocation_ttl` through the settings pipeline; defaults (60s / 24h)
-   are currently hardcoded in `internal/streamrevoke/store.go`.
+1. **Operator config follow-up:** the over-cap lifetime is now validated as
+   `playback.over_cap_revocation_ttl` and defaults to the reconstructable token
+   lifetime. It is startup-bound and affects only future revocations after the
+   required restart: monotonic expiry cannot shorten an existing kill.
+   Poll/default admin-revocation settings remain separate follow-up work.
 2. **Media title enrichment:** resolve `MediaFileID → title` at admin display time
    so the view shows *what* is being watched, not just a numeric id (also enables a
    distinct-title re-streaming heuristic).
