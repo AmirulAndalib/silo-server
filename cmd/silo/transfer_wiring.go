@@ -13,8 +13,8 @@ type transferRegistryComposition struct {
 	registry *transfers.Registry
 }
 
-func newTransferRegistryComposition() *transferRegistryComposition {
-	return &transferRegistryComposition{registry: transfers.New()}
+func newTransferRegistryComposition(maxPerUser int) *transferRegistryComposition {
+	return &transferRegistryComposition{registry: transfers.NewWithOptions(transfers.Options{MaxPerUser: &maxPerUser})}
 }
 
 func (c *transferRegistryComposition) wireAPI(deps *api.Dependencies) {

@@ -3,6 +3,8 @@ package abs
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"path/filepath"
@@ -119,20 +121,6 @@ func (h *Handler) handleFileStream(w http.ResponseWriter, r *http.Request) {
 
 	mediaFile := files[fileIdx]
 
-	// /download variant: hint the client to save rather than stream.
-	if strings.HasSuffix(r.URL.Path, "/download") {
-		filename := filepath.Base(mediaFile.FilePath)
-		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
-	}
-
-	// Set Content-Type for audio files. ServeDirectPlay uses MimeFromExtension
-	// which covers video containers; we override with audio-specific MIME
-	// types because ABS clients pattern-match on Content-Type.
-	ext := strings.ToLower(filepath.Ext(mediaFile.FilePath))
-	if ct := audioContentType(ext); ct != "" {
-		w.Header().Set("Content-Type", ct)
-	}
-
 	route := "abs_file_stream"
 	if strings.HasSuffix(r.URL.Path, "/download") {
 		route = "abs_file_download"
@@ -149,10 +137,24 @@ func (h *Handler) handleFileStream(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.deps.Transfers != nil {
 		if err := h.deps.Transfers.Begin(transfer); err != nil {
-			slog.DebugContext(r.Context(), "ABS transfer not monitored", "component", "audiobooks", "transfer_id", transfer.ID, "error", err)
+			slog.DebugContext(r.Context(), "ABS transfer rejected", "component", "audiobooks", "transfer_id", transfer.ID, "error", err)
+			writeTransferBeginError(w, err)
+			return
 		}
 	}
 	defer h.deps.Transfers.End(transfer.ID)
+
+	// Success-only response headers must follow transfer admission so a
+	// rejection is not mislabeled as audio or an attachment.
+	if strings.HasSuffix(r.URL.Path, "/download") {
+		filename := filepath.Base(mediaFile.FilePath)
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	}
+	ext := strings.ToLower(filepath.Ext(mediaFile.FilePath))
+	if ct := audioContentType(ext); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+
 	metered := playback.NewSessionMeteredWriter(w, h.deps.Transfers, transfer.ID)
 	defer func() { _ = metered.Close() }()
 
@@ -164,6 +166,27 @@ func (h *Handler) handleFileStream(w http.ResponseWriter, r *http.Request) {
 		// ServeDirectPlay has already written an error response; just log.
 		return
 	}
+}
+
+func writeTransferBeginError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	code := "internal_error"
+	message := "Failed to monitor transfer"
+	switch {
+	case errors.Is(err, transfers.ErrUserTransferLimit):
+		status = http.StatusTooManyRequests
+		code = "transfer_limit_exceeded"
+		message = "Concurrent transfer limit exceeded"
+		w.Header().Set("Retry-After", "5")
+	case errors.Is(err, transfers.ErrRegistryFull):
+		status = http.StatusServiceUnavailable
+		code = "monitoring_unavailable"
+		message = "Transfer monitoring unavailable"
+		w.Header().Set("Retry-After", "5")
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"code": code, "message": message})
 }
 
 // handlePublicTrack serves audio bytes for ONE track of a playback session.

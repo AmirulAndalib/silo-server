@@ -152,14 +152,16 @@ type batchManifestsResponse struct {
 // downloadCapabilityResponse is the GET /downloads/capability payload clients
 // use for feature detection instead of introspecting admin settings.
 type downloadCapabilityResponse struct {
-	Enabled              bool     `json:"enabled"`
-	DownloadAllowed      bool     `json:"download_allowed"`
-	QualityPresets       []string `json:"quality_presets"`
-	TranscodeEnabled     bool     `json:"transcode_enabled"`
-	TranscodeUserAllowed bool     `json:"transcode_user_allowed"`
-	SeasonDownload       bool     `json:"season_download"`
-	SeriesMonitoring     bool     `json:"series_monitoring"`
-	MonitoringModes      []string `json:"monitoring_modes,omitempty"`
+	Enabled                      bool     `json:"enabled"`
+	DownloadAllowed              bool     `json:"download_allowed"`
+	QualityPresets               []string `json:"quality_presets"`
+	TranscodeEnabled             bool     `json:"transcode_enabled"`
+	TranscodeUserAllowed         bool     `json:"transcode_user_allowed"`
+	SeasonDownload               bool     `json:"season_download"`
+	SeriesMonitoring             bool     `json:"series_monitoring"`
+	MonitoringModes              []string `json:"monitoring_modes,omitempty"`
+	MaxUserConcurrentTransfers   int      `json:"max_user_concurrent_transfers"`
+	TransferMonitoringFailClosed bool     `json:"transfer_monitoring_fail_closed"`
 }
 
 func toDownloadResponse(d *downloads.Download) downloadResponse {
@@ -216,14 +218,16 @@ func (h *DownloadHandler) HandleCapability(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeJSON(w, http.StatusOK, downloadCapabilityResponse{
-		Enabled:              capInfo.Enabled,
-		DownloadAllowed:      capInfo.DownloadAllowed,
-		QualityPresets:       capInfo.QualityPresets,
-		TranscodeEnabled:     capInfo.TranscodeEnabled,
-		TranscodeUserAllowed: capInfo.TranscodeUserAllowed,
-		SeasonDownload:       capInfo.SeasonDownload,
-		SeriesMonitoring:     capInfo.SeriesMonitoring,
-		MonitoringModes:      capInfo.MonitoringModes,
+		Enabled:                      capInfo.Enabled,
+		DownloadAllowed:              capInfo.DownloadAllowed,
+		QualityPresets:               capInfo.QualityPresets,
+		TranscodeEnabled:             capInfo.TranscodeEnabled,
+		TranscodeUserAllowed:         capInfo.TranscodeUserAllowed,
+		SeasonDownload:               capInfo.SeasonDownload,
+		SeriesMonitoring:             capInfo.SeriesMonitoring,
+		MonitoringModes:              capInfo.MonitoringModes,
+		MaxUserConcurrentTransfers:   h.transfers.MaxPerUser(),
+		TransferMonitoringFailClosed: true,
 	})
 }
 
@@ -447,6 +451,9 @@ func (h *DownloadHandler) HandleDownloadFile(w http.ResponseWriter, r *http.Requ
 	// the write deadline with progress instead.
 	sw := httpstream.NewRollingDeadlineWriterCtx(r.Context(), w)
 	transfer := h.newTransfer(r, userID, profileID, deviceName, "native_download")
+	if !h.beginTransfer(w, r, transfer) {
+		return
+	}
 	defer h.transfers.End(transfer.ID)
 	metered := playback.NewSessionMeteredWriter(sw, h.transfers, transfer.ID)
 	defer func() { _ = metered.Close() }()
@@ -502,6 +509,9 @@ func (h *DownloadHandler) HandleDirectDownload(w http.ResponseWriter, r *http.Re
 	startedAt := time.Now()
 	r = r.WithContext(httpstream.WithCutLatch(r.Context(), &httpstream.CutLatch{}))
 	transfer := h.newTransfer(r, userID, profileID, deviceName, "native_direct")
+	if !h.beginTransfer(w, r, transfer) {
+		return
+	}
 	defer h.transfers.End(transfer.ID)
 	metered := playback.NewSessionMeteredWriter(w, h.transfers, transfer.ID)
 	defer func() { _ = metered.Close() }()
@@ -513,6 +523,28 @@ func (h *DownloadHandler) HandleDirectDownload(w http.ResponseWriter, r *http.Re
 		h.writeDownloadError(w, err)
 		return
 	}
+}
+
+func (h *DownloadHandler) beginTransfer(w http.ResponseWriter, r *http.Request, transfer transfers.Transfer) bool {
+	if err := h.transfers.Begin(transfer); err != nil {
+		slog.DebugContext(r.Context(), "download transfer rejected",
+			"component", "api",
+			"transfer_id", transfer.ID,
+			"error", err,
+		)
+		switch {
+		case errors.Is(err, transfers.ErrUserTransferLimit):
+			w.Header().Set("Retry-After", "5")
+			writeError(w, http.StatusTooManyRequests, "transfer_limit_exceeded", "Concurrent transfer limit exceeded")
+		case errors.Is(err, transfers.ErrRegistryFull):
+			w.Header().Set("Retry-After", "5")
+			writeError(w, http.StatusServiceUnavailable, "monitoring_unavailable", "Transfer monitoring unavailable")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to monitor transfer")
+		}
+		return false
+	}
+	return true
 }
 
 func (h *DownloadHandler) newTransfer(r *http.Request, userID int, profileID, clientName, route string) transfers.Transfer {

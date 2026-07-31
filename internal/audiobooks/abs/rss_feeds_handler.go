@@ -260,7 +260,9 @@ func (h *Handler) handlePublicFeedFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.deps.Transfers != nil {
 		if err := h.deps.Transfers.Begin(transfer); err != nil {
-			slog.DebugContext(r.Context(), "ABS feed transfer not monitored", "component", "audiobooks", "transfer_id", transfer.ID, "error", err)
+			slog.DebugContext(r.Context(), "ABS feed transfer rejected", "component", "audiobooks", "transfer_id", transfer.ID, "error", err)
+			writeTransferBeginError(w, err)
+			return
 		}
 	}
 	defer h.deps.Transfers.End(transfer.ID)

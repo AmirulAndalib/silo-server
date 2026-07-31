@@ -165,11 +165,22 @@ func (h *EbookReaderHandler) HandleReadFile(w http.ResponseWriter, r *http.Reque
 	}
 	if h.Transfers != nil {
 		if err := h.Transfers.Begin(transfer); err != nil {
-			slog.DebugContext(r.Context(), "ebook transfer not monitored",
+			slog.DebugContext(r.Context(), "ebook transfer rejected",
 				"component", "ebooks",
 				"transfer_id", transfer.ID,
 				"error", err,
 			)
+			switch {
+			case errors.Is(err, transfers.ErrUserTransferLimit):
+				w.Header().Set("Retry-After", "5")
+				writeError(w, http.StatusTooManyRequests, "transfer_limit_exceeded", "Concurrent transfer limit exceeded")
+			case errors.Is(err, transfers.ErrRegistryFull):
+				w.Header().Set("Retry-After", "5")
+				writeError(w, http.StatusServiceUnavailable, "monitoring_unavailable", "Transfer monitoring unavailable")
+			default:
+				writeError(w, http.StatusInternalServerError, "internal_error", "Failed to monitor transfer")
+			}
+			return
 		}
 	}
 	defer h.Transfers.End(transfer.ID)

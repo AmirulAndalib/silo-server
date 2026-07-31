@@ -874,7 +874,7 @@ func (s *Service) ServeDirect(ctx context.Context, w http.ResponseWriter, r *htt
 		return catalog.ErrItemNotFound
 	}
 	transfer.MediaFileID = file.ID
-	s.beginTransfer(ctx, transfer)
+	s.annotateTransfer(transfer)
 	return s.serveLocalFile(ctx, w, r, file.FilePath, userID)
 }
 
@@ -1081,7 +1081,7 @@ func (s *Service) serveDownloadBytes(ctx context.Context, w http.ResponseWriter,
 		}
 		transfer.DownloadID = dl.ID
 		transfer.MediaFileID = dl.MediaFileID
-		s.beginTransfer(ctx, transfer)
+		s.annotateTransfer(transfer)
 		return s.serveLocalFile(ctx, w, r, artifact.OutputPath, userID)
 	}
 	if file.MissingSince != nil {
@@ -1092,17 +1092,15 @@ func (s *Service) serveDownloadBytes(ctx context.Context, w http.ResponseWriter,
 	}
 	transfer.DownloadID = dl.ID
 	transfer.MediaFileID = dl.MediaFileID
-	s.beginTransfer(ctx, transfer)
+	s.annotateTransfer(transfer)
 	return s.serveLocalFile(ctx, w, r, file.FilePath, userID)
 }
 
-func (s *Service) beginTransfer(ctx context.Context, transfer transfers.Transfer) {
+func (s *Service) annotateTransfer(transfer transfers.Transfer) {
 	if s.transfers == nil {
 		return
 	}
-	if err := s.transfers.Begin(transfer); err != nil {
-		slog.DebugContext(ctx, "download transfer not monitored", "component", "downloads", "transfer_id", transfer.ID, "error", err)
-	}
+	s.transfers.Annotate(transfer.ID, transfer.DownloadID, transfer.MediaFileID)
 }
 
 func (s *Service) serveLocalFile(ctx context.Context, w http.ResponseWriter, r *http.Request, path string, userID int) error {

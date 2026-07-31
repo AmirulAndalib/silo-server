@@ -165,7 +165,7 @@ func (f *fakeDownloadService) ServeDirect(_ context.Context, w http.ResponseWrit
 	f.gotTransfer = transfer
 	if f.beginTransfer && f.transferRegistry != nil {
 		transfer.MediaFileID = fileID
-		_ = f.transferRegistry.Begin(transfer)
+		f.transferRegistry.Annotate(transfer.ID, "", fileID)
 	}
 	if f.directErr != nil {
 		return f.directErr
@@ -179,7 +179,7 @@ func (f *fakeDownloadService) ServeFile(_ context.Context, w http.ResponseWriter
 	f.gotTransfer = transfer
 	if f.beginTransfer && f.transferRegistry != nil {
 		transfer.DownloadID = downloadID
-		_ = f.transferRegistry.Begin(transfer)
+		f.transferRegistry.Annotate(transfer.ID, downloadID, 0)
 	}
 	if f.serveErr != nil {
 		return f.serveErr
@@ -281,6 +281,7 @@ func TestHandleCapability(t *testing.T) {
 		TranscodeUserAllowed: true,
 	}}
 	h := NewDownloadHandler(svc)
+	h.SetTransferRegistry(transfers.New())
 
 	rec := httptest.NewRecorder()
 	h.HandleCapability(rec, downloadTestRequest(http.MethodGet, "/downloads/capability", nil, 7, "", ""))
@@ -297,6 +298,9 @@ func TestHandleCapability(t *testing.T) {
 	}
 	if len(resp.QualityPresets) != 1 || resp.QualityPresets[0] != downloads.QualityOriginal {
 		t.Fatalf("quality presets = %v, want [original]", resp.QualityPresets)
+	}
+	if resp.MaxUserConcurrentTransfers != 24 || !resp.TransferMonitoringFailClosed {
+		t.Fatalf("transfer capability = %+v", resp)
 	}
 }
 
@@ -535,6 +539,86 @@ func TestHandleDirectDownloadMissingFileID(t *testing.T) {
 	h.HandleDirectDownload(rec, downloadTestRequest(http.MethodGet, "/direct-download", nil, 7, "", ""))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestDownloadTransferAdmissionFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		registry   func(t *testing.T) *transfers.Registry
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name: "per-user cap",
+			registry: func(t *testing.T) *transfers.Registry {
+				t.Helper()
+				limit := 1
+				r := transfers.NewWithOptions(transfers.Options{MaxPerUser: &limit})
+				if err := r.Begin(transfers.Transfer{ID: "existing", UserID: 7}); err != nil {
+					t.Fatal(err)
+				}
+				return r
+			},
+			wantStatus: http.StatusTooManyRequests,
+			wantCode:   "transfer_limit_exceeded",
+		},
+		{
+			name: "global cap",
+			registry: func(t *testing.T) *transfers.Registry {
+				t.Helper()
+				unlimited := 0
+				r := transfers.NewWithOptions(transfers.Options{MaxEntries: 1, MaxPerUser: &unlimited})
+				if err := r.Begin(transfers.Transfer{ID: "existing", UserID: 8}); err != nil {
+					t.Fatal(err)
+				}
+				return r
+			},
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "monitoring_unavailable",
+		},
+	} {
+		for _, route := range []string{"managed", "direct"} {
+			for _, method := range []string{http.MethodGet, http.MethodHead, "range"} {
+				t.Run(tc.name+"/"+route+"/"+method, func(t *testing.T) {
+					registry := tc.registry(t)
+					svc := &fakeDownloadService{}
+					h := NewDownloadHandler(svc)
+					h.SetTransferRegistry(registry)
+					requestMethod := method
+					if method == "range" {
+						requestMethod = http.MethodGet
+					}
+					var req *http.Request
+					if route == "managed" {
+						req = withChiID(downloadTestRequest(requestMethod, "/downloads/dl1/file", nil, 7, "p1", "dev1"), "dl1")
+					} else {
+						req = downloadTestRequest(requestMethod, "/direct-download?file_id=42", nil, 7, "p1", "")
+					}
+					if method == "range" {
+						req.Header.Set("Range", "bytes=0-1")
+					}
+					rec := httptest.NewRecorder()
+					if route == "managed" {
+						h.HandleDownloadFile(rec, req)
+					} else {
+						h.HandleDirectDownload(rec, req)
+					}
+					if rec.Code != tc.wantStatus {
+						t.Fatalf("status = %d, want %d; body=%s", rec.Code, tc.wantStatus, rec.Body.String())
+					}
+					if rec.Header().Get("Retry-After") != "5" {
+						t.Fatalf("Retry-After = %q, want 5", rec.Header().Get("Retry-After"))
+					}
+					if !bytes.Contains(rec.Body.Bytes(), []byte(tc.wantCode)) || bytes.Contains(rec.Body.Bytes(), []byte("served")) {
+						t.Fatalf("body = %q, want error code and no served bytes", rec.Body.String())
+					}
+					if svc.gotTransfer.ID != "" {
+						t.Fatalf("service was called with transfer %+v", svc.gotTransfer)
+					}
+				})
+			}
+		}
 	}
 }
 

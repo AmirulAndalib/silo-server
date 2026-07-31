@@ -36,11 +36,12 @@ var restartRequiredKeys = map[string]bool{
 	// thumbnails, audiobook enricher) — keep restart-required until those
 	// convert. transcode_dir is fully live (only the playback handler reads
 	// it). The chapter-thumbnail worker pool is sized at construction.
-	"playback.ffmpeg_path":               true,
-	"playback.hw_accel":                  true,
-	"playback.hw_device":                 true,
-	"playback.chapter_thumbnail_workers": true,
-	"playback.over_cap_revocation_ttl":   true,
+	"playback.ffmpeg_path":                   true,
+	"playback.hw_accel":                      true,
+	"playback.hw_device":                     true,
+	"playback.chapter_thumbnail_workers":     true,
+	"playback.over_cap_revocation_ttl":       true,
+	"playback.max_user_concurrent_transfers": true,
 
 	// Scanner / matcher toggles captured at construction. Worker counts,
 	// batch size, metadata.cache_images, and mdblist.api_key hot-reload via

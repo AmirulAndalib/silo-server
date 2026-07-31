@@ -1,12 +1,15 @@
 package transfers
 
 import (
+	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -82,7 +85,8 @@ func TestRegistryConcurrentPoursForSameDownloadDoNotCollide(t *testing.T) {
 }
 
 func TestRegistryConcurrentLifecycle(t *testing.T) {
-	r := NewWithOptions(Options{MaxEntries: 256})
+	unlimited := 0
+	r := NewWithOptions(Options{MaxEntries: 256, MaxPerUser: &unlimited})
 	var wg sync.WaitGroup
 	for i := 0; i < 200; i++ {
 		wg.Add(1)
@@ -108,7 +112,8 @@ func TestRegistryConcurrentLifecycle(t *testing.T) {
 
 func TestRegistryCapHoldsUnderRacingBegin(t *testing.T) {
 	const cap = 7
-	r := NewWithOptions(Options{MaxEntries: cap})
+	unlimited := 0
+	r := NewWithOptions(Options{MaxEntries: cap, MaxPerUser: &unlimited})
 	var wg sync.WaitGroup
 	var accepted atomic.Int64
 	for i := 0; i < 100; i++ {
@@ -131,6 +136,122 @@ func TestRegistryCapHoldsUnderRacingBegin(t *testing.T) {
 		t.Fatalf("snapshot size = %d, want %d", got, cap)
 	}
 }
+
+func TestRegistryPerUserLimitAndAnnotation(t *testing.T) {
+	now := time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC)
+	maxPerUser := 2
+	logs := &countingLogHandler{}
+	r := NewWithOptions(Options{
+		MaxPerUser: &maxPerUser,
+		Now:        func() time.Time { return now },
+		Logger:     slog.New(logs),
+	})
+	for _, id := range []string{"one", "two"} {
+		if err := r.Begin(Transfer{ID: id, UserID: 7, Route: "native_download"}); err != nil {
+			t.Fatalf("Begin(%q): %v", id, err)
+		}
+	}
+	if err := r.Begin(Transfer{ID: "over", UserID: 7, Route: "native_download"}); !errors.Is(err, ErrUserTransferLimit) {
+		t.Fatalf("Begin at per-user cap = %v, want ErrUserTransferLimit", err)
+	}
+	if err := r.Begin(Transfer{ID: "other", UserID: 8}); err != nil {
+		t.Fatalf("other user Begin: %v", err)
+	}
+
+	r.End("never-began")
+	if err := r.Begin(Transfer{ID: "still-over", UserID: 7}); !errors.Is(err, ErrUserTransferLimit) {
+		t.Fatalf("Begin after unknown End = %v, want ErrUserTransferLimit", err)
+	}
+	if got := logs.count.Load(); got != 1 {
+		t.Fatalf("warnings before interval = %d, want 1", got)
+	}
+	now = now.Add(fullWarningInterval)
+	if err := r.Begin(Transfer{ID: "warn-again", UserID: 7}); !errors.Is(err, ErrUserTransferLimit) {
+		t.Fatalf("Begin after warning interval = %v, want ErrUserTransferLimit", err)
+	}
+	if got := logs.count.Load(); got != 2 {
+		t.Fatalf("warnings after interval = %d, want 2", got)
+	}
+
+	r.End("one")
+	if err := r.Begin(Transfer{ID: "replacement", UserID: 7}); err != nil {
+		t.Fatalf("Begin after End: %v", err)
+	}
+	r.Annotate("replacement", " download ", 42)
+	r.Annotate("unknown", "ignored", 99)
+	var replacement Transfer
+	for _, transfer := range r.Snapshot() {
+		if transfer.ID == "replacement" {
+			replacement = transfer
+		}
+	}
+	if replacement.DownloadID != "download" || replacement.MediaFileID != 42 {
+		t.Fatalf("annotated transfer = %+v", replacement)
+	}
+	if len(r.Snapshot()) != 3 {
+		t.Fatalf("Annotate unknown changed registry: %+v", r.Snapshot())
+	}
+
+	r.End("two")
+	r.End("replacement")
+	r.End("other")
+	if len(r.perUser) != 0 {
+		t.Fatalf("perUser retained zero-count state: %+v", r.perUser)
+	}
+
+	unlimited := 0
+	unlimitedRegistry := NewWithOptions(Options{MaxEntries: 30, MaxPerUser: &unlimited})
+	for i := 0; i < 30; i++ {
+		if err := unlimitedRegistry.Begin(Transfer{ID: strconv.Itoa(i), UserID: 1}); err != nil {
+			t.Fatalf("explicit unlimited Begin(%d): %v", i, err)
+		}
+	}
+
+	defaultRegistry := New()
+	if defaultRegistry.MaxPerUser() != defaultMaxPerUser {
+		t.Fatalf("unset MaxPerUser = %d, want %d", defaultRegistry.MaxPerUser(), defaultMaxPerUser)
+	}
+	for i := 0; i < defaultMaxPerUser; i++ {
+		if err := defaultRegistry.Begin(Transfer{ID: strconv.Itoa(i), UserID: 1}); err != nil {
+			t.Fatalf("default Begin(%d): %v", i, err)
+		}
+	}
+	if err := defaultRegistry.Begin(Transfer{ID: "default-over", UserID: 1}); !errors.Is(err, ErrUserTransferLimit) {
+		t.Fatalf("Begin at default cap = %v, want ErrUserTransferLimit", err)
+	}
+}
+
+func TestParseMaxPerUser(t *testing.T) {
+	for _, tc := range []struct {
+		raw     string
+		want    int
+		wantErr bool
+	}{
+		{raw: "", want: defaultMaxPerUser},
+		{raw: "0", want: 0},
+		{raw: "48", want: 48},
+		{raw: "-1", wantErr: true},
+		{raw: "10001", wantErr: true},
+		{raw: "many", wantErr: true},
+	} {
+		got, err := ParseMaxPerUser(tc.raw)
+		if (err != nil) != tc.wantErr || got != tc.want {
+			t.Errorf("ParseMaxPerUser(%q) = %d, %v; want %d, error=%v", tc.raw, got, err, tc.want, tc.wantErr)
+		}
+	}
+}
+
+type countingLogHandler struct {
+	count atomic.Int64
+}
+
+func (h *countingLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *countingLogHandler) Handle(context.Context, slog.Record) error {
+	h.count.Add(1)
+	return nil
+}
+func (h *countingLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *countingLogHandler) WithGroup(string) slog.Handler      { return h }
 
 func TestRegistryClampsAndNormalizesRequestStrings(t *testing.T) {
 	r := New()

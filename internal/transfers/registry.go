@@ -3,9 +3,11 @@ package transfers
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +16,7 @@ import (
 
 const (
 	defaultMaxEntries   = 10_000
+	defaultMaxPerUser   = 24
 	fullWarningInterval = time.Minute
 	maxDownloadIDLength = 256
 	maxProfileIDLength  = 256
@@ -23,10 +26,13 @@ const (
 )
 
 var (
-	ErrRegistryFull = errors.New("transfer registry is full")
-	ErrInvalidID    = errors.New("transfer id is required")
-	ErrDuplicateID  = errors.New("transfer id is already active")
+	ErrRegistryFull      = errors.New("transfer registry is full")
+	ErrUserTransferLimit = errors.New("user transfer limit reached")
+	ErrInvalidID         = errors.New("transfer id is required")
+	ErrDuplicateID       = errors.New("transfer id is already active")
 )
+
+const MaxPerUserSetting = "playback.max_user_concurrent_transfers"
 
 // Transfer describes one active HTTP file pour. DownloadID is correlation
 // metadata only: ID uniquely identifies this request, including concurrent
@@ -48,15 +54,25 @@ type Transfer struct {
 // Options customizes a Registry. Zero values use production defaults.
 type Options struct {
 	MaxEntries int
+	MaxPerUser *int
 	Now        func() time.Time
+	Logger     *slog.Logger
+}
+
+type userTransferState struct {
+	count       int
+	lastWarning time.Time
 }
 
 // Registry is a bounded, process-local collection of active transfers.
 type Registry struct {
 	mu              sync.RWMutex
 	items           map[string]Transfer
+	perUser         map[int]userTransferState
 	maxEntries      int
+	maxPerUser      int
 	now             func() time.Time
+	logger          *slog.Logger
 	lastFullWarning time.Time
 }
 
@@ -73,11 +89,44 @@ func NewWithOptions(opts Options) *Registry {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
+	maxPerUser := defaultMaxPerUser
+	if opts.MaxPerUser != nil {
+		maxPerUser = max(0, *opts.MaxPerUser)
+	}
+	if opts.Logger == nil {
+		opts.Logger = slog.Default()
+	}
 	return &Registry{
 		items:      make(map[string]Transfer),
+		perUser:    make(map[int]userTransferState),
 		maxEntries: opts.MaxEntries,
+		maxPerUser: maxPerUser,
 		now:        opts.Now,
+		logger:     opts.Logger,
 	}
+}
+
+// ParseMaxPerUser parses the process-start setting. Empty input selects the
+// production default; zero explicitly disables the per-user cap.
+func ParseMaxPerUser(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultMaxPerUser, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 || value > defaultMaxEntries {
+		return 0, fmt.Errorf("%s must be an integer between 0 and %d", MaxPerUserSetting, defaultMaxEntries)
+	}
+	return value, nil
+}
+
+// MaxPerUser returns the configured per-user concurrent-transfer cap. Zero
+// means unlimited.
+func (r *Registry) MaxPerUser() int {
+	if r == nil {
+		return 0
+	}
+	return r.maxPerUser
 }
 
 // Begin records an active transfer. Strings derived from request metadata are
@@ -107,16 +156,54 @@ func (r *Registry) Begin(t Transfer) error {
 	if _, exists := r.items[t.ID]; exists {
 		return ErrDuplicateID
 	}
+	userState := r.perUser[t.UserID]
+	if r.maxPerUser > 0 && userState.count >= r.maxPerUser {
+		now := r.now()
+		if userState.lastWarning.IsZero() || now.Sub(userState.lastWarning) >= fullWarningInterval {
+			userState.lastWarning = now
+			r.perUser[t.UserID] = userState
+			r.logger.Warn("user transfer limit reached",
+				"component", "transfers",
+				"route", t.Route,
+				"user_id", t.UserID,
+				"max_per_user", r.maxPerUser,
+			)
+		}
+		return ErrUserTransferLimit
+	}
 	if len(r.items) >= r.maxEntries {
 		now := r.now()
 		if r.lastFullWarning.IsZero() || now.Sub(r.lastFullWarning) >= fullWarningInterval {
 			r.lastFullWarning = now
-			slog.Warn("transfer registry full; serving without monitoring", "component", "transfers", "max_entries", r.maxEntries)
+			r.logger.Warn("transfer registry full",
+				"component", "transfers",
+				"route", t.Route,
+				"user_id", t.UserID,
+				"max_entries", r.maxEntries,
+			)
 		}
 		return ErrRegistryFull
 	}
 	r.items[t.ID] = t
+	userState.count++
+	r.perUser[t.UserID] = userState
 	return nil
+}
+
+// Annotate adds correlation metadata after a handler-owned Begin. Unknown IDs
+// are ignored so late resolution cannot create an unbounded registry entry.
+func (r *Registry) Annotate(id, downloadID string, mediaFileID int) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	t, ok := r.items[id]
+	if ok {
+		t.DownloadID = clamp(downloadID, maxDownloadIDLength)
+		t.MediaFileID = mediaFileID
+		r.items[id] = t
+	}
+	r.mu.Unlock()
 }
 
 // AddServedBytes implements playback.ServedBytesRecorder. Updates for unknown
@@ -149,7 +236,16 @@ func (r *Registry) End(id string) {
 		return
 	}
 	r.mu.Lock()
-	delete(r.items, id)
+	if t, ok := r.items[id]; ok {
+		delete(r.items, id)
+		state := r.perUser[t.UserID]
+		state.count--
+		if state.count <= 0 {
+			delete(r.perUser, t.UserID)
+		} else {
+			r.perUser[t.UserID] = state
+		}
+	}
 	r.mu.Unlock()
 }
 

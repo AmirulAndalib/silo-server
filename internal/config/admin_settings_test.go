@@ -212,6 +212,8 @@ func TestNormalizeAdminSettingRejectsInvalidValues(t *testing.T) {
 		{key: "auth.access_token_expiry", value: "forever"},
 		{key: "playback.over_cap_revocation_ttl", value: "4m59s"},
 		{key: "playback.over_cap_revocation_ttl", value: "24h1s"},
+		{key: "playback.max_user_concurrent_transfers", value: "-1"},
+		{key: "playback.max_user_concurrent_transfers", value: "10001"},
 		{key: "recommendations.embeddings_cron", value: "not a cron"},
 		{key: "notifications.server_channels.batch_seconds", value: "119"},
 		{key: "catalog.search.meilisearch.semantic_ratio", value: "1.2"},
@@ -236,6 +238,14 @@ func TestOverCapRevocationTTLDefaultAndValidation(t *testing.T) {
 	}
 	if got, err := NormalizeAdminSetting("playback.over_cap_revocation_ttl", "6h"); err != nil || got != "6h" {
 		t.Fatalf("valid over-cap revocation TTL = %q, %v", got, err)
+	}
+	if got := effective["playback.max_user_concurrent_transfers"]; got != "24" {
+		t.Fatalf("default max user concurrent transfers = %q, want 24", got)
+	}
+	for _, value := range []string{"0", "48", "10000"} {
+		if got, err := NormalizeAdminSetting("playback.max_user_concurrent_transfers", value); err != nil || got != value {
+			t.Fatalf("max user concurrent transfers %q = %q, %v", value, got, err)
+		}
 	}
 }
 

@@ -60,6 +60,7 @@ var adminSettingDefaults = map[string]string{
 	"playback.chapter_thumbnail_node_capacity": "1",
 	"playback.chapter_thumbnail_hdr_policy":    "best_effort",
 	"playback.over_cap_revocation_ttl":         streamtoken.MaxTTL.String(),
+	"playback.max_user_concurrent_transfers":   "24",
 	"playback.watched_threshold":               "90",
 	"playback.min_resume_threshold":            "5",
 	"allow_4k_transcode":                       "false",
@@ -363,6 +364,8 @@ func NormalizeAdminSetting(key, raw string) (string, error) {
 		return normalizeAdminDuration(key, value)
 	case "playback.over_cap_revocation_ttl":
 		return normalizeAdminDurationRange(key, value, 5*time.Minute, streamtoken.MaxTTL)
+	case "playback.max_user_concurrent_transfers":
+		return normalizeAdminInt(key, value, 0, 10_000)
 
 	case "server.log_level":
 		return normalizeAdminEnum(key, value, "debug", "info", "warn", "error")

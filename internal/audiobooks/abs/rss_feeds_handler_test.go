@@ -5,13 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 )
 
 type memRSSFeedStore struct {
@@ -216,6 +220,82 @@ func TestPublicFeed_HappyPath_XML(t *testing.T) {
 	for _, needle := range []string{"<rss", "<channel>", "<title>"} {
 		if !strings.Contains(body, needle) {
 			t.Errorf("body missing %q; got %s", needle, body)
+		}
+	}
+}
+
+func TestFeedFileTransferAdmissionFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		registry   func(t *testing.T) *transfers.Registry
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name: "per-user cap",
+			registry: func(t *testing.T) *transfers.Registry {
+				t.Helper()
+				limit := 1
+				r := transfers.NewWithOptions(transfers.Options{MaxPerUser: &limit})
+				if err := r.Begin(transfers.Transfer{ID: "existing", UserID: 1}); err != nil {
+					t.Fatal(err)
+				}
+				return r
+			},
+			wantStatus: http.StatusTooManyRequests,
+			wantCode:   "transfer_limit_exceeded",
+		},
+		{
+			name: "global cap",
+			registry: func(t *testing.T) *transfers.Registry {
+				t.Helper()
+				unlimited := 0
+				r := transfers.NewWithOptions(transfers.Options{MaxEntries: 1, MaxPerUser: &unlimited})
+				if err := r.Begin(transfers.Transfer{ID: "existing", UserID: 2}); err != nil {
+					t.Fatal(err)
+				}
+				return r
+			},
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "monitoring_unavailable",
+		},
+	} {
+		for _, method := range []string{http.MethodGet, http.MethodHead, "range"} {
+			t.Run(tc.name+"/"+method, func(t *testing.T) {
+				store := newMemRSSFeedStore()
+				store.rows["feed-id"] = RSSFeed{
+					ID: "feed-id", UserID: "1", ProfileID: "profile-1", LibraryItemID: "book-1", Slug: "feed", CreatedAt: time.Now(),
+				}
+				h := New(Dependencies{
+					RSSFeedStore: store,
+					MediaStore: &revocationFeedFileMediaStore{file: &models.MediaFile{
+						ID: 9, ContentID: "book-1", FilePath: "must-not-be-served.mp3",
+					}},
+					Transfers: tc.registry(t),
+				})
+				requestMethod := method
+				if method == "range" {
+					requestMethod = http.MethodGet
+				}
+				req := httptest.NewRequest(requestMethod, "/feed/feed/file/9", nil)
+				if method == "range" {
+					req.Header.Set("Range", "bytes=0-1")
+				}
+				rctx := chi.NewRouteContext()
+				rctx.URLParams.Add("slug", "feed")
+				rctx.URLParams.Add("ino", "9")
+				rec := httptest.NewRecorder()
+				h.handlePublicFeedFile(rec, req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx)))
+				if rec.Code != tc.wantStatus {
+					t.Fatalf("status = %d, want %d; body=%s", rec.Code, tc.wantStatus, rec.Body.String())
+				}
+				if rec.Header().Get("Retry-After") != "5" {
+					t.Fatalf("Retry-After = %q, want 5", rec.Header().Get("Retry-After"))
+				}
+				if !strings.Contains(rec.Body.String(), tc.wantCode) || strings.Contains(rec.Body.String(), "must-not-be-served") {
+					t.Fatalf("body = %q, want error code and no file bytes", rec.Body.String())
+				}
+			})
 		}
 	}
 }

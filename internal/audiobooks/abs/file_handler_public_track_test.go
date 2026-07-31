@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 )
 
 // fakePlaybackSessionStore is an in-memory ABSPlaybackSessionStore for the
@@ -131,6 +133,81 @@ func TestHandlePublicTrack_ServesBytesForValidSession(t *testing.T) {
 	}
 	if got := rec.Header().Get("Content-Type"); got != "audio/mpeg" {
 		t.Errorf("Content-Type = %q, want audio/mpeg", got)
+	}
+}
+
+func TestFileTransferAdmissionFailsClosedBeforeSuccessHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		registry   func(t *testing.T) *transfers.Registry
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name: "per-user cap",
+			registry: func(t *testing.T) *transfers.Registry {
+				t.Helper()
+				limit := 1
+				r := transfers.NewWithOptions(transfers.Options{MaxPerUser: &limit})
+				if err := r.Begin(transfers.Transfer{ID: "existing", UserID: 1}); err != nil {
+					t.Fatal(err)
+				}
+				return r
+			},
+			wantStatus: http.StatusTooManyRequests,
+			wantCode:   "transfer_limit_exceeded",
+		},
+		{
+			name: "global cap",
+			registry: func(t *testing.T) *transfers.Registry {
+				t.Helper()
+				unlimited := 0
+				r := transfers.NewWithOptions(transfers.Options{MaxEntries: 1, MaxPerUser: &unlimited})
+				if err := r.Begin(transfers.Transfer{ID: "existing", UserID: 2}); err != nil {
+					t.Fatal(err)
+				}
+				return r
+			},
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "monitoring_unavailable",
+		},
+	} {
+		for _, method := range []string{http.MethodGet, http.MethodHead, "range"} {
+			t.Run(tc.name+"/"+method, func(t *testing.T) {
+				h, _ := newPublicTrackHandler(t, "unused", "book-1", false)
+				h.deps.Transfers = tc.registry(t)
+				requestMethod := method
+				if method == "range" {
+					requestMethod = http.MethodGet
+				}
+				req := httptest.NewRequest(requestMethod, "/api/items/book-1/file/0/download", nil)
+				if method == "range" {
+					req.Header.Set("Range", "bytes=0-1")
+				}
+				rctx := chi.NewRouteContext()
+				rctx.URLParams.Add("libraryItemId", "book-1")
+				rctx.URLParams.Add("ino", "0")
+				ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+				ctx = context.WithValue(ctx, ctxKey{}, ctxAuth{UserID: "1", ProfileID: "profile-1"})
+				rec := httptest.NewRecorder()
+				h.handleFileStream(rec, req.WithContext(ctx))
+				if rec.Code != tc.wantStatus {
+					t.Fatalf("status = %d, want %d; body=%s", rec.Code, tc.wantStatus, rec.Body.String())
+				}
+				if rec.Header().Get("Retry-After") != "5" {
+					t.Fatalf("Retry-After = %q, want 5", rec.Header().Get("Retry-After"))
+				}
+				if rec.Header().Get("Content-Disposition") != "" {
+					t.Fatalf("rejection has Content-Disposition %q", rec.Header().Get("Content-Disposition"))
+				}
+				if rec.Header().Get("Content-Type") != "application/json" {
+					t.Fatalf("Content-Type = %q, want application/json", rec.Header().Get("Content-Type"))
+				}
+				if !strings.Contains(rec.Body.String(), tc.wantCode) || strings.Contains(rec.Body.String(), "audio-bytes") {
+					t.Fatalf("body = %q, want error code and no audio bytes", rec.Body.String())
+				}
+			})
+		}
 	}
 }
 

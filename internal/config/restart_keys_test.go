@@ -12,6 +12,7 @@ func TestRestartRequired(t *testing.T) {
 		{"auth.jwt_secret", true},
 		{"ratelimit.backend", true},
 		{"playback.over_cap_revocation_ttl", true},
+		{"playback.max_user_concurrent_transfers", true},
 		// Prefix-covered namespaces.
 		{"database.max_connections", true},
 		{"userdb.backend", true},

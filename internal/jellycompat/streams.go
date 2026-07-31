@@ -268,7 +268,18 @@ func (h *PlaybackHandler) HandleDownload(w http.ResponseWriter, r *http.Request)
 	}
 	if h.Transfers != nil {
 		if err := h.Transfers.Begin(transfer); err != nil {
-			slog.DebugContext(r.Context(), "compat transfer not monitored", "component", "jellycompat", "transfer_id", transfer.ID, "error", err)
+			slog.DebugContext(r.Context(), "compat transfer rejected", "component", "jellycompat", "transfer_id", transfer.ID, "error", err)
+			switch {
+			case errors.Is(err, transfers.ErrUserTransferLimit):
+				w.Header().Set("Retry-After", "5")
+				writeError(w, http.StatusTooManyRequests, "transfer_limit_exceeded", "Concurrent transfer limit exceeded")
+			case errors.Is(err, transfers.ErrRegistryFull):
+				w.Header().Set("Retry-After", "5")
+				writeError(w, http.StatusServiceUnavailable, "monitoring_unavailable", "Transfer monitoring unavailable")
+			default:
+				writeError(w, http.StatusInternalServerError, "internal_error", "Failed to monitor transfer")
+			}
+			return
 		}
 	}
 	defer h.Transfers.End(transfer.ID)

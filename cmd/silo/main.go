@@ -105,6 +105,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/taskmanager/triggers"
 	"github.com/Silo-Server/silo-server/internal/telemetry"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
+	"github.com/Silo-Server/silo-server/internal/transfers"
 	"github.com/Silo-Server/silo-server/internal/usercollections"
 	"github.com/Silo-Server/silo-server/internal/userdb"
 	"github.com/Silo-Server/silo-server/internal/userstore"
@@ -758,7 +759,17 @@ func main() {
 
 	// One process-local registry is shared by every download-class serving
 	// surface and the admin view. It is intentionally separate from live streams.
-	transferMonitoring := newTransferRegistryComposition()
+	maxUserTransfers, maxUserTransfersErr := transfers.ParseMaxPerUser(settings[transfers.MaxPerUserSetting])
+	if maxUserTransfersErr != nil {
+		slog.Warn("invalid max user concurrent transfers setting; using default",
+			"component", "transfers",
+			"setting", transfers.MaxPerUserSetting,
+			"value", settings[transfers.MaxPerUserSetting],
+			"error", maxUserTransfersErr,
+		)
+		maxUserTransfers, _ = transfers.ParseMaxPerUser("")
+	}
+	transferMonitoring := newTransferRegistryComposition(maxUserTransfers)
 
 	// Central-side kill switch: written by the async enforcer, admin terminate,
 	// and account revocation; edges enforce it via Redis pub/sub + poll. Memory-
