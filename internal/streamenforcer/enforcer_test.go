@@ -3,13 +3,16 @@ package streamenforcer
 import (
 	"context"
 	"errors"
+	"os"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streammonitor"
+	"github.com/redis/go-redis/v9"
 )
 
 type fakeSource struct {
@@ -244,5 +247,160 @@ func TestParseRevocationTTL(t *testing.T) {
 		if _, err := ParseRevocationTTL(raw); err == nil {
 			t.Fatalf("ParseRevocationTTL(%q) accepted invalid value", raw)
 		}
+	}
+}
+
+type firstCoordinator struct {
+	mu       sync.Mutex
+	acquired bool
+}
+
+func (c *firstCoordinator) Acquire(context.Context) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.acquired {
+		return false, nil
+	}
+	c.acquired = true
+	return true, nil
+}
+
+type errorCoordinator struct{}
+
+func (errorCoordinator) Acquire(context.Context) (bool, error) {
+	return false, errors.New("redis unavailable")
+}
+
+type countingSource struct {
+	mu    sync.Mutex
+	snap  streammonitor.Snapshot
+	calls int
+}
+
+func (s *countingSource) Snapshot(context.Context) (streammonitor.Snapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	return s.snap, nil
+}
+
+func TestSharedCoordinatorAllowsExactlyOneEnforcerEvaluation(t *testing.T) {
+	base := time.Now()
+	source := &countingSource{snap: streammonitor.Snapshot{Streams: []streammonitor.LiveStream{
+		stream("keep", 7, base.Add(time.Minute)),
+		stream("victim", 7, base),
+	}}}
+	revoker := &fakeRevoker{}
+	coordinator := &firstCoordinator{}
+	enforcers := []*Enforcer{
+		New(source, func(context.Context, int) (int, error) { return 1, nil }, revoker, time.Second),
+		New(source, func(context.Context, int) (int, error) { return 1, nil }, revoker, time.Second),
+	}
+	for _, enforcer := range enforcers {
+		enforcer.SetCoordinator(coordinator)
+	}
+
+	var wg sync.WaitGroup
+	for _, enforcer := range enforcers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			enforcer.evaluate(context.Background())
+		}()
+	}
+	wg.Wait()
+	source.mu.Lock()
+	snapshotCalls := source.calls
+	source.mu.Unlock()
+	if snapshotCalls != 1 {
+		t.Fatalf("snapshot calls = %d, want exactly 1", snapshotCalls)
+	}
+	if len(revoker.revoked) != 1 || revoker.revoked[0] != "victim" {
+		t.Fatalf("revoked = %v, want exactly [victim]", revoker.revoked)
+	}
+}
+
+func TestCoordinatorErrorStillEvaluates(t *testing.T) {
+	base := time.Now()
+	revoker := &fakeRevoker{}
+	enforcer := New(fakeSource{snap: streammonitor.Snapshot{Streams: []streammonitor.LiveStream{
+		stream("keep", 7, base.Add(time.Minute)),
+		stream("victim", 7, base),
+	}}}, func(context.Context, int) (int, error) { return 1, nil }, revoker, time.Second)
+	enforcer.SetCoordinator(errorCoordinator{})
+	enforcer.evaluate(context.Background())
+	if len(revoker.revoked) != 1 || revoker.revoked[0] != "victim" {
+		t.Fatalf("revoked = %v, want [victim]", revoker.revoked)
+	}
+}
+
+type blockingSource struct {
+	deadlineObserved chan struct{}
+}
+
+func (s blockingSource) Snapshot(ctx context.Context) (streammonitor.Snapshot, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		close(s.deadlineObserved)
+		return streammonitor.Snapshot{}, errors.New("evaluation context has no deadline")
+	}
+	<-ctx.Done()
+	close(s.deadlineObserved)
+	return streammonitor.Snapshot{}, ctx.Err()
+}
+
+func TestEvaluationPassIsBoundedByInterval(t *testing.T) {
+	observed := make(chan struct{})
+	enforcer := New(
+		blockingSource{deadlineObserved: observed},
+		func(context.Context, int) (int, error) { return 1, nil },
+		&fakeRevoker{},
+		25*time.Millisecond,
+	)
+	start := time.Now()
+	enforcer.evaluate(context.Background())
+	elapsed := time.Since(start)
+	select {
+	case <-observed:
+	default:
+		t.Fatal("source did not observe the evaluation deadline")
+	}
+	if elapsed < 20*time.Millisecond || elapsed > 250*time.Millisecond {
+		t.Fatalf("evaluation elapsed %v, want bounded near 25ms", elapsed)
+	}
+}
+
+func TestRedisCoordinatorElectsOneHolderAndRenews(t *testing.T) {
+	addr := os.Getenv("SILO_TEST_REDIS_ADDR")
+	if addr == "" {
+		t.Skip("SILO_TEST_REDIS_ADDR is not set")
+	}
+	ctx := context.Background()
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	t.Cleanup(func() {
+		_ = rdb.Del(ctx, coordinatorKey).Err()
+		_ = rdb.Close()
+	})
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		t.Fatalf("ping test Redis: %v", err)
+	}
+	if err := rdb.Del(ctx, coordinatorKey).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	const interval = 80 * time.Millisecond
+	first := NewRedisCoordinator(rdb, "first", interval)
+	second := NewRedisCoordinator(rdb, "second", interval)
+	if acquired, err := first.Acquire(ctx); err != nil || !acquired {
+		t.Fatalf("first acquire=%v err=%v, want true", acquired, err)
+	}
+	if acquired, err := second.Acquire(ctx); err != nil || acquired {
+		t.Fatalf("second acquire=%v err=%v, want false", acquired, err)
+	}
+	time.Sleep(90 * time.Millisecond)
+	if acquired, err := first.Acquire(ctx); err != nil || !acquired {
+		t.Fatalf("renew acquire=%v err=%v, want true", acquired, err)
+	}
+	if ttl, err := rdb.PTTL(ctx, coordinatorKey).Result(); err != nil || ttl < 120*time.Millisecond {
+		t.Fatalf("renewed lease TTL=%v err=%v, want >=120ms", ttl, err)
 	}
 }

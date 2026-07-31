@@ -51,6 +51,67 @@ const (
 	defaultTTL = 24 * time.Hour
 )
 
+var mergeMirrorScript = redis.NewScript(`
+local incoming = cjson.decode(ARGV[1])
+local existing_raw = redis.call('GET', KEYS[1])
+local merged = incoming
+
+if existing_raw ~= false then
+	local ok, existing = pcall(cjson.decode, existing_raw)
+	if ok
+		and type(existing.revoked_at_sec) == 'number'
+		and type(existing.revoked_at_nsec) == 'number'
+		and type(existing.expires_at_sec) == 'number'
+		and type(existing.expires_at_nsec) == 'number' then
+		merged = existing
+
+		local incoming_permanent = incoming.expires_at_sec == 0
+		local existing_permanent = existing.expires_at_sec == 0
+		local incoming_expiry_later = incoming.expires_at_sec > existing.expires_at_sec
+			or (incoming.expires_at_sec == existing.expires_at_sec
+				and incoming.expires_at_nsec > existing.expires_at_nsec)
+		if incoming_permanent or (not existing_permanent and incoming_expiry_later) then
+			merged.expires_at = incoming.expires_at
+			merged.expires_at_sec = incoming.expires_at_sec
+			merged.expires_at_nsec = incoming.expires_at_nsec
+		end
+
+		local incoming_cutoff_later = incoming.revoked_at_sec > existing.revoked_at_sec
+			or (incoming.revoked_at_sec == existing.revoked_at_sec
+				and incoming.revoked_at_nsec > existing.revoked_at_nsec)
+		if incoming_cutoff_later then
+			merged.revoked_at = incoming.revoked_at
+			merged.revoked_at_sec = incoming.revoked_at_sec
+			merged.revoked_at_nsec = incoming.revoked_at_nsec
+			merged.reason = incoming.reason
+		end
+	end
+end
+
+local permanent = merged.expires_at_sec == 0
+local expired = not permanent and (
+	merged.expires_at_sec < tonumber(ARGV[2])
+	or (merged.expires_at_sec == tonumber(ARGV[2])
+		and merged.expires_at_nsec <= tonumber(ARGV[3]))
+)
+if expired then
+	redis.call('DEL', KEYS[1])
+	return 0
+end
+
+local encoded = cjson.encode(merged)
+if permanent then
+	redis.call('SET', KEYS[1], encoded)
+else
+	local ttl_ms = math.ceil(
+		(merged.expires_at_sec - tonumber(ARGV[2])) * 1000
+		+ (merged.expires_at_nsec - tonumber(ARGV[3])) / 1000000
+	)
+	redis.call('SET', KEYS[1], encoded, 'PX', math.max(1, ttl_ms))
+end
+return 1
+`)
+
 // Kind identifies what a revocation targets.
 type Kind string
 
@@ -143,6 +204,7 @@ type Store struct {
 	items            map[Key]Revocation
 	tombstones       map[Key]time.Time
 	tombstoneExpires map[Key]time.Time
+	mirrorWarnOnce   sync.Once
 }
 
 // New builds a Store, applying defaults for any unset Options.
@@ -311,6 +373,19 @@ func (r Revocation) effectiveExpiry() time.Time {
 	return r.ExpiresAt
 }
 
+// mergeRevocations is the Go definition of the two independent monotonic
+// dimensions also applied atomically by mergeMirrorScript.
+func mergeRevocations(existing, incoming Revocation) Revocation {
+	if incoming.effectiveExpiry().After(existing.effectiveExpiry()) {
+		existing.ExpiresAt = incoming.ExpiresAt
+	}
+	if incoming.RevokedAt.After(existing.RevokedAt) {
+		existing.RevokedAt = incoming.RevokedAt
+		existing.Reason = incoming.Reason
+	}
+	return existing
+}
+
 // applyLocal independently merges a revocation's two monotonic dimensions:
 // expiry never moves earlier, while the user-cutoff RevokedAt never moves
 // backward. Reason follows the record that supplied the newer cutoff. Keeping
@@ -331,14 +406,7 @@ func (s *Store) applyLocal(r Revocation) {
 		}
 	}
 	if existing, ok := s.items[r.key()]; ok {
-		if r.effectiveExpiry().After(existing.effectiveExpiry()) {
-			existing.ExpiresAt = r.ExpiresAt
-		}
-		if r.RevokedAt.After(existing.RevokedAt) {
-			existing.RevokedAt = r.RevokedAt
-			existing.Reason = r.Reason
-		}
-		s.items[r.key()] = existing
+		s.items[r.key()] = mergeRevocations(existing, r)
 	} else {
 		s.items[r.key()] = r
 	}
@@ -405,10 +473,8 @@ func (s *Store) revokeWithWarningsLocked(ctx context.Context, key Key, reason st
 	merged := s.effective(r.key())
 
 	// Redis mirror for multi-node propagation to edges. Mirror the merged copy
-	// applyLocal kept. This SET is deliberately serialized by opMu in this
-	// process. Separate central replicas can still race and overwrite a newer
-	// value because Redis does not atomically merge records; that is deferred to
-	// the multi-replica work, not addressed by narrowing this lock.
+	// applyLocal kept; Redis atomically merges it with writes from other central
+	// replicas.
 	if err := s.mirrorToRedis(ctx, merged); err != nil {
 		warnings = append(warnings, "Redis mirror was not updated")
 	}
@@ -442,8 +508,29 @@ func (s *Store) revokeWithWarningsLocked(ctx context.Context, key Key, reason st
 	return warnings, nil
 }
 
-// mirrorToRedis writes (or deletes) the Redis mirror key for a revocation with a
-// TTL of the time remaining until r.ExpiresAt. It is the single shared
+type mirrorPayload struct {
+	Revocation
+	RevokedAtSec  int64 `json:"revoked_at_sec"`
+	RevokedAtNSec int64 `json:"revoked_at_nsec"`
+	ExpiresAtSec  int64 `json:"expires_at_sec"`
+	ExpiresAtNSec int64 `json:"expires_at_nsec"`
+}
+
+func newMirrorPayload(r Revocation) mirrorPayload {
+	payload := mirrorPayload{
+		Revocation:    r,
+		RevokedAtSec:  r.RevokedAt.Unix(),
+		RevokedAtNSec: int64(r.RevokedAt.Nanosecond()),
+	}
+	if !r.ExpiresAt.IsZero() {
+		payload.ExpiresAtSec = r.ExpiresAt.Unix()
+		payload.ExpiresAtNSec = int64(r.ExpiresAt.Nanosecond())
+	}
+	return payload
+}
+
+// mirrorToRedis atomically merges the Redis mirror with a revocation and sets
+// its TTL to the time remaining until the merged expiry. It is the single shared
 // Redis-arming path, used both by Revoke and by the durable warm loops: edge
 // nodes (proxy/transcode) have no durable store and learn kills ONLY from
 // Redis, so re-arming Redis from the durable source of truth after a Redis flush
@@ -454,15 +541,32 @@ func (s *Store) mirrorToRedis(ctx context.Context, r Revocation) error {
 	if s.rdb == nil {
 		return nil
 	}
-	data, err := json.Marshal(r)
+	data, err := json.Marshal(newMirrorPayload(r))
 	if err != nil {
 		slog.WarnContext(ctx, "streamrevoke marshal failed", "error", err, "kind", r.Kind, "id", r.ID)
 		return err
 	}
+	now := time.Now()
+	if err := mergeMirrorScript.Run(
+		ctx,
+		s.rdb,
+		[]string{redisKey(r.key())},
+		data,
+		now.Unix(),
+		now.Nanosecond(),
+	).Err(); err == nil {
+		return nil
+	} else {
+		s.mirrorWarnOnce.Do(func() {
+			slog.WarnContext(ctx, "streamrevoke atomic Redis merge unavailable; falling back to plain mirror writes",
+				"error", err)
+		})
+	}
+	return s.mirrorToRedisFallback(ctx, r, data)
+}
+
+func (s *Store) mirrorToRedisFallback(ctx context.Context, r Revocation, data []byte) error {
 	if r.ExpiresAt.IsZero() {
-		// Permanent kill: set without a TTL, matching applyLocal/effectiveExpiry
-		// treating a zero ExpiresAt as "never". A TTL of time.Until(zero) would be
-		// hugely negative and drop the key, so late-joining edges would miss it.
 		if err := s.rdb.Set(ctx, redisKey(r.key()), data, 0).Err(); err != nil {
 			slog.WarnContext(ctx, "streamrevoke redis set failed", "error", err, "kind", r.Kind, "id", r.ID)
 			return err
@@ -471,7 +575,6 @@ func (s *Store) mirrorToRedis(ctx context.Context, r Revocation) error {
 	}
 	ttl := time.Until(r.ExpiresAt)
 	if ttl <= 0 {
-		// Already expired: nothing to mirror in Redis.
 		if err := s.rdb.Del(ctx, redisKey(r.key())).Err(); err != nil {
 			slog.DebugContext(ctx, "streamrevoke redis del failed", "error", err, "kind", r.Kind, "id", r.ID)
 			return err

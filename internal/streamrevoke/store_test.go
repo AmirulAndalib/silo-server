@@ -181,6 +181,9 @@ func (h *recordingRedisHook) DialHook(next redis.DialHook) redis.DialHook {
 
 func (h *recordingRedisHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "eval" || cmd.Name() == "evalsha" {
+			return errors.New("lua disabled")
+		}
 		if cmd.Name() == "set" {
 			select {
 			case h.set <- struct{}{}:
@@ -194,6 +197,33 @@ func (h *recordingRedisHook) ProcessHook(next redis.ProcessHook) redis.ProcessHo
 
 func (h *recordingRedisHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return next
+}
+
+func TestMirrorFallsBackToPlainSetWhenLuaFails(t *testing.T) {
+	rdb := redis.NewClient(&redis.Options{Addr: "unused.invalid:6379"})
+	t.Cleanup(func() { _ = rdb.Close() })
+	set := make(chan struct{}, 2)
+	rdb.AddHook(&recordingRedisHook{set: set})
+	store := New(Options{Redis: rdb})
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	revocation := Revocation{
+		Kind: KindSession, ID: "fallback", RevokedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+	}
+	for range 2 {
+		if err := store.mirrorToRedis(context.Background(), revocation); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := len(set); got != 2 {
+		t.Fatalf("plain SET fallback attempts = %d, want 2", got)
+	}
+	const warning = "streamrevoke atomic Redis merge unavailable; falling back to plain mirror writes"
+	if got := strings.Count(logs.String(), warning); got != 1 {
+		t.Fatalf("fallback warnings = %d, want 1; logs: %s", got, logs.String())
+	}
 }
 
 func (f *fakeDurable) UpsertTombstone(_ context.Context, tombstone Tombstone) error {

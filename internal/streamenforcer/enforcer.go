@@ -60,6 +60,15 @@ type Enforcer struct {
 	interval      time.Duration
 	revocationTTL time.Duration
 	now           func() time.Time
+	coordinator   Coordinator
+}
+
+// SetCoordinator installs the optional cross-replica evaluator coordinator.
+// Without one, every tick evaluates as before.
+func (e *Enforcer) SetCoordinator(c Coordinator) {
+	if e != nil {
+		e.coordinator = c
+	}
 }
 
 // New builds an enforcer. interval <= 0 uses DefaultInterval.
@@ -131,7 +140,18 @@ func (e *Enforcer) Start(ctx context.Context) {
 // evaluate runs one pass: snapshot → per-user over-cap check → revoke victims.
 // Exported behavior is covered by EvaluateOnce for tests.
 func (e *Enforcer) evaluate(ctx context.Context) {
-	if err := e.EvaluateOnce(ctx); err != nil {
+	if e.coordinator != nil {
+		acquired, err := e.coordinator.Acquire(ctx)
+		if err != nil {
+			// Coordination failure must not disable enforcement.
+			slog.DebugContext(ctx, "stream enforcer coordination failed; evaluating anyway", "error", err)
+		} else if !acquired {
+			return
+		}
+	}
+	passCtx, cancel := context.WithTimeout(ctx, e.interval)
+	defer cancel()
+	if err := e.EvaluateOnce(passCtx); err != nil {
 		slog.DebugContext(ctx, "stream enforcer evaluate failed", "error", err)
 	}
 }

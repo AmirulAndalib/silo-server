@@ -108,13 +108,12 @@ type Tracker struct {
 // NewTracker creates a session tracker for the given node.
 // rdb may be nil, in which case all operations are no-ops.
 func NewTracker(rdb *redis.Client, nodeURL, nodeName, nodeType string) *Tracker {
-	h := sha256.Sum256([]byte(nodeURL))
 	return &Tracker{
 		rdb:       rdb,
 		nodeURL:   nodeURL,
 		nodeName:  nodeName,
 		nodeType:  nodeType,
-		nodeHash:  hex.EncodeToString(h[:4]), // 8 hex chars
+		nodeHash:  namespaceHash(nodeURL),
 		sessions:  make(map[string]sessionRefs),
 		ephemeral: make(map[string]time.Time),
 		touched:   make(map[string]time.Time),
@@ -125,7 +124,16 @@ func NewTracker(rdb *redis.Client, nodeURL, nodeName, nodeType string) *Tracker 
 
 // redisKey returns the full Redis key for a session.
 func (tr *Tracker) redisKey(sessionID string) string {
-	return KeyPrefix + tr.nodeHash + ":" + sessionID
+	return sessionRedisKey(tr.nodeHash, sessionID)
+}
+
+func namespaceHash(namespace string) string {
+	h := sha256.Sum256([]byte(namespace))
+	return hex.EncodeToString(h[:4])
+}
+
+func sessionRedisKey(nodeHash, sessionID string) string {
+	return KeyPrefix + nodeHash + ":" + sessionID
 }
 
 // NodeHash returns the node's hash prefix used in Redis keys.

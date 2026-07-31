@@ -1708,6 +1708,7 @@ func main() {
 	// Build the reconciler early enough that playback handlers can trigger
 	// immediate session syncs after start/stop events.
 	nodeIdentity := resolveNodeIdentity()
+	instanceID := nodeIdentity + ":" + uuid.NewString()
 
 	var reconciler *worker.Reconciler
 	var heartbeatWriter *worker.HeartbeatWriter
@@ -1752,6 +1753,15 @@ func main() {
 		})
 		var monitorSource streammonitor.Source = localSource
 		if apiRedisClient != nil {
+			publisher := nodesessions.NewPublisher(apiRedisClient, instanceID, nodeIdentity)
+			publisher.Start(appCtx, 10*time.Second, func() []nodesessions.SessionInfo {
+				return streammonitor.LiveLocalSessions(sessionMgr, nodeIdentity)
+			})
+			defer func() {
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cleanupCancel()
+				publisher.Cleanup(cleanupCtx)
+			}()
 			monitorSource = streammonitor.NewMultiSource(localSource, streammonitor.NewRedisSource(apiRedisClient))
 		}
 		// Resolve caps through the session manager so the enforcer and synchronous
@@ -1768,13 +1778,19 @@ func main() {
 				"error", ttlErr)
 			overCapRevocationTTL = streamenforcer.DefaultRevocationTTL
 		}
-		streamenforcer.NewWithRevocationTTL(monitorSource, func(ctx context.Context, userID int) (int, error) {
+		enforcer := streamenforcer.NewWithRevocationTTL(monitorSource, func(ctx context.Context, userID int) (int, error) {
 			limits, err := sessionMgr.EffectiveLimits(ctx, userID)
 			if err != nil {
 				return 0, err
 			}
 			return limits.MaxStreams, nil
-		}, streamRevocation, 0, overCapRevocationTTL).Start(appCtx)
+		}, streamRevocation, 0, overCapRevocationTTL)
+		if apiRedisClient != nil {
+			enforcer.SetCoordinator(streamenforcer.NewRedisCoordinator(
+				apiRedisClient, instanceID, streamenforcer.DefaultInterval,
+			))
+		}
+		enforcer.Start(appCtx)
 
 		nodeURL := fmt.Sprintf("http://%s%s", nodeIdentity, cfg.Server.Listen)
 		heartbeatWriter = worker.NewHeartbeatWriter(deps.DB, nodeIdentity, mode, nodeURL)
