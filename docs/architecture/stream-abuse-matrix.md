@@ -329,8 +329,19 @@ Enforcement ⚠️ (fails open at the edge).**
 The classic Stremio/Plex-share abuse: one account pulls a single stream and a proxy
 fans it out to hundreds. It stays at concurrency 1, so admission and the enforcer
 never fire, and the re-streaming heuristic that would catch it *does not exist*
-(correction #2). The fingerprints to build it (`ClientIP`, `ClientName`,
-`BytesServed`, distinct `MediaFileID`) are captured but unused. **Detection ❌ /
+(correction #2). **Correction #9 (2026-07-31): the fingerprints are NOT ready to
+consume, contrary to what this document and the architecture plan previously said.**
+`ClientIP` is a *single* value per session, not a set: integrated mode stamps it once at
+session creation and no media request ever updates it
+(`internal/api/handlers/stream.go` never touches `ClientIP`), while the edge tracker
+overwrites `records[sessionID]` on every `Track`/`EnsureEphemeral`
+(`internal/nodesessions/tracker.go`). `mergeStreams` then collapses multi-node records
+to one winner and only backfills an IP when the winner has none. So five devices pulling
+one session still present as one address, and a polling consumer cannot see fan-out at
+all. Building the heuristic requires collecting bounded viewer observations **at
+authenticated media-serve time**, not consuming the existing snapshot. Note also that C14
+proper — a downstream proxy re-broadcasting one pulled stream — is invisible to any
+IP-based signal by construction: Silo sees exactly one address. **Detection ❌ /
 Enforcement ❌.**
 
 **C15. Many concurrent streams feeding a restream service (over cap).**
@@ -612,8 +623,12 @@ Then, as originally scoped:
    connection cap / `LimitListener` (E25–E28).
 4. **Add a per-node concurrent-transcode cap** and wire `nodepool.MaxJobs` defaults
    (E29).
-5. **Implement the restream heuristic** (C14/C16): the fingerprints already flow
-   through `streammonitor`; a distinct-viewer-IP rule is the missing consumer.
+5. **Implement the restream heuristic** (C16 fan-out; **not** C14): the fingerprints do
+   **not** already flow in usable form — see correction #9. A distinct-viewer-IP rule
+   needs per-request observation at media-serve time plus a trust-boundary-correct client
+   address at the edge (`internal/proxy/server.go`'s `edgeClientIP` reads `RemoteAddr`
+   and ignores `X-Forwarded-For`, so behind ingress every viewer collapses to one
+   address).
    Decisions are now settled: distinct viewer IPs per session as the signal, Redis
    with a ~24h TTL when configured and in-memory otherwise, detection **on by
    default and alert-only**, with auto-kill behind an operator setting that defaults

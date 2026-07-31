@@ -185,9 +185,14 @@ and direct-play/stream egress:
 
 ### Pillar 4 — Detection heuristics & perimeter (C14, E21–E29) — partly new, partly gap-closing
 
-- **Re-streaming heuristic (C14/C16) — build it (it does not exist; matrix
-  correction #2).** The fingerprints already flow through `streammonitor`
-  (`ClientIP`, `ClientName`, `MediaFileID`, `BytesServed`). Add a consumer rule:
+- **Re-streaming heuristic (C16 fan-out only — C14 is undetectable this way) — build it
+  (it does not exist; matrix correction #2).** ⚠️ **Superseded by abuse-matrix correction
+  #9 (2026-07-31): the fingerprints do NOT already flow in usable form.** `ClientIP` is a
+  single value per session — stamped once at session creation in integrated mode,
+  overwritten per request at the edge — so concurrent viewers collapse to one address and
+  no consumer of the existing snapshot can see fan-out. It needs per-request observation
+  at media-serve time. The rule sketched below is retained for its shape, not its
+  feasibility claim:
   distinct client-IPs per `sid`, sustained throughput vs. media bitrate, distinct
   concurrent titles per `uid`. Output = a flag → Tier-1 demotion. Ship **disabled**;
   tune against real traffic before enabling (false-kill risk).

@@ -244,7 +244,7 @@ Captured per live stream (`streammonitor.LiveStream` / `nodesessions.SessionInfo
 | play method (direct/remux/transcode) | `Type` | primary |
 | **route (native/jellycompat)** | `Route` — `Session.Origin` (integrated) or token `Origin` claim (edge) | primary; native and jellycompat share the SessionManager and `Type`, so route is a distinct field seeded at the two `WithClientInfo` sites and carried to edges in the token |
 | node serving | NodeName/NodeURL | integrated stamps the local host |
-| client ip / client name | `Session.ClientIP/ClientName` (integrated) or edge request + `ClientName` claim | secondary; also the natural re-streaming fingerprint |
+| client ip / client name | `Session.ClientIP/ClientName` (integrated) or edge request + `ClientName` claim | secondary. **Not usable as a re-streaming fingerprint as-is:** it is one value per session, stamped at session creation (integrated) or overwritten per request (edge), so concurrent viewers of one session collapse to a single address. A restream heuristic needs per-request observation at serve time — see abuse-matrix correction #9 |
 | position | `Session.Position` | secondary timing |
 | bytes served | edge `AddBytes` / integrated `SessionMeteredWriter` | server-observed throughput signal |
 | hw/sw, resolution, codecs | Session / node record | secondary |
