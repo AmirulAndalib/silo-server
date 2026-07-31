@@ -341,8 +341,11 @@ one session still present as one address, and a polling consumer cannot see fan-
 all. Building the heuristic requires collecting bounded viewer observations **at
 authenticated media-serve time**, not consuming the existing snapshot. Note also that C14
 proper — a downstream proxy re-broadcasting one pulled stream — is invisible to any
-IP-based signal by construction: Silo sees exactly one address. **Detection ❌ /
-Enforcement ❌.**
+IP-based signal by construction: Silo sees exactly one address. (The edge's own address
+resolution was separately blind behind an ingress and is now fixed — `edgeClientIP`
+resolves through the `clientip.trusted_proxies` boundary — but that only makes viewers
+distinguishable; it does not create the per-session address *set* the heuristic needs.)
+**Detection ❌ / Enforcement ❌.**
 
 **C15. Many concurrent streams feeding a restream service (over cap).**
 This *is* caught — but only as a raw over-count, not labeled as re-streaming.
@@ -625,10 +628,11 @@ Then, as originally scoped:
    (E29).
 5. **Implement the restream heuristic** (C16 fan-out; **not** C14): the fingerprints do
    **not** already flow in usable form — see correction #9. A distinct-viewer-IP rule
-   needs per-request observation at media-serve time plus a trust-boundary-correct client
-   address at the edge (`internal/proxy/server.go`'s `edgeClientIP` reads `RemoteAddr`
-   and ignores `X-Forwarded-For`, so behind ingress every viewer collapses to one
-   address).
+   needs per-request observation at media-serve time. The edge trust-boundary half is
+   **done**: `internal/proxy/server.go`'s `edgeClientIP` now resolves through the
+   operator's `clientip.trusted_proxies` boundary like the native surface, so viewers
+   behind an ingress are distinguishable and a forged `X-Forwarded-For` from an untrusted
+   peer is ignored. Tracked as issue #522.
    Decisions are now settled: distinct viewer IPs per session as the signal, Redis
    with a ~24h TTL when configured and in-memory otherwise, detection **on by
    default and alert-only**, with auto-kill behind an operator setting that defaults

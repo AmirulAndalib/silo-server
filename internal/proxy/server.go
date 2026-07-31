@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 
+	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
@@ -42,6 +43,7 @@ type Server struct {
 	subCache *playback.SubtitleCache
 
 	revocation revocationStore
+	ipResolver *clientip.Resolver
 }
 
 // SetRevocationStore wires the kill-switch the edge consults per request. The
@@ -49,6 +51,16 @@ type Server struct {
 // check is a local map read.
 func (s *Server) SetRevocationStore(store revocationStore) {
 	s.revocation = store
+}
+
+// SetClientIPResolver wires the trusted-proxy-aware client address resolver so
+// edge monitoring records the real viewer rather than the ingress that fronts
+// this node. Without one the edge falls back to the connecting address, which
+// behind a reverse proxy or load balancer is the same value for every viewer.
+// The resolver's trusted list is updated in place on setting changes, so this
+// is wired once at startup.
+func (s *Server) SetClientIPResolver(resolver *clientip.Resolver) {
+	s.ipResolver = resolver
 }
 
 // NewServer creates a new proxy server backed by a config watcher and session
@@ -198,7 +210,7 @@ func (s *Server) handleDirectPlay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info := sessionInfo(s.tracker, claims, "direct_play", edgeClientIP(r))
+	info := sessionInfo(s.tracker, claims, "direct_play", s.edgeClientIP(r))
 	lease := s.tracker.Track(r.Context(), info)
 	defer s.releaseTracked(lease)
 
@@ -291,7 +303,7 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info := sessionInfo(s.tracker, claims, "remux", edgeClientIP(r))
+	info := sessionInfo(s.tracker, claims, "remux", s.edgeClientIP(r))
 	lease := s.tracker.Track(r.Context(), info)
 	defer s.releaseTracked(lease)
 
@@ -349,7 +361,7 @@ func transcodeTransportIDFromClaims(claims *streamtoken.Claims) string {
 // requests instead of request lifetime. Visibility is separate from served
 // liveness: only a successful upstream media response advances LastServedAt.
 func (s *Server) ensureTranscodeSession(r *http.Request, claims *streamtoken.Claims) {
-	s.tracker.EnsureEphemeral(r.Context(), sessionInfo(s.tracker, claims, "transcode", edgeClientIP(r)))
+	s.tracker.EnsureEphemeral(r.Context(), sessionInfo(s.tracker, claims, "transcode", s.edgeClientIP(r)))
 }
 
 // sessionInfo builds the node-session tracker record for a verified token,
@@ -374,8 +386,24 @@ func sessionInfo(tr *nodesessions.Tracker, claims *streamtoken.Claims, kind, cli
 	}
 }
 
-// edgeClientIP extracts the connecting client's IP from the request, best-effort.
-func edgeClientIP(r *http.Request) string {
+// edgeClientIP resolves the viewer's address for monitoring attribution.
+//
+// When a trusted-proxy resolver is wired it walks the forwarding headers the
+// same way the native API surface does, honouring the operator's
+// `clientip.trusted_proxies` boundary — headers are consulted only when the
+// connecting peer is itself trusted, so an untrusted client cannot forge its
+// own address. Without a resolver (or when the peer is untrusted) this is the
+// connecting address, which is correct for a directly-exposed edge but
+// collapses every viewer to one value behind an ingress or load balancer.
+func (s *Server) edgeClientIP(r *http.Request) string {
+	if s != nil && s.ipResolver != nil {
+		return s.ipResolver.ClientIP(r)
+	}
+	return remoteAddrIP(r)
+}
+
+// remoteAddrIP extracts the connecting peer's IP, best-effort.
+func remoteAddrIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

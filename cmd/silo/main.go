@@ -682,6 +682,33 @@ func main() {
 		if mode == "proxy" {
 			srv := proxy.NewServer(watcher, tracker)
 			srv.SetRevocationStore(revStore)
+			// Resolve the viewer's address through the operator's trusted-proxy
+			// boundary, as the native surface does. Without this the edge records
+			// the connecting peer, which behind an ingress or load balancer is the
+			// same address for every viewer — collapsing the admin session view and
+			// any per-viewer analysis to one indistinguishable client.
+			edgeResolver := clientip.NewResolver(nil)
+			if cidrs, cidrErr := clientip.LoadTrustedCIDRs(appCtx, settingsRepo); cidrErr != nil {
+				// Fail closed on trust, not on startup: an empty trusted list means
+				// forwarding headers are ignored entirely, so a spoofed header can
+				// never be believed. The edge falls back to the connecting peer.
+				slog.Warn("edge client-IP trust list unavailable; ignoring forwarding headers",
+					"component", "proxy", "error", cidrErr)
+			} else {
+				edgeResolver.UpdateTrustedCIDRs(cidrs)
+			}
+			// Keep the boundary current: the setting is hot-reloadable on central,
+			// so the edge must not need a restart to follow it.
+			watcher.OnChange(func(_, _ *config.Config) {
+				cidrs, loadErr := clientip.LoadTrustedCIDRs(context.Background(), settingsRepo)
+				if loadErr != nil {
+					slog.Warn("edge client-IP trust list reload failed",
+						"component", "proxy", "error", loadErr)
+					return
+				}
+				edgeResolver.UpdateTrustedCIDRs(cidrs)
+			})
+			srv.SetClientIPResolver(edgeResolver)
 			handler = srv.Handler()
 		} else {
 			srv := transcodenode.NewServer(watcher, tracker)
