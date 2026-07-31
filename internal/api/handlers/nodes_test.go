@@ -56,17 +56,20 @@ func TestHandleListSessionsAddsSiblingTransfersWithoutChangingSessionShape(t *te
 	if len(body.Sessions) != 1 {
 		t.Fatalf("sessions = %s", body.Sessions)
 	}
+	// This session has never served a byte, so last_served_at is omitted
+	// rather than reporting the client's last progress report as a serve time
+	// (decision A5). The field is still emitted once real bytes are served —
+	// asserted below.
 	expectedSession, err := json.Marshal(nodesessions.SessionInfo{
-		SessionID:    session.ID,
-		NodeName:     testLocalNode,
-		AuthUserID:   session.UserID,
-		ProfileID:    session.ProfileID,
-		Type:         string(session.PlayMethod),
-		Route:        session.Origin(),
-		MediaFileID:  session.MediaFileID,
-		ClientName:   session.ClientName,
-		StartedAt:    session.StartedAt.UTC().Format(time.RFC3339),
-		LastServedAt: session.LastActivityAt.UTC().Format(time.RFC3339),
+		SessionID:   session.ID,
+		NodeName:    testLocalNode,
+		AuthUserID:  session.UserID,
+		ProfileID:   session.ProfileID,
+		Type:        string(session.PlayMethod),
+		Route:       session.Origin(),
+		MediaFileID: session.MediaFileID,
+		ClientName:  session.ClientName,
+		StartedAt:   session.StartedAt.UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		t.Fatalf("marshal expected session: %v", err)
@@ -76,6 +79,23 @@ func TestHandleListSessionsAddsSiblingTransfersWithoutChangingSessionShape(t *te
 	}
 	if len(body.Transfers) != 1 || body.Transfers[0].ID != testTransferID {
 		t.Fatalf("transfers = %+v", body.Transfers)
+	}
+
+	// Once the server actually serves bytes, last_served_at reappears — the
+	// field is omitted for want of a server-observed serve, not removed.
+	if err := sm.BeginTransport(session.ID); err != nil {
+		t.Fatalf("BeginTransport: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	h.HandleListSessions(rec, httptest.NewRequest("GET", "/admin/nodes/sessions", nil))
+	var served struct {
+		Sessions []nodesessions.SessionInfo `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &served); err != nil {
+		t.Fatalf("decode served response: %v", err)
+	}
+	if len(served.Sessions) != 1 || served.Sessions[0].LastServedAt == "" {
+		t.Fatalf("last_served_at missing after a served transport: %+v", served.Sessions)
 	}
 }
 
