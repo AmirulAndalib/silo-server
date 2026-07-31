@@ -1093,6 +1093,7 @@ func TestSessionManager_LimitCountsIgnoreStaleSessions(t *testing.T) {
 	sm := playback.NewSessionManager(5, 2)
 	sm.SetLivenessGracePeriods(20*time.Millisecond, 40*time.Millisecond)
 	sm.SetTranscodeLivenessGrace(20 * time.Millisecond)
+	sm.SetUnservedSessionGrace(20 * time.Millisecond)
 
 	if _, err := sm.StartSession(1, "profile-1", 100, playback.PlayDirect, false); err != nil {
 		t.Fatalf("StartSession direct: %v", err)
@@ -1248,6 +1249,7 @@ func TestSessionManager_ZeroLimits(t *testing.T) {
 
 func TestSessionManager_CleanExpired(t *testing.T) {
 	sm := playback.NewSessionManager(0, 0)
+	sm.SetUnservedSessionGrace(0)
 
 	// Create three sessions.
 	idle, _ := sm.StartSession(1, "prof", 100, playback.PlayDirect, false)
@@ -1257,21 +1259,20 @@ func TestSessionManager_CleanExpired(t *testing.T) {
 	// Mark the third session as actively transporting media.
 	_ = sm.BeginTransport(transportActive.ID)
 
-	// Send a recent progress update on the "active" session so it stays fresh.
+	// Send a recent progress update on the "active" session. Client-reported
+	// progress does not confer server-observed liveness.
 	_ = sm.UpdateProgress(active.ID, 42.0, false)
 
 	// The "idle" session has no update since StartSession.
 	// The "transportActive" session has an open media transport, so it should
 	// be exempt.
 
-	// CleanExpired with 0 duration expires everything without a WebSocket
-	// that hasn't been updated "recently". Since all sessions were just
-	// created, use a very short maxIdle to ensure only truly idle ones are
-	// caught. We simulate staleness by using a large duration that none can
-	// exceed.
+	// CleanExpired with 0 duration expires everything without an active
+	// transport. Disabling the never-served grace above preserves exact control
+	// for this explicit zero-window cleanup.
 	expired := sm.CleanExpired(0) // 0 means "expire anything older than now"
 
-	// Both inactive sessions should be expired (UpdatedAt <= time.Now()).
+	// Both sessions without a server-observed transport should be expired.
 	// The transport-active session should survive regardless of staleness.
 	if len(expired) != 2 {
 		t.Fatalf("CleanExpired(0) removed %d sessions, want 2", len(expired))
@@ -1319,6 +1320,7 @@ func TestSessionManager_CleanExpired_RespectsMaxIdle(t *testing.T) {
 
 func TestSessionManager_CleanInactive_TriggersExpirationHook(t *testing.T) {
 	sm := playback.NewSessionManager(0, 0)
+	sm.SetUnservedSessionGrace(0)
 
 	session, err := sm.StartSession(1, "prof", 100, playback.PlayDirect, false)
 	if err != nil {
@@ -1347,6 +1349,7 @@ func TestSessionManager_CleanInactive_TriggersExpirationHook(t *testing.T) {
 
 func TestSessionManager_CleanExpired_PausedGracePeriod(t *testing.T) {
 	sm := playback.NewSessionManager(0, 0)
+	sm.SetUnservedSessionGrace(0)
 
 	// Create two sessions and mark one as paused.
 	playing, _ := sm.StartSession(1, "prof", 100, playback.PlayDirect, false)
@@ -1384,6 +1387,7 @@ func TestCheckReplacementAllowedExcludesOnlyTheReplacedSession(t *testing.T) {
 	sm := playback.NewSessionManager(10, 2)
 	sm.SetLivenessGracePeriods(25*time.Millisecond, time.Hour)
 	sm.SetTranscodeLivenessGrace(25 * time.Millisecond)
+	sm.SetUnservedSessionGrace(25 * time.Millisecond)
 
 	failed, err := sm.StartSession(1, "profile-1", 100, playback.PlayTranscode, false)
 	if err != nil {

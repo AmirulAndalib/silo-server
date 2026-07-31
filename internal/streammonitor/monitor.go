@@ -13,11 +13,10 @@
 //     (BeginTransport/EndTransport around every byte pour) — no client progress
 //     required to stay visible.
 //
-// TIMING is a secondary signal. On the edge, LastServedAt is purely byte-observed.
-// In integrated mode LastServedAt is mapped from SessionManager.LastActivityAt,
-// which client progress reports also advance; that is acceptable because it is
-// used only to order over-cap victims (selectVictims), never to decide whether a
-// stream exists or is counted. See internal/nodesessions for record production.
+// TIMING is server-observed on every path. LastServedAt advances only when the
+// server begins, ends, or writes a media transport. A session that has not
+// served media projects an empty LastServedAt and sorts as the stalest over-cap
+// victim. See internal/nodesessions for record production.
 package streammonitor
 
 import (
@@ -315,9 +314,9 @@ func LiveLocalSessions(sm *playback.SessionManager, nodeName string) []nodesessi
 	live := sm.AllSessions()
 	out := make([]nodesessions.SessionInfo, 0, len(live))
 	for _, s := range live {
-		lastServedAt := s.LastServedAt
-		if lastServedAt.IsZero() {
-			lastServedAt = s.LastActivityAt
+		lastServedAt := ""
+		if !s.LastServedAt.IsZero() {
+			lastServedAt = s.LastServedAt.UTC().Format(time.RFC3339)
 		}
 		out = append(out, nodesessions.SessionInfo{
 			SessionID:    s.ID,
@@ -333,7 +332,7 @@ func LiveLocalSessions(sm *playback.SessionManager, nodeName string) []nodesessi
 			Resolution:   s.TargetResolution,
 			HWAccel:      s.TranscodeHWAccel,
 			StartedAt:    s.StartedAt.UTC().Format(time.RFC3339),
-			LastServedAt: lastServedAt.UTC().Format(time.RFC3339),
+			LastServedAt: lastServedAt,
 			BytesServed:  s.BytesServed,
 		})
 	}

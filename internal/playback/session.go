@@ -182,6 +182,7 @@ type SessionManager struct {
 	activeGrace      time.Duration
 	pausedGrace      time.Duration
 	transcodeGrace   time.Duration
+	unservedGrace    time.Duration
 	expireHook       func(*Session)
 }
 
@@ -248,6 +249,10 @@ const (
 	// DefaultTranscodeSessionGrace covers buffer-ahead gaps between segment
 	// requests without depending on local ffmpeg process state.
 	DefaultTranscodeSessionGrace = 10 * time.Minute
+
+	// DefaultUnservedSessionGrace gives a newly-created session time to begin
+	// serving media before admission and cleanup treat it as inactive.
+	DefaultUnservedSessionGrace = 2 * time.Minute
 )
 
 // NewSessionManager creates a SessionManager with the given concurrency limits.
@@ -261,6 +266,7 @@ func NewSessionManager(maxStreams, maxTranscodes int) *SessionManager {
 		activeGrace:    DefaultActiveSessionGrace,
 		pausedGrace:    DefaultPausedSessionGrace,
 		transcodeGrace: DefaultTranscodeSessionGrace,
+		unservedGrace:  DefaultUnservedSessionGrace,
 	}
 }
 
@@ -280,8 +286,9 @@ func (m *SessionManager) SetAdmissionDecider(decider AdmissionDecider) {
 	m.admissionDecider = decider
 }
 
-// SetLivenessGracePeriods overrides the grace periods used by admission
-// control and stale-session cleanup.
+// SetLivenessGracePeriods overrides the active and paused grace periods used by
+// admission control and stale-session cleanup. The never-served grace is
+// configured independently with SetUnservedSessionGrace.
 func (m *SessionManager) SetLivenessGracePeriods(active, paused time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -301,6 +308,14 @@ func (m *SessionManager) SetTranscodeLivenessGrace(grace time.Duration) {
 	if grace > 0 {
 		m.transcodeGrace = grace
 	}
+}
+
+// SetUnservedSessionGrace overrides the idle window for sessions that have not
+// served media. A non-positive duration disables this additional grace.
+func (m *SessionManager) SetUnservedSessionGrace(grace time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.unservedGrace = grace
 }
 
 // SetExpirationHook registers a callback that runs after a session is removed
@@ -1305,8 +1320,9 @@ func (m *SessionManager) AllSessions() []*Session {
 	return result
 }
 
-// CleanExpired removes sessions whose last playback activity exceeds maxIdle.
-// Paused sessions receive a 3x grace period for backwards compatibility.
+// CleanExpired removes sessions whose last server-observed liveness exceeds
+// maxIdle. Paused sessions receive a 3x grace period for backwards
+// compatibility.
 func (m *SessionManager) CleanExpired(maxIdle time.Duration) []*Session {
 	return m.CleanInactive(maxIdle, maxIdle*3)
 }
@@ -1321,9 +1337,9 @@ func (m *SessionManager) CleanStale() []*Session {
 	return m.CleanInactive(active, paused)
 }
 
-// CleanInactive removes sessions whose last playback activity exceeds the
-// provided grace period. Sessions with an active media transport request are
-// preserved even if they have not emitted a recent heartbeat yet.
+// CleanInactive removes sessions whose last server-observed liveness exceeds
+// the provided grace period. Sessions with an active media transport request
+// are preserved even if they have not emitted a recent heartbeat yet.
 func (m *SessionManager) CleanInactive(activeIdle, pausedIdle time.Duration) []*Session {
 	m.mu.Lock()
 
@@ -1371,14 +1387,12 @@ func (m *SessionManager) sessionIsInactiveLocked(s *Session, now time.Time, acti
 		return true
 	}
 
-	lastActivity := s.LastActivityAt
-	if lastActivity.IsZero() {
-		lastActivity = s.UpdatedAt
+	if s.IsPaused && (s.HasRealtimeConnection || s.HasWebSocket) {
+		return false
 	}
-	if lastActivity.IsZero() {
-		lastActivity = s.StartedAt
-	}
-	if lastActivity.IsZero() {
+
+	livenessAt := s.serverObservedLivenessAt()
+	if livenessAt.IsZero() {
 		return false
 	}
 
@@ -1388,11 +1402,21 @@ func (m *SessionManager) sessionIsInactiveLocked(s *Session, now time.Time, acti
 	} else if s.PlayMethod == PlayTranscode && m.transcodeGrace > grace {
 		grace = m.transcodeGrace
 	}
+	if s.LastServedAt.IsZero() && s.activeTransportCount == 0 && m.unservedGrace > grace {
+		grace = m.unservedGrace
+	}
 	if grace <= 0 {
-		return !lastActivity.After(now)
+		return !livenessAt.After(now)
 	}
 
-	return !lastActivity.Add(grace).After(now)
+	return !livenessAt.Add(grace).After(now)
+}
+
+func (s *Session) serverObservedLivenessAt() time.Time {
+	if !s.LastServedAt.IsZero() {
+		return s.LastServedAt
+	}
+	return s.StartedAt
 }
 
 // String returns a human-readable summary of a session.

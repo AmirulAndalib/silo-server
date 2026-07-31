@@ -363,6 +363,16 @@ func TestLiveLocalSessionsMapping(t *testing.T) {
 		t.Fatalf("StartSessionWithContext: %v", err)
 	}
 	session.ClientIP = "192.0.2.10"
+	if err := sm.BeginTransport(session.ID); err != nil {
+		t.Fatalf("BeginTransport: %v", err)
+	}
+	if err := sm.EndTransport(session.ID); err != nil {
+		t.Fatalf("EndTransport: %v", err)
+	}
+	session, err = sm.GetSession(session.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
 	got := LiveLocalSessions(sm, "local")
 	if len(got) != 1 {
 		t.Fatalf("sessions = %+v", got)
@@ -375,7 +385,26 @@ func TestLiveLocalSessionsMapping(t *testing.T) {
 		info.ClientIP != "192.0.2.10" {
 		t.Fatalf("mapped session = %+v", info)
 	}
-	if info.LastServedAt != session.LastActivityAt.UTC().Format(time.RFC3339) {
-		t.Fatalf("LastServedAt = %q, want LastActivityAt fallback", info.LastServedAt)
+	if info.LastServedAt != session.LastServedAt.UTC().Format(time.RFC3339) {
+		t.Fatalf("LastServedAt = %q, want server-observed timestamp", info.LastServedAt)
+	}
+}
+
+func TestLiveLocalSessionsDoesNotProjectClientActivityAsLastServed(t *testing.T) {
+	sm := playback.NewSessionManager(0, 0)
+	session, err := sm.StartSession(42, "profile-1", 9, playback.PlayDirect, false)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	if err := sm.UpdateProgress(session.ID, 12, false); err != nil {
+		t.Fatalf("UpdateProgress: %v", err)
+	}
+
+	got := LiveLocalSessions(sm, "local")
+	if len(got) != 1 {
+		t.Fatalf("sessions = %+v", got)
+	}
+	if got[0].LastServedAt != "" {
+		t.Fatalf("LastServedAt = %q, want empty for a never-served session", got[0].LastServedAt)
 	}
 }

@@ -69,7 +69,7 @@ func TestTranscodeLivenessGraceAndPausedPrecedence(t *testing.T) {
 			}
 			m.mu.Lock()
 			m.sessions[s.ID].IsPaused = tt.paused
-			m.sessions[s.ID].LastActivityAt = time.Now().Add(-tt.idle)
+			m.sessions[s.ID].LastServedAt = time.Now().Add(-tt.idle)
 			m.mu.Unlock()
 			reaped := m.CleanStale()
 			if (len(reaped) > 0) != tt.wantReaped {

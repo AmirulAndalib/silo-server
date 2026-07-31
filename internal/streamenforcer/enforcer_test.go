@@ -142,6 +142,47 @@ func TestEvaluateOnce(t *testing.T) {
 	}
 }
 
+func TestEvaluateOnceProgressOnlySessionIsVictimBeforeServingStreams(t *testing.T) {
+	sm := playback.NewSessionManager(0, 0)
+	phantom, err := sm.StartSession(7, "profile", 1, playback.PlayDirect, false)
+	if err != nil {
+		t.Fatalf("StartSession(phantom): %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		session, startErr := sm.StartSession(7, "profile", 10+i, playback.PlayDirect, false)
+		if startErr != nil {
+			t.Fatalf("StartSession(serving %d): %v", i, startErr)
+		}
+		if beginErr := sm.BeginTransport(session.ID); beginErr != nil {
+			t.Fatalf("BeginTransport(serving %d): %v", i, beginErr)
+		}
+		if bytesErr := sm.AddServedBytes(session.ID, 1024); bytesErr != nil {
+			t.Fatalf("AddServedBytes(serving %d): %v", i, bytesErr)
+		}
+		if endErr := sm.EndTransport(session.ID); endErr != nil {
+			t.Fatalf("EndTransport(serving %d): %v", i, endErr)
+		}
+	}
+
+	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second)) + 10*time.Millisecond)
+	if err := sm.UpdateProgress(phantom.ID, 30, false); err != nil {
+		t.Fatalf("UpdateProgress(phantom): %v", err)
+	}
+
+	source := streammonitor.NewFuncSource(func(context.Context) ([]nodesessions.SessionInfo, error) {
+		return streammonitor.LiveLocalSessions(sm, "local"), nil
+	})
+	rev := &fakeRevoker{}
+	e := New(source, func(context.Context, int) (int, error) { return 2, nil }, rev, 0)
+	if err := e.EvaluateOnce(context.Background()); err != nil {
+		t.Fatalf("EvaluateOnce: %v", err)
+	}
+	if len(rev.revoked) != 1 || rev.revoked[0] != phantom.ID {
+		t.Fatalf("revoked = %v, want progress-only phantom %q", rev.revoked, phantom.ID)
+	}
+}
+
 func TestEvaluateOnceSourceError(t *testing.T) {
 	rev := &fakeRevoker{}
 	e := New(fakeSource{err: errors.New("scan failed")}, func(context.Context, int) (int, error) { return 1, nil }, rev, 0)
