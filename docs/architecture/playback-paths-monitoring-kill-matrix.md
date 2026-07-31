@@ -43,8 +43,18 @@
 > request's record, the async-tracking race that could leave a permanently
 > non-expiring ghost session, and the protocol-v3 logical-vs-transport identity split
 > that counted one stream twice — all three were sources of a **wrong over-cap
-> count**, which is why they precede the revocation batch. **GAP-14 remains open**, to
-> the liveness/replica batch under decision A7 (fail closed + connection cap).
+> count**, which is why they precede the revocation batch.
+>
+> **Update 2026-07-31 — liveness/replica batch landed.** **GAP-14 is RESOLVED**:
+> download-class pours that cannot be monitored are refused (429/503 + `Retry-After`)
+> instead of served blind, and a per-user concurrent-transfer cap
+> (`playback.max_user_concurrent_transfers`, default 24) makes registry saturation
+> unreachable by one actor. Decision **A5** landed with it, so the client-progress
+> caveat below is now closed. Decision **A6** landed too: integrated sessions are
+> published to the shared `silo:sessions:` picture under a per-process instance id and
+> one Redis-elected evaluator runs each pass, so replicas are no longer mutually blind
+> — but **synchronous admission is still per-process**, so cross-replica excess is
+> trimmed asynchronously rather than refused at the door.
 >
 > Monitoring projection is **not** uniformly async, and the claim has been corrected
 > rather than the code rushed: the first Redis write per session is synchronous, later
@@ -52,11 +62,13 @@
 > deliberately deferred rather than shipping a lossy or reorderable one — a naive
 > fire-and-forget projection is what caused the ghost-session defect above.
 >
-> Two claims elsewhere in this doc are therefore **still not true** and are called out
-> where they appear: the kill switch does not "keep a stream dead" (an over-cap kill
-> still reopens after 5m until the revocation batch lands), and monitoring does not
-> "never trust client progress" (the `LastActivityAt` fallback survives until decision
-> A5 lands in the liveness batch). Do not restore the blanket phrasing.
+> One claim elsewhere in this doc was **not true** and is now resolved: monitoring
+> genuinely does "never trust client progress" as of the liveness batch — the
+> `LastActivityAt` fallback is gone from the projection *and* from reaping, with the
+> single deliberate exception that a **paused** session holding an open, ping-checked
+> realtime/WebSocket connection is exempt from reaping (an observed connection, not a
+> reported position; it preserves the issue #243 fix). Do not restore the old
+> fallback.
 >
 > Note also that every "cut" in this document means **cut within ~5s**, not
 > immediately: the in-flight watcher polls on a 5s interval.
@@ -157,22 +169,24 @@ bytes but withholds/falsifies progress must still be counted.
   not a sum**: the two records are two observers of one pour, so summing would
   double-count. `DedupeSessionInfos` had the identical hole and feeds the admin view;
   fixed there too.
-- ⚠️ **GAP-14 — registry saturation serves unmonitored (open).** The transfer
-  registry is capped at `defaultMaxEntries = 10_000`
-  (`transfers/registry.go:16`). Past that, `Begin` returns `ErrRegistryFull` and all
-  four call sites (`downloads/service.go:1103`, `jellycompat/streams.go:249`,
-  `abs/file_handler.go:150`, `abs/rss_feeds_handler.go:260`) log at **Debug** and
-  serve anyway; byte updates for the unregistered pour are discarded
-  (`registry.go:122`). Since there is no connection cap anywhere (abuse matrix E28)
-  and the compat surface is unthrottled (E25/E27), an attacker can hold the registry
-  at its ceiling and blind download-class monitoring for every other user. The
-  registry's own once-per-minute `Warn` is the only operator signal.
+- **GAP-14 — RESOLVED (liveness/replica batch).** The transfer registry is capped at
+  `defaultMaxEntries = 10_000` (`transfers/registry.go`). Past that, `Begin` returned
+  `ErrRegistryFull` and every call site logged at **Debug** and served anyway, with
+  byte updates for the unregistered pour discarded. Since there is no connection cap
+  anywhere (abuse matrix E28) and the compat surface is unthrottled (E25/E27), an
+  attacker could hold the registry at its ceiling and blind download-class monitoring
+  for every other user.
 
-  **Decision A7 — still open, scheduled for the liveness/replica batch: fail closed,
-  plus a connection cap.** A per-user/credential concurrent-connection cap makes
-  saturation unreachable by one actor, *and* download-class pours are refused rather
-  than served unobserved if it saturates anyway. Until that lands, "no invisible
-  streams" silently stops being true under load — do not claim otherwise.
+  **Decision A7 shipped: fail closed, plus a per-user cap.** A per-user concurrent
+  cap (`playback.max_user_concurrent_transfers`, default 24, checked *before* the
+  global limit) makes saturation unreachable by one actor, and a pour that cannot be
+  registered is now refused — 429 `transfer_limit_exceeded` or 503
+  `monitoring_unavailable`, both with `Retry-After` — rather than served unobserved.
+  Note the site count: there are **five** call sites, not the four previously listed
+  here; `api/handlers/ebook_reader.go` was missing. Saturation is warned at the
+  registry (rate-limited per user, carrying route and user id) rather than once per
+  rejected request, which an actor parked at its cap could turn into log
+  amplification.
 - **Existence is server-observed on every cell** *except the ebook rows above*.
   Integrated: a session is
   unreapable while `activeTransportCount > 0`, and every byte-serving path now
@@ -184,11 +198,16 @@ bytes but withholds/falsifies progress must still be counted.
   the whole connection (direct/remux) or while segments are pulled (transcode),
   advanced only by real bytes. **No path requires a client progress report to stay
   visible or counted.**
-- **Timing is secondary and may trust the client only for position.**
+- **Timing is server-observed; the client is trusted only for position.**
   `Session.LastServedAt` is deliberately distinct from `LastActivityAt` and is
-  advanced only by server-observed bytes or transport begin/end. Client progress
-  can still advance `LastActivityAt`, preserving reaping semantics, but cannot
-  influence the enforcer's victim ordering. Integrated `BytesServed` and
+  advanced only by server-observed bytes or transport begin/end. As of decision A5
+  client progress feeds **neither** the enforcer's victim ordering **nor** reaping:
+  idleness is measured from `LastServedAt`, falling back only to `StartedAt` behind a
+  bounded never-served grace, and a never-served session projects an *empty*
+  `LastServedAt` so it sorts as the stalest over-cap victim. The one deliberate
+  exception is a **paused** session holding an open, ping-checked realtime/WebSocket
+  connection, which stays exempt from reaping — an observed connection, not a reported
+  position (issue #243). Integrated `BytesServed` and
   `LastServedAt` are mapped alongside the edge equivalents. On the central side this
   holds exactly: `Session.LastServedAt` is written only by `BeginTransport`,
   `EndTransport` and `AddServedBytes` (`playback/session.go:1132,1151,1169`) — no

@@ -75,8 +75,8 @@ The branch docs oversell several things. The stories below are scored against th
 > are now FIXED** (GAP-10, GAP-11, GAP-12, GAP-13); they are kept here with their
 > original wording because the summary-matrix rows and the follow-up list still
 > reference them, and because the *reason* each was invisible to the test suite is the
-> durable lesson. Correction **8 (GAP-14) remains open**, now with decision A7
-> attached. See the follow-up list at the end for what is left.
+> durable lesson. Correction **8 (GAP-14) is now also fixed** by the liveness/replica
+> batch under decision A7. See the follow-up list at the end for what is left.
 >
 > **Update 2026-07-30 — tracker-lifecycle batch landed.** GAP-15 is also fixed, along
 > with three defects that all produced a **wrong over-cap count**: overlapping edge
@@ -88,12 +88,15 @@ The branch docs oversell several things. The stories below are scored against th
 > batch on purpose: decision A1 removes the self-healing that limits the damage of a
 > miscount, so the count must be trustworthy first.
 >
-> Two claims this document makes elsewhere are **still false** and must not be
-> restored to blanket phrasing: the kill switch does not "keep a stream dead" (an
-> over-cap kill still reopens after 5m until the revocation batch lands), and
-> monitoring does not "never trust client progress" (the `LastActivityAt` fallback
-> survives until decision A5 lands). Also read every "cut" as "cut within ~5s" — the
-> in-flight watcher polls on a 5s interval.
+> Both claims this document previously flagged as false are now true, with named
+> bounds. The kill switch does "keep a stream dead": since the revocation batch an
+> over-cap kill lasts the token's full reconstructable life instead of reopening after
+> 5m. Monitoring does "never trust client progress": since the liveness batch the
+> `LastActivityAt` fallback is gone from both the projection and reaping — the single
+> deliberate exception being that a **paused** session holding an open, ping-checked
+> realtime/WebSocket connection is exempt from reaping (an observed connection, not a
+> reported position). Still read every "cut" as "cut within ~5s" — the in-flight
+> watcher polls on a 5s interval.
 
 4. **The ABS in-flight kill switch does not work.** *(FIXED — `Unwrap()` added; the
    replacement test drives the mounted router over a real socket and was confirmed to
@@ -165,11 +168,11 @@ Jellyfin-compat surface is unthrottled (see Category E).
 |---|---|---|---|---|
 | 1 | User opens N+1 concurrent **transcodes** (over cap) | ✅ | ✅ immediate | Admission refuses the N+1 start synchronously |
 | 2 | User opens N+1 concurrent **direct-play** streams | ✅ | ✅ immediate | Same admission gate; method-agnostic |
-| 3 | **Shared account**, many devices streaming at once | ✅ | ✅ / ⚠️ | Capped per-user on one process; leaks across replicas (#7) |
-| 4 | **Buffer-ahead then pause** fetches >45s to duck the cap | ✅ | ✅ | Unpaused transcodes retain a 10m integrated / 180s edge server-observed grace |
-| 5 | **Withhold/falsify progress** to hide a stream | ✅ | ✅ | Existence is byte-observed; progress only moves a display field |
+| 3 | **Shared account**, many devices streaming at once | ✅ | ✅ / ⚠️ | Admission caps per-user on one process; cross-replica excess is now seen and trimmed by the enforcer within ~120s (#7) |
+| 4 | **Buffer-ahead then pause** fetches >45s to duck the cap | ✅ | ✅ | Unpaused transcodes retain a 10m integrated / 180s edge server-observed grace; paused sessions now age from the last **served byte**, not the last client ping |
+| 5 | **Withhold/falsify progress** to hide a stream | ✅ | ✅ | Existence is byte-observed, and since A5 progress no longer confers liveness or reprieves reaping — a progress-only phantom ages out and sorts as the stalest over-cap victim |
 | 6 | **Rapid session churn** between enforcer ticks | ⚠️ | ⚠️ | Admission blocks over-cap starts; no rate limit on `/start` |
-| 7 | Split streams across **multiple integrated replicas** | ⚠️ | ⚠️ | Admission and integrated monitoring remain per-process (VERIFY-3) |
+| 7 | Split streams across **multiple integrated replicas** | ✅ | ⚠️ ~120s | Integrated sessions are published to the shared `silo:sessions:` picture and one elected evaluator trims the excess. **Admission is still per-process**, so the over-cap starts are admitted and then trimmed, not refused |
 | 8 | **Standard user** exceeds cap via the edge/multi-node path | ✅ | ✅ ~120s | Enforcer resolves the group-merged effective cap and trims the excess |
 
 ### Category B — Admin control / kill switch
@@ -194,13 +197,13 @@ Jellyfin-compat surface is unthrottled (see Category E).
 
 | # | Abuse story | Detection | Enforcement | One-line verdict |
 |---|---|---|---|---|
-| 17 | Rip whole library via **native download** endpoints | ⚠️ | ⚠️ | Active pours/bytes visible *until the registry saturates* (GAP-14); creation-time gate only; **no volume cap** |
-| 18 | Rip via **compat `/Items/{id}/Download`** (Infuse) | ⚠️ | ❌ | Active pour visible, but **no quota at all** |
-| 18a | Rip via authenticated **ABS file/download** route | ✅ | ⚠️ | Active pour visible and now cuttable in flight (GAP-10 fixed); still **no volume quota** |
+| 17 | Rip whole library via **native download** endpoints | ✅ | ⚠️ | Pours are always monitored or refused (429/503) since A7, and a per-user concurrent cap bounds one actor; creation-time gate only; **still no volume cap** |
+| 18 | Rip via **compat `/Items/{id}/Download`** (Infuse) | ✅ | ⚠️ | Pour is monitored or refused, and the per-user concurrent cap applies; **still no volume quota** |
+| 18a | Rip via authenticated **ABS file/download** route | ✅ | ⚠️ | Pour visible, cuttable in flight (GAP-10), and now monitored-or-refused with a per-user concurrent cap (A7); still **no volume quota** |
 | 18b | Pull an **ABS public playback track** | ✅ | ✅ | Native session id is monitored/metered; session and owner kills land |
 | 18c | Pull a **public ABS RSS feed file** | ✅ | ⚠️ | Active pour visible; owner cutoff uses feed creation time and the in-flight cut now lands (GAP-10 fixed). Closing a feed still does not cut its current pour; that needs a separately designed, collision-safe feed capability revocation id and is deferred. |
-| 18d | Rip via the **ebook/comic/PDF reader** route | ✅ | ⚠️ | Now metered, transfer-rowed, refused on entry and cut in flight (GAP-11 fixed); cap-exempt per A4 and still no volume quota |
-| 19 | Rip via **sequential direct-play GETs** (one at a time) | ⚠️ | ❌ | Cap counts concurrency, not volume; stays at 1 forever |
+| 18d | Rip via the **ebook/comic/PDF reader** route | ✅ | ⚠️ | Metered, transfer-rowed, refused on entry and cut in flight (GAP-11); also fails closed under A7 — this was the fifth `Begin` call site the batch handoff missed. Cap-exempt per A4; still no volume quota |
+| 19 | Rip via **sequential direct-play GETs** (one at a time) | ⚠️ | ❌ | Cap counts concurrency, not volume; stays at 1 forever. A7's per-user cap is also concurrency-based and does not touch this |
 | 20 | Admin **stops an in-progress rip** mid-transfer | — | ✅ | `WatchAndCut` now lands on every download-class route within ~5s (GAP-10/GAP-12 fixed); admin must still issue the revoke |
 
 ### Category E — API / DB load abuse (non-stream; branch is orthogonal)
@@ -487,8 +490,9 @@ visible, no CPU/process signal) / Enforcement ❌ (no aggregate cap).**
 - Authoritative, **byte-observed** stream existence on the *playback* surfaces that a
   client cannot hide by lying about or withholding progress (A5) — with the two
   bounded caveat GAP-15 noted there, and now **including** ebooks (GAP-11 fixed) and
-  subtitle pours. GAP-13 is fixed, so merged byte totals are trustworthy too. Still
-  **not** guaranteed under transfer-registry saturation (GAP-14, open).
+  subtitle pours. GAP-13 is fixed, so merged byte totals are trustworthy too, and
+  GAP-14 is fixed: a download-class pour that cannot be monitored is now **refused**
+  rather than served blind.
 - A durable, restart-surviving, reconnect-proof **kill switch** for a *specific
   session* or a *user*, via one shared `Refuse` + `WatchAndCut` (B9–B12, D20).
   `Refuse` — the next-request half — holds everywhere it is mounted. The
@@ -500,9 +504,14 @@ visible, no CPU/process signal) / Enforcement ❌ (no aggregate cap).**
   decision A1 lands.
 - Immediate **synchronous admission** refusal of over-cap starts, and an async
   over-cap reconciler for the multi-node picture (A1, A2, C15) — *when a per-user
-  cap is set*.
+  cap is set*. Since A6, integrated sessions are published to the shared
+  `silo:sessions:` picture and a single elected evaluator trims cross-replica excess.
 
 **Does not cover (by scope or by gap):**
+- **Distributed synchronous admission.** A6 gave every replica the same *monitoring*
+  picture, but `StartSession`'s cap check still reads only the local `SessionManager`.
+  Streams spread across replicas are all admitted and then trimmed asynchronously
+  within the ~120s budget, not refused at the door.
 - **Under-cap re-streaming** (C14) and **token hoarding/fan-out** (C16) — no
   detection, no enforcement; the heuristic that was scoped for this is unimplemented.
 - **Bulk ripping** by download (D17/D18) or sequential direct-play (D19) — the cap
@@ -525,9 +534,9 @@ issues inherit them rather than re-litigating.
 | **A2** | Revocation state model | **Durable tombstones** — an independent `RevokedAt`/`ExpiresAt` merge *plus* a durable tombstone so an un-ban survives a restart and cannot be re-`Upsert`ed by a stale replica. One Goose migration. |
 | **A3** | Credential identity for the user cutoff | **Presented credential time.** Native access uses token `iat`; normal Jellyfin compatibility sessions use their stable login `CreatedAt`, not the refreshed bridged token. API keys and valid JWTs without `iat` use zero and deliberately fail open, so a user cutoff cannot cut their pours. Per-login logout cuts stay out of scope (they need authorization-generation/per-login identity in the stream credential). |
 | **A4** | What counts as a "stream" | **Observe + make killable, keep cap-exempt** for the ABS bare file route and ebook/comic/PDF reading. Neither consumes a video stream slot. **Implemented.** |
-| **A5** | Liveness source of truth | **Separate server-observed liveness entirely.** Client progress becomes UI metadata and never feeds enforcement or reaping; the `LastActivityAt` fallback for `LastServedAt` is removed. This is what makes "never trusts client progress" true — it is **not** true today. |
-| **A6** | Multi-replica visibility | **Publish every integrated stream to Redis** so all replica enforcers share one picture. Fixes the incomplete-input root cause; snapshot staleness handled by re-reading at kill time rather than a distributed lock. |
-| **A7** | Fail-open vs fail-closed monitoring | **Fail closed + connection cap.** See follow-up 0e. |
+| **A5** | Liveness source of truth | **Separate server-observed liveness entirely.** Client progress never feeds enforcement or reaping; the `LastActivityAt` fallback for `LastServedAt` is removed, and reaping measures from `LastServedAt` (falling back only to `StartedAt`) behind a configurable never-served grace. Paused sessions holding an open realtime/WebSocket connection stay exempt — an observed, ping-checked connection is server-observed, unlike a reported progress position, and this preserves the issue #243 fix. **Implemented.** |
+| **A6** | Multi-replica visibility | **Publish every integrated stream to Redis** so all replica enforcers share one picture, keyed by a per-process instance id. A renewable Redis lease elects one evaluator per tick so replicas cannot trim from divergent snapshots. Fixes **monitoring** only — synchronous admission stays per-process. **Implemented.** |
+| **A7** | Fail-open vs fail-closed monitoring | **Fail closed + connection cap.** Download-class pours are refused (429/503 + `Retry-After`) rather than served unmonitored, and a per-user concurrent-transfer cap (`playback.max_user_concurrent_transfers`, default 24) makes registry saturation unreachable by one actor. **Implemented.** |
 | **A8** | Scope | **Split.** The serve-path, capability and docs work lands first; tracker lifecycle → revocation state → liveness/replicas → re-stream heuristic follow in that dependency order. |
 
 A new finding recorded while implementing A4, for the A3 batch: `streamRequestIdentity`
@@ -571,18 +580,22 @@ enhancements.** In rough fix-cost order:
     a stream. The proposed ordered, bounded projection queue is deliberately deferred
     until its startup, drain, cleanup ordering, backpressure, and refresh interaction
     can be designed together.
-0f. **Decide the registry-saturation policy explicitly** (GAP-14) — **DECIDED (A7),
-    not yet implemented:** fail *closed* for download-class pours once the registry is
-    full, **and** add a per-user/credential concurrent-connection cap (E28) so
-    saturation is unreachable by a single actor in the first place. Scheduled for the
-    liveness/replica batch. Today it still fails open, logging at Debug at the call
-    sites.
+0f. ~~**Decide the registry-saturation policy explicitly**~~ (GAP-14) — **DONE (A7).**
+    Download-class pours fail *closed* once the registry is full (429/503 with
+    `Retry-After`), and a per-user concurrent-transfer cap
+    (`playback.max_user_concurrent_transfers`, default 24) makes saturation
+    unreachable by a single actor. Five call sites, not four — `ebook_reader.go` was
+    missing from the original list. Note this does **not** close E28: there is still
+    no server-wide connection cap, only a per-user transfer cap.
 0g. ~~**Bound the kill-list propagation lock.**~~ **DONE.** Redis and pub/sub run
     before the durable mirror, and detached propagation/startup warm use bounded
     contexts. `opMu` deliberately remains held across propagation so a same-process
-    unrevoke cannot interleave with an older mirror write. Two central replicas can
-    still race the unconditional Redis `SET`; an atomic cross-replica merge remains
-    deferred to A6/Batch 4.
+    unrevoke cannot interleave with an older mirror write. The cross-replica race on
+    the Redis mirror is **now also closed**: `mirrorToRedis` merges server-side in Lua
+    with the same monotonic semantics as `applyLocal`, comparing exact `(sec, nsec)`
+    pairs and merging *before* deciding to delete, so a lapsed incoming revocation
+    cannot remove a live stronger one. Falls back to the previous plain `SET` (logged
+    once) if the script cannot run.
 
 Then, as originally scoped:
 
@@ -600,11 +613,50 @@ Then, as originally scoped:
 4. **Add a per-node concurrent-transcode cap** and wire `nodepool.MaxJobs` defaults
    (E29).
 5. **Implement the restream heuristic** (C14/C16): the fingerprints already flow
-   through `streammonitor`; a distinct-viewer-IP / distinct-title / throughput rule
-   is the missing consumer. Ship disabled, tune against real traffic.
+   through `streammonitor`; a distinct-viewer-IP rule is the missing consumer.
+   Decisions are now settled: distinct viewer IPs per session as the signal, Redis
+   with a ~24h TTL when configured and in-memory otherwise, detection **on by
+   default and alert-only**, with auto-kill behind an operator setting that defaults
+   to off. Note the privacy posture explicitly — this retains per-viewer IP history
+   on every deployment.
 6. **Per-client listing-load accounting** (E21–E24): attribute browse cost per
    device and add caching/singleflight to the general paged browse, not just the
    Latest/hub rails.
+
+## Accepted limitations from the liveness/replica batch (2026-07-31)
+
+Deliberate, recorded decisions. Changing any of them is a new decision, not a bugfix.
+
+- **Paused sessions age from the last served byte, not the last client ping.** A paused
+  session holding an open realtime/WebSocket connection stays exempt from reaping; one
+  whose client only POSTs progress is reaped after the 30m paused grace and resumes via
+  the restart-resilient reconstruct path. This is the A5 boundary: an observed,
+  ping-checked connection counts as liveness, a reported position does not.
+- **A never-served session is retained for a bounded grace** (`DefaultUnservedSessionGrace`,
+  2m) so a slow first byte is not reaped instantly. It is a separate configurable knob
+  rather than a floor on `SetLivenessGracePeriods`, which would otherwise silently
+  override an operator's shorter window.
+- **`last_served_at` is omitted for integrated sessions that have never served.** The
+  admin session list shares the enforcer's projection, so it no longer reports a client
+  progress timestamp as a serve time. The field is unchanged when real bytes exist.
+- **Synchronous admission remains per-process.** See "does not cover" above.
+- **The integrated session publisher waits one 10s tick before its first publish**, so a
+  freshly-started replica's sessions are briefly absent from the shared picture. Bounded
+  and self-correcting; that replica's own enforcer still sees them through the local
+  source.
+- **The enforcer lease is advisory.** A Redis error means every replica evaluates, which
+  is the pre-A6 behavior — failing to coordinate must never mean failing to enforce.
+- **The Redis revocation merge degrades to a plain `SET`** if the Lua script cannot run
+  (logged once). Behavior then matches pre-A6.
+- **Transfer-saturation rejections are logged at Warn inside the registry**, rate-limited
+  per user and carrying route and user id — not once per rejected request at each call
+  site, which an actor parked at its cap could turn into a log-amplification vector.
+- **`playback.max_user_concurrent_transfers` set too low will 429 legitimate
+  multi-connection downloaders**, which routinely open 4-8 sockets per file and consume
+  one transfer id per concurrent Range request.
+- **The Lua-executing tests skip without `SILO_TEST_REDIS_ADDR`**, and this repository
+  runs no `go test` job in CI, so that evidence is local-only until a Redis service is
+  added to CI.
 
 ## AI-use disclosure
 
@@ -664,3 +716,44 @@ CI. No frontend files were changed. The `internal/access` and `internal/jellycom
 test packages **do not compile on `main`** (stale `UserStore` doubles missing
 `GetOnboardingState`), so the compat changes in this round are **verified by reading
 only** — CI cannot exercise them either until that is fixed separately.
+
+Round 5 (2026-07-31) implemented the liveness/replica batch (A5, A6, A7) as the same
+cross-model relay: Claude Opus 5 planned and reviewed, Codex `gpt-5.6-sol` at medium
+effort adversarially reviewed the plan and implemented it in three commit-sized passes,
+and Claude re-ran every verification independently.
+
+- Codex's plan review returned 14 findings. The load-bearing ones, all **accepted**:
+  the proposed Lua merge's `ttl <= 0 ⇒ DEL` could delete a *stronger* concurrent
+  revocation, so the script must merge before deciding to delete; the repository's Redis
+  test doubles are hand-written go-redis `ProcessHook` fakes that **cannot execute Lua**,
+  so the originally-proposed merge tests would have proven nothing; a hardcoded
+  never-served grace would silently override `SetLivenessGracePeriods`' documented
+  contract and break four existing tests; and the per-user cap option could not express
+  both "unset ⇒ default" and "explicit 0 ⇒ unlimited" as a plain `int`.
+- Two review claims were **rejected** on verification. That the new setting required an
+  Admin UI field (and therefore frontend changes): `playback.over_cap_revocation_ttl`,
+  added by Batch 5 on this same branch, has identical backend plumbing and is
+  deliberately absent from `PlaybackSettings.tsx`'s `KEYS` list, so backend-only matches
+  the branch's own precedent. And that the setting should be parsed near the enforcer
+  wiring: the registry is constructed far earlier, so it is parsed at the construction
+  site from the settings map already loaded at startup.
+- Claude's own planning found a conflict the decision record did not anticipate: A5 says
+  client progress must never feed reaping, but `session_paused_grace_test.go` encodes
+  issue #243, where reaping a paused transcode froze clients. Resolved by keying the
+  paused exemption on an open, **ping-checked** realtime/WebSocket connection — a
+  server-observed connection rather than a client-reported position — which satisfies
+  both.
+- Codex's sandbox **blocks loopback TCP**, so the six real-Redis tests it wrote never
+  executed there; it reported this explicitly rather than claiming they passed. Claude
+  ran them against a real Redis 8.6.2 (`EVAL` + `cjson` confirmed) and then
+  mutation-checked them by bypassing the Lua merge back to the old unconditional `SET`:
+  four of five failed, confirming they genuinely exercise the merge.
+- Claude's review found one defect Codex missed: `TestHandleListSessions...` asserted
+  `last_served_at == LastActivityAt`, encoding the very fallback A5 removes. It surfaced
+  only when running `./internal/api/...`, which the first verification pass skipped.
+  Fixed, and the test now also asserts the field reappears once bytes are served.
+
+Verification note for this round: the Lua-executing tests are gated on
+`SILO_TEST_REDIS_ADDR` and were run locally against Redis 8.6.2. This repository has
+**no CI job that runs `go test`** at all, so all Go test evidence here is local. `pnpm`
+remains absent on this host; no frontend files were changed in this round.
