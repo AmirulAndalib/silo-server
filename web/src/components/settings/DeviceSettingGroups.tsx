@@ -1,7 +1,6 @@
 import { Lock, RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
@@ -11,6 +10,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { LanguageSelect } from "@/components/settings/LanguageSelect";
+import { SettingSlider } from "@/components/settings/SettingSlider";
 import { SettingsGroup } from "@/components/settings/SettingsGroup";
 import { groupDeviceSettings } from "@/lib/deviceSettingGroups";
 import type { EffectiveSetting } from "@/hooks/queries/settingValues";
@@ -30,6 +30,12 @@ export interface DeviceSettingGroupsProps {
    * a name when the household parent is acting for someone else.
    */
   ownerLabel: string;
+  /**
+   * The target device's self-reported platform string. When given, settings
+   * the manifest marks as not applying to that platform are hidden — unless
+   * the device already stores a value, which must stay clearable.
+   */
+  devicePlatform?: string;
   disabled?: boolean;
   onChange: (key: SettingKey, value: unknown) => void;
   onReset: (key: SettingKey) => void;
@@ -40,14 +46,23 @@ export interface DeviceSettingGroupsProps {
 export function DeviceSettingGroups({
   settings,
   ownerLabel,
+  devicePlatform,
   disabled = false,
   onChange,
   onReset,
   onOpenPanel,
 }: DeviceSettingGroupsProps) {
+  const storedHere = new Set(
+    (Object.keys(settings) as SettingKey[]).filter(
+      (key) => settings[key]?.scope === "profile_device",
+    ),
+  );
   return (
     <div className="space-y-4">
-      {groupDeviceSettings().map((group) => (
+      {groupDeviceSettings(undefined, {
+        devicePlatform,
+        keysWithStoredValues: storedHere,
+      }).map((group) => (
         <SettingsGroup key={group.id} title={group.title} description={group.description}>
           {group.keys.map((key) => (
             <DeviceSettingRow
@@ -238,20 +253,17 @@ function DeviceSettingControl({
   if (control === "slider" || control === "stepper") {
     const numeric = typeof value === "number" ? value : Number(definition.defaultValue ?? 0);
     return (
-      <div className="order-1 flex w-full items-center gap-3 sm:order-none sm:max-w-[260px]">
-        <Slider
-          value={[numeric]}
-          min={definition.minimum}
-          max={definition.maximum}
-          step={definition.step}
-          disabled={disabled}
-          onValueCommit={(values) => onChange(settingKey, values[0] ?? numeric)}
-        />
-        <span className="text-muted-foreground min-w-16 text-right text-xs font-medium">
-          {numeric}
-          {definition.unit ? ` ${definition.unit}` : ""}
-        </span>
-      </div>
+      <SettingSlider
+        className="order-1 flex w-full items-center gap-3 sm:order-none sm:max-w-[260px]"
+        value={numeric}
+        min={definition.minimum}
+        max={definition.maximum}
+        step={definition.step}
+        unit={definition.unit}
+        disabled={disabled}
+        aria-label={definition.label}
+        onCommit={(next) => onChange(settingKey, next)}
+      />
     );
   }
 

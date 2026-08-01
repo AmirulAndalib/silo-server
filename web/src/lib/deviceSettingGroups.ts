@@ -78,6 +78,51 @@ const HIDDEN_KEYS = new Set<string>([
   "ui.remember_library_page_state",
 ]);
 
+/**
+ * The manifest's platform identifiers, as `platforms` uses them.
+ *
+ * Devices self-report a free-form platform string ("iOS Web", "tvOS",
+ * "android-tv"), so editing another device means mapping that string onto
+ * these before the advisory `platforms` tags can be applied.
+ */
+export type ManifestPlatform = "web" | "ios" | "tvos" | "macos" | "android" | "android_tv";
+
+/**
+ * Maps a device's self-reported platform string to a manifest platform, or
+ * null when the string is unrecognized. Order matters: every browser platform
+ * string ends in "Web" ("iOS Web", "Android Web"), so the web check runs
+ * before the OS checks — an iPhone browser is a web device, not an iOS app.
+ */
+export function manifestPlatformFor(devicePlatform: string | undefined): ManifestPlatform | null {
+  if (!devicePlatform) return null;
+  const p = devicePlatform.toLowerCase();
+  if (p.includes("web") || p.includes("browser")) return "web";
+  if (p.includes("android-tv") || p.includes("android_tv") || p.includes("android tv")) {
+    return "android_tv";
+  }
+  if (p.includes("tvos") || p.includes("apple tv")) return "tvos";
+  if (p.includes("ios") || p.includes("iphone") || p.includes("ipad")) return "ios";
+  if (p.includes("macos") || p.includes("mac os")) return "macos";
+  if (p.includes("android")) return "android";
+  return null;
+}
+
+/**
+ * Whether a setting is expected to do anything on the given platform.
+ *
+ * The manifest's `platforms` field is advisory UI metadata: absent means
+ * "expected everywhere". An unrecognized device platform shows everything —
+ * offering a control that may be inert beats hiding one that is not.
+ */
+export function settingAppliesToPlatform(
+  key: SettingKey,
+  platform: ManifestPlatform | null,
+): boolean {
+  const platforms = SETTING_DEFINITIONS[key]?.platforms;
+  if (!platforms?.length || !platform) return true;
+  return platforms.includes(platform);
+}
+
 export function groupForDeviceSetting(key: SettingKey): DeviceSettingGroupId | null {
   if (HIDDEN_KEYS.has(key)) return null;
   const explicit = EXPLICIT_GROUPS[key];
@@ -95,12 +140,29 @@ export function groupForDeviceSetting(key: SettingKey): DeviceSettingGroupId | n
   }
 }
 
-/** The groups to render, in reading order, with empty groups omitted. */
+/**
+ * The groups to render, in reading order, with empty groups omitted.
+ *
+ * `devicePlatform` is the target device's self-reported platform string; when
+ * given, settings whose `platforms` tag excludes that device are dropped — a
+ * browser gets no "Screen orientation", a phone no TV-only toggles. A key the
+ * device stores a value for stays visible regardless, so a stale override can
+ * always be seen and cleared.
+ */
 export function groupDeviceSettings(
   keys: readonly SettingKey[] = ALL_DEVICE_SETTING_KEYS,
+  options?: { devicePlatform?: string; keysWithStoredValues?: ReadonlySet<string> },
 ): DeviceSettingGroup[] {
+  const platform = manifestPlatformFor(options?.devicePlatform);
   const byGroup = new Map<DeviceSettingGroupId, SettingKey[]>();
   for (const key of keys) {
+    if (
+      options?.devicePlatform !== undefined &&
+      !settingAppliesToPlatform(key, platform) &&
+      !options?.keysWithStoredValues?.has(key)
+    ) {
+      continue;
+    }
     const group = groupForDeviceSetting(key);
     if (!group) continue;
     const existing = byGroup.get(group);

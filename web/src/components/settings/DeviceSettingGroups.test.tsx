@@ -187,6 +187,64 @@ describe("DeviceSettingGroups", () => {
     expect(screen.getByText("3.5 Mbps")).toBeInTheDocument();
   });
 
+  // The sliders shipped controlled with only onValueCommit, so the thumb
+  // never moved and no keyboard or pointer gesture could change the value.
+  // Keyboard steps are what jsdom can exercise; they commit through the same
+  // path a pointer release does.
+  it("commits a slider change", async () => {
+    const { onChange } = renderGroups({
+      "playback.next_up_prompt_seconds": effective({
+        key: "playback.next_up_prompt_seconds",
+        value: 30,
+        source: "default",
+      }),
+    });
+
+    const slider = screen.getByRole("slider", { name: "Next up prompt" });
+    slider.focus();
+    await userEvent.keyboard("{ArrowRight}");
+
+    expect(onChange).toHaveBeenCalledWith("playback.next_up_prompt_seconds", 31);
+  });
+
+  it("hides settings that cannot apply to the device being edited", () => {
+    render(
+      <DeviceSettingGroups
+        settings={{}}
+        ownerLabel="your"
+        devicePlatform="macOS Web"
+        onChange={vi.fn()}
+        onReset={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("Screen orientation")).not.toBeInTheDocument();
+    expect(screen.queryByText("Audio sync offset")).not.toBeInTheDocument();
+    expect(screen.getByText("Subtitles", { selector: "h3" })).toBeInTheDocument();
+  });
+
+  it("keeps an inapplicable setting visible while this device stores a value", () => {
+    render(
+      <DeviceSettingGroups
+        settings={{
+          "player.audio_sync_ms": {
+            key: "player.audio_sync_ms",
+            value: 250,
+            source: "profile_device",
+            scope: "profile_device",
+          },
+        }}
+        ownerLabel="your"
+        devicePlatform="macOS Web"
+        onChange={vi.fn()}
+        onReset={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Audio sync offset")).toBeInTheDocument();
+    expect(screen.queryByText("Screen orientation")).not.toBeInTheDocument();
+  });
+
   it("states who set a locked value rather than disabling it silently", () => {
     renderGroups({
       "playback.preferred_quality": effective({

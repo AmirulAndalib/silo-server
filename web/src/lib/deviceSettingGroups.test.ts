@@ -4,6 +4,8 @@ import {
   groupDeviceSettings,
   groupForDeviceSetting,
   hiddenDeviceSettingKeys,
+  manifestPlatformFor,
+  settingAppliesToPlatform,
 } from "@/lib/deviceSettingGroups";
 import { ALL_DEVICE_SETTING_KEYS } from "@/lib/settingsDisplay";
 
@@ -47,5 +49,49 @@ describe("deviceSettingGroups", () => {
 
     const single = groupDeviceSettings(["player.hdr_enabled"]);
     expect(single.map((group) => group.id)).toEqual(["picture"]);
+  });
+
+  // Browser platform strings all end in "Web" ("iOS Web"), so a phone browser
+  // must classify as web, not as the phone's native app.
+  it("maps self-reported platform strings onto the manifest's identifiers", () => {
+    expect(manifestPlatformFor("macOS Web")).toBe("web");
+    expect(manifestPlatformFor("iOS Web")).toBe("web");
+    expect(manifestPlatformFor("iOS")).toBe("ios");
+    expect(manifestPlatformFor("tvOS")).toBe("tvos");
+    expect(manifestPlatformFor("android")).toBe("android");
+    expect(manifestPlatformFor("android-tv")).toBe("android_tv");
+    expect(manifestPlatformFor("Roku")).toBeNull();
+    expect(manifestPlatformFor(undefined)).toBeNull();
+  });
+
+  it("hides settings the manifest marks as not applying to the device", () => {
+    // Screen orientation is ios/android only; audio sync is native-only.
+    expect(settingAppliesToPlatform("player.orientation_mode", "web")).toBe(false);
+    expect(settingAppliesToPlatform("player.orientation_mode", "ios")).toBe(true);
+    expect(settingAppliesToPlatform("player.audio_sync_ms", "web")).toBe(false);
+    expect(settingAppliesToPlatform("player.audio_sync_ms", "tvos")).toBe(true);
+    // An untagged setting is expected everywhere.
+    expect(settingAppliesToPlatform("playback.subtitle_mode", "web")).toBe(true);
+    // An unrecognized platform hides nothing.
+    expect(settingAppliesToPlatform("player.orientation_mode", null)).toBe(true);
+
+    const keys = groupDeviceSettings(undefined, { devicePlatform: "macOS Web" }).flatMap(
+      (group) => group.keys,
+    );
+    expect(keys).not.toContain("player.orientation_mode");
+    expect(keys).not.toContain("player.match_frame_rate");
+    expect(keys).not.toContain("player.audio_sync_ms");
+    expect(keys).toContain("playback.subtitle_mode");
+  });
+
+  // A stale override on a now-inapplicable setting must stay visible, or it
+  // can never be cleared from this screen.
+  it("keeps a platform-hidden setting visible while the device stores a value", () => {
+    const keys = groupDeviceSettings(undefined, {
+      devicePlatform: "macOS Web",
+      keysWithStoredValues: new Set(["player.audio_sync_ms"]),
+    }).flatMap((group) => group.keys);
+    expect(keys).toContain("player.audio_sync_ms");
+    expect(keys).not.toContain("player.orientation_mode");
   });
 });

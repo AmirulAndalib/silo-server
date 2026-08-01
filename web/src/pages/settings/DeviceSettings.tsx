@@ -12,6 +12,7 @@ import {
 } from "@/components/admin/deviceOverrides";
 import { DeviceList, lastSeenLabel } from "@/components/settings/DeviceList";
 import { DeviceSettingGroups } from "@/components/settings/DeviceSettingGroups";
+import { SubtitleAppearancePanelView } from "@/components/settings/SubtitleAppearancePanelView";
 import { useClearDeviceSettings, useForgetDevice, useMyDevices } from "@/hooks/queries/devices";
 import {
   useClearSettingValue,
@@ -21,7 +22,8 @@ import {
 import { useCurrentProfile } from "@/hooks/useCurrentProfile";
 import { useIsActingAdmin } from "@/hooks/useIsActingAdmin";
 import { ALL_DEVICE_SETTING_KEYS } from "@/lib/settingsDisplay";
-import type { SettingKey } from "@/lib/settingsContract";
+import { SETTING_KEYS, type SettingKey } from "@/lib/settingsContract";
+import { parseSubtitleAppearance, type SubtitleAppearance } from "@/lib/subtitleAppearance";
 import { cn } from "@/lib/utils";
 
 /**
@@ -252,6 +254,14 @@ function DeviceDetail({
     profileId: targetProfileId,
   };
 
+  // The subtitle appearance panel edits its object locally so dragging a
+  // colour or opacity feels instant, persisting each patch as it lands. The
+  // server value reasserts itself whenever the panel is (re)opened.
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
+  const [appearance, setAppearance] = useState<SubtitleAppearance | null>(null);
+  const appearanceSetting = settings[SETTING_KEYS.PLAYBACK_SUBTITLE_APPEARANCE];
+  const appearanceChangedHere = appearanceSetting?.scope === "profile_device";
+
   const changedCount = device.changed_count;
   const kind = classifyPlatform(device.device_platform);
 
@@ -380,6 +390,7 @@ function DeviceDetail({
         <DeviceSettingGroups
           settings={settings}
           ownerLabel={ownerLabel}
+          devicePlatform={device.device_platform}
           disabled={setValue.isPending || clearValue.isPending}
           onChange={(key: SettingKey, value: unknown) =>
             setValue.mutate(
@@ -399,8 +410,43 @@ function DeviceDetail({
               },
             )
           }
+          onOpenPanel={() => {
+            setAppearance(parseSubtitleAppearance(appearanceSetting?.value));
+            setAppearanceOpen(true);
+          }}
         />
       )}
+
+      <SubtitleAppearancePanelView
+        open={appearanceOpen && appearance !== null}
+        value={appearance ?? parseSubtitleAppearance(undefined)}
+        onChange={(patch) => {
+          const next = { ...(appearance ?? parseSubtitleAppearance(undefined)), ...patch };
+          setAppearance(next);
+          setValue.mutate(
+            { key: SETTING_KEYS.PLAYBACK_SUBTITLE_APPEARANCE, value: next, identity },
+            {
+              onError: (error) =>
+                toast.error(error instanceof Error ? error.message : "Couldn't save"),
+            },
+          );
+        }}
+        onClose={() => setAppearanceOpen(false)}
+        canReset={appearanceChangedHere}
+        onReset={() => {
+          clearValue.mutate(
+            { key: SETTING_KEYS.PLAYBACK_SUBTITLE_APPEARANCE, identity },
+            {
+              onError: (error) =>
+                toast.error(error instanceof Error ? error.message : "Couldn't reset"),
+            },
+          );
+          setAppearanceOpen(false);
+        }}
+        resetLabel={`Use ${ownerLabel} style`}
+        eyebrow={device.device_name || "This device"}
+        status={setValue.isPending ? "Saving…" : "Changes saved automatically"}
+      />
 
       {forSomeoneElse ? (
         <Callout tone="muted" icon={<ShieldCheck className="h-4 w-4" />}>
