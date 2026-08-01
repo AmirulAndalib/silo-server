@@ -2895,7 +2895,14 @@ export interface EventsHelloMessage {
   schema_version: number;
   connection_id: string;
   available_channels: EventChannel[];
-  required_action: "subscribe";
+  /**
+   * "none" when the connection already holds at least one subscription,
+   * declared as ?channels= on the URL. "subscribe" when it still owes a
+   * subscribe frame — including when it declared channels but none of them
+   * resolved, since such a connection is subscribed to nothing and is closed
+   * after the grace period like any other silent one.
+   */
+  required_action: "subscribe" | "none";
 }
 
 export interface EventsSubscribeMessage {
