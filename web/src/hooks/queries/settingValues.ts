@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/api/client";
+import { api, ApiClientError } from "@/api/client";
 import { storage } from "@/utils/storage";
 import { SETTING_DEFINITIONS, SETTINGS_REVISION, type SettingKey } from "@/lib/settingsContract";
 import { useEventChannel } from "@/components/realtimeEventsContext";
@@ -183,6 +183,35 @@ export function useSettingValue<T = unknown>(
   };
 }
 
+export function isDefinitiveSettingMutationRejection(error: unknown): boolean {
+  // Ordinary 4xx responses reject the request before applying it. A 408 or
+  // 5xx can be emitted by the server or a gateway after the mutation reached
+  // the handler, so those remain ambiguous and require reconciliation.
+  return (
+    error instanceof ApiClientError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408
+  );
+}
+
+function shouldReconcileAfterMutationError(error: unknown): boolean {
+  return !isDefinitiveSettingMutationRejection(error);
+}
+
+function invalidateSettingValueQueries(
+  queryClient: ReturnType<typeof useQueryClient>,
+  identity: SettingIdentity,
+) {
+  void queryClient.invalidateQueries({ queryKey: [...settingsKeys.all, "values"] });
+  // A device-scoped write changes that device's "how many things differ"
+  // count, which the device list shows. Without this the badge stays stale
+  // until the list's own staleTime expires.
+  if (identity.scope === "profile_device") {
+    void queryClient.invalidateQueries({ queryKey: deviceKeys.all });
+  }
+}
+
 /** Write one value at one scope. */
 export function useSetSettingValue() {
   const qc = useQueryClient();
@@ -208,13 +237,12 @@ export function useSetSettingValue() {
         },
         body: JSON.stringify({ value }),
       }),
-    onSettled: (_data, _error, variables) => {
-      void qc.invalidateQueries({ queryKey: [...settingsKeys.all, "values"] });
-      // A device-scoped write changes that device's "how many things differ"
-      // count, which the device list shows. Without this the badge stays stale
-      // until the list's own staleTime expires.
-      if (variables.identity.scope === "profile_device") {
-        void qc.invalidateQueries({ queryKey: deviceKeys.all });
+    onSuccess: (_data, variables) => {
+      invalidateSettingValueQueries(qc, variables.identity);
+    },
+    onError: (error, variables) => {
+      if (shouldReconcileAfterMutationError(error)) {
+        invalidateSettingValueQueries(qc, variables.identity);
       }
     },
   });
@@ -227,10 +255,17 @@ export function useClearSettingValue() {
   return useMutation({
     mutationFn: ({ key, identity }: { key: SettingKey; identity: SettingIdentity }) =>
       api(`/settings/values/${key}?${identityQuery(identity)}`, { method: "DELETE" }),
-    onSettled: (_data, _error, variables) => {
-      void qc.invalidateQueries({ queryKey: [...settingsKeys.all, "values"] });
-      if (variables.identity.scope === "profile_device") {
-        void qc.invalidateQueries({ queryKey: deviceKeys.all });
+    onSuccess: (_data, variables) => {
+      invalidateSettingValueQueries(qc, variables.identity);
+    },
+    onError: (error, variables) => {
+      // DELETE is idempotent for reset callers: a 404 means another client
+      // already cleared the value, so stale effective caches must catch up.
+      if (
+        shouldReconcileAfterMutationError(error) ||
+        (error instanceof ApiClientError && error.status === 404)
+      ) {
+        invalidateSettingValueQueries(qc, variables.identity);
       }
     },
   });
