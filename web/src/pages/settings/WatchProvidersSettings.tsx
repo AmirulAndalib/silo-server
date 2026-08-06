@@ -39,7 +39,7 @@ import type { WatchProviderConnectionConfig } from "@/hooks/queries/watchProvide
 import {
   buildConnectionConfig,
   connectionSchemasAreValid,
-  type RenderableConnectionSchema,
+  renderableConnectionSchemas,
 } from "./watchProviderConnectionConfig";
 
 function formatRelativeTime(value?: string) {
@@ -231,9 +231,7 @@ function APIKeyBlock({
   const [connectionConfig, setConnectionConfig] = useState<WatchProviderConnectionConfig>({});
   const [configValidity, setConfigValidity] = useState<Record<string, boolean>>({});
   const trimmed = value.trim();
-  const renderableSchemas = configSchemas.filter(
-    (schema): schema is RenderableConnectionSchema => schema.admin_form != null,
-  );
+  const renderableSchemas = renderableConnectionSchemas(configSchemas);
   const configValid = connectionSchemasAreValid(
     renderableSchemas,
     connectionConfig,
