@@ -33,6 +33,10 @@ import {
 } from "@/hooks/queries/watchProviders";
 import { Input } from "@/components/ui/input";
 import { formatRelativeTime as formatRelativeTimeBase } from "@/lib/date";
+import { SchemaForm } from "@/components/admin/plugins/SchemaForm";
+import { buildSchemaValues, parseFieldTypes } from "@/components/admin/plugins/schemaFormUtils";
+import type { PluginConfigSchema } from "@/api/types";
+import type { WatchProviderConnectionConfig } from "@/hooks/queries/watchProviders";
 
 function formatRelativeTime(value?: string) {
   return formatRelativeTimeBase(value, { rounding: "floor", justNowLabel: "Just now" }) ?? "Never";
@@ -206,17 +210,41 @@ function AuthCodeBlock({
 
 function APIKeyBlock({
   displayName,
+  configSchemas,
   pending,
   onSubmit,
   onCancel,
 }: {
   displayName: string;
+  configSchemas: PluginConfigSchema[];
   pending: boolean;
-  onSubmit: (apiKey: string) => void;
+  onSubmit: (apiKey: string, connectionConfig: WatchProviderConnectionConfig) => void;
   onCancel: () => void;
 }) {
   const [value, setValue] = useState("");
+  const [connectionConfig, setConnectionConfig] = useState<WatchProviderConnectionConfig>({});
+  const [configValidity, setConfigValidity] = useState<Record<string, boolean>>({});
   const trimmed = value.trim();
+  const configValid = configSchemas.every(
+    (schema) => configValidity[schema.key] ?? !schema.required,
+  );
+
+  const configuredValues = () =>
+    Object.fromEntries(
+      configSchemas.flatMap((schema) => {
+        if (!schema.admin_form) return [];
+        return [
+          [
+            schema.key,
+            buildSchemaValues(
+              schema.admin_form,
+              connectionConfig[schema.key] ?? {},
+              parseFieldTypes(schema.json_schema),
+            ),
+          ],
+        ];
+      }),
+    );
 
   return (
     <div className="border-primary/30 bg-primary/5 rounded-xl border border-dashed p-4">
@@ -237,6 +265,31 @@ function APIKeyBlock({
           <X className="h-4 w-4" />
         </Button>
       </div>
+      {configSchemas.map((schema) =>
+        schema.admin_form ? (
+          <div key={schema.key} className="mt-4 space-y-2">
+            <div>
+              <div className="text-sm font-medium">{schema.title || schema.key}</div>
+              {schema.description ? (
+                <div className="text-muted-foreground mt-0.5 text-xs leading-snug">
+                  {schema.description}
+                </div>
+              ) : null}
+            </div>
+            <SchemaForm
+              descriptor={schema.admin_form}
+              values={connectionConfig[schema.key] ?? {}}
+              onChange={(next) =>
+                setConnectionConfig((current) => ({ ...current, [schema.key]: next }))
+              }
+              idPrefix={`watch-provider-${schema.key}`}
+              onValidityChange={(valid) =>
+                setConfigValidity((current) => ({ ...current, [schema.key]: valid }))
+              }
+            />
+          </div>
+        ) : null,
+      )}
       <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-stretch">
         <Input
           type="password"
@@ -250,8 +303,8 @@ function APIKeyBlock({
         <Button
           type="button"
           size="sm"
-          disabled={pending || trimmed.length === 0}
-          onClick={() => onSubmit(trimmed)}
+          disabled={pending || trimmed.length === 0 || !configValid}
+          onClick={() => onSubmit(trimmed, configuredValues())}
           className="sm:flex-none"
         >
           {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
@@ -446,12 +499,15 @@ function WatchProviderCard({ providerKey }: { providerKey: string }) {
     });
   };
 
-  const handleSubmitAPIKey = (apiKey: string) => {
-    connectAPIKey.mutate(apiKey, {
-      onSuccess: () => {
-        setApiKeyPrompt(false);
+  const handleSubmitAPIKey = (apiKey: string, connectionConfig: WatchProviderConnectionConfig) => {
+    connectAPIKey.mutate(
+      { apiKey, connectionConfig },
+      {
+        onSuccess: () => {
+          setApiKeyPrompt(false);
+        },
       },
-    });
+    );
   };
 
   const handleCancelAPIKey = () => {
@@ -541,6 +597,7 @@ function WatchProviderCard({ providerKey }: { providerKey: string }) {
         <div className="mt-4">
           <APIKeyBlock
             displayName={displayName}
+            configSchemas={connection.connection_config_schema ?? []}
             pending={connectAPIKey.isPending}
             onSubmit={handleSubmitAPIKey}
             onCancel={handleCancelAPIKey}
