@@ -437,6 +437,7 @@ type upcomingEventResponse struct {
 
 type sectionItemResponse struct {
 	ContentID         string                 `json:"content_id"`
+	PlayContentID     string                 `json:"play_content_id,omitempty"`
 	Type              string                 `json:"type"`
 	Title             string                 `json:"title"`
 	SeriesID          string                 `json:"series_id,omitempty"`
@@ -1237,6 +1238,28 @@ func (h *SectionHandler) buildSectionsResponse(r *http.Request, withItems []sect
 	for _, s := range withItems {
 		allItems = append(allItems, s.Items...)
 	}
+	playTargets := map[string]string{}
+	if h.fetcher != nil {
+		inputs := make([]catalog.PlayableTargetInput, 0, len(allItems))
+		for _, item := range allItems {
+			if item == nil || item.ContentID == "" {
+				continue
+			}
+			inputs = append(inputs, catalog.PlayableTargetInput{ContentID: item.ContentID, Type: item.Type})
+		}
+		resolvedTargets, err := h.fetcher.ResolvePlayableTargets(r.Context(), catalog.PlayableTargetQuery{
+			UserID:     apimw.GetUserID(r.Context()),
+			ProfileID:  apimw.GetProfileID(r.Context()),
+			LibraryIDs: sectionRequestLibraryIDs(r),
+			Access:     requestAccessFilter(r),
+			Items:      inputs,
+		})
+		if err != nil {
+			slog.WarnContext(r.Context(), "resolving section playable targets", "component", "api", "error", err)
+		} else {
+			playTargets = resolvedTargets
+		}
+	}
 	userStates := h.listSectionItemUserStates(r, allItems)
 	imageURLs := h.resolveSectionItemImageURLs(r.Context(), withItems)
 	episodeMeta := h.listSectionEpisodeItemMeta(r.Context(), withItems, requestAccessFilter(r))
@@ -1267,7 +1290,7 @@ func (h *SectionHandler) buildSectionsResponse(r *http.Request, withItems []sect
 				meta.SeriesTitle = value.SeriesTitle
 			}
 			imageKey := sectionItemImageKey{sectionID: s.ID, contentID: item.ContentID}
-			items = append(items, h.toSectionItemResponse(s.SectionType, item, meta, overlaySummaries[item.ContentID], userStates[item.ContentID], imageURLs[imageKey]))
+			items = append(items, h.toSectionItemResponse(s.SectionType, item, meta, overlaySummaries[item.ContentID], userStates[item.ContentID], imageURLs[imageKey], playTargets[item.ContentID]))
 		}
 		resp.Sections = append(resp.Sections, resolvedSectionResponse{
 			ID:          s.ID,
@@ -1282,6 +1305,17 @@ func (h *SectionHandler) buildSectionsResponse(r *http.Request, withItems []sect
 		})
 	}
 	return resp
+}
+
+func sectionRequestLibraryIDs(r *http.Request) []int {
+	if r == nil || !strings.Contains(r.URL.Path, "/library/") {
+		return nil
+	}
+	libraryID, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil || libraryID <= 0 {
+		return nil
+	}
+	return []int{libraryID}
 }
 
 // listSectionMangaChapterItemMeta resolves series linkage for every manga
@@ -1406,9 +1440,14 @@ func (h *SectionHandler) resolveSectionItemImageURLs(ctx context.Context, withIt
 	return result
 }
 
-func (h *SectionHandler) toSectionItemResponse(sectionType sections.SectionType, item *models.MediaItem, meta *sections.SectionItemMeta, overlaySummary *models.OverlaySummary, userState *itemUserStateResponse, imageURLs sectionItemImageURLs) sectionItemResponse {
+func (h *SectionHandler) toSectionItemResponse(sectionType sections.SectionType, item *models.MediaItem, meta *sections.SectionItemMeta, overlaySummary *models.OverlaySummary, userState *itemUserStateResponse, imageURLs sectionItemImageURLs, resolvedPlayContentID string) sectionItemResponse {
+	playContentID := item.PlayContentID
+	if playContentID == "" {
+		playContentID = resolvedPlayContentID
+	}
 	resp := sectionItemResponse{
 		ContentID:         item.ContentID,
+		PlayContentID:     playContentID,
 		Type:              item.Type,
 		Title:             item.Title,
 		Year:              item.Year,

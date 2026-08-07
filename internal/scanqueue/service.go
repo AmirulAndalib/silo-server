@@ -13,6 +13,7 @@ import (
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/libraryingest"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/scanbatch"
 	"github.com/Silo-Server/silo-server/internal/scantrigger"
 )
 
@@ -283,7 +284,17 @@ func (s *Service) requeueStale() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	requeued, err := s.repo.RequeueStaleRunning(ctx, time.Now().UTC().Add(-s.staleAfter))
+	staleBefore := time.Now().UTC().Add(-s.staleAfter)
+	failed, err := s.repo.FailStaleDirectRunning(ctx, staleBefore)
+	if err != nil {
+		slog.Warn("scan queue: failed to abandon stale direct runs", "error", err)
+		return
+	}
+	if failed > 0 {
+		slog.Info("scan queue: failed abandoned direct runs", "count", failed)
+	}
+
+	requeued, err := s.repo.RequeueStaleRunning(ctx, staleBefore)
 	if err != nil {
 		slog.Warn("scan queue: failed to requeue stale runs", "error", err)
 		return
@@ -339,6 +350,7 @@ func (s *Service) process(run *models.ScanRun) {
 
 	ctx, cancel := context.WithCancel(s.appCtx)
 	defer cancel()
+	ctx = scanbatch.WithRunID(ctx, run.ID)
 	s.trackRunning(run.ID, run.MediaFolderID, cancel)
 	defer s.untrackRunning(run.ID)
 	progressReporter := newScanProgressReporter(s, run)

@@ -65,6 +65,12 @@ vi.mock("@/lib/thumbhash", () => ({
   decodeThumbhash: () => "",
 }));
 
+vi.mock("@/components/CardPlayOverlay", () => ({
+  default: ({ contentId, title, size }: { contentId: string; title: string; size?: string }) => (
+    <a href={`/watch/${contentId}`} aria-label={`Play ${title}`} data-size={size} />
+  ),
+}));
+
 import { GlobalSearch } from "./GlobalSearch";
 
 const browseFixture = {
@@ -132,6 +138,23 @@ describe("GlobalSearch", () => {
     expect(markup).toContain("Showing top results");
     expect(markup).not.toContain("of 50");
     expect(markup).toContain("Press Enter for all results");
+  });
+
+  it("shows a compact independent play target for playable library results", () => {
+    mocks.useQuery.mockReturnValue({
+      data: {
+        total: 1,
+        has_more: false,
+        items: [{ ...browseFixture, play_content_id: "movie-99" }],
+      },
+      isFetching: false,
+      isError: false,
+    });
+
+    const markup = renderSearchMarkup({ defaultOpen: true, initialQuery: "Test" });
+    expect(markup).toContain('href="/watch/movie-99"');
+    expect(markup).toContain('aria-label="Play Test Movie"');
+    expect(markup).toContain('data-size="compact"');
   });
 
   it("labels ebook preview rows with title case media type", () => {

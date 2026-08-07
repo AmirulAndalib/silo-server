@@ -659,6 +659,13 @@ func main() {
 	var restartRequested atomic.Bool
 
 	eventBus := cache.NewEventBus(cfg.Redis.URL)
+	if err := eventBus.Subscribe(appCtx, cache.ChannelCatalog, func(event cache.Event) {
+		if event.Type == cache.EventScanComplete {
+			sections.InvalidateResolvedListCache()
+		}
+	}); err != nil {
+		slog.Warn("subscribe section cache invalidation failed", "error", err)
+	}
 	logStreamHub := logstream.NewHub(nodeID, eventBus)
 	if err := logStreamHub.Start(appCtx); err != nil {
 		log.Fatalf("log stream hub start: %v", err)
@@ -1558,6 +1565,7 @@ func main() {
 				deps.FolderRepo,
 				itemRefreshResolver,
 				libraryIngestExecutor,
+				scanqueue.NewRepository(deps.DB),
 				metadataService,
 				deps.EventBus,
 				deps.RealtimeHub,
@@ -1573,6 +1581,7 @@ func main() {
 				seasonRepo,
 				episodeRepo,
 				libraryIngestExecutor,
+				scanqueue.NewRepository(deps.DB),
 				metadataService,
 				deps.EventBus,
 				deps.RealtimeHub,

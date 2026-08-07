@@ -91,6 +91,7 @@ type ItemsHandler struct {
 	seasonRepo               *catalog.SeasonRepository
 	ratingsRepo              ratingsRepository
 	catalogResolver          *catalog.CatalogResolver
+	playableTargets          *catalog.PlayableTargetResolver
 	fileRepo                 EpisodeFileProvider
 	detailSvc                *catalog.DetailService
 	storeProvider            userstore.UserStoreProvider
@@ -131,8 +132,9 @@ func NewItemsHandler(
 		catalogResolver: catalog.NewCatalogResolver(browseRepo, itemRepo).
 			WithEpisodeRepository(episodeRepo).
 			WithUserStoreProvider(storeProvider),
-		fileRepo:      fileRepo,
-		storeProvider: storeProvider,
+		playableTargets: catalog.NewPlayableTargetResolverForItems(itemRepo),
+		fileRepo:        fileRepo,
+		storeProvider:   storeProvider,
 		watchState: watchstate.NewService(storeProvider).WithStableIdentityResolver(
 			watchstate.NewStableIdentityResolver(itemRepo, episodeRepo, providerIDRepo),
 		),
@@ -291,8 +293,10 @@ func (h *ItemsHandler) requestStaleMetadataRefresh(ctx context.Context, targetTy
 // itemListResponse is the shape of a single item in browse/search list responses.
 type itemListResponse struct {
 	ContentID         string                      `json:"content_id"`
+	PlayContentID     string                      `json:"play_content_id,omitempty"`
 	Type              string                      `json:"type"`
 	Title             string                      `json:"title"`
+	SeriesID          string                      `json:"series_id,omitempty"`
 	SeriesTitle       string                      `json:"series_title,omitempty"`
 	SeasonNumber      *int                        `json:"season_number,omitempty"`
 	EpisodeNumber     *int                        `json:"episode_number,omitempty"`
@@ -365,6 +369,7 @@ type itemFiltersResponse struct {
 // seasonResponse is the shape of a season in API responses.
 type seasonResponse struct {
 	ContentID       string                  `json:"content_id"`
+	PlayContentID   string                  `json:"play_content_id,omitempty"`
 	SeasonNumber    int                     `json:"season_number"`
 	IsSpecials      bool                    `json:"is_specials,omitempty"`
 	Title           string                  `json:"title"`
@@ -911,9 +916,14 @@ func (h *ItemsHandler) writeCatalogBrowseResponse(w http.ResponseWriter, r *http
 
 	overlaySummaries := h.listOverlaySummaries(r.Context(), result.Items, h.accessFilter(r))
 	userStates := h.listItemUserStates(r, result.Items)
+	playTargets := h.listPlayableTargets(r, result.Items, req.Query.LibraryIDs, h.accessFilter(r))
 	items := make([]itemListResponse, 0, len(result.Items))
 	for _, item := range result.Items {
-		items = append(items, h.toItemListResponseWithOverlay(r, item, overlaySummaries[item.ContentID], userStates[item.ContentID]))
+		resp := h.toItemListResponseWithOverlay(r, item, overlaySummaries[item.ContentID], userStates[item.ContentID])
+		if resp.PlayContentID == "" {
+			resp.PlayContentID = playTargets[item.ContentID]
+		}
+		items = append(items, resp)
 	}
 
 	writeJSON(w, http.StatusOK, browseResponse{
@@ -923,6 +933,52 @@ func (h *ItemsHandler) writeCatalogBrowseResponse(w http.ResponseWriter, r *http
 		Items:      items,
 	})
 	return true
+}
+
+func (h *ItemsHandler) listPlayableTargets(r *http.Request, items []*models.MediaItem, libraryIDs []int, filter catalog.AccessFilter) map[string]string {
+	inputs := make([]catalog.PlayableTargetInput, 0, len(items))
+	for _, item := range items {
+		if item == nil || item.ContentID == "" {
+			continue
+		}
+		inputs = append(inputs, catalog.PlayableTargetInput{ContentID: item.ContentID, Type: item.Type})
+	}
+	return h.resolvePlayableTargetInputs(r, inputs, libraryIDs, filter)
+}
+
+func (h *ItemsHandler) resolvePlayableTargetInputs(r *http.Request, inputs []catalog.PlayableTargetInput, libraryIDs []int, filter catalog.AccessFilter) map[string]string {
+	if h == nil || h.playableTargets == nil || len(inputs) == 0 {
+		return map[string]string{}
+	}
+	targets, err := h.playableTargets.Resolve(r.Context(), catalog.PlayableTargetQuery{
+		UserID:     apimw.GetUserID(r.Context()),
+		ProfileID:  apimw.GetProfileID(r.Context()),
+		LibraryIDs: libraryIDs,
+		Access:     filter,
+		Items:      inputs,
+	})
+	if err != nil {
+		slog.WarnContext(r.Context(), "resolving playable poster targets", "component", "api", "error", err)
+		return map[string]string{}
+	}
+	return targets
+}
+
+func (h *ItemsHandler) enrichSeasonPlayTargets(r *http.Request, seriesID string, seasons []seasonResponse) {
+	inputs := make([]catalog.PlayableTargetInput, 0, len(seasons))
+	for i := range seasons {
+		seasonNumber := seasons[i].SeasonNumber
+		inputs = append(inputs, catalog.PlayableTargetInput{
+			ContentID:    seasons[i].ContentID,
+			Type:         "season",
+			SeriesID:     seriesID,
+			SeasonNumber: &seasonNumber,
+		})
+	}
+	targets := h.resolvePlayableTargetInputs(r, inputs, nil, h.accessFilter(r))
+	for i := range seasons {
+		seasons[i].PlayContentID = targets[seasons[i].ContentID]
+	}
 }
 
 func (h *ItemsHandler) writeCatalogFiltersResponse(w http.ResponseWriter, r *http.Request, values map[string][]string) bool {
@@ -977,6 +1033,7 @@ func (h *ItemsHandler) toItemListResponseWithOverlay(r *http.Request, item *mode
 func itemListResponseShell(item *models.MediaItem, overlaySummary *models.OverlaySummary, userState *itemUserStateResponse) itemListResponse {
 	resp := itemListResponse{
 		ContentID:         item.ContentID,
+		PlayContentID:     item.PlayContentID,
 		Type:              item.Type,
 		Title:             item.Title,
 		Year:              item.Year,
@@ -1076,20 +1133,19 @@ func (h *ItemsHandler) itemListCardImageURLs(ctx context.Context, items []*model
 	return urls
 }
 
-func (h *ItemsHandler) listEpisodeBrowseMetadata(
-	ctx context.Context,
-	items []*models.MediaItem,
-) map[string]struct {
+type episodeBrowseMetadata struct {
+	SeriesID      string
 	SeriesTitle   string
 	SeasonNumber  *int
 	EpisodeNumber *int
-} {
+}
+
+func (h *ItemsHandler) listEpisodeBrowseMetadata(
+	ctx context.Context,
+	items []*models.MediaItem,
+) map[string]episodeBrowseMetadata {
 	if h == nil || h.episodeRepo == nil {
-		return map[string]struct {
-			SeriesTitle   string
-			SeasonNumber  *int
-			EpisodeNumber *int
-		}{}
+		return map[string]episodeBrowseMetadata{}
 	}
 
 	episodeIDs := make([]string, 0)
@@ -1100,20 +1156,12 @@ func (h *ItemsHandler) listEpisodeBrowseMetadata(
 		episodeIDs = append(episodeIDs, item.ContentID)
 	}
 	if len(episodeIDs) == 0 {
-		return map[string]struct {
-			SeriesTitle   string
-			SeasonNumber  *int
-			EpisodeNumber *int
-		}{}
+		return map[string]episodeBrowseMetadata{}
 	}
 
 	episodes, err := h.episodeRepo.GetByIDs(ctx, episodeIDs)
 	if err != nil || len(episodes) == 0 {
-		return map[string]struct {
-			SeriesTitle   string
-			SeasonNumber  *int
-			EpisodeNumber *int
-		}{}
+		return map[string]episodeBrowseMetadata{}
 	}
 
 	seriesIDs := make([]string, 0, len(episodes))
@@ -1141,22 +1189,15 @@ func (h *ItemsHandler) listEpisodeBrowseMetadata(
 		}
 	}
 
-	result := make(map[string]struct {
-		SeriesTitle   string
-		SeasonNumber  *int
-		EpisodeNumber *int
-	}, len(episodes))
+	result := make(map[string]episodeBrowseMetadata, len(episodes))
 	for _, episode := range episodes {
 		if episode == nil {
 			continue
 		}
 		seasonNumber := episode.SeasonNumber
 		episodeNumber := episode.EpisodeNumber
-		result[episode.ContentID] = struct {
-			SeriesTitle   string
-			SeasonNumber  *int
-			EpisodeNumber *int
-		}{
+		result[episode.ContentID] = episodeBrowseMetadata{
+			SeriesID:      episode.SeriesID,
 			SeriesTitle:   seriesTitles[episode.SeriesID],
 			SeasonNumber:  &seasonNumber,
 			EpisodeNumber: &episodeNumber,

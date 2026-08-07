@@ -17,6 +17,7 @@ import { decodeThumbhash } from "@/lib/thumbhash";
 import { cn } from "@/lib/utils";
 import { Search } from "lucide-react";
 import { RequestToAddSection } from "./RequestToAddSection";
+import CardPlayOverlay from "./CardPlayOverlay";
 
 const PREVIEW_LIMIT = 8;
 const DEBOUNCE_MS = 200;
@@ -48,59 +49,73 @@ function GlobalSearchResultRow({
   index,
   isSelected,
   onPick,
+  onPlay,
 }: {
   item: BrowseItem;
   index: number;
   isSelected: boolean;
   onPick: (contentId: string) => void;
+  onPlay: () => void;
 }) {
   const { loaded, onLoad } = useImageLoaded(item.poster_url);
   const thumbhashUrl = item.poster_thumbhash ? decodeThumbhash(item.poster_thumbhash) : "";
 
   return (
-    <button
-      type="button"
+    <div
       id={`search-result-${index}`}
       role="option"
       aria-selected={isSelected}
       data-selected={isSelected || undefined}
       onClick={() => onPick(item.content_id)}
-      className="hover:bg-muted/80 data-[selected]:bg-accent flex w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors"
+      className="group/media hover:bg-muted/80 data-[selected]:bg-accent relative rounded-md transition-colors"
     >
-      <div
-        className="bg-muted relative h-14 w-10 shrink-0 overflow-hidden rounded-md"
-        style={
-          thumbhashUrl
-            ? {
-                backgroundImage: `url(${thumbhashUrl})`,
-                backgroundSize: "cover",
-                backgroundPosition: "center",
-              }
-            : undefined
-        }
-      >
-        {item.poster_url ? (
-          <img
-            src={item.poster_url}
-            alt=""
-            className={`h-full w-full object-cover ${loaded ? "opacity-100" : "opacity-0"}`}
-            loading="lazy"
-            onLoad={onLoad}
-          />
-        ) : (
-          <div className="text-muted-foreground flex h-full items-center justify-center px-1 text-center text-[10px] leading-tight">
-            {item.title.slice(0, 24)}
-          </div>
-        )}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-medium">{item.title}</div>
-        <div className="text-muted-foreground text-xs">
-          {item.year > 0 ? `${item.year} · ` : ""}
-          {typeLabel(item.type)}
+      <button type="button" className="flex w-full items-center gap-3 px-3 py-2 text-left">
+        <div
+          className="bg-muted relative h-14 w-10 shrink-0 overflow-hidden rounded-md"
+          style={
+            thumbhashUrl
+              ? {
+                  backgroundImage: `url(${thumbhashUrl})`,
+                  backgroundSize: "cover",
+                  backgroundPosition: "center",
+                }
+              : undefined
+          }
+        >
+          {item.poster_url ? (
+            <img
+              src={item.poster_url}
+              alt=""
+              className={`h-full w-full object-cover ${loaded ? "opacity-100" : "opacity-0"}`}
+              loading="lazy"
+              onLoad={onLoad}
+            />
+          ) : (
+            <div className="text-muted-foreground flex h-full items-center justify-center px-1 text-center text-[10px] leading-tight">
+              {item.title.slice(0, 24)}
+            </div>
+          )}
         </div>
-      </div>
-    </button>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium">{item.title}</div>
+          <div className="text-muted-foreground text-xs">
+            {item.year > 0 ? `${item.year} · ` : ""}
+            {typeLabel(item.type)}
+          </div>
+        </div>
+      </button>
+      {item.play_content_id ? (
+        <div className="pointer-events-none absolute top-2 left-3 h-14 w-10">
+          <CardPlayOverlay
+            contentId={item.play_content_id}
+            title={item.title}
+            type={item.type === "movie" ? "movie" : "episode"}
+            size="compact"
+            onPlaybackStart={onPlay}
+          />
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -308,6 +323,7 @@ export function GlobalSearch({
                     index={i}
                     isSelected={i === selectedIndex}
                     onPick={handlePickItem}
+                    onPlay={() => setOpen(false)}
                   />
                 ))}
               </div>

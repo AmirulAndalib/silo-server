@@ -132,6 +132,47 @@ func TestBuildSectionsResponseEnrichesEpisodeMetadata(t *testing.T) {
 	}
 }
 
+func TestBuildSectionsResponseSupportsMixedEpisodeAndSeriesRecentItems(t *testing.T) {
+	seasonNumber := 3
+	episodeNumber := 7
+	seriesID := "series-running"
+	fetcher := &stubSectionEpisodeFetcher{meta: map[string]sections.SectionItemMeta{
+		"episode-new": {
+			SeriesID:      &seriesID,
+			SeriesTitle:   "Running Show",
+			SeasonNumber:  &seasonNumber,
+			EpisodeNumber: &episodeNumber,
+		},
+	}}
+	h := &SectionHandler{episodeFetcher: fetcher}
+	withItems := []sections.SectionWithItems{{
+		ResolvedSection: sections.ResolvedSection{ID: "tv-recent", SectionType: sections.SectionRecentlyAdded, Title: "Recently Added in TV Shows"},
+		Items: []*models.MediaItem{
+			{ContentID: "episode-new", Type: "episode", Title: "A New Arrival", Status: "matched", PlayContentID: "episode-new"},
+			{ContentID: "series-batch", Type: "series", Title: "Batch Show", Status: "matched", PlayContentID: "episode-batch-first"},
+		},
+	}}
+
+	resp := h.buildSectionsResponse(httptest.NewRequest(http.MethodGet, "/sections", nil), withItems)
+	if len(resp.Sections) != 1 || len(resp.Sections[0].Items) != 2 {
+		t.Fatalf("response shape = %#v", resp)
+	}
+	episodeItem := resp.Sections[0].Items[0]
+	if episodeItem.Type != "episode" || episodeItem.SeriesTitle != "Running Show" || episodeItem.SeasonNumber == nil || *episodeItem.SeasonNumber != 3 || episodeItem.EpisodeNumber == nil || *episodeItem.EpisodeNumber != 7 {
+		t.Fatalf("episode response = %#v", episodeItem)
+	}
+	if episodeItem.PlayContentID != "episode-new" {
+		t.Fatalf("episode play content id = %q, want episode-new", episodeItem.PlayContentID)
+	}
+	seriesItem := resp.Sections[0].Items[1]
+	if seriesItem.Type != "series" || seriesItem.Title != "Batch Show" || seriesItem.SeasonNumber != nil || seriesItem.EpisodeNumber != nil {
+		t.Fatalf("series response = %#v", seriesItem)
+	}
+	if seriesItem.PlayContentID != "episode-batch-first" {
+		t.Fatalf("series play content id = %q, want episode-batch-first", seriesItem.PlayContentID)
+	}
+}
+
 func TestBuildSectionsResponseKeepsExistingEpisodeMeta(t *testing.T) {
 	seasonNumber := 2
 	episodeNumber := 6

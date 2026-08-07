@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -47,6 +48,9 @@ const (
 	// the map, so keys for scopes that are never requested again cannot linger
 	// for the life of the process.
 	resolvedListPruneInterval = time.Minute
+	// resolvedListInvalidationInterval coalesces scan-complete bursts so file
+	// scans cannot keep the recently-added cache permanently cold.
+	resolvedListInvalidationInterval = 30 * time.Second
 )
 
 // resolvedListLoader builds the shared item list for a cache key. It takes a
@@ -78,7 +82,58 @@ var (
 	// ever spawned.
 	resolvedListRefreshMu  sync.Mutex
 	resolvedListRefreshing = make(map[string]struct{})
+	resolvedListGeneration atomic.Uint64
+
+	resolvedListInvalidationMu       sync.Mutex
+	resolvedListLastInvalidation     time.Time
+	resolvedListInvalidationPending  bool
+	resolvedListInvalidationCancel   func()
+	resolvedListInvalidationSequence uint64
+	resolvedListNow                  = time.Now
+	resolvedListScheduleInvalidation = func(delay time.Duration, callback func()) func() {
+		timer := time.AfterFunc(delay, callback)
+		return func() { timer.Stop() }
+	}
 )
+
+// InvalidateResolvedListCache advances the cache namespace. Existing entries
+// and in-flight refreshes remain under the old generation and therefore cannot
+// repopulate reads after a catalog scan completes. Scan-complete bursts are
+// coalesced so large batches advance the namespace at most once per 30 seconds.
+func InvalidateResolvedListCache() {
+	resolvedListInvalidationMu.Lock()
+	defer resolvedListInvalidationMu.Unlock()
+
+	now := resolvedListNow()
+	deadline := resolvedListLastInvalidation.Add(resolvedListInvalidationInterval)
+	if !resolvedListLastInvalidation.IsZero() && now.Before(deadline) {
+		resolvedListInvalidationPending = true
+		if resolvedListInvalidationCancel == nil {
+			resolvedListInvalidationSequence++
+			sequence := resolvedListInvalidationSequence
+			resolvedListInvalidationCancel = resolvedListScheduleInvalidation(deadline.Sub(now), func() {
+				resolvedListInvalidationMu.Lock()
+				defer resolvedListInvalidationMu.Unlock()
+				if sequence != resolvedListInvalidationSequence || !resolvedListInvalidationPending {
+					return
+				}
+				resolvedListInvalidationPending = false
+				resolvedListInvalidationCancel = nil
+				resolvedListLastInvalidation = deadline
+				resolvedListGeneration.Add(1)
+			})
+		}
+		return
+	}
+	if resolvedListInvalidationCancel != nil {
+		resolvedListInvalidationSequence++
+		resolvedListInvalidationCancel()
+		resolvedListInvalidationCancel = nil
+	}
+	resolvedListInvalidationPending = false
+	resolvedListLastInvalidation = now
+	resolvedListGeneration.Add(1)
+}
 
 // getOrRefresh returns the shared item list for key, implementing serve /
 // refresh-ahead / block-only-when-dead:
@@ -255,17 +310,24 @@ func cloneMediaItems(items []*models.MediaItem) []*models.MediaItem {
 // the section's own ID to determine which items it contains — the sole s.ID read
 // lives in the non-cacheable user-collection branch. Dropping the arbitrary ID
 // lets two sections that share type+config+limit+scope collapse to ONE shared
-// entry: e.g. a natively configured "recently added" library rail and the
-// jellyfin-compat /Items/Latest for that same library are built once and reused
-// across both surfaces.
+// entry. Compatibility behavior flags that change membership are included.
 //
 // userID/profileID are still excluded so entries are shared across everyone with
 // the same access; the per-user overlay is always recomputed downstream, so a
 // cached entry never leaks one profile's state to another.
 func resolvedListCacheKey(resolved ResolvedSection, libraryID *int, libraryIDs []int, filter catalog.AccessFilter) string {
 	var b strings.Builder
+	if resolved.SectionType == SectionRecentlyAdded {
+		b.WriteString("generation=")
+		b.WriteString(strconv.FormatUint(resolvedListGeneration.Load(), 10))
+		b.WriteString("|")
+	}
 	b.WriteString("type=")
 	b.WriteString(string(resolved.SectionType))
+	if resolved.SectionType == SectionRecentlyAdded {
+		b.WriteString("|disable_tv_event_grouping=")
+		b.WriteString(strconv.FormatBool(resolved.DisableTVEventGrouping))
+	}
 
 	b.WriteString("|config=")
 	b.WriteString(hashSectionConfig(resolved.Config))
@@ -371,6 +433,21 @@ func (f *Fetcher) isCacheableSectionType(resolved ResolvedSection) bool {
 // resetResolvedListCacheForTest clears all process-global cache state. Tests
 // call it between cases so entries and in-flight refreshes never leak across.
 func resetResolvedListCacheForTest() {
+	resolvedListInvalidationMu.Lock()
+	if resolvedListInvalidationCancel != nil {
+		resolvedListInvalidationCancel()
+	}
+	resolvedListGeneration.Store(0)
+	resolvedListLastInvalidation = time.Time{}
+	resolvedListInvalidationPending = false
+	resolvedListInvalidationCancel = nil
+	resolvedListInvalidationSequence++
+	resolvedListNow = time.Now
+	resolvedListScheduleInvalidation = func(delay time.Duration, callback func()) func() {
+		timer := time.AfterFunc(delay, callback)
+		return func() { timer.Stop() }
+	}
+	resolvedListInvalidationMu.Unlock()
 	resolvedListCacheMu.Lock()
 	resolvedListCache = make(map[string]resolvedListEntry)
 	resolvedListLastPrune = time.Time{}

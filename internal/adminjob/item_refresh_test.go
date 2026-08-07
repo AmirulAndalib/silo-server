@@ -4,13 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/libraryingest"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/scanbatch"
 	"github.com/Silo-Server/silo-server/internal/scanner"
+	"github.com/Silo-Server/silo-server/internal/scanqueue"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type itemRefreshTestFolderRepo struct {
@@ -123,11 +130,17 @@ func TestItemRefreshResolverDeriveCompleteRefreshScope_UsesCanonicalRootForSerie
 
 type itemRefreshTestIngester struct {
 	scanPath string
+	runID    string
 	result   *libraryingest.Result
+	err      error
 }
 
-func (s *itemRefreshTestIngester) IngestSubtree(_ context.Context, _ *models.MediaFolder, subtreePath string) (*libraryingest.Result, error) {
+func (s *itemRefreshTestIngester) IngestSubtree(ctx context.Context, _ *models.MediaFolder, subtreePath string) (*libraryingest.Result, error) {
 	s.scanPath = subtreePath
+	s.runID = scanbatch.RunID(ctx)
+	if s.err != nil {
+		return nil, s.err
+	}
 	if s.result != nil {
 		return s.result, nil
 	}
@@ -135,6 +148,54 @@ func (s *itemRefreshTestIngester) IngestSubtree(_ context.Context, _ *models.Med
 		ScanResult:   &scanner.ScanResult{},
 		MatchedFiles: 2,
 	}, nil
+}
+
+type itemRefreshTestScanRuns struct {
+	createdInput scanqueue.CreateInput
+	startedID    string
+	completedID  string
+	failedID     string
+	failure      string
+	heartbeats   atomic.Int64
+}
+
+func (r *itemRefreshTestScanRuns) TouchHeartbeat(_ context.Context, _ string) error {
+	r.heartbeats.Add(1)
+	return nil
+}
+
+func (r *itemRefreshTestScanRuns) Create(_ context.Context, input scanqueue.CreateInput) (*models.ScanRun, bool, error) {
+	r.createdInput = input
+	return &models.ScanRun{ID: "admin-refresh-run", MediaFolderID: input.LibraryID, Mode: input.Mode, Path: input.Path}, true, nil
+}
+
+func (r *itemRefreshTestScanRuns) Start(_ context.Context, id string) (*models.ScanRun, error) {
+	r.startedID = id
+	return &models.ScanRun{ID: id, Status: scanqueue.StatusRunning}, nil
+}
+
+func (r *itemRefreshTestScanRuns) Complete(_ context.Context, id string, _ *events.ScanRunResult) (*models.ScanRun, error) {
+	r.completedID = id
+	return &models.ScanRun{ID: id, Status: scanqueue.StatusCompleted}, nil
+}
+
+func (r *itemRefreshTestScanRuns) Fail(_ context.Context, id string, message string) (*models.ScanRun, error) {
+	r.failedID = id
+	r.failure = message
+	return &models.ScanRun{ID: id, Status: scanqueue.StatusFailed}, nil
+}
+
+func TestDirectScanHeartbeatKeepsRunAlive(t *testing.T) {
+	scanRuns := &itemRefreshTestScanRuns{}
+	stop := startDirectScanHeartbeat(scanRuns, "admin-refresh-run", time.Millisecond)
+	deadline := time.Now().Add(time.Second)
+	for scanRuns.heartbeats.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	stop()
+	if scanRuns.heartbeats.Load() == 0 {
+		t.Fatal("direct scan heartbeat was not touched")
+	}
 }
 
 type itemRefreshTestRefresher struct {
@@ -297,8 +358,9 @@ func TestItemRefreshExecutorAllowsScanPathOutsideLibraryRoots(t *testing.T) {
 	rootClaimRepo := &itemRefreshTestRootClaimRepo{}
 	groupClaimRepo := &itemRefreshTestGroupClaimRepo{}
 	skippedRootRepo := newItemRefreshTestSkippedRootRepo()
+	scanRuns := &itemRefreshTestScanRuns{}
 
-	executor := NewItemRefreshExecutor(folderRepo, fileRepo, rootClaimRepo, groupClaimRepo, skippedRootRepo, nil, nil, ingester, refresher, nil, nil)
+	executor := NewItemRefreshExecutor(folderRepo, fileRepo, rootClaimRepo, groupClaimRepo, skippedRootRepo, nil, nil, ingester, scanRuns, refresher, nil, nil)
 
 	result, err := executor.Execute(context.Background(), ItemRefreshRequest{
 		RequestedContentID: "119730834381996036",
@@ -323,6 +385,154 @@ func TestItemRefreshExecutorAllowsScanPathOutsideLibraryRoots(t *testing.T) {
 	}
 	if got, want := result.MatchedFiles, 2; got != want {
 		t.Fatalf("Execute() matched files = %d, want %d", got, want)
+	}
+	if ingester.runID != "admin-refresh-run" || scanRuns.startedID != "admin-refresh-run" || scanRuns.completedID != "admin-refresh-run" {
+		t.Fatalf("scan lifecycle run context=%q started=%q completed=%q", ingester.runID, scanRuns.startedID, scanRuns.completedID)
+	}
+	if scanRuns.createdInput.Mode != scanqueue.ModeSubtree || scanRuns.createdInput.Trigger != itemRefreshScanTrigger {
+		t.Fatalf("scan create input = %#v", scanRuns.createdInput)
+	}
+}
+
+func TestItemRefreshExecutorFailsScanRunWhenIngestFails(t *testing.T) {
+	t.Parallel()
+
+	ingestErr := errors.New("scanner failed")
+	ingester := &itemRefreshTestIngester{err: ingestErr}
+	scanRuns := &itemRefreshTestScanRuns{}
+	executor := NewItemRefreshExecutor(
+		&itemRefreshTestFolderRepo{folder: &models.MediaFolder{ID: 3, Enabled: true}},
+		&itemRefreshTestFileRepo{},
+		&itemRefreshTestRootClaimRepo{},
+		&itemRefreshTestGroupClaimRepo{},
+		newItemRefreshTestSkippedRootRepo(),
+		nil,
+		nil,
+		ingester,
+		scanRuns,
+		&itemRefreshTestRefresher{},
+		nil,
+		nil,
+	)
+
+	_, err := executor.Execute(context.Background(), ItemRefreshRequest{
+		RequestedContentID: "movie-1",
+		RefreshContentID:   "movie-1",
+		ScanFolderID:       3,
+		ScanPath:           "/media/movie-1",
+	}, nil)
+	if !errors.Is(err, ingestErr) {
+		t.Fatalf("Execute() error = %v, want scanner failure", err)
+	}
+	if scanRuns.failedID != "admin-refresh-run" || scanRuns.failure != ingestErr.Error() {
+		t.Fatalf("failed scan lifecycle id=%q message=%q", scanRuns.failedID, scanRuns.failure)
+	}
+	if scanRuns.completedID != "" {
+		t.Fatalf("failed scan unexpectedly completed as %q", scanRuns.completedID)
+	}
+}
+
+type itemRefreshDBIngester struct {
+	repo      *scanner.FileRepository
+	seriesID  string
+	episodeID string
+	filePath  string
+}
+
+func (i *itemRefreshDBIngester) IngestSubtree(ctx context.Context, folder *models.MediaFolder, _ string) (*libraryingest.Result, error) {
+	file, err := i.repo.Upsert(ctx, models.MediaFile{
+		ContentID:     i.seriesID,
+		EpisodeID:     i.episodeID,
+		MediaFolderID: folder.ID,
+		FilePath:      i.filePath,
+		FileSize:      1024,
+		SeasonNumber:  1,
+		EpisodeNumber: 1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := i.repo.UpdateEpisodeLink(ctx, file.ID, i.episodeID, 1, 1); err != nil {
+		return nil, err
+	}
+	return &libraryingest.Result{ScanResult: &scanner.ScanResult{New: 1}, MatchedFiles: 1}, nil
+}
+
+func TestItemRefreshExecutorPersistsForeignKeyBackedScanProvenance(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := time.Now().UnixNano()
+	seriesID := fmt.Sprintf("admin-refresh-series-%d", suffix)
+	episodeID := fmt.Sprintf("admin-refresh-episode-%d", suffix)
+	filePath := fmt.Sprintf("/tmp/admin-refresh-%d-s01e01.mkv", suffix)
+	var folderID int
+	if err := pool.QueryRow(ctx, `INSERT INTO media_folders (type, name, enabled) VALUES ('series', $1, true) RETURNING id`, seriesID).Scan(&folderID); err != nil {
+		t.Fatalf("seed folder: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id = $1`, seriesID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_folders WHERE id = $1`, folderID)
+	})
+	if _, err := pool.Exec(ctx, `INSERT INTO media_items (content_id, type, title, status, genres) VALUES ($1, 'series', 'Admin Refresh', 'matched', '{}'::text[])`, seriesID); err != nil {
+		t.Fatalf("seed series: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO media_item_libraries (content_id, media_folder_id) VALUES ($1, $2)`, seriesID, folderID); err != nil {
+		t.Fatalf("seed series membership: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO episodes (content_id, series_id, season_number, episode_number, title) VALUES ($1, $2, 1, 1, 'Episode One')`, episodeID, seriesID); err != nil {
+		t.Fatalf("seed episode: %v", err)
+	}
+
+	ingester := &itemRefreshDBIngester{
+		repo:      scanner.NewFileRepository(pool),
+		seriesID:  seriesID,
+		episodeID: episodeID,
+		filePath:  filePath,
+	}
+	executor := NewItemRefreshExecutor(
+		&itemRefreshTestFolderRepo{folder: &models.MediaFolder{ID: folderID, Type: "series", Enabled: true}},
+		&itemRefreshTestFileRepo{},
+		&itemRefreshTestRootClaimRepo{},
+		&itemRefreshTestGroupClaimRepo{},
+		newItemRefreshTestSkippedRootRepo(),
+		nil,
+		nil,
+		ingester,
+		scanqueue.NewRepository(pool),
+		&itemRefreshTestRefresher{},
+		nil,
+		nil,
+	)
+	if _, err := executor.Execute(ctx, ItemRefreshRequest{
+		RequestedContentID: seriesID,
+		RefreshContentID:   seriesID,
+		ScanFolderID:       folderID,
+		ScanPath:           filepath.Dir(filePath),
+	}, nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var fileRunID, episodeRunID, status string
+	if err := pool.QueryRow(ctx, `
+		SELECT mf.first_seen_scan_run_id, el.first_seen_scan_run_id, sr.status
+		FROM media_files mf
+		JOIN episode_libraries el ON el.episode_id = mf.episode_id AND el.media_folder_id = mf.media_folder_id
+		JOIN scan_runs sr ON sr.id = mf.first_seen_scan_run_id
+		WHERE mf.file_path = $1
+	`, filePath).Scan(&fileRunID, &episodeRunID, &status); err != nil {
+		t.Fatalf("read persisted provenance: %v", err)
+	}
+	if fileRunID == "" || episodeRunID != fileRunID || status != scanqueue.StatusCompleted {
+		t.Fatalf("file run=%q episode run=%q status=%q", fileRunID, episodeRunID, status)
 	}
 }
 
@@ -363,6 +573,7 @@ func TestItemRefreshExecutorCompleteRefreshRebuildsAndMapsEpisodeTarget(t *testi
 		nil,
 		episodeRepo,
 		ingester,
+		&itemRefreshTestScanRuns{},
 		refresher,
 		nil,
 		nil,
