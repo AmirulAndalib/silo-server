@@ -28,6 +28,7 @@ type directScanRunRepository interface {
 	TouchHeartbeat(ctx context.Context, id string) error
 	Complete(ctx context.Context, id string, result *events.ScanRunResult) (*models.ScanRun, error)
 	Fail(ctx context.Context, id string, errorMessage string) (*models.ScanRun, error)
+	MarkCancelled(ctx context.Context, id string) (*models.ScanRun, bool, error)
 }
 
 func startDirectScanHeartbeat(repo directScanRunRepository, runID string, interval time.Duration) func() {
@@ -79,9 +80,16 @@ func beginDirectSubtreeScan(
 	if !created {
 		return nil, nil, fmt.Errorf("scan scope already has active run %s", run.ID)
 	}
-	run, err = repo.Start(ctx, run.ID)
+	runID := run.ID
+	run, err = repo.Start(ctx, runID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("start scan run: %w", err)
+		startErr := fmt.Errorf("start scan run: %w", err)
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), directScanFinishTimeout)
+		defer cancel()
+		if _, _, cleanupErr := repo.MarkCancelled(cleanupCtx, runID); cleanupErr != nil {
+			return nil, nil, errors.Join(startErr, fmt.Errorf("cancel scan run after start failure: %w", cleanupErr))
+		}
+		return nil, nil, startErr
 	}
 	return scanbatch.WithRunID(ctx, run.ID), run, nil
 }

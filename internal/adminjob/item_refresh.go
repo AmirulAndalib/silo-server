@@ -510,6 +510,7 @@ func (e *ItemRefreshExecutor) Execute(ctx context.Context, req ItemRefreshReques
 	if err := completeDirectScan(ctx, e.scanRuns, scanRun, ingestResult); err != nil {
 		return nil, fmt.Errorf("scan scope: %w", err)
 	}
+	e.publish(cache.EventScanComplete, strconv.Itoa(req.ScanFolderID))
 	scanResult := ingestResult.ScanResult
 
 	if progress != nil {
@@ -550,7 +551,6 @@ func (e *ItemRefreshExecutor) Execute(ctx context.Context, req ItemRefreshReques
 		return nil, fmt.Errorf("refresh metadata: %w", err)
 	}
 
-	e.publish(cache.EventScanComplete, strconv.Itoa(req.ScanFolderID))
 	e.publish(cache.EventMetadataUpdated, refreshContentID)
 	if e.realtimeHub != nil {
 		if scanResult != nil && (scanResult.New > 0 || scanResult.Updated > 0 || scanResult.Missing > 0 || matched > 0) {

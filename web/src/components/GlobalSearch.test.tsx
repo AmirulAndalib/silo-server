@@ -226,9 +226,35 @@ describe("GlobalSearch", () => {
       </QueryClientProvider>,
     );
 
-    await userEvent.click(screen.getByRole("option", { name: /A Reader/i }));
+    await userEvent.click(screen.getByRole("button", { name: /A Reader/i }));
 
     expect(mocks.navigate).toHaveBeenCalledWith("/item/ebook%201");
+  });
+
+  it("uses independent controls instead of interactive listbox options", () => {
+    mocks.useQuery.mockReturnValue({
+      data: {
+        total: 1,
+        has_more: false,
+        items: [{ ...browseFixture, play_content_id: "movie-99" }],
+      },
+      isFetching: false,
+      isError: false,
+    });
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <GlobalSearch defaultOpen initialQuery="Test" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("option")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Test Movie/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Play Test Movie" })).toBeInTheDocument();
   });
 });
 

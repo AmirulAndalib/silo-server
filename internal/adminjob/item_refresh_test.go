@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/cache"
 	"github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/libraryingest"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -155,7 +156,11 @@ type itemRefreshTestScanRuns struct {
 	startedID    string
 	completedID  string
 	failedID     string
+	cancelledID  string
 	failure      string
+	startErr     error
+	cancelErr    error
+	cancelCtxErr error
 	heartbeats   atomic.Int64
 }
 
@@ -171,6 +176,9 @@ func (r *itemRefreshTestScanRuns) Create(_ context.Context, input scanqueue.Crea
 
 func (r *itemRefreshTestScanRuns) Start(_ context.Context, id string) (*models.ScanRun, error) {
 	r.startedID = id
+	if r.startErr != nil {
+		return nil, r.startErr
+	}
 	return &models.ScanRun{ID: id, Status: scanqueue.StatusRunning}, nil
 }
 
@@ -183,6 +191,35 @@ func (r *itemRefreshTestScanRuns) Fail(_ context.Context, id string, message str
 	r.failedID = id
 	r.failure = message
 	return &models.ScanRun{ID: id, Status: scanqueue.StatusFailed}, nil
+}
+
+func (r *itemRefreshTestScanRuns) MarkCancelled(ctx context.Context, id string) (*models.ScanRun, bool, error) {
+	r.cancelledID = id
+	r.cancelCtxErr = ctx.Err()
+	if r.cancelErr != nil {
+		return nil, false, r.cancelErr
+	}
+	return &models.ScanRun{ID: id, Status: scanqueue.StatusCancelled}, true, nil
+}
+
+func TestBeginDirectSubtreeScanCancelsAcceptedRunWhenStartFails(t *testing.T) {
+	t.Parallel()
+
+	startErr := errors.New("start failed")
+	scanRuns := &itemRefreshTestScanRuns{startErr: startErr}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := beginDirectSubtreeScan(ctx, scanRuns, 3, "/media/show", itemRefreshScanTrigger)
+	if !errors.Is(err, startErr) {
+		t.Fatalf("beginDirectSubtreeScan() error = %v, want start failure", err)
+	}
+	if scanRuns.cancelledID != "admin-refresh-run" {
+		t.Fatalf("canceled run = %q, want admin-refresh-run", scanRuns.cancelledID)
+	}
+	if scanRuns.cancelCtxErr != nil {
+		t.Fatalf("cleanup context error = %v, want detached active context", scanRuns.cancelCtxErr)
+	}
 }
 
 func TestDirectScanHeartbeatKeepsRunAlive(t *testing.T) {
@@ -202,6 +239,7 @@ type itemRefreshTestRefresher struct {
 	targetType string
 	contentID  string
 	folderID   int
+	err        error
 }
 
 func (r *itemRefreshTestRefresher) RefreshItem(_ context.Context, contentID string) error {
@@ -217,7 +255,43 @@ func (r *itemRefreshTestRefresher) RefreshTargetForLibrary(_ context.Context, ta
 	r.targetType = targetType
 	r.contentID = contentID
 	r.folderID = folderID
-	return nil
+	return r.err
+}
+
+func TestItemRefreshPublishesScanCompleteBeforeMetadataFailure(t *testing.T) {
+	t.Parallel()
+
+	eventBus := &libraryRefreshTestEventBus{}
+	executor := NewItemRefreshExecutor(
+		&itemRefreshTestFolderRepo{folder: &models.MediaFolder{ID: 3, Enabled: true}},
+		&itemRefreshTestFileRepo{},
+		&itemRefreshTestRootClaimRepo{},
+		&itemRefreshTestGroupClaimRepo{},
+		newItemRefreshTestSkippedRootRepo(),
+		nil,
+		nil,
+		&itemRefreshTestIngester{},
+		&itemRefreshTestScanRuns{},
+		&itemRefreshTestRefresher{err: errors.New("metadata failed")},
+		eventBus,
+		nil,
+	)
+
+	_, err := executor.Execute(context.Background(), ItemRefreshRequest{
+		RequestedContentID: "series-1",
+		RefreshContentID:   "series-1",
+		ScanFolderID:       3,
+		ScanPath:           "/media/show",
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "metadata failed") {
+		t.Fatalf("Execute() error = %v, want metadata failure", err)
+	}
+	for _, event := range eventBus.events {
+		if event.Type == cache.EventScanComplete && event.Payload == "3" {
+			return
+		}
+	}
+	t.Fatalf("events = %#v, want scan_complete before metadata failure", eventBus.events)
 }
 
 type itemRefreshTestFileRepo struct {

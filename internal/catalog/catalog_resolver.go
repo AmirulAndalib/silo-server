@@ -466,6 +466,7 @@ func (r *CatalogResolver) resolveRecentTVSectionSource(
 		SnapshotAt: &snapshot,
 		Limit:      req.Limit,
 		Offset:     req.Offset,
+		SkipTotal:  req.SkipTotal,
 	})
 	if err != nil {
 		return nil, true, err
@@ -512,7 +513,7 @@ func (r *CatalogResolver) resolveRecentTVSectionSource(
 		Items:      ordered,
 		Total:      total,
 		HasMore:    hasMore,
-		TotalExact: true,
+		TotalExact: !req.SkipTotal,
 		SnapshotAt: snapshot,
 	}, true, nil
 }

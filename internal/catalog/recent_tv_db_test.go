@@ -121,6 +121,15 @@ func TestRecentTVRepositoryGroupsScanBatchesAndPaginates(t *testing.T) {
 	if err != nil || pageTotal != len(want) || !pageHasMore || !equalRecentTVTargets(page, want[1:3]) {
 		t.Fatalf("page = %#v, total %d, hasMore %v, err %v", page, pageTotal, pageHasMore, err)
 	}
+	preview, previewTotal, previewHasMore, err := repo.List(ctx, RecentTVQuery{
+		LibraryIDs: []int{tvFolderID},
+		Limit:      2,
+		Offset:     1,
+		SkipTotal:  true,
+	})
+	if err != nil || previewTotal != 0 || !previewHasMore || !equalRecentTVTargets(preview, want[1:3]) {
+		t.Fatalf("count-free page = %#v, total %d, hasMore %v, err %v", preview, previewTotal, previewHasMore, err)
+	}
 	empty, emptyTotal, emptyHasMore, err := repo.List(ctx, RecentTVQuery{LibraryIDs: []int{tvFolderID}, Limit: 2, Offset: 99})
 	if err != nil || emptyTotal != len(want) || emptyHasMore || len(empty) != 0 {
 		t.Fatalf("past-end page = %#v, total %d, hasMore %v, err %v", empty, emptyTotal, emptyHasMore, err)

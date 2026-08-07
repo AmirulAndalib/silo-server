@@ -63,13 +63,14 @@ function GlobalSearchResultRow({
   return (
     <div
       id={`search-result-${index}`}
-      role="option"
-      aria-selected={isSelected}
       data-selected={isSelected || undefined}
-      onClick={() => onPick(item.content_id)}
       className="group/media hover:bg-muted/80 data-[selected]:bg-accent relative rounded-md transition-colors"
     >
-      <button type="button" className="flex w-full items-center gap-3 px-3 py-2 text-left">
+      <button
+        type="button"
+        onClick={() => onPick(item.content_id)}
+        className="flex w-full items-center gap-3 px-3 py-2 text-left"
+      >
         <div
           className="bg-muted relative h-14 w-10 shrink-0 overflow-hidden rounded-md"
           style={
@@ -270,9 +271,6 @@ export function GlobalSearch({
               className="placeholder:text-muted-foreground flex h-12 w-full bg-transparent text-sm outline-none"
               autoFocus
               aria-label="Search"
-              aria-activedescendant={
-                selectedIndex >= 0 ? `search-result-${selectedIndex}` : undefined
-              }
               onKeyDown={(e) => {
                 if (e.key === "ArrowDown") {
                   e.preventDefault();
@@ -300,7 +298,7 @@ export function GlobalSearch({
         {showResultsPanel && (
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="max-h-[min(22rem,55vh)] overflow-y-auto overscroll-contain px-2 py-2">
-              <div role="listbox">
+              <div role="group" aria-label="Library search results">
                 {showLoading && (
                   <div className="text-muted-foreground px-3 py-6 text-center text-sm">
                     Searching...

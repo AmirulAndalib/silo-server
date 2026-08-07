@@ -31,6 +31,7 @@ type RecentTVQuery struct {
 	SnapshotAt *time.Time
 	Limit      int
 	Offset     int
+	SkipTotal  bool
 }
 
 // RecentTVRepository resolves scan-batched episode availability into episode
@@ -182,9 +183,25 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 		argIdx++
 	}
 
+	fetchLimit := limit
+	if q.SkipTotal {
+		fetchLimit++
+	}
 	limitIdx := argIdx
 	offsetIdx := argIdx + 1
-	args = append(args, limit, q.Offset)
+	args = append(args, fetchLimit, q.Offset)
+
+	totalsCTE := `,
+		totals AS (
+			SELECT COUNT(*)::int AS total_count FROM filtered
+		)`
+	fromClause := "FROM totals\n\t\tLEFT JOIN page ON true"
+	totalColumn := ", totals.total_count"
+	if q.SkipTotal {
+		totalsCTE = ""
+		fromClause = "FROM page"
+		totalColumn = ""
+	}
 
 	sql := fmt.Sprintf(`
 		WITH episode_events AS (
@@ -248,10 +265,7 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 			SELECT target_id, target_type, added_at, event_id, series_id, anchor_season_number, single_episode_id
 			FROM deduplicated
 			WHERE target_rank = 1
-		),
-		totals AS (
-			SELECT COUNT(*)::int AS total_count FROM filtered
-		),
+		)%s,
 		page AS (
 			SELECT target_id, target_type, added_at, event_id, series_id, anchor_season_number, single_episode_id
 			FROM filtered
@@ -259,10 +273,8 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 			LIMIT $%d OFFSET $%d
 		)
 		SELECT page.target_id, page.target_type, page.added_at,
-		       COALESCE(page.single_episode_id, play_target.content_id) AS play_content_id,
-		       totals.total_count
-		FROM totals
-		LEFT JOIN page ON true
+		       COALESCE(page.single_episode_id, play_target.content_id) AS play_content_id%s
+		%s
 		LEFT JOIN LATERAL (
 			SELECT e_play.content_id
 			FROM episodes e_play
@@ -285,7 +297,7 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 			LIMIT 1
 		) play_target ON true
 		ORDER BY page.added_at DESC, page.target_type ASC, page.target_id ASC, page.event_id ASC
-	`, strings.Join(availabilityConditions, " AND "), strings.Join(seriesConditions, " AND "), seriesWithoutEpisodeSnapshotCondition, limitIdx, offsetIdx)
+	`, strings.Join(availabilityConditions, " AND "), strings.Join(seriesConditions, " AND "), seriesWithoutEpisodeSnapshotCondition, totalsCTE, limitIdx, offsetIdx, totalColumn, fromClause)
 
 	rows, err := r.pool.Query(ctx, sql, args...)
 	if err != nil {
@@ -298,7 +310,11 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 	for rows.Next() {
 		var contentID, targetType, playContentID *string
 		var addedAt *time.Time
-		if err := rows.Scan(&contentID, &targetType, &addedAt, &playContentID, &total); err != nil {
+		scanArgs := []any{&contentID, &targetType, &addedAt, &playContentID}
+		if !q.SkipTotal {
+			scanArgs = append(scanArgs, &total)
+		}
+		if err := rows.Scan(scanArgs...); err != nil {
 			return nil, 0, false, fmt.Errorf("scanning recently-added TV event: %w", err)
 		}
 		if contentID != nil && targetType != nil && addedAt != nil {
@@ -311,6 +327,13 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, false, fmt.Errorf("iterating recently-added TV events: %w", err)
+	}
+	if q.SkipTotal {
+		hasMore := len(targets) > limit
+		if hasMore {
+			targets = targets[:limit]
+		}
+		return targets, 0, hasMore, nil
 	}
 	return targets, total, q.Offset+len(targets) < total, nil
 }
