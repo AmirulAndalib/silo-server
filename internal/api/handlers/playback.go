@@ -624,32 +624,33 @@ func (h *PlaybackHandler) resolveOriginalLanguage(ctx context.Context, file *mod
 	return lang
 }
 
-// resolvedProfileAudioLanguage returns the effective playback.audio_language
-// for the profile with no content context, resolved through the settings
-// contract — the canonical replacement for reading the legacy
-// user_profiles.language column, matching catalog's detail resolution. It may
-// return playback.OriginalLanguageSentinel, which the caller resolves to a
-// concrete language. Returns "" when nothing is stored: the contract default
-// is null, "no preference".
-func resolvedProfileAudioLanguage(ctx context.Context, store userstore.UserStore, profileID string) string {
-	if store == nil || profileID == "" {
-		return ""
+// resolvedPlaybackAudioLanguage returns the effective playback.audio_language
+// for one canonical settings context. It may return
+// playback.OriginalLanguageSentinel, which the caller resolves to a concrete
+// language. Returns "" when nothing is stored: the contract default is null,
+// "no preference". Resolution and decoding failures are returned so playback
+// does not silently substitute a different track.
+func resolvedPlaybackAudioLanguage(ctx context.Context, store userstore.UserStore, rc settingsresolve.Context) (string, error) {
+	if store == nil || rc.ProfileID == "" {
+		return "", nil
 	}
 	contract, err := settingscontract.Load()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("loading settings contract: %w", err)
 	}
-	resolved, err := settingsresolve.New(contract).Resolve(ctx, store,
-		settingsresolve.Context{ProfileID: profileID},
+	resolved, err := settingsresolve.New(contract).Resolve(ctx, store, rc,
 		[]string{settingskeys.PlaybackAudioLanguage}, nil)
-	if err != nil || len(resolved) == 0 {
-		return ""
+	if err != nil {
+		return "", fmt.Errorf("resolving playback audio language: %w", err)
+	}
+	if len(resolved) == 0 {
+		return "", nil
 	}
 	var language string
-	if json.Unmarshal(resolved[0].Value, &language) != nil {
-		return ""
+	if err := json.Unmarshal(resolved[0].Value, &language); err != nil {
+		return "", fmt.Errorf("decoding playback audio language: %w", err)
 	}
-	return strings.TrimSpace(language)
+	return strings.TrimSpace(language), nil
 }
 
 // --- Persistence helpers ---

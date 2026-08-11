@@ -26,6 +26,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/settingsresolve"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 )
@@ -362,11 +363,11 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 		return
 	}
 	userID := apimw.GetUserID(r.Context())
-	digestBytes := sha256.Sum256(body)
-	requestDigest := hex.EncodeToString(digestBytes[:])
+	deviceID := deviceMetadataFromRequest(r).DeviceID
+	requestDigests := newPlaybackStartRequestDigestsV3(body, deviceID)
 	if existing, lookupErr := h.PlanStoreV3.GetAttemptByPlaybackAttemptID(r.Context(), req.PlaybackAttemptID); lookupErr == nil {
 		if existing.UserID != userID || existing.ProfileID != profileID || existing.RequestedMediaFileID != req.FileID ||
-			(existing.RequestDigest != "" && existing.RequestDigest != requestDigest) {
+			!requestDigests.matches(existing.RequestDigest) {
 			writeError(w, http.StatusConflict, "playback_attempt_reused", "The playback attempt ID belongs to a different request")
 			return
 		}
@@ -404,7 +405,7 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 		return
 	}
 	if req.AudioTrackID == "" && req.AudioTrackIndex == nil {
-		audioIndex, err = h.preferredAudioTrackIndexV3(r.Context(), userID, profileID, requestedFile)
+		audioIndex, err = h.preferredAudioTrackIndexV3(r.Context(), userID, profileID, deviceID, requestedFile)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load the saved audio preference")
 			return
@@ -434,7 +435,7 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 			effectiveFile = h.ensurePlaybackProbe(r.Context(), alternate)
 			audioIndex = remapAudioIndexV3(requestedFile, effectiveFile, audioIndex)
 			if err := h.remapSubtitleSelectionV3(r.Context(), requestedFile, effectiveFile, &req); err != nil {
-				response, persistErr := h.persistTerminalStartDecisionV3(r.Context(), userID, profileID, req, requestDigest, requestedFile.ID, effectiveFile.ID, playback.NewTerminalResponseV3("subtitle_unavailable_in_version", err.Error(), false))
+				response, persistErr := h.persistTerminalStartDecisionV3(r.Context(), userID, profileID, req, requestDigests, requestedFile.ID, effectiveFile.ID, playback.NewTerminalResponseV3("subtitle_unavailable_in_version", err.Error(), false))
 				if persistErr != nil {
 					writeStartAttemptPersistenceErrorV3(w, persistErr)
 					return
@@ -457,7 +458,7 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 			"file_id", effectiveFile.ID,
 			"quality_preference", req.QualityPreference,
 		)
-		response, persistErr := h.persistTerminalStartDecisionV3(r.Context(), userID, profileID, req, requestDigest, requestedFile.ID, effectiveFile.ID, playback.NewTerminalResponseV3(result.Terminal.Reason, result.Terminal.Message, result.Terminal.Retryable))
+		response, persistErr := h.persistTerminalStartDecisionV3(r.Context(), userID, profileID, req, requestDigests, requestedFile.ID, effectiveFile.ID, playback.NewTerminalResponseV3(result.Terminal.Reason, result.Terminal.Message, result.Terminal.Retryable))
 		if persistErr != nil {
 			writeStartAttemptPersistenceErrorV3(w, persistErr)
 			return
@@ -486,7 +487,7 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 		"bandwidth_estimate_kbps", intOrZeroHandlerV3(req.BandwidthEstimateKbps),
 	)
 	result.Plan.DegradationWarnings = append(result.Plan.DegradationWarnings, warnings...)
-	response, statusErr := h.startPlannedPlaybackV3(r, userID, profileID, req, requestDigest, requestedFile, effectiveFile, audioIndex, result)
+	response, statusErr := h.startPlannedPlaybackV3(r, userID, profileID, req, requestDigests, requestedFile, effectiveFile, audioIndex, result)
 	if statusErr != nil {
 		if statusErr.reason == "playback_attempt_reused" {
 			writeError(w, http.StatusConflict, "playback_attempt_reused", statusErr.message)
@@ -495,7 +496,7 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 		if statusErr.reason == "internal_error" {
 			slog.ErrorContext(r.Context(), "protocol v3 start failed", "component", "api", "reason", statusErr.reason, "error", statusErr.cause)
 		}
-		persistedResponse, persistErr := h.startFailureDecisionV3(r.Context(), userID, profileID, req, requestDigest, requestedFile.ID, effectiveFile.ID, statusErr)
+		persistedResponse, persistErr := h.startFailureDecisionV3(r.Context(), userID, profileID, req, requestDigests, requestedFile.ID, effectiveFile.ID, statusErr)
 		if persistErr != nil {
 			writeStartAttemptPersistenceErrorV3(w, persistErr)
 			return
@@ -506,7 +507,32 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusCreated, response)
 }
 
-func (h *PlaybackHandler) startPlannedPlaybackV3(r *http.Request, userID int, profileID string, req playback.StartRequestV3, requestDigest string, requestedFile, effectiveFile *models.MediaFile, audioIndex int, result playback.PlannerResultV3) (playback.DecisionResponseV3, *transportErrorV3) {
+type playbackStartRequestDigestsV3 struct {
+	current string
+	legacy  string
+}
+
+// newPlaybackStartRequestDigestsV3 fingerprints both the body and normalized
+// device identity because either can change the selected playback plan. It
+// also retains the pre-device digest while attempts written by an older
+// server can still be replayed during a rolling deployment.
+func newPlaybackStartRequestDigestsV3(body []byte, deviceID string) playbackStartRequestDigestsV3 {
+	hasher := sha256.New()
+	_, _ = fmt.Fprintf(hasher, "%d:", len(body))
+	_, _ = hasher.Write(body)
+	_, _ = hasher.Write([]byte(deviceID))
+	legacy := sha256.Sum256(body)
+	return playbackStartRequestDigestsV3{
+		current: hex.EncodeToString(hasher.Sum(nil)),
+		legacy:  hex.EncodeToString(legacy[:]),
+	}
+}
+
+func (d playbackStartRequestDigestsV3) matches(stored string) bool {
+	return stored == "" || stored == d.current || stored == d.legacy
+}
+
+func (h *PlaybackHandler) startPlannedPlaybackV3(r *http.Request, userID int, profileID string, req playback.StartRequestV3, requestDigests playbackStartRequestDigestsV3, requestedFile, effectiveFile *models.MediaFile, audioIndex int, result playback.PlannerResultV3) (playback.DecisionResponseV3, *transportErrorV3) {
 	if result.Plan == nil {
 		return playback.DecisionResponseV3{}, &transportErrorV3{reason: "internal_error", message: "The server produced no playback plan."}
 	}
@@ -574,7 +600,7 @@ func (h *PlaybackHandler) startPlannedPlaybackV3(r *http.Request, userID int, pr
 		return playback.DecisionResponseV3{}, subtitleArtifactErrorV3("Failed to prepare the selected subtitle artifact.", err)
 	}
 	response := playback.DecisionResponseV3{ProtocolVersion: playback.ProtocolV3, ServerFeatures: playback.ServerFeaturesV3(), Outcome: playback.OutcomePlayableV3, SessionID: session.ID, PlaybackPlan: result.Plan}
-	record := playback.AttemptRecordV3{PlaybackAttemptID: req.PlaybackAttemptID, SessionID: session.ID, UserID: userID, ProfileID: profileID, RequestedMediaFileID: requestedFile.ID, EffectiveMediaFileID: effectiveFile.ID, CurrentPlanID: result.Plan.PlanID, CurrentPlan: *result.Plan, FrozenRecipe: frozenRecipe, NormalizedRequest: req, StartResponse: response, RequestDigest: requestDigest, ExpiresAt: time.Now().Add(playback.MaxTokenTTL)}
+	record := playback.AttemptRecordV3{PlaybackAttemptID: req.PlaybackAttemptID, SessionID: session.ID, UserID: userID, ProfileID: profileID, RequestedMediaFileID: requestedFile.ID, EffectiveMediaFileID: effectiveFile.ID, CurrentPlanID: result.Plan.PlanID, CurrentPlan: *result.Plan, FrozenRecipe: frozenRecipe, NormalizedRequest: req, StartResponse: response, RequestDigest: requestDigests.current, ExpiresAt: time.Now().Add(playback.MaxTokenTTL)}
 	if err := h.updateV3SessionState(r.Context(), session, effectiveFile, result, transport); err != nil {
 		transport.rollback()
 		abort()
@@ -583,12 +609,9 @@ func (h *PlaybackHandler) startPlannedPlaybackV3(r *http.Request, userID int, pr
 	if err := h.PlanStoreV3.SaveAttempt(r.Context(), record); err != nil {
 		transport.rollback()
 		abort()
-		if errors.Is(err, playback.ErrIdempotencyKeyReusedV3) {
-			return playback.DecisionResponseV3{}, &transportErrorV3{reason: "playback_attempt_reused", message: "The playback attempt ID was reused with different input."}
-		}
-		if errors.Is(err, playback.ErrPlaybackAttemptExistsV3) {
+		if errors.Is(err, playback.ErrPlaybackAttemptExistsV3) || errors.Is(err, playback.ErrIdempotencyKeyReusedV3) {
 			existing, lookupErr := h.PlanStoreV3.GetAttemptByPlaybackAttemptID(r.Context(), req.PlaybackAttemptID)
-			if lookupErr == nil && existing.UserID == userID && existing.ProfileID == profileID && existing.RequestedMediaFileID == req.FileID {
+			if lookupErr == nil && existing.UserID == userID && existing.ProfileID == profileID && existing.RequestedMediaFileID == req.FileID && requestDigests.matches(existing.RequestDigest) {
 				// Replaying a concurrent duplicate is only valid while its
 				// session is alive; otherwise tell the client to mint a new
 				// attempt rather than hand it a plan it can never stream.
@@ -596,6 +619,9 @@ func (h *PlaybackHandler) startPlannedPlaybackV3(r *http.Request, userID int, pr
 					return playback.DecisionResponseV3{}, &transportErrorV3{reason: "session_expired", message: "The playback session for this attempt has ended.", retryable: true}
 				}
 				return decisionResponseFromAttemptV3(existing), nil
+			}
+			if errors.Is(err, playback.ErrIdempotencyKeyReusedV3) {
+				return playback.DecisionResponseV3{}, &transportErrorV3{reason: "playback_attempt_reused", message: "The playback attempt ID was reused with different input."}
 			}
 		}
 		return playback.DecisionResponseV3{}, &transportErrorV3{reason: "internal_error", message: "Failed to persist the playback plan.", cause: err}
@@ -814,14 +840,14 @@ func sessionOwnsResumeTimelineV3(file *models.MediaFile) bool {
 }
 
 // preferredAudioTrackIndexV3 answers what an omitted audio track means: the
-// language this profile has settled on for this series, this library, or
-// generally — the same resolution the catalog performs when it publishes
-// `effective_audio_track_index`, so the track a client sees on the detail page
-// is the track that plays when it does not ask for one.
+// language this profile has settled on for this series, this library, this
+// device, or generally — the same resolution the catalog performs when it
+// publishes `effective_audio_track_index`, so the track a client sees on the
+// detail page is the track that plays when it does not ask for one.
 //
 // The client sends a track identity only when the viewer picked one. Defaulting
 // to ordinal zero instead would silently play the first track on the reel.
-func (h *PlaybackHandler) preferredAudioTrackIndexV3(ctx context.Context, userID int, profileID string, file *models.MediaFile) (int, error) {
+func (h *PlaybackHandler) preferredAudioTrackIndexV3(ctx context.Context, userID int, profileID, deviceID string, file *models.MediaFile) (int, error) {
 	if file == nil || len(file.AudioTracks) == 0 || h.StoreProvider == nil {
 		return 0, nil
 	}
@@ -830,8 +856,9 @@ func (h *PlaybackHandler) preferredAudioTrackIndexV3(ctx context.Context, userID
 		slog.ErrorContext(ctx, "protocol v3 start: audio preference store lookup failed", "component", "api", "user_id", userID, "error", err)
 		return 0, err
 	}
+	seriesID := h.resolveSeriesID(ctx, file)
 	var seriesPref *playback.AudioTrackPreference
-	if seriesID := h.resolveSeriesID(ctx, file); seriesID != "" {
+	if seriesID != "" {
 		stored, prefErr := store.GetAudioPreference(ctx, profileID, seriesID)
 		if prefErr != nil {
 			slog.ErrorContext(ctx, "protocol v3 start: series audio preference lookup failed", "component", "api", "profile_id", profileID, "series_id", seriesID, "error", prefErr)
@@ -839,36 +866,38 @@ func (h *PlaybackHandler) preferredAudioTrackIndexV3(ctx context.Context, userID
 		}
 		if stored != nil {
 			seriesPref = &playback.AudioTrackPreference{AudioTrackIndex: stored.AudioTrackIndex, AudioLanguage: stored.AudioLanguage, TrackSignature: stored.TrackSignature}
-			if seriesPref.AudioLanguage == playback.OriginalLanguageSentinel {
-				seriesPref.AudioLanguage = h.resolveOriginalLanguage(ctx, file)
+		}
+	}
+	rc := settingsresolve.Context{
+		ProfileID:  profileID,
+		DeviceID:   deviceID,
+		LibraryIDs: []int{file.MediaFolderID},
+	}
+	if seriesID != "" {
+		rc.SeriesIDs = []string{seriesID}
+	}
+	preferredLang, err := resolvedPlaybackAudioLanguage(ctx, store, rc)
+	if err != nil {
+		slog.ErrorContext(ctx, "protocol v3 start: canonical audio preference lookup failed", "component", "api", "profile_id", profileID, "device_id", deviceID, "error", err)
+		return 0, err
+	}
+	if preferredLang == playback.OriginalLanguageSentinel {
+		preferredLang = h.resolveOriginalLanguage(ctx, file)
+		if preferredLang == "" {
+			preferredLang, err = resolvedPlaybackAudioLanguage(ctx, store, settingsresolve.Context{ProfileID: profileID})
+			if err != nil {
+				slog.ErrorContext(ctx, "protocol v3 start: profile audio preference fallback failed", "component", "api", "profile_id", profileID, "error", err)
+				return 0, err
+			}
+			if preferredLang == playback.OriginalLanguageSentinel {
+				preferredLang = h.resolveOriginalLanguage(ctx, file)
 			}
 		}
 	}
-	preferredLang := resolvedProfileAudioLanguage(ctx, store, profileID)
-	// A library override applies only where no series-sticky choice exists;
-	// having watched this series in a language outranks the library default.
-	libraryLang := ""
-	if seriesPref == nil {
-		stored, prefErr := store.GetLibraryPlaybackPreference(ctx, profileID, file.MediaFolderID)
-		if prefErr != nil {
-			slog.ErrorContext(ctx, "protocol v3 start: library audio preference lookup failed", "component", "api", "profile_id", profileID, "library_id", file.MediaFolderID, "error", prefErr)
-			return 0, prefErr
-		}
-		if stored != nil {
-			libraryLang = stored.AudioLanguage
-		}
-	}
-	if preferredLang == playback.OriginalLanguageSentinel || libraryLang == playback.OriginalLanguageSentinel {
-		originalLang := h.resolveOriginalLanguage(ctx, file)
-		if preferredLang == playback.OriginalLanguageSentinel {
-			preferredLang = originalLang
-		}
-		if libraryLang == playback.OriginalLanguageSentinel {
-			libraryLang = originalLang
-		}
-	}
-	if libraryLang != "" {
-		preferredLang = libraryLang
+	if seriesPref != nil {
+		// The specialized row supplies concrete track identity; canonical
+		// settings own the language and its scope precedence.
+		seriesPref.AudioLanguage = preferredLang
 	}
 	return normalizeAudioTrackIndex(file, playback.SelectAudioTrack(file.AudioTracks, preferredLang, seriesPref)), nil
 }
@@ -2677,7 +2706,7 @@ func sessionStartErrorV3(err error) *transportErrorV3 {
 	}
 }
 
-func (h *PlaybackHandler) persistTerminalStartDecisionV3(ctx context.Context, userID int, profileID string, req playback.StartRequestV3, requestDigest string, requestedFileID, effectiveFileID int, response playback.DecisionResponseV3) (playback.DecisionResponseV3, error) {
+func (h *PlaybackHandler) persistTerminalStartDecisionV3(ctx context.Context, userID int, profileID string, req playback.StartRequestV3, requestDigests playbackStartRequestDigestsV3, requestedFileID, effectiveFileID int, response playback.DecisionResponseV3) (playback.DecisionResponseV3, error) {
 	record := playback.AttemptRecordV3{
 		PlaybackAttemptID:    req.PlaybackAttemptID,
 		UserID:               userID,
@@ -2686,12 +2715,12 @@ func (h *PlaybackHandler) persistTerminalStartDecisionV3(ctx context.Context, us
 		EffectiveMediaFileID: effectiveFileID,
 		NormalizedRequest:    req,
 		StartResponse:        response,
-		RequestDigest:        requestDigest,
+		RequestDigest:        requestDigests.current,
 		ExpiresAt:            time.Now().Add(playback.MaxTokenTTL),
 	}
 	if err := h.PlanStoreV3.SaveAttempt(ctx, record); err == nil {
 		return response, nil
-	} else if !errors.Is(err, playback.ErrPlaybackAttemptExistsV3) {
+	} else if !errors.Is(err, playback.ErrPlaybackAttemptExistsV3) && !errors.Is(err, playback.ErrIdempotencyKeyReusedV3) {
 		return playback.DecisionResponseV3{}, err
 	}
 
@@ -2700,15 +2729,15 @@ func (h *PlaybackHandler) persistTerminalStartDecisionV3(ctx context.Context, us
 		return playback.DecisionResponseV3{}, err
 	}
 	if existing.UserID != userID || existing.ProfileID != profileID ||
-		existing.RequestedMediaFileID != requestedFileID || existing.RequestDigest != requestDigest {
+		existing.RequestedMediaFileID != requestedFileID || !requestDigests.matches(existing.RequestDigest) {
 		return playback.DecisionResponseV3{}, playback.ErrIdempotencyKeyReusedV3
 	}
 	return decisionResponseFromAttemptV3(existing), nil
 }
 
-func (h *PlaybackHandler) startFailureDecisionV3(ctx context.Context, userID int, profileID string, req playback.StartRequestV3, requestDigest string, requestedFileID, effectiveFileID int, failure *transportErrorV3) (playback.DecisionResponseV3, error) {
+func (h *PlaybackHandler) startFailureDecisionV3(ctx context.Context, userID int, profileID string, req playback.StartRequestV3, requestDigests playbackStartRequestDigestsV3, requestedFileID, effectiveFileID int, failure *transportErrorV3) (playback.DecisionResponseV3, error) {
 	response := playback.NewTerminalResponseV3(failure.reason, failure.message, failure.retryable)
-	return h.persistTerminalStartDecisionV3(ctx, userID, profileID, req, requestDigest, requestedFileID, effectiveFileID, response)
+	return h.persistTerminalStartDecisionV3(ctx, userID, profileID, req, requestDigests, requestedFileID, effectiveFileID, response)
 }
 
 func writeStartAttemptPersistenceErrorV3(w http.ResponseWriter, err error) {
