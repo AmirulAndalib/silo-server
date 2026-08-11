@@ -633,10 +633,10 @@ func (h *PlaybackHandler) HandlePlaybackInfo(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "BadRequest", "Invalid playback request")
 		return
 	}
-	if req.UserID != "" && req.UserID != session.PseudoUserID.String() {
-		writeError(w, http.StatusNotFound, "NotFound", "User not found")
-		return
-	}
+	// PlaybackInfo is authorized by the token-derived session. Some clients
+	// retain a previous UserId in their request body while moving to the next
+	// item; that advisory value must not turn an otherwise authorized playback
+	// negotiation into a 404.
 
 	detail, err := h.content.GetItemDetail(r.Context(), session, contentID, nil)
 	if err != nil {
@@ -654,6 +654,24 @@ func (h *PlaybackHandler) HandlePlaybackInfo(w http.ResponseWriter, r *http.Requ
 	sourceDTOs := make([]mediaSourceDTO, 0, len(detail.Versions))
 
 	allow4KTranscode := h.allow4KVideoTranscode(r.Context())
+	if req.MediaSourceID != "" {
+		matched := false
+		for _, version := range detail.Versions {
+			candidate := h.buildPlaybackSource(routeItemID, playSessionID, version, profile, req, allow4KTranscode)
+			if mediaSourceIDsEqual(candidate.ID, req.MediaSourceID) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			// Continue Watching and autoplay clients can carry the previous
+			// episode's MediaSourceId into the next PlaybackInfo request. The
+			// authenticated item route remains authoritative; fall back to its
+			// available versions instead of returning a misleading 404.
+			slog.InfoContext(r.Context(), "jellycompat ignored stale playback media source", "component", "jellycompat")
+			req.MediaSourceID = ""
+		}
+	}
 	for _, version := range detail.Versions {
 		source := h.buildPlaybackSource(routeItemID, playSessionID, version, profile, req, allow4KTranscode)
 		if req.MediaSourceID != "" && !mediaSourceIDsEqual(source.ID, req.MediaSourceID) {
@@ -730,6 +748,7 @@ func (h *PlaybackHandler) HandlePlaybackInfo(w http.ResponseWriter, r *http.Requ
 		firstMediaBrowserAuthorizationValue(r, "DeviceId"),
 		newCaseInsensitiveQuery(r.URL.Query()).Get("DeviceId"),
 	)
+	clientDeviceID = stripCompatNUL(clientDeviceID)
 	h.playbackStore.PutNegotiated(PlaybackSession{
 		ID:                 playSessionID,
 		CompatToken:        session.Token,
@@ -745,6 +764,14 @@ func (h *PlaybackHandler) HandlePlaybackInfo(w http.ResponseWriter, r *http.Requ
 		PlaySessionID: playSessionID,
 		MediaSources:  sourceDTOs,
 	})
+}
+
+// stripCompatNUL removes the only code point PostgreSQL rejects in JSONB text.
+// DeviceId and static PlaySessionId come from clients, then become fields in a
+// durable PlaybackSession. Without this boundary check one malformed value
+// leaves the session cache-only; its first revalidation drops playback.
+func stripCompatNUL(value string) string {
+	return strings.ReplaceAll(value, "\x00", "")
 }
 
 func (h *PlaybackHandler) parsePlaybackRequest(r *http.Request, compatToken string) (playbackInfoRequest, DeviceProfile, error) {
