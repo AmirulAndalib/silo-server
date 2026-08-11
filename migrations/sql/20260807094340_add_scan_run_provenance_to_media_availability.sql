@@ -45,49 +45,17 @@ END;
 $$;
 -- +goose StatementEnd
 
--- A failed concurrent build can leave an invalid index that IF NOT EXISTS
--- would otherwise skip on retry.
--- +goose StatementBegin
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        JOIN pg_index i ON i.indexrelid = c.oid
-        WHERE n.nspname = 'public'
-          AND c.relname = 'idx_media_files_first_seen_scan_run_id'
-          AND NOT i.indisvalid
-    ) THEN
-        DROP INDEX public.idx_media_files_first_seen_scan_run_id;
-    END IF;
-END;
-$$;
--- +goose StatementEnd
+-- A failed concurrent build can leave an invalid index. Keep retry cleanup
+-- outside a transaction so it cannot take a blocking ordinary index-drop lock.
+DROP INDEX CONCURRENTLY IF EXISTS public.idx_media_files_first_seen_scan_run_id;
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_media_files_first_seen_scan_run_id
+CREATE INDEX CONCURRENTLY idx_media_files_first_seen_scan_run_id
     ON public.media_files (first_seen_scan_run_id)
     WHERE first_seen_scan_run_id IS NOT NULL;
 
--- +goose StatementBegin
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        JOIN pg_index i ON i.indexrelid = c.oid
-        WHERE n.nspname = 'public'
-          AND c.relname = 'idx_episode_libraries_first_seen_scan_run_id'
-          AND NOT i.indisvalid
-    ) THEN
-        DROP INDEX public.idx_episode_libraries_first_seen_scan_run_id;
-    END IF;
-END;
-$$;
--- +goose StatementEnd
+DROP INDEX CONCURRENTLY IF EXISTS public.idx_episode_libraries_first_seen_scan_run_id;
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_episode_libraries_first_seen_scan_run_id
+CREATE INDEX CONCURRENTLY idx_episode_libraries_first_seen_scan_run_id
     ON public.episode_libraries (first_seen_scan_run_id)
     WHERE first_seen_scan_run_id IS NOT NULL;
 

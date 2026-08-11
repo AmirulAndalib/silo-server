@@ -231,7 +231,7 @@ describe("GlobalSearch", () => {
     expect(mocks.navigate).toHaveBeenCalledWith("/item/ebook%201");
   });
 
-  it("uses independent controls instead of interactive listbox options", () => {
+  it("moves real focus through an accessible result list while keeping Play independent", async () => {
     mocks.useQuery.mockReturnValue({
       data: {
         total: 1,
@@ -251,9 +251,14 @@ describe("GlobalSearch", () => {
       </QueryClientProvider>,
     );
 
-    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
-    expect(screen.queryByRole("option")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Test Movie/i })).toBeInTheDocument();
+    const input = screen.getByRole("searchbox", { name: "Search" });
+    const result = screen.getByRole("button", { name: /Test Movie/i });
+    expect(input).toHaveAttribute("aria-controls", "global-search-library-results");
+    expect(screen.getByRole("list", { name: "Library search results" })).toBeInTheDocument();
+    input.focus();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(result).toHaveFocus();
+    expect(result).toHaveAttribute("aria-current", "true");
     expect(screen.getByRole("link", { name: "Play Test Movie" })).toBeInTheDocument();
   });
 });

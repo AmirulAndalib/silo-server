@@ -950,12 +950,14 @@ func (h *ItemsHandler) resolvePlayableTargetInputs(r *http.Request, inputs []cat
 	if h == nil || h.playableTargets == nil || len(inputs) == 0 {
 		return map[string]string{}
 	}
+	store, _, _ := h.userStoreForRequest(r)
 	targets, err := h.playableTargets.Resolve(r.Context(), catalog.PlayableTargetQuery{
-		UserID:     apimw.GetUserID(r.Context()),
-		ProfileID:  apimw.GetProfileID(r.Context()),
-		LibraryIDs: libraryIDs,
-		Access:     filter,
-		Items:      inputs,
+		UserID:        apimw.GetUserID(r.Context()),
+		ProfileID:     requestProfileID(r),
+		LibraryIDs:    libraryIDs,
+		Access:        filter,
+		Items:         inputs,
+		ProgressStore: store,
 	})
 	if err != nil {
 		slog.WarnContext(r.Context(), "resolving playable poster targets", "component", "api", "error", err)

@@ -120,7 +120,7 @@ func (h *CatalogHandler) HandleGetCatalog(w http.ResponseWriter, r *http.Request
 		}
 
 		resultItems := groupedCatalogItems(entries)
-		items := h.catalogItemResponses(r, resultItems, catalog.NormalizeQuerySort(req.Query.Sort).Field, req.Query.LibraryIDs, accessFilter)
+		items := h.catalogItemResponses(r, resultItems, catalog.NormalizeQuerySort(req.Query.Sort).Field, playableTargetLibraryIDs(req), accessFilter)
 		for i := range items {
 			if i < len(entries) && entries[i].summary != nil {
 				applyWorkSummaryToCatalogItem(&items[i], entries[i].summary)
@@ -144,8 +144,15 @@ func (h *CatalogHandler) HandleGetCatalog(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to resolve catalog")
 		return
 	}
-	items := h.catalogItemResponses(r, result.Items, catalog.NormalizeQuerySort(req.Query.Sort).Field, req.Query.LibraryIDs, accessFilter)
+	items := h.catalogItemResponses(r, result.Items, catalog.NormalizeQuerySort(req.Query.Sort).Field, playableTargetLibraryIDs(req), accessFilter)
 	h.writeCatalogResponse(w, result, items, groupedByWork)
+}
+
+func playableTargetLibraryIDs(req catalog.CatalogRequest) []int {
+	if req.LibraryID > 0 {
+		return []int{req.LibraryID}
+	}
+	return req.Query.LibraryIDs
 }
 
 func (h *CatalogHandler) catalogItemResponses(r *http.Request, resultItems []*models.MediaItem, sortField string, libraryIDs []int, accessFilter catalog.AccessFilter) []itemListResponse {

@@ -82,6 +82,7 @@ func TestClaimNextAcceptedSkipsDirectAdminRuns(t *testing.T) {
 func TestStaleJanitorFailsDirectRunsAndRequeuesQueuedRuns(t *testing.T) {
 	ctx, pool, repo, folderID := openDirectRunTestRepository(t)
 	directID := createDirectRunTestRow(t, ctx, repo, folderID, "/direct", TriggerAdminLibraryRefresh)
+	acceptedDirectID := createDirectRunTestRow(t, ctx, repo, folderID, "/accepted-direct", TriggerAdminItemRefresh)
 	queuedID := createDirectRunTestRow(t, ctx, repo, folderID, "/queued", "manual")
 
 	for _, id := range []string{directID, queuedID} {
@@ -94,7 +95,7 @@ func TestStaleJanitorFailsDirectRunsAndRequeuesQueuedRuns(t *testing.T) {
 		UPDATE scan_runs
 		SET started_at = $2, heartbeat_at = $2, updated_at = $2
 		WHERE id = ANY($1)`,
-		[]string{directID, queuedID},
+		[]string{directID, acceptedDirectID, queuedID},
 		staleAt,
 	); err != nil {
 		t.Fatalf("make scan runs stale: %v", err)
@@ -110,6 +111,16 @@ func TestStaleJanitorFailsDirectRunsAndRequeuesQueuedRuns(t *testing.T) {
 	}
 	if direct.Status != StatusFailed || direct.ErrorMessage != "abandoned direct scan run" {
 		t.Fatalf("direct run status/error = %q/%q, want %q/%q", direct.Status, direct.ErrorMessage, StatusFailed, "abandoned direct scan run")
+	}
+	acceptedDirect, err := repo.GetByID(ctx, acceptedDirectID)
+	if err != nil {
+		t.Fatalf("load accepted direct run: %v", err)
+	}
+	if acceptedDirect.Status != StatusFailed || acceptedDirect.ErrorMessage != "abandoned direct scan run" {
+		t.Fatalf("accepted direct run status/error = %q/%q, want %q/%q", acceptedDirect.Status, acceptedDirect.ErrorMessage, StatusFailed, "abandoned direct scan run")
+	}
+	if replacement := createDirectRunTestRow(t, ctx, repo, folderID, "/accepted-direct", TriggerAdminItemRefresh); replacement == acceptedDirectID {
+		t.Fatalf("replacement direct run reused stale ID %q", replacement)
 	}
 
 	queued, err := repo.GetByID(ctx, queuedID)

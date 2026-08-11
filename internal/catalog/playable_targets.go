@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/Silo-Server/silo-server/internal/access"
+	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -27,11 +30,19 @@ type PlayableTargetInput struct {
 // PlayableTargetQuery scopes direct-play target resolution to the acting
 // profile and, when supplied, the libraries represented by the surface.
 type PlayableTargetQuery struct {
-	UserID     int
-	ProfileID  string
-	LibraryIDs []int
-	Access     AccessFilter
-	Items      []PlayableTargetInput
+	UserID        int
+	ProfileID     string
+	LibraryIDs    []int
+	Access        AccessFilter
+	Items         []PlayableTargetInput
+	ProgressStore PlayableTargetProgressStore
+}
+
+// PlayableTargetProgressStore is the backend-neutral progress capability used
+// to rank series and season targets without coupling catalog reads to the
+// PostgreSQL user tables.
+type PlayableTargetProgressStore interface {
+	ListProgressByMediaItems(ctx context.Context, profileID string, mediaItemIDs []string) (map[string]userstore.WatchProgress, error)
 }
 
 // PlayableTargetResolver resolves card-level playback targets in one query.
@@ -99,11 +110,20 @@ func (r *PlayableTargetResolver) Resolve(ctx context.Context, q PlayableTargetQu
 		return result, nil
 	}
 
-	args := []any{ids, types, seriesIDs, seasonNumbers, q.UserID, q.ProfileID}
-	argIdx := 7
+	args := []any{ids, types, seriesIDs, seasonNumbers}
+	argIdx := 5
 	fileConditions := []string{
 		playableFileExists,
 		"EXISTS (SELECT 1 FROM media_folders pf WHERE pf.id = mf.media_folder_id AND pf.enabled = TRUE)",
+	}
+	if maxQuality := access.NormalizePlaybackQuality(q.Access.MaxPlaybackQuality); maxQuality != "" {
+		maxRank := 3
+		if maxQuality == access.PlaybackQuality4K {
+			maxRank = 4
+		}
+		fileConditions = append(fileConditions, fmt.Sprintf(`CASE UPPER(BTRIM(COALESCE(mf.resolution, '')))
+			WHEN '480P' THEN 1 WHEN '720P' THEN 2 WHEN '1080P' THEN 3
+			WHEN '2160P' THEN 4 WHEN '4320P' THEN 5 ELSE 0 END <= %d`, maxRank))
 	}
 	effectiveLibraries := uniquePositiveInts(q.LibraryIDs)
 	if len(effectiveLibraries) > 0 {
@@ -135,7 +155,7 @@ func (r *PlayableTargetResolver) Resolve(ctx context.Context, q PlayableTargetQu
 			  AS requested(content_id, media_type, series_id, season_number, ord)
 		),
 		leaf_targets AS (
-			SELECT requested.ord, requested.content_id AS play_content_id
+			SELECT requested.ord, requested.content_id, requested.content_id AS play_content_id
 			FROM requested
 			WHERE requested.media_type IN ('movie', 'episode')
 			  AND EXISTS (
@@ -181,27 +201,12 @@ func (r *PlayableTargetResolver) Resolve(ctx context.Context, q PlayableTargetQu
 		),
 		episode_candidates AS (
 			SELECT requested.ord,
+			       requested.content_id,
 			       candidate.content_id AS play_content_id,
-			       ROW_NUMBER() OVER (
-				   PARTITION BY requested.ord
-				   ORDER BY
-				     CASE
-				       WHEN progress.position_seconds > 0 AND NOT progress.completed THEN 0
-				       WHEN progress.media_item_id IS NULL OR NOT progress.completed THEN 1
-				       ELSE 2
-				     END ASC,
-				     CASE WHEN progress.position_seconds > 0 AND NOT progress.completed THEN progress.updated_at END DESC NULLS LAST,
-				     CASE WHEN candidate.season_number = 0 THEN 1 ELSE 0 END ASC,
-				     candidate.season_number ASC,
-				     candidate.episode_number ASC,
-				     candidate.content_id ASC
-			       ) AS candidate_rank
+			       candidate.season_number,
+			       candidate.episode_number
 			FROM requested
 			JOIN candidate_episodes candidate ON candidate.ord = requested.ord
-			LEFT JOIN user_watch_progress progress
-			  ON progress.user_id = $5
-			 AND progress.profile_id = $6
-			 AND progress.media_item_id = candidate.content_id
 			WHERE EXISTS (
 				SELECT 1
 				FROM media_files mf
@@ -210,14 +215,17 @@ func (r *PlayableTargetResolver) Resolve(ctx context.Context, q PlayableTargetQu
 			  )
 		),
 		resolved AS (
-			SELECT ord, play_content_id FROM leaf_targets
+			SELECT ord, content_id, play_content_id, -1 AS season_number, -1 AS episode_number FROM leaf_targets
 			UNION ALL
-			SELECT ord, play_content_id FROM episode_candidates WHERE candidate_rank = 1
+			SELECT ord, content_id, play_content_id, season_number, episode_number FROM episode_candidates
 		)
-		SELECT requested.content_id, resolved.play_content_id
-		FROM requested
-		JOIN resolved USING (ord)
-		ORDER BY requested.ord
+		SELECT content_id, play_content_id
+		FROM resolved
+		ORDER BY ord,
+		         CASE WHEN season_number = 0 THEN 1 ELSE 0 END,
+		         season_number,
+		         episode_number,
+		         play_content_id
 	`, strings.Join(fileConditions, " AND "), strings.Join(fileConditions, " AND "))
 
 	rows, err := r.pool.Query(ctx, query, args...)
@@ -225,15 +233,63 @@ func (r *PlayableTargetResolver) Resolve(ctx context.Context, q PlayableTargetQu
 		return nil, fmt.Errorf("resolving playable poster targets: %w", err)
 	}
 	defer rows.Close()
+	candidates := make(map[string][]string, len(ids))
+	allCandidateIDs := make([]string, 0)
 	for rows.Next() {
 		var contentID, playContentID string
 		if err := rows.Scan(&contentID, &playContentID); err != nil {
 			return nil, fmt.Errorf("scanning playable poster target: %w", err)
 		}
-		result[contentID] = playContentID
+		candidates[contentID] = append(candidates[contentID], playContentID)
+		allCandidateIDs = append(allCandidateIDs, playContentID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating playable poster targets: %w", err)
 	}
+	progress := map[string]userstore.WatchProgress{}
+	if q.ProgressStore != nil && len(allCandidateIDs) > 0 {
+		progress, err = q.ProgressStore.ListProgressByMediaItems(ctx, q.ProfileID, allCandidateIDs)
+		if err != nil {
+			return nil, fmt.Errorf("listing progress for playable poster targets: %w", err)
+		}
+	}
+	for contentID, targetCandidates := range candidates {
+		if len(targetCandidates) > 0 {
+			result[contentID] = preferredPlayableTarget(targetCandidates, progress)
+		}
+	}
 	return result, nil
+}
+
+func preferredPlayableTarget(candidates []string, progress map[string]userstore.WatchProgress) string {
+	best := candidates[0]
+	bestRank := playableProgressRank(progress, best)
+	for _, candidate := range candidates[1:] {
+		rank := playableProgressRank(progress, candidate)
+		if rank < bestRank || (rank == 0 && bestRank == 0 && progressUpdatedAfter(progress[candidate].UpdatedAt, progress[best].UpdatedAt)) {
+			best = candidate
+			bestRank = rank
+		}
+	}
+	return best
+}
+
+func playableProgressRank(progress map[string]userstore.WatchProgress, contentID string) int {
+	entry, ok := progress[contentID]
+	if ok && entry.PositionSeconds > 0 && !entry.Completed {
+		return 0
+	}
+	if !ok || !entry.Completed {
+		return 1
+	}
+	return 2
+}
+
+func progressUpdatedAfter(candidate, current string) bool {
+	candidateTime, candidateErr := time.Parse(time.RFC3339Nano, candidate)
+	currentTime, currentErr := time.Parse(time.RFC3339Nano, current)
+	if candidateErr == nil && currentErr == nil {
+		return candidateTime.After(currentTime)
+	}
+	return candidate > current
 }

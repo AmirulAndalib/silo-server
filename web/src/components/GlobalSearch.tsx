@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useCallback } from "react";
+import { useMemo, useState, useEffect, useCallback, useRef } from "react";
 import { useImageLoaded } from "@/hooks/useImageLoaded";
 import { useQuery } from "@tanstack/react-query";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -50,25 +50,39 @@ function GlobalSearchResultRow({
   isSelected,
   onPick,
   onPlay,
+  onMoveSelection,
 }: {
   item: BrowseItem;
   index: number;
   isSelected: boolean;
   onPick: (contentId: string) => void;
   onPlay: () => void;
+  onMoveSelection: (index: number) => void;
 }) {
   const { loaded, onLoad } = useImageLoaded(item.poster_url);
   const thumbhashUrl = item.poster_thumbhash ? decodeThumbhash(item.poster_thumbhash) : "";
 
   return (
     <div
-      id={`search-result-${index}`}
+      role="listitem"
       data-selected={isSelected || undefined}
       className="group/media hover:bg-muted/80 data-[selected]:bg-accent relative rounded-md transition-colors"
     >
       <button
+        id={`search-result-${index}`}
         type="button"
         onClick={() => onPick(item.content_id)}
+        onFocus={() => onMoveSelection(index)}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            onMoveSelection(index + 1);
+          } else if (event.key === "ArrowUp") {
+            event.preventDefault();
+            onMoveSelection(index - 1);
+          }
+        }}
+        aria-current={isSelected ? "true" : undefined}
         className="flex w-full items-center gap-3 px-3 py-2 text-left"
       >
         <div
@@ -127,6 +141,7 @@ export function GlobalSearch({
   const [open, setOpen] = useState(defaultOpen);
   const [query, setQuery] = useState(initialQuery);
   const [selectedIndex, setSelectedIndex] = useState(-1);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const navigate = useViewTransitionNavigate();
   const beginSidebarItemNavigation = useSidebarItemNavigation();
   const debouncedQuery = useDebounce(query.trim(), DEBOUNCE_MS);
@@ -225,9 +240,9 @@ export function GlobalSearch({
   // Auto-scroll the selected result into view
   useEffect(() => {
     if (selectedIndex >= 0) {
-      document
-        .getElementById(`search-result-${selectedIndex}`)
-        ?.scrollIntoView({ block: "nearest" });
+      const selectedResult = document.getElementById(`search-result-${selectedIndex}`);
+      selectedResult?.focus();
+      selectedResult?.scrollIntoView?.({ block: "nearest" });
     }
   }, [selectedIndex]);
 
@@ -245,6 +260,17 @@ export function GlobalSearch({
     !canRequest.isResolving &&
     !tmdbDebounceCatchingUp;
   const showError = previewQuery.isError;
+  const moveResultFocus = useCallback(
+    (nextIndex: number) => {
+      if (items.length === 0) {
+        setSelectedIndex(-1);
+        searchInputRef.current?.focus();
+        return;
+      }
+      setSelectedIndex((nextIndex + items.length) % items.length);
+    },
+    [items.length],
+  );
 
   return (
     <Dialog
@@ -265,23 +291,22 @@ export function GlobalSearch({
           <div className={cn("flex items-center px-5 sm:px-6", showResultsPanel && "border-b")}>
             <Search className="text-muted-foreground mr-2 h-4 w-4 shrink-0" />
             <input
+              ref={searchInputRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search library..."
               className="placeholder:text-muted-foreground flex h-12 w-full bg-transparent text-sm outline-none"
               autoFocus
               aria-label="Search"
+              role="searchbox"
+              aria-controls="global-search-library-results"
               onKeyDown={(e) => {
                 if (e.key === "ArrowDown") {
                   e.preventDefault();
-                  setSelectedIndex((prev) =>
-                    items.length === 0 ? -1 : prev < items.length - 1 ? prev + 1 : 0,
-                  );
+                  moveResultFocus(selectedIndex + 1);
                 } else if (e.key === "ArrowUp") {
                   e.preventDefault();
-                  setSelectedIndex((prev) =>
-                    items.length === 0 ? -1 : prev <= 0 ? items.length - 1 : prev - 1,
-                  );
+                  moveResultFocus(selectedIndex - 1);
                 } else if (e.key === "Enter" && selectedIndex >= 0 && items[selectedIndex]) {
                   e.preventDefault();
                   handlePickItem(items[selectedIndex].content_id);
@@ -298,7 +323,11 @@ export function GlobalSearch({
         {showResultsPanel && (
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="max-h-[min(22rem,55vh)] overflow-y-auto overscroll-contain px-2 py-2">
-              <div role="group" aria-label="Library search results">
+              <div
+                id="global-search-library-results"
+                role="list"
+                aria-label="Library search results"
+              >
                 {showLoading && (
                   <div className="text-muted-foreground px-3 py-6 text-center text-sm">
                     Searching...
@@ -322,6 +351,7 @@ export function GlobalSearch({
                     isSelected={i === selectedIndex}
                     onPick={handlePickItem}
                     onPlay={() => setOpen(false)}
+                    onMoveSelection={moveResultFocus}
                   />
                 ))}
               </div>

@@ -514,7 +514,7 @@ func (r *Repository) RequeueStaleRunning(ctx context.Context, before time.Time) 
 	return int(tag.RowsAffected()), nil
 }
 
-func (r *Repository) FailStaleDirectRunning(ctx context.Context, before time.Time) (int, error) {
+func (r *Repository) FailStaleDirect(ctx context.Context, before time.Time) (int, error) {
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE scan_runs
 		SET status = $2,
@@ -522,10 +522,10 @@ func (r *Repository) FailStaleDirectRunning(ctx context.Context, before time.Tim
 			completed_at = NOW(),
 			heartbeat_at = NOW(),
 			updated_at = NOW()
-		WHERE status = $1
+		WHERE status = ANY($1)
 		  AND COALESCE(heartbeat_at, started_at, requested_at) < $4
 		  AND trigger = ANY($5)`,
-		StatusRunning,
+		[]string{StatusAccepted, StatusRunning},
 		StatusFailed,
 		"abandoned direct scan run",
 		before,

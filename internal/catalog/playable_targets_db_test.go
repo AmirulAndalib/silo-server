@@ -2,12 +2,16 @@ package catalog
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/userdb"
+	"github.com/Silo-Server/silo-server/internal/userstore"
+	"github.com/Silo-Server/silo-server/internal/userstore/pgstore"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -30,6 +34,7 @@ func TestPlayableTargetResolverProfileStateAvailabilityAndAccess(t *testing.T) {
 	series, completedSeries, deniedSeries := id("series"), id("completed"), id("denied")
 	season := id("season-1")
 	special, episode1, episode2 := id("special"), id("episode-1"), id("episode-2")
+	crossLibraryEpisode := id("cross-library-episode")
 	completed1, completed2 := id("completed-1"), id("completed-2")
 	deniedEpisode := id("denied-episode")
 
@@ -82,8 +87,9 @@ func TestPlayableTargetResolverProfileStateAvailabilityAndAccess(t *testing.T) {
 		       ($4, $9, 1, 1, 'Completed One'),
 		       ($5, $9, 1, 2, 'Completed Two'),
 		       ($6, $10, 1, 1, 'Denied'),
-		       ($7, $8, 1, 3, 'Unavailable')
-	`, special, episode1, episode2, completed1, completed2, deniedEpisode, id("unavailable-episode"), series, completedSeries, deniedSeries); err != nil {
+		       ($7, $8, 1, 3, 'Unavailable'),
+		       ($11, $8, 1, 0, 'Other Library')
+	`, special, episode1, episode2, completed1, completed2, deniedEpisode, id("unavailable-episode"), series, completedSeries, deniedSeries, crossLibraryEpisode); err != nil {
 		t.Fatalf("seed episodes: %v", err)
 	}
 	seedFile := func(contentID, episodeID string, folderID int, missing bool) {
@@ -100,11 +106,15 @@ func TestPlayableTargetResolverProfileStateAvailabilityAndAccess(t *testing.T) {
 		}
 	}
 	seedFile(movie, "", allowedFolderID, false)
+	if _, err := pool.Exec(ctx, `UPDATE media_files SET resolution = '2160p' WHERE content_id = $1`, movie); err != nil {
+		t.Fatalf("mark movie as 4K: %v", err)
+	}
 	seedFile(missingMovie, "", allowedFolderID, true)
 	for _, episodeID := range []string{special, episode1, episode2, completed1, completed2} {
 		seedFile("", episodeID, allowedFolderID, false)
 	}
 	seedFile("", deniedEpisode, deniedFolderID, false)
+	seedFile("", crossLibraryEpisode, deniedFolderID, false)
 
 	base := time.Now().UTC().Add(-time.Hour)
 	if _, err := pool.Exec(ctx, `
@@ -113,8 +123,9 @@ func TestPlayableTargetResolverProfileStateAvailabilityAndAccess(t *testing.T) {
 		       ($1, $2, $4, 300, 1200, FALSE, $9),
 		       ($1, $2, $5, 0, 1200, TRUE, $8),
 		       ($1, $2, $6, 0, 1200, TRUE, $8),
-		       ($1, $7, $3, 200, 1200, FALSE, $10)
-	`, userID, profileA, episode1, episode2, completed1, completed2, profileB, base, base.Add(time.Minute), base.Add(2*time.Minute)); err != nil {
+		       ($1, $7, $3, 200, 1200, FALSE, $10),
+		       ($1, $2, $11, 500, 1200, FALSE, $12)
+	`, userID, profileA, episode1, episode2, completed1, completed2, profileB, base, base.Add(time.Minute), base.Add(2*time.Minute), crossLibraryEpisode, base.Add(3*time.Minute)); err != nil {
 		t.Fatalf("seed progress: %v", err)
 	}
 
@@ -128,9 +139,13 @@ func TestPlayableTargetResolverProfileStateAvailabilityAndAccess(t *testing.T) {
 		{ContentID: deniedSeries, Type: "series"},
 	}
 	resolver := NewPlayableTargetResolver(pool)
+	progressStore, err := pgstore.NewPostgresProvider(pool).ForUser(ctx, userID)
+	if err != nil {
+		t.Fatalf("create postgres progress store: %v", err)
+	}
 	targetsA, err := resolver.Resolve(ctx, PlayableTargetQuery{
 		UserID: userID, ProfileID: profileA, Items: inputs,
-		Access: AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}},
+		Access: AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}}, ProgressStore: progressStore,
 	})
 	if err != nil {
 		t.Fatalf("resolve profile A: %v", err)
@@ -146,10 +161,30 @@ func TestPlayableTargetResolverProfileStateAvailabilityAndAccess(t *testing.T) {
 		t.Fatalf("profile A targets = %#v, want %#v", targetsA, wantA)
 	}
 
+	qualityCapped, err := resolver.Resolve(ctx, PlayableTargetQuery{
+		UserID: userID, ProfileID: profileA,
+		Items:         []PlayableTargetInput{{ContentID: movie, Type: "movie"}},
+		Access:        AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}, MaxPlaybackQuality: "1080p"},
+		ProgressStore: progressStore,
+	})
+	if err != nil || qualityCapped[movie] != "" {
+		t.Fatalf("quality-capped target = %#v, err %v; want no 4K movie target", qualityCapped, err)
+	}
+
+	libraryScoped, err := resolver.Resolve(ctx, PlayableTargetQuery{
+		UserID: userID, ProfileID: profileA,
+		Items:         []PlayableTargetInput{{ContentID: series, Type: "series"}},
+		LibraryIDs:    []int{allowedFolderID},
+		ProgressStore: progressStore,
+	})
+	if err != nil || libraryScoped[series] != episode2 {
+		t.Fatalf("library-scoped target = %#v, err %v; want in-library episode %s", libraryScoped, err, episode2)
+	}
+
 	targetsB, err := resolver.Resolve(ctx, PlayableTargetQuery{
 		UserID: userID, ProfileID: profileB,
 		Items:  []PlayableTargetInput{{ContentID: series, Type: "series"}},
-		Access: AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}},
+		Access: AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}}, ProgressStore: progressStore,
 	})
 	if err != nil || targetsB[series] != episode1 {
 		t.Fatalf("profile B target = %#v, err %v; want resumable %s", targetsB, err, episode1)
@@ -158,7 +193,7 @@ func TestPlayableTargetResolverProfileStateAvailabilityAndAccess(t *testing.T) {
 	untouched, err := resolver.Resolve(ctx, PlayableTargetQuery{
 		UserID: userID, ProfileID: id("no-progress"),
 		Items:  []PlayableTargetInput{{ContentID: series, Type: "series"}},
-		Access: AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}},
+		Access: AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}}, ProgressStore: progressStore,
 	})
 	if err != nil || untouched[series] != episode1 {
 		t.Fatalf("untouched target = %#v, err %v; want regular season before special %s", untouched, err, episode1)
@@ -171,13 +206,45 @@ func TestPlayableTargetResolverProfileStateAvailabilityAndAccess(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			targets, err := resolver.Resolve(ctx, PlayableTargetQuery{
 				UserID: userID, ProfileID: profileA, Items: []PlayableTargetInput{input},
-				Access: AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}},
+				Access: AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}}, ProgressStore: progressStore,
 			})
 			if err != nil || targets[season] != episode2 {
 				t.Fatalf("season target = %#v, err %v; want %s", targets, err, episode2)
 			}
 		})
 	}
+
+	t.Run("sqlite progress backend", func(t *testing.T) {
+		db, err := sql.Open("sqlite3", ":memory:")
+		if err != nil {
+			t.Fatalf("open sqlite user store: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := db.Close(); err != nil {
+				t.Errorf("close sqlite user store: %v", err)
+			}
+		})
+		if err := userdb.InitSchema(db); err != nil {
+			t.Fatalf("initialize sqlite user store: %v", err)
+		}
+		sqliteStore := userdb.NewSQLiteUserStore(db)
+		if err := sqliteStore.CreateProfile(ctx, userstore.Profile{ID: profileA, Name: "A"}); err != nil {
+			t.Fatalf("create sqlite profile: %v", err)
+		}
+		if err := sqliteStore.SetProgressAt(ctx, profileA, episode1, 400, 1200, false, time.Now().UTC()); err != nil {
+			t.Fatalf("seed sqlite progress: %v", err)
+		}
+
+		targets, err := resolver.Resolve(ctx, PlayableTargetQuery{
+			UserID: userID, ProfileID: profileA,
+			Items:         []PlayableTargetInput{{ContentID: series, Type: "series"}},
+			Access:        AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}},
+			ProgressStore: sqliteStore,
+		})
+		if err != nil || targets[series] != episode1 {
+			t.Fatalf("sqlite-backed target = %#v, err %v; want resumable %s", targets, err, episode1)
+		}
+	})
 }
 
 func nilIfBlank(value string) any {
