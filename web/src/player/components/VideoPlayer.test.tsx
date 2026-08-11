@@ -17,6 +17,10 @@ const controls = vi.hoisted(() => ({
     subtitleTracks: PlayerSubtitleInfo[];
   },
 }));
+const subtitleTimeline = vi.hoisted(() => ({
+  textOffsetSeconds: null as number | null,
+  assOffsetSeconds: null as number | null,
+}));
 
 vi.mock("../hooks/usePlaybackRealtime", () => ({
   usePlaybackRealtime: vi.fn((options) => {
@@ -31,9 +35,17 @@ vi.mock("../hooks/useKeyboardShortcuts", () => ({ useKeyboardShortcuts: vi.fn() 
 vi.mock("../hooks/useRemuxSeeking", () => ({
   useRemuxSeeking: () => ({ handleSeek: vi.fn() }),
 }));
-vi.mock("../hooks/useSubtitleTracks", () => ({ useSubtitleTracks: () => [] }));
+vi.mock("../hooks/useSubtitleTracks", () => ({
+  useSubtitleTracks: (...args: unknown[]) => {
+    subtitleTimeline.textOffsetSeconds = args[3] as number;
+    return [];
+  },
+}));
 vi.mock("../hooks/useASSSubtitles", () => ({
-  useASSSubtitles: () => ({ isActive: false }),
+  useASSSubtitles: (...args: unknown[]) => {
+    subtitleTimeline.assOffsetSeconds = args[4] as number;
+    return { isActive: false };
+  },
 }));
 vi.mock("../hooks/useSubtitleAppearance", () => ({
   useSubtitleAppearance: () => ({
@@ -115,6 +127,8 @@ describe("VideoPlayer plan failure recovery", () => {
   beforeEach(() => {
     realtimeOptions.current = null;
     controls.current = null;
+    subtitleTimeline.textOffsetSeconds = null;
+    subtitleTimeline.assOffsetSeconds = null;
     vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
     vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
     vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
@@ -169,12 +183,54 @@ describe("VideoPlayer plan failure recovery", () => {
     fireEvent.error(video);
     expect(onPlanFailure).toHaveBeenCalledTimes(2);
   });
+
+  it("does not retry an auto-selected subtitle after its replan is refused", async () => {
+    const onSubtitleTrackChange = vi.fn();
+    const sidecarTrack: PlayerSubtitleInfo = {
+      index: 2,
+      media_file_id: 7,
+      track_id: "file:7:subtitle:2",
+      language: "en",
+      codec: "srt",
+      label: "English",
+      source: "external",
+      url: "/stream/session-1/subtitles/2.vtt",
+    };
+    const { rerenderPlayer } = renderPlayer({
+      subtitleUrls: [sidecarTrack],
+      subtitleMode: "always",
+      preferredSubtitleLanguage: "en",
+      onSubtitleTrackChange,
+    });
+
+    await waitFor(() => expect(onSubtitleTrackChange).toHaveBeenCalledOnce());
+    expect(onSubtitleTrackChange).toHaveBeenCalledWith(2, 0);
+
+    rerenderPlayer({ replanError: "Silo could not apply the subtitle selection." });
+
+    await waitFor(() => expect(controls.current?.activeSubtitleIndex).toBeNull());
+    expect(onSubtitleTrackChange).toHaveBeenCalledOnce();
+
+    const nextPlan = fixturePlanV3({
+      ...directPlan,
+      plan_id: "plan:next-session",
+      plan_attempt_key: "v3:next-session",
+      session_id: "session-2",
+    });
+    rerenderPlayer({ sessionId: "session-2", plan: nextPlan, replanError: null });
+
+    await waitFor(() => expect(controls.current?.activeSubtitleIndex).toBe(2));
+    expect(onSubtitleTrackChange).toHaveBeenCalledTimes(2);
+    expect(onSubtitleTrackChange).toHaveBeenLastCalledWith(2, 0);
+  });
 });
 
 describe("VideoPlayer native HLS timeline", () => {
   beforeEach(() => {
     realtimeOptions.current = null;
     controls.current = null;
+    subtitleTimeline.textOffsetSeconds = null;
+    subtitleTimeline.assOffsetSeconds = null;
     vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
     vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
     vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
@@ -214,6 +270,8 @@ describe("VideoPlayer native HLS timeline", () => {
     fireEvent.loadedMetadata(video);
 
     expect(video.currentTime).toBe(7);
+    expect(subtitleTimeline.textOffsetSeconds).toBe(0);
+    expect(subtitleTimeline.assOffsetSeconds).toBe(0);
   });
 });
 

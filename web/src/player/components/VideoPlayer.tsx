@@ -255,7 +255,7 @@ export function VideoPlayer({
   const lastRecoveryRef = useRef(0);
   const reportedPlanFailureKeyRef = useRef<string | null>(null);
   const transportFailedForPlanRevisionRef = useRef<number | null>(null);
-  const streamOriginRef = useRef(0);
+  const timelineOffsetRef = useRef(0);
   const subtitleFetchAnchorRef = useRef(initialPosition);
   const backendDurationRef = useRef(propDuration ?? 0);
   const autoEnterPictureInPictureAttemptedRef = useRef(false);
@@ -490,7 +490,7 @@ export function VideoPlayer({
     roomConnection: watchTogether,
     sessionId,
     videoRef,
-    streamOriginRef,
+    streamOriginRef: timelineOffsetRef,
   });
   const roomPlaybackActive = !!watchTogetherRoomId && !watchTogether.closedReason;
   const roomSyncWaiting = watchTogether.room?.playback_state === "waiting";
@@ -531,14 +531,14 @@ export function VideoPlayer({
   const isCopyOriginalHLS = plan.delivery === "server_remux_hls";
 
   // Keep the player-local clock mapped onto the canonical media timeline.
-  const streamOriginSeconds = plan.timeline.stream_origin_seconds;
-  streamOriginRef.current = streamOriginSeconds;
+  const timelineOffsetSeconds = plan.timeline.timeline_offset_seconds;
+  timelineOffsetRef.current = timelineOffsetSeconds;
 
   // Media-time position playback is heading to, for consumers that need a
   // position before the element has media loaded (when currentTime still
   // reads 0): an in-flight seek target, else the session's start position.
   subtitleFetchAnchorRef.current =
-    pendingSeekTime ?? toMediaTime(effectiveInitialPosition, streamOriginSeconds);
+    pendingSeekTime ?? toMediaTime(effectiveInitialPosition, timelineOffsetSeconds);
 
   useEffect(() => {
     if (backendDuration > 0) {
@@ -701,7 +701,7 @@ export function VideoPlayer({
       setPendingSeekTime(seconds);
       setCurrentTime(seconds);
 
-      const nativeSeconds = toPlayerTime(seconds, streamOriginRef.current);
+      const nativeSeconds = toPlayerTime(seconds, timelineOffsetRef.current);
       if (canSeekAnywhere) {
         if (isHlsStream) video.currentTime = nativeSeconds;
         else handleSeek(nativeSeconds);
@@ -773,17 +773,20 @@ export function VideoPlayer({
   // before dispatching the seek request.
   const handleKeyboardSeek = useCallback(
     (seconds: number) => {
-      handlePlayerSeek(toMediaTime(seconds, streamOriginRef.current));
+      handlePlayerSeek(toMediaTime(seconds, timelineOffsetRef.current));
     },
     [handlePlayerSeek],
   );
 
   // -- Watch progress reporting --
-  const flushWatchProgress = useWatchProgress(sessionId, videoRef, streamOriginRef);
+  const flushWatchProgress = useWatchProgress(sessionId, videoRef, timelineOffsetRef);
 
   const buildExitState = useCallback((): PlaybackExitState => {
     const video = videoRef.current;
-    const positionSeconds = toMediaTime(video?.currentTime ?? currentTime, streamOriginRef.current);
+    const positionSeconds = toMediaTime(
+      video?.currentTime ?? currentTime,
+      timelineOffsetRef.current,
+    );
     // positionSeconds is media time, so the runtime paired with it must be too.
     const durationSeconds = mediaDurationSeconds(backendDurationRef.current, duration);
 
@@ -1588,7 +1591,7 @@ export function VideoPlayer({
       setAwaitingFirstFrame(false);
     };
     const onTimeUpdate = () => {
-      const nextTime = toMediaTime(video.currentTime, streamOriginRef.current);
+      const nextTime = toMediaTime(video.currentTime, timelineOffsetRef.current);
       const resolved = resolvePendingSeekTime(nextTime, pendingSeekTime);
       setCurrentTime(resolved.currentTime);
       if (resolved.pendingSeekTime !== pendingSeekTime) {
@@ -1602,7 +1605,7 @@ export function VideoPlayer({
     };
     const onSeeked = () => {
       setPendingSeekTime(null);
-      setCurrentTime(toMediaTime(video.currentTime, streamOriginRef.current));
+      setCurrentTime(toMediaTime(video.currentTime, timelineOffsetRef.current));
       markPlaybackStarted();
       clearBuffering();
       if (roomSyncWaiting && watchTogetherSync.attachedSessionId === sessionId) {
@@ -1864,7 +1867,7 @@ export function VideoPlayer({
     videoRef,
     effectiveSubtitleTracks,
     activeSubtitleIndex,
-    streamOriginSeconds,
+    timelineOffsetSeconds,
     subtitleDelayMs,
     durationRef,
     subtitleFetchAnchorRef,
@@ -1879,7 +1882,7 @@ export function VideoPlayer({
     subtitleUrls,
     activeSubtitleIndex,
     isDetached,
-    streamOriginSeconds,
+    timelineOffsetSeconds,
     subtitleDelayMs,
   );
 
@@ -1932,13 +1935,23 @@ export function VideoPlayer({
   // A refused replan leaves the previous stream playing, so the selection has
   // to roll back too: without this the menu would keep claiming a track is on
   // that the server never rendered, and re-picking it would be suppressed as an
-  // unchanged selection instead of retrying.
+  // unchanged selection instead of retrying. Pin the accepted selection just
+  // like a manual choice so auto-selection does not immediately request the
+  // rejected track again; a later user choice can still retry it explicitly.
   useEffect(() => {
     if (requestedSubtitleTrackChangeRef.current && replanError && !replanning) {
+      subtitleSelectionWasManualRef.current = true;
       setActiveSubtitleIndex(plan.selected_tracks.subtitle?.index ?? null);
       requestedSubtitleTrackChangeRef.current = null;
     }
   }, [plan.selected_tracks.subtitle?.index, replanError, replanning]);
+
+  // A refusal pin belongs only to the session that rejected the automatic
+  // selection. Clear it before the auto-selection effect evaluates a new
+  // session so the viewer's persisted subtitle mode applies to the next title.
+  useEffect(() => {
+    subtitleSelectionWasManualRef.current = false;
+  }, [sessionId]);
 
   // -- Auto-select subtitle track based on mode --
   useEffect(() => {
@@ -1991,11 +2004,8 @@ export function VideoPlayer({
     audioTracks,
     activeAudioIndex,
     selectedVersion,
+    sessionId,
   ]);
-
-  useEffect(() => {
-    subtitleSelectionWasManualRef.current = false;
-  }, [sessionId]);
 
   // -- Control callbacks --
   const handlePlayPause = useCallback(() => {
