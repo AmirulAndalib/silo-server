@@ -267,7 +267,7 @@ export function GlobalSearch({
         searchInputRef.current?.focus();
         return;
       }
-      setSelectedIndex((nextIndex + items.length) % items.length);
+      setSelectedIndex(((nextIndex % items.length) + items.length) % items.length);
     },
     [items.length],
   );
@@ -306,7 +306,7 @@ export function GlobalSearch({
                   moveResultFocus(selectedIndex + 1);
                 } else if (e.key === "ArrowUp") {
                   e.preventDefault();
-                  moveResultFocus(selectedIndex - 1);
+                  moveResultFocus(selectedIndex < 0 ? items.length - 1 : selectedIndex - 1);
                 } else if (e.key === "Enter" && selectedIndex >= 0 && items[selectedIndex]) {
                   e.preventDefault();
                   handlePickItem(items[selectedIndex].content_id);

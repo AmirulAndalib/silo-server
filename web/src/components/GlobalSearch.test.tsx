@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -231,12 +231,15 @@ describe("GlobalSearch", () => {
     expect(mocks.navigate).toHaveBeenCalledWith("/item/ebook%201");
   });
 
-  it("moves real focus through an accessible result list while keeping Play independent", async () => {
+  it("moves real focus through an accessible result list while keeping Play independent", () => {
     mocks.useQuery.mockReturnValue({
       data: {
-        total: 1,
+        total: 2,
         has_more: false,
-        items: [{ ...browseFixture, play_content_id: "movie-99" }],
+        items: [
+          { ...browseFixture, play_content_id: "movie-99" },
+          { ...browseFixture, content_id: "movie-100", title: "Second Movie" },
+        ],
       },
       isFetching: false,
       isError: false,
@@ -252,13 +255,14 @@ describe("GlobalSearch", () => {
     );
 
     const input = screen.getByRole("searchbox", { name: "Search" });
-    const result = screen.getByRole("button", { name: /Test Movie/i });
+    const lastResult = screen.getByRole("button", { name: /Second Movie/i });
     expect(input).toHaveAttribute("aria-controls", "global-search-library-results");
     expect(screen.getByRole("list", { name: "Library search results" })).toBeInTheDocument();
     input.focus();
-    await userEvent.keyboard("{ArrowDown}");
-    expect(result).toHaveFocus();
-    expect(result).toHaveAttribute("aria-current", "true");
+    expect(screen.queryByRole("button", { current: true })).not.toBeInTheDocument();
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(lastResult).toHaveFocus();
+    expect(lastResult).toHaveAttribute("aria-current", "true");
     expect(screen.getByRole("link", { name: "Play Test Movie" })).toBeInTheDocument();
   });
 });

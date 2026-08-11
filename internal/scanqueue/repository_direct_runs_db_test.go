@@ -95,10 +95,19 @@ func TestStaleJanitorFailsDirectRunsAndRequeuesQueuedRuns(t *testing.T) {
 		UPDATE scan_runs
 		SET started_at = $2, heartbeat_at = $2, updated_at = $2
 		WHERE id = ANY($1)`,
-		[]string{directID, acceptedDirectID, queuedID},
+		[]string{directID, queuedID},
 		staleAt,
 	); err != nil {
-		t.Fatalf("make scan runs stale: %v", err)
+		t.Fatalf("make started scan runs stale: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE scan_runs
+		SET requested_at = $2, started_at = NULL, heartbeat_at = NULL, updated_at = $2
+		WHERE id = $1`,
+		acceptedDirectID,
+		staleAt,
+	); err != nil {
+		t.Fatalf("make accepted direct scan run stale: %v", err)
 	}
 
 	service := NewService(repo, nil, nil, nil, ctx, 1, 1)
