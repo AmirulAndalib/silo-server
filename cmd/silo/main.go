@@ -721,6 +721,7 @@ func main() {
 			handler = srv.Handler()
 		} else {
 			srv := transcodenode.NewServer(watcher, tracker)
+			srv.SetInputPathAuthorizer(transcodenode.NewMediaRootAuthorizer(catalog.NewFolderRepository(pool)))
 			srv.SetFFmpegLogSink(playback.NewSlogFFmpegLogSink(slog.Default(), nodeID))
 			// Read jellycompat reconstruction recipes central wrote at transcode
 			// start, so this node can rebuild a Jellyfin transcode after its own
@@ -2060,20 +2061,26 @@ func main() {
 			// Download prepare-to-file pipeline (Phase 3): a durable, leased encode
 			// queue hosted on the task manager. Built here (before Start) and shared
 			// with the API via deps so the download service can enqueue jobs.
+			liveDownloadConfig := func() *config.Config {
+				if deps.LiveConfig != nil {
+					if c := deps.LiveConfig(); c != nil {
+						return c
+					}
+				}
+				return deps.Config
+			}
+			var downloadWorkPlanner nodepool.TranscodeWorkPlanner
+			if deps.NodePlanner != nil {
+				downloadWorkPlanner = deps.NodePlanner
+			}
+			preparer := downloads.NewNodeAwarePreparer(downloads.NewPlaybackPreparer(), downloadWorkPlanner, liveDownloadConfig)
 			artifactMgr := downloads.NewArtifactManager(
 				downloads.NewArtifactRepository(deps.DB),
 				downloads.NewRepository(deps.DB),
 				deps.FileRepo,
-				downloads.NewPlaybackPreparer(),
+				preparer,
 				deps.NodeID,
-				func() *config.Config {
-					if deps.LiveConfig != nil {
-						if c := deps.LiveConfig(); c != nil {
-							return c
-						}
-					}
-					return deps.Config
-				},
+				liveDownloadConfig,
 				func(ctx context.Context, d *downloads.Download) {
 					if deps.EventsHub == nil {
 						return

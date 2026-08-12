@@ -135,6 +135,18 @@ transcoding.
 Multi-host operators can use those examples as a starting point for a dedicated worker Compose
 file connected to the deployment's shared PostgreSQL and Redis services.
 
+Proxy nodes serve source downloads from the same absolute media paths used by direct playback.
+Prepared-download work can also run on transcode nodes and the resulting file can be served by a
+proxy node when `download.artifact_dir` is explicitly configured. Mount that directory at the same
+absolute path on the API, transcode, and proxy nodes. With the default node-local artifact directory,
+Silo keeps preparation and prepared-file delivery on the API node. Downloads with a configured
+server-wide or per-user bandwidth limit also remain API-local so those aggregate limits stay exact.
+Clients discover distributed delivery through `proxy_delivery` on the download capability response.
+When it is true, they may opt into `GET` or `HEAD /api/v1/downloads/{id}/file-proxy` and
+`/api/v1/direct-download-proxy`; those routes may return a temporary redirect to a proxy node. The
+established `/file` and `/direct-download` routes keep serving bytes directly with their existing
+status-code contract.
+
 ### Deployment Notes
 
 The default compose stack intentionally bundles PostgreSQL and Redis for ease of setup and assumes a fresh install without those services already available. If you already operate PostgreSQL and Redis, omit those examples from compose and point Silo at your existing infrastructure instead. For serious installs, PostgreSQL is better on a separate VM or a managed service so upgrades, tuning, and backups are isolated from the app host. Redis can stay local for many installs, but externalizing it is also reasonable if you already operate shared infrastructure.
@@ -158,7 +170,7 @@ through the admin UI after first launch.
 | `integrated` | Full server: API + frontend + scanner + transcode (default) |
 | `api` | API server only, no local transcoding |
 | `proxy` | Stream proxy node that connects to the shared deployment database and Redis |
-| `transcode` | HLS transcode worker node that connects to the shared deployment database and Redis |
+| `transcode` | HLS and prepared-download worker node that connects to the shared deployment database and Redis |
 
 ### PostgreSQL Auto-Tuning
 

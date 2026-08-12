@@ -19,6 +19,8 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/Silo-Server/silo-server/internal/chapterthumbs"
+	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/downloadprepare"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -79,11 +81,24 @@ const sessionIdleTTL = 10 * time.Minute
 // sessionReapInterval is how often the idle reaper sweeps for stale jobs.
 const sessionReapInterval = time.Minute
 
+// Session tracking is monitoring-only and must never make a healthy node's
+// control-plane response depend on Redis latency.
+const sessionTrackingOperationTimeout = 2 * time.Second
+
+type sessionTracker interface {
+	Track(context.Context, nodesessions.SessionInfo)
+	Remove(context.Context, string)
+	Cleanup(context.Context)
+	NodeURL() string
+	NodeName() string
+}
+
 // Server is the HTTP handler for transcode mode.
 type Server struct {
 	watcher    *nodeconfig.Watcher
-	tracker    *nodesessions.Tracker
+	tracker    sessionTracker
 	ffmpegSink playback.FFmpegLogSink
+	inputPaths InputPathAuthorizer
 	sessions   map[string]*playback.TranscodeSession
 	// lastAccess records, per registered session id, when a manifest or segment
 	// request last touched the job (registration counts as the first access).
@@ -175,9 +190,13 @@ func (s *Server) restartSessionLocked(ctx context.Context, sessionID string, ses
 
 // NewServer creates a new transcode server.
 func NewServer(watcher *nodeconfig.Watcher, tracker *nodesessions.Tracker) *Server {
+	var trackerImpl sessionTracker
+	if tracker != nil {
+		trackerImpl = tracker
+	}
 	s := &Server{
 		watcher:    watcher,
-		tracker:    tracker,
+		tracker:    trackerImpl,
 		sessions:   make(map[string]*playback.TranscodeSession),
 		lastAccess: make(map[string]time.Time),
 	}
@@ -373,6 +392,12 @@ func (s *Server) SetRecipeStore(store recipeStore) {
 	s.recipeStore = store
 }
 
+// SetInputPathAuthorizer wires the library-root authority used by every node
+// endpoint that accepts an FFmpeg input path.
+func (s *Server) SetInputPathAuthorizer(authorizer InputPathAuthorizer) {
+	s.inputPaths = authorizer
+}
+
 // Handler returns the chi.Router with all transcode routes.
 func (s *Server) Handler() http.Handler {
 	s.startIdleReaper()
@@ -383,6 +408,7 @@ func (s *Server) Handler() http.Handler {
 		r.Use(s.requireBearer)
 		r.Get("/hw-capabilities", s.handleHWCapabilities)
 		r.Post("/chapter-thumbnails/extract", s.handleChapterThumbnailExtract)
+		r.Post("/downloads/prepare", s.handleDownloadPrepare)
 		r.Post("/transcode/start", s.handleStart)
 		r.Delete("/transcode/{session_id}", s.handleStop)
 		r.Get("/transcode/{session_id}/master.m3u8", s.handleManifest)
@@ -391,6 +417,88 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/status", s.handleStatus)
 	})
 	return r
+}
+
+func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
+	var req downloadprepare.Request
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.JobID) == "" || strings.TrimSpace(req.InputPath) == "" || strings.TrimSpace(req.OutputPath) == "" {
+		http.Error(w, "job_id, input_path, and output_path are required", http.StatusBadRequest)
+		return
+	}
+
+	cfg := s.watcher.Config()
+	if cfg == nil {
+		http.Error(w, "node not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.requireApprovedInputPath(w, r, req.InputPath) {
+		return
+	}
+	artifactRoot := config.EffectiveDownloadArtifactDir(cfg.Download.ArtifactDir, cfg.Playback.TranscodeDir)
+	if err := os.MkdirAll(artifactRoot, 0o755); err != nil {
+		http.Error(w, "artifact directory unavailable", http.StatusInternalServerError)
+		return
+	}
+	if !pathWithinRoot(artifactRoot, req.OutputPath) || !strings.EqualFold(filepath.Ext(req.OutputPath), ".mp4") {
+		http.Error(w, "output_path must be an mp4 under the configured artifact directory", http.StatusBadRequest)
+		return
+	}
+
+	jobCtx := r.Context()
+	s.activeJobs.Add(1)
+	defer s.activeJobs.Add(-1)
+	if s.tracker != nil {
+		finishTracking := s.trackDownloadPrepare(jobCtx, nodesessions.SessionInfo{
+			SessionID:  "download-" + req.JobID,
+			NodeURL:    s.tracker.NodeURL(),
+			NodeName:   s.tracker.NodeName(),
+			Type:       "download_prepare",
+			CodecVideo: req.TargetCodecVideo,
+			CodecAudio: req.TargetCodecAudio,
+			Resolution: req.TargetResolution,
+			StartedAt:  time.Now().UTC().Format(time.RFC3339),
+		})
+		defer finishTracking()
+	}
+
+	opts := req.TranscodeOpts(cfg.Playback.FFmpegPath, cfg.Playback.HWAccel, cfg.Playback.HWDevice, s.ffmpegSink)
+	if err := playback.PrepareFile(jobCtx, opts, req.OutputPath); err != nil {
+		if jobCtx.Err() == nil {
+			slog.ErrorContext(jobCtx, "prepare download artifact", "component", "transcodenode", "job_id", req.JobID, "error", err)
+		}
+		http.Error(w, "failed to prepare download artifact", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": req.JobID, "status": "ready"})
+}
+
+// trackDownloadPrepare runs the monitoring lifecycle off the request path.
+// One goroutine owns both operations so Remove can never overtake Track, even
+// when the encode completes before Redis responds. finish only signals that
+// the job ended; it never waits for either bounded Redis operation.
+func (s *Server) trackDownloadPrepare(ctx context.Context, info nodesessions.SessionInfo) func() {
+	finished := make(chan struct{})
+	var finishOnce sync.Once
+	baseCtx := context.WithoutCancel(ctx)
+	go func() {
+		trackCtx, cancelTrack := context.WithTimeout(baseCtx, sessionTrackingOperationTimeout)
+		s.tracker.Track(trackCtx, info)
+		cancelTrack()
+
+		<-finished
+		removeCtx, cancelRemove := context.WithTimeout(baseCtx, sessionTrackingOperationTimeout)
+		s.tracker.Remove(removeCtx, info.SessionID)
+		cancelRemove()
+	}()
+	return func() {
+		finishOnce.Do(func() { close(finished) })
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -422,8 +530,15 @@ func (s *Server) handleChapterThumbnailExtract(w http.ResponseWriter, r *http.Re
 		writeChapterThumbnailError(w, http.StatusBadRequest, "invalid_request", "input_path is required")
 		return
 	}
+	if !s.requireApprovedInputPath(w, r, req.InputPath) {
+		return
+	}
 
 	cfg := s.watcher.Config()
+	if cfg == nil {
+		writeChapterThumbnailError(w, http.StatusServiceUnavailable, "node_unavailable", "node not configured")
+		return
+	}
 	frame, reason, err := chapterthumbs.ExtractFrame(r.Context(), chapterthumbs.FrameExtractOptions{
 		InputPath:            req.InputPath,
 		SeekSeconds:          req.SeekSeconds,
@@ -456,6 +571,10 @@ func writeChapterThumbnailError(w http.ResponseWriter, status int, reason string
 func (s *Server) requireBearer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.watcher.Config()
+		if cfg == nil {
+			http.Error(w, "node not configured", http.StatusServiceUnavailable)
+			return
+		}
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != cfg.Auth.JWTSecret {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -476,8 +595,15 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session_id and input_path are required", http.StatusBadRequest)
 		return
 	}
+	if !s.requireApprovedInputPath(w, r, req.InputPath) {
+		return
+	}
 
 	cfg := s.watcher.Config()
+	if cfg == nil {
+		http.Error(w, "node not configured", http.StatusServiceUnavailable)
+		return
+	}
 	outputDir := filepath.Join(cfg.Playback.TranscodeDir, req.SessionID)
 
 	opts := playback.TranscodeOpts{
@@ -598,6 +724,24 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) requireApprovedInputPath(w http.ResponseWriter, r *http.Request, path string) bool {
+	if s.inputPaths == nil {
+		http.Error(w, "input path authority unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	allowed, err := s.inputPaths.Allowed(r.Context(), path)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "authorize transcode input path", "component", "transcodenode", "error", err)
+		http.Error(w, "input path authority unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	if !allowed {
+		http.Error(w, "input_path must be an approved absolute media file", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
 // reconstructFromToken rebuilds a transcode session this node lost to its own
 // restart. The proxy forwards the client's verified stream token in the
 // X-Silo-Stream-Token header; the token carries the full byte-affecting recipe
@@ -615,6 +759,9 @@ func (s *Server) reconstructFromToken(r *http.Request, sessionID string, request
 		return nil
 	}
 	cfg := s.watcher.Config()
+	if cfg == nil {
+		return nil
+	}
 	claims, err := streamtoken.Verify(tokenStr, cfg.Auth.JWTSecret)
 	if err != nil {
 		slog.WarnContext(r.Context(), "transcode node reconstruct: invalid stream token", "component", "transcodenode", "error", err,
@@ -676,6 +823,16 @@ func (s *Server) reconstructFromToken(r *http.Request, sessionID string, request
 // single-flight in reconstructFromToken, so it is the sole writer racing to
 // register sessionID. Returns nil if the spawn fails or the slot wait is canceled.
 func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSegment int, card playback.RecipeCard) *playback.TranscodeSession {
+	if s.inputPaths == nil {
+		slog.ErrorContext(r.Context(), "transcode node reconstruct input authority unavailable", "component", "transcodenode", "session", sessionID)
+		return nil
+	}
+	allowed, err := s.inputPaths.Allowed(r.Context(), card.InputPath)
+	if err != nil || !allowed {
+		slog.WarnContext(r.Context(), "transcode node reconstruct input rejected", "component", "transcodenode", "session", sessionID, "error", err)
+		return nil
+	}
+
 	// Pace the cold-start burst so a node restart that loses many sessions does not
 	// launch every ffmpeg at once. A client that disconnects while waiting releases
 	// its slot rather than queueing dead work.
@@ -698,6 +855,9 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	}
 
 	cfg := s.watcher.Config()
+	if cfg == nil {
+		return nil
+	}
 	outputDir := filepath.Join(cfg.Playback.TranscodeDir, sessionID)
 	opts := card.TranscodeOpts(outputDir, cfg.Playback.FFmpegPath, s.ffmpegSink)
 	opts.SessionID = sessionID
