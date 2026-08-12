@@ -408,6 +408,9 @@ var defaultJellyfinCompatServerID = uuid.NewSHA1(
 	[]byte("https://silo.local/jellycompat"),
 ).String()
 
+const playbackTranscodeDirSettingKey = "playback.transcode_dir"
+const downloadArtifactDirSettingKey = "download.artifact_dir"
+
 // DefaultTranscodeDir is the fallback playback.transcode_dir; download
 // artifacts default to a sibling directory (see EffectiveDownloadArtifactDir).
 const DefaultTranscodeDir = "/tmp/silo-transcode"

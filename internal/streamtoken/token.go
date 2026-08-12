@@ -49,6 +49,16 @@ type Claims struct {
 	UserID      int    `json:"uid,omitempty"`
 	ProfileID   string `json:"pid,omitempty"`
 	MediaFileID int    `json:"mfid,omitempty"`
+	// DownloadArtifactID is an opaque transcode-node artifact handle. For
+	// download tokens TranscodeNode is its authenticated origin; MediaPath stays
+	// empty so node-local filesystem paths never leave the owning node.
+	DownloadArtifactID string `json:"daid,omitempty"`
+	// DownloadArtifactRowID identifies the authoritative database row so a
+	// proxy can fence and requeue a signed remote locator that returns 404.
+	DownloadArtifactRowID string `json:"darid,omitempty"`
+	// DownloadFilename is the client-facing attachment name. Remote artifact
+	// ids are internal attempt handles and must never become saved filenames.
+	DownloadFilename string `json:"dfn,omitempty"`
 
 	// Reconstruction recipe — the byte-affecting encode parameters, mirroring the
 	// former playback.RecipeCard. Zero for direct/remux tokens, which reconstruct

@@ -718,6 +718,15 @@ func main() {
 		var handler http.Handler
 		if mode == "proxy" {
 			srv := proxy.NewServer(watcher, tracker)
+			srv.SetRemoteArtifactMissReporter(downloads.NewArtifactManager(
+				downloads.NewArtifactRepository(pool),
+				downloads.NewRepository(pool),
+				nil,
+				downloads.NewPlaybackPreparer(),
+				nodeID,
+				watcher.Config,
+				nil,
+			))
 			handler = srv.Handler()
 		} else {
 			srv := transcodenode.NewServer(watcher, tracker)
@@ -921,8 +930,14 @@ func main() {
 		proxyPool := nodepool.NewProxyPool()
 		transcodePool := nodepool.NewTranscodePool()
 
-		proxyNodes, _ := nodeRepo.ListEnabled(context.Background(), nodepool.NodeTypeProxy)
-		transcodeNodes, _ := nodeRepo.ListEnabled(context.Background(), nodepool.NodeTypeTranscode)
+		proxyNodes, err := nodeRepo.ListEnabled(appCtx, nodepool.NodeTypeProxy)
+		if err != nil {
+			log.Fatalf("load enabled proxy nodes: %v", err)
+		}
+		transcodeNodes, err := nodeRepo.ListEnabled(appCtx, nodepool.NodeTypeTranscode)
+		if err != nil {
+			log.Fatalf("load enabled transcode nodes: %v", err)
+		}
 		proxyPool.SetNodes(proxyNodes)
 		transcodePool.SetNodes(transcodeNodes)
 
@@ -2074,6 +2089,9 @@ func main() {
 				downloadWorkPlanner = deps.NodePlanner
 			}
 			preparer := downloads.NewNodeAwarePreparer(downloads.NewPlaybackPreparer(), downloadWorkPlanner, liveDownloadConfig)
+			if deps.NodeRepo != nil {
+				preparer.SetOriginLookup(deps.NodeRepo)
+			}
 			artifactMgr := downloads.NewArtifactManager(
 				downloads.NewArtifactRepository(deps.DB),
 				downloads.NewRepository(deps.DB),

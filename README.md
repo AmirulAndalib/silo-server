@@ -136,16 +136,20 @@ Multi-host operators can use those examples as a starting point for a dedicated 
 file connected to the deployment's shared PostgreSQL and Redis services.
 
 Proxy nodes serve source downloads from the same absolute media paths used by direct playback.
-Prepared-download work can also run on transcode nodes and the resulting file can be served by a
-proxy node when `download.artifact_dir` is explicitly configured. Mount that directory at the same
-absolute path on the API, transcode, and proxy nodes. With the default node-local artifact directory,
-Silo keeps preparation and prepared-file delivery on the API node. Downloads with a configured
-server-wide or per-user bandwidth limit also remain API-local so those aggregate limits stay exact.
+Prepared-download work can also run on transcode nodes. Each selected transcode node retains its
+result on node-local storage and exposes it only through Silo's authenticated internal artifact API;
+the paired proxy relays those bytes, so no shared artifact mount is required. Dedicated transcode
+nodes default to retaining prepared downloads in a protected directory inside the transcode volume
+captured at process startup. `download.artifact_dir` overrides that location for both dedicated
+transcode nodes and the integrated/API-local fallback, so mount the configured path on every process
+that prepares downloads. Changing either artifact-path setting requires a restart. Downloads with a
+configured server-wide or per-user bandwidth limit remain API-local so those aggregate limits stay exact.
 Clients discover distributed delivery through `proxy_delivery` on the download capability response.
 When it is true, they may opt into `GET` or `HEAD /api/v1/downloads/{id}/file-proxy` and
 `/api/v1/direct-download-proxy`; those routes may return a temporary redirect to a proxy node. The
 established `/file` and `/direct-download` routes keep serving bytes directly with their existing
-status-code contract.
+status-code contract; for a node-local prepared artifact, the API itself performs the authenticated
+relay on that fallback route.
 
 ### Deployment Notes
 
