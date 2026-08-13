@@ -21,6 +21,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 const testSecret = "node-reconstruct-test-secret"
@@ -919,5 +920,44 @@ func TestHandleStartUsesConfiguredHWDeviceList(t *testing.T) {
 	defer session.CloseProcess()
 	if got := session.Opts().HWDevice; got != "/dev/dri/renderD888" {
 		t.Fatalf("session HWDevice = %q, want one concrete device from the configured list", got)
+	}
+}
+
+func TestHandleStartRejectsIncompleteOrStaleToneMapRecipe(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*TranscodeStartRequest)
+	}{
+		{name: "mode without policy", mutate: func(request *TranscodeStartRequest) {
+			request.ToneMapMode = tonemap.ModeSoftware
+		}},
+		{name: "stale version", mutate: func(request *TranscodeStartRequest) {
+			request.ToneMapPolicy = tonemap.PolicySoftwareOnly
+			request.ToneMapMode = tonemap.ModeSoftware
+			request.ToneMapSourceKind = tonemap.SourcePQ
+			request.ToneMapRecipeVersion = "stale"
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			request := TranscodeStartRequest{
+				SessionID: "tone-map-invalid", InputPath: "/media/movie.mkv",
+				TargetCodecVideo: "h264", TargetCodecAudio: "aac", SegmentDuration: 2,
+			}
+			tt.mutate(&request)
+			body, err := json.Marshal(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recorder := httptest.NewRecorder()
+			server.handleStart(recorder, httptest.NewRequest(http.MethodPost, "/transcode/start", bytes.NewReader(body)))
+			if recorder.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+			if server.activeJobs.Load() != 0 || len(server.sessions) != 0 {
+				t.Fatal("invalid tone-map recipe started a node job")
+			}
+		})
 	}
 }

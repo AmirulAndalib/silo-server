@@ -19,6 +19,12 @@ func (p *recordingEncodePreparer) PrepareFile(_ context.Context, _ string, _ pla
 	return PreparedArtifact{OutputPath: outputPath, FileSize: 8}, nil
 }
 
+type staticDownloadSettings map[string]string
+
+func (s staticDownloadSettings) GetAll(context.Context) (map[string]string, error) {
+	return s, nil
+}
+
 type recordingRemotePreparer struct {
 	nodeURL   string
 	secret    string
@@ -203,6 +209,24 @@ func TestNodeAwarePreparerFallsBackLocallyWithoutEligibleCapacity(t *testing.T) 
 	prepared, err := p.PrepareFile(context.Background(), "artifact-2", playback.TranscodeOpts{}, "/artifacts/job-2.mp4")
 	if err != nil || prepared.OutputPath == "" || local.calls != 1 {
 		t.Fatalf("prepared=%+v err=%v local calls=%d", prepared, err, local.calls)
+	}
+}
+
+func TestNodeAwarePreparerHonorsDisabledLocalFallback(t *testing.T) {
+	limit := 1
+	pool := nodepool.NewTranscodePool()
+	pool.SetNodes([]*nodepool.Node{{URL: "http://full", Enabled: true, Healthy: true, ActiveJobs: 1, MaxJobs: &limit}})
+	local := &recordingEncodePreparer{}
+	cfg := &config.Config{}
+	cfg.Auth.JWTSecret = "secret"
+	p := NewNodeAwarePreparer(local, nodepool.NewPlanner(nodepool.NewProxyPool(), pool), func() *config.Config { return cfg })
+	p.SetSettingsReader(staticDownloadSettings{"playback.local_transcode_fallback": "false"})
+
+	if _, err := p.PrepareFile(context.Background(), "artifact-no-fallback", playback.TranscodeOpts{}, "/artifacts/job.mp4"); err == nil {
+		t.Fatal("expected unavailable-node error with local fallback disabled")
+	}
+	if local.calls != 0 {
+		t.Fatalf("local calls = %d, want 0", local.calls)
 	}
 }
 

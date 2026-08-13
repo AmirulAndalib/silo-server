@@ -8,6 +8,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 // enumeratingNodePlannerV3 is a SessionPlanner stub that also exposes pooled
@@ -68,6 +69,29 @@ func TestHLSPlanningRegistryV3WithoutEnumeratorIsLocal(t *testing.T) {
 
 	if registry := handler.hlsPlanningRegistryV3(context.Background()); registry != local {
 		t.Fatal("a planner without node enumeration must plan from the local registry")
+	}
+}
+
+func TestHLSPlanningRegistryV3EnablesValidatedLocalToneMapWithoutRestart(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	local := playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{
+		Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+	}})
+	presetLocalRegistryV3(handler, local)
+	handler.v3ToneMapCapabilities = tonemap.Capabilities{{
+		Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	}}
+	handler.v3ToneMapOnce.Do(func() {})
+	settings := &mutablePlaybackSettingsV3{values: map[string]string{}}
+	handler.SettingsRepo = settings
+
+	if handler.hlsPlanningRegistryV3(context.Background()).Available(playback.TransformationHDRToSDRToneMapV3) {
+		t.Fatal("disabled tone-map policy widened the local transformation registry")
+	}
+	settings.values["playback.transcode_software_tone_map_enabled"] = "true"
+	if !handler.hlsPlanningRegistryV3(context.Background()).Available(playback.TransformationHDRToSDRToneMapV3) {
+		t.Fatal("enabled validated tone-map executor was not available without restart")
 	}
 }
 

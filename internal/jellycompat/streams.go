@@ -25,6 +25,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
 
@@ -231,19 +232,24 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 		}
 		upstreamSession, upstreamErr := h.sessionMgr.GetSession(playSession.UpstreamSessionID)
 		if upstreamErr == nil {
-			plan := h.NodePlanner.PlanSession(playSession.UpstreamSessionID, upstreamSession.TranscodeNodeURL, true, source.Version.Bitrate)
+			if h.fileResolver == nil {
+				failRemoteStart()
+				writeError(w, http.StatusInternalServerError, "ServerError", "File resolver not available")
+				return
+			}
+			file, fileErr := h.fileResolver.GetByID(r.Context(), source.FileID)
+			if fileErr != nil {
+				failRemoteStart()
+				writeError(w, http.StatusNotFound, "NotFound", "Media file not found")
+				return
+			}
+			plan, planErr := h.planCompatTranscodeSession(r.Context(), upstreamSession, file, source.Version.Bitrate, !source.TranscodeAudio)
+			if planErr != nil {
+				failRemoteStart()
+				writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", planErr.Error())
+				return
+			}
 			if tcNode := plan.TranscodeNode; tcNode != nil {
-				if h.fileResolver == nil {
-					failRemoteStart()
-					writeError(w, http.StatusInternalServerError, "ServerError", "File resolver not available")
-					return
-				}
-				file, fileErr := h.fileResolver.GetByID(r.Context(), source.FileID)
-				if fileErr != nil {
-					failRemoteStart()
-					writeError(w, http.StatusNotFound, "NotFound", "Media file not found")
-					return
-				}
 				if err := h.sessionMgr.SetTranscodeNodeURL(playSession.UpstreamSessionID, tcNode.URL); err != nil {
 					failRemoteStart()
 					writeError(w, http.StatusInternalServerError, "ServerError", "Failed to bind transcode node")
@@ -254,6 +260,10 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 					failRemoteStart()
 					if errors.Is(err, errTranscode4KDisallowed) {
 						writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
+						return
+					}
+					if errors.Is(err, errHDRTranscodeUnsupported) {
+						writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", err.Error())
 						return
 					}
 					writeError(w, http.StatusBadGateway, "TranscodeStartFailed", "Transcode node rejected the request")
@@ -287,6 +297,10 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	if err != nil {
 		if errors.Is(err, errTranscode4KDisallowed) {
 			writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
+			return
+		}
+		if errors.Is(err, errHDRTranscodeUnsupported) {
+			writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", err.Error())
 			return
 		}
 		if errors.Is(err, playback.ErrManifestNotReady) {
@@ -339,6 +353,10 @@ func (h *PlaybackHandler) HandleHLSManifest(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		if errors.Is(err, errTranscode4KDisallowed) {
 			writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
+			return
+		}
+		if errors.Is(err, errHDRTranscodeUnsupported) {
+			writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", err.Error())
 			return
 		}
 		if errors.Is(err, playback.ErrManifestNotReady) {
@@ -1672,6 +1690,18 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 	if source.TranscodeAudio {
 		opts.TargetCodecVideo = "copy"
 	}
+	var toneMapCapabilities tonemap.Capabilities
+	if !source.TranscodeAudio {
+		metadata := tonemap.MetadataForFile(file)
+		if metadata.DynamicRange != "" && metadata.DynamicRange != playback.DynamicRangeSDRV3 {
+			toneMapCapabilities = h.localToneMapCapabilities(ctx)
+		}
+		toneMapRecipe, toneMapErr := h.resolveCompatToneMapRecipe(ctx, file, toneMapCapabilities)
+		if toneMapErr != nil {
+			return nil, toneMapErr
+		}
+		toneMapRecipe.apply(&opts)
+	}
 	opts.SegmentDuration = h.compatSegmentDuration()
 
 	// Hold the per-session lifecycle lock across "check existing → spawn →
@@ -1684,9 +1714,39 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 		return existing, nil
 	}
 	transcodeSession, err := playback.StartTranscode(context.WithoutCancel(ctx), opts)
+	if err != nil && opts.ToneMapMode == tonemap.ModeHardware && opts.ToneMapPolicy.Allows(tonemap.ModeSoftware) &&
+		toneMapCapabilities.Supports(tonemap.ModeSoftware, opts.ToneMapSourceKind) {
+		opts.ToneMapMode = tonemap.ModeSoftware
+		opts.ToneMapFilter = toneMapCapabilities.FilterFor(tonemap.ModeSoftware, opts.ToneMapSourceKind)
+		opts.HWAccel = playback.HWAccelNone
+		transcodeSession, err = playback.StartTranscode(context.WithoutCancel(ctx), opts)
+	}
 	if err != nil {
 		unlock()
 		return nil, err
+	}
+	if opts.ToneMapMode != "" {
+		if _, readyErr := transcodeSession.WaitForManifest(playback.ManifestStartupTimeout); readyErr != nil {
+			_ = transcodeSession.Close()
+			if opts.ToneMapMode != tonemap.ModeHardware || !opts.ToneMapPolicy.Allows(tonemap.ModeSoftware) ||
+				!toneMapCapabilities.Supports(tonemap.ModeSoftware, opts.ToneMapSourceKind) {
+				unlock()
+				return nil, readyErr
+			}
+			opts.ToneMapMode = tonemap.ModeSoftware
+			opts.ToneMapFilter = toneMapCapabilities.FilterFor(tonemap.ModeSoftware, opts.ToneMapSourceKind)
+			opts.HWAccel = playback.HWAccelNone
+			transcodeSession, err = playback.StartTranscode(context.WithoutCancel(ctx), opts)
+			if err != nil {
+				unlock()
+				return nil, err
+			}
+			if _, fallbackErr := transcodeSession.WaitForManifest(playback.ManifestStartupTimeout); fallbackErr != nil {
+				_ = transcodeSession.Close()
+				unlock()
+				return nil, fallbackErr
+			}
+		}
 	}
 	// Safe under the lifecycle lock: the re-check above held, so no other path
 	// registered this session.

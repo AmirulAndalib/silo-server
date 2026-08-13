@@ -23,11 +23,13 @@ import (
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/clientip"
+	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/settingsresolve"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 )
 
@@ -55,15 +57,17 @@ const (
 var errSubtitleStoreUnavailableV3 = errors.New("subtitle store unavailable")
 
 type v3NodeCapabilityCache struct {
-	transformations []playback.TransformationV3
-	err             error
-	expiresAt       time.Time
+	transformations     []playback.TransformationV3
+	toneMapCapabilities tonemap.Capabilities
+	err                 error
+	expiresAt           time.Time
 }
 
 type preparedTransportV3 struct {
 	url                string
 	nodeURL            string
 	transportID        string
+	toneMapMode        tonemap.Mode
 	commit             func()
 	rollback           func()
 	applySession       func() (func() error, error)
@@ -138,6 +142,15 @@ func (h *PlaybackHandler) transformationRegistryV3(ctx context.Context) *playbac
 	return h.v3Registry
 }
 
+func (h *PlaybackHandler) localToneMapCapabilitiesV3(ctx context.Context) tonemap.Capabilities {
+	h.v3ToneMapOnce.Do(func() {
+		cfg := h.playbackConfig()
+		resolved := playback.ResolveHWAccelWithFFmpeg(cfg.HWAccel, cfg.FFmpegPath)
+		h.v3ToneMapCapabilities = tonemap.Probe(context.WithoutCancel(ctx), playback.ResolveFFmpegPath(cfg.FFmpegPath), resolved, cfg.HWDevice)
+	})
+	return append(tonemap.Capabilities(nil), h.v3ToneMapCapabilities...)
+}
+
 // remoteTransformationsV3 is the transport-time capability lookup for a
 // selected node. It never trusts memoized failures: those may be planning
 // deadlines far shorter than this path's fetch budget, and rejecting the
@@ -155,16 +168,24 @@ func (h *PlaybackHandler) remoteTransformationsPlanningV3(ctx context.Context, n
 }
 
 func (h *PlaybackHandler) lookupRemoteTransformationsV3(ctx context.Context, nodeURL string, honorCachedFailure bool) ([]playback.TransformationV3, error) {
+	entry, err := h.lookupRemoteCapabilitiesV3(ctx, nodeURL, honorCachedFailure)
+	if err != nil {
+		return nil, err
+	}
+	return append([]playback.TransformationV3(nil), entry.transformations...), nil
+}
+
+func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeURL string, honorCachedFailure bool) (v3NodeCapabilityCache, error) {
 	now := time.Now()
 	h.v3NodeCapabilitiesMu.Lock()
 	entry, ok := h.v3NodeCapabilities[nodeURL]
 	h.v3NodeCapabilitiesMu.Unlock()
 	if ok && now.Before(entry.expiresAt) {
 		if entry.err == nil {
-			return append([]playback.TransformationV3(nil), entry.transformations...), nil
+			return entry, nil
 		}
 		if honorCachedFailure {
-			return nil, entry.err
+			return v3NodeCapabilityCache{}, entry.err
 		}
 	}
 
@@ -176,11 +197,12 @@ func (h *PlaybackHandler) lookupRemoteTransformationsV3(ctx context.Context, nod
 		}
 		h.v3NodeCapabilities[nodeURL] = v3NodeCapabilityCache{err: err, expiresAt: now.Add(v3NodeCapabilityErrorTTL)}
 		h.v3NodeCapabilitiesMu.Unlock()
-		return nil, err
+		return v3NodeCapabilityCache{}, err
 	}
 	entry = v3NodeCapabilityCache{
-		transformations: append([]playback.TransformationV3(nil), info.Transformations...),
-		expiresAt:       now.Add(v3NodeCapabilityTTL),
+		transformations:     append([]playback.TransformationV3(nil), info.Transformations...),
+		toneMapCapabilities: append(tonemap.Capabilities(nil), info.ToneMapCapabilities...),
+		expiresAt:           now.Add(v3NodeCapabilityTTL),
 	}
 	h.v3NodeCapabilitiesMu.Lock()
 	if h.v3NodeCapabilities == nil {
@@ -188,7 +210,15 @@ func (h *PlaybackHandler) lookupRemoteTransformationsV3(ctx context.Context, nod
 	}
 	h.v3NodeCapabilities[nodeURL] = entry
 	h.v3NodeCapabilitiesMu.Unlock()
-	return append([]playback.TransformationV3(nil), entry.transformations...), nil
+	return entry, nil
+}
+
+func (h *PlaybackHandler) remoteToneMapCapabilitiesV3(ctx context.Context, nodeURL string, planning bool) (tonemap.Capabilities, error) {
+	entry, err := h.lookupRemoteCapabilitiesV3(ctx, nodeURL, planning)
+	if err != nil {
+		return nil, err
+	}
+	return append(tonemap.Capabilities(nil), entry.toneMapCapabilities...), nil
 }
 
 // transcodeNodeEnumeratorV3 exposes the pooled transcode nodes whose
@@ -213,6 +243,16 @@ type proxyNodeEnumeratorV3 interface {
 // Without pooled nodes this is exactly the local registry.
 func (h *PlaybackHandler) hlsPlanningRegistryV3(ctx context.Context) *playback.TransformationRegistryV3 {
 	local := h.transformationRegistryV3(ctx)
+	settings := h.plannerSettingsV3(ctx)
+	policy := tonemap.NewPolicy(settings.HardwareToneMapEnabled, settings.SoftwareToneMapEnabled)
+	if policy != tonemap.PolicyNone &&
+		(h.NodePlanner == nil || nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo)) &&
+		len(h.localToneMapCapabilitiesV3(ctx)) > 0 {
+		local = local.WithAdvertised([]playback.TransformationV3{{
+			Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3,
+			RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		}})
+	}
 	enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3)
 	if !ok {
 		return local
@@ -238,6 +278,33 @@ func (h *PlaybackHandler) lazyHLSPlanningRegistryV3(ctx context.Context) func() 
 	return func() *playback.TransformationRegistryV3 {
 		once.Do(func() { registry = h.hlsPlanningRegistryV3(ctx) })
 		return registry
+	}
+}
+
+func (h *PlaybackHandler) hlsToneMapCapabilitiesV3(ctx context.Context) tonemap.Capabilities {
+	capabilities := tonemap.Capabilities(nil)
+	if h.NodePlanner == nil || nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo) {
+		capabilities = h.localToneMapCapabilitiesV3(ctx)
+	}
+	enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3)
+	if !ok {
+		return capabilities
+	}
+	for _, nodeURL := range enumerator.TranscodeNodeURLs() {
+		remote, err := h.remoteToneMapCapabilitiesV3(ctx, nodeURL, true)
+		if err == nil {
+			capabilities = append(capabilities, remote...)
+		}
+	}
+	return capabilities
+}
+
+func (h *PlaybackHandler) lazyHLSToneMapCapabilitiesV3(ctx context.Context) func() tonemap.Capabilities {
+	var once sync.Once
+	var capabilities tonemap.Capabilities
+	return func() tonemap.Capabilities {
+		once.Do(func() { capabilities = h.hlsToneMapCapabilitiesV3(ctx) })
+		return capabilities
 	}
 }
 
@@ -294,9 +361,16 @@ func (h *PlaybackHandler) planNodeSessionV3(ctx context.Context, session *playba
 	}
 	capable := make(map[string]struct{})
 	for nodeURL, advertised := range h.pooledNodeTransformationsV3(ctx, enumerator.TranscodeNodeURLs()) {
-		if validateAdvertisedTransformationsV3(result.Plan, advertised) == nil {
-			capable[nodeURL] = struct{}{}
+		if validateAdvertisedTransformationsV3(result.Plan, advertised) != nil {
+			continue
 		}
+		if planRequiresToneMapV3(result.Plan) {
+			capabilities, err := h.remoteToneMapCapabilitiesV3(ctx, nodeURL, true)
+			if err != nil || !capabilities.Supports(result.ToneMapMode, result.ToneMapSourceKind) {
+				continue
+			}
+		}
+		capable[nodeURL] = struct{}{}
 	}
 	// The predicate runs under the planner lock: a set lookup only.
 	return selector.PlanSessionWith(session.ID, session.TranscodeNodeURL, true, result.TargetBitrateKbps, func(node *nodepool.Node) bool {
@@ -306,6 +380,30 @@ func (h *PlaybackHandler) planNodeSessionV3(ctx context.Context, session *playba
 		_, ok := capable[node.URL]
 		return ok
 	})
+}
+
+func planRequiresToneMapV3(plan *playback.PlanV3) bool {
+	if plan == nil {
+		return false
+	}
+	for _, transformation := range plan.Transformations {
+		if transformation.Executor == playback.ExecutorServerV3 &&
+			transformation.Name == playback.TransformationHDRToSDRToneMapV3 {
+			return true
+		}
+	}
+	return false
+}
+
+func validateToneMapExecutorV3(result playback.PlannerResultV3, capabilities tonemap.Capabilities) error {
+	if !planRequiresToneMapV3(result.Plan) {
+		return nil
+	}
+	if result.ToneMapMode == "" || result.ToneMapSourceKind == "" ||
+		!capabilities.Supports(result.ToneMapMode, result.ToneMapSourceKind) {
+		return fmt.Errorf("executor lacks %s %s tone mapping", result.ToneMapMode, result.ToneMapSourceKind)
+	}
+	return nil
 }
 
 // validateAdvertisedTransformationsV3 verifies that every server-executed
@@ -344,7 +442,27 @@ func (h *PlaybackHandler) HandlePlaybackCapabilityV3(w http.ResponseWriter, r *h
 	response := playback.CapabilityResponseV3{Enabled: true, ProtocolVersions: []int{playback.ProtocolV3}}
 	response.Features = playback.ServerFeaturesV3()
 	response.Deliveries = []playback.DeliveryV3{playback.DeliveryOriginalHTTPV3, playback.DeliveryRemuxProgressiveV3, playback.DeliveryRemuxHLSV3, playback.DeliveryTranscodeHLSV3}
-	response.Transformations = h.transformationRegistryV3(r.Context()).Advertised()
+	settings := h.plannerSettingsV3(r.Context())
+	policy := tonemap.NewPolicy(settings.HardwareToneMapEnabled, settings.SoftwareToneMapEnabled)
+	registry := h.transformationRegistryV3(r.Context())
+	toneMapAvailable := false
+	if policy != tonemap.PolicyNone {
+		for _, capability := range h.hlsToneMapCapabilitiesV3(r.Context()) {
+			if policy.Allows(capability.Mode) && len(capability.SourceKinds) > 0 {
+				toneMapAvailable = true
+				break
+			}
+		}
+		if toneMapAvailable {
+			registry = h.hlsPlanningRegistryV3(r.Context())
+		}
+	}
+	for _, transformation := range registry.Advertised() {
+		if transformation.Name == playback.TransformationHDRToSDRToneMapV3 && !toneMapAvailable {
+			continue
+		}
+		response.Transformations = append(response.Transformations, transformation)
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -433,7 +551,7 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 	result := playback.PlanPlaybackV3(playback.PlannerInputV3{
 		Request: req, RequestedFile: requestedFile, EffectiveFile: effectiveFile,
 		AudioTrackIndex: audioIndex, Settings: settings,
-		Registry: h.transformationRegistryV3(r.Context()), HLSRegistry: h.lazyHLSPlanningRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(),
+		Registry: h.transformationRegistryV3(r.Context()), HLSRegistry: h.lazyHLSPlanningRegistryV3(r.Context()), HLSToneMapCapabilities: h.lazyHLSToneMapCapabilitiesV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(),
 		AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile),
 	})
 	if terminalAllowsAlternateFileV3(result.Terminal) && shouldTryAlternateFileV3(req.QualityPreference) {
@@ -453,7 +571,7 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 				writePlaybackFilePreflightError(w, err)
 				return
 			}
-			result = playback.PlanPlaybackV3(playback.PlannerInputV3{Request: req, RequestedFile: requestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: settings, Registry: h.transformationRegistryV3(r.Context()), HLSRegistry: h.lazyHLSPlanningRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
+			result = playback.PlanPlaybackV3(playback.PlannerInputV3{Request: req, RequestedFile: requestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: settings, Registry: h.transformationRegistryV3(r.Context()), HLSRegistry: h.lazyHLSPlanningRegistryV3(r.Context()), HLSToneMapCapabilities: h.lazyHLSToneMapCapabilitiesV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
 		}
 	}
 	h.clarifyOriginalQuality4KTerminalV3(r.Context(), result.Terminal, requestedFile, !shouldTryAlternateFileV3(req.QualityPreference))
@@ -589,15 +707,17 @@ func (h *PlaybackHandler) startPlannedPlaybackV3(r *http.Request, userID int, pr
 		return playback.DecisionResponseV3{}, &transportErrorV3{reason: "internal_error", message: "Failed to load the initialized playback session.", cause: err}
 	}
 	result.Plan.SessionID = session.ID
-	frozenRecipe, frozenErr := h.freezeExecutableRecipeV3(r.Context(), effectiveFile, result)
-	if frozenErr != nil {
-		abort()
-		return playback.DecisionResponseV3{}, subtitleArtifactErrorV3("Failed to freeze the selected subtitle identity.", frozenErr)
-	}
 	transport, transportErr := h.prepareTransportV3(r, session, effectiveFile, result)
 	if transportErr != nil {
 		abort()
 		return playback.DecisionResponseV3{}, transportErr
+	}
+	applyTransportToneMapModeV3(&result, transport)
+	frozenRecipe, frozenErr := h.freezeExecutableRecipeV3(r.Context(), effectiveFile, result)
+	if frozenErr != nil {
+		transport.rollback()
+		abort()
+		return playback.DecisionResponseV3{}, subtitleArtifactErrorV3("Failed to freeze the selected subtitle identity.", frozenErr)
 	}
 	result.Plan.Stream.URL = transport.url
 	if err := h.attachSubtitleArtifactV3(r.Context(), session.ID, effectiveFile, result.Plan, result.SubtitleTrackIndex, &frozenRecipe); err != nil {
@@ -687,18 +807,33 @@ func (h *PlaybackHandler) prepareTransportV3(r *http.Request, session *playback.
 			if err == nil {
 				err = validateAdvertisedTransformationsV3(result.Plan, transformations)
 			}
+			if err == nil && planRequiresToneMapV3(result.Plan) {
+				capabilities, capabilityErr := h.remoteToneMapCapabilitiesV3(r.Context(), plan.TranscodeNode.URL, false)
+				if capabilityErr != nil {
+					err = capabilityErr
+				} else {
+					err = validateToneMapExecutorV3(result, capabilities)
+				}
+			}
 			if err == nil {
 				transport, transportErr := h.prepareRemoteTransportV3(r, session, file, result, plan, timeline)
-				if transportErr != nil {
-					if releaser, ok := h.NodePlanner.(sessionReservationReleaserV3); ok {
-						releaser.ReleaseSession(session.ID)
-					}
+				if transportErr == nil {
+					return transport, nil
 				}
-				return transport, transportErr
+				if releaser, ok := h.NodePlanner.(sessionReservationReleaserV3); ok {
+					releaser.ReleaseSession(session.ID)
+				}
+				if fallback, attempted, fallbackErr := h.prepareSoftwareToneMapFallbackV3(r, session, file, result, timeline); attempted {
+					return fallback, fallbackErr
+				}
+				return preparedTransportV3{}, transportErr
 			}
 			slog.WarnContext(r.Context(), "protocol v3 transcode node capability mismatch", "node", plan.TranscodeNode.URL, "error", err)
 			if releaser, ok := h.NodePlanner.(sessionReservationReleaserV3); ok {
 				releaser.ReleaseSession(session.ID)
+			}
+			if fallback, attempted, fallbackErr := h.prepareSoftwareToneMapFallbackV3(r, session, file, result, timeline); attempted {
+				return fallback, fallbackErr
 			}
 			if !nodepool.LocalTranscodeFallbackAllowed(r.Context(), h.SettingsRepo) {
 				return preparedTransportV3{}, &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "No transcode node can execute the selected playback recipe.", retryable: true, cause: err}
@@ -717,8 +852,42 @@ func (h *PlaybackHandler) prepareTransportV3(r *http.Request, session *playback.
 		if err := validateAdvertisedTransformationsV3(result.Plan, h.transformationRegistryV3(r.Context()).Advertised()); err != nil {
 			return preparedTransportV3{}, &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "No available transcode executor can run the selected playback recipe.", retryable: true, cause: err}
 		}
+		if planRequiresToneMapV3(result.Plan) {
+			if err := validateToneMapExecutorV3(result, h.localToneMapCapabilitiesV3(r.Context())); err != nil {
+				return preparedTransportV3{}, &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "No available transcode executor can run the selected tone-map recipe.", retryable: true, cause: err}
+			}
+		}
 	}
 	return h.prepareLocalTransportV3(r, session, file, result, timeline)
+}
+
+func canRetrySoftwareToneMapV3(result playback.PlannerResultV3) bool {
+	return result.FrozenSourceMetadata == nil && result.ToneMapMode == tonemap.ModeHardware &&
+		result.ToneMapPolicy.Allows(tonemap.ModeSoftware)
+}
+
+func (h *PlaybackHandler) prepareSoftwareToneMapFallbackV3(r *http.Request, session *playback.Session, file *models.MediaFile, result playback.PlannerResultV3, timeline preparedTimelineV3) (preparedTransportV3, bool, *transportErrorV3) {
+	if !canRetrySoftwareToneMapV3(result) {
+		return preparedTransportV3{}, false, nil
+	}
+	fallbackResult := result
+	fallbackResult.ToneMapMode = tonemap.ModeSoftware
+	if fallbackPlan := h.planNodeSessionV3(r.Context(), session, fallbackResult); fallbackPlan.TranscodeNode != nil {
+		fallback, fallbackErr := h.prepareRemoteTransportV3(r, session, file, fallbackResult, fallbackPlan, timeline)
+		if fallbackErr == nil {
+			return fallback, true, nil
+		}
+		if releaser, ok := h.NodePlanner.(sessionReservationReleaserV3); ok {
+			releaser.ReleaseSession(session.ID)
+		}
+		return preparedTransportV3{}, true, fallbackErr
+	}
+	if nodepool.LocalTranscodeFallbackAllowed(r.Context(), h.SettingsRepo) &&
+		h.localToneMapCapabilitiesV3(r.Context()).Supports(tonemap.ModeSoftware, fallbackResult.ToneMapSourceKind) {
+		fallback, fallbackErr := h.prepareLocalTransportV3(r, session, file, fallbackResult, timeline)
+		return fallback, true, fallbackErr
+	}
+	return preparedTransportV3{}, false, nil
 }
 
 func (h *PlaybackHandler) prepareTransportTimelineV3(ctx context.Context, session *playback.Session, file *models.MediaFile, result playback.PlannerResultV3) (preparedTimelineV3, *transportErrorV3) {
@@ -1152,8 +1321,35 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 	sourceMetadata := sourceExecutionMetadataV3(file, result)
 	sourceProfile, sourceBitDepth := sourceVideoTranscodeFactsV3(file, result)
 	unlock := h.tm.LockSessionLifecycle(session.ID)
-	opts := playback.TranscodeOpts{InputPath: file.FilePath, OutputDir: outputDir, OutputSubdir: outputSubdir, SessionID: session.ID, SourceVideoCodec: sourceMetadata.VideoCodec, SourceVideoProfile: sourceProfile, SourceVideoBitDepth: sourceBitDepth, SoftwareVideoDecode: sourceMetadata.SoftwareVideoDecode, VideoBitstreamFilter: videoBitstreamFilterForPlanV3(result.Plan), SeekSeconds: timeline.seekSeconds, StreamOriginSeconds: timeline.streamOriginSeconds, CopySeekAnchorResolved: timeline.copySeekAnchorResolved, StartSegmentNumber: timeline.startSegmentNumber, TargetResolution: result.TargetResolution, TargetCodecVideo: videoCodec, TargetCodecAudio: result.TargetAudioCodec, TargetAudioChannels: result.TargetAudioChannels, TargetAudioBitrateKbps: result.TargetAudioBitrateKbps, TargetBitrateKbps: result.TargetBitrateKbps, SegmentDuration: 2, FFmpegPath: cfg.FFmpegPath, HWAccel: cfg.HWAccel, HWDevice: cfg.HWDevice, AudioTrackIndex: plannedAudioTrackIndexV3(result, session.AudioTrackIndex), SubtitleTrackIndex: result.SubtitleTransportTrackIndex, SubtitleBurnIn: result.SubtitleBurnIn, SubtitleCodec: result.SubtitleCodec, TotalDuration: sourceMetadata.DurationSeconds, FastStart: true, NodeType: playbackNodeIntegratedV3, ExecutionMode: playbackNodeIntegratedV3, FFmpegLogSink: h.FFmpegLogSink}
+	opts := playback.TranscodeOpts{InputPath: file.FilePath, OutputDir: outputDir, OutputSubdir: outputSubdir, SessionID: session.ID, SourceVideoCodec: sourceMetadata.VideoCodec, SourceVideoProfile: sourceProfile, SourceVideoBitDepth: sourceBitDepth, SoftwareVideoDecode: sourceMetadata.SoftwareVideoDecode, ToneMapPolicy: result.ToneMapPolicy, ToneMapMode: result.ToneMapMode, ToneMapSourceKind: result.ToneMapSourceKind, ToneMapRecipeVersion: result.ToneMapRecipeVersion, ToneMapPreflightRequired: result.ToneMapPreflightRequired, ToneMapSourceRevision: result.ToneMapSourceRevision, VideoBitstreamFilter: videoBitstreamFilterForPlanV3(result.Plan), SeekSeconds: timeline.seekSeconds, StreamOriginSeconds: timeline.streamOriginSeconds, CopySeekAnchorResolved: timeline.copySeekAnchorResolved, StartSegmentNumber: timeline.startSegmentNumber, TargetResolution: result.TargetResolution, TargetCodecVideo: videoCodec, TargetCodecAudio: result.TargetAudioCodec, TargetAudioChannels: result.TargetAudioChannels, TargetAudioBitrateKbps: result.TargetAudioBitrateKbps, TargetBitrateKbps: result.TargetBitrateKbps, SegmentDuration: 2, FFmpegPath: cfg.FFmpegPath, HWAccel: cfg.HWAccel, HWDevice: cfg.HWDevice, AudioTrackIndex: plannedAudioTrackIndexV3(result, session.AudioTrackIndex), SubtitleTrackIndex: result.SubtitleTransportTrackIndex, SubtitleBurnIn: result.SubtitleBurnIn, SubtitleCodec: result.SubtitleCodec, TotalDuration: sourceMetadata.DurationSeconds, FastStart: true, NodeType: playbackNodeIntegratedV3, ExecutionMode: playbackNodeIntegratedV3, FFmpegLogSink: h.FFmpegLogSink}
+	opts.ToneMapDVConfigPresent = sourceMetadata.ToneMapDVConfigPresent
+	opts.ToneMapDVBLCompatIDPresent = sourceMetadata.ToneMapDVBLCompatIDPresent
+	opts.ToneMapDVBLPresent = sourceMetadata.ToneMapDVBLPresent
+	opts.ToneMapDVRPUPresent = sourceMetadata.ToneMapDVRPUPresent
+	if opts.ToneMapMode != "" {
+		capabilities := h.localToneMapCapabilitiesV3(r.Context())
+		opts.ToneMapFilter = capabilities.FilterFor(opts.ToneMapMode, opts.ToneMapSourceKind)
+		if opts.ToneMapMode == tonemap.ModeHardware {
+			opts.HWAccel = capabilities.BackendFor(opts.ToneMapMode, opts.ToneMapSourceKind)
+		} else {
+			opts.HWAccel = playback.HWAccelNone
+		}
+	}
+	usedToneMapFallback := false
 	ts, err := h.startLocalPlaybackTransport(r.Context(), opts)
+	if err != nil && result.FrozenSourceMetadata == nil && opts.ToneMapMode == tonemap.ModeHardware &&
+		opts.ToneMapPolicy.Allows(tonemap.ModeSoftware) {
+		capabilities := h.localToneMapCapabilitiesV3(r.Context())
+		if capabilities.Supports(tonemap.ModeSoftware, opts.ToneMapSourceKind) {
+			slog.WarnContext(r.Context(), "hardware tone-map failed to start; retrying once in software",
+				"component", "playback", "playback_session_id", session.ID, "error", err)
+			opts.ToneMapMode = tonemap.ModeSoftware
+			opts.ToneMapFilter = capabilities.FilterFor(tonemap.ModeSoftware, opts.ToneMapSourceKind)
+			opts.HWAccel = playback.HWAccelNone
+			usedToneMapFallback = true
+			ts, err = h.startLocalPlaybackTransport(r.Context(), opts)
+		}
+	}
 	if err != nil {
 		unlock()
 		return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Failed to start the playback transport.", retryable: true, cause: err}
@@ -1163,6 +1359,38 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 		failedDevice := ts.Opts().HWDevice
 		transportErr := manifestStartupTransportErrorV3(wasRunning, readyErr)
 		_ = ts.Close()
+		if usedToneMapFallback {
+			unlock()
+			return preparedTransportV3{}, transportErr
+		}
+
+		if result.FrozenSourceMetadata == nil && opts.ToneMapMode == tonemap.ModeHardware &&
+			opts.ToneMapPolicy.Allows(tonemap.ModeSoftware) {
+			capabilities := h.localToneMapCapabilitiesV3(r.Context())
+			if capabilities.Supports(tonemap.ModeSoftware, opts.ToneMapSourceKind) {
+				fallbackOpts := opts
+				fallbackOpts.ToneMapMode = tonemap.ModeSoftware
+				fallbackOpts.ToneMapFilter = capabilities.FilterFor(tonemap.ModeSoftware, opts.ToneMapSourceKind)
+				fallbackOpts.HWAccel = playback.HWAccelNone
+				slog.WarnContext(r.Context(), "hardware tone-map failed during startup; retrying once in software",
+					"component", "playback",
+					"playback_session_id", session.ID,
+					"failed_device", failedDevice,
+					"error", readyErr)
+				ts, err = h.startLocalPlaybackTransport(r.Context(), fallbackOpts)
+				if err != nil {
+					unlock()
+					return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Failed to start the software tone-map fallback.", retryable: true, cause: err}
+				}
+				if _, fallbackReadyErr := ts.WaitForManifest(playback.ManifestStartupTimeout); fallbackReadyErr != nil {
+					transportErr = manifestStartupTransportErrorV3(ts.IsRunning(), fallbackReadyErr)
+					_ = ts.Close()
+					unlock()
+					return preparedTransportV3{}, transportErr
+				}
+				goto transportReady
+			}
+		}
 		if wasRunning {
 			unlock()
 			return preparedTransportV3{}, transportErr
@@ -1192,13 +1420,16 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 			return preparedTransportV3{}, transportErr
 		}
 	}
+
+transportReady:
 	card := playback.NewRecipeCard(session.UserID, session.ProfileID, file.ID, "", ts.Opts())
 	url := appendStreamToken(fmt.Sprintf("/playback/transcode/%s/master.m3u8", session.ID), h.signSessionToken(card))
 	committed := false
 	previousNodeURL := session.TranscodeNodeURL
 	previousTransportID := remoteTransportID(session)
 	return preparedTransportV3{
-		url: url,
+		url:         url,
+		toneMapMode: ts.Opts().ToneMapMode,
 		commit: func() {
 			if committed {
 				return
@@ -1248,7 +1479,25 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 	}
 	sourceMetadata := sourceExecutionMetadataV3(file, result)
 	sourceProfile, sourceBitDepth := sourceVideoTranscodeFactsV3(file, result)
-	req := transcodenode.TranscodeStartRequest{SessionID: transportID, InputPath: file.FilePath, SourceVideoCodec: sourceMetadata.VideoCodec, SourceVideoProfile: sourceProfile, SourceVideoBitDepth: sourceBitDepth, SoftwareVideoDecode: sourceMetadata.SoftwareVideoDecode, VideoBitstreamFilter: videoBitstreamFilterForPlanV3(result.Plan), SeekSeconds: timeline.seekSeconds, StreamOriginSeconds: timeline.streamOriginSeconds, CopySeekAnchorResolved: timeline.copySeekAnchorResolved, StartSegmentNumber: timeline.startSegmentNumber, TargetResolution: result.TargetResolution, TargetCodecVideo: videoCodec, TargetCodecAudio: result.TargetAudioCodec, TargetAudioChannels: result.TargetAudioChannels, TargetAudioBitrateKbps: result.TargetAudioBitrateKbps, TargetBitrateKbps: result.TargetBitrateKbps, SegmentDuration: 2, HWAccel: h.playbackConfig().HWAccel, AudioTrackIndex: plannedAudioTrackIndexV3(result, session.AudioTrackIndex), SubtitleTrackIndex: result.SubtitleTransportTrackIndex, SubtitleBurnIn: result.SubtitleBurnIn, SubtitleCodec: result.SubtitleCodec, TotalDuration: sourceMetadata.DurationSeconds, RequireReady: true}
+	hwAccel := h.playbackConfig().HWAccel
+	toneMapFilter := ""
+	if result.ToneMapMode != "" {
+		capabilities, err := h.remoteToneMapCapabilitiesV3(r.Context(), node.URL, false)
+		if err != nil || !capabilities.Supports(result.ToneMapMode, result.ToneMapSourceKind) {
+			return preparedTransportV3{}, &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "The selected node cannot run the tone-map recipe.", retryable: true, cause: err}
+		}
+		toneMapFilter = capabilities.FilterFor(result.ToneMapMode, result.ToneMapSourceKind)
+		if result.ToneMapMode == tonemap.ModeHardware {
+			hwAccel = capabilities.BackendFor(result.ToneMapMode, result.ToneMapSourceKind)
+		} else {
+			hwAccel = playback.HWAccelNone
+		}
+	}
+	req := transcodenode.TranscodeStartRequest{SessionID: transportID, InputPath: file.FilePath, SourceVideoCodec: sourceMetadata.VideoCodec, SourceVideoProfile: sourceProfile, SourceVideoBitDepth: sourceBitDepth, SoftwareVideoDecode: sourceMetadata.SoftwareVideoDecode, ToneMapPolicy: result.ToneMapPolicy, ToneMapMode: result.ToneMapMode, ToneMapSourceKind: result.ToneMapSourceKind, ToneMapRecipeVersion: result.ToneMapRecipeVersion, ToneMapPreflightRequired: result.ToneMapPreflightRequired, ToneMapSourceRevision: result.ToneMapSourceRevision, VideoBitstreamFilter: videoBitstreamFilterForPlanV3(result.Plan), SeekSeconds: timeline.seekSeconds, StreamOriginSeconds: timeline.streamOriginSeconds, CopySeekAnchorResolved: timeline.copySeekAnchorResolved, StartSegmentNumber: timeline.startSegmentNumber, TargetResolution: result.TargetResolution, TargetCodecVideo: videoCodec, TargetCodecAudio: result.TargetAudioCodec, TargetAudioChannels: result.TargetAudioChannels, TargetAudioBitrateKbps: result.TargetAudioBitrateKbps, TargetBitrateKbps: result.TargetBitrateKbps, SegmentDuration: 2, HWAccel: hwAccel, AudioTrackIndex: plannedAudioTrackIndexV3(result, session.AudioTrackIndex), SubtitleTrackIndex: result.SubtitleTransportTrackIndex, SubtitleBurnIn: result.SubtitleBurnIn, SubtitleCodec: result.SubtitleCodec, TotalDuration: sourceMetadata.DurationSeconds, RequireReady: true}
+	req.ToneMapDVConfigPresent = sourceMetadata.ToneMapDVConfigPresent
+	req.ToneMapDVBLCompatIDPresent = sourceMetadata.ToneMapDVBLCompatIDPresent
+	req.ToneMapDVBLPresent = sourceMetadata.ToneMapDVBLPresent
+	req.ToneMapDVRPUPresent = sourceMetadata.ToneMapDVRPUPresent
 	nodeResp, status, err := h.startRemotePlaybackTransport(r.Context(), node.URL, req)
 	if err != nil {
 		// A timeout can fire after the node actually started the job; the
@@ -1261,8 +1510,16 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 		h.tm.StopRemoteTranscode(transportID, node.URL)
 		return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "The selected transcode node rejected the playback transport.", retryable: true}
 	}
+	if req.ToneMapMode != "" && nodeResp.ToneMapMode != req.ToneMapMode {
+		h.tm.StopRemoteTranscode(transportID, node.URL)
+		return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "The selected transcode node did not confirm the tone-map recipe.", retryable: true}
+	}
 	hw := firstNonEmptyHandlerV3(strings.TrimSpace(nodeResp.HWAccel), strings.TrimSpace(req.HWAccel))
-	card := playback.NewRecipeCard(session.UserID, session.ProfileID, file.ID, node.URL, playback.TranscodeOpts{InputPath: req.InputPath, SessionID: session.ID, TranscodeTransportID: transportID, SourceVideoCodec: req.SourceVideoCodec, SourceVideoProfile: req.SourceVideoProfile, SourceVideoBitDepth: req.SourceVideoBitDepth, SoftwareVideoDecode: req.SoftwareVideoDecode, VideoBitstreamFilter: req.VideoBitstreamFilter, SeekSeconds: req.SeekSeconds, StreamOriginSeconds: req.StreamOriginSeconds, CopySeekAnchorResolved: req.CopySeekAnchorResolved, StartSegmentNumber: req.StartSegmentNumber, TargetResolution: req.TargetResolution, TargetCodecVideo: req.TargetCodecVideo, TargetCodecAudio: req.TargetCodecAudio, TargetAudioChannels: req.TargetAudioChannels, TargetAudioBitrateKbps: req.TargetAudioBitrateKbps, TargetBitrateKbps: req.TargetBitrateKbps, SegmentDuration: req.SegmentDuration, HWAccel: hw, AudioTrackIndex: req.AudioTrackIndex, SubtitleTrackIndex: req.SubtitleTrackIndex, SubtitleBurnIn: req.SubtitleBurnIn, SubtitleCodec: req.SubtitleCodec, TotalDuration: req.TotalDuration})
+	card := playback.NewRecipeCard(session.UserID, session.ProfileID, file.ID, node.URL, playback.TranscodeOpts{InputPath: req.InputPath, SessionID: session.ID, TranscodeTransportID: transportID, SourceVideoCodec: req.SourceVideoCodec, SourceVideoProfile: req.SourceVideoProfile, SourceVideoBitDepth: req.SourceVideoBitDepth, SoftwareVideoDecode: req.SoftwareVideoDecode, ToneMapPolicy: req.ToneMapPolicy, ToneMapMode: req.ToneMapMode, ToneMapSourceKind: req.ToneMapSourceKind, ToneMapFilter: toneMapFilter, ToneMapRecipeVersion: req.ToneMapRecipeVersion, ToneMapPreflightRequired: req.ToneMapPreflightRequired, ToneMapSourceRevision: req.ToneMapSourceRevision, VideoBitstreamFilter: req.VideoBitstreamFilter, SeekSeconds: req.SeekSeconds, StreamOriginSeconds: req.StreamOriginSeconds, CopySeekAnchorResolved: req.CopySeekAnchorResolved, StartSegmentNumber: req.StartSegmentNumber, TargetResolution: req.TargetResolution, TargetCodecVideo: req.TargetCodecVideo, TargetCodecAudio: req.TargetCodecAudio, TargetAudioChannels: req.TargetAudioChannels, TargetAudioBitrateKbps: req.TargetAudioBitrateKbps, TargetBitrateKbps: req.TargetBitrateKbps, SegmentDuration: req.SegmentDuration, HWAccel: hw, AudioTrackIndex: req.AudioTrackIndex, SubtitleTrackIndex: req.SubtitleTrackIndex, SubtitleBurnIn: req.SubtitleBurnIn, SubtitleCodec: req.SubtitleCodec, TotalDuration: req.TotalDuration})
+	card.ToneMapDVConfigPresent = req.ToneMapDVConfigPresent
+	card.ToneMapDVBLCompatIDPresent = req.ToneMapDVBLCompatIDPresent
+	card.ToneMapDVBLPresent = req.ToneMapDVBLPresent
+	card.ToneMapDVRPUPresent = req.ToneMapDVRPUPresent
 	url := h.buildProxyManifestURL(card, nodePlan.ProxyNode)
 	// buildProxyManifestURL only returns an absolute proxy URL when a proxy was
 	// planned and the token could be signed; otherwise the client fetches the
@@ -1272,7 +1529,7 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 	previousNodeURL := session.TranscodeNodeURL
 	previousTransportID := remoteTransportID(session)
 	unlock := h.tm.LockSessionLifecycle(session.ID)
-	return preparedTransportV3{url: url, nodeURL: node.URL, transportID: transportID, commit: func() {
+	return preparedTransportV3{url: url, nodeURL: node.URL, transportID: transportID, toneMapMode: nodeResp.ToneMapMode, commit: func() {
 		if committed {
 			return
 		}
@@ -1307,10 +1564,21 @@ func sourceExecutionMetadataV3(file *models.MediaFile, result playback.PlannerRe
 		return playback.SourceExecutionMetadataV3{}
 	}
 	videoCodec, profile, bitDepth := playback.SourceVideoTranscodeFacts(file)
+	track := models.VideoTrack{}
+	if len(file.VideoTracks) > 0 {
+		track = file.VideoTracks[0]
+	}
 	return playback.SourceExecutionMetadataV3{
-		VideoCodec:          videoCodec,
-		SoftwareVideoDecode: playback.RequiresSoftwareVideoDecode(videoCodec, profile, bitDepth),
-		DurationSeconds:     float64(file.Duration),
+		VideoCodec:                 videoCodec,
+		SoftwareVideoDecode:        playback.RequiresSoftwareVideoDecode(videoCodec, profile, bitDepth),
+		DurationSeconds:            float64(file.Duration),
+		ToneMapSourceKind:          result.ToneMapSourceKind,
+		ToneMapPreflightRequired:   result.ToneMapPreflightRequired,
+		ToneMapSourceRevision:      result.ToneMapSourceRevision,
+		ToneMapDVConfigPresent:     track.DVConfigPresent,
+		ToneMapDVBLCompatIDPresent: track.DVBLCompatIDPresent,
+		ToneMapDVBLPresent:         track.DVBLPresent,
+		ToneMapDVRPUPresent:        track.DVRPUPresent,
 	}
 }
 
@@ -1923,7 +2191,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 			}
 		}
 	} else {
-		result = playback.PlanPlaybackV3(playback.PlannerInputV3{Request: start, RequestedFile: plannerRequestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: h.plannerSettingsV3(r.Context()), Registry: h.transformationRegistryV3(r.Context()), HLSRegistry: h.lazyHLSPlanningRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AttemptedKeys: attemptedKeys, AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
+		result = playback.PlanPlaybackV3(playback.PlannerInputV3{Request: start, RequestedFile: plannerRequestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: h.plannerSettingsV3(r.Context()), Registry: h.transformationRegistryV3(r.Context()), HLSRegistry: h.lazyHLSPlanningRegistryV3(r.Context()), HLSToneMapCapabilities: h.lazyHLSToneMapCapabilitiesV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AttemptedKeys: attemptedKeys, AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
 	}
 	if outputChange && result.Terminal != nil && effectiveFile.ID != currentEffectiveFile.ID {
 		// Returning to the requested edition is speculative during an output
@@ -1937,7 +2205,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 		if err != nil {
 			return playback.DecisionResponseV3{}, *record, nil, &transportErrorV3{reason: "track_unavailable", message: err.Error()}
 		}
-		result = playback.PlanPlaybackV3(playback.PlannerInputV3{Request: start, RequestedFile: plannerRequestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: h.plannerSettingsV3(r.Context()), Registry: h.transformationRegistryV3(r.Context()), HLSRegistry: h.lazyHLSPlanningRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AttemptedKeys: attemptedKeys, AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
+		result = playback.PlanPlaybackV3(playback.PlannerInputV3{Request: start, RequestedFile: plannerRequestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: h.plannerSettingsV3(r.Context()), Registry: h.transformationRegistryV3(r.Context()), HLSRegistry: h.lazyHLSPlanningRegistryV3(r.Context()), HLSToneMapCapabilities: h.lazyHLSToneMapCapabilitiesV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AttemptedKeys: attemptedKeys, AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
 	}
 	if terminalAllowsAlternateFileV3(result.Terminal) && replanAllowsAlternateFileV3(operation, start.QualityPreference) {
 		if alternate, alternateErr := h.findAlternateFile(r.Context(), requestedFile); alternateErr == nil && alternate != nil {
@@ -1948,7 +2216,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 				if err := preflightPlaybackFile(r.Context(), alternate, h.MissingMarker, h.EventsHub); err == nil {
 					effectiveFile = alternate
 					audioIndex = remappedAudio
-					result = playback.PlanPlaybackV3(playback.PlannerInputV3{Request: start, RequestedFile: plannerRequestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: h.plannerSettingsV3(r.Context()), Registry: h.transformationRegistryV3(r.Context()), HLSRegistry: h.lazyHLSPlanningRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AttemptedKeys: attemptedKeys, AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
+					result = playback.PlanPlaybackV3(playback.PlannerInputV3{Request: start, RequestedFile: plannerRequestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: h.plannerSettingsV3(r.Context()), Registry: h.transformationRegistryV3(r.Context()), HLSRegistry: h.lazyHLSPlanningRegistryV3(r.Context()), HLSToneMapCapabilities: h.lazyHLSToneMapCapabilitiesV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AttemptedKeys: attemptedKeys, AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
 				}
 			} else if start.SubtitleTrackIndex != nil || start.SubtitleTrackID != "" {
 				result = playback.PlannerResultV3{Terminal: &playback.TerminalV3{
@@ -2020,6 +2288,15 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 		transport, transportErr = h.prepareTransportV3(r, session, effectiveFile, result)
 		if transportErr != nil {
 			return playback.DecisionResponseV3{}, *record, nil, transportErr
+		}
+		applyTransportToneMapModeV3(&result, transport)
+		if !seekReanchor {
+			frozenRecipe, frozenErr := h.freezeExecutableRecipeV3(r.Context(), effectiveFile, result)
+			if frozenErr != nil {
+				transport.rollback()
+				return playback.DecisionResponseV3{}, *record, nil, subtitleArtifactErrorV3("Failed to freeze the selected subtitle identity.", frozenErr)
+			}
+			artifactRecipe = frozenRecipe
 		}
 	}
 	result.Plan.Stream.URL = transport.url
@@ -2104,6 +2381,12 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 	}
 	reservationHandedOff = true
 	return response, updated, &transport, nil
+}
+
+func applyTransportToneMapModeV3(result *playback.PlannerResultV3, transport preparedTransportV3) {
+	if result != nil && transport.toneMapMode != "" {
+		result.ToneMapMode = transport.toneMapMode
+	}
 }
 
 func frozenSeekReanchorResultV3(record *playback.AttemptRecordV3, position float64, now time.Time) (playback.PlannerResultV3, error) {
@@ -2431,7 +2714,17 @@ func sameExecutableAVRecipeV3(left, right playback.ExecutableRecipeV3) bool {
 		left.TargetBitrateKbps == right.TargetBitrateKbps &&
 		left.SourceVideoCodec == right.SourceVideoCodec &&
 		left.SoftwareVideoDecode == right.SoftwareVideoDecode &&
-		left.SourceDurationSeconds == right.SourceDurationSeconds
+		left.SourceDurationSeconds == right.SourceDurationSeconds &&
+		left.ToneMapPolicy == right.ToneMapPolicy &&
+		left.ToneMapMode == right.ToneMapMode &&
+		left.ToneMapSourceKind == right.ToneMapSourceKind &&
+		left.ToneMapRecipeVersion == right.ToneMapRecipeVersion &&
+		left.ToneMapPreflightRequired == right.ToneMapPreflightRequired &&
+		left.ToneMapSourceRevision == right.ToneMapSourceRevision &&
+		left.ToneMapDVConfigPresent == right.ToneMapDVConfigPresent &&
+		left.ToneMapDVBLCompatIDPresent == right.ToneMapDVBLCompatIDPresent &&
+		left.ToneMapDVBLPresent == right.ToneMapDVBLPresent &&
+		left.ToneMapDVRPUPresent == right.ToneMapDVRPUPresent
 }
 
 func sameEffectiveAVRecipeV3(left, right playback.EffectiveRecipeV3) bool {
@@ -2543,7 +2836,7 @@ func shouldTryAlternateFileV3(qualityPreference string) bool {
 
 const (
 	terminalNoAlternateVersionV3            = "no_alternate_version"
-	terminalHDRTranscodeUnsupportedV3       = "hdr_transcode_unsupported"
+	terminalHDRTranscodeUnsupportedV3       = playback.TerminalHDRTranscodeUnsupportedV3
 	terminalSubtitleConversionUnsupportedV3 = "subtitle_conversion_unsupported"
 )
 
@@ -2804,6 +3097,10 @@ func (h *PlaybackHandler) plannerSettingsV3(ctx context.Context) playback.Planne
 	if h.SettingsRepo != nil {
 		value, _ := h.SettingsRepo.Get(ctx, "allow_4k_transcode")
 		settings.Allow4KTranscode = strings.EqualFold(value, "true")
+		value, _ = h.SettingsRepo.Get(ctx, config.PlaybackTranscodeHardwareToneMapSettingKey)
+		settings.HardwareToneMapEnabled = strings.EqualFold(value, "true")
+		value, _ = h.SettingsRepo.Get(ctx, config.PlaybackTranscodeSoftwareToneMapSettingKey)
+		settings.SoftwareToneMapEnabled = strings.EqualFold(value, "true")
 	}
 	return settings
 }

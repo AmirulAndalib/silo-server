@@ -33,6 +33,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/settingsresolve"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchstate"
 	"github.com/Silo-Server/silo-server/internal/watchsync"
@@ -193,19 +194,21 @@ type PlaybackHandler struct {
 	tm *playback.TranscodeManager
 	// PlanStoreV3 owns the short-lived protocol-v3 control-plane state. Router
 	// wiring replaces the in-memory default with PostgreSQL in integrated mode.
-	PlanStoreV3          playback.PlanStoreV3
-	v3RegistryOnce       sync.Once
-	v3Registry           *playback.TransformationRegistryV3
-	v3NodeCapabilitiesMu sync.Mutex
-	v3NodeCapabilities   map[string]v3NodeCapabilityCache
-	v3EventOnce          sync.Once
-	v3EventQueue         chan playback.RouteEventRecordV3
-	v3ReplanMu           sync.Mutex
-	v3ReplanLocks        map[string]*v3ReplanLock
-	v3ReplanSlotsOnce    sync.Once
-	v3ReplanSlots        chan struct{}
-	v3EventRateMu        sync.Mutex
-	v3EventRates         map[string]v3EventRate
+	PlanStoreV3           playback.PlanStoreV3
+	v3RegistryOnce        sync.Once
+	v3Registry            *playback.TransformationRegistryV3
+	v3ToneMapOnce         sync.Once
+	v3ToneMapCapabilities tonemap.Capabilities
+	v3NodeCapabilitiesMu  sync.Mutex
+	v3NodeCapabilities    map[string]v3NodeCapabilityCache
+	v3EventOnce           sync.Once
+	v3EventQueue          chan playback.RouteEventRecordV3
+	v3ReplanMu            sync.Mutex
+	v3ReplanLocks         map[string]*v3ReplanLock
+	v3ReplanSlotsOnce     sync.Once
+	v3ReplanSlots         chan struct{}
+	v3EventRateMu         sync.Mutex
+	v3EventRates          map[string]v3EventRate
 }
 
 type PlaybackWatchScrobbler interface {

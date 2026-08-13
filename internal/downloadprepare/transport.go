@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 const (
@@ -59,18 +60,28 @@ var (
 // transcode node supplies its own FFmpeg path, hardware mode, device list, and
 // output path. ArtifactID is an opaque handle, never a caller-selected path.
 type Request struct {
-	ArtifactID          string  `json:"artifact_id"`
-	InputPath           string  `json:"input_path"`
-	SourceVideoCodec    string  `json:"source_video_codec,omitempty"`
-	SourceVideoProfile  string  `json:"source_video_profile,omitempty"`
-	SourceVideoBitDepth int     `json:"source_video_bit_depth,omitempty"`
-	SoftwareVideoDecode bool    `json:"software_video_decode,omitempty"`
-	TargetCodecVideo    string  `json:"target_codec_video"`
-	TargetCodecAudio    string  `json:"target_codec_audio"`
-	TargetResolution    string  `json:"target_resolution,omitempty"`
-	TargetBitrateKbps   int     `json:"target_bitrate_kbps,omitempty"`
-	AudioTrackIndex     int     `json:"audio_track_index"`
-	TotalDuration       float64 `json:"total_duration,omitempty"`
+	ArtifactID                 string                 `json:"artifact_id"`
+	InputPath                  string                 `json:"input_path"`
+	SourceVideoCodec           string                 `json:"source_video_codec,omitempty"`
+	SourceVideoProfile         string                 `json:"source_video_profile,omitempty"`
+	SourceVideoBitDepth        int                    `json:"source_video_bit_depth,omitempty"`
+	SoftwareVideoDecode        bool                   `json:"software_video_decode,omitempty"`
+	ToneMapPolicy              tonemap.Policy         `json:"tone_map_policy,omitempty"`
+	ToneMapMode                tonemap.Mode           `json:"tone_map_mode,omitempty"`
+	ToneMapSourceKind          tonemap.SourceKind     `json:"tone_map_source_kind,omitempty"`
+	ToneMapRecipeVersion       string                 `json:"tone_map_recipe_version,omitempty"`
+	ToneMapPreflightRequired   bool                   `json:"tone_map_preflight_required,omitempty"`
+	ToneMapSourceRevision      tonemap.SourceRevision `json:"tone_map_source_revision,omitempty,omitzero"`
+	ToneMapDVConfigPresent     bool                   `json:"tone_map_dv_config_present,omitempty"`
+	ToneMapDVBLCompatIDPresent bool                   `json:"tone_map_dv_bl_compat_id_present,omitempty"`
+	ToneMapDVBLPresent         bool                   `json:"tone_map_dv_bl_present,omitempty"`
+	ToneMapDVRPUPresent        bool                   `json:"tone_map_dv_rpu_present,omitempty"`
+	TargetCodecVideo           string                 `json:"target_codec_video"`
+	TargetCodecAudio           string                 `json:"target_codec_audio"`
+	TargetResolution           string                 `json:"target_resolution,omitempty"`
+	TargetBitrateKbps          int                    `json:"target_bitrate_kbps,omitempty"`
+	AudioTrackIndex            int                    `json:"audio_track_index"`
+	TotalDuration              float64                `json:"total_duration,omitempty"`
 }
 
 // Result identifies a completed artifact without exposing the node's local
@@ -86,18 +97,28 @@ func ValidArtifactID(id string) bool { return artifactIDPattern.MatchString(id) 
 // environment-specific execution settings.
 func NewRequest(artifactID string, opts playback.TranscodeOpts) Request {
 	return Request{
-		ArtifactID:          artifactID,
-		InputPath:           opts.InputPath,
-		SourceVideoCodec:    opts.SourceVideoCodec,
-		SourceVideoProfile:  opts.SourceVideoProfile,
-		SourceVideoBitDepth: opts.SourceVideoBitDepth,
-		SoftwareVideoDecode: opts.SoftwareVideoDecode,
-		TargetCodecVideo:    opts.TargetCodecVideo,
-		TargetCodecAudio:    opts.TargetCodecAudio,
-		TargetResolution:    opts.TargetResolution,
-		TargetBitrateKbps:   opts.TargetBitrateKbps,
-		AudioTrackIndex:     opts.AudioTrackIndex,
-		TotalDuration:       opts.TotalDuration,
+		ArtifactID:                 artifactID,
+		InputPath:                  opts.InputPath,
+		SourceVideoCodec:           opts.SourceVideoCodec,
+		SourceVideoProfile:         opts.SourceVideoProfile,
+		SourceVideoBitDepth:        opts.SourceVideoBitDepth,
+		SoftwareVideoDecode:        opts.SoftwareVideoDecode,
+		ToneMapPolicy:              opts.ToneMapPolicy,
+		ToneMapMode:                opts.ToneMapMode,
+		ToneMapSourceKind:          opts.ToneMapSourceKind,
+		ToneMapRecipeVersion:       opts.ToneMapRecipeVersion,
+		ToneMapPreflightRequired:   opts.ToneMapPreflightRequired,
+		ToneMapSourceRevision:      opts.ToneMapSourceRevision,
+		ToneMapDVConfigPresent:     opts.ToneMapDVConfigPresent,
+		ToneMapDVBLCompatIDPresent: opts.ToneMapDVBLCompatIDPresent,
+		ToneMapDVBLPresent:         opts.ToneMapDVBLPresent,
+		ToneMapDVRPUPresent:        opts.ToneMapDVRPUPresent,
+		TargetCodecVideo:           opts.TargetCodecVideo,
+		TargetCodecAudio:           opts.TargetCodecAudio,
+		TargetResolution:           opts.TargetResolution,
+		TargetBitrateKbps:          opts.TargetBitrateKbps,
+		AudioTrackIndex:            opts.AudioTrackIndex,
+		TotalDuration:              opts.TotalDuration,
 	}
 }
 
@@ -105,24 +126,34 @@ func NewRequest(artifactID string, opts playback.TranscodeOpts) Request {
 // node's live execution settings.
 func (r Request) TranscodeOpts(ffmpegPath, hwAccel, hwDevice string, sink playback.FFmpegLogSink) playback.TranscodeOpts {
 	return playback.TranscodeOpts{
-		InputPath:           r.InputPath,
-		SourceVideoCodec:    r.SourceVideoCodec,
-		SourceVideoProfile:  r.SourceVideoProfile,
-		SourceVideoBitDepth: r.SourceVideoBitDepth,
-		SoftwareVideoDecode: r.SoftwareVideoDecode,
-		TargetCodecVideo:    r.TargetCodecVideo,
-		TargetCodecAudio:    r.TargetCodecAudio,
-		TargetResolution:    r.TargetResolution,
-		TargetBitrateKbps:   r.TargetBitrateKbps,
-		AudioTrackIndex:     r.AudioTrackIndex,
-		SubtitleTrackIndex:  -1,
-		FFmpegPath:          ffmpegPath,
-		HWAccel:             hwAccel,
-		HWDevice:            hwDevice,
-		TotalDuration:       r.TotalDuration,
-		NodeType:            "transcode",
-		ExecutionMode:       "download_prepare",
-		FFmpegLogSink:       sink,
+		InputPath:                  r.InputPath,
+		SourceVideoCodec:           r.SourceVideoCodec,
+		SourceVideoProfile:         r.SourceVideoProfile,
+		SourceVideoBitDepth:        r.SourceVideoBitDepth,
+		SoftwareVideoDecode:        r.SoftwareVideoDecode,
+		ToneMapPolicy:              r.ToneMapPolicy,
+		ToneMapMode:                r.ToneMapMode,
+		ToneMapSourceKind:          r.ToneMapSourceKind,
+		ToneMapRecipeVersion:       r.ToneMapRecipeVersion,
+		ToneMapPreflightRequired:   r.ToneMapPreflightRequired,
+		ToneMapSourceRevision:      r.ToneMapSourceRevision,
+		ToneMapDVConfigPresent:     r.ToneMapDVConfigPresent,
+		ToneMapDVBLCompatIDPresent: r.ToneMapDVBLCompatIDPresent,
+		ToneMapDVBLPresent:         r.ToneMapDVBLPresent,
+		ToneMapDVRPUPresent:        r.ToneMapDVRPUPresent,
+		TargetCodecVideo:           r.TargetCodecVideo,
+		TargetCodecAudio:           r.TargetCodecAudio,
+		TargetResolution:           r.TargetResolution,
+		TargetBitrateKbps:          r.TargetBitrateKbps,
+		AudioTrackIndex:            r.AudioTrackIndex,
+		SubtitleTrackIndex:         -1,
+		FFmpegPath:                 ffmpegPath,
+		HWAccel:                    hwAccel,
+		HWDevice:                   hwDevice,
+		TotalDuration:              r.TotalDuration,
+		NodeType:                   "transcode",
+		ExecutionMode:              "download_prepare",
+		FFmpegLogSink:              sink,
 	}
 }
 

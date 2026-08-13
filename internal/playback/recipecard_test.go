@@ -5,17 +5,27 @@ import (
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 func TestRecipeCardRoundTripOpts(t *testing.T) {
+	revision := tonemap.SourceRevision{MediaFileID: 77, FileSize: 100, FileModifiedUnixNano: 200, StreamSignature: "stream"}
 	opts := TranscodeOpts{
-		InputPath:              "/media/movie.mkv",
-		OutputDir:              "/tmp/silo-transcode/abc",
-		SessionID:              "abc",
-		SourceVideoCodec:       "hevc",
-		SourceVideoProfile:     "Main 10",
-		SourceVideoBitDepth:    10,
-		SoftwareVideoDecode:    true,
+		InputPath:                "/media/movie.mkv",
+		OutputDir:                "/tmp/silo-transcode/abc",
+		SessionID:                "abc",
+		SourceVideoCodec:         "hevc",
+		SourceVideoProfile:       "Main 10",
+		SourceVideoBitDepth:      10,
+		SoftwareVideoDecode:      true,
+		ToneMapPolicy:            tonemap.PolicyHardwareThenSoftware,
+		ToneMapMode:              tonemap.ModeHardware,
+		ToneMapSourceKind:        tonemap.SourcePQ,
+		ToneMapFilter:            "tonemap_vaapi",
+		ToneMapRecipeVersion:     TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapPreflightRequired: true,
+		ToneMapSourceRevision:    revision,
+		ToneMapDVConfigPresent:   true, ToneMapDVBLCompatIDPresent: true, ToneMapDVBLPresent: true, ToneMapDVRPUPresent: true,
 		VideoBitstreamFilter:   "dovi_rpu=strip=1",
 		SeekSeconds:            900,
 		StreamOriginSeconds:    896,
@@ -74,6 +84,14 @@ func TestRecipeCardRoundTripOpts(t *testing.T) {
 	}
 	if !got.SoftwareVideoDecode {
 		t.Error("SoftwareVideoDecode lost in round trip")
+	}
+	if got.ToneMapPolicy != opts.ToneMapPolicy || got.ToneMapMode != opts.ToneMapMode ||
+		got.ToneMapSourceKind != opts.ToneMapSourceKind || got.ToneMapFilter != opts.ToneMapFilter ||
+		got.ToneMapRecipeVersion != opts.ToneMapRecipeVersion || got.ToneMapPreflightRequired != opts.ToneMapPreflightRequired || got.ToneMapSourceRevision != revision {
+		t.Errorf("tone-map recipe lost in round trip: %+v", got)
+	}
+	if !got.ToneMapDVConfigPresent || !got.ToneMapDVBLCompatIDPresent || !got.ToneMapDVBLPresent || !got.ToneMapDVRPUPresent {
+		t.Errorf("Dolby Vision presence flags lost in round trip: %+v", got)
 	}
 	if got.SourceVideoProfile != "Main 10" || got.SourceVideoBitDepth != 10 {
 		t.Errorf("source video facts lost in round trip: profile=%q bit_depth=%d", got.SourceVideoProfile, got.SourceVideoBitDepth)
@@ -214,13 +232,22 @@ func TestRecipeCardLegacyDecodeHasEmptyPlayMethod(t *testing.T) {
 // HWDevice are deliberately excluded (re-resolved from live config), so they are
 // not asserted here.
 func TestRecipeCardClaimsRoundTrip(t *testing.T) {
+	revision := tonemap.SourceRevision{MediaFileID: 77, FileSize: 100, FileModifiedUnixNano: 200, StreamSignature: "stream"}
 	card := NewRecipeCard(42, "profile-1", 77, "http://node:9000", TranscodeOpts{
-		InputPath:              "/media/movie.mkv",
-		SessionID:              "abc",
-		SourceVideoCodec:       "hevc",
-		SourceVideoProfile:     "Main 10",
-		SourceVideoBitDepth:    10,
-		SoftwareVideoDecode:    true,
+		InputPath:                "/media/movie.mkv",
+		SessionID:                "abc",
+		SourceVideoCodec:         "hevc",
+		SourceVideoProfile:       "Main 10",
+		SourceVideoBitDepth:      10,
+		SoftwareVideoDecode:      true,
+		ToneMapPolicy:            tonemap.PolicySoftwareOnly,
+		ToneMapMode:              tonemap.ModeSoftware,
+		ToneMapSourceKind:        tonemap.SourceHLG,
+		ToneMapFilter:            "tonemapx",
+		ToneMapRecipeVersion:     TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapPreflightRequired: true,
+		ToneMapSourceRevision:    revision,
+		ToneMapDVConfigPresent:   true, ToneMapDVBLCompatIDPresent: true, ToneMapDVBLPresent: true, ToneMapDVRPUPresent: true,
 		VideoBitstreamFilter:   "dovi_rpu=strip=1",
 		SeekSeconds:            900,
 		StreamOriginSeconds:    896,
@@ -254,6 +281,10 @@ func TestRecipeCardClaimsRoundTrip(t *testing.T) {
 	if got.InputPath != card.InputPath || got.SourceVideoCodec != card.SourceVideoCodec ||
 		got.SourceVideoProfile != card.SourceVideoProfile || got.SourceVideoBitDepth != card.SourceVideoBitDepth ||
 		got.SoftwareVideoDecode != card.SoftwareVideoDecode ||
+		got.ToneMapPolicy != card.ToneMapPolicy || got.ToneMapMode != card.ToneMapMode ||
+		got.ToneMapSourceKind != card.ToneMapSourceKind || got.ToneMapFilter != card.ToneMapFilter ||
+		got.ToneMapRecipeVersion != card.ToneMapRecipeVersion || got.ToneMapPreflightRequired != card.ToneMapPreflightRequired || got.ToneMapSourceRevision != revision ||
+		got.ToneMapDVConfigPresent != card.ToneMapDVConfigPresent || got.ToneMapDVBLCompatIDPresent != card.ToneMapDVBLCompatIDPresent || got.ToneMapDVBLPresent != card.ToneMapDVBLPresent || got.ToneMapDVRPUPresent != card.ToneMapDVRPUPresent ||
 		got.VideoBitstreamFilter != card.VideoBitstreamFilter ||
 		got.SeekSeconds != card.SeekSeconds || got.StreamOriginSeconds != card.StreamOriginSeconds ||
 		got.CopySeekAnchorResolved != card.CopySeekAnchorResolved || got.TargetResolution != card.TargetResolution ||

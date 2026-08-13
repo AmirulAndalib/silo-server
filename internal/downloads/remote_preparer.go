@@ -2,15 +2,20 @@ package downloads
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/downloadprepare"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 // NodeAwarePreparer keeps artifact queue ownership central while executing the
@@ -23,6 +28,22 @@ type NodeAwarePreparer struct {
 	liveCfg      func() *config.Config
 	remote       downloadprepare.RemotePreparer
 	originLookup artifactOriginLookup
+	settings     SettingsReader
+	capabilityMu sync.Mutex
+	capabilities map[string]remoteToneMapCapabilities
+}
+
+type remoteToneMapCapabilities struct {
+	capabilities tonemap.Capabilities
+	expiresAt    time.Time
+}
+
+type eligibleTranscodeWorkPlanner interface {
+	ReserveTranscodeWorkWith(workID string, eligible func(*nodepool.Node) bool) (*nodepool.Node, func())
+}
+
+type transcodeNodeEnumerator interface {
+	TranscodeNodeURLs() []string
 }
 
 type artifactOriginLookup interface {
@@ -34,10 +55,11 @@ func NewNodeAwarePreparer(local EncodePreparer, planner nodepool.TranscodeWorkPl
 		local = playbackPreparer{}
 	}
 	return &NodeAwarePreparer{
-		local:   local,
-		planner: planner,
-		liveCfg: liveCfg,
-		remote:  downloadprepare.HTTPPreparer{},
+		local:        local,
+		planner:      planner,
+		liveCfg:      liveCfg,
+		remote:       downloadprepare.HTTPPreparer{},
+		capabilities: make(map[string]remoteToneMapCapabilities),
 	}
 }
 
@@ -48,6 +70,32 @@ func (p *NodeAwarePreparer) SetOriginLookup(lookup artifactOriginLookup) {
 	p.originLookup = lookup
 }
 
+// SetSettingsReader supplies the live local-fallback policy. It is wired by
+// ArtifactManager together with the tone-map settings used to freeze recipes.
+func (p *NodeAwarePreparer) SetSettingsReader(settings SettingsReader) {
+	p.settings = settings
+}
+
+// LocalFallbackAllowed reports whether this pooled preparer may execute on
+// the API host when no compatible node is available.
+func (p *NodeAwarePreparer) LocalFallbackAllowed(ctx context.Context) bool {
+	if p == nil || p.planner == nil || p.settings == nil {
+		return true
+	}
+	values, err := p.settings.GetAll(ctx)
+	if err != nil {
+		return true
+	}
+	return !strings.EqualFold(values["playback.local_transcode_fallback"], "false")
+}
+
+func (p *NodeAwarePreparer) prepareLocally(ctx context.Context, artifactID string, opts playback.TranscodeOpts, outputPath string) (PreparedArtifact, error) {
+	if !p.LocalFallbackAllowed(ctx) {
+		return PreparedArtifact{}, errors.New("no eligible transcode node and local transcode fallback is disabled")
+	}
+	return p.local.PrepareFile(ctx, artifactID, opts, outputPath)
+}
+
 func (p *NodeAwarePreparer) PrepareFile(ctx context.Context, artifactID string, opts playback.TranscodeOpts, outputPath string) (PreparedArtifact, error) {
 	cfg := p.config()
 	jwtSecret := ""
@@ -55,11 +103,24 @@ func (p *NodeAwarePreparer) PrepareFile(ctx context.Context, artifactID string, 
 		jwtSecret = strings.TrimSpace(cfg.Auth.JWTSecret)
 	}
 	if cfg == nil || jwtSecret == "" || p.remote == nil || p.planner == nil || !downloadprepare.ValidArtifactID(artifactID) {
-		return p.local.PrepareFile(ctx, artifactID, opts, outputPath)
+		return p.prepareLocally(ctx, artifactID, opts, outputPath)
 	}
-	node, release := p.planner.ReserveTranscodeWork("download-prepare-" + artifactID)
+	var node *nodepool.Node
+	var release func()
+	if opts.ToneMapMode != "" {
+		selector, ok := p.planner.(eligibleTranscodeWorkPlanner)
+		if ok {
+			capable := p.capableToneMapNodeURLs(ctx, opts.ToneMapMode, opts.ToneMapSourceKind)
+			node, release = selector.ReserveTranscodeWorkWith("download-prepare-"+artifactID, func(candidate *nodepool.Node) bool {
+				_, supported := capable[strings.TrimRight(candidate.URL, "/")]
+				return supported
+			})
+		}
+	} else {
+		node, release = p.planner.ReserveTranscodeWork("download-prepare-" + artifactID)
+	}
 	if node == nil {
-		return p.local.PrepareFile(ctx, artifactID, opts, outputPath)
+		return p.prepareLocally(ctx, artifactID, opts, outputPath)
 	}
 
 	slog.InfoContext(ctx, "dispatching download artifact prepare", "component", "downloads", "artifact_id", artifactID, "node", node.URL)
@@ -93,7 +154,79 @@ func (p *NodeAwarePreparer) PrepareFile(ctx context.Context, artifactID string, 
 		return PreparedArtifact{}, ctx.Err()
 	}
 	slog.WarnContext(ctx, "remote download artifact prepare unavailable; falling back to local", "component", "downloads", "artifact_id", artifactID, "node", node.URL, "error", err)
-	return p.local.PrepareFile(ctx, artifactID, opts, outputPath)
+	return p.prepareLocally(ctx, artifactID, opts, outputPath)
+}
+
+// ToneMapCapabilities reports the validated executor union of enabled pooled
+// transcode nodes. Selection rechecks the same per-node records before
+// reserving work, so heterogeneous pools cannot receive an incompatible job.
+func (p *NodeAwarePreparer) ToneMapCapabilities(ctx context.Context) tonemap.Capabilities {
+	result := tonemap.Capabilities{}
+	enumerator, ok := p.planner.(transcodeNodeEnumerator)
+	if !ok {
+		return result
+	}
+	for _, nodeURL := range enumerator.TranscodeNodeURLs() {
+		capabilities, err := p.toneMapCapabilitiesForNode(ctx, nodeURL)
+		if err == nil {
+			result = append(result, capabilities...)
+		}
+	}
+	return result
+}
+
+func (p *NodeAwarePreparer) capableToneMapNodeURLs(ctx context.Context, mode tonemap.Mode, kind tonemap.SourceKind) map[string]struct{} {
+	result := make(map[string]struct{})
+	enumerator, ok := p.planner.(transcodeNodeEnumerator)
+	if !ok {
+		return result
+	}
+	for _, nodeURL := range enumerator.TranscodeNodeURLs() {
+		capabilities, err := p.toneMapCapabilitiesForNode(ctx, nodeURL)
+		if err == nil && capabilities.Supports(mode, kind) {
+			result[strings.TrimRight(nodeURL, "/")] = struct{}{}
+		}
+	}
+	return result
+}
+
+func (p *NodeAwarePreparer) toneMapCapabilitiesForNode(ctx context.Context, nodeURL string) (tonemap.Capabilities, error) {
+	nodeURL = strings.TrimRight(nodeURL, "/")
+	now := time.Now()
+	p.capabilityMu.Lock()
+	entry, ok := p.capabilities[nodeURL]
+	p.capabilityMu.Unlock()
+	if ok && now.Before(entry.expiresAt) {
+		return append(tonemap.Capabilities(nil), entry.capabilities...), nil
+	}
+	cfg := p.config()
+	if cfg == nil || strings.TrimSpace(cfg.Auth.JWTSecret) == "" {
+		return nil, errors.New("transcode node credentials unavailable")
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, nodeURL+"/hw-capabilities", nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+cfg.Auth.JWTSecret)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("transcode node returned %d", response.StatusCode)
+	}
+	var info playback.HWAccelInfo
+	if err := json.NewDecoder(response.Body).Decode(&info); err != nil {
+		return nil, err
+	}
+	entry = remoteToneMapCapabilities{capabilities: append(tonemap.Capabilities(nil), info.ToneMapCapabilities...), expiresAt: now.Add(time.Minute)}
+	p.capabilityMu.Lock()
+	p.capabilities[nodeURL] = entry
+	p.capabilityMu.Unlock()
+	return append(tonemap.Capabilities(nil), entry.capabilities...), nil
 }
 
 func remotePreparedArtifact(node *nodepool.Node, result downloadprepare.Result) PreparedArtifact {

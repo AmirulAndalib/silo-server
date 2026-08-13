@@ -9,6 +9,9 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 func TestHTTPPreparerSendsAuthenticatedRecipe(t *testing.T) {
@@ -37,6 +40,42 @@ func TestHTTPPreparerSendsAuthenticatedRecipe(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("request = %+v, want %+v", got, want)
+	}
+}
+
+func TestRequestRoundTripPreservesFrozenToneMapRecipe(t *testing.T) {
+	revision := tonemap.SourceRevision{MediaFileID: 42, FileSize: 100, FileModifiedUnixNano: 200, StreamSignature: "stream"}
+	want := playback.TranscodeOpts{
+		InputPath: "/media/hdr.mkv", ToneMapPolicy: tonemap.PolicyHardwareThenSoftware,
+		ToneMapMode: tonemap.ModeHardware, ToneMapSourceKind: tonemap.SourcePQ,
+		ToneMapFilter: "tonemap_vaapi", ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapPreflightRequired: true, ToneMapSourceRevision: revision,
+		ToneMapDVConfigPresent: true, ToneMapDVBLCompatIDPresent: true, ToneMapDVBLPresent: true, ToneMapDVRPUPresent: true,
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac",
+	}
+	request := NewRequest("artifact-1", want)
+	got := request.TranscodeOpts("/usr/bin/ffmpeg", "qsv", "/dev/dri/renderD128", nil)
+	if got.ToneMapPolicy != want.ToneMapPolicy || got.ToneMapMode != want.ToneMapMode ||
+		got.ToneMapSourceKind != want.ToneMapSourceKind || got.ToneMapRecipeVersion != want.ToneMapRecipeVersion ||
+		got.ToneMapPreflightRequired != want.ToneMapPreflightRequired || got.ToneMapSourceRevision != revision {
+		t.Fatalf("tone-map request round trip = %+v, want %+v", got, want)
+	}
+	if !got.ToneMapDVConfigPresent || !got.ToneMapDVBLCompatIDPresent || !got.ToneMapDVBLPresent || !got.ToneMapDVRPUPresent {
+		t.Fatalf("Dolby Vision source presence flags were lost: %+v", got)
+	}
+	if got.ToneMapFilter != "" {
+		t.Fatalf("node request trusted a server-selected filter: %q", got.ToneMapFilter)
+	}
+}
+
+func TestRequestRoundTripTreatsNonePolicyAsOrdinaryTranscode(t *testing.T) {
+	request := NewRequest("artifact-1", playback.TranscodeOpts{
+		InputPath: "/media/sdr.mkv", ToneMapPolicy: tonemap.PolicyNone,
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac",
+	})
+	got := request.TranscodeOpts("/usr/bin/ffmpeg", "qsv", "/dev/dri/renderD128", nil)
+	if got.ToneMapMode != "" || got.ToneMapSourceKind != "" || got.ToneMapRecipeVersion != "" {
+		t.Fatalf("ordinary transcode gained tone-map recipe fields: %+v", got)
 	}
 }
 

@@ -29,6 +29,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 // goldenSessionID is a fixed UUID: fixtures must be byte-stable across runs,
@@ -335,6 +336,7 @@ func goldenCapabilityResponse() playback.CapabilityResponseV3 {
 		// fixture pins the full set so a client sees every shape it must parse.
 		Transformations: []playback.TransformationV3{
 			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1", ValidatedClaims: []string{playback.ClaimAudioDecodeV3}},
+			{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3, ValidatedClaims: []string{playback.ClaimHDRMetadataRemovedV3, playback.ClaimSDRBT709OutputV3}},
 			{Name: playback.TransformationServerDV7HDR10V3, Executor: playback.ExecutorServerV3, RecipeVersion: "1", ValidatedClaims: playback.DV7ToHDR10ClaimsV3()},
 			{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, ValidatedClaims: []string{playback.ClaimH264DecodeV3}},
 		},
@@ -555,6 +557,19 @@ func goldenConformanceMatrix() playback.ConformanceMatrixV3 {
 	hdr10Request.PlaybackAttemptID = "attempt-hdr10-direct"
 	planner = append(planner, makePlannerScenario("hdr10_exact_direct", "hdr_dv_matrix", hdr10Request, conformanceHDRFile(), nil, settings, registry))
 
+	toneMapRequest := conformanceStartRequest()
+	toneMapRequest.PlaybackAttemptID = "attempt-hdr10-tone-map"
+	toneMapRequest.QualityPreference = resolutionFHD
+	toneMapSettings := settings
+	toneMapSettings.SoftwareToneMapEnabled = true
+	toneMapRegistry := playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
+		{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},
+		{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3, Available: true},
+	})
+	softwarePQ := tonemap.Capabilities{{Mode: tonemap.ModeSoftware, Backend: "software", Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}}}
+	planner = append(planner, makePlannerScenario("hdr10_to_sdr_tone_map", "hdr_dv_matrix", toneMapRequest, conformanceHDRFile(), nil, toneMapSettings, toneMapRegistry, softwarePQ))
+
 	dv8File := conformanceHDRFile()
 	dv8File.VideoTracks[0].DVProfile = 8
 	dv8File.VideoTracks[0].DVBLCompatID = 1
@@ -575,6 +590,21 @@ func goldenConformanceMatrix() playback.ConformanceMatrixV3 {
 	dv7Request.PlaybackAttemptID = "attempt-dv7-hdr10"
 	dv7Registry := playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{Name: playback.TransformationServerDV7HDR10V3, RecipeVersion: "1", Available: true}})
 	planner = append(planner, makePlannerScenario("dolby_vision_7_hdr10_fallback", "hdr_dv_matrix", dv7Request, dv7File, nil, settings, dv7Registry))
+
+	dv7ToneMapFile := *dv7File
+	dv7ToneMapFile.VideoTracks = append([]models.VideoTrack(nil), dv7File.VideoTracks...)
+	dv7ToneMapFile.VideoTracks[0].DVConfigPresent = true
+	dv7ToneMapFile.VideoTracks[0].DVBLCompatIDPresent = true
+	dv7ToneMapFile.VideoTracks[0].DVBLPresent = true
+	dv7ToneMapFile.VideoTracks[0].DVRPUPresent = true
+	dv7ToneMapFile.VideoTracks[0].ColorRange = "tv"
+	dv7ToneMapFile.VideoTracks[0].ColorPrimaries = "bt2020"
+	dv7ToneMapFile.VideoTracks[0].ColorTransfer = "smpte2084"
+	dv7ToneMapFile.VideoTracks[0].ColorSpace = "bt2020nc"
+	dv7ToneMapRequest := conformanceStartRequest()
+	dv7ToneMapRequest.PlaybackAttemptID = "attempt-dv7-id6-tone-map"
+	dv7ToneMapRequest.QualityPreference = resolutionFHD
+	planner = append(planner, makePlannerScenario("dolby_vision_7_id6_to_sdr_tone_map", "hdr_dv_matrix", dv7ToneMapRequest, &dv7ToneMapFile, nil, toneMapSettings, toneMapRegistry, softwarePQ))
 
 	audioAdaptFile := conformanceHDRFile()
 	audioAdaptFile.CodecAudio = codecTrueHD
@@ -744,10 +774,14 @@ func goldenConformanceMatrix() playback.ConformanceMatrixV3 {
 	return playback.ConformanceMatrixV3{SchemaVersion: 1, Planner: planner, Replans: replans, Protocol: protocol}
 }
 
-func makePlannerScenario(name, category string, request playback.StartRequestV3, file *models.MediaFile, attempted []string, settings playback.PlannerSettingsV3, registry *playback.TransformationRegistryV3) playback.PlannerScenarioV3 {
+func makePlannerScenario(name, category string, request playback.StartRequestV3, file *models.MediaFile, attempted []string, settings playback.PlannerSettingsV3, registry *playback.TransformationRegistryV3, toneMapCapabilities ...tonemap.Capabilities) playback.PlannerScenarioV3 {
+	var capabilities tonemap.Capabilities
+	if len(toneMapCapabilities) > 0 {
+		capabilities = toneMapCapabilities[0]
+	}
 	result := playback.PlanPlaybackV3(playback.PlannerInputV3{
 		Request: request, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
-		Settings: settings, Registry: registry, AttemptedKeys: attempted,
+		Settings: settings, Registry: registry, AttemptedKeys: attempted, ToneMapCapabilities: capabilities,
 	})
 	expected := playback.PlannerExpectationV3{Outcome: playback.OutcomeAdaptationUnavailableV3}
 	if result.Plan != nil {

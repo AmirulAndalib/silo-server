@@ -63,26 +63,37 @@ type Claims struct {
 	// Reconstruction recipe — the byte-affecting encode parameters, mirroring the
 	// former playback.RecipeCard. Zero for direct/remux tokens, which reconstruct
 	// from identity alone plus the client-supplied position.
-	SourceVideoCodec       string  `json:"svc,omitempty"`
-	SourceVideoProfile     string  `json:"svp,omitempty"`
-	SourceVideoBitDepth    int     `json:"svb,omitempty"`
-	SoftwareVideoDecode    bool    `json:"svd,omitempty"`
-	VideoBitstreamFilter   string  `json:"vbsf,omitempty"`
-	OutputSubdir           string  `json:"osd,omitempty"`
-	SeekSeconds            float64 `json:"seek,omitempty"`
-	StreamOriginSeconds    float64 `json:"origin,omitempty"`
-	CopySeekAnchorResolved bool    `json:"origin_ok,omitempty"`
-	SegmentDuration        int     `json:"segd,omitempty"`
-	StartSegmentNumber     int     `json:"ssn,omitempty"`
-	SubtitleTrackIndex     int     `json:"sti,omitempty"`
-	SubtitleBurnIn         bool    `json:"sbi,omitempty"`
-	SubtitleCodec          string  `json:"sbc,omitempty"`
-	TargetBitrateKbps      int     `json:"tbr,omitempty"`
-	TotalDuration          float64 `json:"dur,omitempty"`
-	FastStart              bool    `json:"fs,omitempty"`
-	TargetCodecAudio       string  `json:"tca,omitempty"`
-	TargetAudioChannels    int     `json:"tac,omitempty"`
-	TargetAudioBitrateKbps int     `json:"tabr,omitempty"`
+	SourceVideoCodec           string  `json:"svc,omitempty"`
+	SourceVideoProfile         string  `json:"svp,omitempty"`
+	SourceVideoBitDepth        int     `json:"svb,omitempty"`
+	SoftwareVideoDecode        bool    `json:"svd,omitempty"`
+	ToneMapPolicy              string  `json:"tmp,omitempty"`
+	ToneMapMode                string  `json:"tmm,omitempty"`
+	ToneMapSourceKind          string  `json:"tms,omitempty"`
+	ToneMapFilter              string  `json:"tmf,omitempty"`
+	ToneMapRecipeVersion       string  `json:"tmv,omitempty"`
+	ToneMapPreflightRequired   bool    `json:"tmpf,omitempty"`
+	ToneMapSourceRevision      string  `json:"tmsr,omitempty"`
+	ToneMapDVConfigPresent     bool    `json:"tmdc,omitempty"`
+	ToneMapDVBLCompatIDPresent bool    `json:"tmdbci,omitempty"`
+	ToneMapDVBLPresent         bool    `json:"tmdb,omitempty"`
+	ToneMapDVRPUPresent        bool    `json:"tmdr,omitempty"`
+	VideoBitstreamFilter       string  `json:"vbsf,omitempty"`
+	OutputSubdir               string  `json:"osd,omitempty"`
+	SeekSeconds                float64 `json:"seek,omitempty"`
+	StreamOriginSeconds        float64 `json:"origin,omitempty"`
+	CopySeekAnchorResolved     bool    `json:"origin_ok,omitempty"`
+	SegmentDuration            int     `json:"segd,omitempty"`
+	StartSegmentNumber         int     `json:"ssn,omitempty"`
+	SubtitleTrackIndex         int     `json:"sti,omitempty"`
+	SubtitleBurnIn             bool    `json:"sbi,omitempty"`
+	SubtitleCodec              string  `json:"sbc,omitempty"`
+	TargetBitrateKbps          int     `json:"tbr,omitempty"`
+	TotalDuration              float64 `json:"dur,omitempty"`
+	FastStart                  bool    `json:"fs,omitempty"`
+	TargetCodecAudio           string  `json:"tca,omitempty"`
+	TargetAudioChannels        int     `json:"tac,omitempty"`
+	TargetAudioBitrateKbps     int     `json:"tabr,omitempty"`
 
 	// Recipe staleness hint, bumped on each re-mint after a recipe mutation
 	// (audio/quality/seek switch). An optional client-side hint only.

@@ -6,7 +6,209 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
+
+func TestToneMapFFmpegGraphsCoverSupportedExecutors(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       tonemap.Mode
+		hwAccel    string
+		filter     string
+		sourceKind tonemap.SourceKind
+		want       []string
+	}{
+		{name: "software PQ", mode: tonemap.ModeSoftware, hwAccel: "none", filter: "tonemapx", sourceKind: tonemap.SourcePQ, want: []string{"tonemapx=tonemap=bt2390", "color_trc=smpte2084", "libx264"}},
+		{name: "software HLG fallback", mode: tonemap.ModeSoftware, hwAccel: "none", filter: "tonemap", sourceKind: tonemap.SourceHLG, want: []string{"tonemap=hable", "color_trc=arib-std-b67", "libx264"}},
+		{name: "QSV", mode: tonemap.ModeHardware, hwAccel: "qsv", filter: "tonemap_vaapi", sourceKind: tonemap.SourcePQ, want: []string{"tonemap_vaapi", "hwmap=derive_device=qsv:mode=read+write", "h264_qsv"}},
+		{name: "VAAPI", mode: tonemap.ModeHardware, hwAccel: "vaapi", filter: "tonemap_vaapi", sourceKind: tonemap.SourceHLG, want: []string{"tonemap_vaapi", "scale_vaapi", "h264_vaapi"}},
+		{name: "NVENC", mode: tonemap.ModeHardware, hwAccel: "nvenc", filter: "tonemap_cuda", sourceKind: tonemap.SourcePQ, want: []string{"color_trc=smpte2084", "tonemap_cuda", "scale_cuda", "h264_nvenc"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := buildFFmpegArgs(TranscodeOpts{
+				InputPath: "/media/hdr.mkv", OutputDir: t.TempDir(), TargetCodecVideo: "h264", TargetCodecAudio: "aac",
+				TargetResolution: "1080p", HWAccel: tt.hwAccel, ToneMapPolicy: tonemap.PolicyHardwareThenSoftware,
+				ToneMapMode: tt.mode, ToneMapSourceKind: tt.sourceKind, ToneMapFilter: tt.filter,
+				ToneMapRecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3,
+			})
+			joined := strings.Join(args, " ")
+			for _, token := range append(tt.want, "-color_range tv", "-color_primaries bt709", "-color_trc bt709") {
+				if !strings.Contains(joined, token) {
+					t.Fatalf("args missing %q: %s", token, joined)
+				}
+			}
+			if tt.mode == tonemap.ModeSoftware && !strings.Contains(joined, "-colorspace bt709") {
+				t.Fatalf("software args omit explicit output matrix: %s", joined)
+			}
+			if tt.mode == tonemap.ModeHardware && strings.Contains(joined, "-colorspace bt709") {
+				t.Fatalf("hardware args request an incompatible software colorspace conversion: %s", joined)
+			}
+			if tt.mode == tonemap.ModeHardware && strings.Contains(joined, "-pix_fmt yuv420p") {
+				t.Fatalf("hardware graph requested a software pixel format conversion: %s", joined)
+			}
+		})
+	}
+}
+
+func TestEveryToneMapSourceKindBuildsEveryExecutorGraph(t *testing.T) {
+	executors := []struct {
+		name    string
+		mode    tonemap.Mode
+		hwAccel string
+		filter  string
+		encoder string
+	}{
+		{name: "software", mode: tonemap.ModeSoftware, hwAccel: "none", filter: tonemap.SoftwareFilterHable, encoder: "libx264"},
+		{name: "qsv", mode: tonemap.ModeHardware, hwAccel: "qsv", filter: tonemap.HardwareFilterVAAPI, encoder: "h264_qsv"},
+		{name: "vaapi", mode: tonemap.ModeHardware, hwAccel: "vaapi", filter: tonemap.HardwareFilterVAAPI, encoder: "h264_vaapi"},
+		{name: "nvenc", mode: tonemap.ModeHardware, hwAccel: "nvenc", filter: tonemap.HardwareFilterCUDA, encoder: "h264_nvenc"},
+	}
+	for _, kind := range tonemap.AllSourceKinds() {
+		for _, executor := range executors {
+			t.Run(string(kind)+"/"+executor.name, func(t *testing.T) {
+				args := buildPrepareFileArgs(TranscodeOpts{
+					InputPath: "/media/source.mkv", SourceVideoBitDepth: 10, TargetCodecVideo: "h264", TargetCodecAudio: "aac",
+					TargetResolution: "720p", ToneMapPolicy: tonemap.PolicyHardwareThenSoftware,
+					ToneMapMode: executor.mode, ToneMapSourceKind: kind, ToneMapFilter: executor.filter,
+					ToneMapRecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3, HWAccel: executor.hwAccel,
+				}, "/tmp/output.mp4")
+				joined := strings.Join(args, " ")
+				for _, token := range []string{executor.encoder, "-color_range tv", "-color_primaries bt709", "-color_trc bt709", "sidedata=mode=delete:type=DOVI_RPU_BUFFER"} {
+					if !strings.Contains(joined, token) {
+						t.Fatalf("%s/%s graph missing %q: %s", kind, executor.name, token, joined)
+					}
+				}
+				hasLuminanceToneMap := strings.Contains(joined, "tonemap=hable") || strings.Contains(joined, "tonemap_vaapi") || strings.Contains(joined, "tonemap_cuda")
+				if hasLuminanceToneMap == tonemap.IsSDRSource(kind) {
+					t.Fatalf("%s/%s luminance tone-map decision is wrong: %s", kind, executor.name, joined)
+				}
+			})
+		}
+	}
+}
+
+func TestHardwareToneMapRemovesMetadataAfterHardwareFormatConversion(t *testing.T) {
+	tests := []struct {
+		name    string
+		hwAccel string
+		filter  string
+		before  string
+	}{
+		{name: "QSV", hwAccel: "qsv", filter: tonemap.HardwareFilterVAAPI, before: "hwmap=derive_device=qsv"},
+		{name: "VAAPI", hwAccel: "vaapi", filter: tonemap.HardwareFilterVAAPI, before: "scale_vaapi"},
+		{name: "NVENC", hwAccel: "nvenc", filter: tonemap.HardwareFilterCUDA, before: "scale_cuda"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			graph := strings.Join(buildFFmpegArgs(TranscodeOpts{
+				InputPath: "/media/hdr.mkv", OutputDir: t.TempDir(), TargetCodecVideo: "h264", TargetCodecAudio: "aac",
+				TargetResolution: "1080p", HWAccel: tt.hwAccel, ToneMapPolicy: tonemap.PolicyHardwareOnly,
+				ToneMapMode: tonemap.ModeHardware, ToneMapSourceKind: tonemap.SourcePQ, ToneMapFilter: tt.filter,
+				ToneMapRecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3,
+			}), " ")
+			conversion := strings.Index(graph, tt.before)
+			metadata := strings.Index(graph, "sidedata=mode=delete")
+			if conversion < 0 || metadata <= conversion {
+				t.Fatalf("metadata removal precedes hardware format conversion: %s", graph)
+			}
+		})
+	}
+}
+
+func TestToneMapGraphOrdersTextAndBitmapSubtitles(t *testing.T) {
+	base := TranscodeOpts{
+		InputPath: "/media/hdr.mkv", OutputDir: t.TempDir(), TargetCodecVideo: "h264", TargetCodecAudio: "aac", TargetResolution: "1080p",
+		HWAccel: "none", ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware, ToneMapSourceKind: tonemap.SourcePQ,
+		ToneMapFilter: "tonemapx", ToneMapRecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3, SubtitleBurnIn: true, SubtitleTrackIndex: 0,
+	}
+	textOpts := base
+	textOpts.SubtitleCodec = "subrip"
+	textGraph := strings.Join(buildFFmpegArgs(textOpts), " ")
+	assertTokenOrder := func(graph string, tokens ...string) {
+		t.Helper()
+		last := -1
+		for _, token := range tokens {
+			index := strings.Index(graph, token)
+			if index < 0 || index <= last {
+				t.Fatalf("tokens %v are not ordered in %s", tokens, graph)
+			}
+			last = index
+		}
+	}
+	assertTokenOrder(textGraph, "tonemapx=tonemap=bt2390", "scale=-2:1080", "subtitles=")
+
+	bitmapOpts := base
+	bitmapOpts.SubtitleCodec = "hdmv_pgs_subtitle"
+	bitmapGraph := strings.Join(buildFFmpegArgs(bitmapOpts), " ")
+	assertTokenOrder(bitmapGraph, "tonemapx=tonemap=bt2390", "overlay=eof_action=pass", "scale=-2:1080")
+}
+
+func TestSDRBaseGraphsBypassLuminanceToneMapping(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       tonemap.Mode
+		hwAccel    string
+		filter     string
+		sourceKind tonemap.SourceKind
+		want       []string
+	}{
+		{name: "software BT709", mode: tonemap.ModeSoftware, hwAccel: "none", filter: tonemap.SoftwareFilterHable, sourceKind: tonemap.SourceSDRBT709, want: []string{"color_primaries=bt709", "zscale=p=bt709"}},
+		{name: "software BT2020", mode: tonemap.ModeSoftware, hwAccel: "none", filter: tonemap.SoftwareFilterBT2390, sourceKind: tonemap.SourceSDRBT2020, want: []string{"color_primaries=bt2020", "zscale=p=bt709"}},
+		{name: "QSV", mode: tonemap.ModeHardware, hwAccel: "qsv", filter: tonemap.HardwareFilterVAAPI, sourceKind: tonemap.SourceSDRBT709, want: []string{"scale_vaapi=format=nv12", "hwmap=derive_device=qsv"}},
+		{name: "VAAPI", mode: tonemap.ModeHardware, hwAccel: "vaapi", filter: tonemap.HardwareFilterVAAPI, sourceKind: tonemap.SourceSDRBT2020, want: []string{"scale_vaapi=format=nv12", "h264_vaapi"}},
+		{name: "NVENC", mode: tonemap.ModeHardware, hwAccel: "nvenc", filter: tonemap.HardwareFilterCUDA, sourceKind: tonemap.SourceSDRBT2020, want: []string{"hwdownload,format=p010le", "zscale=p=bt709", "hwupload_cuda", "h264_nvenc"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := buildFFmpegArgs(TranscodeOpts{
+				InputPath: "/media/dovi.mkv", OutputDir: t.TempDir(), SourceVideoBitDepth: 10,
+				TargetCodecVideo: "h264", TargetCodecAudio: "aac", TargetResolution: "1080p", HWAccel: tt.hwAccel,
+				ToneMapPolicy: tonemap.PolicyHardwareThenSoftware, ToneMapMode: tt.mode,
+				ToneMapSourceKind: tt.sourceKind, ToneMapFilter: tt.filter, ToneMapRecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3,
+			})
+			joined := strings.Join(args, " ")
+			for _, token := range tt.want {
+				if !strings.Contains(joined, token) {
+					t.Fatalf("args missing %q: %s", token, joined)
+				}
+			}
+			for _, token := range []string{"tonemapx=", "tonemap=hable", "tonemap_vaapi", "tonemap_cuda"} {
+				if strings.Contains(joined, token) {
+					t.Fatalf("SDR fallback unexpectedly applies luminance tone mapping %q: %s", token, joined)
+				}
+			}
+		})
+	}
+}
+
+func TestNVENCSDRBaseGraphsDownloadBeforeSubtitleComposition(t *testing.T) {
+	base := TranscodeOpts{
+		InputPath: "/media/dovi.mkv", OutputDir: t.TempDir(), SourceVideoBitDepth: 10,
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac", TargetResolution: "1080p", HWAccel: "nvenc",
+		ToneMapPolicy: tonemap.PolicyHardwareOnly, ToneMapMode: tonemap.ModeHardware,
+		ToneMapSourceKind: tonemap.SourceSDRBT2020, ToneMapFilter: tonemap.HardwareFilterCUDA,
+		ToneMapRecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3, SubtitleBurnIn: true, SubtitleTrackIndex: 0,
+	}
+	for _, codec := range []string{"subrip", "hdmv_pgs_subtitle"} {
+		t.Run(codec, func(t *testing.T) {
+			opts := base
+			opts.SubtitleCodec = codec
+			graph := strings.Join(buildFFmpegArgs(opts), " ")
+			download := strings.Index(graph, "hwdownload,format=p010le")
+			convert := strings.Index(graph, "zscale=p=bt709")
+			compose := strings.Index(graph, "subtitles=")
+			if codec == "hdmv_pgs_subtitle" {
+				compose = strings.Index(graph, "overlay=eof_action=pass")
+			}
+			upload := strings.LastIndex(graph, "hwupload_cuda")
+			if download < 0 || convert <= download || compose <= convert || upload <= compose {
+				t.Fatalf("unsafe filter order: %s", graph)
+			}
+		})
+	}
+}
 
 func TestPrepareSubtitleFilterInputCreatesParserSafeAlias(t *testing.T) {
 	outputDir := t.TempDir()
@@ -59,6 +261,21 @@ func TestStartTranscodeRejectsUnvalidatedBitstreamFilter(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("DV copy filter was accepted for encoded video")
+	}
+}
+
+func TestValidateToneMapOptsRequiresFrozenSourceRevision(t *testing.T) {
+	opts := TranscodeOpts{
+		TargetCodecVideo: "h264", HWAccel: "qsv", ToneMapPolicy: tonemap.PolicyHardwareOnly,
+		ToneMapMode: tonemap.ModeHardware, ToneMapSourceKind: tonemap.SourcePQ,
+		ToneMapFilter: tonemap.HardwareFilterVAAPI, ToneMapRecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3,
+	}
+	if err := validateToneMapOpts(opts); err == nil {
+		t.Fatal("tone-map recipe without a frozen source revision was accepted")
+	}
+	opts.ToneMapSourceRevision = tonemap.SourceRevision{MediaFileID: 1, FileSize: 1, StreamSignature: "stream"}
+	if err := validateToneMapOpts(opts); err != nil {
+		t.Fatalf("complete tone-map recipe rejected: %v", err)
 	}
 }
 

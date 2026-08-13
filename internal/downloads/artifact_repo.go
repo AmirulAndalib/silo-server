@@ -8,10 +8,13 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 const artifactColumns = `id, media_file_id, format, params_hash, container, codec_video, codec_audio,
-	resolution, audio_track_index, target_bitrate_kbps, output_path,
+	resolution, audio_track_index, target_bitrate_kbps, tone_map_policy, tone_map_mode, tone_map_source_kind, tone_map_recipe_version, tone_map_preflight_required, tone_map_source_revision,
+	tone_map_dv_config_present, tone_map_dv_bl_compat_id_present, tone_map_dv_bl_present, tone_map_dv_rpu_present, output_path,
 	origin_node_id, origin_node_url, origin_node_group, origin_artifact_id, file_size, status, error_message,
 	attempts, max_attempts, lease_owner, lease_expires_at, next_retry_at,
 	created_at, completed_at, last_used_at`
@@ -44,7 +47,8 @@ func scanArtifact(row pgx.Row) (*Artifact, error) {
 	var leaseOwner *string
 	if err := row.Scan(
 		&a.ID, &a.MediaFileID, &a.Format, &a.ParamsHash, &a.Container, &a.CodecVideo, &a.CodecAudio,
-		&a.Resolution, &a.AudioTrackIndex, &a.TargetBitrateKbps, &a.OutputPath,
+		&a.Resolution, &a.AudioTrackIndex, &a.TargetBitrateKbps, &a.ToneMapPolicy, &a.ToneMapMode, &a.ToneMapSourceKind, &a.ToneMapRecipeVersion, &a.ToneMapPreflightRequired, &a.ToneMapSourceRevision,
+		&a.ToneMapDVConfigPresent, &a.ToneMapDVBLCompatIDPresent, &a.ToneMapDVBLPresent, &a.ToneMapDVRPUPresent, &a.OutputPath,
 		&a.OriginNodeID, &a.OriginNodeURL, &a.OriginNodeGroup, &a.OriginArtifactID, &a.FileSize, &a.Status, &a.ErrorMessage,
 		&a.Attempts, &a.MaxAttempts, &leaseOwner, &a.LeaseExpiresAt, &a.NextRetryAt,
 		&a.CreatedAt, &a.CompletedAt, &a.LastUsedAt,
@@ -59,14 +63,19 @@ func scanArtifact(row pgx.Row) (*Artifact, error) {
 // (media_file_id, format, params_hash), then returns the current row (existing
 // or freshly queued) and whether it was newly created.
 func (r *ArtifactRepository) EnsureQueued(ctx context.Context, a *Artifact) (*Artifact, bool, error) {
+	if a.ToneMapPolicy == "" {
+		a.ToneMapPolicy = tonemap.PolicyNone
+	}
 	tag, err := r.pool.Exec(ctx,
 		`INSERT INTO download_artifacts
 			(id, media_file_id, format, params_hash, container, codec_video, codec_audio,
-			 resolution, audio_track_index, target_bitrate_kbps, output_path, status, max_attempts)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'queued', $12)
+			 resolution, audio_track_index, target_bitrate_kbps, tone_map_policy, tone_map_mode, tone_map_source_kind, tone_map_recipe_version, tone_map_preflight_required, tone_map_source_revision,
+			 tone_map_dv_config_present, tone_map_dv_bl_compat_id_present, tone_map_dv_bl_present, tone_map_dv_rpu_present, output_path, status, max_attempts)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, 'queued', $22)
 		 ON CONFLICT (media_file_id, format, params_hash) DO NOTHING`,
 		a.ID, a.MediaFileID, a.Format, a.ParamsHash, a.Container, a.CodecVideo, a.CodecAudio,
-		a.Resolution, a.AudioTrackIndex, a.TargetBitrateKbps, a.OutputPath, a.MaxAttempts,
+		a.Resolution, a.AudioTrackIndex, a.TargetBitrateKbps, a.ToneMapPolicy, a.ToneMapMode, a.ToneMapSourceKind, a.ToneMapRecipeVersion, a.ToneMapPreflightRequired, a.ToneMapSourceRevision,
+		a.ToneMapDVConfigPresent, a.ToneMapDVBLCompatIDPresent, a.ToneMapDVBLPresent, a.ToneMapDVRPUPresent, a.OutputPath, a.MaxAttempts,
 	)
 	if err != nil {
 		return nil, false, fmt.Errorf("ensuring artifact: %w", err)

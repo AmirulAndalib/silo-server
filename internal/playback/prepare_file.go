@@ -9,17 +9,28 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 // PrepareTarget describes the concrete encode target for a prepared download
 // artifact (remux or transcode-to-file).
 type PrepareTarget struct {
-	Container         string
-	CodecVideo        string // "copy" for remux, else an encoder codec (e.g. "h264")
-	CodecAudio        string // "copy" or "aac"
-	Resolution        string // "" = keep source resolution (no scale)
-	AudioTrackIndex   int
-	TargetBitrateKbps int // 0 = encoder default/CRF; >0 caps video bitrate
+	Container                  string
+	CodecVideo                 string // "copy" for remux, else an encoder codec (e.g. "h264")
+	CodecAudio                 string // "copy" or "aac"
+	Resolution                 string // "" = keep source resolution (no scale)
+	AudioTrackIndex            int
+	TargetBitrateKbps          int // 0 = encoder default/CRF; >0 caps video bitrate
+	ToneMapPolicy              tonemap.Policy
+	ToneMapMode                tonemap.Mode
+	ToneMapSourceKind          tonemap.SourceKind
+	ToneMapRecipeVersion       string
+	ToneMapPreflightRequired   bool
+	ToneMapSourceRevision      tonemap.SourceRevision
+	ToneMapDVConfigPresent     bool
+	ToneMapDVBLCompatIDPresent bool
+	ToneMapDVBLPresent         bool
+	ToneMapDVRPUPresent        bool
 }
 
 // ResolvePrepareTarget computes the encode target for a remux/transcode download
@@ -59,6 +70,10 @@ func PrepareFile(ctx context.Context, opts TranscodeOpts, outputPath string) err
 	if outputPath == "" {
 		return fmt.Errorf("prepare-file: empty output path")
 	}
+	opts = normalizeTranscodeOpts(opts)
+	if err := validateToneMapOpts(opts); err != nil {
+		return fmt.Errorf("prepare-file: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
 		return fmt.Errorf("prepare-file: create output dir: %w", err)
 	}
@@ -70,10 +85,12 @@ func PrepareFile(ctx context.Context, opts TranscodeOpts, outputPath string) err
 	// Resolve a multi-device hw_device list to one concrete GPU for this
 	// encode. Run blocks until ffmpeg exits, so the deferred release fires at
 	// exactly the process-exit boundary.
-	opts = normalizeTranscodeOpts(opts)
 	hwDevice, releaseHWDevice := AcquireHWDevice(opts.HWDevice, opts.HWAccel)
 	opts.HWDevice = hwDevice
 	defer releaseHWDevice()
+	if err := validateToneMapSource(ctx, opts); err != nil {
+		return fmt.Errorf("prepare-file: %w", err)
+	}
 
 	args := buildPrepareFileArgs(opts, partPath)
 	bin := opts.FFmpegPath

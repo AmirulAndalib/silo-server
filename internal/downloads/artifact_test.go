@@ -12,6 +12,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/downloadprepare"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 func TestParamsHashStableAndDistinct(t *testing.T) {
@@ -34,6 +35,42 @@ func TestParamsHashStableAndDistinct(t *testing.T) {
 	} {
 		if other == base {
 			t.Fatalf("params hash collision: %q", other)
+		}
+	}
+}
+
+func TestParamsHashIncludesFrozenToneMapRecipe(t *testing.T) {
+	base := paramsHash("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false)
+	legacy := paramsHashWithToneMap("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false, tonemap.PolicyNone, "", "", "")
+	if legacy != base {
+		t.Fatalf("non-tone-mapped hash changed: %q != %q", legacy, base)
+	}
+	toneMapped := paramsHashWithToneMap("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
+		tonemap.PolicyHardwareThenSoftware, tonemap.ModeHardware, tonemap.SourcePQ, playback.TransformationHDRToSDRToneMapRecipeVersionV3)
+	for name, other := range map[string]string{
+		"non-tone-mapped": base,
+		"source kind": paramsHashWithToneMap("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
+			tonemap.PolicyHardwareThenSoftware, tonemap.ModeHardware, tonemap.SourceHLG, playback.TransformationHDRToSDRToneMapRecipeVersionV3),
+		"recipe version": paramsHashWithToneMap("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
+			tonemap.PolicyHardwareThenSoftware, tonemap.ModeHardware, tonemap.SourcePQ, "2"),
+		"execution mode": paramsHashWithToneMap("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
+			tonemap.PolicyHardwareThenSoftware, tonemap.ModeSoftware, tonemap.SourcePQ, playback.TransformationHDRToSDRToneMapRecipeVersionV3),
+	} {
+		if other == toneMapped {
+			t.Fatalf("%s did not affect tone-map artifact hash", name)
+		}
+	}
+	revision := tonemap.SourceRevision{MediaFileID: 1, FileSize: 10, FileModifiedUnixNano: 100, StreamSignature: "stream"}
+	revisionHash := paramsHashWithToneMapRevision("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
+		tonemap.PolicyHardwareThenSoftware, tonemap.ModeHardware, tonemap.SourcePQ, playback.TransformationHDRToSDRToneMapRecipeVersionV3, true, revision)
+	for name, other := range map[string]string{
+		"preflight": paramsHashWithToneMapRevision("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
+			tonemap.PolicyHardwareThenSoftware, tonemap.ModeHardware, tonemap.SourcePQ, playback.TransformationHDRToSDRToneMapRecipeVersionV3, false, revision),
+		"source revision": paramsHashWithToneMapRevision("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
+			tonemap.PolicyHardwareThenSoftware, tonemap.ModeHardware, tonemap.SourcePQ, playback.TransformationHDRToSDRToneMapRecipeVersionV3, true, tonemap.SourceRevision{MediaFileID: 1, FileSize: 11, FileModifiedUnixNano: 100, StreamSignature: "stream"}),
+	} {
+		if other == revisionHash {
+			t.Fatalf("%s did not affect tone-map artifact hash", name)
 		}
 	}
 }

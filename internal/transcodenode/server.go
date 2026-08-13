@@ -25,42 +25,54 @@ import (
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 // TranscodeStartRequest is the JSON body for POST /transcode/start.
 type TranscodeStartRequest struct {
-	SessionID              string  `json:"session_id"`
-	InputPath              string  `json:"input_path"`
-	SourceVideoCodec       string  `json:"source_video_codec"`
-	SourceVideoProfile     string  `json:"source_video_profile,omitempty"`
-	SourceVideoBitDepth    int     `json:"source_video_bit_depth,omitempty"`
-	SoftwareVideoDecode    bool    `json:"software_video_decode,omitempty"`
-	VideoBitstreamFilter   string  `json:"video_bitstream_filter,omitempty"`
-	SeekSeconds            float64 `json:"seek_seconds"`
-	StreamOriginSeconds    float64 `json:"stream_origin_seconds,omitempty"`
-	CopySeekAnchorResolved bool    `json:"copy_seek_anchor_resolved,omitempty"`
-	StartSegmentNumber     int     `json:"start_segment_number"`
-	TargetResolution       string  `json:"target_resolution"`
-	TargetCodecVideo       string  `json:"target_codec_video"`
-	TargetCodecAudio       string  `json:"target_codec_audio"`
-	TargetAudioChannels    int     `json:"target_audio_channels,omitempty"`
-	TargetAudioBitrateKbps int     `json:"target_audio_bitrate_kbps,omitempty"`
-	TargetBitrateKbps      int     `json:"target_bitrate_kbps"`
-	SegmentDuration        int     `json:"segment_duration"`
-	HWAccel                string  `json:"hw_accel"`
-	AudioTrackIndex        int     `json:"audio_track_index"`
-	SubtitleTrackIndex     int     `json:"subtitle_track_index"`
-	SubtitleBurnIn         bool    `json:"subtitle_burn_in"`
-	SubtitleCodec          string  `json:"subtitle_codec,omitempty"`
-	TotalDuration          float64 `json:"total_duration"`
-	RequireReady           bool    `json:"require_ready,omitempty"`
+	SessionID                  string                 `json:"session_id"`
+	InputPath                  string                 `json:"input_path"`
+	SourceVideoCodec           string                 `json:"source_video_codec"`
+	SourceVideoProfile         string                 `json:"source_video_profile,omitempty"`
+	SourceVideoBitDepth        int                    `json:"source_video_bit_depth,omitempty"`
+	SoftwareVideoDecode        bool                   `json:"software_video_decode,omitempty"`
+	ToneMapPolicy              tonemap.Policy         `json:"tone_map_policy,omitempty"`
+	ToneMapMode                tonemap.Mode           `json:"tone_map_mode,omitempty"`
+	ToneMapSourceKind          tonemap.SourceKind     `json:"tone_map_source_kind,omitempty"`
+	ToneMapRecipeVersion       string                 `json:"tone_map_recipe_version,omitempty"`
+	ToneMapPreflightRequired   bool                   `json:"tone_map_preflight_required,omitempty"`
+	ToneMapSourceRevision      tonemap.SourceRevision `json:"tone_map_source_revision,omitempty,omitzero"`
+	ToneMapDVConfigPresent     bool                   `json:"tone_map_dv_config_present,omitempty"`
+	ToneMapDVBLCompatIDPresent bool                   `json:"tone_map_dv_bl_compat_id_present,omitempty"`
+	ToneMapDVBLPresent         bool                   `json:"tone_map_dv_bl_present,omitempty"`
+	ToneMapDVRPUPresent        bool                   `json:"tone_map_dv_rpu_present,omitempty"`
+	VideoBitstreamFilter       string                 `json:"video_bitstream_filter,omitempty"`
+	SeekSeconds                float64                `json:"seek_seconds"`
+	StreamOriginSeconds        float64                `json:"stream_origin_seconds,omitempty"`
+	CopySeekAnchorResolved     bool                   `json:"copy_seek_anchor_resolved,omitempty"`
+	StartSegmentNumber         int                    `json:"start_segment_number"`
+	TargetResolution           string                 `json:"target_resolution"`
+	TargetCodecVideo           string                 `json:"target_codec_video"`
+	TargetCodecAudio           string                 `json:"target_codec_audio"`
+	TargetAudioChannels        int                    `json:"target_audio_channels,omitempty"`
+	TargetAudioBitrateKbps     int                    `json:"target_audio_bitrate_kbps,omitempty"`
+	TargetBitrateKbps          int                    `json:"target_bitrate_kbps"`
+	SegmentDuration            int                    `json:"segment_duration"`
+	HWAccel                    string                 `json:"hw_accel"`
+	AudioTrackIndex            int                    `json:"audio_track_index"`
+	SubtitleTrackIndex         int                    `json:"subtitle_track_index"`
+	SubtitleBurnIn             bool                   `json:"subtitle_burn_in"`
+	SubtitleCodec              string                 `json:"subtitle_codec,omitempty"`
+	TotalDuration              float64                `json:"total_duration"`
+	RequireReady               bool                   `json:"require_ready,omitempty"`
 }
 
 // TranscodeStartResponse is the JSON response for POST /transcode/start.
 type TranscodeStartResponse struct {
-	SessionID string `json:"session_id"`
-	Status    string `json:"status"`
-	HWAccel   string `json:"hw_accel,omitempty"`
+	SessionID   string       `json:"session_id"`
+	Status      string       `json:"status"`
+	HWAccel     string       `json:"hw_accel,omitempty"`
+	ToneMapMode tonemap.Mode `json:"tone_map_mode,omitempty"`
 }
 
 // HealthResponse is the JSON response for GET /api/v1/health.
@@ -488,6 +500,13 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 	if !s.requireApprovedInputPath(w, r, req.InputPath) {
 		return
 	}
+	opts := req.TranscodeOpts(cfg.Playback.FFmpegPath, cfg.Playback.HWAccel, cfg.Playback.HWDevice, s.ffmpegSink)
+	if toneMapRecipeRequested(opts) {
+		if err := resolveToneMapRecipe(r.Context(), &opts); err != nil {
+			http.Error(w, "unsupported or stale tone-map recipe", http.StatusUnprocessableEntity)
+			return
+		}
+	}
 	artifactRoot := s.artifactRoot
 	if err := os.MkdirAll(artifactRoot, 0o755); err != nil {
 		http.Error(w, "artifact directory unavailable", http.StatusInternalServerError)
@@ -518,7 +537,6 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 		defer finishTracking()
 	}
 
-	opts := req.TranscodeOpts(cfg.Playback.FFmpegPath, cfg.Playback.HWAccel, cfg.Playback.HWDevice, s.ffmpegSink)
 	if err := playback.PrepareFile(jobCtx, opts, outputPath); err != nil {
 		if jobCtx.Err() == nil {
 			slog.ErrorContext(jobCtx, "prepare download artifact", "component", "transcodenode", "artifact_id", req.ArtifactID, "error", err)
@@ -532,6 +550,22 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeDownloadPrepareResult(w, req.ArtifactID, stat.Size())
+}
+
+func toneMapRecipeRequested(opts playback.TranscodeOpts) bool {
+	return (opts.ToneMapPolicy != "" && opts.ToneMapPolicy != tonemap.PolicyNone) || opts.ToneMapMode != "" || opts.ToneMapSourceKind != "" || opts.ToneMapRecipeVersion != "" || opts.ToneMapPreflightRequired || !opts.ToneMapSourceRevision.IsZero() || opts.ToneMapDVConfigPresent || opts.ToneMapDVBLCompatIDPresent || opts.ToneMapDVBLPresent || opts.ToneMapDVRPUPresent
+}
+
+func resolveToneMapRecipe(ctx context.Context, opts *playback.TranscodeOpts) error {
+	if opts == nil {
+		return errors.New("missing tone-map recipe")
+	}
+	resolved, err := playback.ResolveToneMapExecutor(ctx, *opts)
+	if err != nil {
+		return err
+	}
+	*opts = resolved
+	return nil
 }
 
 func writeDownloadPrepareResult(w http.ResponseWriter, artifactID string, fileSize int64) {
@@ -637,11 +671,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
 	ffmpegPath := ""
+	hwAccel := playback.HWAccelNone
+	hwDevice := ""
 	if cfg := s.watcher.Config(); cfg != nil {
 		ffmpegPath = cfg.Playback.FFmpegPath
+		hwAccel = playback.ResolveHWAccelWithFFmpeg(cfg.Playback.HWAccel, ffmpegPath)
+		hwDevice = cfg.Playback.HWDevice
 	}
 	info := playback.DetectHWAccelWithFFmpeg(ffmpegPath)
-	info.Transformations = playback.ProbeTransformationRegistryV3(r.Context(), ffmpegPath).Advertised()
+	info.ToneMapCapabilities = tonemap.Probe(r.Context(), playback.ResolveFFmpegPath(ffmpegPath), hwAccel, hwDevice)
+	info.Transformations = playback.ProbeTransformationRegistryWithToneMapV3(r.Context(), ffmpegPath, info.ToneMapCapabilities).Advertised()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)
 }
@@ -735,27 +774,37 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	outputDir := s.sessionOutputDir(req.SessionID)
 
 	opts := playback.TranscodeOpts{
-		InputPath:              req.InputPath,
-		OutputDir:              outputDir,
-		SessionID:              req.SessionID,
-		SourceVideoCodec:       req.SourceVideoCodec,
-		SourceVideoProfile:     req.SourceVideoProfile,
-		SourceVideoBitDepth:    req.SourceVideoBitDepth,
-		SoftwareVideoDecode:    req.SoftwareVideoDecode,
-		VideoBitstreamFilter:   req.VideoBitstreamFilter,
-		SeekSeconds:            req.SeekSeconds,
-		StreamOriginSeconds:    req.StreamOriginSeconds,
-		CopySeekAnchorResolved: req.CopySeekAnchorResolved,
-		StartSegmentNumber:     req.StartSegmentNumber,
-		TargetResolution:       req.TargetResolution,
-		TargetCodecVideo:       req.TargetCodecVideo,
-		TargetCodecAudio:       req.TargetCodecAudio,
-		TargetAudioChannels:    req.TargetAudioChannels,
-		TargetAudioBitrateKbps: req.TargetAudioBitrateKbps,
-		TargetBitrateKbps:      req.TargetBitrateKbps,
-		SegmentDuration:        req.SegmentDuration,
-		FFmpegPath:             cfg.Playback.FFmpegPath,
-		HWAccel:                req.HWAccel,
+		InputPath:                  req.InputPath,
+		OutputDir:                  outputDir,
+		SessionID:                  req.SessionID,
+		SourceVideoCodec:           req.SourceVideoCodec,
+		SourceVideoProfile:         req.SourceVideoProfile,
+		SourceVideoBitDepth:        req.SourceVideoBitDepth,
+		SoftwareVideoDecode:        req.SoftwareVideoDecode,
+		ToneMapPolicy:              req.ToneMapPolicy,
+		ToneMapMode:                req.ToneMapMode,
+		ToneMapSourceKind:          req.ToneMapSourceKind,
+		ToneMapRecipeVersion:       req.ToneMapRecipeVersion,
+		ToneMapPreflightRequired:   req.ToneMapPreflightRequired,
+		ToneMapSourceRevision:      req.ToneMapSourceRevision,
+		ToneMapDVConfigPresent:     req.ToneMapDVConfigPresent,
+		ToneMapDVBLCompatIDPresent: req.ToneMapDVBLCompatIDPresent,
+		ToneMapDVBLPresent:         req.ToneMapDVBLPresent,
+		ToneMapDVRPUPresent:        req.ToneMapDVRPUPresent,
+		VideoBitstreamFilter:       req.VideoBitstreamFilter,
+		SeekSeconds:                req.SeekSeconds,
+		StreamOriginSeconds:        req.StreamOriginSeconds,
+		CopySeekAnchorResolved:     req.CopySeekAnchorResolved,
+		StartSegmentNumber:         req.StartSegmentNumber,
+		TargetResolution:           req.TargetResolution,
+		TargetCodecVideo:           req.TargetCodecVideo,
+		TargetCodecAudio:           req.TargetCodecAudio,
+		TargetAudioChannels:        req.TargetAudioChannels,
+		TargetAudioBitrateKbps:     req.TargetAudioBitrateKbps,
+		TargetBitrateKbps:          req.TargetBitrateKbps,
+		SegmentDuration:            req.SegmentDuration,
+		FFmpegPath:                 cfg.Playback.FFmpegPath,
+		HWAccel:                    req.HWAccel,
 		// This node's configured device (or device list — StartTranscode
 		// resolves it to one GPU), matching what reconstruction uses so fresh
 		// and reconstructed sessions balance identically.
@@ -773,6 +822,12 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 
 	if opts.HWAccel == "" && cfg.Playback.HWAccel != "" {
 		opts.HWAccel = cfg.Playback.HWAccel
+	}
+	if toneMapRecipeRequested(opts) {
+		if err := resolveToneMapRecipe(r.Context(), &opts); err != nil {
+			http.Error(w, "unsupported or stale tone-map recipe", http.StatusUnprocessableEntity)
+			return
+		}
 	}
 
 	// Hold the per-session lifecycle lock across teardown → spawn → register so a
@@ -846,9 +901,10 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(TranscodeStartResponse{
-		SessionID: req.SessionID,
-		Status:    "started",
-		HWAccel:   effectiveHWAccel,
+		SessionID:   req.SessionID,
+		Status:      "started",
+		HWAccel:     effectiveHWAccel,
+		ToneMapMode: session.Opts().ToneMapMode,
 	})
 }
 
@@ -998,6 +1054,13 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	opts.HWDevice = cfg.Playback.HWDevice
 	opts.NodeType = "transcode"
 	opts.ExecutionMode = "transcode_node"
+	if toneMapRecipeRequested(opts) {
+		if err := resolveToneMapRecipe(context.WithoutCancel(r.Context()), &opts); err != nil {
+			slog.ErrorContext(r.Context(), "transcode node reconstruct tone-map recipe unavailable", "component", "transcodenode", "error", err,
+				"session", sessionID, "playback_session_id", sessionID)
+			return nil
+		}
+	}
 
 	// Resume near the segment the client is actually requesting. The card records
 	// the original start; if the client has played past it, spawning at the old

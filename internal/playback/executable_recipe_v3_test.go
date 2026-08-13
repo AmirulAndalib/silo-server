@@ -3,15 +3,21 @@ package playback
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 func TestExecutableRecipeV3RoundTripPreservesOperationalFields(t *testing.T) {
-	plan := &PlanV3{PlanID: "plan:frozen", Delivery: DeliveryRemuxHLSV3}
+	plan := &PlanV3{PlanID: "plan:frozen", Delivery: DeliveryTranscodeHLSV3}
+	revision := tonemap.SourceRevision{MediaFileID: 42, FileSize: 100, FileModifiedUnixNano: 200, StreamSignature: "stream"}
 	want := PlannerResultV3{
-		Plan: plan, PlayMethod: PlayRemux, TranscodeAudio: true,
-		TargetVideoCodec: "copy", TargetAudioCodec: "aac", TargetAudioChannels: 6, TargetAudioBitrateKbps: 320,
+		Plan: plan, PlayMethod: PlayTranscode, TranscodeAudio: true,
+		TargetVideoCodec: "h264", TargetAudioCodec: "aac", TargetAudioChannels: 6, TargetAudioBitrateKbps: 320,
 		TargetResolution: "1080p", TargetBitrateKbps: 18_000,
-		FrozenSourceMetadata: &SourceExecutionMetadataV3{VideoCodec: "h264", SoftwareVideoDecode: true, DurationSeconds: 7_201},
+		ToneMapPolicy: tonemap.PolicyHardwareThenSoftware, ToneMapMode: tonemap.ModeHardware,
+		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapPreflightRequired: true, ToneMapSourceRevision: revision,
+		FrozenSourceMetadata: &SourceExecutionMetadataV3{VideoCodec: "h264", SoftwareVideoDecode: true, DurationSeconds: 7_201, ToneMapSourceKind: tonemap.SourcePQ, ToneMapPreflightRequired: true, ToneMapSourceRevision: revision, ToneMapDVConfigPresent: true, ToneMapDVBLCompatIDPresent: true, ToneMapDVBLPresent: true, ToneMapDVRPUPresent: true},
 		SubtitleTrackIndex:   4, SubtitleTransportTrackIndex: 2,
 		SubtitleBurnIn: true, SubtitleCodec: "hdmv_pgs_subtitle", DownloadedSubtitleID: 71,
 	}
@@ -32,10 +38,51 @@ func TestExecutableRecipeV3RoundTripPreservesOperationalFields(t *testing.T) {
 		got.TargetVideoCodec != want.TargetVideoCodec || got.TargetAudioCodec != want.TargetAudioCodec ||
 		got.TargetAudioChannels != want.TargetAudioChannels || got.TargetAudioBitrateKbps != want.TargetAudioBitrateKbps || got.TargetResolution != want.TargetResolution ||
 		got.TargetBitrateKbps != want.TargetBitrateKbps || got.SubtitleTrackIndex != want.SubtitleTrackIndex ||
+		got.ToneMapPolicy != want.ToneMapPolicy || got.ToneMapMode != want.ToneMapMode ||
+		got.ToneMapSourceKind != want.ToneMapSourceKind || got.ToneMapRecipeVersion != want.ToneMapRecipeVersion || got.ToneMapPreflightRequired != want.ToneMapPreflightRequired || got.ToneMapSourceRevision != revision ||
 		got.SubtitleTransportTrackIndex != want.SubtitleTransportTrackIndex || got.SubtitleBurnIn != want.SubtitleBurnIn ||
 		got.SubtitleCodec != want.SubtitleCodec || got.DownloadedSubtitleID != want.DownloadedSubtitleID || got.FrozenSourceMetadata == nil ||
-		got.FrozenSourceMetadata.VideoCodec != want.FrozenSourceMetadata.VideoCodec || got.FrozenSourceMetadata.SoftwareVideoDecode != want.FrozenSourceMetadata.SoftwareVideoDecode || got.FrozenSourceMetadata.DurationSeconds != want.FrozenSourceMetadata.DurationSeconds {
+		got.FrozenSourceMetadata.VideoCodec != want.FrozenSourceMetadata.VideoCodec || got.FrozenSourceMetadata.SoftwareVideoDecode != want.FrozenSourceMetadata.SoftwareVideoDecode ||
+		got.FrozenSourceMetadata.DurationSeconds != want.FrozenSourceMetadata.DurationSeconds || got.FrozenSourceMetadata.ToneMapSourceKind != want.FrozenSourceMetadata.ToneMapSourceKind || got.FrozenSourceMetadata.ToneMapPreflightRequired != want.FrozenSourceMetadata.ToneMapPreflightRequired || got.FrozenSourceMetadata.ToneMapSourceRevision != revision || !got.FrozenSourceMetadata.ToneMapDVConfigPresent || !got.FrozenSourceMetadata.ToneMapDVBLCompatIDPresent || !got.FrozenSourceMetadata.ToneMapDVBLPresent || !got.FrozenSourceMetadata.ToneMapDVRPUPresent {
 		t.Fatalf("thawed result = %#v, want %#v", got, want)
+	}
+}
+
+func TestExecutableRecipeV3RejectsToneMapFieldsOnLegacyVersion(t *testing.T) {
+	recipe := ExecutableRecipeV3{Version: executableRecipeVersionLegacyV3, PlanID: "plan:legacy", PlayMethod: PlayTranscode}
+	if !recipe.Valid() {
+		t.Fatal("non-tone-mapped version 1 recipe should remain valid")
+	}
+	recipe.ToneMapMode = tonemap.ModeSoftware
+	if recipe.Valid() {
+		t.Fatal("version 1 recipe accepted tone-map execution fields")
+	}
+}
+
+func TestExecutableRecipeV3RejectsIncompleteOrContradictoryToneMapRecipe(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*ExecutableRecipeV3)
+	}{
+		{name: "policy without mode", mutate: func(recipe *ExecutableRecipeV3) { recipe.ToneMapMode = "" }},
+		{name: "mode not allowed by policy", mutate: func(recipe *ExecutableRecipeV3) { recipe.ToneMapPolicy = tonemap.PolicySoftwareOnly }},
+		{name: "missing source kind", mutate: func(recipe *ExecutableRecipeV3) { recipe.ToneMapSourceKind = "" }},
+		{name: "missing source revision", mutate: func(recipe *ExecutableRecipeV3) { recipe.ToneMapSourceRevision = tonemap.SourceRevision{} }},
+		{name: "stale transformation recipe", mutate: func(recipe *ExecutableRecipeV3) { recipe.ToneMapRecipeVersion = "0" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recipe := FreezeExecutableRecipeV3(PlannerResultV3{
+				Plan: &PlanV3{PlanID: "plan-1"}, PlayMethod: PlayTranscode,
+				ToneMapPolicy: tonemap.PolicyHardwareOnly, ToneMapMode: tonemap.ModeHardware,
+				ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3,
+				ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1, FileSize: 1, StreamSignature: "stream"},
+			})
+			tt.mutate(&recipe)
+			if recipe.Valid() {
+				t.Fatal("invalid frozen tone-map recipe was accepted")
+			}
+		})
 	}
 }
 
@@ -61,6 +108,9 @@ func TestExecutableRecipeV3SurvivesJSONRoundTrip(t *testing.T) {
 		if _, ok := fields[field]; !ok {
 			t.Fatalf("encoded recipe omitted meaningful zero-value field %q: %s", field, encoded)
 		}
+	}
+	if _, ok := fields["tone_map_source_revision"]; ok {
+		t.Fatalf("non-tone-mapped recipe encoded an empty source revision: %s", encoded)
 	}
 	var decoded ExecutableRecipeV3
 	if err := json.Unmarshal(encoded, &decoded); err != nil {

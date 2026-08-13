@@ -579,6 +579,13 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 	// operator config change applies to reconstructed sessions too.
 	opts.HWAccel = cfg.HWAccel
 	opts.HWDevice = cfg.HWDevice
+	var toneMapErr error
+	opts, toneMapErr = ResolveToneMapExecutor(context.WithoutCancel(ctx), opts)
+	if toneMapErr != nil {
+		slog.ErrorContext(ctx, "reconstruct tone-map recipe unavailable", "component", "playback", "error", toneMapErr,
+			"session", sessionID, "playback_session_id", sessionID)
+		return nil
+	}
 
 	// Resume near the segment the client is actually requesting. The card records
 	// the original start; if the client has played past it, spawning ffmpeg at the

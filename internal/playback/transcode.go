@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 func init() {
@@ -71,9 +72,20 @@ type TranscodeOpts struct {
 	// decoded frames can still be converted to NV12, uploaded, and encoded by
 	// QSV/VAAPI. The flag is frozen into recipe cards so restarts do not put the
 	// unsupported hardware decoder back.
-	SoftwareVideoDecode bool
-	SubtitleTrackIndex  int // -1 = no subtitles
-	SubtitleBurnIn      bool
+	SoftwareVideoDecode        bool
+	ToneMapPolicy              tonemap.Policy
+	ToneMapMode                tonemap.Mode
+	ToneMapSourceKind          tonemap.SourceKind
+	ToneMapFilter              string
+	ToneMapRecipeVersion       string
+	ToneMapPreflightRequired   bool
+	ToneMapSourceRevision      tonemap.SourceRevision
+	ToneMapDVConfigPresent     bool
+	ToneMapDVBLCompatIDPresent bool
+	ToneMapDVBLPresent         bool
+	ToneMapDVRPUPresent        bool
+	SubtitleTrackIndex         int // -1 = no subtitles
+	SubtitleBurnIn             bool
 	// SubtitleCodec is the probed codec of the burn-in track (e.g. "subrip",
 	// "hdmv_pgs_subtitle"). Bitmap codecs (PGS/DVD/DVB) select the overlay
 	// filter_complex pipeline; text codecs use the libass subtitles filter.
@@ -100,6 +112,7 @@ const DV7ToHDR10BitstreamFilter = "dovi_rpu=strip=1"
 
 const (
 	transcodeCodecH264 = "h264"
+	HWAccelNone        = "none"
 	transcodeHWQSV     = "qsv"
 	transcodeHWVAAPI   = "vaapi"
 	transcodeHWNVENC   = "nvenc"
@@ -218,6 +231,9 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 		opts.SegmentDuration = defaultSegmentDuration
 	}
 	opts = normalizeTranscodeOpts(opts)
+	if err := validateToneMapOpts(opts); err != nil {
+		return nil, err
+	}
 	configuredHWDevices := ParseHWDeviceSet(opts.HWDevice)
 	reserveHWDeviceOnRestart := configuredHWDevices.Multi() && hwAccelBalancesRenderDevices(opts.HWAccel)
 	// Resolve a multi-device hw_device list to one concrete GPU. Restarts reuse
@@ -225,6 +241,10 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	hwDevice, releaseHWDevice := acquireHWDevice(opts.HWDevice, opts.HWAccel, opts.AvoidHWDevice)
 	opts.HWDevice = hwDevice
 	opts.AvoidHWDevice = ""
+	if err := validateToneMapSource(ctx, opts); err != nil {
+		releaseHWDevice()
+		return nil, err
+	}
 
 	// Ensure output directory exists.
 	if err := os.MkdirAll(opts.OutputDir, 0o755); err != nil {
@@ -377,8 +397,113 @@ func resolveSoftwareVideoDecode(opts TranscodeOpts) TranscodeOpts {
 // disagree about whether a source may use hardware decode or encode.
 func normalizeTranscodeOpts(opts TranscodeOpts) TranscodeOpts {
 	opts = resolveSoftwareVideoDecode(opts)
+	if opts.ToneMapMode == tonemap.ModeSoftware {
+		opts.SoftwareVideoDecode = true
+		opts.HWAccel = HWAccelNone
+		return opts
+	}
 	opts.HWAccel = resolveEffectiveTranscodeHWAccel(opts)
 	return opts
+}
+
+func validateToneMapOpts(opts TranscodeOpts) error {
+	if opts.ToneMapMode == "" {
+		if opts.ToneMapPolicy != "" || opts.ToneMapSourceKind != "" || opts.ToneMapFilter != "" || opts.ToneMapRecipeVersion != "" || opts.ToneMapPreflightRequired || !opts.ToneMapSourceRevision.IsZero() || opts.ToneMapDVConfigPresent || opts.ToneMapDVBLCompatIDPresent || opts.ToneMapDVBLPresent || opts.ToneMapDVRPUPresent {
+			return fmt.Errorf("incomplete tone-map recipe")
+		}
+		return nil
+	}
+	if strings.EqualFold(opts.TargetCodecVideo, "copy") {
+		return fmt.Errorf("tone mapping requires video encoding")
+	}
+	if !opts.ToneMapPolicy.Allows(opts.ToneMapMode) ||
+		!tonemap.ValidSourceKind(opts.ToneMapSourceKind) || opts.ToneMapFilter == "" ||
+		opts.ToneMapRecipeVersion != TransformationHDRToSDRToneMapRecipeVersionV3 ||
+		opts.ToneMapSourceRevision.IsZero() {
+		return fmt.Errorf("incomplete tone-map recipe")
+	}
+	switch opts.ToneMapMode {
+	case tonemap.ModeSoftware:
+		if opts.ToneMapFilter != tonemap.SoftwareFilterBT2390 && opts.ToneMapFilter != tonemap.SoftwareFilterHable {
+			return fmt.Errorf("unsupported software tone-map filter %q", opts.ToneMapFilter)
+		}
+	case tonemap.ModeHardware:
+		switch opts.HWAccel {
+		case transcodeHWQSV, transcodeHWVAAPI:
+			if opts.ToneMapFilter != tonemap.HardwareFilterVAAPI {
+				return fmt.Errorf("unsupported %s tone-map filter %q", opts.HWAccel, opts.ToneMapFilter)
+			}
+		case transcodeHWNVENC:
+			if opts.ToneMapFilter != tonemap.HardwareFilterCUDA {
+				return fmt.Errorf("unsupported nvenc tone-map filter %q", opts.ToneMapFilter)
+			}
+		default:
+			return fmt.Errorf("hardware tone mapping requires qsv, vaapi, or nvenc")
+		}
+	default:
+		return fmt.Errorf("unsupported tone-map mode %q", opts.ToneMapMode)
+	}
+	return nil
+}
+
+// ResolveToneMapExecutor validates a frozen tone-map recipe against the
+// current FFmpeg binary and device, then fills the environment-specific
+// backend and filter. The selected mode is never changed here.
+func ResolveToneMapExecutor(ctx context.Context, opts TranscodeOpts) (TranscodeOpts, error) {
+	if (opts.ToneMapPolicy == "" || opts.ToneMapPolicy == tonemap.PolicyNone) && opts.ToneMapMode == "" && opts.ToneMapSourceKind == "" && opts.ToneMapRecipeVersion == "" {
+		opts.ToneMapPolicy = ""
+		return opts, nil
+	}
+	if opts.ToneMapMode == "" || opts.ToneMapSourceKind == "" ||
+		!opts.ToneMapPolicy.Allows(opts.ToneMapMode) ||
+		opts.ToneMapRecipeVersion != TransformationHDRToSDRToneMapRecipeVersionV3 ||
+		opts.ToneMapSourceRevision.IsZero() {
+		return opts, fmt.Errorf("incomplete tone-map recipe")
+	}
+	backend := ResolveHWAccelWithFFmpeg(opts.HWAccel, opts.FFmpegPath)
+	capabilities := tonemap.Probe(ctx, ResolveFFmpegPath(opts.FFmpegPath), backend, opts.HWDevice)
+	if !capabilities.Supports(opts.ToneMapMode, opts.ToneMapSourceKind) {
+		return opts, fmt.Errorf("tone-map executor is not validated")
+	}
+	opts.ToneMapFilter = capabilities.FilterFor(opts.ToneMapMode, opts.ToneMapSourceKind)
+	if opts.ToneMapMode == tonemap.ModeHardware {
+		opts.HWAccel = capabilities.BackendFor(opts.ToneMapMode, opts.ToneMapSourceKind)
+	} else {
+		opts.HWAccel = HWAccelNone
+	}
+	return opts, nil
+}
+
+func validateToneMapSource(ctx context.Context, opts TranscodeOpts) error {
+	if opts.ToneMapMode == "" {
+		return nil
+	}
+	if err := opts.ToneMapSourceRevision.ValidatePath(opts.InputPath); err != nil {
+		return err
+	}
+	if !opts.ToneMapPreflightRequired {
+		return nil
+	}
+	backend := opts.HWAccel
+	if opts.ToneMapMode == tonemap.ModeSoftware {
+		backend = tonemap.BackendSoftware
+	}
+	if err := tonemap.ValidateSource(ctx, tonemap.SourcePreflightRequest{
+		FFmpegPath:      ResolveFFmpegPath(opts.FFmpegPath),
+		InputPath:       opts.InputPath,
+		DurationSeconds: opts.TotalDuration,
+		SourceBitDepth:  opts.SourceVideoBitDepth,
+		Mode:            opts.ToneMapMode,
+		Backend:         backend,
+		Filter:          opts.ToneMapFilter,
+		Kind:            opts.ToneMapSourceKind,
+		RecipeVersion:   opts.ToneMapRecipeVersion,
+		HardwareDevice:  opts.HWDevice,
+		SourceRevision:  opts.ToneMapSourceRevision,
+	}); err != nil {
+		return fmt.Errorf("tone-map source preflight failed: %w", err)
+	}
+	return nil
 }
 
 // buildFFmpegArgs constructs the full ffmpeg argument list from TranscodeOpts.
@@ -507,17 +632,17 @@ func resolveEffectiveTranscodeHWAccel(opts TranscodeOpts) string {
 		return ""
 	}
 	if strings.EqualFold(opts.TargetCodecVideo, "copy") {
-		return "none"
+		return HWAccelNone
 	}
 	if IsMPEG4Part2VideoCodec(opts.SourceVideoCodec) {
-		return "none"
+		return HWAccelNone
 	}
 	// The bundled CUDA software-decode upload path has not been validated.
 	// Prefer the established libx264 fallback over selecting a decoder known
 	// not to accept this source. Intel QSV/VAAPI have the explicit upload paths
 	// below and retain hardware encoding.
 	if opts.SoftwareVideoDecode && hwAccel == transcodeHWNVENC {
-		return "none"
+		return HWAccelNone
 	}
 	return hwAccel
 }
@@ -763,6 +888,21 @@ func appendVideoArgs(args []string, opts TranscodeOpts) []string {
 				"-bufsize", fmt.Sprintf("%dk", opts.TargetBitrateKbps*2))
 		}
 	}
+	if opts.ToneMapMode != "" {
+		args = append(args,
+			"-color_range", "tv",
+			"-color_primaries", "bt709",
+			"-color_trc", "bt709",
+		)
+		// FFmpeg treats -colorspace as a requested pixel conversion for
+		// hardware frames. VAAPI then inserts an impossible auto_scale between
+		// tonemap_vaapi and h264_vaapi. Hardware filters already stamp m=bt709
+		// and the encoder propagates it into the bitstream; libx264 accepts the
+		// explicit mux-boundary option without a format transition.
+		if opts.ToneMapMode == tonemap.ModeSoftware {
+			args = append(args, "-colorspace", "bt709")
+		}
+	}
 
 	return args
 }
@@ -774,6 +914,9 @@ func appendVideoArgs(args []string, opts TranscodeOpts) []string {
 // prepare builder must always produce identical filter chains (a fix landing
 // in only one of them silently ships wrong cached artifacts).
 func appendVideoFilterArgs(args []string, opts TranscodeOpts) []string {
+	if opts.ToneMapMode != "" {
+		return appendToneMapFilterArgs(args, opts)
+	}
 	switch {
 	case bitmapBurnInActive(opts):
 		return appendBitmapSubtitleBurnInArgs(args, opts)
@@ -795,6 +938,120 @@ func appendVideoFilterArgs(args []string, opts TranscodeOpts) []string {
 		}
 	}
 	return args
+}
+
+func appendToneMapFilterArgs(args []string, opts TranscodeOpts) []string {
+	switch {
+	case bitmapBurnInActive(opts):
+		return appendToneMappedBitmapSubtitleArgs(args, opts)
+	case opts.SubtitleBurnIn && opts.SubtitleTrackIndex >= 0:
+		return append(args, "-vf", toneMappedTextSubtitleFilter(opts))
+	default:
+		return append(args, "-vf", toneMapScaleFilter(opts))
+	}
+}
+
+func toneMapScaleFilter(opts TranscodeOpts) string {
+	switch opts.ToneMapMode {
+	case tonemap.ModeSoftware:
+		filter := tonemap.SoftwareFilter(opts.ToneMapSourceKind, opts.ToneMapFilter)
+		if scale := resolutionToScale(opts.TargetResolution); scale != "" {
+			filter += "," + scale
+		}
+		return filter
+	case tonemap.ModeHardware:
+		switch opts.HWAccel {
+		case transcodeHWQSV:
+			return tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "," + qsvToneMapScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter()
+		case transcodeHWVAAPI:
+			return tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "," + vaapiScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter()
+		case transcodeHWNVENC:
+			if tonemap.IsSDRSource(opts.ToneMapSourceKind) {
+				filter := nvencSDRFallbackDownload(opts) + "," + tonemap.SoftwareFilter(opts.ToneMapSourceKind, "")
+				if scale := resolutionToScale(opts.TargetResolution); scale != "" {
+					filter += "," + scale
+				}
+				return filter + ",format=nv12,hwupload_cuda"
+			}
+			return tonemap.SourceParameters(opts.ToneMapSourceKind) + "," + tonemap.CUDAFilter() + "," + nvencScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter()
+		}
+	}
+	return ""
+}
+
+func toneMappedTextSubtitleFilter(opts TranscodeOpts) string {
+	subtitleInputPath := opts.InputPath
+	if opts.subtitleFilterInputPath != "" {
+		subtitleInputPath = opts.subtitleFilterInputPath
+	}
+	subFilter := fmt.Sprintf("subtitles='%s':si=%d", escapeFilterPath(subtitleInputPath), opts.SubtitleTrackIndex)
+	scale := resolutionToScale(opts.TargetResolution)
+	cpuTail := subFilter
+	if scale != "" {
+		cpuTail = scale + "," + subFilter
+	}
+
+	if opts.ToneMapMode == tonemap.ModeSoftware {
+		return tonemap.SoftwareFilter(opts.ToneMapSourceKind, opts.ToneMapFilter) + "," + cpuTail
+	}
+	switch opts.HWAccel {
+	case transcodeHWQSV:
+		return tonemap.VAAPIFilter(opts.ToneMapSourceKind) + ",hwdownload,format=nv12," + cpuTail + ",format=nv12,hwupload,hwmap=derive_device=qsv:mode=read+write,format=qsv," + tonemap.HDRMetadataRemovalFilter()
+	case transcodeHWVAAPI:
+		return tonemap.VAAPIFilter(opts.ToneMapSourceKind) + ",hwdownload,format=nv12," + cpuTail + ",format=nv12,hwupload," + tonemap.HDRMetadataRemovalFilter()
+	case transcodeHWNVENC:
+		if tonemap.IsSDRSource(opts.ToneMapSourceKind) {
+			return nvencSDRFallbackDownload(opts) + "," + tonemap.SoftwareFilter(opts.ToneMapSourceKind, "") + "," + cpuTail + ",format=nv12,hwupload_cuda"
+		}
+		return tonemap.SourceParameters(opts.ToneMapSourceKind) + "," + tonemap.CUDAFilter() + ",hwdownload,format=nv12," + cpuTail + ",format=nv12,hwupload_cuda," + tonemap.HDRMetadataRemovalFilter()
+	default:
+		return ""
+	}
+}
+
+func appendToneMappedBitmapSubtitleArgs(args []string, opts TranscodeOpts) []string {
+	subInput := fmt.Sprintf("[0:s:%d]", opts.SubtitleTrackIndex)
+	var graph string
+	if opts.ToneMapMode == tonemap.ModeSoftware {
+		filters := tonemap.SoftwareFilter(opts.ToneMapSourceKind, opts.ToneMapFilter)
+		graph = "[0:v:0]" + filters + "[vmain];[vmain]" + subInput + "overlay=eof_action=pass"
+		if scale := resolutionToScale(opts.TargetResolution); scale != "" {
+			graph += "," + scale
+		}
+		graph += "[vout]"
+		return append(args, "-filter_complex", graph)
+	}
+
+	switch opts.HWAccel {
+	case transcodeHWQSV:
+		graph = "[0:v:0]" + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "[vmain];" +
+			subInput + "format=bgra,hwupload[sub];[vmain][sub]overlay_vaapi=eof_action=pass," +
+			qsvToneMapScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter() + "[vout]"
+	case transcodeHWVAAPI:
+		graph = "[0:v:0]" + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "[vmain];" +
+			subInput + "format=bgra,hwupload[sub];[vmain][sub]overlay_vaapi=eof_action=pass," +
+			vaapiScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter() + "[vout]"
+	case transcodeHWNVENC:
+		if tonemap.IsSDRSource(opts.ToneMapSourceKind) {
+			graph = "[0:v:0]" + nvencSDRFallbackDownload(opts) + "," + tonemap.SoftwareFilter(opts.ToneMapSourceKind, "") + "[vmain];[vmain]" + subInput + "overlay=eof_action=pass"
+		} else {
+			graph = "[0:v:0]" + tonemap.SourceParameters(opts.ToneMapSourceKind) + "," + tonemap.CUDAFilter() + ",hwdownload,format=nv12[vmain];[vmain]" +
+				subInput + "overlay=eof_action=pass"
+		}
+		if scale := resolutionToScale(opts.TargetResolution); scale != "" {
+			graph += "," + scale
+		}
+		graph += ",format=nv12,hwupload_cuda," + tonemap.HDRMetadataRemovalFilter() + "[vout]"
+	}
+	return append(args, "-filter_complex", graph)
+}
+
+func nvencSDRFallbackDownload(opts TranscodeOpts) string {
+	format := "nv12"
+	if opts.SourceVideoBitDepth > 8 {
+		format = "p010le"
+	}
+	return "hwdownload,format=" + format
 }
 
 // TranscodesAudio reports whether a transcode with the given target audio
@@ -1037,6 +1294,13 @@ func qsvScaleFilter(res string) string {
 	default:
 		return "scale_vaapi=format=nv12,hwmap=derive_device=qsv,format=qsv"
 	}
+}
+
+// QSV must map the VAAPI tone-map output with read/write access. The default
+// read-only mapping succeeds for synthetic upload probes but fails against
+// real decoded HEVC surfaces on Intel with ENOSYS during the first frame.
+func qsvToneMapScaleFilter(res string) string {
+	return strings.Replace(qsvScaleFilter(res), "hwmap=derive_device=qsv", "hwmap=derive_device=qsv:mode=read+write", 1)
 }
 
 func qsvSoftwareDecodeFilter(res string) string {

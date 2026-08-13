@@ -103,12 +103,32 @@ type ffprobeChapter struct {
 }
 
 type ffprobeSideData struct {
-	SideDataType string `json:"side_data_type"`
-	DVProfile    int    `json:"dv_profile"`
-	DVLevel      int    `json:"dv_level"`
-	DVBlPresent  int    `json:"dv_bl_present"`
-	DVElPresent  int    `json:"dv_el_present"`
-	DVBLCompatID int    `json:"dv_bl_signal_compatibility_id"`
+	SideDataType        string `json:"side_data_type"`
+	DVProfile           int    `json:"dv_profile"`
+	DVLevel             int    `json:"dv_level"`
+	DVBlPresent         int    `json:"bl_present_flag"`
+	DVElPresent         int    `json:"el_present_flag"`
+	DVRPUPresent        int    `json:"rpu_present_flag"`
+	DVBlPresentLegacy   int    `json:"dv_bl_present"`
+	DVElPresentLegacy   int    `json:"dv_el_present"`
+	DVRPUPresentLegacy  int    `json:"dv_rpu_present"`
+	DVBLCompatID        int    `json:"dv_bl_signal_compatibility_id"`
+	DVBLCompatIDPresent bool   `json:"-"`
+}
+
+func (d *ffprobeSideData) UnmarshalJSON(data []byte) error {
+	type sideDataAlias ffprobeSideData
+	var decoded sideDataAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*d = ffprobeSideData(decoded)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	_, d.DVBLCompatIDPresent = fields["dv_bl_signal_compatibility_id"]
+	return nil
 }
 
 // ffprobeDisp represents the disposition flags on a stream.
@@ -203,32 +223,36 @@ func convertProbeData(raw *ffprobeOutput) *ProbeData {
 			// FFmpeg's canonical name for AVCOL_RANGE_UNSPECIFIED.
 			colorRange := firstNonEmpty(s.ColorRange, "unknown")
 			track := VideoTrackInfo{
-				Title:              firstNonEmpty(s.Tags["title"], s.CodecLongName, strings.ToUpper(s.CodecName)),
-				Codec:              s.CodecName,
-				DolbyVision:        dolbyVisionProfile(s.SideDataList),
-				DVProfile:          dvProfile,
-				DVLevel:            dolbyVisionLevel(s.SideDataList),
-				DVBLCompatID:       dolbyVisionBLCompatID(s.SideDataList),
-				DVELPresent:        dolbyVisionELPresent(s.SideDataList),
-				DVEnhancementLayer: dolbyVisionEnhancementLayer(dolbyVisionELPresent(s.SideDataList)),
-				HDR10Plus:          hasHDR10Plus(s.SideDataList),
-				Profile:            s.Profile,
-				Level:              s.Level,
-				Width:              s.Width,
-				Height:             s.Height,
-				AspectRatio:        s.DisplayAspectRatio,
-				Interlaced:         isInterlaced(s.FieldOrder),
-				FrameRate:          normalizeFrameRate(s.AvgFrameRate),
-				Bitrate:            parseNumeric(s.BitRate) / 1000,
-				VideoRange:         videoRangeLabel(s),
-				VideoRangeType:     videoRangeType(s),
-				ColorRange:         colorRange,
-				ColorPrimaries:     s.ColorPrimaries,
-				ColorSpace:         s.ColorSpace,
-				ColorTransfer:      s.ColorTransfer,
-				BitDepth:           models.NormalizeVideoBitDepth(parseBitDepth(s), s.PixFmt, s.Profile),
-				PixelFormat:        s.PixFmt,
-				ReferenceFrames:    s.Refs,
+				Title:               firstNonEmpty(s.Tags["title"], s.CodecLongName, strings.ToUpper(s.CodecName)),
+				Codec:               s.CodecName,
+				DolbyVision:         dolbyVisionProfile(s.SideDataList),
+				DVProfile:           dvProfile,
+				DVLevel:             dolbyVisionLevel(s.SideDataList),
+				DVBLCompatID:        dolbyVisionBLCompatID(s.SideDataList),
+				DVConfigPresent:     dolbyVisionConfigPresent(s.SideDataList),
+				DVBLCompatIDPresent: dolbyVisionBLCompatIDPresent(s.SideDataList),
+				DVBLPresent:         dolbyVisionBLPresent(s.SideDataList),
+				DVRPUPresent:        dolbyVisionRPUPresent(s.SideDataList),
+				DVELPresent:         dolbyVisionELPresent(s.SideDataList),
+				DVEnhancementLayer:  dolbyVisionEnhancementLayer(dolbyVisionELPresent(s.SideDataList)),
+				HDR10Plus:           hasHDR10Plus(s.SideDataList),
+				Profile:             s.Profile,
+				Level:               s.Level,
+				Width:               s.Width,
+				Height:              s.Height,
+				AspectRatio:         s.DisplayAspectRatio,
+				Interlaced:          isInterlaced(s.FieldOrder),
+				FrameRate:           normalizeFrameRate(s.AvgFrameRate),
+				Bitrate:             parseNumeric(s.BitRate) / 1000,
+				VideoRange:          videoRangeLabel(s),
+				VideoRangeType:      videoRangeType(s),
+				ColorRange:          colorRange,
+				ColorPrimaries:      s.ColorPrimaries,
+				ColorSpace:          s.ColorSpace,
+				ColorTransfer:       s.ColorTransfer,
+				BitDepth:            models.NormalizeVideoBitDepth(parseBitDepth(s), s.PixFmt, s.Profile),
+				PixelFormat:         s.PixFmt,
+				ReferenceFrames:     s.Refs,
 			}
 			pd.VideoTracks = append(pd.VideoTracks, track)
 			if pd.CodecVideo == "" {
@@ -806,17 +830,56 @@ func dolbyVisionLevel(sideData []ffprobeSideData) int {
 
 func dolbyVisionBLCompatID(sideData []ffprobeSideData) int {
 	for _, data := range sideData {
-		if strings.EqualFold(data.SideDataType, "DOVI configuration record") && data.DVBLCompatID > 0 {
+		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
 			return data.DVBLCompatID
 		}
 	}
 	return 0
 }
 
+func dolbyVisionBLCompatIDPresent(sideData []ffprobeSideData) bool {
+	for _, data := range sideData {
+		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
+			// Non-zero values in hand-built probe fixtures and older callers are
+			// necessarily explicit. JSON decoding separately preserves an
+			// explicitly declared zero so it cannot be confused with omission.
+			return data.DVBLCompatIDPresent || data.DVBLCompatID != 0
+		}
+	}
+	return false
+}
+
+func dolbyVisionConfigPresent(sideData []ffprobeSideData) bool {
+	for _, data := range sideData {
+		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
+			return true
+		}
+	}
+	return false
+}
+
+func dolbyVisionBLPresent(sideData []ffprobeSideData) bool {
+	for _, data := range sideData {
+		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
+			return data.DVBlPresent > 0 || data.DVBlPresentLegacy > 0
+		}
+	}
+	return false
+}
+
+func dolbyVisionRPUPresent(sideData []ffprobeSideData) bool {
+	for _, data := range sideData {
+		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
+			return data.DVRPUPresent > 0 || data.DVRPUPresentLegacy > 0
+		}
+	}
+	return false
+}
+
 func dolbyVisionELPresent(sideData []ffprobeSideData) bool {
 	for _, data := range sideData {
 		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
-			return data.DVElPresent > 0
+			return data.DVElPresent > 0 || data.DVElPresentLegacy > 0
 		}
 	}
 	return false

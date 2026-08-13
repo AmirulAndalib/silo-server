@@ -8,11 +8,14 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 type PlannerSettingsV3 struct {
-	TranscodeEnabled bool
-	Allow4KTranscode bool
+	TranscodeEnabled       bool
+	Allow4KTranscode       bool
+	HardwareToneMapEnabled bool
+	SoftwareToneMapEnabled bool
 }
 
 const (
@@ -45,6 +48,13 @@ type PlannerInputV3 struct {
 	// memoize; the transport layer re-validates whichever executor is
 	// actually selected.
 	HLSRegistry func() *TransformationRegistryV3
+	// ToneMapCapabilities and HLSToneMapCapabilities mirror Registry and
+	// HLSRegistry for executor variants of hdr_to_sdr_tonemap. The public plan
+	// names one stable transformation; these internal capabilities select a
+	// validated hardware or software implementation without exposing that
+	// deployment policy to clients.
+	ToneMapCapabilities    tonemap.Capabilities
+	HLSToneMapCapabilities func() tonemap.Capabilities
 	// DVRPUStrippable reports whether this particular source survives the
 	// Dolby Vision RPU strip. The registries answer whether the executor
 	// carries the transformation; this answers whether the file does, which
@@ -62,9 +72,16 @@ type PlannerInputV3 struct {
 // SourceExecutionMetadataV3 is the immutable source probe snapshot used to
 // reopen a frozen playback recipe without consuming later catalog drift.
 type SourceExecutionMetadataV3 struct {
-	VideoCodec          string
-	SoftwareVideoDecode bool
-	DurationSeconds     float64
+	VideoCodec                 string
+	SoftwareVideoDecode        bool
+	DurationSeconds            float64
+	ToneMapSourceKind          tonemap.SourceKind
+	ToneMapPreflightRequired   bool
+	ToneMapSourceRevision      tonemap.SourceRevision
+	ToneMapDVConfigPresent     bool
+	ToneMapDVBLCompatIDPresent bool
+	ToneMapDVBLPresent         bool
+	ToneMapDVRPUPresent        bool
 }
 
 // dvRPUStrippable resolves the per-source strip verdict, defaulting to true
@@ -110,7 +127,22 @@ type PlannerResultV3 struct {
 	// FrozenSourceMetadata is set only when a durable executable recipe is
 	// thawed for a seek reanchor. Transport construction must then use this
 	// captured source snapshot instead of a freshly probed media row.
-	FrozenSourceMetadata *SourceExecutionMetadataV3
+	FrozenSourceMetadata     *SourceExecutionMetadataV3
+	ToneMapPolicy            tonemap.Policy
+	ToneMapMode              tonemap.Mode
+	ToneMapSourceKind        tonemap.SourceKind
+	ToneMapRecipeVersion     string
+	ToneMapPreflightRequired bool
+	ToneMapSourceRevision    tonemap.SourceRevision
+}
+
+func (input PlannerInputV3) hlsToneMapCapabilities() tonemap.Capabilities {
+	if input.HLSToneMapCapabilities != nil {
+		if capabilities := input.HLSToneMapCapabilities(); capabilities != nil {
+			return capabilities
+		}
+	}
+	return input.ToneMapCapabilities
 }
 
 func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
@@ -191,16 +223,15 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 	}
 	clientDV81Eligible := canClientTransformDV7ToDV81V3(source, input.Request)
 	clientHDR10Eligible := canClientTransformDV7ToHDR10V3(source, input.Request)
-	// With the server strip gone, a client that cannot take the source range
-	// and cannot run its own DV transformation has no route left: this
-	// codebase has no tone-map recipe, so every remaining branch funnels into
-	// planVideoTranscodeV3's hdr_transcode_unsupported. Terminate here instead
-	// so the client is told the actual cause — a source whose Dolby Vision
-	// metadata cannot be removed — rather than a generic HDR message that
-	// sends the user looking for a missing encoder.
+	// With the server strip gone, terminate only when no enabled tone-map route
+	// remains. A validated HDR-to-SDR executor can still decode the compatible
+	// base layer without preserving the Dolby Vision metadata.
 	if dvStripUnsupportedBySource && !rangeOK && !clientDV81Eligible && !clientHDR10Eligible {
-		return terminalPlannerResultV3(TerminalDVConversionUnsupportedV3,
-			"This source's Dolby Vision metadata cannot be removed cleanly, and this device cannot play the source as it is.", false)
+		_, _, _, _, toneMapEligible := toneMapRecipeV3(input, source)
+		if !toneMapEligible {
+			return terminalPlannerResultV3(TerminalDVConversionUnsupportedV3,
+				"This source's Dolby Vision metadata cannot be removed cleanly, and this device cannot play the source as it is.", false)
+		}
 	}
 
 	base := PlanV3{
@@ -508,7 +539,7 @@ func availableQualitiesV3(input PlannerInputV3, source SourceDescriptorV3) []Ava
 	if is4KSourceV3(input.EffectiveFile, source) && !input.Settings.Allow4KTranscode {
 		return qualities
 	}
-	if hdrTranscodeUnavailableV3(source) {
+	if hdrTranscodeUnavailableV3(input, source) {
 		return qualities
 	}
 	for _, height := range []int{2160, 1080, 720, 480} {
@@ -709,11 +740,11 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 		}
 		return terminalPlannerResultV3("transcoding_disabled", "The source requires video adaptation, but transcoding is unavailable.", false)
 	}
-	if hdrTranscodeUnavailableV3(source) {
+	if hdrTranscodeUnavailableV3(input, source) {
 		if subtitleForcedAdaptation {
 			return terminalPlannerResultV3("subtitle_conversion_unsupported", "The selected subtitle must be burned into the video, but this HDR source cannot be re-encoded.", false)
 		}
-		return terminalPlannerResultV3("hdr_transcode_unsupported", "This HDR source requires video encoding, but no validated HDR-preserving or tone-map recipe is installed.", false)
+		return terminalPlannerResultV3(TerminalHDRTranscodeUnsupportedV3, "This HDR source requires video encoding, but no validated HDR-preserving or tone-map recipe is installed.", false)
 	}
 	if is4KSourceV3(input.EffectiveFile, source) && !input.Settings.Allow4KTranscode {
 		if subtitleForcedAdaptation {
@@ -742,6 +773,29 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 		TransformationV3{Name: TransformationVideoToH264V3, Executor: ExecutorServerV3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, ValidatedClaims: []string{ClaimH264DecodeV3}},
 		TransformationV3{Name: TransformationAudioToAACV3, Executor: ExecutorServerV3, RecipeVersion: "1", ValidatedClaims: []string{ClaimAudioDecodeV3}},
 	)
+	toneMapPolicy, toneMapMode, toneMapResolution, toneMapRevision, toneMapOK := toneMapRecipeV3(input, source)
+	toneMapSourceKind := toneMapResolution.Kind
+	if source.DynamicRange != "" && source.DynamicRange != DynamicRangeSDRV3 {
+		if !toneMapOK {
+			return terminalPlannerResultV3(TerminalHDRTranscodeUnsupportedV3, "This HDR source requires video encoding, but no enabled validated tone-map recipe is available.", false)
+		}
+		plan.Transformations = append(plan.Transformations, TransformationV3{
+			Name: TransformationHDRToSDRToneMapV3, Executor: ExecutorServerV3,
+			RecipeVersion:   TransformationHDRToSDRToneMapRecipeVersionV3,
+			ValidatedClaims: []string{ClaimHDRMetadataRemovedV3, ClaimSDRBT709OutputV3},
+		})
+		plan.DegradationWarnings = append(plan.DegradationWarnings, DegradationWarningV3{
+			Code: "hdr_tone_mapped", Message: "HDR video is tone-mapped to SDR for this playback route.",
+		})
+	} else {
+		// A non-tone-mapped recipe has no execution policy. Keeping PolicyNone
+		// here would turn an ordinary SDR encode into a partial frozen recipe at
+		// the FFmpeg execution boundary.
+		toneMapPolicy = ""
+		toneMapSourceKind = ""
+		toneMapResolution = tonemap.SourceResolution{}
+		toneMapRevision = tonemap.SourceRevision{}
+	}
 	plan.Claims.Audio = AudioClaimsV3{Codec: "aac", Passthrough: false, AtmosPreserved: false, Reason: "server_audio_adaptation"}
 	applySubtitleDecisionV3(&plan, subtitle.Decision)
 	plan.Claims.Subtitles = subtitle.Claims
@@ -762,7 +816,7 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 	if planAttemptedV3(plan, input.Request.ClientPlaybackContext.Output.OutputContextID, input.AttemptedKeys) {
 		return terminalPlannerResultV3("adaptation_exhausted", "All compatible playback recipes have already failed for this output route.", false)
 	}
-	return PlannerResultV3{Plan: &plan, PlayMethod: PlayTranscode, TranscodeAudio: true, TargetVideoCodec: "h264", TargetAudioCodec: "aac", TargetAudioChannels: targetAudioChannels, TargetResolution: quality.Label, TargetBitrateKbps: quality.BitrateKbps, SubtitleTrackIndex: subtitle.SelectedIndex, SubtitleTransportTrackIndex: subtitle.TransportIndex, SubtitleBurnIn: subtitle.RequiresBurn, SubtitleCodec: subtitle.Codec, DownloadedSubtitleID: subtitle.DownloadedSubtitleID}
+	return PlannerResultV3{Plan: &plan, PlayMethod: PlayTranscode, TranscodeAudio: true, TargetVideoCodec: "h264", TargetAudioCodec: "aac", TargetAudioChannels: targetAudioChannels, TargetResolution: quality.Label, TargetBitrateKbps: quality.BitrateKbps, SubtitleTrackIndex: subtitle.SelectedIndex, SubtitleTransportTrackIndex: subtitle.TransportIndex, SubtitleBurnIn: subtitle.RequiresBurn, SubtitleCodec: subtitle.Codec, DownloadedSubtitleID: subtitle.DownloadedSubtitleID, ToneMapPolicy: toneMapPolicy, ToneMapMode: toneMapMode, ToneMapSourceKind: toneMapSourceKind, ToneMapRecipeVersion: toneMapRecipeVersionV3(toneMapOK), ToneMapPreflightRequired: toneMapResolution.PreflightRequired, ToneMapSourceRevision: toneMapRevision}
 }
 
 // applySubtitleDecisionV3 changes the delivery-specific subtitle policy without
@@ -977,8 +1031,55 @@ func hlsNativeAudioCodecV3(codec string) bool {
 
 // hdrTranscodeUnavailableV3 mirrors planVideoTranscodeV3's terminal
 // condition: no validated HDR-preserving or tone-map transcode recipe exists.
-func hdrTranscodeUnavailableV3(source SourceDescriptorV3) bool {
-	return source.DynamicRange != "" && source.DynamicRange != DynamicRangeSDRV3
+func hdrTranscodeUnavailableV3(input PlannerInputV3, source SourceDescriptorV3) bool {
+	if source.DynamicRange == "" || source.DynamicRange == DynamicRangeSDRV3 {
+		return false
+	}
+	_, _, _, _, ok := toneMapRecipeV3(input, source)
+	return !ok
+}
+
+func toneMapRecipeV3(input PlannerInputV3, source SourceDescriptorV3) (tonemap.Policy, tonemap.Mode, tonemap.SourceResolution, tonemap.SourceRevision, bool) {
+	policy := tonemap.NewPolicy(input.Settings.HardwareToneMapEnabled, input.Settings.SoftwareToneMapEnabled)
+	file := input.EffectiveFile
+	if file == nil {
+		file = input.RequestedFile
+	}
+	resolution := toneMapSourceResolutionV3(file, source)
+	revision := tonemap.RevisionForFile(file)
+	if policy == tonemap.PolicyNone || resolution.Kind == "" || input.hlsRegistry() == nil ||
+		!input.hlsRegistry().Available(TransformationHDRToSDRToneMapV3) {
+		return policy, "", resolution, revision, false
+	}
+	mode := input.hlsToneMapCapabilities().PreferredMode(policy, resolution.Kind)
+	return policy, mode, resolution, revision, mode != ""
+}
+
+func toneMapSourceResolutionV3(file *models.MediaFile, source SourceDescriptorV3) tonemap.SourceResolution {
+	metadata := tonemap.SourceMetadata{
+		DynamicRange: source.DynamicRange,
+		DVProfile:    source.DVProfile,
+		DVBLCompatID: source.DVBLCompatID,
+	}
+	if file != nil && len(file.VideoTracks) > 0 {
+		track := file.VideoTracks[0]
+		metadata.DVConfigPresent = track.DVConfigPresent
+		metadata.DVBLCompatIDPresent = track.DVBLCompatIDPresent
+		metadata.DVBLPresent = track.DVBLPresent
+		metadata.DVRPUPresent = track.DVRPUPresent
+		metadata.ColorRange = track.ColorRange
+		metadata.ColorPrimaries = track.ColorPrimaries
+		metadata.ColorTransfer = track.ColorTransfer
+		metadata.ColorSpace = track.ColorSpace
+	}
+	return tonemap.ResolveSource(metadata)
+}
+
+func toneMapRecipeVersionV3(enabled bool) string {
+	if enabled {
+		return TransformationHDRToSDRToneMapRecipeVersionV3
+	}
+	return ""
 }
 
 // videoTranscodeExecutableV3 mirrors planVideoTranscodeV3's terminal
@@ -991,7 +1092,7 @@ func videoTranscodeExecutableV3(input PlannerInputV3, source SourceDescriptorV3)
 	if is4KSourceV3(input.EffectiveFile, source) && !input.Settings.Allow4KTranscode {
 		return false
 	}
-	if hdrTranscodeUnavailableV3(source) {
+	if hdrTranscodeUnavailableV3(input, source) {
 		return false
 	}
 	return input.hlsRegistry().Available(TransformationVideoToH264V3) && input.hlsRegistry().Available(TransformationAudioToAACV3)

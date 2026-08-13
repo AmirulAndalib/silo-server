@@ -295,6 +295,13 @@ func (p *Planner) ReleaseSession(sessionID string) {
 // a playback session it does not require a proxy partner: the completed file
 // is written to the configured shared artifact store and served later.
 func (p *Planner) ReserveTranscodeWork(workID string) (*Node, func()) {
+	return p.ReserveTranscodeWorkWith(workID, nil)
+}
+
+// ReserveTranscodeWorkWith is ReserveTranscodeWork with an optional
+// capability predicate. The predicate runs under the planner lock and must not
+// perform I/O.
+func (p *Planner) ReserveTranscodeWorkWith(workID string, eligible func(*Node) bool) (*Node, func()) {
 	if p == nil || p.transcodes == nil || workID == "" {
 		return nil, func() {}
 	}
@@ -306,6 +313,9 @@ func (p *Planner) ReserveTranscodeWork(workID string) (*Node, func()) {
 	var best *Node
 	for _, node := range p.transcodes.Nodes() {
 		if node == nil || !node.Enabled || !node.Healthy || !p.underCap(node, now) {
+			continue
+		}
+		if eligible != nil && !eligible(node) {
 			continue
 		}
 		if best == nil || p.effectiveJobs(node, now) < p.effectiveJobs(best, now) {

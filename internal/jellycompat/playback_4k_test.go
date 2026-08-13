@@ -3,9 +3,13 @@ package jellycompat
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 type stubSettingsReader struct {
@@ -130,6 +134,69 @@ func TestBuildPlaybackSource4KVideoTranscodeGate(t *testing.T) {
 				t.Errorf("TranscodeAudio = %v, want %v", source.TranscodeAudio, tt.wantTranscodeAudio)
 			}
 		})
+	}
+}
+
+func TestApplyCompatToneMapAvailability(t *testing.T) {
+	hdrVersion := catalog.FileVersion{
+		FileID: 1,
+		HDR:    true,
+		VideoTracks: []models.VideoTrack{{
+			VideoRangeType: "HDR10",
+			ColorPrimaries: "bt2020",
+			ColorTransfer:  "smpte2084",
+			ColorSpace:     "bt2020nc",
+		}},
+	}
+	hardware := tonemap.Capability{Mode: tonemap.ModeHardware, Backend: "vaapi", Filter: "tonemap_vaapi", SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}}
+	software := tonemap.Capability{Mode: tonemap.ModeSoftware, Backend: "software", Filter: "tonemapx", SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}}
+	tests := []struct {
+		name         string
+		hardware     bool
+		software     bool
+		capabilities tonemap.Capabilities
+		source       PlaybackMediaSource
+		want         bool
+	}{
+		{name: "both disabled", source: PlaybackMediaSource{SupportsTranscoding: true, Version: hdrVersion}},
+		{name: "hardware enabled and available", hardware: true, capabilities: tonemap.Capabilities{hardware}, source: PlaybackMediaSource{SupportsTranscoding: true, Version: hdrVersion}, want: true},
+		{name: "hardware enabled but unavailable", hardware: true, capabilities: tonemap.Capabilities{software}, source: PlaybackMediaSource{SupportsTranscoding: true, Version: hdrVersion}},
+		{name: "software enabled and available", software: true, capabilities: tonemap.Capabilities{software}, source: PlaybackMediaSource{SupportsTranscoding: true, Version: hdrVersion}, want: true},
+		{name: "both enabled prefer any available executor", hardware: true, software: true, capabilities: tonemap.Capabilities{software, hardware}, source: PlaybackMediaSource{SupportsTranscoding: true, Version: hdrVersion}, want: true},
+		{name: "audio-only transcode remains available", source: PlaybackMediaSource{SupportsTranscoding: true, TranscodeAudio: true, Version: hdrVersion}, want: true},
+		{name: "direct-only source remains unavailable", source: PlaybackMediaSource{Version: hdrVersion}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			settings := map[string]string{
+				config.PlaybackTranscodeHardwareToneMapSettingKey: strconv.FormatBool(tt.hardware),
+				config.PlaybackTranscodeSoftwareToneMapSettingKey: strconv.FormatBool(tt.software),
+			}
+			h := &PlaybackHandler{SettingsRepo: stubSettingsReader{values: settings}}
+			got := h.applyCompatToneMapAvailability(context.Background(), tt.source, tt.capabilities)
+			if got.SupportsTranscoding != tt.want {
+				t.Fatalf("SupportsTranscoding = %t, want %t", got.SupportsTranscoding, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyCompatToneMapAvailabilityAcceptsProfile7ID6Fallback(t *testing.T) {
+	h := &PlaybackHandler{SettingsRepo: stubSettingsReader{values: map[string]string{
+		config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+	}}}
+	source := PlaybackMediaSource{
+		SupportsTranscoding: true,
+		Version: catalog.FileVersion{HDR: true, VideoTracks: []models.VideoTrack{{
+			DolbyVision: "Dolby Vision Profile 7",
+			DVProfile:   7, DVBLCompatID: 6,
+			DVConfigPresent: true, DVBLCompatIDPresent: true, DVBLPresent: true, DVRPUPresent: true,
+			ColorRange: "tv", ColorPrimaries: "bt2020", ColorTransfer: "smpte2084", ColorSpace: "bt2020nc",
+		}}},
+	}
+	capabilities := tonemap.Capabilities{{Mode: tonemap.ModeSoftware, Backend: "software", Filter: "tonemapx", SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}}}
+	if got := h.applyCompatToneMapAvailability(context.Background(), source, capabilities); !got.SupportsTranscoding {
+		t.Fatal("Profile 7 compatibility-ID 6 fallback was not advertised as transcodable")
 	}
 }
 

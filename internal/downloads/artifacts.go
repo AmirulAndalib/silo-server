@@ -17,6 +17,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/idgen"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 const (
@@ -50,6 +51,11 @@ type EncodePreparer interface {
 type playbackPreparer struct{}
 
 func (playbackPreparer) PrepareFile(ctx context.Context, _ string, opts playback.TranscodeOpts, outputPath string) (PreparedArtifact, error) {
+	var err error
+	opts, err = playback.ResolveToneMapExecutor(ctx, opts)
+	if err != nil {
+		return PreparedArtifact{}, err
+	}
 	if err := playback.PrepareFile(ctx, opts, outputPath); err != nil {
 		return PreparedArtifact{}, err
 	}
@@ -84,6 +90,7 @@ type ArtifactManager struct {
 	preparer             EncodePreparer
 	owner                string
 	liveCfg              func() *config.Config
+	settings             SettingsReader
 	notify               ArtifactNotifier
 	remoteRecoveryBudget time.Duration
 	remoteCleanupBudget  time.Duration
@@ -92,6 +99,11 @@ type ArtifactManager struct {
 	kick           func()
 	lastDiskSweep  time.Time
 	lastStaleSweep time.Time
+}
+
+type toneMapCapabilityProvider interface {
+	ToneMapCapabilities(context.Context) tonemap.Capabilities
+	LocalFallbackAllowed(context.Context) bool
 }
 
 // maintenanceInterval spaces the disk-presence and stale-row sweeps: both are
@@ -133,6 +145,18 @@ func NewArtifactManager(
 	return &ArtifactManager{
 		repo: repo, downloads: downloadRepo, fileRepo: fileRepo, preparer: preparer,
 		owner: owner, liveCfg: liveCfg, notify: notify,
+	}
+}
+
+// SetSettingsReader supplies live admin settings used when a prepared
+// artifact recipe is first frozen. Existing queued artifacts retain their
+// stored recipe when settings later change.
+func (m *ArtifactManager) SetSettingsReader(settings SettingsReader) {
+	if m != nil {
+		m.settings = settings
+		if preparer, ok := m.preparer.(interface{ SetSettingsReader(SettingsReader) }); ok {
+			preparer.SetSettingsReader(settings)
+		}
 	}
 }
 
@@ -227,24 +251,42 @@ func (m *ArtifactManager) artifactDir() string {
 // given format, returning the current artifact row. The deterministic
 // output_path keeps a reclaimed job idempotent.
 func (m *ArtifactManager) Ensure(ctx context.Context, file *models.MediaFile, format string, target playback.PrepareTarget) (*Artifact, error) {
-	hash := paramsHash(format, target.Container, target.CodecVideo, target.CodecAudio, target.Resolution, target.AudioTrackIndex, target.TargetBitrateKbps, false)
+	var err error
+	target, err = m.resolveToneMapTarget(ctx, file, target)
+	if err != nil {
+		return nil, err
+	}
+	if target.ToneMapPolicy == "" {
+		target.ToneMapPolicy = tonemap.PolicyNone
+	}
+	hash := paramsHashWithToneMapRevision(format, target.Container, target.CodecVideo, target.CodecAudio, target.Resolution, target.AudioTrackIndex, target.TargetBitrateKbps, false, target.ToneMapPolicy, target.ToneMapMode, target.ToneMapSourceKind, target.ToneMapRecipeVersion, target.ToneMapPreflightRequired, target.ToneMapSourceRevision)
 	id, err := idgen.NextID()
 	if err != nil {
 		return nil, err
 	}
 	a := &Artifact{
-		ID:                id,
-		MediaFileID:       file.ID,
-		Format:            format,
-		ParamsHash:        hash,
-		Container:         target.Container,
-		CodecVideo:        target.CodecVideo,
-		CodecAudio:        target.CodecAudio,
-		Resolution:        target.Resolution,
-		AudioTrackIndex:   target.AudioTrackIndex,
-		TargetBitrateKbps: target.TargetBitrateKbps,
-		OutputPath:        artifactOutputPath(m.artifactDir(), file.ID, format, hash),
-		MaxAttempts:       artifactMaxAttempts,
+		ID:                         id,
+		MediaFileID:                file.ID,
+		Format:                     format,
+		ParamsHash:                 hash,
+		Container:                  target.Container,
+		CodecVideo:                 target.CodecVideo,
+		CodecAudio:                 target.CodecAudio,
+		Resolution:                 target.Resolution,
+		AudioTrackIndex:            target.AudioTrackIndex,
+		TargetBitrateKbps:          target.TargetBitrateKbps,
+		ToneMapPolicy:              target.ToneMapPolicy,
+		ToneMapMode:                target.ToneMapMode,
+		ToneMapSourceKind:          target.ToneMapSourceKind,
+		ToneMapRecipeVersion:       target.ToneMapRecipeVersion,
+		ToneMapPreflightRequired:   target.ToneMapPreflightRequired,
+		ToneMapSourceRevision:      target.ToneMapSourceRevision.Encode(),
+		ToneMapDVConfigPresent:     target.ToneMapDVConfigPresent,
+		ToneMapDVBLCompatIDPresent: target.ToneMapDVBLCompatIDPresent,
+		ToneMapDVBLPresent:         target.ToneMapDVBLPresent,
+		ToneMapDVRPUPresent:        target.ToneMapDVRPUPresent,
+		OutputPath:                 artifactOutputPath(m.artifactDir(), file.ID, format, hash),
+		MaxAttempts:                artifactMaxAttempts,
 	}
 	row, created, err := m.repo.EnsureQueued(ctx, a)
 	if err != nil {
@@ -278,6 +320,84 @@ func (m *ArtifactManager) Ensure(ctx context.Context, file *models.MediaFile, fo
 		m.triggerDrain()
 	}
 	return row, nil
+}
+
+func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models.MediaFile, target playback.PrepareTarget) (playback.PrepareTarget, error) {
+	if strings.EqualFold(target.CodecVideo, "copy") || file == nil || file.IsAudioOnly() {
+		return target, nil
+	}
+	metadata := tonemap.MetadataForFile(file)
+	if metadata.DynamicRange == "" || metadata.DynamicRange == playback.DynamicRangeSDRV3 {
+		return target, nil
+	}
+	resolution := tonemap.ResolveSource(metadata)
+	kind := resolution.Kind
+	if kind == "" {
+		return target, fmt.Errorf("HDR source is not safe to tone-map: %w", ErrQualityUnavailable)
+	}
+	if m.settings == nil {
+		return target, fmt.Errorf("HDR tone mapping is disabled: %w", ErrQualityUnavailable)
+	}
+	settings, err := m.settings.GetAll(ctx)
+	if err != nil {
+		return target, fmt.Errorf("load tone-map settings: %w", err)
+	}
+	if is4KDownloadSource(file) && !strings.EqualFold(settings["allow_4k_transcode"], "true") {
+		return target, fmt.Errorf("4K transcoding is disabled: %w", ErrQualityUnavailable)
+	}
+	policy := tonemap.NewPolicy(
+		strings.EqualFold(settings[config.PlaybackTranscodeHardwareToneMapSettingKey], "true"),
+		strings.EqualFold(settings[config.PlaybackTranscodeSoftwareToneMapSettingKey], "true"),
+	)
+	if policy == tonemap.PolicyNone {
+		return target, fmt.Errorf("HDR tone mapping is disabled: %w", ErrQualityUnavailable)
+	}
+	capabilities := tonemap.Capabilities(nil)
+	provider, pooled := m.preparer.(toneMapCapabilityProvider)
+	if !pooled || provider.LocalFallbackAllowed(ctx) {
+		capabilities = m.localToneMapCapabilities(ctx)
+	}
+	if pooled {
+		capabilities = append(capabilities, provider.ToneMapCapabilities(ctx)...)
+	}
+	mode := capabilities.PreferredMode(policy, kind)
+	if mode == "" {
+		return target, fmt.Errorf("no enabled validated tone-map executor is available: %w", ErrQualityUnavailable)
+	}
+	target.ToneMapPolicy = policy
+	target.ToneMapMode = mode
+	target.ToneMapSourceKind = kind
+	target.ToneMapRecipeVersion = playback.TransformationHDRToSDRToneMapRecipeVersionV3
+	target.ToneMapPreflightRequired = resolution.PreflightRequired
+	target.ToneMapSourceRevision = tonemap.RevisionForFile(file)
+	target.ToneMapDVConfigPresent = metadata.DVConfigPresent
+	target.ToneMapDVBLCompatIDPresent = metadata.DVBLCompatIDPresent
+	target.ToneMapDVBLPresent = metadata.DVBLPresent
+	target.ToneMapDVRPUPresent = metadata.DVRPUPresent
+	return target, nil
+}
+
+func (m *ArtifactManager) localToneMapCapabilities(ctx context.Context) tonemap.Capabilities {
+	if m == nil || m.liveCfg == nil {
+		return nil
+	}
+	cfg := m.liveCfg()
+	if cfg == nil {
+		return nil
+	}
+	backend := playback.ResolveHWAccelWithFFmpeg(cfg.Playback.HWAccel, cfg.Playback.FFmpegPath)
+	return tonemap.Probe(ctx, playback.ResolveFFmpegPath(cfg.Playback.FFmpegPath), backend, cfg.Playback.HWDevice)
+}
+
+func is4KDownloadSource(file *models.MediaFile) bool {
+	if file == nil {
+		return false
+	}
+	if len(file.VideoTracks) > 0 && file.VideoTracks[0].Height >= 2160 {
+		return true
+	}
+	resolution := strings.ToLower(strings.TrimSpace(file.Resolution))
+	return strings.Contains(resolution, "2160") || strings.Contains(resolution, "4k")
 }
 
 func (m *ArtifactManager) triggerDrain() {
@@ -755,21 +875,39 @@ func (m *ArtifactManager) buildOpts(file *models.MediaFile, a *Artifact) playbac
 		}
 	}
 	sourceVideoCodec, sourceVideoProfile, sourceVideoBitDepth := playback.SourceVideoTranscodeFacts(file)
+	toneMapPolicy := a.ToneMapPolicy
+	if a.ToneMapMode == "" {
+		toneMapPolicy = ""
+	}
+	sourceRevision, err := tonemap.DecodeSourceRevision(a.ToneMapSourceRevision)
+	if err != nil {
+		sourceRevision = tonemap.SourceRevision{MediaFileID: -1}
+	}
 	return playback.TranscodeOpts{
-		InputPath:           file.FilePath,
-		SourceVideoCodec:    sourceVideoCodec,
-		SourceVideoProfile:  sourceVideoProfile,
-		SourceVideoBitDepth: sourceVideoBitDepth,
-		TargetCodecVideo:    a.CodecVideo,
-		TargetCodecAudio:    a.CodecAudio,
-		TargetResolution:    a.Resolution,
-		TargetBitrateKbps:   a.TargetBitrateKbps,
-		AudioTrackIndex:     a.AudioTrackIndex,
-		SubtitleTrackIndex:  -1,
-		FFmpegPath:          cfg.Playback.FFmpegPath,
-		HWAccel:             cfg.Playback.HWAccel,
-		HWDevice:            cfg.Playback.HWDevice,
-		TotalDuration:       float64(file.Duration),
+		InputPath:                  file.FilePath,
+		SourceVideoCodec:           sourceVideoCodec,
+		SourceVideoProfile:         sourceVideoProfile,
+		SourceVideoBitDepth:        sourceVideoBitDepth,
+		TargetCodecVideo:           a.CodecVideo,
+		TargetCodecAudio:           a.CodecAudio,
+		TargetResolution:           a.Resolution,
+		TargetBitrateKbps:          a.TargetBitrateKbps,
+		ToneMapPolicy:              toneMapPolicy,
+		ToneMapMode:                a.ToneMapMode,
+		ToneMapSourceKind:          a.ToneMapSourceKind,
+		ToneMapRecipeVersion:       a.ToneMapRecipeVersion,
+		ToneMapPreflightRequired:   a.ToneMapPreflightRequired,
+		ToneMapSourceRevision:      sourceRevision,
+		ToneMapDVConfigPresent:     a.ToneMapDVConfigPresent,
+		ToneMapDVBLCompatIDPresent: a.ToneMapDVBLCompatIDPresent,
+		ToneMapDVBLPresent:         a.ToneMapDVBLPresent,
+		ToneMapDVRPUPresent:        a.ToneMapDVRPUPresent,
+		AudioTrackIndex:            a.AudioTrackIndex,
+		SubtitleTrackIndex:         -1,
+		FFmpegPath:                 cfg.Playback.FFmpegPath,
+		HWAccel:                    cfg.Playback.HWAccel,
+		HWDevice:                   cfg.Playback.HWDevice,
+		TotalDuration:              float64(file.Duration),
 	}
 }
 

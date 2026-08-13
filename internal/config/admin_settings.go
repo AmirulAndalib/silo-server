@@ -16,6 +16,16 @@ import (
 const cloudflareURLMode = "cloudflare_token"
 const chapterThumbnailSoftwareToneMapKey = "playback.chapter_thumbnail_software_tone_map_enabled"
 
+// PlaybackTranscodeHardwareToneMapSettingKey and
+// PlaybackTranscodeSoftwareToneMapSettingKey are server-wide execution policy
+// knobs. They live in the admin settings registry (not the generated
+// per-profile settings contract) because they govern which FFmpeg recipes the
+// deployment may execute.
+const (
+	PlaybackTranscodeHardwareToneMapSettingKey = "playback.transcode_hardware_tone_map_enabled"
+	PlaybackTranscodeSoftwareToneMapSettingKey = "playback.transcode_software_tone_map_enabled"
+)
+
 // adminSettingDefaults is the effective value shown by the Admin UI when no
 // row exists in server_settings. Keep these values aligned with the runtime
 // readers that own each setting. The UI must never invent a second set of
@@ -59,6 +69,8 @@ var adminSettingDefaults = map[string]string{
 	"playback.chapter_thumbnail_node_capacity": "1",
 	"playback.chapter_thumbnail_hdr_policy":    "best_effort",
 	chapterThumbnailSoftwareToneMapKey:         "false",
+	PlaybackTranscodeHardwareToneMapSettingKey: "false",
+	PlaybackTranscodeSoftwareToneMapSettingKey: "false",
 	"playback.watched_threshold":               "90",
 	"playback.min_resume_threshold":            "5",
 	"allow_4k_transcode":                       "false",
@@ -269,7 +281,8 @@ func NormalizeAdminSetting(key, raw string) (string, error) {
 
 	switch key {
 	case "metadata.cache_images", "playback.transcode_enabled", "playback.local_transcode_fallback",
-		chapterThumbnailSoftwareToneMapKey,
+		chapterThumbnailSoftwareToneMapKey, PlaybackTranscodeHardwareToneMapSettingKey,
+		PlaybackTranscodeSoftwareToneMapSettingKey,
 		"allow_4k_transcode", "enable_transcode_throttle", "audiobookshelf_compat.enabled",
 		"jellyfin_compat.enabled", "jellyfin_compat.web_enabled", "recommendations.enabled",
 		"subtitle_ai.enabled", "subtitle_ai.transcribe_enabled", "metadata_ai.enabled",

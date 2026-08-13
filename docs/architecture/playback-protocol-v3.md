@@ -126,10 +126,13 @@ unknown, and both look like an absent field.
 `deliveries` reports the four *server-side* delivery values, not the three
 delivery classes a client negotiates in. §4 gives the folding.
 
-`transformations` advertises only what the *installed* FFmpeg was probed for at
-startup — a server without a `dovi_rpu` bitstream filter does not list
-`server_dv7_to_hdr10`. A client must not assume a transformation exists because
-this document names it.
+`transformations` advertises only what an eligible executor has validated. Most
+entries come from the installed FFmpeg probe; pooled transcode nodes contribute
+their own advertisements. `hdr_to_sdr_tonemap` additionally requires an
+administrator-enabled hardware or software policy and a successful device-level
+smoke probe for the applicable PQ, HLG, or SDR fallback-base source kind. A
+client must not assume a
+transformation exists because this document names it.
 
 `enabled` survives from the rollout period and is now constant `true`; the
 negative shape was deliberately removed before v1 lock because v3 is the only
@@ -602,6 +605,7 @@ The plan will play, but something the user might notice was given up.
 | `dolby_vision_removed` | DV metadata stripped |
 | `dolby_vision_strip_unsupported_by_source` | DV could not be stripped |
 | `dolby_vision_enhancement_layer_discarded` | FEL/MEL dropped, base layer kept |
+| `hdr_tone_mapped` | HDR video converted to limited-range BT.709 SDR |
 | `audio_converted` | Audio re-encoded rather than copied |
 | `subtitle_burn_in` | Subtitles rendered into the video |
 | `quality_reduction_unavailable` | Requested rung could not be produced |
@@ -784,21 +788,35 @@ A transformation is a named, versioned media operation with claims attached.
 | --- | --- | --- | --- | --- |
 | `audio_to_aac` | `server` | `1` | — | `audio_decode` |
 | `video_to_h264` | `server` | `2` | `sdr` output | `h264_decode` |
+| `hdr_to_sdr_tonemap` | `server` | `1` | limited-range BT.709 `sdr` output with HDR metadata removed | `hdr_metadata_removed`, `sdr_bt709_output` |
 | `server_dv7_to_hdr10` | `server` | `1` | `hdr10` output | `dolby_vision_metadata_removed`, `hdr10_base_layer_preserved`, `enhancement_layer_discarded` |
 
-They are advertised only if the installed FFmpeg actually has the required
-capability, probed once at startup:
+They are advertised only if an eligible executor actually has the required
+capability. The ordinary FFmpeg feature probe is cached; the more expensive
+tone-map smoke probe is lazy and cached by binary, backend, and device:
 
 | Transformation | Probe |
 | --- | --- |
 | `server_dv7_to_hdr10` | `ffmpeg -bsfs` contains `dovi_rpu` |
 | `audio_to_aac` | `ffmpeg -encoders` contains an `aac` encoder |
 | `video_to_h264` | `ffmpeg -encoders` contains any of `libx264`, `h264_qsv`, `h264_vaapi`, `h264_nvenc`, `h264_videotoolbox` |
+| `hdr_to_sdr_tonemap` | A bounded decode → BT.709 H.264 encode succeeds for the advertised PQ, BT.2100 HLG, legacy HLG, BT.709 SDR-base, and/or BT.2020 SDR-base source kinds on the real software, VAAPI/QSV, or NVENC executor |
 
-`GET /playback/capability` reports the *local* probe only. A deployment with
-pooled transcode nodes may still plan an HLS route using a transformation those
-nodes advertise but the local FFmpeg lacks, so the capability list is a floor,
-not a ceiling — one more reason a client must not precompute routes from it.
+`GET /playback/capability` reports the union of currently eligible local and
+pooled executors. The generic tone-map transformation does not reveal hardware
+selection policy; the server freezes a validated executor into each accepted
+recipe. Heterogeneous pools are filtered again at transport startup, and a stale
+or older node advertisement is rejected instead of silently changing modes.
+Dolby Vision compatibility IDs `1` through `6` resolve to their declared
+standards-compatible base layer: `1` and `6` are PQ, `2` is BT.709 SDR, `3` is
+legacy BT.709-gamut HLG, `4` is BT.2100 HLG, and `5` is BT.2020 SDR. ID `0`,
+Profile 5, and a declared absent base layer remain unsupported. Missing,
+reserved, legacy, or contradictory signaling
+is only a candidate classification: the selected executor must successfully
+decode and normalize samples near the beginning, midpoint, and end before the
+first manifest is published. Positive and negative verdicts are cached against
+the source revision, FFmpeg build, recipe, backend/device, and driver, so any
+relevant change forces validation again.
 
 An unavailable transformation is not silently skipped at plan time: it produces
 its own terminal reason (`dv_conversion_unsupported`,

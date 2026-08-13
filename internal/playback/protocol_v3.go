@@ -129,11 +129,13 @@ const (
 // Server transformation names. A plan names the transformations its serving
 // executor must run; the registry keys availability by the same names.
 const (
-	TransformationAudioToAACV3     = "audio_to_aac"
-	TransformationVideoToH264V3    = "video_to_h264"
-	TransformationServerDV7HDR10V3 = "server_dv7_to_hdr10"
+	TransformationAudioToAACV3      = "audio_to_aac"
+	TransformationVideoToH264V3     = "video_to_h264"
+	TransformationServerDV7HDR10V3  = "server_dv7_to_hdr10"
+	TransformationHDRToSDRToneMapV3 = "hdr_to_sdr_tonemap"
 
-	TransformationVideoToH264RecipeVersionV3 = "2"
+	TransformationVideoToH264RecipeVersionV3     = "2"
+	TransformationHDRToSDRToneMapRecipeVersionV3 = "1"
 )
 
 // Transformation executors: who runs the transformation. A "server"
@@ -152,6 +154,8 @@ const (
 	ClaimDolbyVisionMetadataRemovedV3 = "dolby_vision_metadata_removed"
 	ClaimHDR10BaseLayerPreservedV3    = "hdr10_base_layer_preserved"
 	ClaimEnhancementLayerDiscardedV3  = "enhancement_layer_discarded"
+	ClaimHDRMetadataRemovedV3         = "hdr_metadata_removed"
+	ClaimSDRBT709OutputV3             = "sdr_bt709_output"
 )
 
 // DV7ToHDR10ClaimsV3 returns the claims the server DV7→HDR10 transformation
@@ -164,6 +168,7 @@ func DV7ToHDR10ClaimsV3() []string {
 const (
 	TerminalAudioConversionUnsupportedV3 = "audio_conversion_unsupported"
 	TerminalVideoConversionUnsupportedV3 = "video_conversion_unsupported"
+	TerminalHDRTranscodeUnsupportedV3    = "hdr_transcode_unsupported"
 	TerminalDVConversionUnsupportedV3    = "dv_conversion_unsupported"
 )
 

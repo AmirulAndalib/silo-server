@@ -37,6 +37,17 @@ function cpuToneMapSwitch(markup: string): Element {
   return toggle;
 }
 
+function settingSwitch(markup: string, labelText: string): Element {
+  const container = document.createElement("div");
+  container.innerHTML = markup;
+  const label = Array.from(container.querySelectorAll("label")).find(
+    (candidate) => candidate.textContent === labelText,
+  );
+  const toggle = label?.htmlFor ? container.querySelector(`[id="${label.htmlFor}"]`) : null;
+  if (!toggle) throw new Error(`${labelText} toggle was not rendered`);
+  return toggle;
+}
+
 describe("PlaybackSettings CPU tone mapping", () => {
   it("includes the setting and renders it off by default", () => {
     useSettingsFormMock.mockReturnValue(
@@ -68,5 +79,46 @@ describe("PlaybackSettings CPU tone mapping", () => {
 
     expect(toggle).toHaveAttribute("aria-checked", "true");
     expect(toggle).toHaveAttribute("disabled");
+  });
+});
+
+describe("PlaybackSettings transcode tone mapping", () => {
+  it("registers independent hardware and software settings disabled by default", () => {
+    useSettingsFormMock.mockReturnValue(makeForm({ "playback.hw_accel": "auto" }));
+
+    const markup = renderToStaticMarkup(<PlaybackSettings />);
+    const keys = useSettingsFormMock.mock.calls[0]?.[0]?.keys as string[];
+
+    expect(keys).toContain("playback.transcode_hardware_tone_map_enabled");
+    expect(keys).toContain("playback.transcode_software_tone_map_enabled");
+    expect(settingSwitch(markup, "Enable Hardware HDR Tone Mapping")).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+    expect(settingSwitch(markup, "Enable Software HDR Tone Mapping")).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+  });
+
+  it("keeps the two policies independent", () => {
+    useSettingsFormMock.mockReturnValue(
+      makeForm({
+        "playback.hw_accel": "qsv",
+        "playback.transcode_hardware_tone_map_enabled": "true",
+        "playback.transcode_software_tone_map_enabled": "false",
+      }),
+    );
+
+    const markup = renderToStaticMarkup(<PlaybackSettings />);
+
+    expect(settingSwitch(markup, "Enable Hardware HDR Tone Mapping")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(settingSwitch(markup, "Enable Software HDR Tone Mapping")).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
   });
 });

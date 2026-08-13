@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 func hasDegradationWarningV3(warnings []DegradationWarningV3, code string) bool {
@@ -1071,6 +1072,119 @@ func TestPlanPlaybackV3NeverClaimsUnimplementedHDRTranscode(t *testing.T) {
 	result := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}})
 	if result.Terminal == nil || result.Terminal.Reason != "hdr_transcode_unsupported" {
 		t.Fatalf("result = %s", ExplainPlannerResultV3(result))
+	}
+}
+
+func TestPlanPlaybackV3ToneMapSettingsSelectValidatedExecutor(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.VideoTracks[0].ColorPrimaries = "bt2020"
+	file.VideoTracks[0].ColorTransfer = "smpte2084"
+	file.VideoTracks[0].ColorSpace = "bt2020nc"
+	req := validStartRequestV3()
+	req.QualityPreference = "1080p"
+	registry := NewTransformationRegistryV3([]TransformationSpecV3{
+		{Name: TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: TransformationVideoToH264V3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, Available: true},
+		{Name: TransformationHDRToSDRToneMapV3, RecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3, Available: true},
+	})
+	capabilities := tonemap.Capabilities{
+		{Mode: tonemap.ModeSoftware, Backend: "software", Filter: "tonemapx", SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ, tonemap.SourceHLG}},
+		{Mode: tonemap.ModeHardware, Backend: "qsv", Filter: "tonemap_vaapi", SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+	}
+	tests := []struct {
+		name     string
+		hardware bool
+		software bool
+		wantMode tonemap.Mode
+	}{
+		{name: "disabled"},
+		{name: "hardware only", hardware: true, wantMode: tonemap.ModeHardware},
+		{name: "software only", software: true, wantMode: tonemap.ModeSoftware},
+		{name: "hardware preferred", hardware: true, software: true, wantMode: tonemap.ModeHardware},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := PlanPlaybackV3(PlannerInputV3{
+				Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
+				Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true, HardwareToneMapEnabled: tt.hardware, SoftwareToneMapEnabled: tt.software},
+				Registry: registry, ToneMapCapabilities: capabilities,
+			})
+			if tt.wantMode == "" {
+				if result.Terminal == nil || result.Terminal.Reason != "hdr_transcode_unsupported" {
+					t.Fatalf("result = %s", ExplainPlannerResultV3(result))
+				}
+				return
+			}
+			if result.Plan == nil || result.ToneMapMode != tt.wantMode || result.ToneMapSourceKind != tonemap.SourcePQ {
+				t.Fatalf("result = %#v", result)
+			}
+			if result.Plan.EffectiveRecipe.DynamicRange != DynamicRangeSDRV3 || !hasDegradationWarningV3(result.Plan.DegradationWarnings, "hdr_tone_mapped") {
+				t.Fatalf("plan = %#v", result.Plan)
+			}
+			found := false
+			for _, transformation := range result.Plan.Transformations {
+				if transformation.Name == TransformationHDRToSDRToneMapV3 && transformation.RecipeVersion == TransformationHDRToSDRToneMapRecipeVersionV3 {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("transformations = %#v", result.Plan.Transformations)
+			}
+		})
+	}
+}
+
+func TestPlanPlaybackV3RejectsDolbyOnlyAndFreezesAmbiguousFallbacks(t *testing.T) {
+	registry := NewTransformationRegistryV3([]TransformationSpecV3{
+		{Name: TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: TransformationVideoToH264V3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, Available: true},
+		{Name: TransformationHDRToSDRToneMapV3, RecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3, Available: true},
+	})
+	capabilities := tonemap.Capabilities{{Mode: tonemap.ModeSoftware, Backend: "software", Filter: "tonemapx", SourceKinds: tonemap.AllSourceKinds()}}
+	tests := []struct {
+		name          string
+		mutate        func(*models.VideoTrack)
+		wantTerminal  bool
+		wantKind      tonemap.SourceKind
+		wantPreflight bool
+	}{
+		{name: "profile 5", mutate: func(track *models.VideoTrack) { track.DVProfile = 5 }, wantTerminal: true},
+		{name: "explicit id 0", mutate: func(track *models.VideoTrack) { track.DVBLCompatID = 0 }, wantTerminal: true},
+		{name: "absent base", mutate: func(track *models.VideoTrack) { track.DVBLPresent = false }, wantTerminal: true},
+		{name: "id 2 SDR base", mutate: func(track *models.VideoTrack) {
+			track.DVProfile, track.DVBLCompatID = 8, 2
+			track.ColorPrimaries, track.ColorTransfer, track.ColorSpace = "bt709", "bt709", "bt709"
+		}, wantKind: tonemap.SourceSDRBT709},
+		{name: "legacy missing id presence", mutate: func(track *models.VideoTrack) {
+			track.DVConfigPresent, track.DVBLCompatIDPresent = false, false
+		}, wantKind: tonemap.SourcePQ, wantPreflight: true},
+		{name: "contradictory transfer", mutate: func(track *models.VideoTrack) {
+			track.ColorTransfer = "arib-std-b67"
+		}, wantKind: tonemap.SourcePQ, wantPreflight: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := detailedFixtureFileV3()
+			track := &file.VideoTracks[0]
+			track.DVProfile, track.DVBLCompatID = 7, 6
+			track.DVConfigPresent, track.DVBLCompatIDPresent, track.DVBLPresent, track.DVRPUPresent = true, true, true, true
+			track.VideoRangeType = "DOVIWithHDR10"
+			track.ColorRange, track.ColorPrimaries, track.ColorTransfer, track.ColorSpace = "tv", "bt2020", "smpte2084", "bt2020nc"
+			tt.mutate(track)
+			req := validStartRequestV3()
+			req.QualityPreference = "1080p"
+			result := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
+				Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true, SoftwareToneMapEnabled: true}, Registry: registry, ToneMapCapabilities: capabilities})
+			if tt.wantTerminal {
+				if result.Terminal == nil || result.Terminal.Reason != "hdr_transcode_unsupported" {
+					t.Fatalf("result = %s", ExplainPlannerResultV3(result))
+				}
+				return
+			}
+			if result.Plan == nil || result.ToneMapSourceKind != tt.wantKind || result.ToneMapPreflightRequired != tt.wantPreflight {
+				t.Fatalf("result = %#v", result)
+			}
+		})
 	}
 }
 
