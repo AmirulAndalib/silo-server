@@ -14,7 +14,7 @@ ALTER TABLE public.download_artifacts
         (tone_map_policy = 'none' AND tone_map_mode = '' AND tone_map_source_kind = '' AND tone_map_recipe_version = '' AND tone_map_preflight_required = false AND tone_map_source_revision = '' AND tone_map_dv_config_present = false AND tone_map_dv_bl_compat_id_present = false AND tone_map_dv_bl_present = false AND tone_map_dv_rpu_present = false)
         OR
         (((tone_map_policy = 'hardware_only' OR tone_map_policy = 'hardware_then_software') AND tone_map_mode = 'hardware')
-            OR ((tone_map_policy = 'software_only' OR tone_map_policy = 'hardware_then_software') AND tone_map_mode = 'software'))
+            OR ((tone_map_policy = 'software_only' OR tone_map_policy = 'hardware_then_software') AND tone_map_mode = 'software')
             AND tone_map_source_kind IN ('pq', 'hlg', 'hlg_bt709', 'sdr_bt709', 'sdr_bt2020')
             AND tone_map_recipe_version = '1'
             AND tone_map_source_revision <> '')
