@@ -39,6 +39,7 @@ type blockingSessionTracker struct {
 
 	mu                sync.Mutex
 	events            []string
+	tracked           nodesessions.SessionInfo
 	trackHasDeadline  bool
 	removeHasDeadline bool
 }
@@ -74,10 +75,11 @@ func newBlockingSessionTracker() *blockingSessionTracker {
 	}
 }
 
-func (t *blockingSessionTracker) Track(ctx context.Context, _ nodesessions.SessionInfo) {
+func (t *blockingSessionTracker) Track(ctx context.Context, info nodesessions.SessionInfo) {
 	_, hasDeadline := ctx.Deadline()
 	t.mu.Lock()
 	t.trackHasDeadline = hasDeadline
+	t.tracked = info
 	t.events = append(t.events, "track")
 	t.mu.Unlock()
 	close(t.trackStarted)
@@ -954,6 +956,96 @@ func TestHandleStartUsesConfiguredHWDeviceList(t *testing.T) {
 	defer session.CloseProcess()
 	if got := session.Opts().HWDevice; got != "/dev/dri/renderD888" {
 		t.Fatalf("session HWDevice = %q, want one concrete device from the configured list", got)
+	}
+}
+
+func TestRemoteSessionTrackingPreservesResolvedToneMapMode(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		reconstruct bool
+	}{
+		{name: "fresh remote session"},
+		{name: "reconstructed remote session", reconstruct: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := newTestServer(t)
+			tracker := newBlockingSessionTracker()
+			server.tracker = tracker
+			ffmpegPath := filepath.Join(t.TempDir(), "tone-map-ffmpeg.sh")
+			script := "#!/bin/sh\n" +
+				"case \" $* \" in\n" +
+				"  *\" -filters \"*) printf ' T.. zscale V->V scale\\n T.. tonemapx V->V tone-map\\n T.. sidedata V->V metadata\\n'; exit 0;;\n" +
+				"  *\" -encoders \"*) printf ' V..... libx264 H.264\\n'; exit 0;;\n" +
+				"  *\" -f null - \"*) exit 0;;\n" +
+				"esac\n" +
+				"while :; do sleep 0.1; done\n"
+			if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			server.watcher.Config().Playback.FFmpegPath = ffmpegPath
+			server.watcher.Config().Playback.HWAccel = playback.HWAccelNone
+			inputPath := filepath.Join(t.TempDir(), "source.mkv")
+			if err := os.WriteFile(inputPath, []byte("source"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(inputPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts := playback.TranscodeOpts{
+				SessionID: "tracked-tone-map", InputPath: inputPath,
+				TargetCodecVideo: "h264", TargetCodecAudio: "aac", TargetResolution: "1080p", SegmentDuration: 2,
+				ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
+				ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+				ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1, FileSize: info.Size()},
+			}
+
+			var session *playback.TranscodeSession
+			if test.reconstruct {
+				card := playback.NewRecipeCard(7, "profile-1", 42, "", opts)
+				session = server.spawnReconstruct(httptest.NewRequest(http.MethodGet, "/", nil), opts.SessionID, -1, card)
+				if session == nil {
+					t.Fatal("reconstructed session was not started")
+				}
+			} else {
+				body, err := json.Marshal(TranscodeStartRequest{
+					SessionID: opts.SessionID, InputPath: opts.InputPath,
+					TargetCodecVideo: opts.TargetCodecVideo, TargetCodecAudio: opts.TargetCodecAudio,
+					TargetResolution: opts.TargetResolution, SegmentDuration: opts.SegmentDuration,
+					ToneMapPolicy: opts.ToneMapPolicy, ToneMapMode: opts.ToneMapMode,
+					ToneMapSourceKind: opts.ToneMapSourceKind, ToneMapRecipeVersion: opts.ToneMapRecipeVersion,
+					ToneMapSourceRevision: opts.ToneMapSourceRevision,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				recorder := httptest.NewRecorder()
+				server.handleStart(recorder, httptest.NewRequest(http.MethodPost, "/transcode/start", bytes.NewReader(body)))
+				if recorder.Code != http.StatusAccepted {
+					t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+				}
+				server.mu.RLock()
+				session = server.sessions[opts.SessionID]
+				server.mu.RUnlock()
+				if session == nil {
+					t.Fatal("remote session was not registered")
+				}
+			}
+			defer func() { _ = session.CloseProcess() }()
+
+			select {
+			case <-tracker.trackStarted:
+			case <-time.After(2 * time.Second):
+				t.Fatal("remote session tracking did not start")
+			}
+			tracker.mu.Lock()
+			tracked := tracker.tracked
+			tracker.mu.Unlock()
+			close(tracker.trackRelease)
+			if tracked.ToneMapMode != string(tonemap.ModeSoftware) {
+				t.Fatalf("tracked tone-map mode = %q, want %q", tracked.ToneMapMode, tonemap.ModeSoftware)
+			}
+		})
 	}
 }
 

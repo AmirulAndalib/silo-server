@@ -895,15 +895,16 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	effectiveHWAccel := session.Opts().HWAccel
 	trackCtx := context.WithoutCancel(r.Context())
 	go s.tracker.Track(trackCtx, nodesessions.SessionInfo{
-		SessionID:  req.SessionID,
-		NodeURL:    s.tracker.NodeURL(),
-		NodeName:   s.tracker.NodeName(),
-		Type:       "transcode",
-		CodecVideo: req.TargetCodecVideo,
-		CodecAudio: req.TargetCodecAudio,
-		Resolution: req.TargetResolution,
-		HWAccel:    effectiveHWAccel,
-		StartedAt:  time.Now().UTC().Format(time.RFC3339),
+		SessionID:   req.SessionID,
+		NodeURL:     s.tracker.NodeURL(),
+		NodeName:    s.tracker.NodeName(),
+		Type:        "transcode",
+		CodecVideo:  req.TargetCodecVideo,
+		CodecAudio:  req.TargetCodecAudio,
+		Resolution:  req.TargetResolution,
+		HWAccel:     effectiveHWAccel,
+		ToneMapMode: string(session.Opts().ToneMapMode),
+		StartedAt:   time.Now().UTC().Format(time.RFC3339),
 	})
 
 	w.WriteHeader(http.StatusAccepted)
@@ -1117,6 +1118,7 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 		CodecAudio:  card.TargetCodecAudio,
 		Resolution:  card.TargetResolution,
 		HWAccel:     session.Opts().HWAccel,
+		ToneMapMode: string(session.Opts().ToneMapMode),
 		StartedAt:   time.Now().UTC().Format(time.RFC3339),
 		AuthUserID:  card.UserID,
 		ProfileID:   card.ProfileID,

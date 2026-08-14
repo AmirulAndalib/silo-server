@@ -1,16 +1,21 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import PlaybackSettings from "./PlaybackSettings";
 
 const useSettingsFormMock = vi.fn();
+const useHWAccelDetectionMock = vi.fn();
+
+beforeEach(() => {
+  useHWAccelDetectionMock.mockReturnValue({ data: undefined, isLoading: false });
+});
 
 vi.mock("@/hooks/useSettingsForm", () => ({
   useSettingsForm: (...args: unknown[]) => useSettingsFormMock(...args),
 }));
 
 vi.mock("@/hooks/queries/admin/system", () => ({
-  useHWAccelDetection: () => ({ data: undefined, isLoading: false }),
+  useHWAccelDetection: (...args: unknown[]) => useHWAccelDetectionMock(...args),
 }));
 
 function makeForm(values: Record<string, string>) {
@@ -121,6 +126,27 @@ describe("PlaybackSettings transcode tone mapping", () => {
     useSettingsFormMock.mockReturnValue(
       makeForm({
         "playback.hw_accel": "none",
+        "playback.transcode_hardware_tone_map_enabled": "true",
+      }),
+    );
+
+    const toggle = settingSwitch(
+      renderToStaticMarkup(<PlaybackSettings />),
+      "Enable Hardware HDR Tone Mapping",
+    );
+
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(toggle).toHaveAttribute("disabled");
+  });
+
+  it("disables hardware tone mapping when auto detection resolves to software", () => {
+    useHWAccelDetectionMock.mockReturnValue({
+      data: { resolved: "none" },
+      isLoading: false,
+    });
+    useSettingsFormMock.mockReturnValue(
+      makeForm({
+        "playback.hw_accel": "auto",
         "playback.transcode_hardware_tone_map_enabled": "true",
       }),
     );

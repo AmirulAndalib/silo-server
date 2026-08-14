@@ -245,6 +245,12 @@ type proxyNodeEnumeratorV3 interface {
 	ProxyNodeURLs() []string
 }
 
+type hlsToneMapCapabilityInventoryV3 struct {
+	local                    tonemap.Capabilities
+	union                    tonemap.Capabilities
+	localTranscodeFallbackOK bool
+}
+
 // localHLSExecutionRegistryV3 returns the transformations this API process can
 // execute for an HLS delivery. Tone mapping is added only when local execution
 // is allowed, the administrator permits a mode, and the configured FFmpeg and
@@ -252,15 +258,27 @@ type proxyNodeEnumeratorV3 interface {
 // validation must share this view or a locally planned recipe can be rejected
 // before FFmpeg starts.
 func (h *PlaybackHandler) localHLSExecutionRegistryV3(ctx context.Context) *playback.TransformationRegistryV3 {
-	local := h.transformationRegistryV3(ctx)
 	settings := h.plannerSettingsV3(ctx)
 	policy := tonemap.NewPolicy(settings.HardwareToneMapEnabled, settings.SoftwareToneMapEnabled)
-	if policy == tonemap.PolicyNone ||
-		(h.NodePlanner != nil && !nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo)) {
+	inventory := hlsToneMapCapabilityInventoryV3{}
+	if policy != tonemap.PolicyNone {
+		inventory.localTranscodeFallbackOK, inventory.local = h.localHLSToneMapCapabilitiesV3(ctx)
+	}
+	return h.localHLSExecutionRegistryWithInputsV3(ctx, settings, inventory)
+}
+
+func (h *PlaybackHandler) localHLSExecutionRegistryWithInputsV3(
+	ctx context.Context,
+	settings playback.PlannerSettingsV3,
+	inventory hlsToneMapCapabilityInventoryV3,
+) *playback.TransformationRegistryV3 {
+	local := h.transformationRegistryV3(ctx)
+	policy := tonemap.NewPolicy(settings.HardwareToneMapEnabled, settings.SoftwareToneMapEnabled)
+	if policy == tonemap.PolicyNone || !inventory.localTranscodeFallbackOK {
 		return local
 	}
 	capabilityAvailable := false
-	for _, capability := range h.localToneMapCapabilitiesV3(ctx) {
+	for _, capability := range inventory.local {
 		if policy.Allows(capability.Mode) && len(capability.SourceKinds) > 0 {
 			capabilityAvailable = true
 			break
@@ -281,7 +299,21 @@ func (h *PlaybackHandler) localHLSExecutionRegistryV3(ctx context.Context) *play
 // and recipe version pinned by this server), so node-only capabilities remain
 // unavailable when transport falls back to the API process.
 func (h *PlaybackHandler) hlsPlanningRegistryV3(ctx context.Context) *playback.TransformationRegistryV3 {
-	local := h.localHLSExecutionRegistryV3(ctx)
+	settings := h.plannerSettingsV3(ctx)
+	inventory := hlsToneMapCapabilityInventoryV3{}
+	policy := tonemap.NewPolicy(settings.HardwareToneMapEnabled, settings.SoftwareToneMapEnabled)
+	if policy != tonemap.PolicyNone {
+		inventory = h.hlsToneMapCapabilityInventoryV3(ctx)
+	}
+	return h.hlsPlanningRegistryWithInputsV3(ctx, settings, inventory)
+}
+
+func (h *PlaybackHandler) hlsPlanningRegistryWithInputsV3(
+	ctx context.Context,
+	settings playback.PlannerSettingsV3,
+	inventory hlsToneMapCapabilityInventoryV3,
+) *playback.TransformationRegistryV3 {
+	local := h.localHLSExecutionRegistryWithInputsV3(ctx, settings, inventory)
 	enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3)
 	if !ok {
 		return local
@@ -297,29 +329,24 @@ func (h *PlaybackHandler) hlsPlanningRegistryV3(ctx context.Context) *playback.T
 	return local.WithAdvertised(merged)
 }
 
-// lazyHLSPlanningRegistryV3 defers (and memoizes) the widened-registry build
-// so the planner only pays for node capability lookups when a route decision
-// actually depends on them; direct-play and other source-preserving starts
-// never touch the pool.
-func (h *PlaybackHandler) lazyHLSPlanningRegistryV3(ctx context.Context) func() *playback.TransformationRegistryV3 {
-	var once sync.Once
-	var registry *playback.TransformationRegistryV3
-	return func() *playback.TransformationRegistryV3 {
-		once.Do(func() { registry = h.hlsPlanningRegistryV3(ctx) })
-		return registry
+func (h *PlaybackHandler) localHLSToneMapCapabilitiesV3(ctx context.Context) (bool, tonemap.Capabilities) {
+	localFallbackAllowed := h.NodePlanner == nil || nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo)
+	if !localFallbackAllowed {
+		return false, nil
 	}
+	return true, h.localToneMapCapabilitiesV3(ctx)
 }
 
-// hlsToneMapCapabilitiesV3 builds the executor union available to HLS planning
-// from eligible local fallback and all reachable transcode nodes.
-func (h *PlaybackHandler) hlsToneMapCapabilitiesV3(ctx context.Context) tonemap.Capabilities {
-	capabilities := tonemap.Capabilities(nil)
-	if h.NodePlanner == nil || nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo) {
-		capabilities = h.localToneMapCapabilitiesV3(ctx)
+func (h *PlaybackHandler) hlsToneMapCapabilityInventoryV3(ctx context.Context) hlsToneMapCapabilityInventoryV3 {
+	localFallbackAllowed, local := h.localHLSToneMapCapabilitiesV3(ctx)
+	inventory := hlsToneMapCapabilityInventoryV3{
+		local:                    local,
+		union:                    append(tonemap.Capabilities(nil), local...),
+		localTranscodeFallbackOK: localFallbackAllowed,
 	}
 	enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3)
 	if !ok {
-		return capabilities
+		return inventory
 	}
 	nodeURLs := enumerator.TranscodeNodeURLs()
 	fetchCtx, cancel := context.WithTimeout(ctx, v3NodeCapabilityPlanTimeout)
@@ -340,9 +367,28 @@ func (h *PlaybackHandler) hlsToneMapCapabilitiesV3(ctx context.Context) tonemap.
 	}
 	wg.Wait()
 	for _, remote := range results {
-		capabilities = append(capabilities, remote...)
+		inventory.union = append(inventory.union, remote...)
 	}
-	return capabilities
+	return inventory
+}
+
+// lazyHLSPlanningRegistryV3 defers (and memoizes) the widened-registry build
+// so the planner only pays for node capability lookups when a route decision
+// actually depends on them; direct-play and other source-preserving starts
+// never touch the pool.
+func (h *PlaybackHandler) lazyHLSPlanningRegistryV3(ctx context.Context) func() *playback.TransformationRegistryV3 {
+	var once sync.Once
+	var registry *playback.TransformationRegistryV3
+	return func() *playback.TransformationRegistryV3 {
+		once.Do(func() { registry = h.hlsPlanningRegistryV3(ctx) })
+		return registry
+	}
+}
+
+// hlsToneMapCapabilitiesV3 builds the executor union available to HLS planning
+// from eligible local fallback and all reachable transcode nodes.
+func (h *PlaybackHandler) hlsToneMapCapabilitiesV3(ctx context.Context) tonemap.Capabilities {
+	return h.hlsToneMapCapabilityInventoryV3(ctx).union
 }
 
 // lazyHLSToneMapCapabilitiesV3 memoizes the capability union so source-
@@ -499,14 +545,15 @@ func (h *PlaybackHandler) HandlePlaybackCapabilityV3(w http.ResponseWriter, r *h
 	registry := h.transformationRegistryV3(r.Context())
 	toneMapAvailable := false
 	if policy != tonemap.PolicyNone {
-		for _, capability := range h.hlsToneMapCapabilitiesV3(r.Context()) {
+		inventory := h.hlsToneMapCapabilityInventoryV3(r.Context())
+		for _, capability := range inventory.union {
 			if policy.Allows(capability.Mode) && len(capability.SourceKinds) > 0 {
 				toneMapAvailable = true
 				break
 			}
 		}
 		if toneMapAvailable {
-			registry = h.hlsPlanningRegistryV3(r.Context())
+			registry = h.hlsPlanningRegistryWithInputsV3(r.Context(), settings, inventory)
 		}
 	}
 	for _, transformation := range registry.Advertised() {

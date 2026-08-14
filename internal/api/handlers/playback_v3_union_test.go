@@ -221,7 +221,7 @@ func TestHLSToneMapCapabilitiesV3FetchesNodesConcurrently(t *testing.T) {
 	var startedOnce sync.Once
 	bothStarted := make(chan struct{})
 	release := make(chan struct{})
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	serve := func(w http.ResponseWriter, _ *http.Request) {
 		if active.Add(1) == 2 {
 			startedOnce.Do(func() { close(bothStarted) })
 		}
@@ -230,12 +230,15 @@ func TestHLSToneMapCapabilitiesV3FetchesNodesConcurrently(t *testing.T) {
 			Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
 			SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
 		}}})
-	}))
-	defer remote.Close()
+	}
+	first := httptest.NewServer(http.HandlerFunc(serve))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(serve))
+	defer second.Close()
 
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "test-secret"
-	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{remote.URL, remote.URL}}
+	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{first.URL, second.URL}}
 	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{config.PlaybackLocalTranscodeFallbackSettingKey: "false"}}
 	result := make(chan tonemap.Capabilities, 1)
 	go func() { result <- handler.hlsToneMapCapabilitiesV3(context.Background()) }()
@@ -278,6 +281,44 @@ func TestHLSToneMapCapabilitiesV3HonorsSharedDeadline(t *testing.T) {
 	}
 	if len(got) != 1 || !got.Supports(tonemap.ModeSoftware, tonemap.SourcePQ) {
 		t.Fatalf("aggregated capabilities = %#v, want the successful node retained", got)
+	}
+}
+
+func TestHandlePlaybackCapabilityV3ReusesResolvedToneMapInputs(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{
+		Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+	}}))
+	handler.v3ToneMapProbe = func(context.Context, string, string, string) tonemap.Capabilities {
+		return tonemap.Capabilities{{
+			Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+			SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+		}}
+	}
+	settings := &mutablePlaybackSettingsV3{
+		values: map[string]string{
+			config.Allow4KTranscodeSettingKey:                 "true",
+			config.PlaybackTranscodeHardwareToneMapSettingKey: "false",
+			config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+		},
+		getCalls: make(map[string]int),
+	}
+	handler.SettingsRepo = settings
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/playback/capability", nil).WithContext(newAuthorizedPlaybackContext())
+	handler.HandlePlaybackCapabilityV3(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	for _, key := range []string{
+		config.Allow4KTranscodeSettingKey,
+		config.PlaybackTranscodeHardwareToneMapSettingKey,
+		config.PlaybackTranscodeSoftwareToneMapSettingKey,
+	} {
+		if got := settings.getCalls[key]; got != 1 {
+			t.Fatalf("settings lookup %q = %d, want exactly one", key, got)
+		}
 	}
 }
 

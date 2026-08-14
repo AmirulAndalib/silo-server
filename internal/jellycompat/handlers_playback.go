@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -364,9 +365,7 @@ func (h *PlaybackHandler) localToneMapCapabilities(ctx context.Context) tonemap.
 // remoteToneMapCapabilities retrieves one transcode node's authenticated,
 // smoke-tested executor inventory under a bounded request deadline.
 func (h *PlaybackHandler) remoteToneMapCapabilities(ctx context.Context, nodeURL string) (tonemap.Capabilities, error) {
-	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, strings.TrimRight(nodeURL, "/")+"/hw-capabilities", nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(nodeURL, "/")+"/hw-capabilities", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -399,12 +398,32 @@ func (h *PlaybackHandler) compatToneMapCapabilityInventory(ctx context.Context) 
 	capabilities := make(tonemap.Capabilities, 0, 4)
 	byNode := make(map[string]tonemap.Capabilities)
 	if enumerator, ok := h.NodePlanner.(compatTranscodeNodeEnumerator); ok {
-		for _, nodeURL := range enumerator.TranscodeNodeURLs() {
-			remote, err := h.remoteToneMapCapabilities(ctx, nodeURL)
-			if err == nil {
-				byNode[strings.TrimRight(nodeURL, "/")] = remote
-				capabilities = append(capabilities, remote...)
+		nodeURLs := enumerator.TranscodeNodeURLs()
+		fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		results := make([]struct {
+			capabilities tonemap.Capabilities
+			ok           bool
+		}, len(nodeURLs))
+		var wg sync.WaitGroup
+		for i, nodeURL := range nodeURLs {
+			wg.Add(1)
+			go func(i int, nodeURL string) {
+				defer wg.Done()
+				remote, err := h.remoteToneMapCapabilities(fetchCtx, nodeURL)
+				if err == nil {
+					results[i].capabilities = remote
+					results[i].ok = true
+				}
+			}(i, nodeURL)
+		}
+		wg.Wait()
+		cancel()
+		for i, result := range results {
+			if !result.ok {
+				continue
 			}
+			byNode[strings.TrimRight(nodeURLs[i], "/")] = result.capabilities
+			capabilities = append(capabilities, result.capabilities...)
 		}
 	}
 	if h.NodePlanner == nil || nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo) {

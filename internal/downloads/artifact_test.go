@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync/atomic"
@@ -109,6 +110,70 @@ func TestBuildOptsWarnsWithoutLoggingInvalidSourceRevisionValue(t *testing.T) {
 	}
 	if strings.Contains(output, artifact.ToneMapSourceRevision) {
 		t.Fatalf("warning exposed the stored source revision: %s", output)
+	}
+}
+
+func TestResolveToneMapTargetPreservesDegradedHDRTranscodeWhenPolicyDisabled(t *testing.T) {
+	file := hdrDownloadTestFile()
+	target := playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"}
+	for _, test := range []struct {
+		name     string
+		settings SettingsReader
+	}{
+		{name: "settings unavailable"},
+		{name: "policy disabled", settings: staticDownloadSettings{
+			config.Allow4KTranscodeSettingKey:                 "false",
+			config.PlaybackTranscodeHardwareToneMapSettingKey: "false",
+			config.PlaybackTranscodeSoftwareToneMapSettingKey: "false",
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &ArtifactManager{settings: test.settings}
+			got, err := manager.resolveToneMapTarget(context.Background(), file, target)
+			if err != nil {
+				t.Fatalf("resolveToneMapTarget() error = %v", err)
+			}
+			if got != target {
+				t.Fatalf("degraded target = %#v, want unchanged %#v", got, target)
+			}
+		})
+	}
+}
+
+func TestResolveToneMapTargetRetainsFourKRestrictionWhenPolicyDisabled(t *testing.T) {
+	file := hdrDownloadTestFile()
+	file.VideoTracks[0].Height = 2160
+	manager := &ArtifactManager{settings: staticDownloadSettings{
+		config.Allow4KTranscodeSettingKey:                 "false",
+		config.PlaybackTranscodeHardwareToneMapSettingKey: "false",
+		config.PlaybackTranscodeSoftwareToneMapSettingKey: "false",
+	}}
+	_, err := manager.resolveToneMapTarget(context.Background(), file, playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"})
+	if !errors.Is(err, ErrQualityUnavailable) || !strings.Contains(err.Error(), "4K transcoding is disabled") {
+		t.Fatalf("resolveToneMapTarget() error = %v, want disabled 4K ErrQualityUnavailable", err)
+	}
+}
+
+func TestResolveToneMapTargetReturnsCancellationWhenExecutorInventoryIsEmpty(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	manager := &ArtifactManager{settings: staticDownloadSettings{
+		config.Allow4KTranscodeSettingKey:                 "true",
+		config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+	}}
+	_, err := manager.resolveToneMapTarget(ctx, hdrDownloadTestFile(), playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("resolveToneMapTarget() error = %v, want context.Canceled", err)
+	}
+}
+
+func hdrDownloadTestFile() *models.MediaFile {
+	return &models.MediaFile{
+		HDR: true,
+		VideoTracks: []models.VideoTrack{{
+			Codec: "hevc", Height: 1080, BitDepth: 10, VideoRange: "HDR10",
+			ColorRange: "tv", ColorPrimaries: "bt2020", ColorTransfer: "smpte2084", ColorSpace: "bt2020nc",
+		}},
 	}
 }
 

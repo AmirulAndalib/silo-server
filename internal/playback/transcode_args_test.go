@@ -671,6 +671,53 @@ func TestBuildFFmpegArgs_H264High10DerivesSoftwareDecodeFromSourceFacts(t *testi
 	}
 }
 
+func TestBuildFFmpegArgs_H264High10UploadsBeforeHardwareToneMap(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		hwAccel string
+	}{
+		{name: "QSV", hwAccel: transcodeHWQSV},
+		{name: "VAAPI", hwAccel: transcodeHWVAAPI},
+	} {
+		for _, subtitle := range []struct {
+			name  string
+			codec string
+		}{
+			{name: "none"},
+			{name: "text", codec: "ass"},
+			{name: "bitmap", codec: "hdmv_pgs_subtitle"},
+		} {
+			t.Run(test.name+"/"+subtitle.name, func(t *testing.T) {
+				opts := TranscodeOpts{
+					InputPath: "/media/high10-hdr.mkv", OutputDir: t.TempDir(), SessionID: "high10-tone-map",
+					SourceVideoCodec: "h264", SourceVideoProfile: "High 10", SourceVideoBitDepth: 10,
+					TargetCodecVideo: "h264", TargetCodecAudio: "aac", SegmentDuration: 2,
+					HWAccel: test.hwAccel, TargetResolution: "720p",
+					ToneMapPolicy: tonemap.PolicyHardwareOnly, ToneMapMode: tonemap.ModeHardware,
+					ToneMapSourceKind: tonemap.SourcePQ, ToneMapFilter: tonemap.HardwareFilterVAAPI,
+					ToneMapRecipeVersion:  TransformationHDRToSDRToneMapRecipeVersionV3,
+					ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1},
+					SubtitleTrackIndex:    -1,
+				}
+				if subtitle.codec != "" {
+					opts.SubtitleTrackIndex = 0
+					opts.SubtitleBurnIn = true
+					opts.SubtitleCodec = subtitle.codec
+				}
+				joined := strings.Join(buildFFmpegArgs(opts), " ")
+				upload := strings.Index(joined, "format=nv12,hwupload")
+				toneMap := strings.Index(joined, "tonemap_vaapi")
+				if upload < 0 || toneMap < 0 || upload >= toneMap {
+					t.Fatalf("software frames were not uploaded before tonemap_vaapi: %s", joined)
+				}
+				if strings.Contains(joined, "-hwaccel vaapi") || strings.Contains(joined, "-hwaccel_output_format vaapi") {
+					t.Fatalf("High 10 source unexpectedly selected hardware decode: %s", joined)
+				}
+			})
+		}
+	}
+}
+
 func TestBuildFFmpegArgs_H264High10QSVASSBurnInUsesSoftwareFrames(t *testing.T) {
 	args := buildFFmpegArgs(TranscodeOpts{
 		InputPath:           "/media/high10.mkv",

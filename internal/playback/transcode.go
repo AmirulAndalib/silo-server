@@ -979,9 +979,9 @@ func toneMapScaleFilter(opts TranscodeOpts) string {
 	case tonemap.ModeHardware:
 		switch opts.HWAccel {
 		case transcodeHWQSV:
-			return tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "," + qsvToneMapScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter()
+			return softwareToneMapUploadFilter(opts) + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "," + qsvToneMapScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter()
 		case transcodeHWVAAPI:
-			return tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "," + vaapiScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter()
+			return softwareToneMapUploadFilter(opts) + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "," + vaapiScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter()
 		case transcodeHWNVENC:
 			if tonemap.IsSDRSource(opts.ToneMapSourceKind) {
 				filter := nvencSDRFallbackDownload(opts) + "," + tonemap.SoftwareFilter(opts.ToneMapSourceKind, "")
@@ -1015,9 +1015,9 @@ func toneMappedTextSubtitleFilter(opts TranscodeOpts) string {
 	}
 	switch opts.HWAccel {
 	case transcodeHWQSV:
-		return tonemap.VAAPIFilter(opts.ToneMapSourceKind) + ",hwdownload,format=nv12," + cpuTail + ",format=nv12,hwupload,hwmap=derive_device=qsv:mode=read+write,format=qsv," + tonemap.HDRMetadataRemovalFilter()
+		return softwareToneMapUploadFilter(opts) + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + ",hwdownload,format=nv12," + cpuTail + ",format=nv12,hwupload,hwmap=derive_device=qsv:mode=read+write,format=qsv," + tonemap.HDRMetadataRemovalFilter()
 	case transcodeHWVAAPI:
-		return tonemap.VAAPIFilter(opts.ToneMapSourceKind) + ",hwdownload,format=nv12," + cpuTail + ",format=nv12,hwupload," + tonemap.HDRMetadataRemovalFilter()
+		return softwareToneMapUploadFilter(opts) + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + ",hwdownload,format=nv12," + cpuTail + ",format=nv12,hwupload," + tonemap.HDRMetadataRemovalFilter()
 	case transcodeHWNVENC:
 		if tonemap.IsSDRSource(opts.ToneMapSourceKind) {
 			return nvencSDRFallbackDownload(opts) + "," + tonemap.SoftwareFilter(opts.ToneMapSourceKind, "") + "," + cpuTail + ",format=nv12,hwupload_cuda"
@@ -1045,11 +1045,11 @@ func appendToneMappedBitmapSubtitleArgs(args []string, opts TranscodeOpts) []str
 
 	switch opts.HWAccel {
 	case transcodeHWQSV:
-		graph = "[0:v:0]" + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "[vmain];" +
+		graph = "[0:v:0]" + softwareToneMapUploadFilter(opts) + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "[vmain];" +
 			subInput + "format=bgra,hwupload[sub];[vmain][sub]overlay_vaapi=eof_action=pass," +
 			qsvToneMapScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter() + "[vout]"
 	case transcodeHWVAAPI:
-		graph = "[0:v:0]" + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "[vmain];" +
+		graph = "[0:v:0]" + softwareToneMapUploadFilter(opts) + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "[vmain];" +
 			subInput + "format=bgra,hwupload[sub];[vmain][sub]overlay_vaapi=eof_action=pass," +
 			vaapiScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter() + "[vout]"
 	case transcodeHWNVENC:
@@ -1068,6 +1068,15 @@ func appendToneMappedBitmapSubtitleArgs(args []string, opts TranscodeOpts) []str
 		return args
 	}
 	return append(args, "-filter_complex", graph)
+}
+
+// softwareToneMapUploadFilter moves CPU-decoded AVC High 10 frames onto the
+// VAAPI device before invoking the hardware-only tonemap_vaapi filter.
+func softwareToneMapUploadFilter(opts TranscodeOpts) string {
+	if opts.SoftwareVideoDecode && (opts.HWAccel == transcodeHWQSV || opts.HWAccel == transcodeHWVAAPI) {
+		return "format=nv12,hwupload,"
+	}
+	return ""
 }
 
 // nvencSDRFallbackDownload preserves the decoded bit depth while bringing an

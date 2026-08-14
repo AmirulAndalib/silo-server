@@ -1,6 +1,7 @@
 package tonemap
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -112,6 +113,12 @@ func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightReques
 				entry.expiresAt = time.Now().Add(sourcePreflightNegativeTTL)
 			}
 			sourcePreflightCache.Lock()
+			now := time.Now()
+			for cachedKey, cached := range sourcePreflightCache.entries {
+				if cached.errorMessage != "" && !now.Before(cached.expiresAt) {
+					delete(sourcePreflightCache.entries, cachedKey)
+				}
+			}
 			sourcePreflightCache.entries[key] = entry
 			sourcePreflightCache.Unlock()
 			return entry, nil
@@ -536,8 +543,8 @@ func ffprobeForFFmpeg(ffmpegPath string) string {
 // decodeCommandJSON extracts the outer JSON object from command output that may
 // contain diagnostics before or after the payload.
 func decodeCommandJSON(output []byte, target any) error {
-	start := strings.IndexByte(string(output), '{')
-	end := strings.LastIndexByte(string(output), '}')
+	start := bytes.IndexByte(output, '{')
+	end := bytes.LastIndexByte(output, '}')
 	if start < 0 || end < start {
 		return errors.New("JSON payload unavailable")
 	}

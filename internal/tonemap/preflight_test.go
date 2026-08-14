@@ -120,6 +120,37 @@ func TestValidateSourceRetriesExpiredNegativeVerdict(t *testing.T) {
 	}
 }
 
+func TestValidateSourceWriteEvictsExpiredNegativeEntries(t *testing.T) {
+	resetSourcePreflightCache(t)
+	now := time.Now()
+	sourcePreflightCache.Lock()
+	sourcePreflightCache.entries["positive"] = sourcePreflightCacheEntry{}
+	sourcePreflightCache.entries["expired-negative"] = sourcePreflightCacheEntry{
+		errorMessage: "temporary failure",
+		expiresAt:    now.Add(-time.Second),
+	}
+	sourcePreflightCache.Unlock()
+
+	request := sourcePreflightTestRequest(t)
+	conversions := 0
+	if err := ValidateSourceWithRunner(context.Background(), request, sourcePreflightTestRunner(&conversions, func() string {
+		return "ffmpeg version eviction"
+	}, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	sourcePreflightCache.Lock()
+	_, positivePresent := sourcePreflightCache.entries["positive"]
+	_, expiredPresent := sourcePreflightCache.entries["expired-negative"]
+	sourcePreflightCache.Unlock()
+	if !positivePresent {
+		t.Fatal("valid positive entry was evicted")
+	}
+	if expiredPresent {
+		t.Fatal("expired negative entry was retained after a cache write")
+	}
+}
+
 // TestSourcePreflightTimeoutCoversAllBoundedCommands verifies the shared deadline covers the command matrix.
 func TestSourcePreflightTimeoutCoversAllBoundedCommands(t *testing.T) {
 	want := 10*probeCommandTimeout + sourcePreflightTimeoutSlack

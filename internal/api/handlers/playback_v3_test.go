@@ -30,8 +30,9 @@ import (
 )
 
 type mutablePlaybackSettingsV3 struct {
-	mu     sync.Mutex
-	values map[string]string
+	mu       sync.Mutex
+	values   map[string]string
+	getCalls map[string]int
 }
 
 type failingAudioPreferenceStoreV3 struct {
@@ -280,6 +281,9 @@ func TestReplanAllowsAlternateFileV3PinsSeekOperations(t *testing.T) {
 func (s *mutablePlaybackSettingsV3) Get(_ context.Context, key string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.getCalls != nil {
+		s.getCalls[key]++
+	}
 	return s.values[key], nil
 }
 

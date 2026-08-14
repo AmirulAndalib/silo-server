@@ -31,6 +31,7 @@ type SessionInfo struct {
 	CodecAudio  string `json:"codec_audio,omitempty"`
 	Resolution  string `json:"resolution,omitempty"`
 	HWAccel     string `json:"hw_accel,omitempty"`
+	ToneMapMode string `json:"tone_map_mode,omitempty"`
 	StartedAt   string `json:"started_at"`
 
 	// AuthUserID / ProfileID / MediaFileID are the numeric ownership keys the

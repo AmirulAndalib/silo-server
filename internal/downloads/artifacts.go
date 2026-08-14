@@ -341,7 +341,7 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 		return target, fmt.Errorf("HDR source is not safe to tone-map: %w", ErrQualityUnavailable)
 	}
 	if m.settings == nil {
-		return target, fmt.Errorf("HDR tone mapping is disabled: %w", ErrQualityUnavailable)
+		return target, nil
 	}
 	settings, err := m.settings.GetAll(ctx)
 	if err != nil {
@@ -355,7 +355,7 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 		strings.EqualFold(settings[config.PlaybackTranscodeSoftwareToneMapSettingKey], "true"),
 	)
 	if policy == tonemap.PolicyNone {
-		return target, fmt.Errorf("HDR tone mapping is disabled: %w", ErrQualityUnavailable)
+		return target, nil
 	}
 	capabilities := tonemap.Capabilities(nil)
 	provider, pooled := m.preparer.(toneMapCapabilityProvider)
@@ -367,6 +367,9 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 	}
 	mode := capabilities.PreferredMode(policy, kind)
 	if mode == "" {
+		if err := ctx.Err(); err != nil {
+			return target, err
+		}
 		return target, fmt.Errorf("no enabled validated tone-map executor is available: %w", ErrQualityUnavailable)
 	}
 	target.ToneMapPolicy = policy
