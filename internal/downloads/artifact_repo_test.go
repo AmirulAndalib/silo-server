@@ -87,8 +87,10 @@ func TestArtifactEnsureQueuedRoundTripsToneMapRecipe(t *testing.T) {
 	artifact.ToneMapPolicy = tonemap.PolicyHardwareThenSoftware
 	artifact.ToneMapMode = tonemap.ModeHardware
 	artifact.ToneMapSourceKind = tonemap.SourcePQ
-	artifact.ToneMapRecipeVersion = playback.TransformationHDRToSDRToneMapRecipeVersionV3
-	artifact.ToneMapSourceRevision = tonemap.SourceRevision{MediaFileID: fileID, FileSize: 100, StreamSignature: "video"}.Encode()
+	wantRecipeVersion := playback.TransformationHDRToSDRToneMapRecipeVersionV3
+	wantSourceRevision := tonemap.SourceRevision{MediaFileID: fileID, FileSize: 100, StreamSignature: "video"}.Encode()
+	artifact.ToneMapRecipeVersion = wantRecipeVersion
+	artifact.ToneMapSourceRevision = wantSourceRevision
 
 	returned, created, err := repo.EnsureQueued(ctx, artifact)
 	if err != nil || !created {
@@ -96,8 +98,8 @@ func TestArtifactEnsureQueuedRoundTripsToneMapRecipe(t *testing.T) {
 	}
 	assertToneMapRecipe := func(name string, got *Artifact) {
 		t.Helper()
-		if got.ToneMapPolicy != tonemap.PolicyHardwareThenSoftware || got.ToneMapMode != tonemap.ModeHardware || got.ToneMapSourceKind != tonemap.SourcePQ {
-			t.Fatalf("%s tone-map recipe = policy %q mode %q source %q", name, got.ToneMapPolicy, got.ToneMapMode, got.ToneMapSourceKind)
+		if got.ToneMapPolicy != tonemap.PolicyHardwareThenSoftware || got.ToneMapMode != tonemap.ModeHardware || got.ToneMapSourceKind != tonemap.SourcePQ || got.ToneMapRecipeVersion != wantRecipeVersion || got.ToneMapSourceRevision != wantSourceRevision {
+			t.Fatalf("%s tone-map recipe = policy %q mode %q source %q version %q revision %q; want version %q revision %q", name, got.ToneMapPolicy, got.ToneMapMode, got.ToneMapSourceKind, got.ToneMapRecipeVersion, got.ToneMapSourceRevision, wantRecipeVersion, wantSourceRevision)
 		}
 	}
 	assertToneMapRecipe("returned", returned)
