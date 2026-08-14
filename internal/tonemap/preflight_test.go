@@ -173,8 +173,8 @@ func TestSourcePreflightCacheBoundsSuccessfulVerdicts(t *testing.T) {
 // TestSourcePreflightTimeoutCoversAllBoundedCommands verifies the shared deadline covers the command matrix.
 func TestSourcePreflightTimeoutCoversAllBoundedCommands(t *testing.T) {
 	want := 10*probeCommandTimeout + sourcePreflightTimeoutSlack
-	if got := sourcePreflightTotalTimeout(100); got != want {
-		t.Fatalf("sourcePreflightTotalTimeout() = %s, want %s", got, want)
+	if got := SourcePreflightTimeout(100); got != want {
+		t.Fatalf("SourcePreflightTimeout() = %s, want %s", got, want)
 	}
 	executionWant := 9*probeCommandTimeout + sourcePreflightTimeoutSlack
 	if got := sourcePreflightExecutionTimeout(100); got != executionWant {

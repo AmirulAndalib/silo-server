@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 )
 
@@ -32,7 +33,7 @@ func (h *PlaybackHandler) startRemotePlaybackTransport(ctx context.Context, node
 	if err != nil {
 		return transcodenode.TranscodeStartResponse{}, 0, err
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, h.remotePlaybackTransportTimeout(request))
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(requestCtx, http.MethodPost, nodeURL+"/transcode/start", bytes.NewReader(body))
 	if err != nil {
@@ -58,10 +59,23 @@ func (h *PlaybackHandler) startRemotePlaybackTransport(ctx context.Context, node
 	return result, response.StatusCode, nil
 }
 
+func (h *PlaybackHandler) remotePlaybackTransportTimeout(request transcodenode.TranscodeStartRequest) time.Duration {
+	if request.ToneMapMode == "" {
+		return 20 * time.Second
+	}
+	device := h.playbackConfig().HWDevice
+	timeout := tonemap.ProbeRequestTimeout(request.HWAccel, device)
+	if request.ToneMapPreflightRequired {
+		timeout += tonemap.SourcePreflightTimeout(request.TotalDuration)
+	}
+	if request.RequireReady {
+		timeout += transcodenode.TranscodeStartReadinessTimeout
+	}
+	return timeout
+}
+
 func fetchRemoteTranscodeCapabilities(ctx context.Context, nodeURL, jwtSecret string) (playback.HWAccelInfo, error) {
-	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, strings.TrimRight(nodeURL, "/")+"/hw-capabilities", nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(nodeURL, "/")+"/hw-capabilities", nil)
 	if err != nil {
 		return playback.HWAccelInfo{}, err
 	}

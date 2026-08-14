@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/markers"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
@@ -4255,5 +4256,38 @@ func TestTerminalAllowsAlternateFileV3CoversSubtitleForcedRefusals(t *testing.T)
 	}
 	if terminalAllowsAlternateFileV3(nil) {
 		t.Fatal("a nil terminal must not trigger an alternate-version retry")
+	}
+}
+
+func TestPlaybackV3ToneMapBudgetsCoverColdNodeWork(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/dev/dri/renderD128"}
+	}
+
+	if got, want := handler.localToneMapProbeTimeoutV3(), tonemap.ProbeEndpointTimeout(tonemap.BackendQSV, "/dev/dri/renderD128"); got != want {
+		t.Fatalf("local tone-map probe timeout = %s, want %s", got, want)
+	}
+	if got, want := handler.remoteToneMapProbeTimeoutV3(), tonemap.ProbeRequestTimeout(tonemap.BackendQSV, "/dev/dri/renderD128"); got != want {
+		t.Fatalf("remote tone-map probe timeout = %s, want %s", got, want)
+	}
+	if got := handler.toneMapPlanningTimeoutV3(true); got != v3NodeCapabilityPlanTimeout {
+		t.Fatalf("planning timeout with local fallback = %s, want %s", got, v3NodeCapabilityPlanTimeout)
+	}
+	if got, want := handler.toneMapPlanningTimeoutV3(false), tonemap.ProbeRequestTimeout(tonemap.BackendQSV, "/dev/dri/renderD128"); got != want {
+		t.Fatalf("remote-only planning timeout = %s, want %s", got, want)
+	}
+
+	request := transcodenode.TranscodeStartRequest{
+		ToneMapMode:              tonemap.ModeHardware,
+		ToneMapPreflightRequired: true,
+		TotalDuration:            100,
+		RequireReady:             true,
+		HWAccel:                  tonemap.BackendQSV,
+	}
+	want := tonemap.ProbeRequestTimeout(tonemap.BackendQSV, "/dev/dri/renderD128") +
+		tonemap.SourcePreflightTimeout(100) + transcodenode.TranscodeStartReadinessTimeout
+	if got := handler.remotePlaybackTransportTimeout(request); got != want {
+		t.Fatalf("remote tone-map start timeout = %s, want %s", got, want)
 	}
 }

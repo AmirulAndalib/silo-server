@@ -858,8 +858,10 @@ func TestPrepareTransportV3ReportsSoftwareToneMapFallback(t *testing.T) {
 	baseFFmpeg := writePlaybackTestFFmpeg(t)
 	ffmpegPath := filepath.Join(t.TempDir(), "hardware-failing-ffmpeg.sh")
 	script := "#!/bin/sh\n" +
+		"out=\"\"\n" +
+		"for arg in \"$@\"; do case \"$arg\" in *.m3u8) out=\"$(dirname \"$arg\")\";; esac; done\n" +
 		"for arg in \"$@\"; do\n" +
-		"  case \"$arg\" in *tonemap_vaapi*) printf partial > hardware-partial.marker; echo 'hardware tone map failed' >&2; exit 1;; esac\n" +
+		"  case \"$arg\" in *tonemap_vaapi*) mkdir -p \"$out\"; printf partial > \"$out/hardware-partial.marker\"; echo 'hardware tone map failed' >&2; exit 1;; esac\n" +
 		"done\n" +
 		"exec \"" + baseFFmpeg + "\" \"$@\"\n"
 	if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {

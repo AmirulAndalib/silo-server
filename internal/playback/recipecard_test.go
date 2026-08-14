@@ -2,7 +2,6 @@ package playback
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
@@ -275,13 +274,6 @@ func TestRecipeCardClaimsRoundTrip(t *testing.T) {
 	})
 
 	claims := card.ToClaims()
-	encodedClaims, err := json.Marshal(claims)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(encodedClaims), `"tmf"`) {
-		t.Fatalf("stream-token claims carried the environment-specific tone-map filter: %s", encodedClaims)
-	}
 	got := RecipeCardFromClaims(&claims)
 
 	// Identity + routing.

@@ -1641,6 +1641,8 @@ func (h *PlaybackHandler) ensureTranscodeManifest(ctx context.Context, compatSes
 	}
 }
 
+var compatManifestStartupTimeout = playback.ManifestStartupTimeout
+
 // ensureTranscodeSession returns, reconstructs, or starts the requested transcode.
 func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessionID, upstreamSessionID string, source PlaybackMediaSource) (*playback.TranscodeSession, error) {
 	if existing := h.tm.GetTranscodeSession(upstreamSessionID); existing != nil {
@@ -1731,7 +1733,7 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 		unlock()
 		return existing, nil
 	}
-	manifestDeadline := time.Now().Add(playback.ManifestStartupTimeout)
+	manifestDeadline := time.Now().Add(compatManifestStartupTimeout)
 	transcodeSession, err := playback.StartTranscode(context.WithoutCancel(ctx), opts)
 	if err != nil && downgradeToSoftwareToneMap(
 		opts.ToneMapPolicy, &opts.ToneMapMode, &opts.ToneMapFilter, &opts.HWAccel,
@@ -1772,7 +1774,8 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 			}
 			h.tm.RegisterTranscodeSession(upstreamSessionID, transcodeSession)
 			replaceUnlock()
-			if _, fallbackErr := transcodeSession.WaitForManifest(time.Until(manifestDeadline)); fallbackErr != nil {
+			fallbackManifestDeadline := time.Now().Add(compatManifestStartupTimeout)
+			if _, fallbackErr := transcodeSession.WaitForManifest(time.Until(fallbackManifestDeadline)); fallbackErr != nil {
 				cleanupUnlock := h.tm.LockSessionLifecycle(upstreamSessionID)
 				h.tm.CloseTranscodeSessionIf(upstreamSessionID, transcodeSession, "")
 				cleanupUnlock()

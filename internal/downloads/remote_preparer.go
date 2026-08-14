@@ -44,7 +44,6 @@ type remoteToneMapCapabilities struct {
 const (
 	remoteToneMapCapabilityTTL      = time.Minute
 	remoteToneMapCapabilityErrorTTL = 15 * time.Second
-	remoteToneMapCapabilityTimeout  = 5 * time.Second
 )
 
 // eligibleTranscodeWorkPlanner reserves work only on nodes that satisfy a
@@ -286,7 +285,7 @@ func (p *NodeAwarePreparer) toneMapCapabilitiesForNode(ctx context.Context, node
 		p.cacheToneMapCapabilityFailure(nodeURL, err)
 		return nil, err
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, remoteToneMapCapabilityTimeout)
+	requestCtx, cancel := context.WithTimeout(ctx, tonemap.ProbeRequestTimeout(cfg.Playback.HWAccel, cfg.Playback.HWDevice))
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, nodeURL+"/hw-capabilities", nil)
 	if err != nil {
@@ -318,6 +317,16 @@ func (p *NodeAwarePreparer) toneMapCapabilitiesForNode(ctx context.Context, node
 	p.capabilities[nodeURL] = entry
 	p.capabilityMu.Unlock()
 	return append(tonemap.Capabilities(nil), entry.capabilities...), nil
+}
+
+// ToneMapCapabilityTimeout returns the complete cold-node capability budget
+// used when pooled nodes are the only eligible tone-map executors.
+func (p *NodeAwarePreparer) ToneMapCapabilityTimeout() time.Duration {
+	cfg := p.config()
+	if cfg == nil {
+		return remoteOnlyToneMapPlanTimeout
+	}
+	return tonemap.ProbeRequestTimeout(cfg.Playback.HWAccel, cfg.Playback.HWDevice)
 }
 
 // cacheToneMapCapabilityFailure negatively caches an unreachable or invalid

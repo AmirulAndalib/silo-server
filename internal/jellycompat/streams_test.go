@@ -16,6 +16,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 // withCompatSession attaches a compat session carrying tok to req, so the
@@ -174,6 +175,74 @@ func writeCompatStartupManifest(t *testing.T, outputDir string) {
 		"#EXTINF:2,\nseg_00000.m4s\n#EXTINF:2,\nseg_00001.m4s\n#EXTINF:2,\nseg_00002.m4s\n"
 	if err := os.WriteFile(filepath.Join(outputDir, "stream.m3u8"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEnsureTranscodeSessionGivesSoftwareFallbackFreshManifestBudget(t *testing.T) {
+	previousTimeout := compatManifestStartupTimeout
+	compatManifestStartupTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { compatManifestStartupTimeout = previousTimeout })
+
+	ffmpegPath := filepath.Join(t.TempDir(), "fallback-ffmpeg.sh")
+	script := "#!/bin/sh\n" +
+		"case \"$*\" in *tonemap_vaapi*) sleep 30; exit 0;; esac\n" +
+		"out=\"\"\n" +
+		"for arg in \"$@\"; do case \"$arg\" in *.m3u8) out=\"$(dirname \"$arg\")\";; esac; done\n" +
+		"mkdir -p \"$out\"\n" +
+		"for name in seg_00000.m4s seg_00001.m4s seg_00002.m4s; do printf segment > \"$out/$name\"; done\n" +
+		"printf '#EXTM3U\\n#EXT-X-TARGETDURATION:2\\n#EXT-X-MEDIA-SEQUENCE:0\\n#EXTINF:2,\\nseg_00000.m4s\\n#EXTINF:2,\\nseg_00001.m4s\\n#EXTINF:2,\\nseg_00002.m4s\\n' > \"$out/stream.m3u8\"\n" +
+		"sleep 30\n"
+	if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	file := &models.MediaFile{ID: 42, FilePath: filepath.Join(t.TempDir(), "movie.mkv"), HDR: true, VideoTracks: []models.VideoTrack{{
+		Codec: "hevc", Profile: "Main 10", BitDepth: 10, VideoRange: "HDR10",
+		ColorRange: "tv", ColorPrimaries: "bt2020", ColorTransfer: "smpte2084", ColorSpace: "bt2020nc",
+	}}}
+	if err := os.WriteFile(file.FilePath, []byte("source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(file.FilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modifiedAt := info.ModTime()
+	file.FileSize = info.Size()
+	file.FileModifiedAt = &modifiedAt
+	version := testCompatVersion()
+	version.FileID = file.ID
+	version.VideoTracks = file.VideoTracks
+	source := testCompatSource(NewResourceIDCodec(), version)
+	store := NewPlaybackSessionStore(time.Hour, nil)
+	store.Put(PlaybackSession{ID: "play-1", UpstreamSessionID: "upstream-1", MediaSources: []PlaybackMediaSource{source}})
+	handler := &PlaybackHandler{
+		playbackStore: store,
+		sessionMgr: &testCompatSessionManager{sessions: map[string]*playback.Session{
+			"upstream-1": {ID: "upstream-1", UserID: 7, ProfileID: "profile-1", MediaFileID: file.ID, PlayMethod: playback.PlayTranscode},
+		}},
+		fileResolver: testCompatFileResolver{file: file},
+		SettingsRepo: stubSettingsReader{values: map[string]string{
+			config.PlaybackTranscodeHardwareToneMapSettingKey: "true",
+			config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+		}},
+		TranscodeDir: t.TempDir(), FFmpegPath: ffmpegPath, HWAccel: tonemap.BackendQSV,
+		tm: playback.NewTranscodeManager(),
+		compatToneMapProbe: func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+			return tonemap.Capabilities{
+				{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+				{Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+			}, nil
+		},
+	}
+
+	session, err := handler.ensureTranscodeSession(context.Background(), "play-1", "upstream-1", source)
+	if err != nil {
+		t.Fatalf("ensureTranscodeSession() error = %v, want software fallback ready", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	if opts := session.Opts(); opts.ToneMapMode != tonemap.ModeSoftware || opts.HWAccel != playback.HWAccelNone {
+		t.Fatalf("fallback opts = mode %q hw %q, want software/none", opts.ToneMapMode, opts.HWAccel)
 	}
 }
 

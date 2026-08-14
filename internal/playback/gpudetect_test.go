@@ -434,7 +434,7 @@ func writeFakeFFmpeg(t *testing.T, probe fakeFFmpegProbe) fakeFFmpegBinary {
 		script += fmt.Sprintf("sleep %.3f\n", probe.delay.Seconds())
 	}
 	if probe.hang {
-		script += "while :; do :; done\n"
+		script += "exec sleep 2147483647\n"
 	}
 	script += "case \"$*\" in\n"
 	script += "  *-hwaccels*)\n"

@@ -45,10 +45,22 @@ func TestProbeTotalTimeoutCoversBoundedCommandMatrix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			want := time.Duration(tt.count)*probeCommandTimeout + probeTimeoutSlack
-			if got := probeTotalTimeout(tt.backend, tt.device); got != want {
-				t.Fatalf("probeTotalTimeout() = %s, want %s", got, want)
+			if got := ProbeTotalTimeout(tt.backend, tt.device); got != want {
+				t.Fatalf("ProbeTotalTimeout() = %s, want %s", got, want)
 			}
 		})
+	}
+}
+
+func TestProbeEndpointTimeoutCoversDetectionAndProbeBudgets(t *testing.T) {
+	if got, want := ProbeEndpointTimeout(BackendQSV, "/dev/dri/renderD128"), 81*time.Second; got != want {
+		t.Fatalf("ProbeEndpointTimeout() = %s, want %s", got, want)
+	}
+	if got, want := ProbeEndpointTimeout("auto", "/dev/dri/renderD128,/dev/dri/renderD129"), 106*time.Second; got != want {
+		t.Fatalf("ProbeEndpointTimeout(auto) = %s, want %s", got, want)
+	}
+	if got, want := ProbeRequestTimeout(BackendQSV, "/dev/dri/renderD128"), 86*time.Second; got != want {
+		t.Fatalf("ProbeRequestTimeout() = %s, want %s", got, want)
 	}
 }
 

@@ -1312,21 +1312,29 @@ func resolutionToScale(res string) string {
 
 // qsvScaleFilter returns the VAAPI→QSV filter chain with optional resolution scaling.
 func qsvScaleFilter(res string) string {
+	return qsvScaleFilterWithMapMode(res, "")
+}
+
+func qsvScaleFilterWithMapMode(res, mapMode string) string {
+	hwmap := "hwmap=derive_device=qsv"
+	if mapMode != "" {
+		hwmap += ":mode=" + mapMode
+	}
 	switch res {
 	case "2160p":
-		return "scale_vaapi=w=-2:h=2160:format=nv12,hwmap=derive_device=qsv,format=qsv"
+		return "scale_vaapi=w=-2:h=2160:format=nv12," + hwmap + ",format=qsv"
 	case "1080p":
-		return "scale_vaapi=w=-2:h=1080:format=nv12,hwmap=derive_device=qsv,format=qsv"
+		return "scale_vaapi=w=-2:h=1080:format=nv12," + hwmap + ",format=qsv"
 	case "720p":
-		return "scale_vaapi=w=-2:h=720:format=nv12,hwmap=derive_device=qsv,format=qsv"
+		return "scale_vaapi=w=-2:h=720:format=nv12," + hwmap + ",format=qsv"
 	case "480p":
-		return "scale_vaapi=w=-2:h=480:format=nv12,hwmap=derive_device=qsv,format=qsv"
+		return "scale_vaapi=w=-2:h=480:format=nv12," + hwmap + ",format=qsv"
 	case "420p":
-		return "scale_vaapi=w=-2:h=420:format=nv12,hwmap=derive_device=qsv,format=qsv"
+		return "scale_vaapi=w=-2:h=420:format=nv12," + hwmap + ",format=qsv"
 	case "328p":
-		return "scale_vaapi=w=-2:h=328:format=nv12,hwmap=derive_device=qsv,format=qsv"
+		return "scale_vaapi=w=-2:h=328:format=nv12," + hwmap + ",format=qsv"
 	default:
-		return "scale_vaapi=format=nv12,hwmap=derive_device=qsv,format=qsv"
+		return "scale_vaapi=format=nv12," + hwmap + ",format=qsv"
 	}
 }
 
@@ -1334,7 +1342,7 @@ func qsvScaleFilter(res string) string {
 // read-only mapping succeeds for synthetic upload probes but fails against
 // real decoded HEVC surfaces on Intel with ENOSYS during the first frame.
 func qsvToneMapScaleFilter(res string) string {
-	return strings.Replace(qsvScaleFilter(res), "hwmap=derive_device=qsv", "hwmap=derive_device=qsv:mode=read+write", 1)
+	return qsvScaleFilterWithMapMode(res, "read+write")
 }
 
 func qsvSoftwareDecodeFilter(res string) string {

@@ -25,6 +25,9 @@ const (
 	artifactHeartbeat   = 40 * time.Second
 	artifactMaxAttempts = 3
 	toneMapPlanTimeout  = 5 * time.Second
+	// Used only when remote nodes are the sole eligible executor. In that case
+	// degrading around a cold probe would falsely reject the first request.
+	remoteOnlyToneMapPlanTimeout = 2 * time.Minute
 )
 
 // PreparedArtifact describes either a local prepared file or an opaque artifact
@@ -114,6 +117,22 @@ type toneMapCapabilityProvider interface {
 // executors with reservable capacity before an artifact recipe is frozen.
 type toneMapCapacityProvider interface {
 	ToneMapModeAvailable(context.Context, tonemap.Mode, tonemap.SourceKind) (bool, error)
+}
+
+type toneMapCapabilityTimeoutProvider interface {
+	ToneMapCapabilityTimeout() time.Duration
+}
+
+func toneMapPlanningTimeout(provider toneMapCapabilityProvider, localFallbackAllowed bool) time.Duration {
+	if localFallbackAllowed {
+		return toneMapPlanTimeout
+	}
+	if budgeted, ok := provider.(toneMapCapabilityTimeoutProvider); ok {
+		if timeout := budgeted.ToneMapCapabilityTimeout(); timeout > 0 {
+			return timeout
+		}
+	}
+	return remoteOnlyToneMapPlanTimeout
 }
 
 // maintenanceInterval spaces the disk-presence and stale-row sweeps: both are
@@ -349,6 +368,9 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 		return target, nil
 	}
 	if m.settings == nil {
+		if is4K {
+			return target, fmt.Errorf("4K transcode settings are unavailable: %w", ErrQualityUnavailable)
+		}
 		return target, nil
 	}
 	settings, err := m.settings.GetAll(ctx)
@@ -374,7 +396,8 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 		return target, fmt.Errorf("HDR source is not safe to tone-map: %w", ErrQualityUnavailable)
 	}
 	provider, pooled := m.preparer.(toneMapCapabilityProvider)
-	probeCtx, cancelProbe := context.WithTimeout(ctx, toneMapPlanTimeout)
+	localFallbackAllowed := !pooled || provider.LocalFallbackAllowed(ctx)
+	probeCtx, cancelProbe := context.WithTimeout(ctx, toneMapPlanningTimeout(provider, localFallbackAllowed))
 	defer cancelProbe()
 	type capabilityResult struct {
 		capabilities tonemap.Capabilities
@@ -383,7 +406,7 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 	}
 	results := make(chan capabilityResult, 2)
 	resultCount := 0
-	if !pooled || provider.LocalFallbackAllowed(probeCtx) {
+	if localFallbackAllowed {
 		resultCount++
 		go func() {
 			local, probeErr := m.localToneMapCapabilities(probeCtx)

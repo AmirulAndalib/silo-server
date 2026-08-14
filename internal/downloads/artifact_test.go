@@ -157,6 +157,27 @@ func TestResolveToneMapTargetRetainsFourKRestrictionWhenPolicyDisabled(t *testin
 	}
 }
 
+func TestResolveToneMapTargetFailsClosedForFourKWhenSettingsUnavailable(t *testing.T) {
+	file := hdrDownloadTestFile()
+	file.VideoTracks[0].Height = 2160
+	manager := &ArtifactManager{}
+
+	_, err := manager.resolveToneMapTarget(context.Background(), file, playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"})
+	if !errors.Is(err, ErrQualityUnavailable) || !strings.Contains(err.Error(), "settings are unavailable") {
+		t.Fatalf("resolveToneMapTarget() error = %v, want unavailable-settings ErrQualityUnavailable", err)
+	}
+}
+
+func TestToneMapPlanningTimeoutAllowsColdProbeWithoutLocalFallback(t *testing.T) {
+	provider := capacityAwareToneMapPreparer{}
+	if got := toneMapPlanningTimeout(provider, true); got != toneMapPlanTimeout {
+		t.Fatalf("planning timeout with local fallback = %s, want %s", got, toneMapPlanTimeout)
+	}
+	if got := toneMapPlanningTimeout(provider, false); got != remoteOnlyToneMapPlanTimeout {
+		t.Fatalf("remote-only planning timeout = %s, want %s", got, remoteOnlyToneMapPlanTimeout)
+	}
+}
+
 func TestResolveToneMapTargetAppliesFourKRestrictionBeforeDynamicRangeHandling(t *testing.T) {
 	target := playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"}
 	settings := staticDownloadSettings{

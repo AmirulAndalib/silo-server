@@ -179,6 +179,13 @@ func TestHandleHWCapabilitiesReturnsServiceUnavailableWhenDeadlineExpires(t *tes
 	}
 }
 
+func TestToneMapCapabilityResolveTimeoutCoversConfiguredProbeBudget(t *testing.T) {
+	got := toneMapCapabilityResolveTimeout(tonemap.BackendQSV, "/dev/dri/renderD128")
+	if want := tonemap.ProbeEndpointTimeout(tonemap.BackendQSV, "/dev/dri/renderD128"); got != want {
+		t.Fatalf("capability resolve timeout = %v, want endpoint budget %v", got, want)
+	}
+}
+
 func TestHandleStartRequireReadyRejectsExitedFFmpeg(t *testing.T) {
 	server := newTestServer(t)
 	ffmpegPath := filepath.Join(t.TempDir(), "failing-ffmpeg.sh")

@@ -233,7 +233,7 @@ func ResolveSource(source SourceMetadata) SourceResolution {
 		if candidate == "" {
 			candidate = sourceKindFromColorMetadata(source)
 			preflight = candidate != ""
-		} else if !source.DVBLCompatIDPresent || !standardProfileCompatibility(source.DVProfile, source.DVBLCompatID) {
+		} else if !standardProfileCompatibility(source.DVProfile, source.DVBLCompatID) {
 			preflight = true
 		}
 	case DynamicRangeHDRUnknown:

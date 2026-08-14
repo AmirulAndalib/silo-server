@@ -319,6 +319,80 @@ func TestStartRemoteToneMapConfirmationMismatchRollsBackNode(t *testing.T) {
 	}
 }
 
+func TestStartRemoteTranscodeIndeterminateAcceptedResponseRollsBackNode(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body func(http.ResponseWriter, *http.Request)
+	}{
+		{
+			name: "malformed response",
+			body: func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = w.Write([]byte(`{"status":`))
+			},
+		},
+		{
+			name: "timeout after accepted headers",
+			body: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusAccepted)
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			previousTimeout := compatRemoteTranscodeStartTimeout
+			compatRemoteTranscodeStartTimeout = 200 * time.Millisecond
+			t.Cleanup(func() { compatRemoteTranscodeStartTimeout = previousTimeout })
+
+			deleted := make(chan string, 1)
+			node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
+					test.body(w, r)
+				case r.Method == http.MethodDelete:
+					deleted <- r.URL.Path
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(node.Close)
+
+			handler, _, playbackStore := newRemoteTranscodeHandler(t, node.URL, &stubRecipeNodeStore{})
+			playbackStore.Put(PlaybackSession{ID: "play-1", UpstreamSessionID: "upstream-1"})
+			err := handler.startRemoteTranscode(context.Background(), "play-1", "upstream-1", testRemoteTranscodeSource(), &models.MediaFile{ID: 42, FilePath: "/media/movie.mkv"}, 0, node.URL)
+			if err == nil {
+				t.Fatal("startRemoteTranscode() error = nil, want indeterminate accepted response failure")
+			}
+			select {
+			case path := <-deleted:
+				if path != "/transcode/upstream-1" {
+					t.Fatalf("rollback DELETE path = %q, want /transcode/upstream-1", path)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("expected rollback DELETE after indeterminate accepted response")
+			}
+		})
+	}
+}
+
+func TestRemoteTranscodeStartTimeoutCoversColdProbePreflightAndReadiness(t *testing.T) {
+	handler := &PlaybackHandler{HWAccel: tonemap.BackendQSV}
+	request := transcodenode.TranscodeStartRequest{
+		ToneMapMode:              tonemap.ModeHardware,
+		ToneMapPreflightRequired: true,
+		TotalDuration:            100,
+		RequireReady:             true,
+	}
+	want := tonemap.ProbeRequestTimeout(tonemap.BackendQSV, "") + tonemap.SourcePreflightTimeout(100) + transcodenode.TranscodeStartReadinessTimeout
+	if got := handler.remoteTranscodeStartTimeout(request); got != want {
+		t.Fatalf("remote transcode start timeout = %v, want %v", got, want)
+	}
+}
+
 // TestStartRemoteTranscode_NodeRestartReconstruct covers the node-restart leg:
 // central persists the recipe to the control-plane store at start, the node
 // loses all in-memory state, and a reconstruct fetch via the store's Get

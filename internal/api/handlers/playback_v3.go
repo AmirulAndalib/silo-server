@@ -48,11 +48,9 @@ const (
 	// Failed capability fetches are memoized briefly so an unreachable node
 	// costs one timeout per window instead of one per planning request.
 	v3NodeCapabilityErrorTTL = 15 * time.Second
-	// Capability fetches on the planning path run under a deadline well below
-	// the fetch helper's own 10s timeout: planning happens on the start
-	// request path, where a slow node must degrade the union, not the user.
-	v3NodeCapabilityPlanTimeout    = 5 * time.Second
-	v3ToneMapTransportProbeTimeout = 10 * time.Second
+	// Planning degrades around slow pooled nodes. Full cold-probe budgets are
+	// reserved for transport-time validation of the executor already selected.
+	v3NodeCapabilityPlanTimeout = 5 * time.Second
 )
 
 var errSubtitleStoreUnavailableV3 = errors.New("subtitle store unavailable")
@@ -163,9 +161,26 @@ func (h *PlaybackHandler) localToneMapCapabilitiesV3(ctx context.Context) (tonem
 }
 
 func (h *PlaybackHandler) localToneMapCapabilitiesForTransportV3(ctx context.Context) (tonemap.Capabilities, error) {
-	probeCtx, cancel := context.WithTimeout(ctx, v3ToneMapTransportProbeTimeout)
+	probeCtx, cancel := context.WithTimeout(ctx, h.localToneMapProbeTimeoutV3())
 	defer cancel()
 	return h.localToneMapCapabilitiesV3(probeCtx)
+}
+
+func (h *PlaybackHandler) localToneMapProbeTimeoutV3() time.Duration {
+	cfg := h.playbackConfig()
+	return tonemap.ProbeEndpointTimeout(cfg.HWAccel, cfg.HWDevice)
+}
+
+func (h *PlaybackHandler) remoteToneMapProbeTimeoutV3() time.Duration {
+	cfg := h.playbackConfig()
+	return tonemap.ProbeRequestTimeout(cfg.HWAccel, cfg.HWDevice)
+}
+
+func (h *PlaybackHandler) toneMapPlanningTimeoutV3(localFallbackAllowed bool) time.Duration {
+	if localFallbackAllowed {
+		return v3NodeCapabilityPlanTimeout
+	}
+	return h.remoteToneMapProbeTimeoutV3()
 }
 
 // remoteTransformationsV3 is the transport-time capability lookup for a
@@ -209,7 +224,9 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 		}
 	}
 
-	info, err := fetchRemoteTranscodeCapabilities(ctx, nodeURL, h.JWTSecret)
+	requestCtx, cancel := context.WithTimeout(ctx, h.remoteToneMapProbeTimeoutV3())
+	defer cancel()
+	info, err := fetchRemoteTranscodeCapabilities(requestCtx, nodeURL, h.JWTSecret)
 	if err != nil {
 		h.v3NodeCapabilitiesMu.Lock()
 		if h.v3NodeCapabilities == nil {
@@ -362,14 +379,14 @@ func (h *PlaybackHandler) localHLSToneMapCapabilitiesForTransportV3(ctx context.
 // hlsToneMapCapabilityInventoryV3 snapshots local and pooled-node tone-map
 // capabilities for a single planning operation.
 func (h *PlaybackHandler) hlsToneMapCapabilityInventoryV3(ctx context.Context) (hlsToneMapCapabilityInventoryV3, error) {
-	fetchCtx, cancel := context.WithTimeout(ctx, v3NodeCapabilityPlanTimeout)
+	localAllowed := h.NodePlanner == nil || nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo)
+	fetchCtx, cancel := context.WithTimeout(ctx, h.toneMapPlanningTimeoutV3(localAllowed))
 	defer cancel()
 
 	type capabilityResult struct {
 		capabilities tonemap.Capabilities
 		err          error
 	}
-	localAllowed := h.NodePlanner == nil || nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo)
 	var localResult capabilityResult
 	var localWG sync.WaitGroup
 	if localAllowed {

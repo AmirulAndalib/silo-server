@@ -18,6 +18,8 @@ const (
 	probeCommandTimeout = 5 * time.Second
 	probeNegativeTTL    = 15 * time.Second
 	probeTimeoutSlack   = time.Second
+	probeEndpointSlack  = 20 * time.Second
+	probeRequestSlack   = 5 * time.Second
 )
 
 // One deterministic 64x64 Main 10 HEVC frame. Keeping the compressed fixture
@@ -70,7 +72,7 @@ func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevic
 		if ok && probeCacheEntryCurrent(cached, now()) {
 			return append(Capabilities(nil), cached.capabilities...), nil
 		}
-		probeCtx, cancel := context.WithTimeout(context.Background(), probeTotalTimeout(hardwareBackend, hardwareDevice))
+		probeCtx, cancel := context.WithTimeout(context.Background(), ProbeTotalTimeout(hardwareBackend, hardwareDevice))
 		defer cancel()
 		result, err := probeWithRunner(probeCtx, ffmpegPath, hardwareBackend, hardwareDevice, run)
 		if err != nil {
@@ -153,9 +155,9 @@ func probeCacheEntryCurrent(entry probeCacheEntry, now time.Time) bool {
 	return len(entry.capabilities) > 0 || now.Before(entry.expiresAt)
 }
 
-// probeTotalTimeout budgets one bounded deadline for every listing and smoke
+// ProbeTotalTimeout budgets one bounded deadline for every listing and smoke
 // command the selected backend and device set can execute.
-func probeTotalTimeout(hardwareBackend, hardwareDevice string) time.Duration {
+func ProbeTotalTimeout(hardwareBackend, hardwareDevice string) time.Duration {
 	commandCount := 2 + len(AllSourceKinds())
 	backend := strings.ToLower(strings.TrimSpace(hardwareBackend))
 	switch backend {
@@ -163,6 +165,24 @@ func probeTotalTimeout(hardwareBackend, hardwareDevice string) time.Duration {
 		commandCount += len(AllSourceKinds()) * len(probeDevices(hardwareDevice, backend))
 	}
 	return time.Duration(commandCount)*probeCommandTimeout + probeTimeoutSlack
+}
+
+// ProbeEndpointTimeout includes auto-backend discovery and response overhead
+// around the full tone-map command matrix. Callers of a remote capability
+// endpoint must allow this budget or a cold, valid node will be abandoned while
+// its shared probe is still warming the cache.
+func ProbeEndpointTimeout(hardwareBackend, hardwareDevice string) time.Duration {
+	backend := strings.ToLower(strings.TrimSpace(hardwareBackend))
+	if backend == "" || backend == "auto" {
+		backend = BackendQSV
+	}
+	return ProbeTotalTimeout(backend, hardwareDevice) + probeEndpointSlack
+}
+
+// ProbeRequestTimeout gives a remote caller additional transport and response
+// margin beyond the server-side endpoint budget.
+func ProbeRequestTimeout(hardwareBackend, hardwareDevice string) time.Duration {
+	return ProbeEndpointTimeout(hardwareBackend, hardwareDevice) + probeRequestSlack
 }
 
 // ProbeWithRunner inventories executors by checking FFmpeg listings and then

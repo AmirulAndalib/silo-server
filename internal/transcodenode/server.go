@@ -97,9 +97,8 @@ const sessionReapInterval = time.Minute
 // control-plane response depend on Redis latency.
 const sessionTrackingOperationTimeout = 2 * time.Second
 
-// Reconstruct requests are client-driven and must not leave a node probe
-// running indefinitely after the originating request has gone away.
-const toneMapResolveTimeout = 10 * time.Second
+// TranscodeStartReadinessTimeout is the node-side RequireReady manifest budget.
+const TranscodeStartReadinessTimeout = 8 * time.Second
 
 type sessionTracker interface {
 	Track(context.Context, nodesessions.SessionInfo)
@@ -572,7 +571,7 @@ func resolveToneMapRecipe(ctx context.Context, opts *playback.TranscodeOpts) err
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	resolveCtx, cancel := context.WithTimeout(ctx, toneMapResolveTimeout)
+	resolveCtx, cancel := context.WithTimeout(ctx, tonemap.ProbeEndpointTimeout(opts.HWAccel, opts.HWDevice))
 	defer cancel()
 	resolved, err := playback.ResolveToneMapExecutor(resolveCtx, *opts)
 	if err != nil {
@@ -685,16 +684,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 // handleHWCapabilities reports live smoke-tested node capabilities.
 func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
-	resolveCtx, cancel := context.WithTimeout(r.Context(), toneMapResolveTimeout)
-	defer cancel()
 	ffmpegPath := ""
-	hwAccel := playback.HWAccelNone
+	configuredHWAccel := playback.HWAccelNone
 	hwDevice := ""
 	if cfg := s.watcher.Config(); cfg != nil {
 		ffmpegPath = cfg.Playback.FFmpegPath
-		hwAccel = playback.ResolveHWAccelWithFFmpegContext(resolveCtx, cfg.Playback.HWAccel, ffmpegPath)
+		configuredHWAccel = cfg.Playback.HWAccel
 		hwDevice = cfg.Playback.HWDevice
 	}
+	resolveCtx, cancel := context.WithTimeout(r.Context(), toneMapCapabilityResolveTimeout(configuredHWAccel, hwDevice))
+	defer cancel()
+	hwAccel := playback.ResolveHWAccelWithFFmpegContext(resolveCtx, configuredHWAccel, ffmpegPath)
 	info := playback.DetectHWAccelWithFFmpegContext(resolveCtx, ffmpegPath)
 	capabilities, err := tonemap.Probe(resolveCtx, playback.ResolveFFmpegPath(ffmpegPath), hwAccel, hwDevice)
 	if err != nil {
@@ -710,6 +710,10 @@ func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
 	info.Transformations = registry.Advertised()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)
+}
+
+func toneMapCapabilityResolveTimeout(hardwareBackend, hardwareDevice string) time.Duration {
+	return tonemap.ProbeEndpointTimeout(hardwareBackend, hardwareDevice)
 }
 
 func (s *Server) handleChapterThumbnailExtract(w http.ResponseWriter, r *http.Request) {
@@ -894,7 +898,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.RequireReady {
-		if _, err := session.WaitForManifest(8 * time.Second); err != nil {
+		if _, err := session.WaitForManifest(TranscodeStartReadinessTimeout); err != nil {
 			_ = session.Close()
 			unlock()
 			slog.ErrorContext(r.Context(), "transcode failed readiness check", "component", "transcodenode", "error", err, "session", req.SessionID, "playback_session_id", req.SessionID)

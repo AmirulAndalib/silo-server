@@ -84,7 +84,7 @@ func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightReques
 		request.FFprobePath = ffprobeForFFmpeg(request.FFmpegPath)
 	}
 
-	preflightCtx, cancel := context.WithTimeout(ctx, sourcePreflightTotalTimeout(request.DurationSeconds))
+	preflightCtx, cancel := context.WithTimeout(ctx, SourcePreflightTimeout(request.DurationSeconds))
 	defer cancel()
 	key, cacheable := sourcePreflightKey(preflightCtx, request, run)
 	if err := preflightCtx.Err(); err != nil {
@@ -175,9 +175,9 @@ func sourcePreflightCacheStore(key string, entry sourcePreflightCacheEntry, now 
 	sourcePreflightCache.entries[key] = entry
 }
 
-// sourcePreflightTotalTimeout includes the FFmpeg identity lookup and the full
+// SourcePreflightTimeout includes the FFmpeg identity lookup and the full
 // shared validation command matrix.
-func sourcePreflightTotalTimeout(durationSeconds float64) time.Duration {
+func SourcePreflightTimeout(durationSeconds float64) time.Duration {
 	return probeCommandTimeout + sourcePreflightExecutionTimeout(durationSeconds)
 }
 

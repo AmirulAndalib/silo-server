@@ -205,6 +205,9 @@ func TestSDRBaseGraphsBypassLuminanceToneMapping(t *testing.T) {
 					t.Fatalf("SDR fallback unexpectedly applies luminance tone mapping %q: %s", token, joined)
 				}
 			}
+			if tt.hwAccel == transcodeHWNVENC && !strings.Contains(joined, "sidedata=mode=delete:type=DOVI_RPU_BUFFER") {
+				t.Fatalf("NVENC SDR fallback did not remove Dolby Vision side data: %s", joined)
+			}
 		})
 	}
 }
@@ -232,6 +235,9 @@ func TestNVENCSDRBaseGraphsDownloadBeforeSubtitleComposition(t *testing.T) {
 			upload := strings.LastIndex(graph, "hwupload_cuda")
 			if download < 0 || convert <= download || compose <= convert || upload <= compose {
 				t.Fatalf("unsafe filter order: %s", graph)
+			}
+			if !strings.Contains(graph, "sidedata=mode=delete:type=DOVI_RPU_BUFFER") {
+				t.Fatalf("NVENC SDR subtitle graph did not remove Dolby Vision side data: %s", graph)
 			}
 		})
 	}
