@@ -424,6 +424,7 @@ func (m *TranscodeManager) ReconstructSession(ctx context.Context, sessionID str
 		TargetAudioBitrateKbps: card.TargetAudioBitrateKbps,
 		TargetBitrateKbps:      card.TargetBitrateKbps,
 		TranscodeHWAccel:       card.HWAccel,
+		ToneMapMode:            card.ToneMapMode,
 		// Client metadata survives the restart so the admin views keep the
 		// client label and Jellyfin identification for the session's lifetime.
 		ClientName:       normalizeClientMetadataValue(card.ClientName, 128),

@@ -171,7 +171,7 @@ func TestReconstructSessionRestoresClientMetadata(t *testing.T) {
 	tm := NewTranscodeManager()
 	tm.Sessions = NewSessionManager(0, 0)
 
-	card := NewRecipeCard(42, "profile-1", 77, "", TranscodeOpts{SessionID: "sess-jf", InputPath: "/media/movie.mkv"})
+	card := NewRecipeCard(42, "profile-1", 77, "", TranscodeOpts{SessionID: "sess-jf", InputPath: "/media/movie.mkv", HWAccel: "qsv", ToneMapMode: tonemap.ModeHardware})
 	card.ClientName = "Findroid"
 	card.ClientVersion = "0.15"
 	card.ClientUserAgent = "Findroid/0.15 (Android)"
@@ -186,26 +186,30 @@ func TestReconstructSessionRestoresClientMetadata(t *testing.T) {
 	if !session.TranscodeAudio {
 		t.Fatal("TranscodeAudio must be restored from the card (aac default re-encodes)")
 	}
+	if session.TranscodeHWAccel != "qsv" || session.ToneMapMode != tonemap.ModeHardware {
+		t.Fatalf("execution facts not restored: hw=%q tone_map=%q", session.TranscodeHWAccel, session.ToneMapMode)
+	}
 }
 
 // SetTranscodeStreamDetails records the running transcode's encode decisions
 // on the live session so sync rows classify by actual work (video copy =
-// repackage) rather than the transport method.
+// repackage) rather than the transport method, while also reporting the
+// confirmed encoder and tone-map executors.
 func TestSetTranscodeStreamDetails(t *testing.T) {
 	m := NewSessionManager(0, 0)
 	m.RegisterReconstructed(&Session{ID: "sess-1", UserID: 7, PlayMethod: PlayTranscode})
 
-	if err := m.SetTranscodeStreamDetails("sess-1", "copy", "aac", true); err != nil {
+	if err := m.SetTranscodeStreamDetails("sess-1", "copy", "aac", true, "qsv", tonemap.ModeHardware); err != nil {
 		t.Fatalf("SetTranscodeStreamDetails: %v", err)
 	}
 	s, err := m.GetSession("sess-1")
 	if err != nil {
 		t.Fatalf("GetSession: %v", err)
 	}
-	if s.TargetVideoCodec != "copy" || s.TargetAudioCodec != "aac" || !s.TranscodeAudio {
+	if s.TargetVideoCodec != "copy" || s.TargetAudioCodec != "aac" || !s.TranscodeAudio || s.TranscodeHWAccel != "qsv" || s.ToneMapMode != tonemap.ModeHardware {
 		t.Fatalf("details not recorded: %+v", s)
 	}
-	if err := m.SetTranscodeStreamDetails("missing", "h264", "aac", true); err == nil {
+	if err := m.SetTranscodeStreamDetails("missing", "h264", "aac", true, "none", tonemap.ModeSoftware); err == nil {
 		t.Fatal("expected ErrSessionNotFound for unknown session")
 	}
 }

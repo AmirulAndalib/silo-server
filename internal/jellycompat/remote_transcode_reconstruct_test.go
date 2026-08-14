@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 )
 
@@ -125,6 +127,98 @@ func testRemoteTranscodeSource() PlaybackMediaSource {
 	version := testCompatVersion()
 	source := testCompatSource(codec, version)
 	return source
+}
+
+func TestStartRemoteTranscodeReportsConfirmedExecutor(t *testing.T) {
+	recipeStore := &stubRecipeNodeStore{}
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/transcode/start" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(transcodenode.TranscodeStartResponse{HWAccel: "qsv"})
+	}))
+	t.Cleanup(node.Close)
+	handler, sessionMgr, playbackStore := newRemoteTranscodeHandler(t, node.URL, recipeStore)
+	playbackStore.Put(PlaybackSession{ID: "play-1", UpstreamSessionID: "upstream-1"})
+
+	if err := handler.startRemoteTranscode(context.Background(), "play-1", "upstream-1", testRemoteTranscodeSource(), &models.MediaFile{ID: 42, FilePath: "/media/movie.mkv"}, 0, node.URL); err != nil {
+		t.Fatalf("startRemoteTranscode: %v", err)
+	}
+
+	session := sessionMgr.sessions["upstream-1"]
+	if session.TargetVideoCodec != compatTargetVideoCodec || session.TargetAudioCodec != compatTargetAudioCodec || session.TranscodeHWAccel != "qsv" || session.ToneMapMode != "" {
+		t.Fatalf("reported remote execution facts are incomplete: %+v", session)
+	}
+	card, ok := recipeStore.Get("upstream-1")
+	if !ok || card.HWAccel != "qsv" {
+		t.Fatalf("persisted remote recipe executor = %q, found=%v", card.HWAccel, ok)
+	}
+}
+
+func TestStartRemoteToneMapReportsConfirmedExecutorAndFallback(t *testing.T) {
+	tests := []struct {
+		name           string
+		rejectHardware bool
+		wantHWAccel    string
+		wantMode       tonemap.Mode
+	}{
+		{name: "hardware", wantHWAccel: tonemap.BackendQSV, wantMode: tonemap.ModeHardware},
+		{name: "software fallback", rejectHardware: true, wantHWAccel: playback.HWAccelNone, wantMode: tonemap.ModeSoftware},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			capabilities := tonemap.Capabilities{
+				{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+				{Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+			}
+			node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/hw-capabilities":
+					writeJSON(w, http.StatusOK, playback.HWAccelInfo{ToneMapCapabilities: capabilities})
+				case "/transcode/start":
+					var request transcodenode.TranscodeStartRequest
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Fatalf("decode start request: %v", err)
+					}
+					if test.rejectHardware && request.ToneMapMode == tonemap.ModeHardware {
+						w.WriteHeader(http.StatusUnprocessableEntity)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusAccepted)
+					_ = json.NewEncoder(w).Encode(transcodenode.TranscodeStartResponse{HWAccel: request.HWAccel, ToneMapMode: request.ToneMapMode})
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(node.Close)
+
+			recipeStore := &stubRecipeNodeStore{}
+			handler, sessionMgr, playbackStore := newRemoteTranscodeHandler(t, node.URL, recipeStore)
+			handler.SettingsRepo = stubSettingsReader{values: map[string]string{
+				config.PlaybackTranscodeHardwareToneMapSettingKey: "true",
+				config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+			}}
+			playbackStore.Put(PlaybackSession{ID: "play-1", UpstreamSessionID: "upstream-1"})
+			file := &models.MediaFile{ID: 42, FilePath: "/media/movie.mkv", HDR: true, VideoTracks: []models.VideoTrack{{Codec: "hevc", VideoRangeType: "HDR10", ColorTransfer: "smpte2084", ColorPrimaries: "bt2020", ColorSpace: "bt2020nc", BitDepth: 10}}}
+
+			if err := handler.startRemoteTranscode(context.Background(), "play-1", "upstream-1", testRemoteTranscodeSource(), file, 0, node.URL); err != nil {
+				t.Fatalf("startRemoteTranscode: %v", err)
+			}
+
+			session := sessionMgr.sessions["upstream-1"]
+			if session.TranscodeHWAccel != test.wantHWAccel || session.ToneMapMode != test.wantMode {
+				t.Fatalf("reported execution facts = hw %q tone_map %q, want %q %q", session.TranscodeHWAccel, session.ToneMapMode, test.wantHWAccel, test.wantMode)
+			}
+			card, ok := recipeStore.Get("upstream-1")
+			if !ok || card.HWAccel != test.wantHWAccel || card.ToneMapMode != test.wantMode {
+				t.Fatalf("persisted execution facts = hw %q tone_map %q, found=%v", card.HWAccel, card.ToneMapMode, ok)
+			}
+		})
+	}
 }
 
 // TestStartRemoteTranscode_NodeRestartReconstruct covers the node-restart leg:

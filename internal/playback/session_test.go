@@ -770,6 +770,8 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 		TranscodeRouteSet:    true,
 		SubtitleTrackIndex:   -1,
 		StreamBitrateKbps:    8_000,
+		TranscodeHWAccel:     "qsv",
+		ToneMapMode:          "hardware",
 		TranscodeNodeURL:     "http://old-node",
 		TranscodeTransportID: "old-transport",
 	}); err != nil {
@@ -786,6 +788,8 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 			TranscodeRouteSet:    true,
 			SubtitleTrackIndex:   1,
 			StreamBitrateKbps:    3_500,
+			TranscodeHWAccel:     "none",
+			ToneMapMode:          "software",
 			TranscodeNodeURL:     "http://new-node",
 			TranscodeTransportID: "new-transport",
 		},
@@ -800,7 +804,7 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	if replaced.MediaFileID != 84 || replaced.PlayMethod != playback.PlayTranscode || replaced.AudioTrackIndex != 2 ||
-		replaced.TranscodeNodeURL != "http://new-node" || replaced.Position != position || !replaced.IsPaused {
+		replaced.TranscodeNodeURL != "http://new-node" || replaced.TranscodeHWAccel != "none" || replaced.ToneMapMode != "software" || replaced.Position != position || !replaced.IsPaused {
 		t.Fatalf("replacement session = %#v", replaced)
 	}
 	if err := manager.RollbackReplacement(session.ID, rollback); err != nil {
@@ -812,6 +816,7 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 	}
 	if restored.MediaFileID != 42 || restored.PlayMethod != playback.PlayDirect || restored.AudioTrackIndex != 0 ||
 		restored.TranscodeNodeURL != "http://old-node" || restored.TranscodeTransportID != "old-transport" ||
+		restored.TranscodeHWAccel != "qsv" || restored.ToneMapMode != "hardware" ||
 		restored.Position != 0 || restored.IsPaused {
 		t.Fatalf("restored session = %#v", restored)
 	}

@@ -59,6 +59,7 @@ type playbackSessionRow struct {
 	TargetAudioCodec         string    `json:"target_audio_codec,omitempty"`
 	TargetBitrateKbps        *int      `json:"target_bitrate_kbps"`
 	TranscodeHWAccel         string    `json:"transcode_hw_accel,omitempty"`
+	ToneMapMode              string    `json:"tone_map_mode,omitempty"`
 	SourceContainer          string    `json:"source_container,omitempty"`
 	SourceBitrateKbps        *int      `json:"source_bitrate_kbps"`
 	SourceVideoCodec         string    `json:"source_video_codec,omitempty"`
@@ -79,8 +80,8 @@ type playbackSessionRow struct {
 
 // playbackSessionsCapabilitiesResponse advertises the additive fields of the
 // live admin session payload so independently deployed clients (Android,
-// Apple) can feature-detect them. Both fields are omitempty on the wire, so
-// absence on a row is otherwise indistinguishable from an older server.
+// Apple) can feature-detect them. Optional row fields cannot otherwise
+// distinguish unsupported data from a supported but currently absent fact.
 type playbackSessionsCapabilitiesResponse struct {
 	// EffectivePlayMethod reports that rows carry effective_play_method.
 	EffectivePlayMethod bool `json:"effective_play_method"`
@@ -89,6 +90,12 @@ type playbackSessionsCapabilitiesResponse struct {
 	EffectivePlayMethodValues []string `json:"effective_play_method_values"`
 	// IsJellyfinClient reports that rows carry is_jellyfin_client.
 	IsJellyfinClient bool `json:"is_jellyfin_client"`
+	// TranscodeHWAccel reports that rows carry the confirmed transcode executor.
+	TranscodeHWAccel bool `json:"transcode_hw_accel"`
+	// ToneMapMode reports that rows carry the confirmed tone-map executor.
+	ToneMapMode bool `json:"tone_map_mode"`
+	// ToneMapModeValues is the closed vocabulary for recognized tone-map modes.
+	ToneMapModeValues []string `json:"tone_map_mode_values"`
 }
 
 // HandleGetSessionsCapabilities exposes additive feature support for the live
@@ -98,6 +105,9 @@ func (h *AdminHandler) HandleGetSessionsCapabilities(w http.ResponseWriter, _ *h
 		EffectivePlayMethod:       true,
 		EffectivePlayMethodValues: []string{"direct", "remux", "transcode", "audio"},
 		IsJellyfinClient:          true,
+		TranscodeHWAccel:          true,
+		ToneMapMode:               true,
+		ToneMapModeValues:         []string{"hardware", "software"},
 	})
 }
 
@@ -192,6 +202,7 @@ func (l *PlaybackSessionsLoader) Load(
 			COALESCE(s.target_audio_codec, ''),
 			s.target_bitrate_kbps,
 			COALESCE(s.transcode_hw_accel, ''),
+			COALESCE(s.tone_map_mode, ''),
 			COALESCE(mf.container, ''),
 			mf.bitrate,
 			COALESCE(mf.codec_video, ''),
@@ -241,7 +252,7 @@ func (l *PlaybackSessionsLoader) Load(
 			&s.PositionSeconds, &s.IsPaused, &s.HasPlaybackControl, &s.ClientIP, &s.ClientName, &s.ClientVersion,
 			&s.ClientUserAgent, &s.AudioTrackIndex, &s.TranscodeAudio, &streamBitrateKbps,
 			&s.TranscodeNodeURL, &s.TargetResolution, &s.TargetVideoCodec, &s.TargetAudioCodec, &targetBitrateKbps,
-			&s.TranscodeHWAccel, &s.SourceContainer, &sourceBitrateKbps, &s.SourceVideoCodec, &s.SourceVideoResolution,
+			&s.TranscodeHWAccel, &s.ToneMapMode, &s.SourceContainer, &sourceBitrateKbps, &s.SourceVideoCodec, &s.SourceVideoResolution,
 			&s.SourceAudioCodec, &sourceAudioChannels, &audioTracksJSON, &s.RequestedVideoCodec, &s.RequestedVideoResolution,
 			&s.CompatOrigin,
 		); err != nil {

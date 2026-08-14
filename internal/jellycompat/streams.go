@@ -1640,6 +1640,7 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 	if h.playbackStore != nil {
 		if ps, ok := h.playbackStore.Get(playSessionID); ok && ps.Recipe != nil {
 			if reconstructed := h.tm.ReconstructTranscode(ctx, upstreamSessionID, -1, *ps.Recipe); reconstructed != nil {
+				h.recordTranscodeStreamDetails(ctx, upstreamSessionID, reconstructed.Opts())
 				return reconstructed, nil
 			}
 		}
@@ -1750,17 +1751,18 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 	// registered this session.
 	h.tm.RegisterTranscodeSession(upstreamSessionID, transcodeSession)
 	unlock()
+	effectiveOpts := transcodeSession.Opts()
 
 	// Mirror the actual encode decisions onto the upstream session before the
 	// recipe is persisted — video-copy HLS must not sync as a video transcode.
-	h.recordTranscodeStreamDetails(ctx, upstreamSessionID, opts)
+	h.recordTranscodeStreamDetails(ctx, upstreamSessionID, effectiveOpts)
 
 	// Register the exit monitor and persist the reconstruction recipe (shared with
 	// the remote path). On a failed compat-store write roll back this abandoned
 	// transcode rather than leaking it.
 	h.tm.MonitorLocalTranscodeExit(upstreamSessionID, transcodeSession)
 
-	if err := h.persistTranscodeRecipe(ctx, playSessionID, upstreamSessionID, opts); err != nil {
+	if err := h.persistTranscodeRecipe(ctx, playSessionID, upstreamSessionID, effectiveOpts); err != nil {
 		h.tm.CloseTranscodeSession(upstreamSessionID, "")
 		return nil, err
 	}

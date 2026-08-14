@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 // Session represents an active playback session.
@@ -33,14 +35,15 @@ type Session struct {
 	TranscodeTransportID string // remote node process identity; empty means session ID
 	AudioTrackIndex      int
 
-	StreamBitrateKbps      int    // currently delivered bitrate, when known
-	TargetResolution       string // requested output resolution for transcodes
-	TargetVideoCodec       string // requested output video codec for transcodes
-	TargetAudioCodec       string // requested output audio codec when audio is transcoded
-	TargetAudioChannels    int    // requested encoded audio channel count
-	TargetAudioBitrateKbps int    // requested encoded audio bitrate cap
-	TargetBitrateKbps      int    // requested output bitrate cap for transcodes
-	TranscodeHWAccel       string // effective hardware acceleration mode for transcodes
+	StreamBitrateKbps      int          // currently delivered bitrate, when known
+	TargetResolution       string       // requested output resolution for transcodes
+	TargetVideoCodec       string       // requested output video codec for transcodes
+	TargetAudioCodec       string       // requested output audio codec when audio is transcoded
+	TargetAudioChannels    int          // requested encoded audio channel count
+	TargetAudioBitrateKbps int          // requested encoded audio bitrate cap
+	TargetBitrateKbps      int          // requested output bitrate cap for transcodes
+	TranscodeHWAccel       string       // effective hardware acceleration mode for transcodes
+	ToneMapMode            tonemap.Mode // effective HDR-to-SDR executor for transcodes
 
 	// Byte-affecting transcode recipe fields the offloaded restart path needs to
 	// rebuild the exact same stream after an audio switch. Local transcodes read
@@ -89,6 +92,7 @@ type SessionStreamState struct {
 	TargetAudioBitrateKbps int
 	TargetBitrateKbps      int
 	TranscodeHWAccel       string
+	ToneMapMode            tonemap.Mode
 	TranscodeNodeURL       string
 	TranscodeTransportID   string
 	TranscodeRouteSet      bool
@@ -787,6 +791,7 @@ func applySessionStreamStateLocked(s *Session, state SessionStreamState) {
 	s.TargetAudioBitrateKbps = state.TargetAudioBitrateKbps
 	s.TargetBitrateKbps = state.TargetBitrateKbps
 	s.TranscodeHWAccel = state.TranscodeHWAccel
+	s.ToneMapMode = state.ToneMapMode
 	if state.TranscodeRouteSet {
 		s.TranscodeNodeURL = state.TranscodeNodeURL
 		s.TranscodeTransportID = state.TranscodeTransportID
@@ -821,6 +826,7 @@ func snapshotSessionStreamStateLocked(s *Session) SessionStreamState {
 		TargetAudioBitrateKbps: s.TargetAudioBitrateKbps,
 		TargetBitrateKbps:      s.TargetBitrateKbps,
 		TranscodeHWAccel:       s.TranscodeHWAccel,
+		ToneMapMode:            s.ToneMapMode,
 		TranscodeNodeURL:       s.TranscodeNodeURL,
 		TranscodeTransportID:   s.TranscodeTransportID,
 		TranscodeRouteSet:      true,
@@ -848,6 +854,7 @@ func restoreSessionStreamStateLocked(s *Session, state SessionStreamState) {
 	s.TargetAudioBitrateKbps = state.TargetAudioBitrateKbps
 	s.TargetBitrateKbps = state.TargetBitrateKbps
 	s.TranscodeHWAccel = state.TranscodeHWAccel
+	s.ToneMapMode = state.ToneMapMode
 	s.TranscodeNodeURL = state.TranscodeNodeURL
 	s.TranscodeTransportID = state.TranscodeTransportID
 	s.SubtitleTrackIndex = state.SubtitleTrackIndex
@@ -953,10 +960,10 @@ func (m *SessionManager) RollbackReplacement(sessionID string, rollback SessionR
 
 // SetTranscodeStreamDetails records the actual encode decisions of a running
 // transcode on the session — video copy vs re-encode, and whether audio is
-// re-encoded — so session sync and the admin activity views classify the
-// stream by what ffmpeg is doing rather than by the transport method alone
-// (an HLS session with copied video is a repackage, not a video transcode).
-func (m *SessionManager) SetTranscodeStreamDetails(sessionID, targetVideoCodec, targetAudioCodec string, transcodeAudio bool) error {
+// re-encoded — together with the confirmed hardware and tone-map executors —
+// so session sync and the admin activity views describe what ffmpeg is doing
+// rather than relying on requested transport defaults.
+func (m *SessionManager) SetTranscodeStreamDetails(sessionID, targetVideoCodec, targetAudioCodec string, transcodeAudio bool, hwAccel string, toneMapMode tonemap.Mode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -968,6 +975,8 @@ func (m *SessionManager) SetTranscodeStreamDetails(sessionID, targetVideoCodec, 
 	s.TargetVideoCodec = targetVideoCodec
 	s.TargetAudioCodec = targetAudioCodec
 	s.TranscodeAudio = transcodeAudio
+	s.TranscodeHWAccel = hwAccel
+	s.ToneMapMode = toneMapMode
 	m.touchSessionLocked(s)
 	return nil
 }

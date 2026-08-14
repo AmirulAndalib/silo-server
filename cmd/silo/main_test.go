@@ -15,6 +15,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/plugins"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
 
@@ -138,6 +139,7 @@ func TestBuildLiveSessionSync_UsesTransportPlayMethod(t *testing.T) {
 				PlayMethod:           playback.PlayTranscode,
 				BasePlayMethod:       playback.PlayRemux,
 				TranscodeHWAccel:     "qsv",
+				ToneMapMode:          tonemap.ModeHardware,
 				Position:             125.5,
 				IsPaused:             true,
 			},
@@ -183,6 +185,9 @@ func TestBuildLiveSessionSync_UsesTransportPlayMethod(t *testing.T) {
 			}
 			if got.TranscodeHWAccel != tc.session.TranscodeHWAccel {
 				t.Fatalf("TranscodeHWAccel = %q, want %q", got.TranscodeHWAccel, tc.session.TranscodeHWAccel)
+			}
+			if got.ToneMapMode != string(tc.session.ToneMapMode) {
+				t.Fatalf("ToneMapMode = %q, want %q", got.ToneMapMode, tc.session.ToneMapMode)
 			}
 		})
 	}

@@ -39,6 +39,7 @@ type SessionSync struct {
 	TargetAudioCodec     string
 	TargetBitrateKbps    int
 	TranscodeHWAccel     string
+	ToneMapMode          string
 	StartedAt            time.Time
 	UpdatedAt            time.Time
 	PositionSeconds      float64
@@ -154,8 +155,8 @@ func (r *Reconciler) ReconcileNodeSessions(ctx context.Context, reportingNode st
 				 client_name, client_version, client_user_agent,
 				 audio_track_index, transcode_audio, stream_bitrate_kbps, transcode_node_url,
 				 target_resolution, target_video_codec, target_audio_codec, target_bitrate_kbps,
-				 transcode_hw_accel, position_seconds, is_paused, has_websocket, compat_origin)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), $10::inet, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+				 transcode_hw_accel, tone_map_mode, position_seconds, is_paused, has_websocket, compat_origin)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), $10::inet, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
 			ON CONFLICT (session_id) DO UPDATE SET
 				user_id             = EXCLUDED.user_id,
 				profile_id          = EXCLUDED.profile_id,
@@ -178,6 +179,7 @@ func (r *Reconciler) ReconcileNodeSessions(ctx context.Context, reportingNode st
 				target_audio_codec  = EXCLUDED.target_audio_codec,
 				target_bitrate_kbps = EXCLUDED.target_bitrate_kbps,
 				transcode_hw_accel  = EXCLUDED.transcode_hw_accel,
+				tone_map_mode       = EXCLUDED.tone_map_mode,
 				position_seconds    = EXCLUDED.position_seconds,
 				is_paused           = EXCLUDED.is_paused,
 				has_websocket       = EXCLUDED.has_websocket,
@@ -189,7 +191,7 @@ func (r *Reconciler) ReconcileNodeSessions(ctx context.Context, reportingNode st
 			s.AudioTrackIndex, s.TranscodeAudio, nullableInt(s.StreamBitrateKbps), nullableString(s.TranscodeNodeURL),
 			nullableString(s.TargetResolution), nullableString(s.TargetVideoCodec),
 			nullableString(s.TargetAudioCodec), nullableInt(s.TargetBitrateKbps),
-			nullableString(s.TranscodeHWAccel), normalizePositionSeconds(s.PositionSeconds),
+			nullableString(s.TranscodeHWAccel), nullableString(s.ToneMapMode), normalizePositionSeconds(s.PositionSeconds),
 			s.IsPaused, s.HasWebSocket, s.IsJellyfinCompat)
 		if err != nil {
 			return fmt.Errorf("upserting session %s: %w", s.SessionID, err)
@@ -261,6 +263,7 @@ func loadNodeSessionsSnapshot(ctx context.Context, tx pgx.Tx, reportingNode stri
 			COALESCE(target_audio_codec, ''),
 			COALESCE(target_bitrate_kbps, 0),
 			COALESCE(transcode_hw_accel, ''),
+			COALESCE(tone_map_mode, ''),
 			started_at,
 			updated_at,
 			COALESCE(position_seconds, 0),
@@ -300,6 +303,7 @@ func loadNodeSessionsSnapshot(ctx context.Context, tx pgx.Tx, reportingNode stri
 			&s.TargetAudioCodec,
 			&s.TargetBitrateKbps,
 			&s.TranscodeHWAccel,
+			&s.ToneMapMode,
 			&s.StartedAt,
 			&s.UpdatedAt,
 			&s.PositionSeconds,
@@ -357,6 +361,7 @@ func sessionSnapshotsEqual(left, right []SessionSync) bool {
 			left[i].TargetAudioCodec != right[i].TargetAudioCodec ||
 			left[i].TargetBitrateKbps != right[i].TargetBitrateKbps ||
 			left[i].TranscodeHWAccel != right[i].TranscodeHWAccel ||
+			left[i].ToneMapMode != right[i].ToneMapMode ||
 			!left[i].StartedAt.Equal(right[i].StartedAt) ||
 			!left[i].UpdatedAt.Equal(right[i].UpdatedAt) ||
 			normalizePositionSeconds(left[i].PositionSeconds) != normalizePositionSeconds(right[i].PositionSeconds) ||

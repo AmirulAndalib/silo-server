@@ -2455,6 +2455,7 @@ export interface AdminSession {
   target_audio_codec?: string;
   target_bitrate_kbps: number | null;
   transcode_hw_accel?: string;
+  tone_map_mode?: string;
   source_container?: string;
   source_bitrate_kbps: number | null;
   source_video_codec?: string;

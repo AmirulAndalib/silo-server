@@ -2364,7 +2364,7 @@ func TestPrepareTransportV3RequiresRemoteManifestReadiness(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&startRequest); err != nil {
 				t.Errorf("decode remote start: %v", err)
 			}
-			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: startRequest.SessionID, Status: "started"})
+			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: startRequest.SessionID, Status: "started", HWAccel: "qsv"})
 		case r.Method == http.MethodDelete:
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -2392,6 +2392,9 @@ func TestPrepareTransportV3RequiresRemoteManifestReadiness(t *testing.T) {
 	defer transport.rollback()
 	if !startRequest.RequireReady {
 		t.Fatal("protocol-v3 remote start did not require manifest readiness")
+	}
+	if transport.hwAccel != "qsv" || transport.toneMapMode != "" {
+		t.Fatalf("remote execution facts = hw %q tone_map %q, want qsv and empty", transport.hwAccel, transport.toneMapMode)
 	}
 }
 

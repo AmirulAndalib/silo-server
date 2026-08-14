@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -404,6 +405,12 @@ func TestPrepareTransportV3AcceptsEveryValidatedLocalToneMapExecutor(t *testing.
 			if transportErr != nil {
 				t.Fatalf("prepare %s tone-map transport: %v", test.name, transportErr)
 			}
+			if transport.hwAccel != test.configuredHW || transport.toneMapMode != test.mode {
+				t.Fatalf("prepared execution facts = hw %q tone_map %q, want %q %q", transport.hwAccel, transport.toneMapMode, test.configuredHW, test.mode)
+			}
+			if err := handler.updateV3SessionState(context.Background(), session, file, result, transport); err != nil {
+				t.Fatalf("update session state: %v", err)
+			}
 			transport.commit()
 			t.Cleanup(func() { handler.tm.CloseTranscodeSession(session.ID, "") })
 			live := handler.tm.GetTranscodeSession(session.ID)
@@ -414,7 +421,77 @@ func TestPrepareTransportV3AcceptsEveryValidatedLocalToneMapExecutor(t *testing.
 			if opts.ToneMapMode != test.mode || opts.ToneMapFilter != test.filter || opts.HWAccel != test.configuredHW {
 				t.Fatalf("executor opts = mode %q filter %q hw %q, want %q %q %q", opts.ToneMapMode, opts.ToneMapFilter, opts.HWAccel, test.mode, test.filter, test.configuredHW)
 			}
+			updated, err := manager.GetSession(session.ID)
+			if err != nil {
+				t.Fatalf("load updated session: %v", err)
+			}
+			if updated.TranscodeHWAccel != test.configuredHW || updated.ToneMapMode != test.mode {
+				t.Fatalf("session execution facts = hw %q tone_map %q, want %q %q", updated.TranscodeHWAccel, updated.ToneMapMode, test.configuredHW, test.mode)
+			}
+			reused := reusedHLSTransportV3(updated, transport.url)
+			if reused.hwAccel != test.configuredHW || reused.toneMapMode != test.mode {
+				t.Fatalf("reused execution facts = hw %q tone_map %q, want %q %q", reused.hwAccel, reused.toneMapMode, test.configuredHW, test.mode)
+			}
 		})
+	}
+}
+
+func TestPrepareTransportV3ReportsSoftwareToneMapFallback(t *testing.T) {
+	baseFFmpeg := writePlaybackTestFFmpeg(t)
+	ffmpegPath := filepath.Join(t.TempDir(), "hardware-failing-ffmpeg.sh")
+	script := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do\n" +
+		"  case \"$arg\" in *tonemap_vaapi*) echo 'hardware tone map failed' >&2; exit 1;; esac\n" +
+		"done\n" +
+		"exec \"" + baseFFmpeg + "\" \"$@\"\n"
+	if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write hardware-failing ffmpeg: %v", err)
+	}
+
+	file := stableToneMapTransportFileV3(t)
+	manager := playback.NewSessionManager(0, 0)
+	handler := NewPlaybackHandler(manager)
+	transcodeDir := t.TempDir()
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{FFmpegPath: ffmpegPath, TranscodeDir: transcodeDir, TranscodeEnabled: true, HWAccel: tonemap.BackendQSV, HWDevice: "/dev/dri/renderD128"}
+	}
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{
+		config.PlaybackTranscodeHardwareToneMapSettingKey: "true",
+		config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+	}}
+	handler.v3ToneMapProbe = func(context.Context, string, string, string) tonemap.Capabilities {
+		return tonemap.Capabilities{
+			{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+			{Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+		}
+	}
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
+		{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},
+		{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
+	}))
+	result := playback.PlannerResultV3{
+		Plan: &playback.PlanV3{PlanID: "plan:local-tone-map-fallback", Delivery: playback.DeliveryTranscodeHLSV3, Transformations: []playback.TransformationV3{
+			{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
+			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+			{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
+		}},
+		PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac", TargetResolution: "2160p", TargetBitrateKbps: 32_000,
+		SubtitleTrackIndex: -1, SubtitleTransportTrackIndex: -1,
+		ToneMapPolicy: tonemap.PolicyHardwareThenSoftware, ToneMapMode: tonemap.ModeHardware, ToneMapSourceKind: tonemap.SourcePQ,
+		ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3, ToneMapSourceRevision: tonemap.RevisionForFile(file),
+	}
+	session, err := manager.StartSession(7, "profile-1", file.ID, playback.PlayTranscode, true)
+	if err != nil {
+		t.Fatalf("start playback session: %v", err)
+	}
+	transport, transportErr := handler.prepareTransportV3(httptest.NewRequest(http.MethodPost, "/", nil), session, file, result)
+	if transportErr != nil {
+		t.Fatalf("prepare fallback transport: %v", transportErr)
+	}
+	defer transport.rollback()
+	if transport.hwAccel != playback.HWAccelNone || transport.toneMapMode != tonemap.ModeSoftware {
+		t.Fatalf("fallback execution facts = hw %q tone_map %q, want none and software", transport.hwAccel, transport.toneMapMode)
 	}
 }
 

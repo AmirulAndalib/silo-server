@@ -45,6 +45,18 @@ func TestSyncNowSerializesSnapshotCapture(t *testing.T) {
 	}
 }
 
+func TestSessionSnapshotsEqualDetectsToneMapChanges(t *testing.T) {
+	base := SessionSync{SessionID: "session-1", ToneMapMode: "hardware"}
+	if !sessionSnapshotsEqual([]SessionSync{base}, []SessionSync{base}) {
+		t.Fatal("identical tone-map facts must compare equal")
+	}
+	changed := base
+	changed.ToneMapMode = "software"
+	if sessionSnapshotsEqual([]SessionSync{base}, []SessionSync{changed}) {
+		t.Fatal("tone-map mode change must invalidate the session snapshot")
+	}
+}
+
 // TestSyncNowCoalescesPendingPass guards the follow-up contract: a SyncNow
 // call that arrives while a sync is in flight returns immediately, and the
 // running owner re-captures a fresh snapshot afterwards — so a stop that lands

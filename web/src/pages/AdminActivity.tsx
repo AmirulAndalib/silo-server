@@ -27,6 +27,7 @@ import {
   formatDecisionLabel,
   formatSessionBitrate,
   formatSourceContainerSummary,
+  formatToneMapSummary,
   formatTranscodeModeSummary,
   getSessionClientLabel,
   formatVideoDetail,
@@ -530,6 +531,7 @@ function StreamRow({
   const clientLabel = getSessionClientLabel(session);
   const playbackPosition = formatPlaybackPosition(session);
   const transcodeMode = formatTranscodeModeSummary(session);
+  const toneMap = formatToneMapSummary(session);
   const activityMethod = classifyActivityMethod(session);
   const containerDecision = normalizeContainerDecision(session.play_method);
   const videoDecision = normalizeStreamDecision(session.video_decision || session.play_method);
@@ -657,6 +659,7 @@ function StreamRow({
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-1.5">
             {transcodeMode ? <TranscodeModeBadge label={transcodeMode} /> : null}
+            {toneMap ? <ToneMapModeBadge label={toneMap.badge} /> : null}
             <button
               type="button"
               onClick={toggleDetails}
@@ -850,6 +853,7 @@ function StreamRow({
           <div className="mt-2 rounded-md border border-white/6 bg-white/[0.03] px-2 py-1.5">
             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               {transcodeMode ? <TranscodeModeBadge label={transcodeMode} /> : null}
+              {toneMap ? <ToneMapModeBadge label={toneMap.badge} /> : null}
               <button
                 type="button"
                 onClick={toggleDetails}
@@ -928,6 +932,7 @@ function StreamRow({
           videoDecision={videoDecision}
           audioDecision={audioDecision}
           transcodeMode={transcodeMode}
+          toneMapping={toneMap?.detail ?? null}
           showFFmpeg={ffmpegOpen}
           rows={ffmpegRows}
           isLoading={ffmpegLogs.isLoading}
@@ -981,6 +986,14 @@ function transcodeModeBadgeColor(label: string): string {
   return "border-cyan-400/20 bg-cyan-400/10 text-cyan-200";
 }
 
+function ToneMapModeBadge({ label }: { label: string }) {
+  return (
+    <span className="inline-flex rounded border border-violet-400/25 bg-violet-400/10 px-1.5 py-0.5 text-[9px] font-semibold text-violet-200">
+      {label}
+    </span>
+  );
+}
+
 function PlaybackExpandedPanel({
   session,
   sessionID,
@@ -988,6 +1001,7 @@ function PlaybackExpandedPanel({
   videoDecision,
   audioDecision,
   transcodeMode,
+  toneMapping,
   showFFmpeg,
   rows,
   isLoading,
@@ -1000,6 +1014,7 @@ function PlaybackExpandedPanel({
   videoDecision: string;
   audioDecision: string;
   transcodeMode: string | null;
+  toneMapping: string | null;
   showFFmpeg: boolean;
   rows: OperationalLogEntry[];
   isLoading: boolean;
@@ -1040,6 +1055,7 @@ function PlaybackExpandedPanel({
           delivered={formatDeliveredVideoSummary(session)}
           detail={formatVideoDetail(session)}
           mode={videoDecision === "transcode" ? transcodeMode : null}
+          toneMapping={videoDecision === "transcode" ? toneMapping : null}
         />
         <PlaybackDetailCard
           label="Audio"
@@ -1123,6 +1139,7 @@ function PlaybackDetailCard({
   delivered,
   detail,
   mode,
+  toneMapping,
 }: {
   label: string;
   decision: string;
@@ -1130,6 +1147,7 @@ function PlaybackDetailCard({
   delivered: string;
   detail: string;
   mode?: string | null;
+  toneMapping?: string | null;
 }) {
   return (
     <div className="rounded-lg border border-[var(--terminal-border)]/60 bg-[var(--terminal-bg)]/60 px-3 py-2">
@@ -1147,6 +1165,7 @@ function PlaybackDetailCard({
         <PlaybackDetailLine label="Source" value={source} />
         <PlaybackDetailLine label="Delivered" value={delivered} />
         {mode ? <PlaybackDetailLine label="Mode" value={mode} /> : null}
+        {toneMapping ? <PlaybackDetailLine label="Tone mapping" value={toneMapping} /> : null}
         <PlaybackDetailLine label="Detail" value={detail} muted />
       </div>
     </div>

@@ -10,6 +10,7 @@ import {
   formatDeliveredVideoSummary,
   formatPlaybackDecisionSummary,
   formatSourceContainerSummary,
+  formatToneMapSummary,
   formatTranscodeModeSummary,
   formatVideoDetail,
   formatVideoSummary,
@@ -43,6 +44,7 @@ function makeSession(overrides: Partial<AdminSession> = {}): AdminSession {
     stream_bitrate_kbps: overrides.stream_bitrate_kbps ?? 8000,
     target_bitrate_kbps: overrides.target_bitrate_kbps ?? 8000,
     transcode_hw_accel: overrides.transcode_hw_accel,
+    tone_map_mode: overrides.tone_map_mode,
     source_container: overrides.source_container ?? "mkv",
     source_bitrate_kbps: overrides.source_bitrate_kbps ?? 9000,
     source_video_codec: overrides.source_video_codec ?? "h264",
@@ -132,6 +134,12 @@ describe("adminActivityPresentation", () => {
 
   it("labels hardware and software transcode modes", () => {
     expect(formatTranscodeModeSummary(makeSession({ transcode_hw_accel: "qsv" }))).toBe("HW QSV");
+    expect(formatTranscodeModeSummary(makeSession({ transcode_hw_accel: "vaapi" }))).toBe(
+      "HW VAAPI",
+    );
+    expect(formatTranscodeModeSummary(makeSession({ transcode_hw_accel: "nvenc" }))).toBe(
+      "HW NVENC",
+    );
     expect(formatTranscodeModeSummary(makeSession({ transcode_hw_accel: "none" }))).toBe("SW");
     expect(
       formatTranscodeModeSummary(
@@ -144,6 +152,29 @@ describe("adminActivityPresentation", () => {
         }),
       ),
     ).toBe("Audio SW");
+  });
+
+  it("reports only confirmed tone-map executors", () => {
+    expect(formatToneMapSummary(makeSession({ tone_map_mode: "hardware" }))).toEqual({
+      badge: "Tone map HW",
+      detail: "Hardware",
+    });
+    expect(formatToneMapSummary(makeSession({ tone_map_mode: "software" }))).toEqual({
+      badge: "Tone map SW",
+      detail: "Software",
+    });
+    expect(formatToneMapSummary(makeSession())).toBeNull();
+    expect(formatToneMapSummary(makeSession({ tone_map_mode: "future-mode" }))).toBeNull();
+    expect(
+      formatToneMapSummary(
+        makeSession({
+          play_method: "remux",
+          video_decision: "remux",
+          audio_decision: "transcode",
+          tone_map_mode: "hardware",
+        }),
+      ),
+    ).toBeNull();
   });
 
   it("buckets activity sessions by the backend's per-stream decisions", () => {

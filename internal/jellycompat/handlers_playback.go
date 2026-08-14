@@ -119,7 +119,7 @@ type compatTranscodeNodeEnumerator interface {
 // Optional (like sessionStarterContext) so lightweight test fakes don't have
 // to; without it the session keeps transport-level defaults only.
 type transcodeStreamDetailsSetter interface {
-	SetTranscodeStreamDetails(sessionID, targetVideoCodec, targetAudioCodec string, transcodeAudio bool) error
+	SetTranscodeStreamDetails(sessionID, targetVideoCodec, targetAudioCodec string, transcodeAudio bool, hwAccel string, toneMapMode tonemap.Mode) error
 }
 
 // recordTranscodeStreamDetails mirrors the encode decisions of a started
@@ -134,7 +134,7 @@ func (h *PlaybackHandler) recordTranscodeStreamDetails(ctx context.Context, upst
 		return
 	}
 	transcodeAudio := playback.TranscodesAudio(opts.TargetCodecAudio)
-	if err := setter.SetTranscodeStreamDetails(upstreamSessionID, opts.TargetCodecVideo, opts.TargetCodecAudio, transcodeAudio); err != nil {
+	if err := setter.SetTranscodeStreamDetails(upstreamSessionID, opts.TargetCodecVideo, opts.TargetCodecAudio, transcodeAudio, opts.HWAccel, opts.ToneMapMode); err != nil {
 		slog.WarnContext(ctx, "record transcode stream details failed", "component", "jellycompat",
 			"error", err, "playback_session_id", upstreamSessionID)
 		return
@@ -747,14 +747,14 @@ func (h *PlaybackHandler) startRemoteTranscode(
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 			return transcodenode.TranscodeStartResponse{}, resp.StatusCode, nil
 		}
-		// Older nodes returned an empty 202 response. Preserve that wire shape
-		// for ordinary transcodes; tone-mapped recipes require the additive
-		// response body so the selected mode can be confirmed and frozen.
-		if request.ToneMapMode == "" {
-			return transcodenode.TranscodeStartResponse{}, resp.StatusCode, nil
-		}
+		// Older nodes returned an empty 202 response. Accept that response for
+		// ordinary transcodes, while decoding current-node execution facts when
+		// present. Tone-mapped recipes still require a confirmed mode below.
 		var result transcodenode.TranscodeStartResponse
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			if errors.Is(err, io.EOF) && request.ToneMapMode == "" {
+				return transcodenode.TranscodeStartResponse{}, resp.StatusCode, nil
+			}
 			return transcodenode.TranscodeStartResponse{}, resp.StatusCode, err
 		}
 		return result, resp.StatusCode, nil
@@ -802,13 +802,22 @@ func (h *PlaybackHandler) startRemoteTranscode(
 		TotalDuration:       reqBody.TotalDuration,
 	}
 	toneMapRecipe.apply(&opts)
+	confirmedHWAccel := strings.TrimSpace(nodeResponse.HWAccel)
+	if confirmedHWAccel != "" {
+		opts.HWAccel = confirmedHWAccel
+	}
+	if reqBody.ToneMapMode != "" {
+		opts.ToneMapMode = nodeResponse.ToneMapMode
+	}
 	if source.TranscodeAudio {
 		opts.TargetCodecVideo = "copy"
 	}
 
 	// Same mirror as the local path: the node runs the encode, but the
 	// upstream session here is what session sync and admin views read.
-	h.recordTranscodeStreamDetails(ctx, upstreamSessionID, opts)
+	reportedOpts := opts
+	reportedOpts.HWAccel = confirmedHWAccel
+	h.recordTranscodeStreamDetails(ctx, upstreamSessionID, reportedOpts)
 
 	if err := h.persistTranscodeRecipe(ctx, playSessionID, upstreamSessionID, opts); err != nil {
 		// Roll back the already-started node ffmpeg so it isn't leaked.
