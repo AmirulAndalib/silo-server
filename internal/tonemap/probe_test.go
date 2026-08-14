@@ -6,8 +6,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"golang.org/x/sync/singleflight"
 )
 
 func TestProbeTotalTimeoutCoversBoundedCommandMatrix(t *testing.T) {
@@ -130,6 +128,5 @@ func resetProbeCache(t *testing.T) {
 	t.Helper()
 	probeCache.Lock()
 	probeCache.entries = make(map[string]probeCacheEntry)
-	probeCache.group = singleflight.Group{}
 	probeCache.Unlock()
 }

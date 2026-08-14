@@ -75,6 +75,9 @@ func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightReques
 	preflightCtx, cancel := context.WithTimeout(ctx, sourcePreflightTotalTimeout(request.DurationSeconds))
 	defer cancel()
 	key, cacheable := sourcePreflightKey(preflightCtx, request, run)
+	if err := preflightCtx.Err(); err != nil {
+		return err
+	}
 	if cacheable {
 		sourcePreflightCache.Lock()
 		entry, ok := sourcePreflightCache.entries[key]
@@ -82,30 +85,44 @@ func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightReques
 		if ok && sourcePreflightCacheEntryCurrent(entry, time.Now()) {
 			return cachedPreflightError(entry)
 		}
-		value, _, _ := sourcePreflightCache.group.Do(key, func() (any, error) {
+		resultCh := sourcePreflightCache.group.DoChan(key, func() (any, error) {
 			sourcePreflightCache.Lock()
 			entry, ok := sourcePreflightCache.entries[key]
 			sourcePreflightCache.Unlock()
 			if ok && sourcePreflightCacheEntryCurrent(entry, time.Now()) {
 				return entry, nil
 			}
+			sharedCtx, sharedCancel := context.WithTimeout(context.Background(), sourcePreflightExecutionTimeout(request.DurationSeconds))
+			defer sharedCancel()
 			entry = sourcePreflightCacheEntry{}
-			if err := runSourcePreflight(preflightCtx, request, run); err != nil {
+			if err := runSourcePreflight(sharedCtx, request, run); err != nil {
 				entry.errorMessage = err.Error()
 				entry.expiresAt = time.Now().Add(sourcePreflightNegativeTTL)
 			}
-			if preflightCtx.Err() == nil {
+			sharedErr := sharedCtx.Err()
+			if entry.errorMessage == "" && sharedErr != nil {
+				entry.errorMessage = sharedErr.Error()
+			}
+			if sharedErr == nil {
 				sourcePreflightCache.Lock()
 				sourcePreflightCache.entries[key] = entry
 				sourcePreflightCache.Unlock()
 			}
 			return entry, nil
 		})
-		entry, ok = value.(sourcePreflightCacheEntry)
-		if !ok {
-			return errors.New("tone-map source preflight failed")
+		select {
+		case <-preflightCtx.Done():
+			return preflightCtx.Err()
+		case result := <-resultCh:
+			if result.Err != nil {
+				return result.Err
+			}
+			entry, ok = result.Val.(sourcePreflightCacheEntry)
+			if !ok {
+				return errors.New("tone-map source preflight failed")
+			}
+			return cachedPreflightError(entry)
 		}
-		return cachedPreflightError(entry)
 	}
 	return runSourcePreflight(preflightCtx, request, run)
 }
@@ -115,7 +132,11 @@ func sourcePreflightCacheEntryCurrent(entry sourcePreflightCacheEntry, now time.
 }
 
 func sourcePreflightTotalTimeout(durationSeconds float64) time.Duration {
-	commandCount := 1 + 3*len(sourcePreflightPositions(durationSeconds))
+	return probeCommandTimeout + sourcePreflightExecutionTimeout(durationSeconds)
+}
+
+func sourcePreflightExecutionTimeout(durationSeconds float64) time.Duration {
+	commandCount := 3 * len(sourcePreflightPositions(durationSeconds))
 	return time.Duration(commandCount)*probeCommandTimeout + sourcePreflightTimeoutSlack
 }
 
@@ -161,14 +182,19 @@ func ffmpegVersionForPreflight(ctx context.Context, ffmpegPath string, run Comma
 		return result, nil
 	}
 	ffmpegVersionCache.Unlock()
-	value, err, _ := ffmpegVersionCache.group.Do(cacheKey, func() (any, error) {
+	resultCh := ffmpegVersionCache.group.DoChan(cacheKey, func() (any, error) {
 		ffmpegVersionCache.Lock()
 		cached, ok := ffmpegVersionCache.entries[cacheKey]
 		ffmpegVersionCache.Unlock()
 		if ok {
 			return append([]byte(nil), cached...), nil
 		}
-		output, runErr := runBounded(ctx, run, resolved, "-version")
+		sharedCtx, sharedCancel := context.WithTimeout(context.Background(), probeCommandTimeout)
+		defer sharedCancel()
+		output, runErr := runBounded(sharedCtx, run, resolved, "-version")
+		if sharedErr := sharedCtx.Err(); sharedErr != nil {
+			return nil, sharedErr
+		}
 		if runErr != nil || len(output) == 0 {
 			return output, runErr
 		}
@@ -177,14 +203,19 @@ func ffmpegVersionForPreflight(ctx context.Context, ffmpegPath string, run Comma
 		ffmpegVersionCache.Unlock()
 		return output, nil
 	})
-	if err != nil {
-		return nil, err
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		output, ok := result.Val.([]byte)
+		if !ok {
+			return nil, errors.New("ffmpeg version unavailable")
+		}
+		return append([]byte(nil), output...), nil
 	}
-	output, ok := value.([]byte)
-	if !ok {
-		return nil, errors.New("ffmpeg version unavailable")
-	}
-	return append([]byte(nil), output...), nil
 }
 
 func ffmpegBinaryCacheKey(ffmpegPath string) (string, string, bool) {

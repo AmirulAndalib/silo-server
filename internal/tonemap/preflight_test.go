@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
-
-	"golang.org/x/sync/singleflight"
 )
 
 func TestValidateSourceCachesPositiveAndNegativeVerdicts(t *testing.T) {
@@ -122,6 +122,10 @@ func TestSourcePreflightTimeoutCoversAllBoundedCommands(t *testing.T) {
 	if got := sourcePreflightTotalTimeout(100); got != want {
 		t.Fatalf("sourcePreflightTotalTimeout() = %s, want %s", got, want)
 	}
+	executionWant := 9*probeCommandTimeout + sourcePreflightTimeoutSlack
+	if got := sourcePreflightExecutionTimeout(100); got != executionWant {
+		t.Fatalf("sourcePreflightExecutionTimeout() = %s, want %s", got, executionWant)
+	}
 }
 
 func TestFFmpegVersionCacheInvalidatesOnBinaryModification(t *testing.T) {
@@ -156,6 +160,188 @@ func TestFFmpegVersionCacheInvalidatesOnBinaryModification(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("version calls = %d, want refresh after binary modification", calls)
+	}
+}
+
+func TestFFmpegVersionSharedLookupSurvivesFirstCallerCancellation(t *testing.T) {
+	resetSourcePreflightCache(t)
+	ffmpegPath := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(ffmpegPath, []byte("ffmpeg"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	var calls atomic.Int32
+	var startedOnce sync.Once
+	var sharedCanceled atomic.Bool
+	runner := func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+		calls.Add(1)
+		startedOnce.Do(func() { close(started) })
+		select {
+		case <-release:
+			return []byte("ffmpeg version shared"), nil
+		case <-ctx.Done():
+			sharedCanceled.Store(true)
+			return nil, ctx.Err()
+		}
+	}
+	type versionResult struct {
+		output []byte
+		err    error
+	}
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	first := make(chan versionResult, 1)
+	go func() {
+		output, err := ffmpegVersionForPreflight(firstCtx, ffmpegPath, runner)
+		first <- versionResult{output: output, err: err}
+	}()
+	<-started
+	second := make(chan versionResult, 1)
+	go func() {
+		output, err := ffmpegVersionForPreflight(context.Background(), ffmpegPath, runner)
+		second <- versionResult{output: output, err: err}
+	}()
+	cancelFirst()
+	select {
+	case result := <-first:
+		if !errors.Is(result.err, context.Canceled) {
+			t.Fatalf("first lookup error = %v, want context canceled", result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled version caller did not stop waiting")
+	}
+	if sharedCanceled.Load() {
+		t.Fatal("caller cancellation propagated to the shared version command")
+	}
+	close(release)
+	select {
+	case result := <-second:
+		if result.err != nil || string(result.output) != "ffmpeg version shared" {
+			t.Fatalf("second lookup = %q, %v", result.output, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("remaining version caller did not receive the shared result")
+	}
+	if _, err := ffmpegVersionForPreflight(context.Background(), ffmpegPath, runner); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("version command calls = %d, want one shared and cached lookup", calls.Load())
+	}
+}
+
+func TestFFmpegVersionCacheDoesNotStoreEmptyOrFailedLookups(t *testing.T) {
+	tests := []struct {
+		name   string
+		output []byte
+		err    error
+	}{
+		{name: "empty"},
+		{name: "failed", err: errors.New("version unavailable")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetSourcePreflightCache(t)
+			ffmpegPath := filepath.Join(t.TempDir(), "ffmpeg")
+			if err := os.WriteFile(ffmpegPath, []byte("ffmpeg"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			runner := func(context.Context, string, ...string) ([]byte, error) {
+				calls++
+				return tt.output, tt.err
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				_, _ = ffmpegVersionForPreflight(context.Background(), ffmpegPath, runner)
+			}
+			if calls != 2 {
+				t.Fatalf("version command calls = %d, want failed lookup retried", calls)
+			}
+		})
+	}
+}
+
+func TestSourcePreflightSharedExecutionSurvivesFirstCallerCancellation(t *testing.T) {
+	resetSourcePreflightCache(t)
+	request := sourcePreflightTestRequest(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	var startedOnce sync.Once
+	var sharedCanceled atomic.Bool
+	var preflightCommands atomic.Int32
+	var conversionCommands atomic.Int32
+	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		if len(args) == 1 && args[0] == "-version" {
+			return []byte("ffmpeg version shared"), nil
+		}
+		preflightCommands.Add(1)
+		startedOnce.Do(func() { close(started) })
+		select {
+		case <-release:
+		case <-ctx.Done():
+			sharedCanceled.Store(true)
+			return nil, ctx.Err()
+		}
+		if strings.Contains(name, "ffprobe") {
+			if !strings.Contains(joined, "stream=codec_name") {
+				return []byte(`{"frames":[{"color_range":"tv","color_space":"bt2020nc","color_transfer":"smpte2084","color_primaries":"bt2020"}]}`), nil
+			}
+			return []byte(`{"streams":[{"codec_name":"h264","pix_fmt":"yuv420p","color_range":"tv","color_space":"bt709","color_transfer":"bt709","color_primaries":"bt709","side_data_list":[]}],"frames":[{"color_range":"tv","color_space":"bt709","color_transfer":"bt709","color_primaries":"bt709","side_data_list":[]}]}`), nil
+		}
+		conversionCommands.Add(1)
+		return nil, nil
+	}
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	first := make(chan error, 1)
+	go func() { first <- ValidateSourceWithRunner(firstCtx, request, runner) }()
+	<-started
+	second := make(chan error, 1)
+	go func() { second <- ValidateSourceWithRunner(context.Background(), request, runner) }()
+	cancelFirst()
+	select {
+	case err := <-first:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("first preflight error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled preflight caller did not stop waiting")
+	}
+	if sharedCanceled.Load() {
+		t.Fatal("caller cancellation propagated to the shared preflight command")
+	}
+	close(release)
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Fatalf("remaining preflight caller error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("remaining preflight caller did not receive the shared result")
+	}
+	commandsBeforeCacheHit := preflightCommands.Load()
+	if err := ValidateSourceWithRunner(context.Background(), request, runner); err != nil {
+		t.Fatal(err)
+	}
+	if preflightCommands.Load() != commandsBeforeCacheHit {
+		t.Fatalf("successful shared preflight was not cached: commands = %d, want %d", preflightCommands.Load(), commandsBeforeCacheHit)
+	}
+	if conversionCommands.Load() != 3 {
+		t.Fatalf("conversion command calls = %d, want three shared samples", conversionCommands.Load())
 	}
 }
 
@@ -296,10 +482,8 @@ func resetSourcePreflightCache(t *testing.T) {
 	t.Helper()
 	sourcePreflightCache.Lock()
 	sourcePreflightCache.entries = make(map[string]sourcePreflightCacheEntry)
-	sourcePreflightCache.group = singleflight.Group{}
 	sourcePreflightCache.Unlock()
 	ffmpegVersionCache.Lock()
 	ffmpegVersionCache.entries = make(map[string][]byte)
-	ffmpegVersionCache.group = singleflight.Group{}
 	ffmpegVersionCache.Unlock()
 }
