@@ -178,11 +178,7 @@ export default function PlaybackSettings() {
           <SettingField
             label="Enable Hardware HDR Tone Mapping"
             type="toggle"
-            hint={
-              hwAccel === "none"
-                ? "Enable hardware acceleration above before allowing GPU HDR tone mapping."
-                : "Uses a validated QSV, VA-API, or NVENC GPU path when an HDR video must be transcoded to SDR. Disabled by default."
-            }
+            hint="Uses supported GPU acceleration to convert HDR video to SDR when transcoding."
             value={form.getValue("playback.transcode_hardware_tone_map_enabled") || "false"}
             onChange={(v) => form.setValue("playback.transcode_hardware_tone_map_enabled", v)}
             disabled={hwAccel === "none"}
@@ -190,7 +186,7 @@ export default function PlaybackSettings() {
           <SettingField
             label="Enable Software HDR Tone Mapping"
             type="toggle"
-            hint="Allows CPU tone mapping when an HDR video must be transcoded to SDR. This can be CPU-intensive and is disabled by default."
+            hint="Allows the CPU to convert HDR video to SDR when transcoding. This can be very CPU-intensive."
             value={form.getValue("playback.transcode_software_tone_map_enabled") || "false"}
             onChange={(v) => form.setValue("playback.transcode_software_tone_map_enabled", v)}
           />
