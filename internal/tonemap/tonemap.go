@@ -220,13 +220,13 @@ func ResolveSource(source SourceMetadata) SourceResolution {
 	case DynamicRangeHLG:
 		candidate = SourceHLG
 	case DynamicRangeDolbyVision:
-		// Profile 5 and an explicitly signaled compatibility id 0 carry a
-		// Dolby-proprietary base signal. Treating either as ordinary PQ is the
-		// purple/green-output failure this resolver is designed to prevent.
-		if source.DVProfile == 5 || source.DVBLCompatIDPresent && source.DVBLCompatID == 0 {
+		// Profile 5 and compatibility id 0 carry a Dolby-proprietary base
+		// signal. Legacy rows omit the presence facts, so their default zero
+		// values cannot establish a safe base layer either.
+		if source.DVProfile == 5 || !source.DVConfigPresent || !source.DVBLCompatIDPresent || source.DVBLCompatID == 0 {
 			return SourceResolution{}
 		}
-		if source.DVConfigPresent && !source.DVBLPresent {
+		if !source.DVBLPresent {
 			return SourceResolution{}
 		}
 		candidate = sourceKindForCompatibilityID(source.DVBLCompatID)
