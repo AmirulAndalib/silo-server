@@ -402,7 +402,13 @@ func sourceConversionPreflightArgs(request SourcePreflightRequest, position floa
 	}
 	args = append(args, "-ss", strconv.FormatFloat(position, 'f', 3, 64), "-i", request.InputPath, "-map", "0:v:0", "-frames:v", "1", "-an", "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1")
 	filter := sourceConversionPreflightFilter(request)
-	args = append(args, "-vf", filter, "-c:v", sourcePreflightEncoder(request), "-color_range", "tv", "-color_primaries", colorBT709, "-color_trc", colorBT709, "-colorspace", colorBT709)
+	args = append(args, "-vf", filter, "-c:v", sourcePreflightEncoder(request), "-color_range", "tv", "-color_primaries", colorBT709, "-color_trc", colorBT709)
+	// Hardware filters already stamp the BT.709 matrix on their output. Asking
+	// FFmpeg to apply -colorspace at the mux boundary can insert an unsupported
+	// software conversion between hardware frames and the hardware encoder.
+	if request.Mode == ModeSoftware {
+		args = append(args, "-colorspace", colorBT709)
+	}
 	if outputPath == "" {
 		return append(args, "-f", "null", "-")
 	}

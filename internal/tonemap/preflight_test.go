@@ -435,6 +435,30 @@ func TestSourceConversionPreflightUsesSiloQSVDriverSelection(t *testing.T) {
 	}
 }
 
+func TestSourceConversionPreflightOnlyRequestsSoftwareColorspaceConversion(t *testing.T) {
+	tests := []struct {
+		name           string
+		mode           Mode
+		backend        string
+		wantColorspace bool
+	}{
+		{name: "software", mode: ModeSoftware, backend: BackendSoftware, wantColorspace: true},
+		{name: "QSV", mode: ModeHardware, backend: BackendQSV},
+		{name: "VAAPI", mode: ModeHardware, backend: BackendVAAPI},
+		{name: "NVENC", mode: ModeHardware, backend: BackendNVENC},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := sourceConversionPreflightArgs(SourcePreflightRequest{
+				Mode: tt.mode, Backend: tt.backend, Kind: SourcePQ,
+			}, 0, "")
+			if got := slices.Contains(args, "-colorspace"); got != tt.wantColorspace {
+				t.Fatalf("preflight -colorspace present = %t, want %t: %s", got, tt.wantColorspace, strings.Join(args, " "))
+			}
+		})
+	}
+}
+
 func sourcePreflightTestRequest(t *testing.T) SourcePreflightRequest {
 	t.Helper()
 	dir := t.TempDir()
