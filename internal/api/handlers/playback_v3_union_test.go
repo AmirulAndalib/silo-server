@@ -122,8 +122,8 @@ func TestHLSPlanningRegistryV3EnablesValidatedLocalToneMapWithoutRestart(t *test
 		Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
 		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
 	}}
-	handler.v3ToneMapProbe = func(context.Context, string, string, string) tonemap.Capabilities {
-		return capabilities
+	handler.v3ToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+		return capabilities, nil
 	}
 	settings := &mutablePlaybackSettingsV3{values: map[string]string{}}
 	handler.SettingsRepo = settings
@@ -144,13 +144,13 @@ func TestLocalToneMapCapabilitiesV3UsesLivePlaybackHardware(t *testing.T) {
 	cfg := config.PlaybackConfig{FFmpegPath: "/opt/ffmpeg-a", HWAccel: "qsv", HWDevice: "/dev/dri/renderD128"}
 	handler.PlaybackConfig = func() config.PlaybackConfig { return cfg }
 	var calls []string
-	handler.v3ToneMapProbe = func(_ context.Context, ffmpegPath, backend, device string) tonemap.Capabilities {
+	handler.v3ToneMapProbe = func(_ context.Context, ffmpegPath, backend, device string) (tonemap.Capabilities, error) {
 		calls = append(calls, ffmpegPath+"|"+backend+"|"+device)
-		return tonemap.Capabilities{{Mode: tonemap.ModeHardware, Backend: backend, Filter: tonemap.HardwareFilterVAAPI, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}}}
+		return tonemap.Capabilities{{Mode: tonemap.ModeHardware, Backend: backend, Filter: tonemap.HardwareFilterVAAPI, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}}}, nil
 	}
 
 	for i := 0; i < 2; i++ {
-		if got := handler.localToneMapCapabilitiesV3(context.Background()); len(got) != 1 || got[0].Backend != "qsv" {
+		if got, err := handler.localToneMapCapabilitiesV3(context.Background()); err != nil || len(got) != 1 || got[0].Backend != "qsv" {
 			t.Fatalf("initial capabilities = %#v", got)
 		}
 	}
@@ -161,7 +161,7 @@ func TestLocalToneMapCapabilitiesV3UsesLivePlaybackHardware(t *testing.T) {
 	cfg.FFmpegPath = "/opt/ffmpeg-b"
 	cfg.HWAccel = "vaapi"
 	cfg.HWDevice = "/dev/dri/renderD129"
-	if got := handler.localToneMapCapabilitiesV3(context.Background()); len(got) != 1 || got[0].Backend != "vaapi" {
+	if got, err := handler.localToneMapCapabilitiesV3(context.Background()); err != nil || len(got) != 1 || got[0].Backend != "vaapi" {
 		t.Fatalf("updated capabilities = %#v", got)
 	}
 	if len(calls) != 3 || calls[1] == calls[2] {
@@ -176,19 +176,19 @@ func TestLocalToneMapCapabilitiesV3DoesNotSerializeCallers(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var calls atomic.Int32
-	handler.v3ToneMapProbe = func(ctx context.Context, _, _, _ string) tonemap.Capabilities {
+	handler.v3ToneMapProbe = func(ctx context.Context, _, _, _ string) (tonemap.Capabilities, error) {
 		if calls.Add(1) == 1 {
 			close(started)
 			<-release
-			return nil
+			return nil, nil
 		}
 		<-ctx.Done()
-		return nil
+		return nil, ctx.Err()
 	}
 
 	firstDone := make(chan struct{})
 	go func() {
-		handler.localToneMapCapabilitiesV3(context.Background())
+		_, _ = handler.localToneMapCapabilitiesV3(context.Background())
 		close(firstDone)
 	}()
 	<-started
@@ -197,7 +197,7 @@ func TestLocalToneMapCapabilitiesV3DoesNotSerializeCallers(t *testing.T) {
 	cancel()
 	secondDone := make(chan struct{})
 	go func() {
-		handler.localToneMapCapabilitiesV3(canceled)
+		_, _ = handler.localToneMapCapabilitiesV3(canceled)
 		close(secondDone)
 	}()
 	select {
@@ -255,6 +255,162 @@ func TestHLSToneMapCapabilitiesV3FetchesNodesConcurrently(t *testing.T) {
 	}
 }
 
+func TestHLSToneMapCapabilityInventoryV3StartsLocalAndRemoteConcurrently(t *testing.T) {
+	localStarted := make(chan struct{})
+	remoteStarted := make(chan struct{})
+	release := make(chan struct{})
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(remoteStarted)
+		<-release
+		writeJSON(w, http.StatusOK, playback.HWAccelInfo{ToneMapCapabilities: tonemap.Capabilities{{
+			Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+			SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+		}}})
+	}))
+	defer remote.Close()
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{remote.URL}}
+	handler.v3ToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+		close(localStarted)
+		<-release
+		return nil, nil
+	}
+	type inventoryResult struct {
+		inventory hlsToneMapCapabilityInventoryV3
+		err       error
+	}
+	result := make(chan inventoryResult, 1)
+	go func() {
+		inventory, err := handler.hlsToneMapCapabilityInventoryV3(context.Background())
+		result <- inventoryResult{inventory: inventory, err: err}
+	}()
+	select {
+	case <-localStarted:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("local capability probe did not start")
+	}
+	select {
+	case <-remoteStarted:
+		close(release)
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("remote capability fetch waited for the local probe")
+	}
+	got := <-result
+	if got.err != nil {
+		t.Fatalf("capability inventory error = %v", got.err)
+	}
+	if !got.inventory.union.Supports(tonemap.ModeSoftware, tonemap.SourcePQ) {
+		t.Fatalf("capability inventory = %#v, want remote executor retained", got.inventory)
+	}
+}
+
+func TestIncompleteToneMapPlanningBecomesRetryableStartFailure(t *testing.T) {
+	for _, reason := range []string{
+		playback.TerminalHDRTranscodeUnsupportedV3,
+		terminalSubtitleConversionUnsupportedV3,
+	} {
+		result := playback.PlannerResultV3{Terminal: &playback.TerminalV3{Reason: reason}}
+
+		result = retryIncompleteToneMapPlanningV3(result, context.DeadlineExceeded)
+
+		if result.Terminal == nil || result.Terminal.Reason != transcodeStartFailedReasonV3 || !result.Terminal.Retryable {
+			t.Fatalf("terminal for %q = %#v, want retryable %q", reason, result.Terminal, transcodeStartFailedReasonV3)
+		}
+	}
+}
+
+func TestUnusedToneMapPlanningSnapshotDoesNotInventCapabilityFailure(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	var probes atomic.Int32
+	handler.v3ToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+		probes.Add(1)
+		return nil, context.DeadlineExceeded
+	}
+	snapshot := &hlsPlanningSnapshotV3{
+		handler: handler,
+		ctx:     context.Background(),
+		settings: playback.PlannerSettingsV3{
+			SoftwareToneMapEnabled: true,
+		},
+	}
+
+	if err := snapshot.capabilityError(); err != nil {
+		t.Fatalf("unused snapshot error = %v", err)
+	}
+	if got := probes.Load(); got != 0 {
+		t.Fatalf("unused snapshot probes = %d, want none", got)
+	}
+}
+
+func TestHandlePlaybackCapabilityV3ReturnsServiceUnavailableWhenToneMapProbeIsIncomplete(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{
+		config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+	}}
+	handler.v3ToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+		return nil, context.DeadlineExceeded
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/playback/capability", nil).WithContext(newAuthorizedPlaybackContext())
+	handler.HandlePlaybackCapabilityV3(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHandlePlaybackCapabilityV3UsesRemoteExecutorWhenLocalProbeIsIncomplete(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, playback.HWAccelInfo{
+			Transformations: []playback.TransformationV3{{
+				Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3,
+				RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+			}},
+			ToneMapCapabilities: tonemap.Capabilities{{
+				Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+				SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+			}},
+		})
+	}))
+	defer remote.Close()
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{remote.URL}}
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{
+		config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+	}}
+	handler.v3ToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+		return nil, context.DeadlineExceeded
+	}
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{
+		Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+	}}))
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/playback/capability", nil).WithContext(newAuthorizedPlaybackContext())
+	handler.HandlePlaybackCapabilityV3(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response playback.CapabilityResponseV3
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	for _, transformation := range response.Transformations {
+		if transformation.Name == playback.TransformationHDRToSDRToneMapV3 {
+			return
+		}
+	}
+	t.Fatal("remote tone-map transformation was not advertised")
+}
+
 // TestHLSToneMapCapabilitiesV3HonorsSharedDeadline verifies slow nodes cannot exceed the planning deadline.
 func TestHLSToneMapCapabilitiesV3HonorsSharedDeadline(t *testing.T) {
 	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
@@ -290,11 +446,11 @@ func TestHandlePlaybackCapabilityV3ReusesResolvedToneMapInputs(t *testing.T) {
 	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{
 		Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
 	}}))
-	handler.v3ToneMapProbe = func(context.Context, string, string, string) tonemap.Capabilities {
+	handler.v3ToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
 		return tonemap.Capabilities{{
 			Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
 			SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
-		}}
+		}}, nil
 	}
 	settings := &mutablePlaybackSettingsV3{
 		values: map[string]string{
@@ -515,11 +671,11 @@ func TestPrepareTransportV3AcceptsEveryValidatedLocalToneMapExecutor(t *testing.
 				}
 			}
 			handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{test.settingKey: "true"}}
-			handler.v3ToneMapProbe = func(context.Context, string, string, string) tonemap.Capabilities {
+			handler.v3ToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
 				return tonemap.Capabilities{{
 					Mode: test.mode, Backend: test.backend, Filter: test.filter,
 					SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
-				}}
+				}}, nil
 			}
 			presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
 				{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},
@@ -605,11 +761,11 @@ func TestPrepareTransportV3ReportsSoftwareToneMapFallback(t *testing.T) {
 		config.PlaybackTranscodeHardwareToneMapSettingKey: "true",
 		config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
 	}}
-	handler.v3ToneMapProbe = func(context.Context, string, string, string) tonemap.Capabilities {
+	handler.v3ToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
 		return tonemap.Capabilities{
 			{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
 			{Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
-		}
+		}, nil
 	}
 	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
 		{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},

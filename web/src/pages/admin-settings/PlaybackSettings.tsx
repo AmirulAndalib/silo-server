@@ -178,12 +178,9 @@ export default function PlaybackSettings() {
           <SettingField
             label="Enable Hardware HDR Tone Mapping"
             type="toggle"
-            hint="Uses supported GPU acceleration to convert HDR video to SDR when transcoding."
+            hint="Allows validated local or remote GPU executors to convert HDR video to SDR when transcoding."
             value={form.getValue("playback.transcode_hardware_tone_map_enabled") || "false"}
             onChange={(v) => form.setValue("playback.transcode_hardware_tone_map_enabled", v)}
-            disabled={
-              hwAccel === "none" || (hwAccel === "auto" && hwDetection.data?.resolved === "none")
-            }
           />
           <SettingField
             label="Enable Software HDR Tone Mapping"

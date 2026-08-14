@@ -332,16 +332,19 @@ describe("adminActivityPresentation", () => {
     expect(formatVideoDetail(session)).toBe("Video stream copied");
   });
 
-  it("prefers the server's exact client label in the full label", () => {
+  it("keeps exact client build/channel and tone-map mode in expanded activity details", () => {
     const session = makeSession({
       client_name: "Silo Android TV",
       client_version: "1.0.0",
       client_build: "5",
+      client_channel: "beta",
       client_label: "Silo Android TV 1.0.0",
-      client_label_full: "Silo Android TV 1.0.0 (build 5)",
+      client_label_full: "Silo Android TV 1.0.0 (build 5, beta)",
+      tone_map_mode: "hardware",
     });
 
-    expect(getSessionClientLabelFull(session)).toBe("Silo Android TV 1.0.0 (build 5)");
+    expect(getSessionClientLabelFull(session)).toBe("Silo Android TV 1.0.0 (build 5, beta)");
+    expect(formatToneMapSummary(session)?.detail).toBe("Hardware");
     // The compact row label keeps its unchanged width.
     expect(getSessionClientLabel(session)).toBe("Silo Android TV 1.0.0");
   });

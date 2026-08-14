@@ -51,7 +51,8 @@ const (
 	// Capability fetches on the planning path run under a deadline well below
 	// the fetch helper's own 10s timeout: planning happens on the start
 	// request path, where a slow node must degrade the union, not the user.
-	v3NodeCapabilityPlanTimeout = 3 * time.Second
+	v3NodeCapabilityPlanTimeout    = 5 * time.Second
+	v3ToneMapTransportProbeTimeout = 10 * time.Second
 )
 
 var errSubtitleStoreUnavailableV3 = errors.New("subtitle store unavailable")
@@ -145,16 +146,26 @@ func (h *PlaybackHandler) transformationRegistryV3(ctx context.Context) *playbac
 
 // localToneMapCapabilitiesV3 returns a defensive copy of the capabilities
 // validated for the current local FFmpeg, backend, and device configuration.
-func (h *PlaybackHandler) localToneMapCapabilitiesV3(ctx context.Context) tonemap.Capabilities {
+func (h *PlaybackHandler) localToneMapCapabilitiesV3(ctx context.Context) (tonemap.Capabilities, error) {
 	cfg := h.playbackConfig()
 	ffmpegPath := playback.ResolveFFmpegPath(cfg.FFmpegPath)
-	resolved := playback.ResolveHWAccelWithFFmpeg(cfg.HWAccel, cfg.FFmpegPath)
+	resolved := playback.ResolveHWAccelWithFFmpegContext(ctx, cfg.HWAccel, cfg.FFmpegPath)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	hwDevice := strings.TrimSpace(cfg.HWDevice)
 	probe := tonemap.Probe
 	if h.v3ToneMapProbe != nil {
 		probe = h.v3ToneMapProbe
 	}
-	return append(tonemap.Capabilities(nil), probe(ctx, ffmpegPath, resolved, hwDevice)...)
+	capabilities, err := probe(ctx, ffmpegPath, resolved, hwDevice)
+	return append(tonemap.Capabilities(nil), capabilities...), err
+}
+
+func (h *PlaybackHandler) localToneMapCapabilitiesForTransportV3(ctx context.Context) (tonemap.Capabilities, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, v3ToneMapTransportProbeTimeout)
+	defer cancel()
+	return h.localToneMapCapabilitiesV3(probeCtx)
 }
 
 // remoteTransformationsV3 is the transport-time capability lookup for a
@@ -259,14 +270,18 @@ type hlsToneMapCapabilityInventoryV3 struct {
 // device have validated an executor in that mode. Planning and transport-time
 // validation must share this view or a locally planned recipe can be rejected
 // before FFmpeg starts.
-func (h *PlaybackHandler) localHLSExecutionRegistryV3(ctx context.Context) *playback.TransformationRegistryV3 {
+func (h *PlaybackHandler) localHLSExecutionRegistryV3(ctx context.Context) (*playback.TransformationRegistryV3, error) {
 	settings := h.plannerSettingsV3(ctx)
 	policy := tonemap.NewPolicy(settings.HardwareToneMapEnabled, settings.SoftwareToneMapEnabled)
 	inventory := hlsToneMapCapabilityInventoryV3{}
 	if policy != tonemap.PolicyNone {
-		inventory.localTranscodeFallbackOK, inventory.local = h.localHLSToneMapCapabilitiesV3(ctx)
+		var err error
+		inventory.localTranscodeFallbackOK, inventory.local, err = h.localHLSToneMapCapabilitiesForTransportV3(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return h.localHLSExecutionRegistryWithInputsV3(ctx, settings, inventory)
+	return h.localHLSExecutionRegistryWithInputsV3(ctx, settings, inventory), nil
 }
 
 // localHLSExecutionRegistryWithInputsV3 builds the local HLS execution
@@ -307,7 +322,7 @@ func (h *PlaybackHandler) hlsPlanningRegistryV3(ctx context.Context) *playback.T
 	inventory := hlsToneMapCapabilityInventoryV3{}
 	policy := tonemap.NewPolicy(settings.HardwareToneMapEnabled, settings.SoftwareToneMapEnabled)
 	if policy != tonemap.PolicyNone {
-		inventory = h.hlsToneMapCapabilityInventoryV3(ctx)
+		inventory, _ = h.hlsToneMapCapabilityInventoryV3(ctx)
 	}
 	return h.hlsPlanningRegistryWithInputsV3(ctx, settings, inventory)
 }
@@ -335,81 +350,153 @@ func (h *PlaybackHandler) hlsPlanningRegistryWithInputsV3(
 	return local.WithAdvertised(merged)
 }
 
-// localHLSToneMapCapabilitiesV3 reports whether local fallback is permitted
-// and, when it is, which tone-map executors the local FFmpeg can use.
-func (h *PlaybackHandler) localHLSToneMapCapabilitiesV3(ctx context.Context) (bool, tonemap.Capabilities) {
+func (h *PlaybackHandler) localHLSToneMapCapabilitiesForTransportV3(ctx context.Context) (bool, tonemap.Capabilities, error) {
 	localFallbackAllowed := h.NodePlanner == nil || nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo)
 	if !localFallbackAllowed {
-		return false, nil
+		return false, nil, nil
 	}
-	return true, h.localToneMapCapabilitiesV3(ctx)
+	capabilities, err := h.localToneMapCapabilitiesForTransportV3(ctx)
+	return true, capabilities, err
 }
 
 // hlsToneMapCapabilityInventoryV3 snapshots local and pooled-node tone-map
 // capabilities for a single planning operation.
-func (h *PlaybackHandler) hlsToneMapCapabilityInventoryV3(ctx context.Context) hlsToneMapCapabilityInventoryV3 {
-	localFallbackAllowed, local := h.localHLSToneMapCapabilitiesV3(ctx)
-	inventory := hlsToneMapCapabilityInventoryV3{
-		local:                    local,
-		union:                    append(tonemap.Capabilities(nil), local...),
-		localTranscodeFallbackOK: localFallbackAllowed,
-	}
-	enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3)
-	if !ok {
-		return inventory
-	}
-	nodeURLs := enumerator.TranscodeNodeURLs()
+func (h *PlaybackHandler) hlsToneMapCapabilityInventoryV3(ctx context.Context) (hlsToneMapCapabilityInventoryV3, error) {
 	fetchCtx, cancel := context.WithTimeout(ctx, v3NodeCapabilityPlanTimeout)
 	defer cancel()
-	results := make([]tonemap.Capabilities, len(nodeURLs))
+
+	type capabilityResult struct {
+		capabilities tonemap.Capabilities
+		err          error
+	}
+	localAllowed := h.NodePlanner == nil || nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo)
+	var localResult capabilityResult
+	var localWG sync.WaitGroup
+	if localAllowed {
+		localWG.Add(1)
+		go func() {
+			defer localWG.Done()
+			localResult.capabilities, localResult.err = h.localToneMapCapabilitiesV3(fetchCtx)
+		}()
+	}
+
+	var nodeURLs []string
+	if enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3); ok {
+		nodeURLs = enumerator.TranscodeNodeURLs()
+	}
+	results := make([]capabilityResult, len(nodeURLs))
 	var wg sync.WaitGroup
 	for i, nodeURL := range nodeURLs {
 		wg.Add(1)
 		go func(i int, nodeURL string) {
 			defer wg.Done()
 			remote, err := h.remoteToneMapCapabilitiesV3(fetchCtx, nodeURL, true)
+			results[i].err = err
 			if err != nil {
 				slog.DebugContext(ctx, "protocol v3 node tone-map capability unavailable for planning", "component", "api", "node", nodeURL, "error", err)
 				return
 			}
-			results[i] = remote
+			results[i].capabilities = remote
 		}(i, nodeURL)
 	}
 	wg.Wait()
-	for _, remote := range results {
-		inventory.union = append(inventory.union, remote...)
-	}
-	return inventory
-}
+	localWG.Wait()
 
-// lazyHLSPlanningRegistryV3 defers (and memoizes) the widened-registry build
-// so the planner only pays for node capability lookups when a route decision
-// actually depends on them; direct-play and other source-preserving starts
-// never touch the pool.
-func (h *PlaybackHandler) lazyHLSPlanningRegistryV3(ctx context.Context) func() *playback.TransformationRegistryV3 {
-	var once sync.Once
-	var registry *playback.TransformationRegistryV3
-	return func() *playback.TransformationRegistryV3 {
-		once.Do(func() { registry = h.hlsPlanningRegistryV3(ctx) })
-		return registry
+	inventory := hlsToneMapCapabilityInventoryV3{localTranscodeFallbackOK: localAllowed}
+	var probeErr error
+	if localAllowed {
+		if localResult.err != nil {
+			probeErr = errors.Join(probeErr, localResult.err)
+		} else {
+			inventory.local = localResult.capabilities
+			inventory.union = append(inventory.union, localResult.capabilities...)
+		}
 	}
+	for _, remote := range results {
+		if remote.err != nil {
+			probeErr = errors.Join(probeErr, remote.err)
+			continue
+		}
+		inventory.union = append(inventory.union, remote.capabilities...)
+	}
+	return inventory, probeErr
 }
 
 // hlsToneMapCapabilitiesV3 builds the executor union available to HLS planning
 // from eligible local fallback and all reachable transcode nodes.
 func (h *PlaybackHandler) hlsToneMapCapabilitiesV3(ctx context.Context) tonemap.Capabilities {
-	return h.hlsToneMapCapabilityInventoryV3(ctx).union
+	inventory, _ := h.hlsToneMapCapabilityInventoryV3(ctx)
+	return inventory.union
 }
 
-// lazyHLSToneMapCapabilitiesV3 memoizes the capability union so source-
-// preserving routes never perform tone-map probes or remote lookups.
-func (h *PlaybackHandler) lazyHLSToneMapCapabilitiesV3(ctx context.Context) func() tonemap.Capabilities {
-	var once sync.Once
-	var capabilities tonemap.Capabilities
-	return func() tonemap.Capabilities {
-		once.Do(func() { capabilities = h.hlsToneMapCapabilitiesV3(ctx) })
-		return capabilities
+type hlsPlanningSnapshotV3 struct {
+	handler   *PlaybackHandler
+	ctx       context.Context
+	settings  playback.PlannerSettingsV3
+	once      sync.Once
+	registry  *playback.TransformationRegistryV3
+	inventory hlsToneMapCapabilityInventoryV3
+	err       error
+	resolved  bool
+}
+
+func (snapshot *hlsPlanningSnapshotV3) resolve() {
+	snapshot.once.Do(func() {
+		snapshot.resolved = true
+		policy := tonemap.NewPolicy(snapshot.settings.HardwareToneMapEnabled, snapshot.settings.SoftwareToneMapEnabled)
+		if policy != tonemap.PolicyNone {
+			snapshot.inventory, snapshot.err = snapshot.handler.hlsToneMapCapabilityInventoryV3(snapshot.ctx)
+		}
+		snapshot.registry = snapshot.handler.hlsPlanningRegistryWithInputsV3(snapshot.ctx, snapshot.settings, snapshot.inventory)
+	})
+}
+
+func (snapshot *hlsPlanningSnapshotV3) hlsRegistry() *playback.TransformationRegistryV3 {
+	snapshot.resolve()
+	return snapshot.registry
+}
+
+func (snapshot *hlsPlanningSnapshotV3) toneMapCapabilities() tonemap.Capabilities {
+	snapshot.resolve()
+	return snapshot.inventory.union
+}
+
+func (snapshot *hlsPlanningSnapshotV3) capabilityError() error {
+	if !snapshot.resolved {
+		return nil
 	}
+	return snapshot.err
+}
+
+func retryIncompleteToneMapPlanningV3(result playback.PlannerResultV3, capabilityErr error) playback.PlannerResultV3 {
+	if capabilityErr == nil || result.Terminal == nil {
+		return result
+	}
+	switch result.Terminal.Reason {
+	case playback.TerminalHDRTranscodeUnsupportedV3, terminalSubtitleConversionUnsupportedV3:
+	default:
+		return result
+	}
+	result.Terminal = &playback.TerminalV3{
+		Reason:    transcodeStartFailedReasonV3,
+		Message:   "Tone-map capability discovery is temporarily unavailable.",
+		Retryable: true,
+	}
+	return result
+}
+
+func (h *PlaybackHandler) planPlaybackWithCapabilitiesV3(ctx context.Context, input playback.PlannerInputV3) (playback.PlannerResultV3, error) {
+	snapshot := &hlsPlanningSnapshotV3{handler: h, ctx: ctx, settings: input.Settings}
+	input.HLSRegistry = snapshot.hlsRegistry
+	input.HLSToneMapCapabilities = snapshot.toneMapCapabilities
+	result := playback.PlanPlaybackV3(input)
+	if result.Terminal != nil {
+		switch result.Terminal.Reason {
+		case playback.TerminalHDRTranscodeUnsupportedV3, terminalSubtitleConversionUnsupportedV3:
+			return result, snapshot.capabilityError()
+		}
+	}
+	return result, nil
 }
 
 // pooledNodeTransformationsV3 collects the advertised transformations of the
@@ -553,8 +640,9 @@ func (h *PlaybackHandler) HandlePlaybackCapabilityV3(w http.ResponseWriter, r *h
 	settings := h.plannerSettingsV3(r.Context())
 	policy := tonemap.NewPolicy(settings.HardwareToneMapEnabled, settings.SoftwareToneMapEnabled)
 	inventory := hlsToneMapCapabilityInventoryV3{}
+	var capabilityErr error
 	if policy != tonemap.PolicyNone {
-		inventory = h.hlsToneMapCapabilityInventoryV3(r.Context())
+		inventory, capabilityErr = h.hlsToneMapCapabilityInventoryV3(r.Context())
 	}
 	registry := h.hlsPlanningRegistryWithInputsV3(r.Context(), settings, inventory)
 	toneMapAvailable := false
@@ -565,6 +653,10 @@ func (h *PlaybackHandler) HandlePlaybackCapabilityV3(w http.ResponseWriter, r *h
 				break
 			}
 		}
+	}
+	if capabilityErr != nil && !toneMapAvailable {
+		writeError(w, http.StatusServiceUnavailable, "capability_unavailable", "Tone-map capability discovery is temporarily unavailable")
+		return
 	}
 	for _, transformation := range registry.Advertised() {
 		if transformation.Name == playback.TransformationHDRToSDRToneMapV3 && !toneMapAvailable {
@@ -658,10 +750,10 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 			return
 		}
 	}
-	result := playback.PlanPlaybackV3(playback.PlannerInputV3{
+	result, toneMapCapabilityErr := h.planPlaybackWithCapabilitiesV3(r.Context(), playback.PlannerInputV3{
 		Request: req, RequestedFile: requestedFile, EffectiveFile: effectiveFile,
 		AudioTrackIndex: audioIndex, Settings: settings,
-		Registry: h.transformationRegistryV3(r.Context()), HLSRegistry: h.lazyHLSPlanningRegistryV3(r.Context()), HLSToneMapCapabilities: h.lazyHLSToneMapCapabilitiesV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(),
+		Registry: h.transformationRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(),
 		AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile),
 	})
 	if terminalAllowsAlternateFileV3(result.Terminal) && shouldTryAlternateFileV3(req.QualityPreference) {
@@ -681,9 +773,10 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 				writePlaybackFilePreflightError(w, err)
 				return
 			}
-			result = playback.PlanPlaybackV3(playback.PlannerInputV3{Request: req, RequestedFile: requestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: settings, Registry: h.transformationRegistryV3(r.Context()), HLSRegistry: h.lazyHLSPlanningRegistryV3(r.Context()), HLSToneMapCapabilities: h.lazyHLSToneMapCapabilitiesV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
+			result, toneMapCapabilityErr = h.planPlaybackWithCapabilitiesV3(r.Context(), playback.PlannerInputV3{Request: req, RequestedFile: requestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: settings, Registry: h.transformationRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
 		}
 	}
+	result = retryIncompleteToneMapPlanningV3(result, toneMapCapabilityErr)
 	h.clarifyOriginalQuality4KTerminalV3(r.Context(), result.Terminal, requestedFile, !shouldTryAlternateFileV3(req.QualityPreference))
 	// The exact app identity is logged with every decision so a route or
 	// terminal reported against one build is attributable without asking the
@@ -1040,11 +1133,19 @@ func (h *PlaybackHandler) prepareTransportV3(r *http.Request, session *playback.
 	// a capable node freeing up satisfies the same plan. Transformation-free
 	// plans skip the check (and the local probe behind it) entirely.
 	if planRequiresServerTransformationsV3(result.Plan) {
-		if err := validateAdvertisedTransformationsV3(result.Plan, h.localHLSExecutionRegistryV3(r.Context()).Advertised()); err != nil {
+		localRegistry, capabilityErr := h.localHLSExecutionRegistryV3(r.Context())
+		if capabilityErr != nil {
+			return preparedTransportV3{}, &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "Local transcode capability validation is temporarily unavailable.", retryable: true, cause: capabilityErr}
+		}
+		if err := validateAdvertisedTransformationsV3(result.Plan, localRegistry.Advertised()); err != nil {
 			return preparedTransportV3{}, &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "No available transcode executor can run the selected playback recipe.", retryable: true, cause: err}
 		}
 		if planRequiresToneMapV3(result.Plan) {
-			if err := validateToneMapExecutorV3(result, h.localToneMapCapabilitiesV3(r.Context())); err != nil {
+			capabilities, capabilityErr := h.localToneMapCapabilitiesForTransportV3(r.Context())
+			if capabilityErr != nil {
+				return preparedTransportV3{}, &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "Local tone-map capability validation is temporarily unavailable.", retryable: true, cause: capabilityErr}
+			}
+			if err := validateToneMapExecutorV3(result, capabilities); err != nil {
 				return preparedTransportV3{}, &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "No available transcode executor can run the selected tone-map recipe.", retryable: true, cause: err}
 			}
 		}
@@ -1077,8 +1178,14 @@ func (h *PlaybackHandler) prepareSoftwareToneMapFallbackV3(r *http.Request, sess
 		}
 		return preparedTransportV3{}, true, fallbackErr
 	}
-	if nodepool.LocalTranscodeFallbackAllowed(r.Context(), h.SettingsRepo) &&
-		h.localToneMapCapabilitiesV3(r.Context()).Supports(tonemap.ModeSoftware, fallbackResult.ToneMapSourceKind) {
+	if !nodepool.LocalTranscodeFallbackAllowed(r.Context(), h.SettingsRepo) {
+		return preparedTransportV3{}, false, nil
+	}
+	capabilities, capabilityErr := h.localToneMapCapabilitiesForTransportV3(r.Context())
+	if capabilityErr != nil {
+		return preparedTransportV3{}, true, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Local tone-map capability validation is temporarily unavailable.", retryable: true, cause: capabilityErr}
+	}
+	if capabilities.Supports(tonemap.ModeSoftware, fallbackResult.ToneMapSourceKind) {
 		fallback, fallbackErr := h.prepareLocalTransportV3(r, session, file, fallbackResult, timeline)
 		return fallback, true, fallbackErr
 	}
@@ -1509,7 +1616,10 @@ func (h *PlaybackHandler) softwareToneMapRetryOptsV3(ctx context.Context, opts p
 		!opts.ToneMapPolicy.Allows(tonemap.ModeSoftware) {
 		return opts, false
 	}
-	capabilities := h.localToneMapCapabilitiesV3(ctx)
+	capabilities, err := h.localToneMapCapabilitiesForTransportV3(ctx)
+	if err != nil {
+		return opts, false
+	}
 	if !capabilities.Supports(tonemap.ModeSoftware, opts.ToneMapSourceKind) {
 		return opts, false
 	}
@@ -1567,7 +1677,11 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 	opts.ToneMapDVBLPresent = sourceMetadata.ToneMapDVBLPresent
 	opts.ToneMapDVRPUPresent = sourceMetadata.ToneMapDVRPUPresent
 	if opts.ToneMapMode != "" {
-		capabilities := h.localToneMapCapabilitiesV3(r.Context())
+		capabilities, capabilityErr := h.localToneMapCapabilitiesForTransportV3(r.Context())
+		if capabilityErr != nil {
+			unlock()
+			return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Local tone-map capability validation is temporarily unavailable.", retryable: true, cause: capabilityErr}
+		}
 		opts.ToneMapFilter = capabilities.FilterFor(opts.ToneMapMode, opts.ToneMapSourceKind)
 		if opts.ToneMapMode == tonemap.ModeHardware {
 			opts.HWAccel = capabilities.BackendFor(opts.ToneMapMode, opts.ToneMapSourceKind)
@@ -2406,6 +2520,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 		}
 	}
 	var result playback.PlannerResultV3
+	var toneMapCapabilityErr error
 	if seekReanchor {
 		if err := h.validateFrozenSubtitleIdentityV3(r.Context(), effectiveFile, record.FrozenRecipe); err != nil {
 			return playback.DecisionResponseV3{}, *record, nil, subtitleArtifactErrorV3("The selected subtitle is no longer available at its frozen route.", err)
@@ -2420,7 +2535,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 			}
 		}
 	} else {
-		result = playback.PlanPlaybackV3(playback.PlannerInputV3{Request: start, RequestedFile: plannerRequestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: h.plannerSettingsV3(r.Context()), Registry: h.transformationRegistryV3(r.Context()), HLSRegistry: h.lazyHLSPlanningRegistryV3(r.Context()), HLSToneMapCapabilities: h.lazyHLSToneMapCapabilitiesV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AttemptedKeys: attemptedKeys, AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
+		result, toneMapCapabilityErr = h.planPlaybackWithCapabilitiesV3(r.Context(), playback.PlannerInputV3{Request: start, RequestedFile: plannerRequestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: h.plannerSettingsV3(r.Context()), Registry: h.transformationRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AttemptedKeys: attemptedKeys, AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
 	}
 	if outputChange && result.Terminal != nil && effectiveFile.ID != currentEffectiveFile.ID {
 		// Returning to the requested edition is speculative during an output
@@ -2434,7 +2549,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 		if err != nil {
 			return playback.DecisionResponseV3{}, *record, nil, &transportErrorV3{reason: "track_unavailable", message: err.Error()}
 		}
-		result = playback.PlanPlaybackV3(playback.PlannerInputV3{Request: start, RequestedFile: plannerRequestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: h.plannerSettingsV3(r.Context()), Registry: h.transformationRegistryV3(r.Context()), HLSRegistry: h.lazyHLSPlanningRegistryV3(r.Context()), HLSToneMapCapabilities: h.lazyHLSToneMapCapabilitiesV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AttemptedKeys: attemptedKeys, AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
+		result, toneMapCapabilityErr = h.planPlaybackWithCapabilitiesV3(r.Context(), playback.PlannerInputV3{Request: start, RequestedFile: plannerRequestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: h.plannerSettingsV3(r.Context()), Registry: h.transformationRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AttemptedKeys: attemptedKeys, AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
 	}
 	if terminalAllowsAlternateFileV3(result.Terminal) && replanAllowsAlternateFileV3(operation, start.QualityPreference) {
 		if alternate, alternateErr := h.findAlternateFile(r.Context(), requestedFile); alternateErr == nil && alternate != nil {
@@ -2445,7 +2560,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 				if err := preflightPlaybackFile(r.Context(), alternate, h.MissingMarker, h.EventsHub); err == nil {
 					effectiveFile = alternate
 					audioIndex = remappedAudio
-					result = playback.PlanPlaybackV3(playback.PlannerInputV3{Request: start, RequestedFile: plannerRequestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: h.plannerSettingsV3(r.Context()), Registry: h.transformationRegistryV3(r.Context()), HLSRegistry: h.lazyHLSPlanningRegistryV3(r.Context()), HLSToneMapCapabilities: h.lazyHLSToneMapCapabilitiesV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AttemptedKeys: attemptedKeys, AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
+					result, toneMapCapabilityErr = h.planPlaybackWithCapabilitiesV3(r.Context(), playback.PlannerInputV3{Request: start, RequestedFile: plannerRequestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: h.plannerSettingsV3(r.Context()), Registry: h.transformationRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AttemptedKeys: attemptedKeys, AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
 				}
 			} else if start.SubtitleTrackIndex != nil || start.SubtitleTrackID != "" {
 				result = playback.PlannerResultV3{Terminal: &playback.TerminalV3{
@@ -2456,6 +2571,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 			}
 		}
 	}
+	result = retryIncompleteToneMapPlanningV3(result, toneMapCapabilityErr)
 	h.clarifyOriginalQuality4KTerminalV3(r.Context(), result.Terminal, requestedFile, replanAlternateFilePinnedByOriginalQualityV3(operation, start.QualityPreference))
 	if result.Terminal != nil {
 		return playback.NewTerminalResponseV3(result.Terminal.Reason, result.Terminal.Message, result.Terminal.Retryable), *record, nil, nil

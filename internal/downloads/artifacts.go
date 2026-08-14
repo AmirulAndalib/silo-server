@@ -24,6 +24,7 @@ const (
 	artifactLease       = 2 * time.Minute
 	artifactHeartbeat   = 40 * time.Second
 	artifactMaxAttempts = 3
+	toneMapPlanTimeout  = 5 * time.Second
 )
 
 // PreparedArtifact describes either a local prepared file or an opaque artifact
@@ -105,7 +106,7 @@ type ArtifactManager struct {
 // toneMapCapabilityProvider exposes the pooled executor inventory and local
 // fallback policy needed before an artifact recipe can be frozen.
 type toneMapCapabilityProvider interface {
-	ToneMapCapabilities(context.Context) tonemap.Capabilities
+	ToneMapCapabilities(context.Context) (tonemap.Capabilities, error)
 	LocalFallbackAllowed(context.Context) bool
 }
 
@@ -368,16 +369,39 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 	}
 	capabilities := tonemap.Capabilities(nil)
 	provider, pooled := m.preparer.(toneMapCapabilityProvider)
-	if !pooled || provider.LocalFallbackAllowed(ctx) {
-		capabilities = m.localToneMapCapabilities(ctx)
+	probeCtx, cancelProbe := context.WithTimeout(ctx, toneMapPlanTimeout)
+	defer cancelProbe()
+	type capabilityResult struct {
+		capabilities tonemap.Capabilities
+		err          error
+	}
+	results := make(chan capabilityResult, 2)
+	resultCount := 0
+	if !pooled || provider.LocalFallbackAllowed(probeCtx) {
+		resultCount++
+		go func() {
+			local, probeErr := m.localToneMapCapabilities(probeCtx)
+			results <- capabilityResult{capabilities: local, err: probeErr}
+		}()
 	}
 	if pooled {
-		capabilities = append(capabilities, provider.ToneMapCapabilities(ctx)...)
+		resultCount++
+		go func() {
+			remote, probeErr := provider.ToneMapCapabilities(probeCtx)
+			results <- capabilityResult{capabilities: remote, err: probeErr}
+		}()
 	}
+	var capabilityErr error
+	for range resultCount {
+		result := <-results
+		capabilities = append(capabilities, result.capabilities...)
+		capabilityErr = errors.Join(capabilityErr, result.err)
+	}
+	capabilityErr = errors.Join(capabilityErr, probeCtx.Err())
 	mode := capabilities.PreferredMode(policy, kind)
 	if mode == "" {
-		if err := ctx.Err(); err != nil {
-			return target, err
+		if capabilityErr != nil {
+			return target, fmt.Errorf("tone-map capability probe unavailable: %w", capabilityErr)
 		}
 		return target, fmt.Errorf("no enabled validated tone-map executor is available: %w", ErrQualityUnavailable)
 	}
@@ -396,15 +420,18 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 
 // localToneMapCapabilities probes the live FFmpeg and hardware configuration
 // used by the API host's artifact worker.
-func (m *ArtifactManager) localToneMapCapabilities(ctx context.Context) tonemap.Capabilities {
+func (m *ArtifactManager) localToneMapCapabilities(ctx context.Context) (tonemap.Capabilities, error) {
 	if m == nil || m.liveCfg == nil {
-		return nil
+		return nil, nil
 	}
 	cfg := m.liveCfg()
 	if cfg == nil {
-		return nil
+		return nil, nil
 	}
-	backend := playback.ResolveHWAccelWithFFmpeg(cfg.Playback.HWAccel, cfg.Playback.FFmpegPath)
+	backend := playback.ResolveHWAccelWithFFmpegContext(ctx, cfg.Playback.HWAccel, cfg.Playback.FFmpegPath)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return tonemap.Probe(ctx, playback.ResolveFFmpegPath(cfg.Playback.FFmpegPath), backend, cfg.Playback.HWDevice)
 }
 

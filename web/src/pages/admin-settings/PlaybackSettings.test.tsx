@@ -123,7 +123,7 @@ describe("PlaybackSettings transcode tone mapping", () => {
     );
   });
 
-  it("preserves but disables hardware tone mapping when hardware acceleration is off", () => {
+  it("keeps hardware tone mapping configurable for remote executors when local acceleration is off", () => {
     useSettingsFormMock.mockReturnValue(
       makeForm({
         "playback.hw_accel": "none",
@@ -137,12 +137,18 @@ describe("PlaybackSettings transcode tone mapping", () => {
     );
 
     expect(toggle).toHaveAttribute("aria-checked", "true");
-    expect(toggle).toHaveAttribute("disabled");
+    expect(toggle).not.toHaveAttribute("disabled");
   });
 
-  it("disables hardware tone mapping when auto detection resolves to software", () => {
+  it("keeps hardware tone mapping configurable when one detected executor is software-only", () => {
     useHWAccelDetectionMock.mockReturnValue({
-      data: { resolved: "none" },
+      data: {
+        resolved: "none",
+        nodes: [
+          { node_url: "http://software-node", resolved: "none" },
+          { node_url: "http://gpu-node", resolved: "qsv" },
+        ],
+      },
       isLoading: false,
     });
     useSettingsFormMock.mockReturnValue(
@@ -158,6 +164,6 @@ describe("PlaybackSettings transcode tone mapping", () => {
     );
 
     expect(toggle).toHaveAttribute("aria-checked", "true");
-    expect(toggle).toHaveAttribute("disabled");
+    expect(toggle).not.toHaveAttribute("disabled");
   });
 });

@@ -696,8 +696,18 @@ func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
 		hwDevice = cfg.Playback.HWDevice
 	}
 	info := playback.DetectHWAccelWithFFmpegContext(resolveCtx, ffmpegPath)
-	info.ToneMapCapabilities = tonemap.Probe(resolveCtx, playback.ResolveFFmpegPath(ffmpegPath), hwAccel, hwDevice)
-	info.Transformations = playback.ProbeTransformationRegistryWithToneMapV3(resolveCtx, ffmpegPath, info.ToneMapCapabilities).Advertised()
+	capabilities, err := tonemap.Probe(resolveCtx, playback.ResolveFFmpegPath(ffmpegPath), hwAccel, hwDevice)
+	if err != nil {
+		http.Error(w, "capability probe unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	info.ToneMapCapabilities = capabilities
+	registry, err := playback.ProbeTransformationRegistryWithToneMapV3Result(resolveCtx, ffmpegPath, info.ToneMapCapabilities)
+	if err != nil {
+		http.Error(w, "capability probe unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	info.Transformations = registry.Advertised()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)
 }

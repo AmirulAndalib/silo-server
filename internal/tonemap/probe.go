@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -46,19 +47,19 @@ var probeCache = struct {
 
 // Probe returns the cached, smoke-tested tone-map capabilities for an FFmpeg
 // binary and hardware configuration.
-func Probe(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevice string) Capabilities {
+func Probe(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevice string) (Capabilities, error) {
 	return probeCached(ctx, ffmpegPath, hardwareBackend, hardwareDevice, runCommand, time.Now)
 }
 
 // probeCached coalesces identical probes without allowing one caller's
 // cancellation to abort the shared work needed by other playback requests.
-func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevice string, run CommandRunner, now func() time.Time) Capabilities {
+func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevice string, run CommandRunner, now func() time.Time) (Capabilities, error) {
 	key := probeCacheKey(ffmpegPath, hardwareBackend, hardwareDevice)
 	probeCache.Lock()
 	if cached, ok := probeCache.entries[key]; ok && probeCacheEntryCurrent(cached, now()) {
 		result := append(Capabilities(nil), cached.capabilities...)
 		probeCache.Unlock()
-		return result
+		return result, nil
 	}
 	probeCache.Unlock()
 
@@ -71,7 +72,10 @@ func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevic
 		}
 		probeCtx, cancel := context.WithTimeout(context.Background(), probeTotalTimeout(hardwareBackend, hardwareDevice))
 		defer cancel()
-		result := ProbeWithRunner(probeCtx, ffmpegPath, hardwareBackend, hardwareDevice, run)
+		result, err := probeWithRunner(probeCtx, ffmpegPath, hardwareBackend, hardwareDevice, run)
+		if err != nil {
+			return nil, err
+		}
 		entry := probeCacheEntry{capabilities: append(Capabilities(nil), result...)}
 		if len(result) == 0 {
 			entry.expiresAt = now().Add(probeNegativeTTL)
@@ -83,14 +87,43 @@ func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevic
 	})
 	select {
 	case <-ctx.Done():
-		return nil
+		return nil, ctx.Err()
 	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
 		capabilities, ok := result.Val.(Capabilities)
 		if !ok {
-			return nil
+			return nil, errors.New("invalid shared tone-map probe result")
 		}
-		return append(Capabilities(nil), capabilities...)
+		return append(Capabilities(nil), capabilities...), nil
 	}
+}
+
+// probeWithRunner preserves deadline and cancellation failures from any
+// bounded FFmpeg command. Ordinary FFmpeg failures still mean the executor is
+// genuinely unsupported and produce a completed empty inventory.
+func probeWithRunner(
+	ctx context.Context,
+	ffmpegPath, hardwareBackend, hardwareDevice string,
+	run CommandRunner,
+) (Capabilities, error) {
+	var transientErr error
+	trackingRunner := func(commandCtx context.Context, name string, args ...string) ([]byte, error) {
+		output, err := run(commandCtx, name, args...)
+		if commandErr := commandCtx.Err(); commandErr != nil {
+			transientErr = errors.Join(transientErr, commandErr)
+		} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			transientErr = errors.Join(transientErr, err)
+		}
+		return output, err
+	}
+	capabilities := ProbeWithRunner(ctx, ffmpegPath, hardwareBackend, hardwareDevice, trackingRunner)
+	transientErr = errors.Join(transientErr, ctx.Err())
+	if transientErr != nil {
+		return nil, transientErr
+	}
+	return capabilities, nil
 }
 
 // probeCacheKey binds reusable capabilities to the resolved FFmpeg binary and

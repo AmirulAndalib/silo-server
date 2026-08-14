@@ -151,6 +151,34 @@ func TestNewServerKeepsDefaultDownloadArtifactsInsideTranscodeVolume(t *testing.
 	}
 }
 
+func TestHandleHWCapabilitiesReturnsServiceUnavailableWhenProbeIsCanceled(t *testing.T) {
+	server := newTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodGet, "/hw-capabilities", nil).WithContext(ctx)
+	recorder := httptest.NewRecorder()
+
+	server.handleHWCapabilities(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusServiceUnavailable, recorder.Body.String())
+	}
+}
+
+func TestHandleHWCapabilitiesReturnsServiceUnavailableWhenDeadlineExpires(t *testing.T) {
+	server := newTestServer(t)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	request := httptest.NewRequest(http.MethodGet, "/hw-capabilities", nil).WithContext(ctx)
+	recorder := httptest.NewRecorder()
+
+	server.handleHWCapabilities(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusServiceUnavailable, recorder.Body.String())
+	}
+}
+
 func TestHandleStartRequireReadyRejectsExitedFFmpeg(t *testing.T) {
 	server := newTestServer(t)
 	ffmpegPath := filepath.Join(t.TempDir(), "failing-ffmpeg.sh")

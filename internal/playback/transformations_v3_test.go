@@ -2,10 +2,23 @@ package playback
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestProbeTransformationRegistryWithToneMapV3ResultPreservesDeadline(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	_, err := ProbeTransformationRegistryWithToneMapV3Result(ctx, "ffmpeg", nil)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("probe error = %v, want context deadline", err)
+	}
+}
 
 func TestH264EncoderAvailabilityAcceptsAnyPipelineEncoder(t *testing.T) {
 	cases := []struct {

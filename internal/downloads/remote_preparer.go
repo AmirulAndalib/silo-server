@@ -37,6 +37,7 @@ type NodeAwarePreparer struct {
 // slice with a short expiry represents a recent lookup failure.
 type remoteToneMapCapabilities struct {
 	capabilities tonemap.Capabilities
+	err          error
 	expiresAt    time.Time
 }
 
@@ -180,19 +181,21 @@ func (p *NodeAwarePreparer) PrepareFile(ctx context.Context, artifactID string, 
 // ToneMapCapabilities reports the validated executor union of enabled pooled
 // transcode nodes. Selection rechecks the same per-node records before
 // reserving work, so heterogeneous pools cannot receive an incompatible job.
-func (p *NodeAwarePreparer) ToneMapCapabilities(ctx context.Context) tonemap.Capabilities {
+func (p *NodeAwarePreparer) ToneMapCapabilities(ctx context.Context) (tonemap.Capabilities, error) {
 	result := tonemap.Capabilities{}
-	for _, capabilities := range p.toneMapCapabilitiesByNode(ctx) {
+	byNode, err := p.toneMapCapabilitiesByNode(ctx)
+	for _, capabilities := range byNode {
 		result = append(result, capabilities...)
 	}
-	return result
+	return result, err
 }
 
 // capableToneMapNodeURLs returns the normalized URLs of nodes that validated
 // the exact mode and source kind frozen in an artifact recipe.
 func (p *NodeAwarePreparer) capableToneMapNodeURLs(ctx context.Context, mode tonemap.Mode, kind tonemap.SourceKind) map[string]struct{} {
 	result := make(map[string]struct{})
-	for nodeURL, capabilities := range p.toneMapCapabilitiesByNode(ctx) {
+	byNode, _ := p.toneMapCapabilitiesByNode(ctx)
+	for nodeURL, capabilities := range byNode {
 		if capabilities.Supports(mode, kind) {
 			result[nodeURL] = struct{}{}
 		}
@@ -202,32 +205,37 @@ func (p *NodeAwarePreparer) capableToneMapNodeURLs(ctx context.Context, mode ton
 
 // toneMapCapabilitiesByNode fetches the enabled pool concurrently and keeps
 // each inventory attached to its node for safe heterogeneous selection.
-func (p *NodeAwarePreparer) toneMapCapabilitiesByNode(ctx context.Context) map[string]tonemap.Capabilities {
+func (p *NodeAwarePreparer) toneMapCapabilitiesByNode(ctx context.Context) (map[string]tonemap.Capabilities, error) {
 	enumerator, ok := p.planner.(transcodeNodeEnumerator)
 	if !ok {
-		return map[string]tonemap.Capabilities{}
+		return map[string]tonemap.Capabilities{}, nil
 	}
 	nodeURLs := enumerator.TranscodeNodeURLs()
-	results := make([]tonemap.Capabilities, len(nodeURLs))
+	results := make([]struct {
+		capabilities tonemap.Capabilities
+		err          error
+	}, len(nodeURLs))
 	var wg sync.WaitGroup
 	for i, nodeURL := range nodeURLs {
 		wg.Add(1)
 		go func(i int, nodeURL string) {
 			defer wg.Done()
-			capabilities, err := p.toneMapCapabilitiesForNode(ctx, nodeURL)
-			if err == nil {
-				results[i] = capabilities
-			}
+			results[i].capabilities, results[i].err = p.toneMapCapabilitiesForNode(ctx, nodeURL)
 		}(i, nodeURL)
 	}
 	wg.Wait()
 	byNode := make(map[string]tonemap.Capabilities, len(nodeURLs))
-	for i, capabilities := range results {
-		if capabilities != nil {
-			byNode[strings.TrimRight(nodeURLs[i], "/")] = capabilities
+	var resultErr error
+	for i, result := range results {
+		if result.err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("node %s: %w", nodeURLs[i], result.err))
+			continue
+		}
+		if result.capabilities != nil {
+			byNode[strings.TrimRight(nodeURLs[i], "/")] = result.capabilities
 		}
 	}
-	return byNode
+	return byNode, resultErr
 }
 
 // toneMapCapabilitiesForNode returns a defensive copy of a fresh cached
@@ -239,34 +247,36 @@ func (p *NodeAwarePreparer) toneMapCapabilitiesForNode(ctx context.Context, node
 	entry, ok := p.capabilities[nodeURL]
 	p.capabilityMu.Unlock()
 	if ok && now.Before(entry.expiresAt) {
-		return append(tonemap.Capabilities(nil), entry.capabilities...), nil
+		return append(tonemap.Capabilities(nil), entry.capabilities...), entry.err
 	}
 	cfg := p.config()
 	if cfg == nil || strings.TrimSpace(cfg.Auth.JWTSecret) == "" {
-		p.cacheToneMapCapabilityFailure(nodeURL)
-		return nil, errors.New("transcode node credentials unavailable")
+		err := errors.New("transcode node credentials unavailable")
+		p.cacheToneMapCapabilityFailure(nodeURL, err)
+		return nil, err
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, remoteToneMapCapabilityTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, nodeURL+"/hw-capabilities", nil)
 	if err != nil {
-		p.cacheToneMapCapabilityFailure(nodeURL)
+		p.cacheToneMapCapabilityFailure(nodeURL, err)
 		return nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.Auth.JWTSecret)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		p.cacheToneMapCapabilityFailure(nodeURL)
+		p.cacheToneMapCapabilityFailure(nodeURL, err)
 		return nil, err
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		p.cacheToneMapCapabilityFailure(nodeURL)
-		return nil, fmt.Errorf("transcode node returned %d", response.StatusCode)
+		err := fmt.Errorf("transcode node returned %d", response.StatusCode)
+		p.cacheToneMapCapabilityFailure(nodeURL, err)
+		return nil, err
 	}
 	var info playback.HWAccelInfo
 	if err := json.NewDecoder(response.Body).Decode(&info); err != nil {
-		p.cacheToneMapCapabilityFailure(nodeURL)
+		p.cacheToneMapCapabilityFailure(nodeURL, err)
 		return nil, err
 	}
 	entry = remoteToneMapCapabilities{capabilities: append(tonemap.Capabilities(nil), info.ToneMapCapabilities...), expiresAt: time.Now().Add(remoteToneMapCapabilityTTL)}
@@ -281,12 +291,12 @@ func (p *NodeAwarePreparer) toneMapCapabilitiesForNode(ctx context.Context, node
 
 // cacheToneMapCapabilityFailure negatively caches an unreachable or invalid
 // node briefly so repeated artifact planning does not amplify the failure.
-func (p *NodeAwarePreparer) cacheToneMapCapabilityFailure(nodeURL string) {
+func (p *NodeAwarePreparer) cacheToneMapCapabilityFailure(nodeURL string, err error) {
 	p.capabilityMu.Lock()
 	if p.capabilities == nil {
 		p.capabilities = make(map[string]remoteToneMapCapabilities)
 	}
-	p.capabilities[nodeURL] = remoteToneMapCapabilities{capabilities: tonemap.Capabilities{}, expiresAt: time.Now().Add(remoteToneMapCapabilityErrorTTL)}
+	p.capabilities[nodeURL] = remoteToneMapCapabilities{capabilities: tonemap.Capabilities{}, err: err, expiresAt: time.Now().Add(remoteToneMapCapabilityErrorTTL)}
 	p.capabilityMu.Unlock()
 }
 

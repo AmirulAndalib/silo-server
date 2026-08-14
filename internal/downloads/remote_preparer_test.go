@@ -306,8 +306,15 @@ func TestNodeAwarePreparerCollectsToneMapCapabilitiesConcurrently(t *testing.T) 
 	cfg := &config.Config{}
 	cfg.Auth.JWTSecret = "secret"
 	preparer := NewNodeAwarePreparer(nil, nodepool.NewPlanner(nodepool.NewProxyPool(), pool), func() *config.Config { return cfg })
-	result := make(chan tonemap.Capabilities, 1)
-	go func() { result <- preparer.ToneMapCapabilities(context.Background()) }()
+	type capabilityResult struct {
+		capabilities tonemap.Capabilities
+		err          error
+	}
+	result := make(chan capabilityResult, 1)
+	go func() {
+		capabilities, err := preparer.ToneMapCapabilities(context.Background())
+		result <- capabilityResult{capabilities: capabilities, err: err}
+	}()
 	select {
 	case <-bothStarted:
 		close(release)
@@ -315,8 +322,12 @@ func TestNodeAwarePreparerCollectsToneMapCapabilitiesConcurrently(t *testing.T) 
 		close(release)
 		t.Fatal("prepared-download node probes did not overlap")
 	}
-	if got := <-result; len(got) != 2 {
-		t.Fatalf("capabilities = %#v, want both nodes", got)
+	got := <-result
+	if got.err != nil {
+		t.Fatalf("capability inventory error = %v", got.err)
+	}
+	if len(got.capabilities) != 2 {
+		t.Fatalf("capabilities = %#v, want both nodes", got.capabilities)
 	}
 }
 
@@ -334,8 +345,8 @@ func TestNodeAwarePreparerCachesCapabilityFailuresBriefly(t *testing.T) {
 	if _, err := preparer.toneMapCapabilitiesForNode(context.Background(), remote.URL); err == nil {
 		t.Fatal("initial failed capability request returned no error")
 	}
-	if got, err := preparer.toneMapCapabilitiesForNode(context.Background(), remote.URL); err != nil || len(got) != 0 {
-		t.Fatalf("cached failure = %#v, %v", got, err)
+	if got, err := preparer.toneMapCapabilitiesForNode(context.Background(), remote.URL); err == nil || len(got) != 0 {
+		t.Fatalf("cached failure = %#v, %v; want the transient error preserved", got, err)
 	}
 	if hits.Load() != 1 {
 		t.Fatalf("requests = %d, want one during the failure TTL", hits.Load())

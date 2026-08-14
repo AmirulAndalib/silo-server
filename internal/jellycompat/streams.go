@@ -246,6 +246,10 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 			plan, planErr := h.planCompatTranscodeSession(r.Context(), upstreamSession, file, source.Version.Bitrate, !source.TranscodeAudio)
 			if planErr != nil {
 				failRemoteStart()
+				if errors.Is(planErr, errToneMapCapabilityUnavailable) {
+					writeError(w, http.StatusServiceUnavailable, "TranscodeUnavailable", planErr.Error())
+					return
+				}
 				writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", planErr.Error())
 				return
 			}
@@ -295,6 +299,10 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	// Ensure the transcode process is running.
 	manifest, err := h.ensureTranscodeManifest(r.Context(), session, playSession.ID, *source)
 	if err != nil {
+		if errors.Is(err, errToneMapCapabilityUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, "TranscodeUnavailable", err.Error())
+			return
+		}
 		if errors.Is(err, errTranscode4KDisallowed) {
 			writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
 			return
@@ -351,6 +359,10 @@ func (h *PlaybackHandler) HandleHLSManifest(w http.ResponseWriter, r *http.Reque
 	// Ensure the transcode process is running.
 	manifest, err := h.ensureTranscodeManifest(r.Context(), session, playSession.ID, *source)
 	if err != nil {
+		if errors.Is(err, errToneMapCapabilityUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, "TranscodeUnavailable", err.Error())
+			return
+		}
 		if errors.Is(err, errTranscode4KDisallowed) {
 			writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
 			return
@@ -1696,7 +1708,11 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 	if !source.TranscodeAudio {
 		metadata := tonemap.MetadataForFile(file)
 		if metadata.DynamicRange != "" && metadata.DynamicRange != playback.DynamicRangeSDRV3 {
-			toneMapCapabilities = h.localToneMapCapabilities(ctx)
+			var capabilityErr error
+			toneMapCapabilities, capabilityErr = h.localToneMapCapabilities(ctx)
+			if capabilityErr != nil {
+				return nil, fmt.Errorf("%w: %w", errToneMapCapabilityUnavailable, capabilityErr)
+			}
 		}
 		toneMapRecipe, toneMapErr := h.resolveCompatToneMapRecipe(ctx, file, toneMapCapabilities)
 		if toneMapErr != nil {

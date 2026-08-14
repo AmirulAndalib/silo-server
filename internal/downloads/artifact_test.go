@@ -213,6 +213,36 @@ func TestResolveToneMapTargetReturnsCancellationWhenExecutorInventoryIsEmpty(t *
 	}
 }
 
+type unavailableToneMapPreparer struct{}
+
+func (unavailableToneMapPreparer) PrepareFile(context.Context, string, playback.TranscodeOpts, string) (PreparedArtifact, error) {
+	return PreparedArtifact{}, nil
+}
+
+func (unavailableToneMapPreparer) ToneMapCapabilities(context.Context) (tonemap.Capabilities, error) {
+	return nil, context.DeadlineExceeded
+}
+
+func (unavailableToneMapPreparer) LocalFallbackAllowed(context.Context) bool { return false }
+
+func TestResolveToneMapTargetReturnsTransientCapabilityErrorBeforeFreezingRecipe(t *testing.T) {
+	manager := &ArtifactManager{
+		preparer: unavailableToneMapPreparer{},
+		settings: staticDownloadSettings{
+			config.Allow4KTranscodeSettingKey:                 "true",
+			config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+		},
+	}
+	target := playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"}
+	got, err := manager.resolveToneMapTarget(context.Background(), hdrDownloadTestFile(), target)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("resolveToneMapTarget() error = %v, want transient capability deadline", err)
+	}
+	if got != target {
+		t.Fatalf("target = %#v, want unfrozen %#v", got, target)
+	}
+}
+
 func hdrDownloadTestFile() *models.MediaFile {
 	return &models.MediaFile{
 		HDR: true,

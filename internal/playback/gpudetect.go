@@ -2,6 +2,7 @@ package playback
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/tonemap"
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -22,6 +24,7 @@ var (
 	sysClassDRMDir             = "/sys/class/drm"
 	currentGOOS                = runtime.GOOS
 	nvencProbeCommandTimeout   = 3 * time.Second
+	nvencProbeNegativeTTL      = 15 * time.Second
 )
 
 type nvencProbeResult struct {
@@ -29,11 +32,17 @@ type nvencProbeResult struct {
 	reason    string
 }
 
+type nvencProbeCacheEntry struct {
+	result    nvencProbeResult
+	expiresAt time.Time
+}
+
 var nvencProbeCache = struct {
 	sync.Mutex
-	byPath map[string]nvencProbeResult
+	byPath map[string]nvencProbeCacheEntry
+	group  singleflight.Group
 }{
-	byPath: make(map[string]nvencProbeResult),
+	byPath: make(map[string]nvencProbeCacheEntry),
 }
 
 // HWAccelInfo describes the detected hardware acceleration capability.
@@ -171,22 +180,75 @@ func ffmpegSupportsNVENC(ffmpegPath string) (bool, string) {
 }
 
 func ffmpegSupportsNVENCContext(ctx context.Context, ffmpegPath string) (bool, string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ffmpegPath = normalizeFFmpegPath(ffmpegPath)
+	cacheKey := nvencProbeCacheKey(ffmpegPath)
+	commandTimeout := nvencProbeCommandTimeout
+	negativeTTL := nvencProbeNegativeTTL
 	nvencProbeCache.Lock()
-	if result, ok := nvencProbeCache.byPath[ffmpegPath]; ok {
+	if entry, ok := nvencProbeCache.byPath[cacheKey]; ok && nvencProbeCacheEntryCurrent(entry, time.Now()) {
 		nvencProbeCache.Unlock()
-		return result.available, result.reason
+		return entry.result.available, entry.result.reason
 	}
 	nvencProbeCache.Unlock()
 
-	result := probeFFmpegNVENCContext(ctx, ffmpegPath)
-	if ctx != nil && ctx.Err() != nil {
+	resultCh := nvencProbeCache.group.DoChan(cacheKey, func() (any, error) {
+		nvencProbeCache.Lock()
+		cached, ok := nvencProbeCache.byPath[cacheKey]
+		nvencProbeCache.Unlock()
+		if ok && nvencProbeCacheEntryCurrent(cached, time.Now()) {
+			return cached.result, nil
+		}
+		probeCtx, cancel := context.WithTimeout(context.Background(), 4*commandTimeout+time.Second)
+		defer cancel()
+		result := probeFFmpegNVENCContext(probeCtx, ffmpegPath, commandTimeout)
+		entry := nvencProbeCacheEntry{result: result}
+		if !result.available {
+			entry.expiresAt = time.Now().Add(negativeTTL)
+		}
+		nvencProbeCache.Lock()
+		nvencProbeCache.byPath[cacheKey] = entry
+		nvencProbeCache.Unlock()
+		return result, nil
+	})
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err().Error()
+	case shared := <-resultCh:
+		if shared.Err != nil {
+			return false, shared.Err.Error()
+		}
+		result, ok := shared.Val.(nvencProbeResult)
+		if !ok {
+			return false, "invalid shared NVENC probe result"
+		}
 		return result.available, result.reason
 	}
-	nvencProbeCache.Lock()
-	nvencProbeCache.byPath[ffmpegPath] = result
-	nvencProbeCache.Unlock()
-	return result.available, result.reason
+}
+
+func nvencProbeCacheEntryCurrent(entry nvencProbeCacheEntry, now time.Time) bool {
+	return entry.result.available || now.Before(entry.expiresAt)
+}
+
+// nvencProbeCacheKey invalidates cached capability results when an FFmpeg
+// executable is replaced at the same configured path.
+func nvencProbeCacheKey(ffmpegPath string) string {
+	identityPath := ffmpegPath
+	if !strings.ContainsRune(identityPath, os.PathSeparator) {
+		if resolved, err := exec.LookPath(identityPath); err == nil {
+			identityPath = resolved
+		}
+	}
+	if absolute, err := filepath.Abs(identityPath); err == nil {
+		identityPath = absolute
+	}
+	info, err := os.Stat(identityPath)
+	if err != nil {
+		return ffmpegPath
+	}
+	return fmt.Sprintf("%s\x00%d\x00%d", identityPath, info.Size(), info.ModTime().UnixNano())
 }
 
 func normalizeFFmpegPath(ffmpegPath string) string {
@@ -200,14 +262,14 @@ func normalizeFFmpegPath(ffmpegPath string) string {
 	return ffmpegPath
 }
 
-func probeFFmpegNVENCContext(ctx context.Context, ffmpegPath string) nvencProbeResult {
-	if output, err := runFFmpegProbe(ctx, ffmpegPath, "-hide_banner", "-hwaccels"); err != nil {
+func probeFFmpegNVENCContext(ctx context.Context, ffmpegPath string, commandTimeout time.Duration) nvencProbeResult {
+	if output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath, "-hide_banner", "-hwaccels"); err != nil {
 		return nvencProbeResult{reason: "hwaccels probe failed: " + FormatFFmpegProbeFailure(err, output)}
 	} else if !ffmpegOutputHasToken(output, "cuda") {
 		return nvencProbeResult{reason: "cuda hwaccel unavailable"}
 	}
 
-	if output, err := runFFmpegProbe(ctx, ffmpegPath, "-hide_banner", "-encoders"); err != nil {
+	if output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath, "-hide_banner", "-encoders"); err != nil {
 		return nvencProbeResult{reason: "encoders probe failed: " + FormatFFmpegProbeFailure(err, output)}
 	} else if !ffmpegOutputHasToken(output, "h264_nvenc") {
 		return nvencProbeResult{reason: "h264_nvenc encoder unavailable"}
@@ -215,7 +277,7 @@ func probeFFmpegNVENCContext(ctx context.Context, ffmpegPath string) nvencProbeR
 		return nvencProbeResult{reason: "hevc_nvenc encoder unavailable"}
 	}
 
-	if output, err := runFFmpegProbe(ctx, ffmpegPath, "-hide_banner", "-filters"); err != nil {
+	if output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath, "-hide_banner", "-filters"); err != nil {
 		return nvencProbeResult{reason: "filters probe failed: " + FormatFFmpegProbeFailure(err, output)}
 	} else if !ffmpegOutputHasToken(output, "scale_cuda") {
 		return nvencProbeResult{reason: "scale_cuda filter unavailable"}
@@ -223,7 +285,7 @@ func probeFFmpegNVENCContext(ctx context.Context, ffmpegPath string) nvencProbeR
 		return nvencProbeResult{reason: "hwupload_cuda filter unavailable"}
 	}
 
-	if output, err := runFFmpegProbe(ctx, ffmpegPath,
+	if output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath,
 		"-hide_banner",
 		"-loglevel", "error",
 		"-f", "lavfi",
@@ -240,11 +302,11 @@ func probeFFmpegNVENCContext(ctx context.Context, ffmpegPath string) nvencProbeR
 	return nvencProbeResult{available: true}
 }
 
-func runFFmpegProbe(ctx context.Context, ffmpegPath string, args ...string) ([]byte, error) {
+func runFFmpegProbe(ctx context.Context, timeout time.Duration, ffmpegPath string, args ...string) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, nvencProbeCommandTimeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return exec.CommandContext(ctx, ffmpegPath, args...).CombinedOutput()
 }

@@ -62,7 +62,11 @@ func TestProbeEmptyCapabilitiesExpire(t *testing.T) {
 		return nil, errors.New("temporarily unavailable")
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		if got := probeCached(context.Background(), "/ffmpeg-empty", BackendSoftware, "", runner, func() time.Time { return now }); len(got) != 0 {
+		got, err := probeCached(context.Background(), "/ffmpeg-empty", BackendSoftware, "", runner, func() time.Time { return now })
+		if err != nil {
+			t.Fatalf("empty probe error = %v", err)
+		}
+		if len(got) != 0 {
 			t.Fatalf("empty probe = %#v", got)
 		}
 	}
@@ -70,9 +74,31 @@ func TestProbeEmptyCapabilitiesExpire(t *testing.T) {
 		t.Fatalf("listing calls = %d, want two from one cached empty probe", calls)
 	}
 	now = now.Add(probeNegativeTTL + time.Second)
-	_ = probeCached(context.Background(), "/ffmpeg-empty", BackendSoftware, "", runner, func() time.Time { return now })
+	_, _ = probeCached(context.Background(), "/ffmpeg-empty", BackendSoftware, "", runner, func() time.Time { return now })
 	if calls != 4 {
 		t.Fatalf("listing calls = %d, want a fresh probe after expiry", calls)
+	}
+}
+
+func TestProbeCommandDeadlineIsTransientAndNotCached(t *testing.T) {
+	resetProbeCache(t)
+	calls := 0
+	runner := func(context.Context, string, ...string) ([]byte, error) {
+		calls++
+		return nil, context.DeadlineExceeded
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		capabilities, err := probeCached(context.Background(), "/ffmpeg-timeout", BackendSoftware, "", runner, time.Now)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("probe error = %v, want context deadline", err)
+		}
+		if len(capabilities) != 0 {
+			t.Fatalf("timed-out probe capabilities = %#v", capabilities)
+		}
+	}
+	if calls != 4 {
+		t.Fatalf("timed-out listing calls = %d, want two fresh listing commands per attempt", calls)
 	}
 }
 
@@ -91,12 +117,20 @@ func TestProbeSuccessfulCapabilitiesDoNotExpire(t *testing.T) {
 		}
 		return nil, nil
 	}
-	if got := probeCached(context.Background(), "/ffmpeg-success", BackendSoftware, "", runner, func() time.Time { return now }); len(got) != 1 {
+	got, err := probeCached(context.Background(), "/ffmpeg-success", BackendSoftware, "", runner, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("successful probe error = %v", err)
+	}
+	if len(got) != 1 {
 		t.Fatalf("successful probe = %#v", got)
 	}
 	firstCalls := calls
 	now = now.Add(24 * time.Hour)
-	if got := probeCached(context.Background(), "/ffmpeg-success", BackendSoftware, "", runner, func() time.Time { return now }); len(got) != 1 {
+	got, err = probeCached(context.Background(), "/ffmpeg-success", BackendSoftware, "", runner, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("cached successful probe error = %v", err)
+	}
+	if len(got) != 1 {
 		t.Fatalf("cached successful probe = %#v", got)
 	}
 	if calls != firstCalls {
@@ -124,11 +158,19 @@ func TestProbeCacheInvalidatesWhenFFmpegBinaryChangesInPlace(t *testing.T) {
 		return nil, nil
 	}
 
-	if got := probeCached(context.Background(), ffmpegPath, BackendSoftware, "", runner, time.Now); len(got) != 1 {
+	got, err := probeCached(context.Background(), ffmpegPath, BackendSoftware, "", runner, time.Now)
+	if err != nil {
+		t.Fatalf("first probe error = %v", err)
+	}
+	if len(got) != 1 {
 		t.Fatalf("first probe = %#v", got)
 	}
 	firstCalls := calls
-	if got := probeCached(context.Background(), ffmpegPath, BackendSoftware, "", runner, time.Now); len(got) != 1 {
+	got, err = probeCached(context.Background(), ffmpegPath, BackendSoftware, "", runner, time.Now)
+	if err != nil {
+		t.Fatalf("cached probe error = %v", err)
+	}
+	if len(got) != 1 {
 		t.Fatalf("cached probe = %#v", got)
 	}
 	if calls != firstCalls {
@@ -138,7 +180,11 @@ func TestProbeCacheInvalidatesWhenFFmpegBinaryChangesInPlace(t *testing.T) {
 	if err := os.WriteFile(ffmpegPath, []byte("replacement-binary"), 0o755); err != nil {
 		t.Fatalf("replace FFmpeg binary: %v", err)
 	}
-	if got := probeCached(context.Background(), ffmpegPath, BackendSoftware, "", runner, time.Now); len(got) != 1 {
+	got, err = probeCached(context.Background(), ffmpegPath, BackendSoftware, "", runner, time.Now)
+	if err != nil {
+		t.Fatalf("probe after replacement error = %v", err)
+	}
+	if len(got) != 1 {
 		t.Fatalf("probe after replacement = %#v", got)
 	}
 	if calls == firstCalls {
@@ -166,24 +212,36 @@ func TestProbeCallerCancellationDoesNotCancelSharedProbe(t *testing.T) {
 		}
 	}
 	firstCtx, cancelFirst := context.WithCancel(context.Background())
-	first := make(chan Capabilities, 1)
+	type probeResult struct {
+		capabilities Capabilities
+		err          error
+	}
+	first := make(chan probeResult, 1)
 	go func() {
-		first <- probeCached(firstCtx, "/ffmpeg-shared", BackendSoftware, "", runner, time.Now)
+		capabilities, err := probeCached(firstCtx, "/ffmpeg-shared", BackendSoftware, "", runner, time.Now)
+		first <- probeResult{capabilities: capabilities, err: err}
 	}()
 	<-started
-	second := make(chan Capabilities, 1)
+	second := make(chan probeResult, 1)
 	go func() {
-		second <- probeCached(context.Background(), "/ffmpeg-shared", BackendSoftware, "", runner, time.Now)
+		capabilities, err := probeCached(context.Background(), "/ffmpeg-shared", BackendSoftware, "", runner, time.Now)
+		second <- probeResult{capabilities: capabilities, err: err}
 	}()
 	cancelFirst()
 	select {
-	case <-first:
+	case result := <-first:
+		if !errors.Is(result.err, context.Canceled) {
+			t.Fatalf("canceled caller error = %v, want context.Canceled", result.err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("canceled caller did not stop waiting")
 	}
 	close(release)
 	select {
-	case <-second:
+	case result := <-second:
+		if result.err != nil {
+			t.Fatalf("remaining caller error = %v", result.err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("remaining caller did not receive the shared probe result")
 	}
