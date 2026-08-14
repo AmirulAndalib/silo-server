@@ -156,11 +156,11 @@ describe("adminActivityPresentation", () => {
 
   it("reports only confirmed tone-map executors", () => {
     expect(formatToneMapSummary(makeSession({ tone_map_mode: "hardware" }))).toEqual({
-      badge: "Tone map HW",
+      badge: "HW Tone map",
       detail: "Hardware",
     });
     expect(formatToneMapSummary(makeSession({ tone_map_mode: "software" }))).toEqual({
-      badge: "Tone map SW",
+      badge: "SW Tone map",
       detail: "Software",
     });
     expect(formatToneMapSummary(makeSession())).toBeNull();
