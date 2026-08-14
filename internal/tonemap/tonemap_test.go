@@ -8,6 +8,7 @@ import (
 	"testing"
 )
 
+// TestSourceKindFor verifies dynamic-range and compatibility mappings.
 func TestSourceKindFor(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -36,6 +37,7 @@ func TestSourceKindFor(t *testing.T) {
 	}
 }
 
+// TestResolveSourceCoversDolbyVisionFallbackCompatibilityIDs verifies supported Dolby Vision bases are classified.
 func TestResolveSourceCoversDolbyVisionFallbackCompatibilityIDs(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -69,6 +71,7 @@ func TestResolveSourceCoversDolbyVisionFallbackCompatibilityIDs(t *testing.T) {
 	}
 }
 
+// TestResolveSourceRejectsDolbyOnlyAndPreflightsAmbiguousMetadata verifies unsafe signals are rejected or checked.
 func TestResolveSourceRejectsDolbyOnlyAndPreflightsAmbiguousMetadata(t *testing.T) {
 	base := SourceMetadata{
 		DynamicRange: DynamicRangeDolbyVision, DVProfile: 7, DVBLCompatID: 6,
@@ -104,6 +107,7 @@ func TestResolveSourceRejectsDolbyOnlyAndPreflightsAmbiguousMetadata(t *testing.
 	}
 }
 
+// TestPolicyKeepsHardwareAndSoftwareIndependent verifies each executor can be enabled separately.
 func TestPolicyKeepsHardwareAndSoftwareIndependent(t *testing.T) {
 	tests := []struct {
 		hardware bool
@@ -122,6 +126,7 @@ func TestPolicyKeepsHardwareAndSoftwareIndependent(t *testing.T) {
 	}
 }
 
+// TestProbeAdvertisesOnlySuccessfulSourceKinds verifies discovery reports only smoke-tested conversions.
 func TestProbeAdvertisesOnlySuccessfulSourceKinds(t *testing.T) {
 	runner := func(_ context.Context, _ string, args ...string) ([]byte, error) {
 		joined := strings.Join(args, " ")
@@ -148,6 +153,7 @@ func TestProbeAdvertisesOnlySuccessfulSourceKinds(t *testing.T) {
 	}
 }
 
+// TestProbeValidatesEveryConfiguredHardwareDevice verifies pooled devices share only common capabilities.
 func TestProbeValidatesEveryConfiguredHardwareDevice(t *testing.T) {
 	seenSecondDevice := false
 	runner := func(_ context.Context, _ string, args ...string) ([]byte, error) {
@@ -177,6 +183,7 @@ func TestProbeValidatesEveryConfiguredHardwareDevice(t *testing.T) {
 	}
 }
 
+// TestFiltersDeclareBT709Output verifies tone-map graphs explicitly produce SDR color metadata.
 func TestFiltersDeclareBT709Output(t *testing.T) {
 	for name, filter := range map[string]string{
 		"software pq":  SoftwareFilter(SourcePQ, "tonemapx"),

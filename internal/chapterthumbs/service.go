@@ -1133,6 +1133,7 @@ func isChapterEligible(chapter models.MediaChapter, now time.Time) bool {
 	return true
 }
 
+// needsTonemap reports whether thumbnail extraction must convert HDR to SDR.
 func needsTonemap(file *models.MediaFile) bool {
 	return tonemap.NeedsToneMap(file)
 }

@@ -481,6 +481,7 @@ func (s *Server) Handler() http.Handler {
 	return r
 }
 
+// handleDownloadPrepare validates and starts a prepared-download job.
 func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 	var req downloadprepare.Request
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
@@ -673,6 +674,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+// handleHWCapabilities reports live smoke-tested node capabilities.
 func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
 	ffmpegPath := ""
 	hwAccel := playback.HWAccelNone
@@ -753,6 +755,7 @@ func (s *Server) requireBearer(next http.Handler) http.Handler {
 	})
 }
 
+// handleStart validates and starts a remote HLS transcode.
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	var req TranscodeStartRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

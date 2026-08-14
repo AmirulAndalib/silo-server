@@ -1629,6 +1629,7 @@ func (h *PlaybackHandler) ensureTranscodeManifest(ctx context.Context, compatSes
 	}
 }
 
+// ensureTranscodeSession returns, reconstructs, or starts the requested transcode.
 func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessionID, upstreamSessionID string, source PlaybackMediaSource) (*playback.TranscodeSession, error) {
 	if existing := h.tm.GetTranscodeSession(upstreamSessionID); existing != nil {
 		return existing, nil

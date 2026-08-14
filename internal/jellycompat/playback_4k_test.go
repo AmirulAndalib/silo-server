@@ -138,6 +138,7 @@ func TestBuildPlaybackSource4KVideoTranscodeGate(t *testing.T) {
 	}
 }
 
+// TestApplyCompatToneMapAvailability verifies compatibility sources reflect executor availability.
 func TestApplyCompatToneMapAvailability(t *testing.T) {
 	hdrVersion := catalog.FileVersion{
 		FileID: 1,
@@ -193,6 +194,7 @@ func TestApplyCompatToneMapAvailability(t *testing.T) {
 	}
 }
 
+// TestApplyCompatToneMapAvailabilityAcceptsProfile7ID6Fallback verifies the compatible Dolby Vision base is accepted.
 func TestApplyCompatToneMapAvailabilityAcceptsProfile7ID6Fallback(t *testing.T) {
 	h := &PlaybackHandler{SettingsRepo: stubSettingsReader{values: map[string]string{
 		config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
@@ -212,6 +214,7 @@ func TestApplyCompatToneMapAvailabilityAcceptsProfile7ID6Fallback(t *testing.T) 
 	}
 }
 
+// TestDowngradeToSoftwareToneMap verifies hardware recipes can safely fall back to software.
 func TestDowngradeToSoftwareToneMap(t *testing.T) {
 	mode := tonemap.ModeHardware
 	filter := tonemap.HardwareFilterVAAPI

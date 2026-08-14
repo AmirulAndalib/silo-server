@@ -40,6 +40,7 @@ func TestProbePipelinePreservesVideoColorRange(t *testing.T) {
 	}
 }
 
+// TestProbePipelinePreservesJellyfinFFprobeDolbyVisionPresenceFlags verifies explicit side-data flags survive probing.
 func TestProbePipelinePreservesJellyfinFFprobeDolbyVisionPresenceFlags(t *testing.T) {
 	rawJSON := `{"streams":[{"codec_type":"video","codec_name":"hevc","color_range":"tv","color_space":"bt2020nc","color_transfer":"smpte2084","color_primaries":"bt2020","side_data_list":[{"side_data_type":"DOVI configuration record","dv_profile":7,"dv_level":6,"rpu_present_flag":1,"el_present_flag":1,"bl_present_flag":1,"dv_bl_signal_compatibility_id":6}]}]}`
 	var raw ffprobeOutput
@@ -58,6 +59,7 @@ func TestProbePipelinePreservesJellyfinFFprobeDolbyVisionPresenceFlags(t *testin
 	}
 }
 
+// TestProbePipelineDistinguishesMissingAndExplicitZeroCompatibilityID verifies absent and zero values remain distinct.
 func TestProbePipelineDistinguishesMissingAndExplicitZeroCompatibilityID(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -82,6 +84,7 @@ func TestProbePipelineDistinguishesMissingAndExplicitZeroCompatibilityID(t *test
 	}
 }
 
+// TestConvertProbeDataVideoRangeTypes verifies FFprobe dynamic-range fields map into catalog tracks.
 func TestConvertProbeDataVideoRangeTypes(t *testing.T) {
 	tests := []struct {
 		name          string

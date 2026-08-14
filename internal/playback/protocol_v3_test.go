@@ -1075,6 +1075,7 @@ func TestPlanPlaybackV3NeverClaimsUnimplementedHDRTranscode(t *testing.T) {
 	}
 }
 
+// TestPlanPlaybackV3ToneMapSettingsSelectValidatedExecutor verifies planning honors validated executor policy.
 func TestPlanPlaybackV3ToneMapSettingsSelectValidatedExecutor(t *testing.T) {
 	file := detailedFixtureFileV3()
 	file.VideoTracks[0].ColorPrimaries = "bt2020"
@@ -1134,6 +1135,7 @@ func TestPlanPlaybackV3ToneMapSettingsSelectValidatedExecutor(t *testing.T) {
 	}
 }
 
+// TestPlanPlaybackV3RejectsDolbyOnlyAndFreezesAmbiguousFallbacks verifies unsafe or uncertain sources are handled explicitly.
 func TestPlanPlaybackV3RejectsDolbyOnlyAndFreezesAmbiguousFallbacks(t *testing.T) {
 	registry := NewTransformationRegistryV3([]TransformationSpecV3{
 		{Name: TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
@@ -2121,6 +2123,7 @@ func TestAvailableQualitiesV3UnknownSourceHeightPublishesNoFixedRungs(t *testing
 	}
 }
 
+// TestAvailableQualitiesV3KeepsDirectHDRPlanningCapabilityLazy verifies direct HDR playback avoids unnecessary probing.
 func TestAvailableQualitiesV3KeepsDirectHDRPlanningCapabilityLazy(t *testing.T) {
 	capabilityCalls := 0
 	input := PlannerInputV3{

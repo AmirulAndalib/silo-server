@@ -43,6 +43,7 @@ func TestHTTPPreparerSendsAuthenticatedRecipe(t *testing.T) {
 	}
 }
 
+// TestRequestRoundTripPreservesFrozenToneMapRecipe verifies remote requests retain executor facts.
 func TestRequestRoundTripPreservesFrozenToneMapRecipe(t *testing.T) {
 	revision := tonemap.SourceRevision{MediaFileID: 42, FileSize: 100, FileModifiedUnixNano: 200, StreamSignature: "stream"}
 	want := playback.TranscodeOpts{
@@ -68,6 +69,7 @@ func TestRequestRoundTripPreservesFrozenToneMapRecipe(t *testing.T) {
 	}
 }
 
+// TestRequestRoundTripTreatsNonePolicyAsOrdinaryTranscode verifies non-tone-map requests remain compatible.
 func TestRequestRoundTripTreatsNonePolicyAsOrdinaryTranscode(t *testing.T) {
 	request := NewRequest("artifact-1", playback.TranscodeOpts{
 		InputPath: "/media/sdr.mkv", ToneMapPolicy: tonemap.PolicyNone,

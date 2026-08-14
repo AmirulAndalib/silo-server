@@ -13,6 +13,7 @@ import (
 	"time"
 )
 
+// TestValidateSourceCachesPositiveAndNegativeVerdicts verifies both verdict classes are reused appropriately.
 func TestValidateSourceCachesPositiveAndNegativeVerdicts(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -42,6 +43,7 @@ func TestValidateSourceCachesPositiveAndNegativeVerdicts(t *testing.T) {
 	}
 }
 
+// TestValidateSourceCacheInvalidatesExecutorAndSourceFacts verifies cache keys bind every frozen input.
 func TestValidateSourceCacheInvalidatesExecutorAndSourceFacts(t *testing.T) {
 	resetSourcePreflightCache(t)
 	request := sourcePreflightTestRequest(t)
@@ -90,6 +92,7 @@ func TestValidateSourceCacheInvalidatesExecutorAndSourceFacts(t *testing.T) {
 	validate("stream signature", request)
 }
 
+// TestValidateSourceRetriesExpiredNegativeVerdict verifies transient failures are retried.
 func TestValidateSourceRetriesExpiredNegativeVerdict(t *testing.T) {
 	resetSourcePreflightCache(t)
 	request := sourcePreflightTestRequest(t)
@@ -117,6 +120,7 @@ func TestValidateSourceRetriesExpiredNegativeVerdict(t *testing.T) {
 	}
 }
 
+// TestSourcePreflightTimeoutCoversAllBoundedCommands verifies the shared deadline covers the command matrix.
 func TestSourcePreflightTimeoutCoversAllBoundedCommands(t *testing.T) {
 	want := 10*probeCommandTimeout + sourcePreflightTimeoutSlack
 	if got := sourcePreflightTotalTimeout(100); got != want {
@@ -128,6 +132,7 @@ func TestSourcePreflightTimeoutCoversAllBoundedCommands(t *testing.T) {
 	}
 }
 
+// TestFFmpegVersionCacheInvalidatesOnBinaryModification verifies executable changes refresh version facts.
 func TestFFmpegVersionCacheInvalidatesOnBinaryModification(t *testing.T) {
 	resetSourcePreflightCache(t)
 	ffmpegPath := filepath.Join(t.TempDir(), "ffmpeg")
@@ -163,6 +168,7 @@ func TestFFmpegVersionCacheInvalidatesOnBinaryModification(t *testing.T) {
 	}
 }
 
+// TestFFmpegVersionSharedLookupSurvivesFirstCallerCancellation verifies one canceled caller cannot abort shared work.
 func TestFFmpegVersionSharedLookupSurvivesFirstCallerCancellation(t *testing.T) {
 	resetSourcePreflightCache(t)
 	ffmpegPath := filepath.Join(t.TempDir(), "ffmpeg")
@@ -237,6 +243,7 @@ func TestFFmpegVersionSharedLookupSurvivesFirstCallerCancellation(t *testing.T) 
 	}
 }
 
+// TestFFmpegVersionCacheDoesNotStoreEmptyOrFailedLookups verifies unusable version results remain retryable.
 func TestFFmpegVersionCacheDoesNotStoreEmptyOrFailedLookups(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -268,6 +275,7 @@ func TestFFmpegVersionCacheDoesNotStoreEmptyOrFailedLookups(t *testing.T) {
 	}
 }
 
+// TestSourcePreflightSharedExecutionSurvivesFirstCallerCancellation verifies shared validation outlives one request.
 func TestSourcePreflightSharedExecutionSurvivesFirstCallerCancellation(t *testing.T) {
 	resetSourcePreflightCache(t)
 	request := sourcePreflightTestRequest(t)
@@ -345,6 +353,7 @@ func TestSourcePreflightSharedExecutionSurvivesFirstCallerCancellation(t *testin
 	}
 }
 
+// TestValidateSourceDoesNotCacheWithoutStableRevision verifies mutable sources are always rechecked.
 func TestValidateSourceDoesNotCacheWithoutStableRevision(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -373,6 +382,7 @@ func TestValidateSourceDoesNotCacheWithoutStableRevision(t *testing.T) {
 	}
 }
 
+// TestValidateSourceChecksEverySampleOutput verifies every representative conversion is inspected.
 func TestValidateSourceChecksEverySampleOutput(t *testing.T) {
 	resetSourcePreflightCache(t)
 	request := sourcePreflightTestRequest(t)
@@ -405,6 +415,7 @@ func TestValidateSourceChecksEverySampleOutput(t *testing.T) {
 	}
 }
 
+// TestSourcePreflightPositionsCoverBeginningMiddleAndEnd verifies representative sampling coverage.
 func TestSourcePreflightPositionsCoverBeginningMiddleAndEnd(t *testing.T) {
 	want := []float64{0, 50, 90}
 	got := sourcePreflightPositions(100)
@@ -413,6 +424,7 @@ func TestSourcePreflightPositionsCoverBeginningMiddleAndEnd(t *testing.T) {
 	}
 }
 
+// TestSourceConversionPreflightFilterMapsQSVFramesOnce verifies the QSV interop graph has one mapping step.
 func TestSourceConversionPreflightFilterMapsQSVFramesOnce(t *testing.T) {
 	filter := sourceConversionPreflightFilter(SourcePreflightRequest{
 		Mode: ModeHardware, Backend: BackendQSV, Kind: SourcePQ,
@@ -425,6 +437,7 @@ func TestSourceConversionPreflightFilterMapsQSVFramesOnce(t *testing.T) {
 	}
 }
 
+// TestSourceConversionPreflightUsesSiloQSVDriverSelection verifies QSV initialization matches runtime selection.
 func TestSourceConversionPreflightUsesSiloQSVDriverSelection(t *testing.T) {
 	args := sourceConversionPreflightArgs(SourcePreflightRequest{
 		Mode: ModeHardware, Backend: BackendQSV, Kind: SourcePQ, HardwareDevice: "/dev/dri/renderD129",
@@ -435,6 +448,7 @@ func TestSourceConversionPreflightUsesSiloQSVDriverSelection(t *testing.T) {
 	}
 }
 
+// TestSourceConversionPreflightOnlyRequestsSoftwareColorspaceConversion verifies hardware graphs avoid an invalid conversion.
 func TestSourceConversionPreflightOnlyRequestsSoftwareColorspaceConversion(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -459,6 +473,7 @@ func TestSourceConversionPreflightOnlyRequestsSoftwareColorspaceConversion(t *te
 	}
 }
 
+// sourcePreflightTestRequest returns a stable request fixture.
 func sourcePreflightTestRequest(t *testing.T) SourcePreflightRequest {
 	t.Helper()
 	dir := t.TempDir()
@@ -485,6 +500,7 @@ func sourcePreflightTestRequest(t *testing.T) SourcePreflightRequest {
 	}
 }
 
+// sourcePreflightTestRunner returns a deterministic injectable command runner.
 func sourcePreflightTestRunner(conversions *int, version func() string, conversionErr error) CommandRunner {
 	return func(_ context.Context, name string, args ...string) ([]byte, error) {
 		joined := strings.Join(args, " ")
@@ -502,6 +518,7 @@ func sourcePreflightTestRunner(conversions *int, version func() string, conversi
 	}
 }
 
+// resetSourcePreflightCache clears shared preflight state between tests.
 func resetSourcePreflightCache(t *testing.T) {
 	t.Helper()
 	sourcePreflightCache.Lock()

@@ -3640,6 +3640,7 @@ func identityEvidenceEqual(existing, expected []byte) bool {
 	return reflect.DeepEqual(existingValue, expectedValue)
 }
 
+// applyProbeData copies normalized probe facts onto a media file.
 func applyProbeData(mf *models.MediaFile, probe *ProbeData, probeSource string) {
 	mf.CodecVideo = probe.CodecVideo
 	mf.CodecAudio = probe.CodecAudio

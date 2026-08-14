@@ -62,6 +62,7 @@ type artifactOriginLookup interface {
 	GetByID(ctx context.Context, id int) (*nodepool.Node, error)
 }
 
+// NewNodeAwarePreparer creates a preparer that can select local or pooled execution.
 func NewNodeAwarePreparer(local EncodePreparer, planner nodepool.TranscodeWorkPlanner, liveCfg func() *config.Config) *NodeAwarePreparer {
 	if local == nil {
 		local = playbackPreparer{}
@@ -110,6 +111,7 @@ func (p *NodeAwarePreparer) prepareLocally(ctx context.Context, artifactID strin
 	return p.local.PrepareFile(ctx, artifactID, opts, outputPath)
 }
 
+// PrepareFile routes an artifact job to a compatible node or allowed local fallback.
 func (p *NodeAwarePreparer) PrepareFile(ctx context.Context, artifactID string, opts playback.TranscodeOpts, outputPath string) (PreparedArtifact, error) {
 	cfg := p.config()
 	jwtSecret := ""

@@ -2351,6 +2351,7 @@ func TestPrepareTransportV3RejectsNodeMissingRequiredTransformation(t *testing.T
 	}
 }
 
+// TestPrepareTransportV3RequiresRemoteManifestReadiness verifies remote startup waits for playable output.
 func TestPrepareTransportV3RequiresRemoteManifestReadiness(t *testing.T) {
 	var startRequest transcodenode.TranscodeStartRequest
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

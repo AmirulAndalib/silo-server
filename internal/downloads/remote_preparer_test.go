@@ -29,6 +29,7 @@ func (p *recordingEncodePreparer) PrepareFile(_ context.Context, _ string, _ pla
 
 type staticDownloadSettings map[string]string
 
+// GetAll returns the fixed settings used by a preparer test.
 func (s staticDownloadSettings) GetAll(context.Context) (map[string]string, error) {
 	return s, nil
 }
@@ -220,6 +221,7 @@ func TestNodeAwarePreparerFallsBackLocallyWithoutEligibleCapacity(t *testing.T) 
 	}
 }
 
+// TestNodeAwarePreparerHonorsDisabledLocalFallback verifies policy can forbid local retry.
 func TestNodeAwarePreparerHonorsDisabledLocalFallback(t *testing.T) {
 	limit := 1
 	pool := nodepool.NewTranscodePool()
@@ -238,6 +240,7 @@ func TestNodeAwarePreparerHonorsDisabledLocalFallback(t *testing.T) {
 	}
 }
 
+// TestNodeAwarePreparerCollectsToneMapCapabilitiesConcurrently verifies node discovery overlaps.
 func TestNodeAwarePreparerCollectsToneMapCapabilitiesConcurrently(t *testing.T) {
 	var active atomic.Int32
 	var once sync.Once
@@ -279,6 +282,7 @@ func TestNodeAwarePreparerCollectsToneMapCapabilitiesConcurrently(t *testing.T) 
 	}
 }
 
+// TestNodeAwarePreparerCachesCapabilityFailuresBriefly verifies transient failures use a bounded cache.
 func TestNodeAwarePreparerCachesCapabilityFailuresBriefly(t *testing.T) {
 	var hits atomic.Int32
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

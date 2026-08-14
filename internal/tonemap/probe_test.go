@@ -3,11 +3,14 @@ package tonemap
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
+// TestProbeTotalTimeoutCoversBoundedCommandMatrix verifies the deadline covers every possible probe command.
 func TestProbeTotalTimeoutCoversBoundedCommandMatrix(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -29,6 +32,7 @@ func TestProbeTotalTimeoutCoversBoundedCommandMatrix(t *testing.T) {
 	}
 }
 
+// TestProbeEmptyCapabilitiesExpire verifies failed discovery is retried after a short interval.
 func TestProbeEmptyCapabilitiesExpire(t *testing.T) {
 	resetProbeCache(t)
 	now := time.Unix(100, 0)
@@ -52,6 +56,7 @@ func TestProbeEmptyCapabilitiesExpire(t *testing.T) {
 	}
 }
 
+// TestProbeSuccessfulCapabilitiesDoNotExpire verifies unchanged positive discovery remains cached.
 func TestProbeSuccessfulCapabilitiesDoNotExpire(t *testing.T) {
 	resetProbeCache(t)
 	now := time.Unix(100, 0)
@@ -79,6 +84,49 @@ func TestProbeSuccessfulCapabilitiesDoNotExpire(t *testing.T) {
 	}
 }
 
+// TestProbeCacheInvalidatesWhenFFmpegBinaryChangesInPlace verifies that a
+// positive result is rechecked after the configured executable is replaced.
+func TestProbeCacheInvalidatesWhenFFmpegBinaryChangesInPlace(t *testing.T) {
+	resetProbeCache(t)
+	ffmpegPath := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(ffmpegPath, []byte("first"), 0o755); err != nil {
+		t.Fatalf("write first FFmpeg binary: %v", err)
+	}
+	calls := 0
+	runner := func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		calls++
+		if len(args) > 0 && args[len(args)-1] == "-filters" {
+			return []byte(" .S. zscale V->V\n .S. tonemapx V->V\n .S. sidedata V->V\n"), nil
+		}
+		if len(args) > 0 && args[len(args)-1] == "-encoders" {
+			return []byte("libx264"), nil
+		}
+		return nil, nil
+	}
+
+	if got := probeCached(context.Background(), ffmpegPath, BackendSoftware, "", runner, time.Now); len(got) != 1 {
+		t.Fatalf("first probe = %#v", got)
+	}
+	firstCalls := calls
+	if got := probeCached(context.Background(), ffmpegPath, BackendSoftware, "", runner, time.Now); len(got) != 1 {
+		t.Fatalf("cached probe = %#v", got)
+	}
+	if calls != firstCalls {
+		t.Fatalf("unchanged binary reran probe: calls = %d, want %d", calls, firstCalls)
+	}
+
+	if err := os.WriteFile(ffmpegPath, []byte("replacement-binary"), 0o755); err != nil {
+		t.Fatalf("replace FFmpeg binary: %v", err)
+	}
+	if got := probeCached(context.Background(), ffmpegPath, BackendSoftware, "", runner, time.Now); len(got) != 1 {
+		t.Fatalf("probe after replacement = %#v", got)
+	}
+	if calls == firstCalls {
+		t.Fatal("replaced FFmpeg binary reused stale positive capabilities")
+	}
+}
+
+// TestProbeCallerCancellationDoesNotCancelSharedProbe verifies one request cannot abort shared discovery.
 func TestProbeCallerCancellationDoesNotCancelSharedProbe(t *testing.T) {
 	resetProbeCache(t)
 	started := make(chan struct{})
@@ -124,6 +172,7 @@ func TestProbeCallerCancellationDoesNotCancelSharedProbe(t *testing.T) {
 	}
 }
 
+// resetProbeCache clears shared probe state between tests.
 func resetProbeCache(t *testing.T) {
 	t.Helper()
 	probeCache.Lock()

@@ -150,23 +150,11 @@ func (h *PlaybackHandler) localToneMapCapabilitiesV3(ctx context.Context) tonema
 	ffmpegPath := playback.ResolveFFmpegPath(cfg.FFmpegPath)
 	resolved := playback.ResolveHWAccelWithFFmpeg(cfg.HWAccel, cfg.FFmpegPath)
 	hwDevice := strings.TrimSpace(cfg.HWDevice)
-	fingerprint := strings.Join([]string{ffmpegPath, resolved, hwDevice}, "\x00")
-
-	h.v3ToneMapMu.Lock()
-	defer h.v3ToneMapMu.Unlock()
-	if h.v3ToneMapFingerprint == fingerprint && len(h.v3ToneMapCapabilities) > 0 {
-		return append(tonemap.Capabilities(nil), h.v3ToneMapCapabilities...)
-	}
 	probe := tonemap.Probe
 	if h.v3ToneMapProbe != nil {
 		probe = h.v3ToneMapProbe
 	}
-	capabilities := probe(ctx, ffmpegPath, resolved, hwDevice)
-	if ctx.Err() == nil && len(capabilities) > 0 {
-		h.v3ToneMapFingerprint = fingerprint
-		h.v3ToneMapCapabilities = append(tonemap.Capabilities(nil), capabilities...)
-	}
-	return append(tonemap.Capabilities(nil), capabilities...)
+	return append(tonemap.Capabilities(nil), probe(ctx, ffmpegPath, resolved, hwDevice)...)
 }
 
 // remoteTransformationsV3 is the transport-time capability lookup for a
@@ -185,6 +173,7 @@ func (h *PlaybackHandler) remoteTransformationsPlanningV3(ctx context.Context, n
 	return h.lookupRemoteTransformationsV3(ctx, nodeURL, true)
 }
 
+// lookupRemoteTransformationsV3 returns a node's cached or freshly fetched transformation inventory.
 func (h *PlaybackHandler) lookupRemoteTransformationsV3(ctx context.Context, nodeURL string, honorCachedFailure bool) ([]playback.TransformationV3, error) {
 	entry, err := h.lookupRemoteCapabilitiesV3(ctx, nodeURL, honorCachedFailure)
 	if err != nil {
@@ -529,6 +518,7 @@ func (h *PlaybackHandler) HandlePlaybackCapabilityV3(w http.ResponseWriter, r *h
 	writeJSON(w, http.StatusOK, response)
 }
 
+// handleStartPlaybackV3 validates, plans, and starts a protocol-v3 request.
 func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.Request, body []byte) {
 	var req playback.StartRequestV3
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -735,6 +725,7 @@ func (d playbackStartRequestDigestsV3) matches(stored string) bool {
 	return stored == "" || stored == d.current || stored == d.legacy
 }
 
+// startPlannedPlaybackV3 creates a session and transport for an accepted plan.
 func (h *PlaybackHandler) startPlannedPlaybackV3(r *http.Request, userID int, profileID string, req playback.StartRequestV3, requestDigests playbackStartRequestDigestsV3, requestedFile, effectiveFile *models.MediaFile, audioIndex int, result playback.PlannerResultV3) (playback.DecisionResponseV3, *transportErrorV3) {
 	if result.Plan == nil {
 		return playback.DecisionResponseV3{}, &transportErrorV3{reason: "internal_error", message: "The server produced no playback plan."}
@@ -871,6 +862,7 @@ func (h *PlaybackHandler) persistSeriesSelectionsV3(ctx context.Context, userID 
 	h.persistAudioPreference(ctx, userID, profileID, file, audioTrackIndex)
 }
 
+// prepareTransportV3 selects and prepares the local, remote, or identity transport.
 func (h *PlaybackHandler) prepareTransportV3(r *http.Request, session *playback.Session, file *models.MediaFile, result playback.PlannerResultV3) (preparedTransportV3, *transportErrorV3) {
 	timeline, timelineErr := h.prepareTransportTimelineV3(r.Context(), session, file, result)
 	if timelineErr != nil {
@@ -1390,6 +1382,7 @@ func appendPlaybackQueryV3(rawURL, key, value string) string {
 	return rawURL + separator + key + "=" + value
 }
 
+// prepareLocalTransportV3 starts a local HLS generation for the selected plan.
 func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *playback.Session, file *models.MediaFile, result playback.PlannerResultV3, timeline preparedTimelineV3) (preparedTransportV3, *transportErrorV3) {
 	cfg := h.playbackConfig()
 	if err := os.MkdirAll(cfg.TranscodeDir, 0o755); err != nil {
@@ -1554,6 +1547,7 @@ func manifestStartupTransportErrorV3(running bool, cause error) *transportErrorV
 	return &transportErrorV3{reason: transcodeStartFailedReasonV3, message: message, retryable: running, cause: cause}
 }
 
+// prepareRemoteTransportV3 starts an HLS generation on the selected transcode node.
 func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *playback.Session, file *models.MediaFile, result playback.PlannerResultV3, nodePlan nodepool.Plan, timeline preparedTimelineV3) (preparedTransportV3, *transportErrorV3) {
 	node := nodePlan.TranscodeNode
 	transportID := transportGenerationV3(session.ID, result.Plan.PlanID)
@@ -1645,6 +1639,7 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 	}}, nil
 }
 
+// sourceExecutionMetadataV3 freezes the source facts used by a remote executor.
 func sourceExecutionMetadataV3(file *models.MediaFile, result playback.PlannerResultV3) playback.SourceExecutionMetadataV3 {
 	if result.FrozenSourceMetadata != nil {
 		return *result.FrozenSourceMetadata
@@ -1679,6 +1674,7 @@ func sourceVideoTranscodeFactsV3(file *models.MediaFile, result playback.Planner
 	return profile, bitDepth
 }
 
+// v3SessionStreamState builds the durable stream state for a prepared transport.
 func (h *PlaybackHandler) v3SessionStreamState(ctx context.Context, session *playback.Session, file *models.MediaFile, result playback.PlannerResultV3, transport preparedTransportV3) playback.SessionStreamState {
 	state := playback.SessionStreamState{PlayMethod: result.PlayMethod, BasePlayMethod: result.PlayMethod, AudioTrackIndex: plannedAudioTrackIndexV3(result, session.AudioTrackIndex), TranscodeAudio: result.TranscodeAudio, RemuxDVMode: remuxDVModeForPlanV3(result.Plan), TranscodeHWAccel: transport.hwAccel, ToneMapMode: transport.toneMapMode, TranscodeNodeURL: transport.nodeURL, TranscodeTransportID: transport.transportID, TranscodeRouteSet: true, ClientIP: clientip.FromContext(ctx), ClientName: session.ClientName, ClientVersion: session.ClientVersion, ClientUserAgent: session.ClientUserAgent, StreamBitrateKbps: result.TargetBitrateKbps, TargetVideoCodec: result.TargetVideoCodec, TargetAudioCodec: result.TargetAudioCodec, TargetAudioChannels: result.TargetAudioChannels, TargetAudioBitrateKbps: result.TargetAudioBitrateKbps, TargetResolution: result.TargetResolution, SubtitleTrackIndex: result.SubtitleTransportTrackIndex, SubtitleBurnIn: result.SubtitleBurnIn}
 	if result.Plan != nil && (result.Plan.Delivery == playback.DeliveryTranscodeHLSV3 || result.Plan.Delivery == playback.DeliveryRemuxHLSV3) {
@@ -2037,6 +2033,7 @@ func (h *PlaybackHandler) HandleReplanPlaybackV3(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, response)
 }
 
+// executeReplanV3 prepares an atomic replacement for a failed playback route.
 func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.AttemptRecordV3, req playback.ReplanRequestV3) (playback.DecisionResponseV3, playback.AttemptRecordV3, *preparedTransportV3, *transportErrorV3) {
 	reservationHeld := false
 	reservationHandedOff := false
@@ -2794,6 +2791,7 @@ func isHLSDeliveryV3(delivery playback.DeliveryV3) bool {
 	return delivery == playback.DeliveryRemuxHLSV3 || delivery == playback.DeliveryTranscodeHLSV3
 }
 
+// sameExecutableAVRecipeV3 reports whether two frozen A/V recipes are equivalent.
 func sameExecutableAVRecipeV3(left, right playback.ExecutableRecipeV3) bool {
 	return left.PlayMethod == right.PlayMethod &&
 		left.TranscodeAudio == right.TranscodeAudio &&
@@ -2827,6 +2825,7 @@ func sameEffectiveAVRecipeV3(left, right playback.EffectiveRecipeV3) bool {
 		optionalIntEqualV3(left.AudioChannels, right.AudioChannels) && left.AudioLayout == right.AudioLayout
 }
 
+// reusedHLSTransportV3 reconstructs transport facts for an existing HLS session.
 func reusedHLSTransportV3(session *playback.Session, streamURL string) preparedTransportV3 {
 	transport := preparedTransportV3{url: streamURL}
 	if session != nil {
@@ -3185,6 +3184,7 @@ func (h *PlaybackHandler) enqueueRouteEventV3(event playback.RouteEventRecordV3)
 	}
 }
 
+// plannerSettingsV3 reads the live settings used by protocol-v3 planning.
 func (h *PlaybackHandler) plannerSettingsV3(ctx context.Context) playback.PlannerSettingsV3 {
 	settings := playback.PlannerSettingsV3{TranscodeEnabled: h.playbackConfig().TranscodeEnabled}
 	if h.SettingsRepo != nil {

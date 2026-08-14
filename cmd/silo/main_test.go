@@ -120,6 +120,7 @@ func (r *s3BucketRecorder) CORSRequests() int {
 	return r.corsRequests
 }
 
+// TestBuildLiveSessionSync_UsesTransportPlayMethod verifies sync reports the active transport method.
 func TestBuildLiveSessionSync_UsesTransportPlayMethod(t *testing.T) {
 	t.Parallel()
 

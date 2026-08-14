@@ -7,6 +7,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
+// TestExecutableRecipeV3RoundTripPreservesOperationalFields verifies frozen recipes restore all execution inputs.
 func TestExecutableRecipeV3RoundTripPreservesOperationalFields(t *testing.T) {
 	plan := &PlanV3{PlanID: "plan:frozen", Delivery: DeliveryTranscodeHLSV3}
 	revision := tonemap.SourceRevision{MediaFileID: 42, FileSize: 100, FileModifiedUnixNano: 200, StreamSignature: "stream"}
@@ -48,6 +49,7 @@ func TestExecutableRecipeV3RoundTripPreservesOperationalFields(t *testing.T) {
 	}
 }
 
+// TestExecutableRecipeV3RejectsToneMapFieldsOnLegacyVersion verifies old recipes cannot carry new tone-map facts.
 func TestExecutableRecipeV3RejectsToneMapFieldsOnLegacyVersion(t *testing.T) {
 	recipe := ExecutableRecipeV3{Version: executableRecipeVersionLegacyV3, PlanID: "plan:legacy", PlayMethod: PlayTranscode}
 	if !recipe.Valid() {
@@ -64,6 +66,7 @@ func TestExecutableRecipeV3RejectsToneMapFieldsOnLegacyVersion(t *testing.T) {
 	}
 }
 
+// TestExecutableRecipeV3AllowsDolbyPresenceMetadataOnSourcePreservingRoutes verifies direct routes retain source facts.
 func TestExecutableRecipeV3AllowsDolbyPresenceMetadataOnSourcePreservingRoutes(t *testing.T) {
 	for _, method := range []PlayMethod{PlayDirect, PlayRemux} {
 		t.Run(string(method), func(t *testing.T) {
@@ -79,6 +82,7 @@ func TestExecutableRecipeV3AllowsDolbyPresenceMetadataOnSourcePreservingRoutes(t
 	}
 }
 
+// TestExecutableRecipeV3RejectsIncompleteOrContradictoryToneMapRecipe verifies frozen recipes are internally consistent.
 func TestExecutableRecipeV3RejectsIncompleteOrContradictoryToneMapRecipe(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -106,6 +110,7 @@ func TestExecutableRecipeV3RejectsIncompleteOrContradictoryToneMapRecipe(t *test
 	}
 }
 
+// TestExecutableRecipeV3SurvivesJSONRoundTrip verifies recipe persistence keeps operational fields.
 func TestExecutableRecipeV3SurvivesJSONRoundTrip(t *testing.T) {
 	plan := &PlanV3{PlanID: "plan:frozen"}
 	recipe := FreezeExecutableRecipeV3(PlannerResultV3{

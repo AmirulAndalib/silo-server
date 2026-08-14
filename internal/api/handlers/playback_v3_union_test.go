@@ -109,6 +109,7 @@ func TestHLSPlanningRegistryV3WithoutEnumeratorIsLocal(t *testing.T) {
 	}
 }
 
+// TestHLSPlanningRegistryV3EnablesValidatedLocalToneMapWithoutRestart verifies live policy changes affect planning.
 func TestHLSPlanningRegistryV3EnablesValidatedLocalToneMapWithoutRestart(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	local := playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{
@@ -134,7 +135,9 @@ func TestHLSPlanningRegistryV3EnablesValidatedLocalToneMapWithoutRestart(t *test
 	}
 }
 
-func TestLocalToneMapCapabilitiesV3RefreshesWhenPlaybackHardwareChanges(t *testing.T) {
+// TestLocalToneMapCapabilitiesV3UsesLivePlaybackHardware verifies that the
+// handler always delegates cache decisions to the shared capability probe.
+func TestLocalToneMapCapabilitiesV3UsesLivePlaybackHardware(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	cfg := config.PlaybackConfig{FFmpegPath: "/opt/ffmpeg-a", HWAccel: "qsv", HWDevice: "/dev/dri/renderD128"}
 	handler.PlaybackConfig = func() config.PlaybackConfig { return cfg }
@@ -149,8 +152,8 @@ func TestLocalToneMapCapabilitiesV3RefreshesWhenPlaybackHardwareChanges(t *testi
 			t.Fatalf("initial capabilities = %#v", got)
 		}
 	}
-	if len(calls) != 1 {
-		t.Fatalf("unchanged fingerprint probed %d times, want 1", len(calls))
+	if len(calls) != 2 {
+		t.Fatalf("live probe calls = %d, want 2", len(calls))
 	}
 
 	cfg.FFmpegPath = "/opt/ffmpeg-b"
@@ -159,11 +162,59 @@ func TestLocalToneMapCapabilitiesV3RefreshesWhenPlaybackHardwareChanges(t *testi
 	if got := handler.localToneMapCapabilitiesV3(context.Background()); len(got) != 1 || got[0].Backend != "vaapi" {
 		t.Fatalf("updated capabilities = %#v", got)
 	}
-	if len(calls) != 2 || calls[0] == calls[1] {
-		t.Fatalf("probe fingerprints = %v, want one refresh for the live config change", calls)
+	if len(calls) != 3 || calls[1] == calls[2] {
+		t.Fatalf("probe inputs = %v, want the live config change on the next call", calls)
 	}
 }
 
+// TestLocalToneMapCapabilitiesV3DoesNotSerializeCallers verifies that a
+// canceled request is not trapped behind another request's slow probe.
+func TestLocalToneMapCapabilitiesV3DoesNotSerializeCallers(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	handler.v3ToneMapProbe = func(ctx context.Context, _, _, _ string) tonemap.Capabilities {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+			return nil
+		}
+		<-ctx.Done()
+		return nil
+	}
+
+	firstDone := make(chan struct{})
+	go func() {
+		handler.localToneMapCapabilitiesV3(context.Background())
+		close(firstDone)
+	}()
+	<-started
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	secondDone := make(chan struct{})
+	go func() {
+		handler.localToneMapCapabilitiesV3(canceled)
+		close(secondDone)
+	}()
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("canceled capability caller waited behind the in-progress probe")
+	}
+	select {
+	case <-firstDone:
+		close(release)
+		t.Fatal("the first probe unexpectedly completed before release")
+	default:
+	}
+	close(release)
+	<-firstDone
+}
+
+// TestHLSToneMapCapabilitiesV3FetchesNodesConcurrently verifies pooled node lookups overlap.
 func TestHLSToneMapCapabilitiesV3FetchesNodesConcurrently(t *testing.T) {
 	var active atomic.Int32
 	var startedOnce sync.Once
@@ -199,6 +250,7 @@ func TestHLSToneMapCapabilitiesV3FetchesNodesConcurrently(t *testing.T) {
 	}
 }
 
+// TestHLSToneMapCapabilitiesV3HonorsSharedDeadline verifies slow nodes cannot exceed the planning deadline.
 func TestHLSToneMapCapabilitiesV3HonorsSharedDeadline(t *testing.T) {
 	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
 		<-request.Context().Done()
@@ -340,6 +392,7 @@ func TestPrepareTransportV3LocalFallbackRejectsUnavailableTransformations(t *tes
 	}
 }
 
+// TestPrepareTransportV3AcceptsEveryValidatedLocalToneMapExecutor verifies each advertised executor starts locally.
 func TestPrepareTransportV3AcceptsEveryValidatedLocalToneMapExecutor(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -436,12 +489,13 @@ func TestPrepareTransportV3AcceptsEveryValidatedLocalToneMapExecutor(t *testing.
 	}
 }
 
+// TestPrepareTransportV3ReportsSoftwareToneMapFallback verifies failed hardware output is discarded before retry.
 func TestPrepareTransportV3ReportsSoftwareToneMapFallback(t *testing.T) {
 	baseFFmpeg := writePlaybackTestFFmpeg(t)
 	ffmpegPath := filepath.Join(t.TempDir(), "hardware-failing-ffmpeg.sh")
 	script := "#!/bin/sh\n" +
 		"for arg in \"$@\"; do\n" +
-		"  case \"$arg\" in *tonemap_vaapi*) echo 'hardware tone map failed' >&2; exit 1;; esac\n" +
+		"  case \"$arg\" in *tonemap_vaapi*) printf partial > hardware-partial.marker; echo 'hardware tone map failed' >&2; exit 1;; esac\n" +
 		"done\n" +
 		"exec \"" + baseFFmpeg + "\" \"$@\"\n"
 	if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
@@ -492,6 +546,10 @@ func TestPrepareTransportV3ReportsSoftwareToneMapFallback(t *testing.T) {
 	defer transport.rollback()
 	if transport.hwAccel != playback.HWAccelNone || transport.toneMapMode != tonemap.ModeSoftware {
 		t.Fatalf("fallback execution facts = hw %q tone_map %q, want none and software", transport.hwAccel, transport.toneMapMode)
+	}
+	markerPath := filepath.Join(transcodeDir, transport.transportID, "hardware-partial.marker")
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("failed hardware output survived software fallback: %v", err)
 	}
 }
 

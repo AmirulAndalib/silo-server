@@ -10,6 +10,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
+// TestToneMapFFmpegGraphsCoverSupportedExecutors verifies each executor emits its required graph.
 func TestToneMapFFmpegGraphsCoverSupportedExecutors(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -52,6 +53,7 @@ func TestToneMapFFmpegGraphsCoverSupportedExecutors(t *testing.T) {
 	}
 }
 
+// TestUnsupportedHardwareToneMapDoesNotAppendEmptyFilterGraph verifies unsupported executors fail validation.
 func TestUnsupportedHardwareToneMapDoesNotAppendEmptyFilterGraph(t *testing.T) {
 	tests := []struct {
 		name string
@@ -72,6 +74,7 @@ func TestUnsupportedHardwareToneMapDoesNotAppendEmptyFilterGraph(t *testing.T) {
 	}
 }
 
+// TestEveryToneMapSourceKindBuildsEveryExecutorGraph verifies graph construction covers the source matrix.
 func TestEveryToneMapSourceKindBuildsEveryExecutorGraph(t *testing.T) {
 	executors := []struct {
 		name    string
@@ -109,6 +112,7 @@ func TestEveryToneMapSourceKindBuildsEveryExecutorGraph(t *testing.T) {
 	}
 }
 
+// TestHardwareToneMapRemovesMetadataAfterHardwareFormatConversion verifies output metadata is ordered safely.
 func TestHardwareToneMapRemovesMetadataAfterHardwareFormatConversion(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -137,6 +141,7 @@ func TestHardwareToneMapRemovesMetadataAfterHardwareFormatConversion(t *testing.
 	}
 }
 
+// TestToneMapGraphOrdersTextAndBitmapSubtitles verifies subtitle composition follows color conversion.
 func TestToneMapGraphOrdersTextAndBitmapSubtitles(t *testing.T) {
 	base := TranscodeOpts{
 		InputPath: "/media/hdr.mkv", OutputDir: t.TempDir(), TargetCodecVideo: "h264", TargetCodecAudio: "aac", TargetResolution: "1080p",
@@ -165,6 +170,7 @@ func TestToneMapGraphOrdersTextAndBitmapSubtitles(t *testing.T) {
 	assertTokenOrder(bitmapGraph, "tonemapx=tonemap=bt2390", "overlay=eof_action=pass", "scale=-2:1080")
 }
 
+// TestSDRBaseGraphsBypassLuminanceToneMapping verifies SDR-compatible bases avoid needless luminance mapping.
 func TestSDRBaseGraphsBypassLuminanceToneMapping(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -203,6 +209,7 @@ func TestSDRBaseGraphsBypassLuminanceToneMapping(t *testing.T) {
 	}
 }
 
+// TestNVENCSDRBaseGraphsDownloadBeforeSubtitleComposition verifies CUDA frames return to software before overlays.
 func TestNVENCSDRBaseGraphsDownloadBeforeSubtitleComposition(t *testing.T) {
 	base := TranscodeOpts{
 		InputPath: "/media/dovi.mkv", OutputDir: t.TempDir(), SourceVideoBitDepth: 10,
@@ -284,6 +291,7 @@ func TestStartTranscodeRejectsUnvalidatedBitstreamFilter(t *testing.T) {
 	}
 }
 
+// TestValidateToneMapOptsRequiresFrozenSourceRevision verifies executable recipes bind stable source facts.
 func TestValidateToneMapOptsRequiresFrozenSourceRevision(t *testing.T) {
 	opts := TranscodeOpts{
 		TargetCodecVideo: "h264", HWAccel: "qsv", ToneMapPolicy: tonemap.PolicyHardwareOnly,

@@ -53,6 +53,7 @@ const (
 	executableRecipeVersionV3       = 2
 )
 
+// FreezeExecutableRecipeV3 captures the byte-affecting facts from a planner result.
 func FreezeExecutableRecipeV3(result PlannerResultV3) ExecutableRecipeV3 {
 	planID := ""
 	if result.Plan != nil {
@@ -94,6 +95,7 @@ func FreezeExecutableRecipeV3(result PlannerResultV3) ExecutableRecipeV3 {
 	}
 }
 
+// Valid reports whether an executable recipe is complete and internally consistent.
 func (r ExecutableRecipeV3) Valid() bool {
 	if (r.Version != executableRecipeVersionLegacyV3 && r.Version != executableRecipeVersionV3) || r.PlanID == "" {
 		return false
@@ -118,6 +120,7 @@ func (r ExecutableRecipeV3) ValidFor(plan PlanV3) bool {
 	return r.Valid() && r.PlanID == plan.PlanID
 }
 
+// PlannerResult restores a planner result from the frozen executable recipe.
 func (r ExecutableRecipeV3) PlannerResult(plan *PlanV3) PlannerResultV3 {
 	return PlannerResultV3{
 		Plan:                     plan,

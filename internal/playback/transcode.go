@@ -630,6 +630,7 @@ func buildFFmpegArgs(opts TranscodeOpts) []string {
 	return args
 }
 
+// resolveEffectiveTranscodeHWAccel returns the backend that will actually execute the recipe.
 func resolveEffectiveTranscodeHWAccel(opts TranscodeOpts) string {
 	hwAccel := ResolveHWAccelWithFFmpeg(opts.HWAccel, opts.FFmpegPath)
 	if hwAccel == "" {
@@ -1321,7 +1322,7 @@ func qsvScaleFilter(res string) string {
 	}
 }
 
-// QSV must map the VAAPI tone-map output with read/write access. The default
+// qsvToneMapScaleFilter maps VAAPI tone-map output with read/write access. The default
 // read-only mapping succeeds for synthetic upload probes but fails against
 // real decoded HEVC surfaces on Intel with ENOSYS during the first frame.
 func qsvToneMapScaleFilter(res string) string {

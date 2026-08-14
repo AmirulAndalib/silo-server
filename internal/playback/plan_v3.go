@@ -147,6 +147,7 @@ func (input PlannerInputV3) hlsToneMapCapabilities() tonemap.Capabilities {
 	return input.ToneMapCapabilities
 }
 
+// PlanPlaybackV3 chooses a playable protocol-v3 route from source and client facts.
 func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 	if input.RequestedFile == nil {
 		return terminalPlannerResultV3("source_unavailable", "The requested media source is unavailable.", false)

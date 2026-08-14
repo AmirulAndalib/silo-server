@@ -182,3 +182,30 @@ func TestPrepareFileResolvesOneDeviceAndReleasesAfterExit(t *testing.T) {
 		t.Fatalf("active count after PrepareFile returned = %d, want 0", count)
 	}
 }
+
+// TestPrepareFileRemovesFailedPartialOutput verifies that a failed encode
+// publishes neither its temporary bytes nor a final artifact.
+func TestPrepareFileRemovesFailedPartialOutput(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "ffmpeg")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\neval \"printf partial > \\${$#}\"\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write failing FFmpeg: %v", err)
+	}
+	outputPath := filepath.Join(dir, "artifact.mp4")
+	err := PrepareFile(context.Background(), TranscodeOpts{
+		InputPath:        "/nonexistent/input.mkv",
+		TargetCodecVideo: "h264",
+		TargetCodecAudio: "aac",
+		FFmpegPath:       script,
+		HWAccel:          HWAccelNone,
+	}, outputPath)
+	if err == nil {
+		t.Fatal("PrepareFile succeeded with a failing FFmpeg process")
+	}
+	if _, statErr := os.Stat(outputPath); !os.IsNotExist(statErr) {
+		t.Fatalf("failed prepared output appeared at final path: %v", statErr)
+	}
+	if _, statErr := os.Stat(outputPath + ".part"); !os.IsNotExist(statErr) {
+		t.Fatalf("failed prepared output left a partial file: %v", statErr)
+	}
+}

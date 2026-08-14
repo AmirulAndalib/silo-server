@@ -51,7 +51,7 @@ func Probe(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevice stri
 // probeCached coalesces identical probes without allowing one caller's
 // cancellation to abort the shared work needed by other playback requests.
 func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevice string, run CommandRunner, now func() time.Time) Capabilities {
-	key := strings.Join([]string{strings.TrimSpace(ffmpegPath), strings.ToLower(strings.TrimSpace(hardwareBackend)), strings.TrimSpace(hardwareDevice)}, "\x00")
+	key := probeCacheKey(ffmpegPath, hardwareBackend, hardwareDevice)
 	probeCache.Lock()
 	if cached, ok := probeCache.entries[key]; ok && probeCacheEntryCurrent(cached, now()) {
 		result := append(Capabilities(nil), cached.capabilities...)
@@ -89,6 +89,27 @@ func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevic
 		}
 		return append(Capabilities(nil), capabilities...)
 	}
+}
+
+// probeCacheKey binds reusable capabilities to the resolved FFmpeg binary and
+// the driver facts for every configured hardware device.
+func probeCacheKey(ffmpegPath, hardwareBackend, hardwareDevice string) string {
+	binaryIdentity := strings.TrimSpace(ffmpegPath)
+	if _, cacheKey, cacheable := ffmpegBinaryCacheKey(binaryIdentity); cacheable {
+		binaryIdentity = cacheKey
+	}
+	backend := strings.ToLower(strings.TrimSpace(hardwareBackend))
+	device := strings.TrimSpace(hardwareDevice)
+	driverIdentities := make([]string, 0)
+	switch backend {
+	case BackendQSV, BackendVAAPI, BackendNVENC:
+		devices := probeDevices(device, backend)
+		driverIdentities = make([]string, 0, len(devices))
+		for _, configuredDevice := range devices {
+			driverIdentities = append(driverIdentities, driverFingerprint(backend, configuredDevice))
+		}
+	}
+	return strings.Join([]string{binaryIdentity, backend, device, strings.Join(driverIdentities, ",")}, "\x00")
 }
 
 // probeCacheEntryCurrent reports whether a positive result or unexpired

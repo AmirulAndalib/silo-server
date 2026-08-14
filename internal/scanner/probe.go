@@ -27,6 +27,7 @@ type ffprobeOutput struct {
 // JSON strings or numbers depending on codec/container details.
 type ffprobeScalarString string
 
+// UnmarshalJSON accepts either a quoted scalar or a numeric FFprobe value.
 func (s *ffprobeScalarString) UnmarshalJSON(data []byte) error {
 	if string(data) == "null" {
 		*s = ""
@@ -830,6 +831,7 @@ func dolbyVisionLevel(sideData []ffprobeSideData) int {
 	return 0
 }
 
+// dolbyVisionBLCompatID returns the declared Dolby Vision base-layer compatibility identifier.
 func dolbyVisionBLCompatID(sideData []ffprobeSideData) int {
 	for _, data := range sideData {
 		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
@@ -886,6 +888,7 @@ func dolbyVisionRPUPresent(sideData []ffprobeSideData) bool {
 	return false
 }
 
+// dolbyVisionELPresent reports whether FFprobe found a Dolby Vision enhancement layer.
 func dolbyVisionELPresent(sideData []ffprobeSideData) bool {
 	for _, data := range sideData {
 		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {

@@ -650,6 +650,7 @@ func clampSeekSeconds(seekSeconds float64, sources []PlaybackMediaSource) float6
 	return seekSeconds
 }
 
+// startRemoteTranscode submits a frozen compatibility recipe to a selected node.
 func (h *PlaybackHandler) startRemoteTranscode(
 	ctx context.Context,
 	playSessionID string,

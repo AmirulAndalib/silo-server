@@ -262,6 +262,7 @@ func audioEligibilityV3(source SourceDescriptorV3, request StartRequestV3) (copy
 	return false, false, claim
 }
 
+// normalizeDynamicRangeV3 returns the protocol dynamic-range label for a track.
 func normalizeDynamicRangeV3(track models.VideoTrack) string {
 	return tonemap.DynamicRangeForVideoTrack(track)
 }

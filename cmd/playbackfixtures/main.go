@@ -321,6 +321,7 @@ func goldenDecisionResponse() playback.DecisionResponseV3 {
 	}
 }
 
+// goldenCapabilityResponse returns the stable protocol capability fixture.
 func goldenCapabilityResponse() playback.CapabilityResponseV3 {
 	return playback.CapabilityResponseV3{
 		Enabled:          true,
@@ -503,6 +504,7 @@ func goldenAttemptKeys() []opaqueAttemptKeyFixture {
 	return fixtures
 }
 
+// goldenConformanceMatrix returns the deterministic planner conformance matrix.
 func goldenConformanceMatrix() playback.ConformanceMatrixV3 {
 	videoFile := conformanceVideoFile()
 	base := conformanceStartRequest()
@@ -774,6 +776,7 @@ func goldenConformanceMatrix() playback.ConformanceMatrixV3 {
 	return playback.ConformanceMatrixV3{SchemaVersion: 1, Planner: planner, Replans: replans, Protocol: protocol}
 }
 
+// makePlannerScenario builds one deterministic protocol-v3 planner fixture.
 func makePlannerScenario(name, category string, request playback.StartRequestV3, file *models.MediaFile, attempted []string, settings playback.PlannerSettingsV3, registry *playback.TransformationRegistryV3, toneMapCapabilities ...tonemap.Capabilities) playback.PlannerScenarioV3 {
 	var capabilities tonemap.Capabilities
 	if len(toneMapCapabilities) > 0 {

@@ -42,6 +42,7 @@ func NewArtifactRepository(pool *pgxpool.Pool) *ArtifactRepository {
 	return &ArtifactRepository{pool: pool}
 }
 
+// scanArtifact decodes one artifact row from the repository query shape.
 func scanArtifact(row pgx.Row) (*Artifact, error) {
 	var a Artifact
 	var leaseOwner *string

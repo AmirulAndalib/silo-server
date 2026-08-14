@@ -240,6 +240,7 @@ func (r *Reconciler) ReconcileNodeSessions(ctx context.Context, reportingNode st
 	return nil
 }
 
+// loadNodeSessionsSnapshot loads the normalized live-session view for one node.
 func loadNodeSessionsSnapshot(ctx context.Context, tx pgx.Tx, reportingNode string) ([]SessionSync, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT
@@ -336,6 +337,7 @@ func normalizeSessionSyncs(reportingNode string, sessions []SessionSync) []Sessi
 	return normalized
 }
 
+// sessionSnapshotsEqual reports whether two normalized live-session views match.
 func sessionSnapshotsEqual(left, right []SessionSync) bool {
 	if len(left) != len(right) {
 		return false

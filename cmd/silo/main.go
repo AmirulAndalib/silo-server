@@ -392,6 +392,7 @@ func runCompatWebCommand(ctx context.Context, args []string) error {
 	}
 }
 
+// main starts the Silo server or a requested maintenance command.
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "compat-web" {
 		if err := runCompatWebCommand(context.Background(), os.Args[2:]); err != nil {

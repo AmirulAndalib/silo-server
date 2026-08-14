@@ -41,6 +41,7 @@ func TestParamsHashStableAndDistinct(t *testing.T) {
 	}
 }
 
+// TestParamsHashIncludesFrozenToneMapRecipe verifies recipe changes produce distinct artifacts.
 func TestParamsHashIncludesFrozenToneMapRecipe(t *testing.T) {
 	base := paramsHash("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false)
 	legacy := paramsHashWithToneMap("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false, tonemap.PolicyNone, "", "", "")
@@ -89,6 +90,7 @@ func TestParamsHashIncludesFrozenToneMapRecipe(t *testing.T) {
 	}
 }
 
+// TestBuildOptsWarnsWithoutLoggingInvalidSourceRevisionValue verifies invalid revisions are handled safely.
 func TestBuildOptsWarnsWithoutLoggingInvalidSourceRevisionValue(t *testing.T) {
 	var logs bytes.Buffer
 	previous := slog.Default()

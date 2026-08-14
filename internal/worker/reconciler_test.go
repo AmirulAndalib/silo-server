@@ -45,6 +45,7 @@ func TestSyncNowSerializesSnapshotCapture(t *testing.T) {
 	}
 }
 
+// TestSessionSnapshotsEqualDetectsToneMapChanges verifies execution-mode changes trigger reconciliation.
 func TestSessionSnapshotsEqualDetectsToneMapChanges(t *testing.T) {
 	base := SessionSync{SessionID: "session-1", ToneMapMode: "hardware"}
 	if !sessionSnapshotsEqual([]SessionSync{base}, []SessionSync{base}) {

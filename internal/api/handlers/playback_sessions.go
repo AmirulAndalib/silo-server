@@ -155,6 +155,7 @@ func NewPlaybackSessionsLoader(
 	}
 }
 
+// Load returns the playback sessions visible to the current request.
 func (l *PlaybackSessionsLoader) Load(
 	ctx context.Context,
 	r *http.Request,

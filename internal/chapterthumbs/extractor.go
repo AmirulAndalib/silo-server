@@ -124,6 +124,7 @@ func softwareToneMapProbeResultValue(result softwareToneMapProbeResult) (string,
 	return "", result.failureReason, errors.New(result.detail)
 }
 
+// probeSoftwareToneMapFilter selects a usable FFmpeg software tone-map filter.
 func probeSoftwareToneMapFilter(
 	ffmpegPath string,
 	probeFn func(ffmpegPath string) ([]byte, error),

@@ -129,6 +129,7 @@ func testRemoteTranscodeSource() PlaybackMediaSource {
 	return source
 }
 
+// TestStartRemoteTranscodeReportsConfirmedExecutor verifies remote execution facts are recorded.
 func TestStartRemoteTranscodeReportsConfirmedExecutor(t *testing.T) {
 	recipeStore := &stubRecipeNodeStore{}
 	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +159,7 @@ func TestStartRemoteTranscodeReportsConfirmedExecutor(t *testing.T) {
 	}
 }
 
+// TestStartRemoteToneMapReportsConfirmedExecutorAndFallback verifies remote fallback facts remain accurate.
 func TestStartRemoteToneMapReportsConfirmedExecutorAndFallback(t *testing.T) {
 	tests := []struct {
 		name           string

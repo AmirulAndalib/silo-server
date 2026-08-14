@@ -50,6 +50,7 @@ type EncodePreparer interface {
 
 type playbackPreparer struct{}
 
+// PrepareFile produces one finalized local download artifact.
 func (playbackPreparer) PrepareFile(ctx context.Context, _ string, opts playback.TranscodeOpts, outputPath string) (PreparedArtifact, error) {
 	var err error
 	opts, err = playback.ResolveToneMapExecutor(ctx, opts)
@@ -875,6 +876,7 @@ func (m *ArtifactManager) heartbeatLoop(ctx context.Context, cancel context.Canc
 	}
 }
 
+// buildOpts reconstructs the frozen encode options for an artifact job.
 func (m *ArtifactManager) buildOpts(file *models.MediaFile, a *Artifact) playback.TranscodeOpts {
 	cfg := config.Config{}
 	if m.liveCfg != nil {

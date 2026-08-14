@@ -25,6 +25,7 @@ type TransformationRegistryV3 struct {
 	entries map[string]TransformationSpecV3
 }
 
+// ProbeTransformationRegistryV3 builds a registry without optional tone-map executors.
 func ProbeTransformationRegistryV3(ctx context.Context, ffmpegPath string) *TransformationRegistryV3 {
 	return ProbeTransformationRegistryWithToneMapV3(ctx, ffmpegPath, nil)
 }

@@ -757,6 +757,7 @@ func TestSetEffectiveMediaFileID(t *testing.T) {
 	}
 }
 
+// TestSessionReplacementAppliesAndRollsBackAtomically verifies failed replacement restores the prior stream.
 func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 	manager := playback.NewSessionManager(0, 0)
 	session, err := manager.StartSessionWithFiles(7, "profile-1", 42, 42, playback.PlayDirect, false)

@@ -755,6 +755,7 @@ func (m *SessionManager) UpdateStreamState(sessionID string, state SessionStream
 	return nil
 }
 
+// applySessionStreamStateLocked applies a complete stream snapshot while the manager lock is held.
 func applySessionStreamStateLocked(s *Session, state SessionStreamState) {
 	if state.PlayMethod != "" {
 		s.PlayMethod = state.PlayMethod
@@ -807,6 +808,7 @@ func applySessionStreamStateLocked(s *Session, state SessionStreamState) {
 	}
 }
 
+// snapshotSessionStreamStateLocked captures replaceable stream fields while the manager lock is held.
 func snapshotSessionStreamStateLocked(s *Session) SessionStreamState {
 	return SessionStreamState{
 		PlayMethod:             s.PlayMethod,
@@ -836,6 +838,7 @@ func snapshotSessionStreamStateLocked(s *Session) SessionStreamState {
 	}
 }
 
+// restoreSessionStreamStateLocked restores replaceable stream fields while the manager lock is held.
 func restoreSessionStreamStateLocked(s *Session, state SessionStreamState) {
 	s.PlayMethod = state.PlayMethod
 	s.BasePlayMethod = state.BasePlayMethod

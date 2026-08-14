@@ -133,6 +133,7 @@ func (m *testCompatSessionManager) SetTranscodeNodeURL(sessionID, url string) er
 	return nil
 }
 
+// SetTranscodeStreamDetails records the execution facts supplied by the compatibility handler.
 func (m *testCompatSessionManager) SetTranscodeStreamDetails(sessionID, targetVideoCodec, targetAudioCodec string, transcodeAudio bool, hwAccel string, toneMapMode tonemap.Mode) error {
 	session, ok := m.sessions[sessionID]
 	if !ok {
@@ -291,6 +292,7 @@ func TestHandlePlaybackReport_UpdatesSelectedAudioStreamAndUpstreamTrack(t *test
 	}
 }
 
+// TestEnsureTranscodeSession_UsesSelectedAudioTrack verifies compatibility playback keeps the requested audio stream.
 func TestEnsureTranscodeSession_UsesSelectedAudioTrack(t *testing.T) {
 	version := testCompatVersion()
 	codec := NewResourceIDCodec()
@@ -336,6 +338,7 @@ func TestEnsureTranscodeSession_UsesSelectedAudioTrack(t *testing.T) {
 	}
 }
 
+// TestEnsureTranscodeSessionReportsReconstructedRecipeFacts verifies reconstructed sessions retain execution facts.
 func TestEnsureTranscodeSessionReportsReconstructedRecipeFacts(t *testing.T) {
 	inputPath := filepath.Join(t.TempDir(), "movie.mkv")
 	if err := os.WriteFile(inputPath, []byte("video"), 0o644); err != nil {

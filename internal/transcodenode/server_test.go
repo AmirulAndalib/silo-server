@@ -227,6 +227,7 @@ func TestHandleDownloadPrepareKeepsStartupArtifactRootAcrossReload(t *testing.T)
 	}
 }
 
+// TestHandleDownloadPrepareReusesCompletedArtifactBeforeResolvingStaleRecipe verifies completed work is idempotent.
 func TestHandleDownloadPrepareReusesCompletedArtifactBeforeResolvingStaleRecipe(t *testing.T) {
 	server := newTestServer(t)
 	if err := os.MkdirAll(server.artifactRoot, 0o755); err != nil {
@@ -956,6 +957,7 @@ func TestHandleStartUsesConfiguredHWDeviceList(t *testing.T) {
 	}
 }
 
+// TestHandleStartRejectsIncompleteOrStaleToneMapRecipe verifies nodes reject unsafe frozen recipes.
 func TestHandleStartRejectsIncompleteOrStaleToneMapRecipe(t *testing.T) {
 	tests := []struct {
 		name   string

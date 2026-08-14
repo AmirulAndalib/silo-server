@@ -8,6 +8,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
+// TestRecipeCardRoundTripOpts verifies recipe cards restore transcode options.
 func TestRecipeCardRoundTripOpts(t *testing.T) {
 	revision := tonemap.SourceRevision{MediaFileID: 77, FileSize: 100, FileModifiedUnixNano: 200, StreamSignature: "stream"}
 	opts := TranscodeOpts{
@@ -165,7 +166,7 @@ func TestRecipeCardClientMetadataStoredNotInClaims(t *testing.T) {
 	}
 }
 
-// A session rebuilt from a card keeps the client identity for its lifetime,
+// TestReconstructSessionRestoresClientMetadata verifies a rebuilt session keeps its client identity,
 // so the admin client label and Jellyfin pill survive a server restart.
 func TestReconstructSessionRestoresClientMetadata(t *testing.T) {
 	tm := NewTranscodeManager()
@@ -191,7 +192,7 @@ func TestReconstructSessionRestoresClientMetadata(t *testing.T) {
 	}
 }
 
-// SetTranscodeStreamDetails records the running transcode's encode decisions
+// TestSetTranscodeStreamDetails verifies the running transcode's encode decisions are recorded
 // on the live session so sync rows classify by actual work (video copy =
 // repackage) rather than the transport method, while also reporting the
 // confirmed encoder and tone-map executors.
@@ -230,7 +231,7 @@ func TestRecipeCardLegacyDecodeHasEmptyPlayMethod(t *testing.T) {
 	}
 }
 
-// A transcode recipe must survive a full round trip through stream-token claims:
+// TestRecipeCardClaimsRoundTrip verifies a transcode recipe survives stream-token claims:
 // the token IS the durable descriptor under token-carried reconstruction, so any
 // dropped byte-affecting field would reconstruct a divergent encode. HWAccel and
 // HWDevice are deliberately excluded (re-resolved from live config), so they are

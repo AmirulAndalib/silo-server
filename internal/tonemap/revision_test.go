@@ -8,6 +8,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
+// TestSourceRevisionRoundTripAndPathValidation verifies encoded revisions retain stable filesystem facts.
 func TestSourceRevisionRoundTripAndPathValidation(t *testing.T) {
 	path := t.TempDir() + "/source.mkv"
 	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
@@ -46,6 +47,7 @@ func TestSourceRevisionRoundTripAndPathValidation(t *testing.T) {
 	}
 }
 
+// TestRevisionForFileChangesWithDolbyVisionPresenceFacts verifies metadata presence affects source identity.
 func TestRevisionForFileChangesWithDolbyVisionPresenceFacts(t *testing.T) {
 	modified := time.Now().UTC().Truncate(time.Microsecond)
 	file := &models.MediaFile{ID: 1, FileSize: 100, FileModifiedAt: &modified, VideoTracks: []models.VideoTrack{{

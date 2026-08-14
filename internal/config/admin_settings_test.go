@@ -186,6 +186,7 @@ func TestChapterThumbnailSoftwareToneMapDefaultsDisabled(t *testing.T) {
 	}
 }
 
+// TestTranscodeToneMapPoliciesDefaultDisabled verifies tone mapping remains opt-in.
 func TestTranscodeToneMapPoliciesDefaultDisabled(t *testing.T) {
 	effective := EffectiveAdminSettings(nil)
 	for _, key := range []string{
@@ -221,6 +222,7 @@ func normalizeEffectiveRuntimeDefaults(cfg *Config) {
 	)
 }
 
+// TestNormalizeAdminSettingRejectsInvalidValues verifies invalid admin settings are rejected.
 func TestNormalizeAdminSettingRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		key   string

@@ -187,7 +187,7 @@ func sourcePreflightKey(ctx context.Context, request SourcePreflightRequest, run
 }
 
 // ffmpegVersionForPreflight coalesces version lookups and invalidates cached
-// output when the resolved binary's modification time changes.
+// output when the resolved binary's identity changes.
 func ffmpegVersionForPreflight(ctx context.Context, ffmpegPath string, run CommandRunner) ([]byte, error) {
 	resolved, cacheKey, cacheable := ffmpegBinaryCacheKey(ffmpegPath)
 	if !cacheable {
@@ -251,7 +251,11 @@ func ffmpegBinaryCacheKey(ffmpegPath string) (string, string, bool) {
 	if err != nil || !info.Mode().IsRegular() {
 		return ffmpegPath, "", false
 	}
-	return resolved, strings.Join([]string{resolved, strconv.FormatInt(info.ModTime().UnixNano(), 10)}, "\x00"), true
+	return resolved, strings.Join([]string{
+		resolved,
+		strconv.FormatInt(info.Size(), 10),
+		strconv.FormatInt(info.ModTime().UnixNano(), 10),
+	}, "\x00"), true
 }
 
 // driverFingerprint hashes the configured backend and available kernel-driver
