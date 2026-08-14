@@ -255,25 +255,43 @@ type proxyNodeEnumeratorV3 interface {
 	ProxyNodeURLs() []string
 }
 
-// hlsPlanningRegistryV3 returns the registry HLS deliveries plan against: the
-// local probe plus every pooled transcode node's advertised transformations.
-// Only availability of locally-defined specs widens (name and recipe version
-// pinned by this server), so any plan built from it passes the per-node
-// advertisement validation when that node is selected, and the local-fallback
-// validation in prepareTransportV3 rejects recipes only nodes can run.
-// Without pooled nodes this is exactly the local registry.
-func (h *PlaybackHandler) hlsPlanningRegistryV3(ctx context.Context) *playback.TransformationRegistryV3 {
+// localHLSExecutionRegistryV3 returns the transformations this API process can
+// execute for an HLS delivery. Tone mapping is added only when local execution
+// is allowed, the administrator permits a mode, and the configured FFmpeg and
+// device have validated an executor in that mode. Planning and transport-time
+// validation must share this view or a locally planned recipe can be rejected
+// before FFmpeg starts.
+func (h *PlaybackHandler) localHLSExecutionRegistryV3(ctx context.Context) *playback.TransformationRegistryV3 {
 	local := h.transformationRegistryV3(ctx)
 	settings := h.plannerSettingsV3(ctx)
 	policy := tonemap.NewPolicy(settings.HardwareToneMapEnabled, settings.SoftwareToneMapEnabled)
-	if policy != tonemap.PolicyNone &&
-		(h.NodePlanner == nil || nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo)) &&
-		len(h.localToneMapCapabilitiesV3(ctx)) > 0 {
+	if policy == tonemap.PolicyNone ||
+		(h.NodePlanner != nil && !nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo)) {
+		return local
+	}
+	capabilityAvailable := false
+	for _, capability := range h.localToneMapCapabilitiesV3(ctx) {
+		if policy.Allows(capability.Mode) && len(capability.SourceKinds) > 0 {
+			capabilityAvailable = true
+			break
+		}
+	}
+	if capabilityAvailable {
 		local = local.WithAdvertised([]playback.TransformationV3{{
 			Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3,
 			RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
 		}})
 	}
+	return local
+}
+
+// hlsPlanningRegistryV3 returns the registry HLS deliveries plan against: the
+// local execution registry plus every pooled transcode node's advertised
+// transformations. Only availability of locally-defined specs widens (name
+// and recipe version pinned by this server), so node-only capabilities remain
+// unavailable when transport falls back to the API process.
+func (h *PlaybackHandler) hlsPlanningRegistryV3(ctx context.Context) *playback.TransformationRegistryV3 {
+	local := h.localHLSExecutionRegistryV3(ctx)
 	enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3)
 	if !ok {
 		return local
@@ -661,8 +679,24 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 			writeError(w, http.StatusConflict, "playback_attempt_reused", statusErr.message)
 			return
 		}
-		if statusErr.reason == "internal_error" {
-			slog.ErrorContext(r.Context(), "protocol v3 start failed", "component", "api", "reason", statusErr.reason, "error", statusErr.cause)
+		failureAttrs := []any{
+			"component", "playback",
+			"reason", statusErr.reason,
+			"retryable", statusErr.retryable,
+			"playback_attempt_id", req.PlaybackAttemptID,
+			"requested_file_id", requestedFile.ID,
+			"effective_file_id", effectiveFile.ID,
+		}
+		if statusErr.cause != nil {
+			failureAttrs = append(failureAttrs, "error", statusErr.cause)
+		}
+		switch {
+		case statusErr.reason == policyErrorInternal:
+			slog.ErrorContext(r.Context(), "protocol v3 planned playback failed", failureAttrs...)
+		case statusErr.cause != nil:
+			slog.WarnContext(r.Context(), "protocol v3 planned playback failed", failureAttrs...)
+		default:
+			slog.InfoContext(r.Context(), "protocol v3 planned playback failed", failureAttrs...)
 		}
 		persistedResponse, persistErr := h.startFailureDecisionV3(r.Context(), userID, profileID, req, requestDigests, requestedFile.ID, effectiveFile.ID, statusErr)
 		if persistErr != nil {
@@ -893,7 +927,7 @@ func (h *PlaybackHandler) prepareTransportV3(r *http.Request, session *playback.
 	// a capable node freeing up satisfies the same plan. Transformation-free
 	// plans skip the check (and the local probe behind it) entirely.
 	if planRequiresServerTransformationsV3(result.Plan) {
-		if err := validateAdvertisedTransformationsV3(result.Plan, h.transformationRegistryV3(r.Context()).Advertised()); err != nil {
+		if err := validateAdvertisedTransformationsV3(result.Plan, h.localHLSExecutionRegistryV3(r.Context()).Advertised()); err != nil {
 			return preparedTransportV3{}, &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "No available transcode executor can run the selected playback recipe.", retryable: true, cause: err}
 		}
 		if planRequiresToneMapV3(result.Plan) {

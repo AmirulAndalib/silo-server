@@ -4,12 +4,14 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
@@ -29,6 +31,36 @@ func (p enumeratingNodePlannerV3) TranscodeNodeURLs() []string { return p.urls }
 func presetLocalRegistryV3(h *PlaybackHandler, registry *playback.TransformationRegistryV3) {
 	h.v3RegistryOnce.Do(func() {})
 	h.v3Registry = registry
+}
+
+// stableToneMapTransportFileV3 returns an HDR source whose filesystem and
+// catalog revision facts agree, allowing transport tests to exercise the
+// executor gate without weakening the production source-revision check.
+func stableToneMapTransportFileV3(t *testing.T) *models.MediaFile {
+	t.Helper()
+	file := v3HandlerFixtureFile(t)
+	info, err := os.Stat(file.FilePath)
+	if err != nil {
+		t.Fatalf("stat tone-map fixture: %v", err)
+	}
+	modifiedAt := info.ModTime()
+	probeUpdatedAt := time.Now().UTC()
+	file.FileSize = info.Size()
+	file.FileModifiedAt = &modifiedAt
+	file.FileHash = "tone-map-fixture"
+	file.ProbeUpdatedAt = &probeUpdatedAt
+	file.CodecVideo = "hevc"
+	file.Resolution = "2160p"
+	file.Bitrate = 32_000
+	file.HDR = true
+	file.VideoTracks[0] = models.VideoTrack{
+		Codec: "hevc", Profile: "main 10", Level: 51, Width: 3840, Height: 2160,
+		FrameRate: "24000/1001", Bitrate: 32_000, BitDepth: 10, PixelFormat: "yuv420p10le",
+		VideoRange: "DolbyVision", VideoRangeType: "DOVIWithHDR10", DVProfile: 7, DVBLCompatID: 6,
+		DVConfigPresent: true, DVBLCompatIDPresent: true, DVBLPresent: true, DVRPUPresent: true,
+		ColorRange: "tv", ColorPrimaries: "bt2020", ColorTransfer: "smpte2084", ColorSpace: "bt2020nc",
+	}
+	return file
 }
 
 func TestHLSPlanningRegistryV3UnionsPooledNodeCapabilities(t *testing.T) {
@@ -304,6 +336,85 @@ func TestPrepareTransportV3LocalFallbackRejectsUnavailableTransformations(t *tes
 	_, transportErr := handler.prepareTransportV3(request, &playback.Session{ID: "session-local-capability"}, v3HandlerFixtureFile(t), playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac"})
 	if transportErr == nil || transportErr.reason != "transcode_node_capability_unavailable" || !transportErr.retryable {
 		t.Fatalf("transport error = %#v", transportErr)
+	}
+}
+
+func TestPrepareTransportV3AcceptsEveryValidatedLocalToneMapExecutor(t *testing.T) {
+	tests := []struct {
+		name           string
+		mode           tonemap.Mode
+		backend        string
+		filter         string
+		policy         tonemap.Policy
+		settingKey     string
+		configuredHW   string
+		hardwareDevice string
+	}{
+		{name: "QSV", mode: tonemap.ModeHardware, backend: tonemap.BackendQSV, filter: tonemap.HardwareFilterVAAPI, policy: tonemap.PolicyHardwareOnly, settingKey: config.PlaybackTranscodeHardwareToneMapSettingKey, configuredHW: tonemap.BackendQSV, hardwareDevice: "/dev/dri/renderD128"},
+		{name: "VAAPI", mode: tonemap.ModeHardware, backend: tonemap.BackendVAAPI, filter: tonemap.HardwareFilterVAAPI, policy: tonemap.PolicyHardwareOnly, settingKey: config.PlaybackTranscodeHardwareToneMapSettingKey, configuredHW: tonemap.BackendVAAPI, hardwareDevice: "/dev/dri/renderD128"},
+		{name: "NVENC", mode: tonemap.ModeHardware, backend: tonemap.BackendNVENC, filter: tonemap.HardwareFilterCUDA, policy: tonemap.PolicyHardwareOnly, settingKey: config.PlaybackTranscodeHardwareToneMapSettingKey, configuredHW: tonemap.BackendNVENC, hardwareDevice: "0"},
+		{name: "software", mode: tonemap.ModeSoftware, backend: tonemap.BackendSoftware, filter: tonemap.SoftwareFilterBT2390, policy: tonemap.PolicySoftwareOnly, settingKey: config.PlaybackTranscodeSoftwareToneMapSettingKey, configuredHW: playback.HWAccelNone},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			file := stableToneMapTransportFileV3(t)
+			manager := playback.NewSessionManager(0, 0)
+			handler := NewPlaybackHandler(manager)
+			ffmpegPath := writePlaybackTestFFmpeg(t)
+			transcodeDir := t.TempDir()
+			handler.PlaybackConfig = func() config.PlaybackConfig {
+				return config.PlaybackConfig{
+					FFmpegPath: ffmpegPath, TranscodeDir: transcodeDir, TranscodeEnabled: true,
+					HWAccel: test.configuredHW, HWDevice: test.hardwareDevice,
+				}
+			}
+			handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{test.settingKey: "true"}}
+			handler.v3ToneMapProbe = func(context.Context, string, string, string) tonemap.Capabilities {
+				return tonemap.Capabilities{{
+					Mode: test.mode, Backend: test.backend, Filter: test.filter,
+					SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+				}}
+			}
+			presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
+				{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},
+				{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+				{Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
+			}))
+			plan := &playback.PlanV3{
+				PlanID: "plan:local-tone-map:" + test.backend, Delivery: playback.DeliveryTranscodeHLSV3,
+				Transformations: []playback.TransformationV3{
+					{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
+					{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+					{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
+				},
+			}
+			result := playback.PlannerResultV3{
+				Plan: plan, PlayMethod: playback.PlayTranscode,
+				TargetVideoCodec: "h264", TargetAudioCodec: "aac", TargetResolution: "2160p", TargetBitrateKbps: 32_000,
+				SubtitleTrackIndex: -1, SubtitleTransportTrackIndex: -1,
+				ToneMapPolicy: test.policy, ToneMapMode: test.mode, ToneMapSourceKind: tonemap.SourcePQ,
+				ToneMapRecipeVersion:  playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+				ToneMapSourceRevision: tonemap.RevisionForFile(file),
+			}
+			session, err := manager.StartSession(7, "profile-1", file.ID, playback.PlayTranscode, true)
+			if err != nil {
+				t.Fatalf("start playback session: %v", err)
+			}
+			transport, transportErr := handler.prepareTransportV3(httptest.NewRequest(http.MethodPost, "/", nil), session, file, result)
+			if transportErr != nil {
+				t.Fatalf("prepare %s tone-map transport: %v", test.name, transportErr)
+			}
+			transport.commit()
+			t.Cleanup(func() { handler.tm.CloseTranscodeSession(session.ID, "") })
+			live := handler.tm.GetTranscodeSession(session.ID)
+			if live == nil {
+				t.Fatal("validated local tone-map transport was not registered")
+			}
+			opts := live.Opts()
+			if opts.ToneMapMode != test.mode || opts.ToneMapFilter != test.filter || opts.HWAccel != test.configuredHW {
+				t.Fatalf("executor opts = mode %q filter %q hw %q, want %q %q %q", opts.ToneMapMode, opts.ToneMapFilter, opts.HWAccel, test.mode, test.filter, test.configuredHW)
+			}
+		})
 	}
 }
 
