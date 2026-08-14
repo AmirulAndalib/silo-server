@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -547,7 +548,16 @@ func TestPrepareTransportV3ReportsSoftwareToneMapFallback(t *testing.T) {
 	if transport.hwAccel != playback.HWAccelNone || transport.toneMapMode != tonemap.ModeSoftware {
 		t.Fatalf("fallback execution facts = hw %q tone_map %q, want none and software", transport.hwAccel, transport.toneMapMode)
 	}
-	markerPath := filepath.Join(transcodeDir, transport.transportID, "hardware-partial.marker")
+	expectedGeneration := transportGenerationV3(session.ID, result.Plan.PlanID)
+	generationPrefix := expectedGeneration[:strings.LastIndexByte(expectedGeneration, '-')+1]
+	generationDirs, err := filepath.Glob(filepath.Join(transcodeDir, generationPrefix+"*"))
+	if err != nil {
+		t.Fatalf("find local transport generation: %v", err)
+	}
+	if len(generationDirs) != 1 {
+		t.Fatalf("local transport generations = %v, want exactly one", generationDirs)
+	}
+	markerPath := filepath.Join(generationDirs[0], "hardware-partial.marker")
 	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
 		t.Fatalf("failed hardware output survived software fallback: %v", err)
 	}
