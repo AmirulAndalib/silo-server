@@ -12,6 +12,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/downloadprepare"
 	"github.com/Silo-Server/silo-server/internal/idgen"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 func newArtifactTestRepo(t *testing.T) (*ArtifactRepository, *pgxpool.Pool, int) {
@@ -76,6 +78,34 @@ func remoteOrphansForArtifact(orphans []RemoteArtifactOrphan, artifactID string)
 		}
 	}
 	return filtered
+}
+
+func TestArtifactEnsureQueuedRoundTripsToneMapRecipe(t *testing.T) {
+	repo, _, fileID := newArtifactTestRepo(t)
+	ctx := context.Background()
+	artifact := newArtifact(t, fileID, "hash-tone-map-round-trip")
+	artifact.ToneMapPolicy = tonemap.PolicyHardwareThenSoftware
+	artifact.ToneMapMode = tonemap.ModeHardware
+	artifact.ToneMapSourceKind = tonemap.SourcePQ
+	artifact.ToneMapRecipeVersion = playback.TransformationHDRToSDRToneMapRecipeVersionV3
+	artifact.ToneMapSourceRevision = tonemap.SourceRevision{MediaFileID: fileID, FileSize: 100, StreamSignature: "video"}.Encode()
+
+	returned, created, err := repo.EnsureQueued(ctx, artifact)
+	if err != nil || !created {
+		t.Fatalf("EnsureQueued = (%+v, created=%v, %v), want new tone-mapped artifact", returned, created, err)
+	}
+	assertToneMapRecipe := func(name string, got *Artifact) {
+		t.Helper()
+		if got.ToneMapPolicy != tonemap.PolicyHardwareThenSoftware || got.ToneMapMode != tonemap.ModeHardware || got.ToneMapSourceKind != tonemap.SourcePQ {
+			t.Fatalf("%s tone-map recipe = policy %q mode %q source %q", name, got.ToneMapPolicy, got.ToneMapMode, got.ToneMapSourceKind)
+		}
+	}
+	assertToneMapRecipe("returned", returned)
+	persisted, err := repo.GetByID(ctx, returned.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertToneMapRecipe("persisted", persisted)
 }
 
 // TestArtifactQueueClaimAndLeaseRecovery is the Phase 3 / invariant-3 acceptance

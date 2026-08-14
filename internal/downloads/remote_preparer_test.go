@@ -268,7 +268,7 @@ func TestNodeAwarePreparerHonorsDisabledLocalFallback(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Auth.JWTSecret = "secret"
 	p := NewNodeAwarePreparer(local, nodepool.NewPlanner(nodepool.NewProxyPool(), pool), func() *config.Config { return cfg })
-	p.SetSettingsReader(staticDownloadSettings{"playback.local_transcode_fallback": "false"})
+	p.SetSettingsReader(staticDownloadSettings{config.PlaybackLocalTranscodeFallbackSettingKey: "false"})
 
 	if _, err := p.PrepareFile(context.Background(), "artifact-no-fallback", playback.TranscodeOpts{}, "/artifacts/job.mp4"); err == nil {
 		t.Fatal("expected unavailable-node error with local fallback disabled")

@@ -55,6 +55,11 @@ func DetectHWAccel() HWAccelInfo {
 
 // DetectHWAccelWithFFmpeg probes this host's GPU hardware and configured FFmpeg.
 func DetectHWAccelWithFFmpeg(ffmpegPath string) HWAccelInfo {
+	return DetectHWAccelWithFFmpegContext(context.Background(), ffmpegPath)
+}
+
+// DetectHWAccelWithFFmpegContext probes this host without outliving ctx.
+func DetectHWAccelWithFFmpegContext(ctx context.Context, ffmpegPath string) HWAccelInfo {
 	devices := listRenderDevices(defaultDRIDir)
 	intel := false
 	for _, d := range devices {
@@ -64,7 +69,7 @@ func DetectHWAccelWithFFmpeg(ffmpegPath string) HWAccelInfo {
 		}
 	}
 	return HWAccelInfo{
-		Resolved:            ResolveHWAccelWithFFmpeg("auto", ffmpegPath),
+		Resolved:            ResolveHWAccelWithFFmpegContext(ctx, "auto", ffmpegPath),
 		RenderDevices:       devices,
 		RenderDeviceDetails: renderDeviceDetails(devices),
 		IntelDetected:       intel,
@@ -99,6 +104,12 @@ func ResolveHWAccel(hwAccel string) string {
 // Preference order: nvenc > qsv > vaapi > none.
 // Non-"auto" values are returned unchanged.
 func ResolveHWAccelWithFFmpeg(hwAccel string, ffmpegPath string) string {
+	return ResolveHWAccelWithFFmpegContext(context.Background(), hwAccel, ffmpegPath)
+}
+
+// ResolveHWAccelWithFFmpegContext resolves auto hardware without allowing any
+// FFmpeg capability probe to outlive ctx.
+func ResolveHWAccelWithFFmpegContext(ctx context.Context, hwAccel string, ffmpegPath string) string {
 	if hwAccel != "auto" {
 		return hwAccel
 	}
@@ -128,7 +139,7 @@ func ResolveHWAccelWithFFmpeg(hwAccel string, ffmpegPath string) string {
 	}
 
 	if nvidiaDevice != "" || hasNVIDIADevice() {
-		if ok, reason := ffmpegSupportsNVENC(ffmpegPath); ok {
+		if ok, reason := ffmpegSupportsNVENCContext(ctx, ffmpegPath); ok {
 			if nvidiaDevice != "" {
 				slog.Info("hw_accel=auto: NVIDIA GPU detected, using NVENC", "device", nvidiaDevice)
 			} else {
@@ -156,6 +167,10 @@ func ResolveHWAccelWithFFmpeg(hwAccel string, ffmpegPath string) string {
 }
 
 func ffmpegSupportsNVENC(ffmpegPath string) (bool, string) {
+	return ffmpegSupportsNVENCContext(context.Background(), ffmpegPath)
+}
+
+func ffmpegSupportsNVENCContext(ctx context.Context, ffmpegPath string) (bool, string) {
 	ffmpegPath = normalizeFFmpegPath(ffmpegPath)
 	nvencProbeCache.Lock()
 	if result, ok := nvencProbeCache.byPath[ffmpegPath]; ok {
@@ -164,7 +179,10 @@ func ffmpegSupportsNVENC(ffmpegPath string) (bool, string) {
 	}
 	nvencProbeCache.Unlock()
 
-	result := probeFFmpegNVENC(ffmpegPath)
+	result := probeFFmpegNVENCContext(ctx, ffmpegPath)
+	if ctx != nil && ctx.Err() != nil {
+		return result.available, result.reason
+	}
 	nvencProbeCache.Lock()
 	nvencProbeCache.byPath[ffmpegPath] = result
 	nvencProbeCache.Unlock()
@@ -182,14 +200,14 @@ func normalizeFFmpegPath(ffmpegPath string) string {
 	return ffmpegPath
 }
 
-func probeFFmpegNVENC(ffmpegPath string) nvencProbeResult {
-	if output, err := runFFmpegProbe(ffmpegPath, "-hide_banner", "-hwaccels"); err != nil {
+func probeFFmpegNVENCContext(ctx context.Context, ffmpegPath string) nvencProbeResult {
+	if output, err := runFFmpegProbe(ctx, ffmpegPath, "-hide_banner", "-hwaccels"); err != nil {
 		return nvencProbeResult{reason: "hwaccels probe failed: " + FormatFFmpegProbeFailure(err, output)}
 	} else if !ffmpegOutputHasToken(output, "cuda") {
 		return nvencProbeResult{reason: "cuda hwaccel unavailable"}
 	}
 
-	if output, err := runFFmpegProbe(ffmpegPath, "-hide_banner", "-encoders"); err != nil {
+	if output, err := runFFmpegProbe(ctx, ffmpegPath, "-hide_banner", "-encoders"); err != nil {
 		return nvencProbeResult{reason: "encoders probe failed: " + FormatFFmpegProbeFailure(err, output)}
 	} else if !ffmpegOutputHasToken(output, "h264_nvenc") {
 		return nvencProbeResult{reason: "h264_nvenc encoder unavailable"}
@@ -197,7 +215,7 @@ func probeFFmpegNVENC(ffmpegPath string) nvencProbeResult {
 		return nvencProbeResult{reason: "hevc_nvenc encoder unavailable"}
 	}
 
-	if output, err := runFFmpegProbe(ffmpegPath, "-hide_banner", "-filters"); err != nil {
+	if output, err := runFFmpegProbe(ctx, ffmpegPath, "-hide_banner", "-filters"); err != nil {
 		return nvencProbeResult{reason: "filters probe failed: " + FormatFFmpegProbeFailure(err, output)}
 	} else if !ffmpegOutputHasToken(output, "scale_cuda") {
 		return nvencProbeResult{reason: "scale_cuda filter unavailable"}
@@ -205,7 +223,7 @@ func probeFFmpegNVENC(ffmpegPath string) nvencProbeResult {
 		return nvencProbeResult{reason: "hwupload_cuda filter unavailable"}
 	}
 
-	if output, err := runFFmpegProbe(ffmpegPath,
+	if output, err := runFFmpegProbe(ctx, ffmpegPath,
 		"-hide_banner",
 		"-loglevel", "error",
 		"-f", "lavfi",
@@ -222,8 +240,11 @@ func probeFFmpegNVENC(ffmpegPath string) nvencProbeResult {
 	return nvencProbeResult{available: true}
 }
 
-func runFFmpegProbe(ffmpegPath string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), nvencProbeCommandTimeout)
+func runFFmpegProbe(ctx context.Context, ffmpegPath string, args ...string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, nvencProbeCommandTimeout)
 	defer cancel()
 	return exec.CommandContext(ctx, ffmpegPath, args...).CombinedOutput()
 }

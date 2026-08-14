@@ -552,7 +552,10 @@ func (h *PlaybackHandler) HandlePlaybackCapabilityV3(w http.ResponseWriter, r *h
 	response.Deliveries = []playback.DeliveryV3{playback.DeliveryOriginalHTTPV3, playback.DeliveryRemuxProgressiveV3, playback.DeliveryRemuxHLSV3, playback.DeliveryTranscodeHLSV3}
 	settings := h.plannerSettingsV3(r.Context())
 	policy := tonemap.NewPolicy(settings.HardwareToneMapEnabled, settings.SoftwareToneMapEnabled)
-	inventory := h.hlsToneMapCapabilityInventoryV3(r.Context())
+	inventory := hlsToneMapCapabilityInventoryV3{}
+	if policy != tonemap.PolicyNone {
+		inventory = h.hlsToneMapCapabilityInventoryV3(r.Context())
+	}
 	registry := h.hlsPlanningRegistryWithInputsV3(r.Context(), settings, inventory)
 	toneMapAvailable := false
 	if policy != tonemap.PolicyNone {
@@ -1453,6 +1456,33 @@ func (h *PlaybackHandler) softwareToneMapRetryOptsV3(ctx context.Context, opts p
 	return opts, true
 }
 
+type localTransportStartupFailureV3 struct {
+	cause         error
+	failedToStart bool
+	wasRunning    bool
+	failedDevice  string
+}
+
+// startReadyLocalPlaybackTransportV3 returns only after the first manifest is
+// safe to serve. A session that fails readiness is closed before the failure is
+// returned so every caller gets the same startup cleanup behavior.
+func (h *PlaybackHandler) startReadyLocalPlaybackTransportV3(ctx context.Context, opts playback.TranscodeOpts) (*playback.TranscodeSession, *localTransportStartupFailureV3) {
+	ts, err := h.startLocalPlaybackTransport(ctx, opts)
+	if err != nil {
+		return nil, &localTransportStartupFailureV3{cause: err, failedToStart: true}
+	}
+	if _, err := ts.WaitForManifest(playback.ManifestStartupTimeout); err != nil {
+		failure := &localTransportStartupFailureV3{
+			cause:        err,
+			wasRunning:   ts.IsRunning(),
+			failedDevice: ts.Opts().HWDevice,
+		}
+		_ = ts.Close()
+		return nil, failure
+	}
+	return ts, nil
+}
+
 // prepareLocalTransportV3 starts a local HLS generation for the selected plan.
 func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *playback.Session, file *models.MediaFile, result playback.PlannerResultV3, timeline preparedTimelineV3) (preparedTransportV3, *transportErrorV3) {
 	cfg := h.playbackConfig()
@@ -1483,25 +1513,22 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 		}
 	}
 	usedToneMapFallback := false
-	ts, err := h.startLocalPlaybackTransport(r.Context(), opts)
-	if err != nil {
+	ts, startupFailure := h.startReadyLocalPlaybackTransportV3(r.Context(), opts)
+	if startupFailure != nil && startupFailure.failedToStart {
 		if softwareOpts, eligible := h.softwareToneMapRetryOptsV3(r.Context(), opts, result.FrozenSourceMetadata != nil); eligible {
 			slog.WarnContext(r.Context(), "hardware tone-map failed to start; retrying once in software",
-				"component", "playback", "playback_session_id", session.ID, "error", err)
+				"component", "playback", "playback_session_id", session.ID, "error", startupFailure.cause)
 			opts = softwareOpts
 			usedToneMapFallback = true
-			ts, err = h.startLocalPlaybackTransport(r.Context(), opts)
+			ts, startupFailure = h.startReadyLocalPlaybackTransportV3(r.Context(), opts)
 		}
 	}
-	if err != nil {
+	if startupFailure != nil && startupFailure.failedToStart {
 		unlock()
-		return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Failed to start the playback transport.", retryable: true, cause: err}
+		return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Failed to start the playback transport.", retryable: true, cause: startupFailure.cause}
 	}
-	if _, readyErr := ts.WaitForManifest(playback.ManifestStartupTimeout); readyErr != nil {
-		wasRunning := ts.IsRunning()
-		failedDevice := ts.Opts().HWDevice
-		transportErr := manifestStartupTransportErrorV3(wasRunning, readyErr)
-		_ = ts.Close()
+	if startupFailure != nil {
+		transportErr := manifestStartupTransportErrorV3(startupFailure.wasRunning, startupFailure.cause)
 		if usedToneMapFallback {
 			unlock()
 			return preparedTransportV3{}, transportErr
@@ -1511,52 +1538,46 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 			slog.WarnContext(r.Context(), "hardware tone-map failed during startup; retrying once in software",
 				"component", "playback",
 				"playback_session_id", session.ID,
-				"failed_device", failedDevice,
-				"error", readyErr)
-			ts, err = h.startLocalPlaybackTransport(r.Context(), fallbackOpts)
-			if err != nil {
+				"failed_device", startupFailure.failedDevice,
+				"error", startupFailure.cause)
+			opts = fallbackOpts
+			ts, startupFailure = h.startReadyLocalPlaybackTransportV3(r.Context(), opts)
+			if startupFailure != nil && startupFailure.failedToStart {
 				unlock()
-				return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Failed to start the software tone-map fallback.", retryable: true, cause: err}
+				return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Failed to start the software tone-map fallback.", retryable: true, cause: startupFailure.cause}
 			}
-			if _, fallbackReadyErr := ts.WaitForManifest(playback.ManifestStartupTimeout); fallbackReadyErr != nil {
-				transportErr = manifestStartupTransportErrorV3(ts.IsRunning(), fallbackReadyErr)
-				_ = ts.Close()
+			if startupFailure != nil {
 				unlock()
-				return preparedTransportV3{}, transportErr
+				return preparedTransportV3{}, manifestStartupTransportErrorV3(startupFailure.wasRunning, startupFailure.cause)
 			}
-			goto transportReady
-		}
-		if wasRunning {
+		} else if startupFailure.wasRunning {
 			unlock()
 			return preparedTransportV3{}, transportErr
-		}
-
-		// FFmpeg and GPU drivers can fail before producing their first segment
-		// even though the recipe is valid. Retry one clean generation, preferring
-		// another configured render device so a transient device failure does not
-		// become an immediate client-visible transport error.
-		retryOpts := opts
-		retryOpts.AvoidHWDevice = failedDevice
-		slog.WarnContext(r.Context(), "local transcode crashed during startup; retrying once",
-			"component", "playback",
-			"playback_session_id", session.ID,
-			"failed_device", failedDevice,
-			"configured_devices", retryOpts.HWDevice,
-			"error", readyErr)
-		ts, err = h.startLocalPlaybackTransport(r.Context(), retryOpts)
-		if err != nil {
-			unlock()
-			return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Failed to start the playback transport.", retryable: true, cause: err}
-		}
-		if _, retryReadyErr := ts.WaitForManifest(playback.ManifestStartupTimeout); retryReadyErr != nil {
-			transportErr = manifestStartupTransportErrorV3(ts.IsRunning(), retryReadyErr)
-			_ = ts.Close()
-			unlock()
-			return preparedTransportV3{}, transportErr
+		} else {
+			// FFmpeg and GPU drivers can fail before producing their first segment
+			// even though the recipe is valid. Retry one clean generation, preferring
+			// another configured render device so a transient device failure does not
+			// become an immediate client-visible transport error.
+			retryOpts := opts
+			retryOpts.AvoidHWDevice = startupFailure.failedDevice
+			slog.WarnContext(r.Context(), "local transcode crashed during startup; retrying once",
+				"component", "playback",
+				"playback_session_id", session.ID,
+				"failed_device", startupFailure.failedDevice,
+				"configured_devices", retryOpts.HWDevice,
+				"error", startupFailure.cause)
+			ts, startupFailure = h.startReadyLocalPlaybackTransportV3(r.Context(), retryOpts)
+			if startupFailure != nil && startupFailure.failedToStart {
+				unlock()
+				return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Failed to start the playback transport.", retryable: true, cause: startupFailure.cause}
+			}
+			if startupFailure != nil {
+				unlock()
+				return preparedTransportV3{}, manifestStartupTransportErrorV3(startupFailure.wasRunning, startupFailure.cause)
+			}
 		}
 	}
 
-transportReady:
 	card := playback.NewRecipeCard(session.UserID, session.ProfileID, file.ID, "", ts.Opts())
 	url := appendStreamToken(fmt.Sprintf("/playback/transcode/%s/master.m3u8", session.ID), h.signSessionToken(card))
 	committed := false

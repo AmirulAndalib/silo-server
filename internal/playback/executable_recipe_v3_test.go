@@ -66,6 +66,48 @@ func TestExecutableRecipeV3RejectsToneMapFieldsOnLegacyVersion(t *testing.T) {
 	}
 }
 
+func TestFreezeExecutableRecipeV3SelectsVersionFromAdditiveFields(t *testing.T) {
+	base := PlannerResultV3{Plan: &PlanV3{PlanID: "plan:version"}, PlayMethod: PlayDirect}
+	if got := FreezeExecutableRecipeV3(base).Version; got != executableRecipeVersionLegacyV3 {
+		t.Fatalf("plain recipe version = %d, want %d", got, executableRecipeVersionLegacyV3)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*PlannerResultV3)
+	}{
+		{name: "policy", mutate: func(result *PlannerResultV3) { result.ToneMapPolicy = tonemap.PolicyNone }},
+		{name: "mode", mutate: func(result *PlannerResultV3) { result.ToneMapMode = tonemap.ModeSoftware }},
+		{name: "source kind", mutate: func(result *PlannerResultV3) { result.ToneMapSourceKind = tonemap.SourcePQ }},
+		{name: "recipe version", mutate: func(result *PlannerResultV3) {
+			result.ToneMapRecipeVersion = TransformationHDRToSDRToneMapRecipeVersionV3
+		}},
+		{name: "preflight", mutate: func(result *PlannerResultV3) { result.ToneMapPreflightRequired = true }},
+		{name: "source revision", mutate: func(result *PlannerResultV3) { result.ToneMapSourceRevision = tonemap.SourceRevision{MediaFileID: 1} }},
+		{name: "DV config", mutate: func(result *PlannerResultV3) {
+			result.FrozenSourceMetadata = &SourceExecutionMetadataV3{ToneMapDVConfigPresent: true}
+		}},
+		{name: "DV compatibility ID", mutate: func(result *PlannerResultV3) {
+			result.FrozenSourceMetadata = &SourceExecutionMetadataV3{ToneMapDVBLCompatIDPresent: true}
+		}},
+		{name: "DV base layer", mutate: func(result *PlannerResultV3) {
+			result.FrozenSourceMetadata = &SourceExecutionMetadataV3{ToneMapDVBLPresent: true}
+		}},
+		{name: "DV RPU", mutate: func(result *PlannerResultV3) {
+			result.FrozenSourceMetadata = &SourceExecutionMetadataV3{ToneMapDVRPUPresent: true}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := base
+			tt.mutate(&result)
+			if got := FreezeExecutableRecipeV3(result).Version; got != executableRecipeVersionV3 {
+				t.Fatalf("recipe version = %d, want %d", got, executableRecipeVersionV3)
+			}
+		})
+	}
+}
+
 // TestExecutableRecipeV3AllowsDolbyPresenceMetadataOnSourcePreservingRoutes verifies direct routes retain source facts.
 func TestExecutableRecipeV3AllowsDolbyPresenceMetadataOnSourcePreservingRoutes(t *testing.T) {
 	for _, method := range []PlayMethod{PlayDirect, PlayRemux} {

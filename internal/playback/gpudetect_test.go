@@ -1,6 +1,7 @@
 package playback
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -88,6 +89,37 @@ func TestExplicitNVENCBypassesFFmpegProbe(t *testing.T) {
 
 	if got := ResolveHWAccelWithFFmpeg("nvenc", "/does/not/exist/ffmpeg"); got != "nvenc" {
 		t.Fatalf("ResolveHWAccelWithFFmpeg() = %q, want nvenc", got)
+	}
+}
+
+func TestResolveHWAccelWithFFmpegContextHonorsCallerDeadline(t *testing.T) {
+	env := setupHWAccelTest(t)
+	env.addRenderDevice(t, "renderD128", "0x10de")
+	ffmpeg := writeFakeFFmpeg(t, fakeFFmpegProbe{hang: true})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	started := time.Now()
+	got := ResolveHWAccelWithFFmpegContext(ctx, "auto", ffmpeg.path)
+	cancel()
+	if got != HWAccelNone {
+		t.Fatalf("ResolveHWAccelWithFFmpegContext() = %q, want none", got)
+	}
+	if elapsed := time.Since(started); elapsed >= 150*time.Millisecond {
+		t.Fatalf("caller deadline took %s, want less than per-command timeout", elapsed)
+	}
+	if ctx.Err() != context.DeadlineExceeded {
+		t.Fatalf("context error = %v, want deadline exceeded", ctx.Err())
+	}
+
+	retryCtx, retryCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	_ = ResolveHWAccelWithFFmpegContext(retryCtx, "auto", ffmpeg.path)
+	retryCancel()
+	logData, err := os.ReadFile(ffmpeg.logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls := strings.Count(string(logData), "\n"); calls != 2 {
+		t.Fatalf("canceled probe command count = %d, want 2 uncached attempts", calls)
 	}
 }
 
@@ -281,7 +313,7 @@ func writeFakeFFmpeg(t *testing.T, probe fakeFFmpegProbe) fakeFFmpegBinary {
 	script := "#!/bin/sh\n"
 	script += fmt.Sprintf("printf '%%s\\n' \"$*\" >> %q\n", logPath)
 	if probe.hang {
-		script += "sleep 5\n"
+		script += "while :; do :; done\n"
 	}
 	script += "case \"$*\" in\n"
 	script += "  *-hwaccels*)\n"

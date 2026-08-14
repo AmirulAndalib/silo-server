@@ -569,7 +569,12 @@ func resolveToneMapRecipe(ctx context.Context, opts *playback.TranscodeOpts) err
 	if opts == nil {
 		return errors.New("missing tone-map recipe")
 	}
-	resolved, err := playback.ResolveToneMapExecutor(ctx, *opts)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resolveCtx, cancel := context.WithTimeout(ctx, toneMapResolveTimeout)
+	defer cancel()
+	resolved, err := playback.ResolveToneMapExecutor(resolveCtx, *opts)
 	if err != nil {
 		return err
 	}
@@ -680,17 +685,19 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 // handleHWCapabilities reports live smoke-tested node capabilities.
 func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
+	resolveCtx, cancel := context.WithTimeout(r.Context(), toneMapResolveTimeout)
+	defer cancel()
 	ffmpegPath := ""
 	hwAccel := playback.HWAccelNone
 	hwDevice := ""
 	if cfg := s.watcher.Config(); cfg != nil {
 		ffmpegPath = cfg.Playback.FFmpegPath
-		hwAccel = playback.ResolveHWAccelWithFFmpeg(cfg.Playback.HWAccel, ffmpegPath)
+		hwAccel = playback.ResolveHWAccelWithFFmpegContext(resolveCtx, cfg.Playback.HWAccel, ffmpegPath)
 		hwDevice = cfg.Playback.HWDevice
 	}
-	info := playback.DetectHWAccelWithFFmpeg(ffmpegPath)
-	info.ToneMapCapabilities = tonemap.Probe(r.Context(), playback.ResolveFFmpegPath(ffmpegPath), hwAccel, hwDevice)
-	info.Transformations = playback.ProbeTransformationRegistryWithToneMapV3(r.Context(), ffmpegPath, info.ToneMapCapabilities).Advertised()
+	info := playback.DetectHWAccelWithFFmpegContext(resolveCtx, ffmpegPath)
+	info.ToneMapCapabilities = tonemap.Probe(resolveCtx, playback.ResolveFFmpegPath(ffmpegPath), hwAccel, hwDevice)
+	info.Transformations = playback.ProbeTransformationRegistryWithToneMapV3(resolveCtx, ffmpegPath, info.ToneMapCapabilities).Advertised()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)
 }
@@ -1067,9 +1074,7 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	opts.NodeType = "transcode"
 	opts.ExecutionMode = "transcode_node"
 	if toneMapRecipeRequested(opts) {
-		resolveCtx, cancelResolve := context.WithTimeout(context.WithoutCancel(r.Context()), toneMapResolveTimeout)
-		err := resolveToneMapRecipe(resolveCtx, &opts)
-		cancelResolve()
+		err := resolveToneMapRecipe(context.WithoutCancel(r.Context()), &opts)
 		if err != nil {
 			slog.ErrorContext(r.Context(), "transcode node reconstruct tone-map recipe unavailable", "component", "transcodenode", "error", err,
 				"session", sessionID, "playback_session_id", sessionID)

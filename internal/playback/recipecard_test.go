@@ -2,6 +2,7 @@ package playback
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
@@ -233,9 +234,9 @@ func TestRecipeCardLegacyDecodeHasEmptyPlayMethod(t *testing.T) {
 
 // TestRecipeCardClaimsRoundTrip verifies a transcode recipe survives stream-token claims:
 // the token IS the durable descriptor under token-carried reconstruction, so any
-// dropped byte-affecting field would reconstruct a divergent encode. HWAccel and
-// HWDevice are deliberately excluded (re-resolved from live config), so they are
-// not asserted here.
+// dropped byte-affecting field would reconstruct a divergent encode. HWAccel,
+// HWDevice, and the derived tone-map filter are deliberately excluded and
+// re-resolved from live config, so they are not asserted here.
 func TestRecipeCardClaimsRoundTrip(t *testing.T) {
 	revision := tonemap.SourceRevision{MediaFileID: 77, FileSize: 100, FileModifiedUnixNano: 200, StreamSignature: "stream"}
 	card := NewRecipeCard(42, "profile-1", 77, "http://node:9000", TranscodeOpts{
@@ -274,6 +275,13 @@ func TestRecipeCardClaimsRoundTrip(t *testing.T) {
 	})
 
 	claims := card.ToClaims()
+	encodedClaims, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encodedClaims), `"tmf"`) {
+		t.Fatalf("stream-token claims carried the environment-specific tone-map filter: %s", encodedClaims)
+	}
 	got := RecipeCardFromClaims(&claims)
 
 	// Identity + routing.
@@ -287,7 +295,7 @@ func TestRecipeCardClaimsRoundTrip(t *testing.T) {
 		got.SourceVideoProfile != card.SourceVideoProfile || got.SourceVideoBitDepth != card.SourceVideoBitDepth ||
 		got.SoftwareVideoDecode != card.SoftwareVideoDecode ||
 		got.ToneMapPolicy != card.ToneMapPolicy || got.ToneMapMode != card.ToneMapMode ||
-		got.ToneMapSourceKind != card.ToneMapSourceKind || got.ToneMapFilter != card.ToneMapFilter ||
+		got.ToneMapSourceKind != card.ToneMapSourceKind || got.ToneMapFilter != "" ||
 		got.ToneMapRecipeVersion != card.ToneMapRecipeVersion || got.ToneMapPreflightRequired != card.ToneMapPreflightRequired || got.ToneMapSourceRevision != revision ||
 		got.ToneMapDVConfigPresent != card.ToneMapDVConfigPresent || got.ToneMapDVBLCompatIDPresent != card.ToneMapDVBLCompatIDPresent || got.ToneMapDVBLPresent != card.ToneMapDVBLPresent || got.ToneMapDVRPUPresent != card.ToneMapDVRPUPresent ||
 		got.VideoBitstreamFilter != card.VideoBitstreamFilter ||

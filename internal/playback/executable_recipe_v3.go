@@ -63,8 +63,8 @@ func FreezeExecutableRecipeV3(result PlannerResultV3) ExecutableRecipeV3 {
 	if result.FrozenSourceMetadata != nil {
 		sourceMetadata = *result.FrozenSourceMetadata
 	}
-	return ExecutableRecipeV3{
-		Version:                     executableRecipeVersionV3,
+	recipe := ExecutableRecipeV3{
+		Version:                     executableRecipeVersionLegacyV3,
 		PlanID:                      planID,
 		PlayMethod:                  result.PlayMethod,
 		TranscodeAudio:              result.TranscodeAudio,
@@ -93,6 +93,23 @@ func FreezeExecutableRecipeV3(result PlannerResultV3) ExecutableRecipeV3 {
 		SubtitleCodec:               result.SubtitleCodec,
 		DownloadedSubtitleID:        result.DownloadedSubtitleID,
 	}
+	if recipe.hasVersion2Fields() {
+		recipe.Version = executableRecipeVersionV3
+	}
+	return recipe
+}
+
+func (r ExecutableRecipeV3) hasVersion2Fields() bool {
+	return r.ToneMapPolicy != "" ||
+		r.ToneMapMode != "" ||
+		r.ToneMapSourceKind != "" ||
+		r.ToneMapRecipeVersion != "" ||
+		r.ToneMapPreflightRequired ||
+		!r.ToneMapSourceRevision.IsZero() ||
+		r.ToneMapDVConfigPresent ||
+		r.ToneMapDVBLCompatIDPresent ||
+		r.ToneMapDVBLPresent ||
+		r.ToneMapDVRPUPresent
 }
 
 // Valid reports whether an executable recipe is complete and internally consistent.
@@ -100,7 +117,7 @@ func (r ExecutableRecipeV3) Valid() bool {
 	if (r.Version != executableRecipeVersionLegacyV3 && r.Version != executableRecipeVersionV3) || r.PlanID == "" {
 		return false
 	}
-	if r.Version == executableRecipeVersionLegacyV3 && (r.ToneMapPolicy != "" || r.ToneMapMode != "" || r.ToneMapSourceKind != "" || r.ToneMapRecipeVersion != "" || r.ToneMapPreflightRequired || !r.ToneMapSourceRevision.IsZero() || r.ToneMapDVConfigPresent || r.ToneMapDVBLCompatIDPresent || r.ToneMapDVBLPresent || r.ToneMapDVRPUPresent) {
+	if r.Version == executableRecipeVersionLegacyV3 && r.hasVersion2Fields() {
 		return false
 	}
 	hasToneMapField := r.ToneMapPolicy != "" || r.ToneMapMode != "" || r.ToneMapSourceKind != "" || r.ToneMapRecipeVersion != "" || r.ToneMapPreflightRequired || !r.ToneMapSourceRevision.IsZero()

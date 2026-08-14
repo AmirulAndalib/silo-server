@@ -462,7 +462,7 @@ func ResolveToneMapExecutor(ctx context.Context, opts TranscodeOpts) (TranscodeO
 		opts.ToneMapSourceRevision.IsZero() {
 		return opts, fmt.Errorf("incomplete tone-map recipe")
 	}
-	backend := ResolveHWAccelWithFFmpeg(opts.HWAccel, opts.FFmpegPath)
+	backend := ResolveHWAccelWithFFmpegContext(ctx, opts.HWAccel, opts.FFmpegPath)
 	capabilities := tonemap.Probe(ctx, ResolveFFmpegPath(opts.FFmpegPath), backend, opts.HWDevice)
 	if !capabilities.Supports(opts.ToneMapMode, opts.ToneMapSourceKind) {
 		return opts, fmt.Errorf("tone-map executor is not validated")

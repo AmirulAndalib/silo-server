@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -184,19 +185,23 @@ func TestStartRemoteTranscodePreservesRequestedExecutorForLegacyEmptyResponse(t 
 // TestStartRemoteToneMapReportsConfirmedExecutorAndFallback verifies remote fallback facts remain accurate.
 func TestStartRemoteToneMapReportsConfirmedExecutorAndFallback(t *testing.T) {
 	tests := []struct {
-		name           string
-		rejectHardware bool
-		rejectSoftware bool
-		wantHWAccel    string
-		wantMode       tonemap.Mode
-		wantErrParts   []string
+		name                 string
+		rejectHardwareStatus int
+		rejectSoftware       bool
+		wantDispatches       int32
+		wantHWAccel          string
+		wantMode             tonemap.Mode
+		wantErrParts         []string
 	}{
-		{name: "hardware", wantHWAccel: tonemap.BackendQSV, wantMode: tonemap.ModeHardware},
-		{name: "software fallback", rejectHardware: true, wantHWAccel: playback.HWAccelNone, wantMode: tonemap.ModeSoftware},
-		{name: "software fallback rejected", rejectHardware: true, rejectSoftware: true, wantErrParts: []string{"initial status 422", "retry status 503"}},
+		{name: "hardware", wantDispatches: 1, wantHWAccel: tonemap.BackendQSV, wantMode: tonemap.ModeHardware},
+		{name: "unprocessable software fallback", rejectHardwareStatus: http.StatusUnprocessableEntity, wantDispatches: 2, wantHWAccel: playback.HWAccelNone, wantMode: tonemap.ModeSoftware},
+		{name: "not implemented software fallback", rejectHardwareStatus: http.StatusNotImplemented, wantDispatches: 2, wantHWAccel: playback.HWAccelNone, wantMode: tonemap.ModeSoftware},
+		{name: "software fallback rejected", rejectHardwareStatus: http.StatusUnprocessableEntity, rejectSoftware: true, wantDispatches: 2, wantErrParts: []string{"initial status 422", "retry status 503"}},
+		{name: "authentication rejection is not retried", rejectHardwareStatus: http.StatusUnauthorized, wantDispatches: 1, wantErrParts: []string{"status 401"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			var dispatches atomic.Int32
 			capabilities := tonemap.Capabilities{
 				{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
 				{Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
@@ -206,14 +211,15 @@ func TestStartRemoteToneMapReportsConfirmedExecutorAndFallback(t *testing.T) {
 				case "/hw-capabilities":
 					writeJSON(w, http.StatusOK, playback.HWAccelInfo{ToneMapCapabilities: capabilities})
 				case "/transcode/start":
+					dispatches.Add(1)
 					var request transcodenode.TranscodeStartRequest
 					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 						t.Errorf("decode start request: %v", err)
 						http.Error(w, "invalid transcode start request", http.StatusBadRequest)
 						return
 					}
-					if test.rejectHardware && request.ToneMapMode == tonemap.ModeHardware {
-						w.WriteHeader(http.StatusUnprocessableEntity)
+					if test.rejectHardwareStatus != 0 && request.ToneMapMode == tonemap.ModeHardware {
+						w.WriteHeader(test.rejectHardwareStatus)
 						return
 					}
 					if test.rejectSoftware && request.ToneMapMode == tonemap.ModeSoftware {
@@ -239,9 +245,12 @@ func TestStartRemoteToneMapReportsConfirmedExecutorAndFallback(t *testing.T) {
 			file := &models.MediaFile{ID: 42, FilePath: "/media/movie.mkv", HDR: true, VideoTracks: []models.VideoTrack{{Codec: "hevc", VideoRangeType: "HDR10", ColorTransfer: "smpte2084", ColorPrimaries: "bt2020", ColorSpace: "bt2020nc", BitDepth: 10}}}
 
 			err := handler.startRemoteTranscode(context.Background(), "play-1", "upstream-1", testRemoteTranscodeSource(), file, 0, node.URL)
+			if got := dispatches.Load(); got != test.wantDispatches {
+				t.Fatalf("start dispatches = %d, want %d", got, test.wantDispatches)
+			}
 			if len(test.wantErrParts) > 0 {
 				if err == nil {
-					t.Fatal("startRemoteTranscode succeeded after both node dispatches were rejected")
+					t.Fatal("startRemoteTranscode succeeded after the node rejected the request")
 				}
 				for _, want := range test.wantErrParts {
 					if !strings.Contains(err.Error(), want) {
@@ -263,6 +272,50 @@ func TestStartRemoteToneMapReportsConfirmedExecutorAndFallback(t *testing.T) {
 				t.Fatalf("persisted execution facts = hw %q tone_map %q, found=%v", card.HWAccel, card.ToneMapMode, ok)
 			}
 		})
+	}
+}
+
+func TestStartRemoteToneMapConfirmationMismatchRollsBackNode(t *testing.T) {
+	deleted := make(chan string, 1)
+	capabilities := tonemap.Capabilities{{
+		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI,
+		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	}}
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
+			writeJSON(w, http.StatusOK, playback.HWAccelInfo{ToneMapCapabilities: capabilities})
+		case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{}`))
+		case r.Method == http.MethodDelete:
+			deleted <- r.URL.Path
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(node.Close)
+
+	handler, _, playbackStore := newRemoteTranscodeHandler(t, node.URL, &stubRecipeNodeStore{})
+	handler.SettingsRepo = stubSettingsReader{values: map[string]string{
+		config.PlaybackTranscodeHardwareToneMapSettingKey: "true",
+	}}
+	playbackStore.Put(PlaybackSession{ID: "play-1", UpstreamSessionID: "upstream-1"})
+	file := &models.MediaFile{ID: 42, FilePath: "/media/movie.mkv", HDR: true, VideoTracks: []models.VideoTrack{{Codec: "hevc", VideoRangeType: "HDR10", ColorTransfer: "smpte2084", ColorPrimaries: "bt2020", ColorSpace: "bt2020nc", BitDepth: 10}}}
+
+	err := handler.startRemoteTranscode(context.Background(), "play-1", "upstream-1", testRemoteTranscodeSource(), file, 0, node.URL)
+	if err == nil || !strings.Contains(err.Error(), "did not confirm tone-map mode") {
+		t.Fatalf("startRemoteTranscode error = %v, want confirmation mismatch", err)
+	}
+	select {
+	case path := <-deleted:
+		if path != "/transcode/upstream-1" {
+			t.Fatalf("rollback DELETE path = %q, want /transcode/upstream-1", path)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected rollback DELETE after tone-map confirmation mismatch")
 	}
 }
 

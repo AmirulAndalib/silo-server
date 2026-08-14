@@ -324,11 +324,13 @@ func TestHandlePlaybackCapabilityV3ReusesResolvedToneMapInputs(t *testing.T) {
 }
 
 func TestHandlePlaybackCapabilityV3AdvertisesPooledTransformationsWhenToneMapDisabled(t *testing.T) {
+	var hits atomic.Int32
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/hw-capabilities" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		hits.Add(1)
 		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{
 			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
 			{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
@@ -364,6 +366,9 @@ func TestHandlePlaybackCapabilityV3AdvertisesPooledTransformationsWhenToneMapDis
 	}
 	if advertised[playback.TransformationHDRToSDRToneMapV3] {
 		t.Fatal("tone-map transformation was advertised while policy was disabled")
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("node capability requests = %d, want one transformation inventory request without a tone-map probe", got)
 	}
 }
 

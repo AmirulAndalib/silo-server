@@ -17,12 +17,13 @@ const (
 // to serve a streaming session without database access.
 //
 // Under token-carried reconstruction (TR-lease) the token is also the durable
-// reconstruction descriptor: its claims carry the full set of byte-affecting
-// encode parameters (the former Postgres "recipe card"), so a front-end that has
-// lost its in-memory session can rebuild ffmpeg from the token the client
-// re-presents — no shared per-session store. The ownership claims (uid/pid/mfid)
-// are lookup keys re-resolved against the authority on reconstruct; they are
-// never trusted on their own.
+// reconstruction descriptor: its claims carry the frozen byte-affecting encode
+// parameters (the former Postgres "recipe card"), while environment-specific
+// fields such as the tone-map filter are resolved from the live node. A
+// front-end that loses its in-memory session can rebuild ffmpeg from the token
+// the client re-presents — no shared per-session store. The ownership claims
+// (uid/pid/mfid) are lookup keys re-resolved against the authority on
+// reconstruct; they are never trusted on their own.
 type Claims struct {
 	SessionID            string `json:"sid"`
 	MediaPath            string `json:"path"`
@@ -70,7 +71,6 @@ type Claims struct {
 	ToneMapPolicy              string  `json:"tmp,omitempty"`
 	ToneMapMode                string  `json:"tmm,omitempty"`
 	ToneMapSourceKind          string  `json:"tms,omitempty"`
-	ToneMapFilter              string  `json:"tmf,omitempty"`
 	ToneMapRecipeVersion       string  `json:"tmv,omitempty"`
 	ToneMapPreflightRequired   bool    `json:"tmpf,omitempty"`
 	ToneMapSourceRevision      string  `json:"tmsr,omitempty"`

@@ -42,20 +42,25 @@ func TestProbePipelinePreservesVideoColorRange(t *testing.T) {
 
 // TestProbePipelinePreservesJellyfinFFprobeDolbyVisionPresenceFlags verifies explicit side-data flags survive probing.
 func TestProbePipelinePreservesJellyfinFFprobeDolbyVisionPresenceFlags(t *testing.T) {
-	rawJSON := `{"streams":[{"codec_type":"video","codec_name":"hevc","color_range":"tv","color_space":"bt2020nc","color_transfer":"smpte2084","color_primaries":"bt2020","side_data_list":[{"side_data_type":"DOVI configuration record","dv_profile":7,"dv_level":6,"rpu_present_flag":1,"el_present_flag":1,"bl_present_flag":1,"dv_bl_signal_compatibility_id":6}]}]}`
-	var raw ffprobeOutput
-	if err := json.Unmarshal([]byte(rawJSON), &raw); err != nil {
-		t.Fatal(err)
-	}
-	probe := convertProbeData(&raw)
-	file := &models.MediaFile{}
-	applyProbeData(file, probe, "local")
-	if len(file.VideoTracks) != 1 {
-		t.Fatalf("VideoTracks length = %d, want 1", len(file.VideoTracks))
-	}
-	track := file.VideoTracks[0]
-	if track.DVProfile != 7 || track.DVLevel != 6 || track.DVBLCompatID != 6 || !track.DVConfigPresent || !track.DVBLCompatIDPresent || !track.DVBLPresent || !track.DVRPUPresent || !track.DVELPresent {
-		t.Fatalf("Dolby Vision facts were not preserved: %#v", track)
+	for _, fields := range []string{
+		`"rpu_present_flag":1,"el_present_flag":1,"bl_present_flag":1`,
+		`"dv_rpu_present":1,"dv_el_present":1,"dv_bl_present":1`,
+	} {
+		rawJSON := `{"streams":[{"codec_type":"video","codec_name":"hevc","color_range":"tv","color_space":"bt2020nc","color_transfer":"smpte2084","color_primaries":"bt2020","side_data_list":[{"side_data_type":"DOVI configuration record","dv_profile":7,"dv_level":6,` + fields + `,"dv_bl_signal_compatibility_id":6}]}]}`
+		var raw ffprobeOutput
+		if err := json.Unmarshal([]byte(rawJSON), &raw); err != nil {
+			t.Fatal(err)
+		}
+		probe := convertProbeData(&raw)
+		file := &models.MediaFile{}
+		applyProbeData(file, probe, "local")
+		if len(file.VideoTracks) != 1 {
+			t.Fatalf("VideoTracks length = %d, want 1", len(file.VideoTracks))
+		}
+		track := file.VideoTracks[0]
+		if track.DVProfile != 7 || track.DVLevel != 6 || track.DVBLCompatID != 6 || !track.DVConfigPresent || !track.DVBLCompatIDPresent || !track.DVBLPresent || !track.DVRPUPresent || !track.DVELPresent {
+			t.Fatalf("Dolby Vision facts were not preserved: %#v", track)
+		}
 	}
 }
 

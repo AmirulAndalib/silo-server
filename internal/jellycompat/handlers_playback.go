@@ -789,7 +789,7 @@ func (h *PlaybackHandler) startRemoteTranscode(
 	}
 	initialStatus := status
 	retriedWithSoftware := false
-	if status != http.StatusAccepted && downgradeToSoftwareToneMap(
+	if (status == http.StatusUnprocessableEntity || status == http.StatusNotImplemented) && downgradeToSoftwareToneMap(
 		toneMapRecipe.policy, &toneMapRecipe.mode, &toneMapRecipe.filter, &toneMapRecipe.hwAccel,
 		toneMapRecipe.sourceKind, toneMapCapabilities,
 	) {
@@ -808,6 +808,7 @@ func (h *PlaybackHandler) startRemoteTranscode(
 		return fmt.Errorf("remote transcode start rejected: status %d", status)
 	}
 	if reqBody.ToneMapMode != "" && nodeResponse.ToneMapMode != reqBody.ToneMapMode {
+		h.tm.CloseTranscodeSession(upstreamSessionID, transcodeNodeURL)
 		return errors.New("remote transcode node did not confirm tone-map mode")
 	}
 

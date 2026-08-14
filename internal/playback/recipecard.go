@@ -178,7 +178,9 @@ func NewRemuxRecipeCard(sessionID string, userID int, profileID string, mediaFil
 
 // TranscodeOpts rebuilds the encode parameters for a reconstruct. outputDir,
 // ffmpegPath and logSink are supplied by the caller from live config because
-// they are environment-specific and not pinned in the card.
+// they are environment-specific and not pinned in the card. ToneMapFilter may
+// also be empty after token reconstruction and is resolved from live capability
+// data before the transcode starts.
 func (c RecipeCard) TranscodeOpts(outputDir, ffmpegPath string, logSink FFmpegLogSink) TranscodeOpts {
 	return TranscodeOpts{
 		InputPath:                  c.InputPath,
@@ -264,7 +266,6 @@ func (c RecipeCard) ToClaims() streamtoken.Claims {
 		ToneMapPolicy:              string(c.ToneMapPolicy),
 		ToneMapMode:                string(c.ToneMapMode),
 		ToneMapSourceKind:          string(c.ToneMapSourceKind),
-		ToneMapFilter:              c.ToneMapFilter,
 		ToneMapRecipeVersion:       c.ToneMapRecipeVersion,
 		ToneMapPreflightRequired:   c.ToneMapPreflightRequired,
 		ToneMapSourceRevision:      c.ToneMapSourceRevision.Encode(),
@@ -291,9 +292,10 @@ func (c RecipeCard) ToClaims() streamtoken.Claims {
 }
 
 // RecipeCardFromClaims rebuilds the reconstruction recipe from verified
-// stream-token claims. HWAccel/HWDevice are deliberately absent (re-resolved
-// from live config by the reconstruct path). An empty PlayMethod decodes to
-// PlayTranscode for back-compat with any token minted before the discriminator.
+// stream-token claims. HWAccel, HWDevice, and ToneMapFilter are deliberately
+// absent (re-resolved from live config by the reconstruct path). An empty
+// PlayMethod decodes to PlayTranscode for back-compat with any token minted
+// before the discriminator.
 func RecipeCardFromClaims(c *streamtoken.Claims) RecipeCard {
 	if c == nil {
 		return RecipeCard{}
@@ -327,7 +329,6 @@ func RecipeCardFromClaims(c *streamtoken.Claims) RecipeCard {
 		ToneMapPolicy:              tonemap.Policy(c.ToneMapPolicy),
 		ToneMapMode:                tonemap.Mode(c.ToneMapMode),
 		ToneMapSourceKind:          tonemap.SourceKind(c.ToneMapSourceKind),
-		ToneMapFilter:              c.ToneMapFilter,
 		ToneMapRecipeVersion:       c.ToneMapRecipeVersion,
 		ToneMapPreflightRequired:   c.ToneMapPreflightRequired,
 		ToneMapSourceRevision:      sourceRevision,
