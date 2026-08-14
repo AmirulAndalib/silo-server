@@ -552,18 +552,15 @@ func (h *PlaybackHandler) HandlePlaybackCapabilityV3(w http.ResponseWriter, r *h
 	response.Deliveries = []playback.DeliveryV3{playback.DeliveryOriginalHTTPV3, playback.DeliveryRemuxProgressiveV3, playback.DeliveryRemuxHLSV3, playback.DeliveryTranscodeHLSV3}
 	settings := h.plannerSettingsV3(r.Context())
 	policy := tonemap.NewPolicy(settings.HardwareToneMapEnabled, settings.SoftwareToneMapEnabled)
-	registry := h.transformationRegistryV3(r.Context())
+	inventory := h.hlsToneMapCapabilityInventoryV3(r.Context())
+	registry := h.hlsPlanningRegistryWithInputsV3(r.Context(), settings, inventory)
 	toneMapAvailable := false
 	if policy != tonemap.PolicyNone {
-		inventory := h.hlsToneMapCapabilityInventoryV3(r.Context())
 		for _, capability := range inventory.union {
 			if policy.Allows(capability.Mode) && len(capability.SourceKinds) > 0 {
 				toneMapAvailable = true
 				break
 			}
-		}
-		if toneMapAvailable {
-			registry = h.hlsPlanningRegistryWithInputsV3(r.Context(), settings, inventory)
 		}
 	}
 	for _, transformation := range registry.Advertised() {
@@ -1439,6 +1436,23 @@ func appendPlaybackQueryV3(rawURL, key, value string) string {
 	return rawURL + separator + key + "=" + value
 }
 
+// softwareToneMapRetryOptsV3 returns the software executor for a one-shot
+// hardware fallback when the recipe is allowed to adapt to live capabilities.
+func (h *PlaybackHandler) softwareToneMapRetryOptsV3(ctx context.Context, opts playback.TranscodeOpts, frozenSourceMetadata bool) (playback.TranscodeOpts, bool) {
+	if frozenSourceMetadata || opts.ToneMapMode != tonemap.ModeHardware ||
+		!opts.ToneMapPolicy.Allows(tonemap.ModeSoftware) {
+		return opts, false
+	}
+	capabilities := h.localToneMapCapabilitiesV3(ctx)
+	if !capabilities.Supports(tonemap.ModeSoftware, opts.ToneMapSourceKind) {
+		return opts, false
+	}
+	opts.ToneMapMode = tonemap.ModeSoftware
+	opts.ToneMapFilter = capabilities.FilterFor(tonemap.ModeSoftware, opts.ToneMapSourceKind)
+	opts.HWAccel = playback.HWAccelNone
+	return opts, true
+}
+
 // prepareLocalTransportV3 starts a local HLS generation for the selected plan.
 func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *playback.Session, file *models.MediaFile, result playback.PlannerResultV3, timeline preparedTimelineV3) (preparedTransportV3, *transportErrorV3) {
 	cfg := h.playbackConfig()
@@ -1470,15 +1484,11 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 	}
 	usedToneMapFallback := false
 	ts, err := h.startLocalPlaybackTransport(r.Context(), opts)
-	if err != nil && result.FrozenSourceMetadata == nil && opts.ToneMapMode == tonemap.ModeHardware &&
-		opts.ToneMapPolicy.Allows(tonemap.ModeSoftware) {
-		capabilities := h.localToneMapCapabilitiesV3(r.Context())
-		if capabilities.Supports(tonemap.ModeSoftware, opts.ToneMapSourceKind) {
+	if err != nil {
+		if softwareOpts, eligible := h.softwareToneMapRetryOptsV3(r.Context(), opts, result.FrozenSourceMetadata != nil); eligible {
 			slog.WarnContext(r.Context(), "hardware tone-map failed to start; retrying once in software",
 				"component", "playback", "playback_session_id", session.ID, "error", err)
-			opts.ToneMapMode = tonemap.ModeSoftware
-			opts.ToneMapFilter = capabilities.FilterFor(tonemap.ModeSoftware, opts.ToneMapSourceKind)
-			opts.HWAccel = playback.HWAccelNone
+			opts = softwareOpts
 			usedToneMapFallback = true
 			ts, err = h.startLocalPlaybackTransport(r.Context(), opts)
 		}
@@ -1497,32 +1507,24 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 			return preparedTransportV3{}, transportErr
 		}
 
-		if result.FrozenSourceMetadata == nil && opts.ToneMapMode == tonemap.ModeHardware &&
-			opts.ToneMapPolicy.Allows(tonemap.ModeSoftware) {
-			capabilities := h.localToneMapCapabilitiesV3(r.Context())
-			if capabilities.Supports(tonemap.ModeSoftware, opts.ToneMapSourceKind) {
-				fallbackOpts := opts
-				fallbackOpts.ToneMapMode = tonemap.ModeSoftware
-				fallbackOpts.ToneMapFilter = capabilities.FilterFor(tonemap.ModeSoftware, opts.ToneMapSourceKind)
-				fallbackOpts.HWAccel = playback.HWAccelNone
-				slog.WarnContext(r.Context(), "hardware tone-map failed during startup; retrying once in software",
-					"component", "playback",
-					"playback_session_id", session.ID,
-					"failed_device", failedDevice,
-					"error", readyErr)
-				ts, err = h.startLocalPlaybackTransport(r.Context(), fallbackOpts)
-				if err != nil {
-					unlock()
-					return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Failed to start the software tone-map fallback.", retryable: true, cause: err}
-				}
-				if _, fallbackReadyErr := ts.WaitForManifest(playback.ManifestStartupTimeout); fallbackReadyErr != nil {
-					transportErr = manifestStartupTransportErrorV3(ts.IsRunning(), fallbackReadyErr)
-					_ = ts.Close()
-					unlock()
-					return preparedTransportV3{}, transportErr
-				}
-				goto transportReady
+		if fallbackOpts, eligible := h.softwareToneMapRetryOptsV3(r.Context(), opts, result.FrozenSourceMetadata != nil); eligible {
+			slog.WarnContext(r.Context(), "hardware tone-map failed during startup; retrying once in software",
+				"component", "playback",
+				"playback_session_id", session.ID,
+				"failed_device", failedDevice,
+				"error", readyErr)
+			ts, err = h.startLocalPlaybackTransport(r.Context(), fallbackOpts)
+			if err != nil {
+				unlock()
+				return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Failed to start the software tone-map fallback.", retryable: true, cause: err}
 			}
+			if _, fallbackReadyErr := ts.WaitForManifest(playback.ManifestStartupTimeout); fallbackReadyErr != nil {
+				transportErr = manifestStartupTransportErrorV3(ts.IsRunning(), fallbackReadyErr)
+				_ = ts.Close()
+				unlock()
+				return preparedTransportV3{}, transportErr
+			}
+			goto transportReady
 		}
 		if wasRunning {
 			unlock()

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -319,6 +320,50 @@ func TestHandlePlaybackCapabilityV3ReusesResolvedToneMapInputs(t *testing.T) {
 		if got := settings.getCalls[key]; got != 1 {
 			t.Fatalf("settings lookup %q = %d, want exactly one", key, got)
 		}
+	}
+}
+
+func TestHandlePlaybackCapabilityV3AdvertisesPooledTransformationsWhenToneMapDisabled(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/hw-capabilities" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{
+			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+			{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
+		}})
+	}))
+	defer remote.Close()
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{remote.URL}}
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{config.PlaybackLocalTranscodeFallbackSettingKey: "false"}}
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
+		{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1"},
+		{Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
+	}))
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/playback/capability", nil).WithContext(newAuthorizedPlaybackContext())
+	handler.HandlePlaybackCapabilityV3(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response playback.CapabilityResponseV3
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	advertised := make(map[string]bool, len(response.Transformations))
+	for _, transformation := range response.Transformations {
+		advertised[transformation.Name] = true
+	}
+	if !advertised[playback.TransformationAudioToAACV3] {
+		t.Fatal("pooled-only audio transformation was omitted while tone mapping was disabled")
+	}
+	if advertised[playback.TransformationHDRToSDRToneMapV3] {
+		t.Fatal("tone-map transformation was advertised while policy was disabled")
 	}
 }
 

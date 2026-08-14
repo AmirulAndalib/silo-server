@@ -27,7 +27,7 @@ type ExecutableRecipeV3 struct {
 	ToneMapSourceKind           tonemap.SourceKind     `json:"tone_map_source_kind,omitempty"`
 	ToneMapRecipeVersion        string                 `json:"tone_map_recipe_version,omitempty"`
 	ToneMapPreflightRequired    bool                   `json:"tone_map_preflight_required,omitempty"`
-	ToneMapSourceRevision       tonemap.SourceRevision `json:"tone_map_source_revision,omitempty,omitzero"`
+	ToneMapSourceRevision       tonemap.SourceRevision `json:"tone_map_source_revision,omitzero"`
 	ToneMapDVConfigPresent      bool                   `json:"tone_map_dv_config_present,omitempty"`
 	ToneMapDVBLCompatIDPresent  bool                   `json:"tone_map_dv_bl_compat_id_present,omitempty"`
 	ToneMapDVBLPresent          bool                   `json:"tone_map_dv_bl_present,omitempty"`

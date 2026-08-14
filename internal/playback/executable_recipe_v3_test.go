@@ -93,6 +93,7 @@ func TestExecutableRecipeV3RejectsIncompleteOrContradictoryToneMapRecipe(t *test
 		{name: "missing source kind", mutate: func(recipe *ExecutableRecipeV3) { recipe.ToneMapSourceKind = "" }},
 		{name: "missing source revision", mutate: func(recipe *ExecutableRecipeV3) { recipe.ToneMapSourceRevision = tonemap.SourceRevision{} }},
 		{name: "stale transformation recipe", mutate: func(recipe *ExecutableRecipeV3) { recipe.ToneMapRecipeVersion = "0" }},
+		{name: "non-transcode play method", mutate: func(recipe *ExecutableRecipeV3) { recipe.PlayMethod = PlayRemux }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

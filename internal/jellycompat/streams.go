@@ -1707,9 +1707,9 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 	opts.SegmentDuration = h.compatSegmentDuration()
 
 	// Hold the per-session lifecycle lock across "check existing → spawn →
-	// register" so a concurrent reconstruct (or another manifest request) cannot
-	// run a second ffmpeg writer against this session's output dir. Re-check under
-	// the lock and yield to any live session instead of spawning a duplicate.
+	// register" so a concurrent reconstruct cannot run a second ffmpeg writer
+	// against this session's output dir. Readiness waits happen after registration
+	// and outside this lock so concurrent manifest requests can use the same session.
 	unlock := h.tm.LockSessionLifecycle(upstreamSessionID)
 	if existing := h.tm.GetTranscodeSession(upstreamSessionID); existing != nil {
 		unlock()
@@ -1726,32 +1726,43 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 		unlock()
 		return nil, err
 	}
+	h.tm.RegisterTranscodeSession(upstreamSessionID, transcodeSession)
+	unlock()
+
 	if opts.ToneMapMode != "" {
 		if _, readyErr := transcodeSession.WaitForManifest(playback.ManifestStartupTimeout); readyErr != nil {
-			_ = transcodeSession.Close()
-			if !downgradeToSoftwareToneMap(
+			fallbackEligible := downgradeToSoftwareToneMap(
 				opts.ToneMapPolicy, &opts.ToneMapMode, &opts.ToneMapFilter, &opts.HWAccel,
 				opts.ToneMapSourceKind, toneMapCapabilities,
-			) {
-				unlock()
+			)
+			replaceUnlock := h.tm.LockSessionLifecycle(upstreamSessionID)
+			if live := h.tm.GetTranscodeSession(upstreamSessionID); live != transcodeSession {
+				replaceUnlock()
+				if live != nil {
+					return live, nil
+				}
+				return nil, readyErr
+			}
+			h.tm.CloseTranscodeSessionIf(upstreamSessionID, transcodeSession, "")
+			if !fallbackEligible {
+				replaceUnlock()
 				return nil, readyErr
 			}
 			transcodeSession, err = playback.StartTranscode(context.WithoutCancel(ctx), opts)
 			if err != nil {
-				unlock()
+				replaceUnlock()
 				return nil, err
 			}
+			h.tm.RegisterTranscodeSession(upstreamSessionID, transcodeSession)
+			replaceUnlock()
 			if _, fallbackErr := transcodeSession.WaitForManifest(playback.ManifestStartupTimeout); fallbackErr != nil {
-				_ = transcodeSession.Close()
-				unlock()
+				cleanupUnlock := h.tm.LockSessionLifecycle(upstreamSessionID)
+				h.tm.CloseTranscodeSessionIf(upstreamSessionID, transcodeSession, "")
+				cleanupUnlock()
 				return nil, fallbackErr
 			}
 		}
 	}
-	// Safe under the lifecycle lock: the re-check above held, so no other path
-	// registered this session.
-	h.tm.RegisterTranscodeSession(upstreamSessionID, transcodeSession)
-	unlock()
 	effectiveOpts := transcodeSession.Opts()
 
 	// Mirror the actual encode decisions onto the upstream session before the

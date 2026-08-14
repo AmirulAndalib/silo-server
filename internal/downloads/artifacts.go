@@ -262,7 +262,12 @@ func (m *ArtifactManager) Ensure(ctx context.Context, file *models.MediaFile, fo
 	if target.ToneMapPolicy == "" {
 		target.ToneMapPolicy = tonemap.PolicyNone
 	}
-	hash := paramsHashWithToneMapRevision(format, target.Container, target.CodecVideo, target.CodecAudio, target.Resolution, target.AudioTrackIndex, target.TargetBitrateKbps, false, target.ToneMapPolicy, target.ToneMapMode, target.ToneMapSourceKind, target.ToneMapRecipeVersion, target.ToneMapPreflightRequired, target.ToneMapSourceRevision)
+	hash := paramsHashWithToneMapRevision(paramsHashParams{
+		format: format, container: target.Container, codecVideo: target.CodecVideo, codecAudio: target.CodecAudio, resolution: target.Resolution,
+		audioTrackIndex: target.AudioTrackIndex, targetBitrateKbps: target.TargetBitrateKbps,
+		policy: target.ToneMapPolicy, mode: target.ToneMapMode, sourceKind: target.ToneMapSourceKind,
+		recipeVersion: target.ToneMapRecipeVersion, preflightRequired: target.ToneMapPreflightRequired, sourceRevision: target.ToneMapSourceRevision,
+	})
 	id, err := idgen.NextID()
 	if err != nil {
 		return nil, err

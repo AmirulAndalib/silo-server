@@ -64,26 +64,44 @@ type Artifact struct {
 	LastUsedAt                 time.Time
 }
 
-// paramsHash is the dedup key for an encode target: format, container, video
-// and audio codecs, resolution, audio track, bitrate, subtitle burn-in, and—
-// when present—tone-map policy, mode, source kind, recipe version, preflight
-// requirement, and source-revision fingerprint.
+type paramsHashParams struct {
+	format, container, codecVideo, codecAudio, resolution string
+	audioTrackIndex, targetBitrateKbps                    int
+	subtitleBurnIn                                        bool
+	policy                                                tonemap.Policy
+	mode                                                  tonemap.Mode
+	sourceKind                                            tonemap.SourceKind
+	recipeVersion                                         string
+	preflightRequired                                     bool
+	sourceRevision                                        tonemap.SourceRevision
+}
+
+// paramsHash is the test-only legacy wrapper for an encode target without a
+// tone-map recipe.
 func paramsHash(format, container, codecVideo, codecAudio, resolution string, audioTrackIndex, targetBitrateKbps int, subtitleBurnIn bool) string {
-	return paramsHashWithToneMap(format, container, codecVideo, codecAudio, resolution, audioTrackIndex, targetBitrateKbps, subtitleBurnIn, tonemap.PolicyNone, "", "", "")
+	return paramsHashWithToneMapRevision(paramsHashParams{
+		format: format, container: container, codecVideo: codecVideo, codecAudio: codecAudio, resolution: resolution,
+		audioTrackIndex: audioTrackIndex, targetBitrateKbps: targetBitrateKbps, subtitleBurnIn: subtitleBurnIn,
+		policy: tonemap.PolicyNone,
+	})
 }
 
 // paramsHashWithToneMap extends the legacy encode identity with the frozen
 // tone-map policy and recipe while preserving old hashes for ordinary encodes.
 func paramsHashWithToneMap(format, container, codecVideo, codecAudio, resolution string, audioTrackIndex, targetBitrateKbps int, subtitleBurnIn bool, policy tonemap.Policy, mode tonemap.Mode, sourceKind tonemap.SourceKind, recipeVersion string) string {
-	return paramsHashWithToneMapRevision(format, container, codecVideo, codecAudio, resolution, audioTrackIndex, targetBitrateKbps, subtitleBurnIn, policy, mode, sourceKind, recipeVersion, false, tonemap.SourceRevision{})
+	return paramsHashWithToneMapRevision(paramsHashParams{
+		format: format, container: container, codecVideo: codecVideo, codecAudio: codecAudio, resolution: resolution,
+		audioTrackIndex: audioTrackIndex, targetBitrateKbps: targetBitrateKbps, subtitleBurnIn: subtitleBurnIn,
+		policy: policy, mode: mode, sourceKind: sourceKind, recipeVersion: recipeVersion,
+	})
 }
 
 // paramsHashWithToneMapRevision binds prepared-output deduplication to the
 // source revision and preflight requirement in addition to the executor recipe.
-func paramsHashWithToneMapRevision(format, container, codecVideo, codecAudio, resolution string, audioTrackIndex, targetBitrateKbps int, subtitleBurnIn bool, policy tonemap.Policy, mode tonemap.Mode, sourceKind tonemap.SourceKind, recipeVersion string, preflightRequired bool, sourceRevision tonemap.SourceRevision) string {
-	input := fmt.Sprintf("%s|%s|%s|%s|%s|%d|%d|%t", format, container, codecVideo, codecAudio, resolution, audioTrackIndex, targetBitrateKbps, subtitleBurnIn)
-	if (policy != "" && policy != tonemap.PolicyNone) || mode != "" || sourceKind != "" || recipeVersion != "" || preflightRequired || !sourceRevision.IsZero() {
-		input += fmt.Sprintf("|%s|%s|%s|%s|%t|%s", policy, mode, sourceKind, recipeVersion, preflightRequired, sourceRevision.Fingerprint())
+func paramsHashWithToneMapRevision(params paramsHashParams) string {
+	input := fmt.Sprintf("%s|%s|%s|%s|%s|%d|%d|%t", params.format, params.container, params.codecVideo, params.codecAudio, params.resolution, params.audioTrackIndex, params.targetBitrateKbps, params.subtitleBurnIn)
+	if (params.policy != "" && params.policy != tonemap.PolicyNone) || params.mode != "" || params.sourceKind != "" || params.recipeVersion != "" || params.preflightRequired || !params.sourceRevision.IsZero() {
+		input += fmt.Sprintf("|%s|%s|%s|%s|%t|%s", params.policy, params.mode, params.sourceKind, params.recipeVersion, params.preflightRequired, params.sourceRevision.Fingerprint())
 	}
 	sum := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(sum[:])

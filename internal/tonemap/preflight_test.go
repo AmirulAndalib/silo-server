@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -148,6 +149,24 @@ func TestValidateSourceWriteEvictsExpiredNegativeEntries(t *testing.T) {
 	}
 	if expiredPresent {
 		t.Fatal("expired negative entry was retained after a cache write")
+	}
+}
+
+func TestSourcePreflightCacheBoundsSuccessfulVerdicts(t *testing.T) {
+	resetSourcePreflightCache(t)
+	now := time.Now()
+	for i := range maxSourcePreflightCacheEntries + 5 {
+		sourcePreflightCacheStore(strconv.Itoa(i), sourcePreflightCacheEntry{}, now)
+	}
+	sourcePreflightCache.Lock()
+	entryCount := len(sourcePreflightCache.entries)
+	_, newestPresent := sourcePreflightCache.entries[strconv.Itoa(maxSourcePreflightCacheEntries+4)]
+	sourcePreflightCache.Unlock()
+	if entryCount != maxSourcePreflightCacheEntries {
+		t.Fatalf("source preflight cache entries = %d, want %d", entryCount, maxSourcePreflightCacheEntries)
+	}
+	if !newestPresent {
+		t.Fatal("source preflight cache evicted the newest successful verdict")
 	}
 }
 
@@ -554,6 +573,7 @@ func resetSourcePreflightCache(t *testing.T) {
 	t.Helper()
 	sourcePreflightCache.Lock()
 	sourcePreflightCache.entries = make(map[string]sourcePreflightCacheEntry)
+	sourcePreflightCache.nextAccess = 0
 	sourcePreflightCache.Unlock()
 	ffmpegVersionCache.Lock()
 	ffmpegVersionCache.entries = make(map[string][]byte)

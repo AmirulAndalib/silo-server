@@ -1082,11 +1082,7 @@ func softwareToneMapUploadFilter(opts TranscodeOpts) string {
 // nvencSDRFallbackDownload preserves the decoded bit depth while bringing an
 // SDR Dolby Vision base layer to the CPU for unsupported CUDA color conversion.
 func nvencSDRFallbackDownload(opts TranscodeOpts) string {
-	format := "nv12"
-	if opts.SourceVideoBitDepth > 8 {
-		format = "p010le"
-	}
-	return "hwdownload,format=" + format
+	return "hwdownload,format=" + tonemap.NVENCSoftwareFallbackPixelFormat(opts.SourceVideoBitDepth)
 }
 
 // TranscodesAudio reports whether a transcode with the given target audio

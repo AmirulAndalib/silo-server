@@ -5,10 +5,30 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestHardwareSmokeFilterNVENCPreservesSourceBitDepth(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		bitDepth int
+		want     string
+		reject   string
+	}{
+		{name: "8-bit", bitDepth: 8, want: "hwdownload,format=nv12", reject: "hwdownload,format=p010le"},
+		{name: "10-bit", bitDepth: 10, want: "hwdownload,format=p010le", reject: "hwdownload,format=nv12"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			filter := hardwareSmokeFilter(BackendNVENC, SourceSDRBT2020, test.bitDepth)
+			if !strings.Contains(filter, test.want) || strings.Contains(filter, test.reject) {
+				t.Fatalf("hardwareSmokeFilter() = %q, want %q without %q", filter, test.want, test.reject)
+			}
+		})
+	}
+}
 
 // TestProbeTotalTimeoutCoversBoundedCommandMatrix verifies the deadline covers every possible probe command.
 func TestProbeTotalTimeoutCoversBoundedCommandMatrix(t *testing.T) {

@@ -2000,6 +2000,55 @@ func TestPlanPlaybackV3AbandonsStripForAnUnstrippableSource(t *testing.T) {
 	}
 }
 
+func TestPlanPlaybackV3ToneMapEscapeRequiresExecutableTranscode(t *testing.T) {
+	file := unstrippableProfile7FixtureV3()
+	registry := NewTransformationRegistryV3([]TransformationSpecV3{
+		{Name: TransformationServerDV7HDR10V3, RecipeVersion: "1", Available: true},
+		{Name: TransformationVideoToH264V3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, Available: true},
+		{Name: TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: TransformationHDRToSDRToneMapV3, RecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3, Available: true},
+	})
+	capabilities := tonemap.Capabilities{{
+		Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	}}
+
+	for _, test := range []struct {
+		name              string
+		transcodeEnabled  bool
+		removeHLSDelivery bool
+		wantPlan          bool
+	}{
+		{name: "transcoding disabled"},
+		{name: "HLS delivery unavailable", transcodeEnabled: true, removeHLSDelivery: true},
+		{name: "usable transcode route", transcodeEnabled: true, wantPlan: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req := hdr10OnlyProfile7RequestV3()
+			if test.removeHLSDelivery {
+				delete(req.ClientPlaybackContext.Deliveries, DeliveryClassHLSV3)
+			}
+			result := PlanPlaybackV3(PlannerInputV3{
+				Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
+				Settings: PlannerSettingsV3{
+					TranscodeEnabled: test.transcodeEnabled, Allow4KTranscode: true, SoftwareToneMapEnabled: true,
+				},
+				Registry: registry, ToneMapCapabilities: capabilities,
+				DVRPUStrippable: func() bool { return false },
+			})
+			if test.wantPlan {
+				if result.Plan == nil || result.Plan.Delivery != DeliveryTranscodeHLSV3 {
+					t.Fatalf("result = %s, want executable tone-map transcode", ExplainPlannerResultV3(result))
+				}
+				return
+			}
+			if result.Terminal == nil || result.Terminal.Reason != TerminalDVConversionUnsupportedV3 {
+				t.Fatalf("terminal = %#v, want Dolby Vision conversion cause", result.Terminal)
+			}
+		})
+	}
+}
+
 // The strip is a server capability, not the only one: a client that can do the
 // conversion itself must still get its route, with the reason the server route
 // was dropped attached.

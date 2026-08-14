@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -185,11 +186,14 @@ func TestStartRemoteToneMapReportsConfirmedExecutorAndFallback(t *testing.T) {
 	tests := []struct {
 		name           string
 		rejectHardware bool
+		rejectSoftware bool
 		wantHWAccel    string
 		wantMode       tonemap.Mode
+		wantErrParts   []string
 	}{
 		{name: "hardware", wantHWAccel: tonemap.BackendQSV, wantMode: tonemap.ModeHardware},
 		{name: "software fallback", rejectHardware: true, wantHWAccel: playback.HWAccelNone, wantMode: tonemap.ModeSoftware},
+		{name: "software fallback rejected", rejectHardware: true, rejectSoftware: true, wantErrParts: []string{"initial status 422", "retry status 503"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -204,10 +208,16 @@ func TestStartRemoteToneMapReportsConfirmedExecutorAndFallback(t *testing.T) {
 				case "/transcode/start":
 					var request transcodenode.TranscodeStartRequest
 					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-						t.Fatalf("decode start request: %v", err)
+						t.Errorf("decode start request: %v", err)
+						http.Error(w, "invalid transcode start request", http.StatusBadRequest)
+						return
 					}
 					if test.rejectHardware && request.ToneMapMode == tonemap.ModeHardware {
 						w.WriteHeader(http.StatusUnprocessableEntity)
+						return
+					}
+					if test.rejectSoftware && request.ToneMapMode == tonemap.ModeSoftware {
+						w.WriteHeader(http.StatusServiceUnavailable)
 						return
 					}
 					w.Header().Set("Content-Type", "application/json")
@@ -228,7 +238,19 @@ func TestStartRemoteToneMapReportsConfirmedExecutorAndFallback(t *testing.T) {
 			playbackStore.Put(PlaybackSession{ID: "play-1", UpstreamSessionID: "upstream-1"})
 			file := &models.MediaFile{ID: 42, FilePath: "/media/movie.mkv", HDR: true, VideoTracks: []models.VideoTrack{{Codec: "hevc", VideoRangeType: "HDR10", ColorTransfer: "smpte2084", ColorPrimaries: "bt2020", ColorSpace: "bt2020nc", BitDepth: 10}}}
 
-			if err := handler.startRemoteTranscode(context.Background(), "play-1", "upstream-1", testRemoteTranscodeSource(), file, 0, node.URL); err != nil {
+			err := handler.startRemoteTranscode(context.Background(), "play-1", "upstream-1", testRemoteTranscodeSource(), file, 0, node.URL)
+			if len(test.wantErrParts) > 0 {
+				if err == nil {
+					t.Fatal("startRemoteTranscode succeeded after both node dispatches were rejected")
+				}
+				for _, want := range test.wantErrParts {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("startRemoteTranscode error = %q, want %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
 				t.Fatalf("startRemoteTranscode: %v", err)
 			}
 

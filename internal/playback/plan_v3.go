@@ -231,7 +231,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 	// base layer without preserving the Dolby Vision metadata.
 	if dvStripUnsupportedBySource && !rangeOK && !clientDV81Eligible && !clientHDR10Eligible {
 		_, _, _, _, toneMapEligible := toneMapRecipeV3(input, source)
-		if !toneMapEligible {
+		if !toneMapEligible || !videoTranscodeExecutableV3(input, source) {
 			return terminalPlannerResultV3(TerminalDVConversionUnsupportedV3,
 				"This source's Dolby Vision metadata cannot be removed cleanly, and this device cannot play the source as it is.", false)
 		}

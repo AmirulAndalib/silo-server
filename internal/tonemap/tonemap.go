@@ -89,6 +89,15 @@ func (p Policy) Allows(mode Mode) bool {
 	}
 }
 
+// NVENCSoftwareFallbackPixelFormat preserves the decoded source depth when
+// CUDA frames must be downloaded for a software color conversion.
+func NVENCSoftwareFallbackPixelFormat(sourceVideoBitDepth int) string {
+	if sourceVideoBitDepth > 8 {
+		return "p010le"
+	}
+	return "nv12"
+}
+
 // SourceKind describes the transfer function and color primaries of the base
 // signal that an executor must convert.
 type SourceKind string

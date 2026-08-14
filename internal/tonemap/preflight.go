@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	sourcePreflightNegativeTTL  = 15 * time.Second
-	sourcePreflightTimeoutSlack = time.Second
+	sourcePreflightNegativeTTL     = 15 * time.Second
+	sourcePreflightTimeoutSlack    = time.Second
+	maxSourcePreflightCacheEntries = 4096
 )
 
 // SourcePreflightRequest freezes the source, executor, and environment facts
@@ -45,12 +46,14 @@ type SourcePreflightRequest struct {
 type sourcePreflightCacheEntry struct {
 	errorMessage string
 	expiresAt    time.Time
+	lastAccess   uint64
 }
 
 var sourcePreflightCache = struct {
 	sync.Mutex
-	entries map[string]sourcePreflightCacheEntry
-	group   singleflight.Group
+	entries    map[string]sourcePreflightCacheEntry
+	nextAccess uint64
+	group      singleflight.Group
 }{entries: make(map[string]sourcePreflightCacheEntry)}
 
 var ffmpegVersionCache = struct {
@@ -88,17 +91,13 @@ func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightReques
 		return err
 	}
 	if cacheable {
-		sourcePreflightCache.Lock()
-		entry, ok := sourcePreflightCache.entries[key]
-		sourcePreflightCache.Unlock()
-		if ok && sourcePreflightCacheEntryCurrent(entry, time.Now()) {
+		entry, ok := sourcePreflightCacheLookup(key, time.Now())
+		if ok {
 			return cachedPreflightError(entry)
 		}
 		resultCh := sourcePreflightCache.group.DoChan(key, func() (any, error) {
-			sourcePreflightCache.Lock()
-			entry, ok := sourcePreflightCache.entries[key]
-			sourcePreflightCache.Unlock()
-			if ok && sourcePreflightCacheEntryCurrent(entry, time.Now()) {
+			entry, ok := sourcePreflightCacheLookup(key, time.Now())
+			if ok {
 				return entry, nil
 			}
 			sharedCtx, sharedCancel := context.WithTimeout(context.Background(), sourcePreflightExecutionTimeout(request.DurationSeconds))
@@ -112,15 +111,7 @@ func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightReques
 				entry.errorMessage = preflightErr.Error()
 				entry.expiresAt = time.Now().Add(sourcePreflightNegativeTTL)
 			}
-			sourcePreflightCache.Lock()
-			now := time.Now()
-			for cachedKey, cached := range sourcePreflightCache.entries {
-				if cached.errorMessage != "" && !now.Before(cached.expiresAt) {
-					delete(sourcePreflightCache.entries, cachedKey)
-				}
-			}
-			sourcePreflightCache.entries[key] = entry
-			sourcePreflightCache.Unlock()
+			sourcePreflightCacheStore(key, entry, time.Now())
 			return entry, nil
 		})
 		select {
@@ -144,6 +135,44 @@ func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightReques
 // unexpired negative verdict may be reused.
 func sourcePreflightCacheEntryCurrent(entry sourcePreflightCacheEntry, now time.Time) bool {
 	return entry.errorMessage == "" || now.Before(entry.expiresAt)
+}
+
+func sourcePreflightCacheLookup(key string, now time.Time) (sourcePreflightCacheEntry, bool) {
+	sourcePreflightCache.Lock()
+	defer sourcePreflightCache.Unlock()
+	entry, ok := sourcePreflightCache.entries[key]
+	if !ok || !sourcePreflightCacheEntryCurrent(entry, now) {
+		return sourcePreflightCacheEntry{}, false
+	}
+	sourcePreflightCache.nextAccess++
+	entry.lastAccess = sourcePreflightCache.nextAccess
+	sourcePreflightCache.entries[key] = entry
+	return entry, true
+}
+
+func sourcePreflightCacheStore(key string, entry sourcePreflightCacheEntry, now time.Time) {
+	sourcePreflightCache.Lock()
+	defer sourcePreflightCache.Unlock()
+	for cachedKey, cached := range sourcePreflightCache.entries {
+		if cached.errorMessage != "" && !now.Before(cached.expiresAt) {
+			delete(sourcePreflightCache.entries, cachedKey)
+		}
+	}
+	delete(sourcePreflightCache.entries, key)
+	for len(sourcePreflightCache.entries) >= maxSourcePreflightCacheEntries {
+		oldestKey := ""
+		var oldestAccess uint64
+		for cachedKey, cached := range sourcePreflightCache.entries {
+			if oldestKey == "" || cached.lastAccess < oldestAccess {
+				oldestKey = cachedKey
+				oldestAccess = cached.lastAccess
+			}
+		}
+		delete(sourcePreflightCache.entries, oldestKey)
+	}
+	sourcePreflightCache.nextAccess++
+	entry.lastAccess = sourcePreflightCache.nextAccess
+	sourcePreflightCache.entries[key] = entry
 }
 
 // sourcePreflightTotalTimeout includes the FFmpeg identity lookup and the full
@@ -434,11 +463,7 @@ func sourceConversionPreflightFilter(request SourcePreflightRequest) string {
 	}
 	if request.Backend == BackendNVENC {
 		if IsSDRSource(request.Kind) {
-			format := "nv12"
-			if request.SourceBitDepth > 8 {
-				format = "p010le"
-			}
-			return "hwdownload,format=" + format + "," + SoftwareFilter(request.Kind, "") + ",format=nv12,hwupload_cuda"
+			return "hwdownload,format=" + NVENCSoftwareFallbackPixelFormat(request.SourceBitDepth) + "," + SoftwareFilter(request.Kind, "") + ",format=nv12,hwupload_cuda"
 		}
 		return SourceParameters(request.Kind) + "," + CUDAFilter() + "," + HDRMetadataRemovalFilter()
 	}

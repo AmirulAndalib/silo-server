@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -54,6 +55,125 @@ func TestAudioSelectionChanged(t *testing.T) {
 				t.Errorf("audioSelectionChanged(%q, %d) = %v, want %v", tc.mediaSourceID, tc.incoming, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestEnsureTranscodeSessionDoesNotHoldLifecycleLockWhileWaitingForManifest(t *testing.T) {
+	dir := t.TempDir()
+	mediaPath := filepath.Join(dir, "movie.mkv")
+	if err := os.WriteFile(mediaPath, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(mediaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedMarker := filepath.Join(dir, "ffmpeg-started")
+	ffmpegPath := filepath.Join(dir, "ffmpeg")
+	ffmpegScript := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do\n" +
+		"  case \"$arg\" in\n" +
+		"    -filters) printf ' .S. zscale V->V\\n .S. tonemapx V->V\\n .S. sidedata V->V\\n'; exit 0;;\n" +
+		"    -encoders) printf 'libx264\\n'; exit 0;;\n" +
+		"  esac\n" +
+		"done\n" +
+		"eval \"last=\\\"\\${$#}\\\"\"\n" +
+		"if [ \"$last\" = '-' ]; then exit 0; fi\n" +
+		"touch " + startedMarker + "\n" +
+		"sleep 30\n"
+	if err := os.WriteFile(ffmpegPath, []byte(ffmpegScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	modifiedAt := info.ModTime()
+	probeUpdatedAt := time.Now().UTC()
+	file := &models.MediaFile{
+		ID: 42, FilePath: mediaPath, FileSize: info.Size(), FileModifiedAt: &modifiedAt, FileHash: "hash", ProbeUpdatedAt: &probeUpdatedAt, HDR: true,
+		VideoTracks: []models.VideoTrack{{
+			Codec: "hevc", Profile: "Main 10", Width: 1920, Height: 1080, BitDepth: 10, PixelFormat: "yuv420p10le",
+			VideoRange: "HDR10", ColorRange: "tv", ColorPrimaries: "bt2020", ColorTransfer: "smpte2084", ColorSpace: "bt2020nc",
+		}},
+	}
+	version := testCompatVersion()
+	source := testCompatSource(NewResourceIDCodec(), version)
+	playbackStore := NewPlaybackSessionStore(time.Hour, nil)
+	playbackStore.Put(PlaybackSession{ID: "play-1", UpstreamSessionID: "upstream-1", UpstreamPlayMethod: "transcode", MediaSources: []PlaybackMediaSource{source}})
+	handler := &PlaybackHandler{
+		playbackStore: playbackStore,
+		sessionMgr: &testCompatSessionManager{sessions: map[string]*playback.Session{
+			"upstream-1": {ID: "upstream-1", UserID: 7, ProfileID: "profile-1", MediaFileID: file.ID, PlayMethod: playback.PlayTranscode},
+		}},
+		fileResolver: testCompatFileResolver{file: file},
+		SettingsRepo: stubSettingsReader{values: map[string]string{config.PlaybackTranscodeSoftwareToneMapSettingKey: "true"}},
+		TranscodeDir: dir,
+		FFmpegPath:   ffmpegPath,
+		HWAccel:      playback.HWAccelNone,
+		tm:           playback.NewTranscodeManager(),
+	}
+
+	type ensureResult struct {
+		session *playback.TranscodeSession
+		err     error
+	}
+	firstResult := make(chan ensureResult, 1)
+	go func() {
+		session, ensureErr := handler.ensureTranscodeSession(context.Background(), "play-1", "upstream-1", source)
+		firstResult <- ensureResult{session: session, err: ensureErr}
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, statErr := os.Stat(startedMarker); statErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fake FFmpeg did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	secondResult := make(chan ensureResult, 1)
+	go func() {
+		session, ensureErr := handler.ensureTranscodeSession(context.Background(), "play-1", "upstream-1", source)
+		secondResult <- ensureResult{session: session, err: ensureErr}
+	}()
+	var second ensureResult
+	select {
+	case second = <-secondResult:
+	case <-time.After(time.Second):
+		writeCompatStartupManifest(t, filepath.Join(dir, "upstream-1"))
+		first := <-firstResult
+		<-secondResult
+		if first.session != nil {
+			handler.tm.CloseTranscodeSession("upstream-1", "")
+		}
+		t.Fatal("concurrent manifest request blocked behind the lifecycle lock")
+	}
+	if second.err != nil || second.session == nil {
+		t.Fatalf("concurrent ensure result = session %p, error %v", second.session, second.err)
+	}
+
+	writeCompatStartupManifest(t, filepath.Join(dir, "upstream-1"))
+	first := <-firstResult
+	if first.err != nil || first.session == nil {
+		t.Fatalf("initial ensure result = session %p, error %v", first.session, first.err)
+	}
+	if first.session != second.session {
+		t.Fatalf("concurrent ensure returned a different transcode session: first=%p second=%p", first.session, second.session)
+	}
+	handler.tm.CloseTranscodeSession("upstream-1", "")
+}
+
+func writeCompatStartupManifest(t *testing.T, outputDir string) {
+	t.Helper()
+	for _, name := range []string{"seg_00000.m4s", "seg_00001.m4s", "seg_00002.m4s"} {
+		if err := os.WriteFile(filepath.Join(outputDir, name), []byte("segment"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n" +
+		"#EXTINF:2,\nseg_00000.m4s\n#EXTINF:2,\nseg_00001.m4s\n#EXTINF:2,\nseg_00002.m4s\n"
+	if err := os.WriteFile(filepath.Join(outputDir, "stream.m3u8"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

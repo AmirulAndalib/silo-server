@@ -46,6 +46,14 @@ func TestParamsHashStableAndDistinct(t *testing.T) {
 func TestParamsHashIncludesFrozenToneMapRecipe(t *testing.T) {
 	base := paramsHash("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false)
 	legacy := paramsHashWithToneMap("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false, tonemap.PolicyNone, "", "", "")
+	hashWithRevision := func(policy tonemap.Policy, mode tonemap.Mode, sourceKind tonemap.SourceKind, recipeVersion string, preflightRequired bool, sourceRevision tonemap.SourceRevision) string {
+		return paramsHashWithToneMapRevision(paramsHashParams{
+			format: "transcode", container: "mp4", codecVideo: "h264", codecAudio: "aac", resolution: "1080p",
+			audioTrackIndex: -1, targetBitrateKbps: 10000,
+			policy: policy, mode: mode, sourceKind: sourceKind, recipeVersion: recipeVersion,
+			preflightRequired: preflightRequired, sourceRevision: sourceRevision,
+		})
+	}
 	if legacy != base {
 		t.Fatalf("non-tone-mapped hash changed: %q != %q", legacy, base)
 	}
@@ -66,24 +74,18 @@ func TestParamsHashIncludesFrozenToneMapRecipe(t *testing.T) {
 	}
 	revision := tonemap.SourceRevision{MediaFileID: 1, FileSize: 10, FileModifiedUnixNano: 100, StreamSignature: "stream"}
 	for name, other := range map[string]string{
-		"policy only": paramsHashWithToneMapRevision("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
-			tonemap.PolicySoftwareOnly, "", "", "", false, tonemap.SourceRevision{}),
-		"preflight only": paramsHashWithToneMapRevision("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
-			tonemap.PolicyNone, "", "", "", true, tonemap.SourceRevision{}),
-		"source revision only": paramsHashWithToneMapRevision("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
-			tonemap.PolicyNone, "", "", "", false, revision),
+		"policy only":          hashWithRevision(tonemap.PolicySoftwareOnly, "", "", "", false, tonemap.SourceRevision{}),
+		"preflight only":       hashWithRevision(tonemap.PolicyNone, "", "", "", true, tonemap.SourceRevision{}),
+		"source revision only": hashWithRevision(tonemap.PolicyNone, "", "", "", false, revision),
 	} {
 		if other == base {
 			t.Fatalf("%s did not enter the tone-map artifact hash", name)
 		}
 	}
-	revisionHash := paramsHashWithToneMapRevision("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
-		tonemap.PolicyHardwareThenSoftware, tonemap.ModeHardware, tonemap.SourcePQ, playback.TransformationHDRToSDRToneMapRecipeVersionV3, true, revision)
+	revisionHash := hashWithRevision(tonemap.PolicyHardwareThenSoftware, tonemap.ModeHardware, tonemap.SourcePQ, playback.TransformationHDRToSDRToneMapRecipeVersionV3, true, revision)
 	for name, other := range map[string]string{
-		"preflight": paramsHashWithToneMapRevision("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
-			tonemap.PolicyHardwareThenSoftware, tonemap.ModeHardware, tonemap.SourcePQ, playback.TransformationHDRToSDRToneMapRecipeVersionV3, false, revision),
-		"source revision": paramsHashWithToneMapRevision("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
-			tonemap.PolicyHardwareThenSoftware, tonemap.ModeHardware, tonemap.SourcePQ, playback.TransformationHDRToSDRToneMapRecipeVersionV3, true, tonemap.SourceRevision{MediaFileID: 1, FileSize: 11, FileModifiedUnixNano: 100, StreamSignature: "stream"}),
+		"preflight":       hashWithRevision(tonemap.PolicyHardwareThenSoftware, tonemap.ModeHardware, tonemap.SourcePQ, playback.TransformationHDRToSDRToneMapRecipeVersionV3, false, revision),
+		"source revision": hashWithRevision(tonemap.PolicyHardwareThenSoftware, tonemap.ModeHardware, tonemap.SourcePQ, playback.TransformationHDRToSDRToneMapRecipeVersionV3, true, tonemap.SourceRevision{MediaFileID: 1, FileSize: 11, FileModifiedUnixNano: 100, StreamSignature: "stream"}),
 	} {
 		if other == revisionHash {
 			t.Fatalf("%s did not affect tone-map artifact hash", name)

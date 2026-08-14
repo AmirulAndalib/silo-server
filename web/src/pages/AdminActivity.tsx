@@ -989,10 +989,19 @@ function transcodeModeBadgeColor(label: string): string {
 /** Render the compact indicator for the confirmed tone-mapping executor. */
 function ToneMapModeBadge({ label }: { label: string }) {
   return (
-    <span className="inline-flex rounded border border-violet-400/25 bg-violet-400/10 px-1.5 py-0.5 text-[9px] font-semibold text-violet-200">
+    <span
+      className={`inline-flex rounded border px-1.5 py-0.5 text-[9px] font-semibold ${toneMapModeBadgeColor(label)}`}
+    >
       {label}
     </span>
   );
+}
+
+function toneMapModeBadgeColor(label: string): string {
+  if (label.trim().toLowerCase() === "sw tone map") {
+    return "border-destructive/30 bg-destructive/10 text-destructive";
+  }
+  return "border-violet-400/25 bg-violet-400/10 text-violet-200";
 }
 
 function PlaybackExpandedPanel({

@@ -23,6 +23,8 @@ const (
 // in the binary lets production probes exercise the real decoder without
 // depending on a media mount or generating source files with an encoder whose
 // availability is itself under test.
+const decodeProbeFixtureBitDepth = 10
+
 const decodeProbeFixtureBase64 = "AAAAAUABDAH//wIgAAADAJAAAAMAAAMAHpWUCQAAAAFCAQECIAAAAwCQAAADAAADAB6gIIEE2WVlSkwvAWgIAAADAAgAAAMACEAAAAABRAHAc8CJAAABKAGsTtcff/U+nK/q+A=="
 
 // CommandRunner executes a bounded external command and returns its combined
@@ -323,7 +325,7 @@ func hardwareSmokeArgs(fixturePath, backend, hardwareDevice string, kind SourceK
 	}
 	base = append(base,
 		"-f", codecHEVC, "-i", fixturePath,
-		"-vf", hardwareSmokeFilter(backend, kind),
+		"-vf", hardwareSmokeFilter(backend, kind, decodeProbeFixtureBitDepth),
 		"-frames:v", "1", "-c:v", hardwareEncoder(backend), "-f", "null", "-",
 	)
 	return base
@@ -331,10 +333,10 @@ func hardwareSmokeArgs(fixturePath, backend, hardwareDevice string, kind SourceK
 
 // hardwareSmokeFilter builds the backend-specific graph used to validate both
 // HDR and already-SDR Dolby Vision base layers.
-func hardwareSmokeFilter(backend string, kind SourceKind) string {
+func hardwareSmokeFilter(backend string, kind SourceKind, sourceVideoBitDepth int) string {
 	if backend == BackendNVENC {
 		if IsSDRSource(kind) {
-			return "hwdownload,format=p010le," + SoftwareFilter(kind, "") + ",format=nv12,hwupload_cuda"
+			return "hwdownload,format=" + NVENCSoftwareFallbackPixelFormat(sourceVideoBitDepth) + "," + SoftwareFilter(kind, "") + ",format=nv12,hwupload_cuda"
 		}
 		return SourceParameters(kind) + "," + CUDAFilter() + "," + HDRMetadataRemovalFilter()
 	}
