@@ -102,20 +102,18 @@ func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightReques
 			}
 			sharedCtx, sharedCancel := context.WithTimeout(context.Background(), sourcePreflightExecutionTimeout(request.DurationSeconds))
 			defer sharedCancel()
+			preflightErr := runSourcePreflight(sharedCtx, request, run)
+			if err := sharedCtx.Err(); err != nil {
+				return sourcePreflightCacheEntry{}, err
+			}
 			entry = sourcePreflightCacheEntry{}
-			if err := runSourcePreflight(sharedCtx, request, run); err != nil {
-				entry.errorMessage = err.Error()
+			if preflightErr != nil {
+				entry.errorMessage = preflightErr.Error()
 				entry.expiresAt = time.Now().Add(sourcePreflightNegativeTTL)
 			}
-			sharedErr := sharedCtx.Err()
-			if entry.errorMessage == "" && sharedErr != nil {
-				entry.errorMessage = sharedErr.Error()
-			}
-			if sharedErr == nil {
-				sourcePreflightCache.Lock()
-				sourcePreflightCache.entries[key] = entry
-				sourcePreflightCache.Unlock()
-			}
+			sourcePreflightCache.Lock()
+			sourcePreflightCache.entries[key] = entry
+			sourcePreflightCache.Unlock()
 			return entry, nil
 		})
 		select {

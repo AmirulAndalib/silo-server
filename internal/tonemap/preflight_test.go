@@ -253,16 +253,16 @@ func TestFFmpegVersionCacheDoesNotStoreEmptyOrFailedLookups(t *testing.T) {
 			if err := os.WriteFile(ffmpegPath, []byte("ffmpeg"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			calls := 0
+			var calls atomic.Int32
 			runner := func(context.Context, string, ...string) ([]byte, error) {
-				calls++
+				calls.Add(1)
 				return tt.output, tt.err
 			}
 			for attempt := 0; attempt < 2; attempt++ {
 				_, _ = ffmpegVersionForPreflight(context.Background(), ffmpegPath, runner)
 			}
-			if calls != 2 {
-				t.Fatalf("version command calls = %d, want failed lookup retried", calls)
+			if calls.Load() != 2 {
+				t.Fatalf("version command calls = %d, want failed lookup retried", calls.Load())
 			}
 		})
 	}
