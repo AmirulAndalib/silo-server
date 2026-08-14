@@ -166,7 +166,7 @@ func applyMigrationForTest(ctx context.Context, t *testing.T, pool *pgxpool.Pool
 	if err != nil {
 		t.Fatalf("create migration provider: %v", err)
 	}
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 	if _, err := provider.Up(ctx); err != nil {
 		t.Fatalf("apply Dolby Vision probe migration: %v", err)
 	}
