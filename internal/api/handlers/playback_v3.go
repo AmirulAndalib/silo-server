@@ -51,6 +51,10 @@ const (
 	// Planning degrades around slow pooled nodes. Full cold-probe budgets are
 	// reserved for transport-time validation of the executor already selected.
 	v3NodeCapabilityPlanTimeout = 5 * time.Second
+	// Older or not-yet-contacted nodes cannot advertise their effective probe
+	// matrix. This conservative cold-fetch bound avoids borrowing the central
+	// server's unrelated hardware configuration.
+	remoteNodeProbeFallbackTimeout = 2 * time.Minute
 )
 
 var errSubtitleStoreUnavailableV3 = errors.New("subtitle store unavailable")
@@ -60,6 +64,7 @@ type v3NodeCapabilityCache struct {
 	toneMapCapabilities tonemap.Capabilities
 	err                 error
 	expiresAt           time.Time
+	probeRequestTimeout time.Duration
 }
 
 type preparedTransportV3 struct {
@@ -171,16 +176,21 @@ func (h *PlaybackHandler) localToneMapProbeTimeoutV3() time.Duration {
 	return tonemap.ProbeEndpointTimeout(cfg.HWAccel, cfg.HWDevice)
 }
 
-func (h *PlaybackHandler) remoteToneMapProbeTimeoutV3() time.Duration {
-	cfg := h.playbackConfig()
-	return tonemap.ProbeRequestTimeout(cfg.HWAccel, cfg.HWDevice)
+func (h *PlaybackHandler) remoteToneMapProbeTimeoutV3(nodeURL string) time.Duration {
+	h.v3NodeCapabilitiesMu.Lock()
+	entry := h.v3NodeCapabilities[nodeURL]
+	h.v3NodeCapabilitiesMu.Unlock()
+	if entry.probeRequestTimeout > 0 {
+		return entry.probeRequestTimeout
+	}
+	return remoteNodeProbeFallbackTimeout
 }
 
 func (h *PlaybackHandler) toneMapPlanningTimeoutV3(localFallbackAllowed bool) time.Duration {
 	if localFallbackAllowed {
 		return v3NodeCapabilityPlanTimeout
 	}
-	return h.remoteToneMapProbeTimeoutV3()
+	return remoteNodeProbeFallbackTimeout
 }
 
 // remoteTransformationsV3 is the transport-time capability lookup for a
@@ -224,22 +234,24 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 		}
 	}
 
-	requestCtx, cancel := context.WithTimeout(ctx, h.remoteToneMapProbeTimeoutV3())
+	requestCtx, cancel := context.WithTimeout(ctx, h.remoteToneMapProbeTimeoutV3(nodeURL))
 	defer cancel()
 	info, err := fetchRemoteTranscodeCapabilities(requestCtx, nodeURL, h.JWTSecret)
+	completedAt := time.Now()
 	if err != nil {
 		h.v3NodeCapabilitiesMu.Lock()
 		if h.v3NodeCapabilities == nil {
 			h.v3NodeCapabilities = make(map[string]v3NodeCapabilityCache)
 		}
-		h.v3NodeCapabilities[nodeURL] = v3NodeCapabilityCache{err: err, expiresAt: now.Add(v3NodeCapabilityErrorTTL)}
+		h.v3NodeCapabilities[nodeURL] = v3NodeCapabilityCache{err: err, expiresAt: completedAt.Add(v3NodeCapabilityErrorTTL), probeRequestTimeout: entry.probeRequestTimeout}
 		h.v3NodeCapabilitiesMu.Unlock()
 		return v3NodeCapabilityCache{}, err
 	}
 	entry = v3NodeCapabilityCache{
 		transformations:     append([]playback.TransformationV3(nil), info.Transformations...),
 		toneMapCapabilities: append(tonemap.Capabilities(nil), info.ToneMapCapabilities...),
-		expiresAt:           now.Add(v3NodeCapabilityTTL),
+		expiresAt:           completedAt.Add(v3NodeCapabilityTTL),
+		probeRequestTimeout: time.Duration(info.ProbeRequestTimeoutMillis) * time.Millisecond,
 	}
 	h.v3NodeCapabilitiesMu.Lock()
 	if h.v3NodeCapabilities == nil {

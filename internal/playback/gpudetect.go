@@ -55,6 +55,9 @@ type HWAccelInfo struct {
 	NodeURL             string               `json:"node_url,omitempty"`
 	Transformations     []TransformationV3   `json:"transformations,omitempty"`
 	ToneMapCapabilities tonemap.Capabilities `json:"tone_map_capabilities,omitempty"`
+	// ProbeRequestTimeoutMillis is the caller-side budget for this node's
+	// effective tone-map probe matrix, including endpoint and transport slack.
+	ProbeRequestTimeoutMillis int64 `json:"probe_request_timeout_ms,omitempty"`
 }
 
 // DetectHWAccel probes this host's GPU hardware and returns structured info.

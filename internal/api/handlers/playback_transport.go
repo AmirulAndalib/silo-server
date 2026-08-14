@@ -33,7 +33,7 @@ func (h *PlaybackHandler) startRemotePlaybackTransport(ctx context.Context, node
 	if err != nil {
 		return transcodenode.TranscodeStartResponse{}, 0, err
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, h.remotePlaybackTransportTimeout(request))
+	requestCtx, cancel := context.WithTimeout(ctx, h.remotePlaybackTransportTimeout(nodeURL, request))
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(requestCtx, http.MethodPost, nodeURL+"/transcode/start", bytes.NewReader(body))
 	if err != nil {
@@ -59,12 +59,11 @@ func (h *PlaybackHandler) startRemotePlaybackTransport(ctx context.Context, node
 	return result, response.StatusCode, nil
 }
 
-func (h *PlaybackHandler) remotePlaybackTransportTimeout(request transcodenode.TranscodeStartRequest) time.Duration {
+func (h *PlaybackHandler) remotePlaybackTransportTimeout(nodeURL string, request transcodenode.TranscodeStartRequest) time.Duration {
 	if request.ToneMapMode == "" {
 		return 20 * time.Second
 	}
-	device := h.playbackConfig().HWDevice
-	timeout := tonemap.ProbeRequestTimeout(request.HWAccel, device)
+	timeout := h.remoteToneMapProbeTimeoutV3(nodeURL)
 	if request.ToneMapPreflightRequired {
 		timeout += tonemap.SourcePreflightTimeout(request.TotalDuration)
 	}

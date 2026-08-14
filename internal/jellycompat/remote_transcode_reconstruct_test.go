@@ -387,8 +387,8 @@ func TestRemoteTranscodeStartTimeoutCoversColdProbePreflightAndReadiness(t *test
 		TotalDuration:            100,
 		RequireReady:             true,
 	}
-	want := tonemap.ProbeRequestTimeout(tonemap.BackendQSV, "") + tonemap.SourcePreflightTimeout(100) + transcodenode.TranscodeStartReadinessTimeout
-	if got := handler.remoteTranscodeStartTimeout(request); got != want {
+	want := 137*time.Second + tonemap.SourcePreflightTimeout(100) + transcodenode.TranscodeStartReadinessTimeout
+	if got := handler.remoteTranscodeStartTimeout(request, 137*time.Second); got != want {
 		t.Fatalf("remote transcode start timeout = %v, want %v", got, want)
 	}
 }

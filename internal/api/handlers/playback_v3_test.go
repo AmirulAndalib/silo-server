@@ -4268,16 +4268,15 @@ func TestPlaybackV3ToneMapBudgetsCoverColdNodeWork(t *testing.T) {
 	if got, want := handler.localToneMapProbeTimeoutV3(), tonemap.ProbeEndpointTimeout(tonemap.BackendQSV, "/dev/dri/renderD128"); got != want {
 		t.Fatalf("local tone-map probe timeout = %s, want %s", got, want)
 	}
-	if got, want := handler.remoteToneMapProbeTimeoutV3(), tonemap.ProbeRequestTimeout(tonemap.BackendQSV, "/dev/dri/renderD128"); got != want {
+	if got, want := handler.remoteToneMapProbeTimeoutV3("https://unknown.example"), remoteNodeProbeFallbackTimeout; got != want {
 		t.Fatalf("remote tone-map probe timeout = %s, want %s", got, want)
 	}
 	if got := handler.toneMapPlanningTimeoutV3(true); got != v3NodeCapabilityPlanTimeout {
 		t.Fatalf("planning timeout with local fallback = %s, want %s", got, v3NodeCapabilityPlanTimeout)
 	}
-	if got, want := handler.toneMapPlanningTimeoutV3(false), tonemap.ProbeRequestTimeout(tonemap.BackendQSV, "/dev/dri/renderD128"); got != want {
+	if got, want := handler.toneMapPlanningTimeoutV3(false), remoteNodeProbeFallbackTimeout; got != want {
 		t.Fatalf("remote-only planning timeout = %s, want %s", got, want)
 	}
-
 	request := transcodenode.TranscodeStartRequest{
 		ToneMapMode:              tonemap.ModeHardware,
 		ToneMapPreflightRequired: true,
@@ -4285,9 +4284,61 @@ func TestPlaybackV3ToneMapBudgetsCoverColdNodeWork(t *testing.T) {
 		RequireReady:             true,
 		HWAccel:                  tonemap.BackendQSV,
 	}
-	want := tonemap.ProbeRequestTimeout(tonemap.BackendQSV, "/dev/dri/renderD128") +
+	want := remoteNodeProbeFallbackTimeout +
 		tonemap.SourcePreflightTimeout(100) + transcodenode.TranscodeStartReadinessTimeout
-	if got := handler.remotePlaybackTransportTimeout(request); got != want {
+	if got := handler.remotePlaybackTransportTimeout("https://unknown.example", request); got != want {
 		t.Fatalf("remote tone-map start timeout = %s, want %s", got, want)
+	}
+}
+
+func TestLookupRemoteCapabilitiesStartsCacheTTLAfterRequestCompletes(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		ttl    time.Duration
+	}{
+		{name: "success", status: http.StatusOK, ttl: v3NodeCapabilityTTL},
+		{name: "error", status: http.StatusServiceUnavailable, ttl: v3NodeCapabilityErrorTTL},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				time.Sleep(80 * time.Millisecond)
+				w.WriteHeader(test.status)
+				if test.status == http.StatusOK {
+					_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{})
+				}
+			}))
+			defer remote.Close()
+
+			handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+			_, _ = handler.lookupRemoteCapabilitiesV3(context.Background(), remote.URL, false)
+			completedAt := time.Now()
+			entry := handler.v3NodeCapabilities[remote.URL]
+			if remaining := entry.expiresAt.Sub(completedAt); remaining < test.ttl-20*time.Millisecond {
+				t.Fatalf("cache TTL after request completion = %s, want at least %s", remaining, test.ttl-20*time.Millisecond)
+			}
+		})
+	}
+}
+
+func TestRemoteToneMapProbeTimeoutUsesTargetNodeBudget(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{ProbeRequestTimeoutMillis: 137000})
+	}))
+	defer remote.Close()
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/central/device/one,/central/device/two"}
+	}
+
+	if _, err := handler.lookupRemoteCapabilitiesV3(context.Background(), remote.URL, false); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := handler.remoteToneMapProbeTimeoutV3(remote.URL), 137*time.Second; got != want {
+		t.Fatalf("remote probe timeout = %s, want target node budget %s", got, want)
+	}
+	request := transcodenode.TranscodeStartRequest{ToneMapMode: tonemap.ModeHardware}
+	if got, want := handler.remotePlaybackTransportTimeout(remote.URL, request), 137*time.Second; got != want {
+		t.Fatalf("remote start timeout = %s, want target node budget %s", got, want)
 	}
 }

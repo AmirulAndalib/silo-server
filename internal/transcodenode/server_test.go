@@ -186,6 +186,31 @@ func TestToneMapCapabilityResolveTimeoutCoversConfiguredProbeBudget(t *testing.T
 	}
 }
 
+func TestHandleHWCapabilitiesAdvertisesEffectiveProbeRequestTimeout(t *testing.T) {
+	server := newTestServer(t)
+	ffmpegPath := filepath.Join(t.TempDir(), "successful-probe.sh")
+	if err := os.WriteFile(ffmpegPath, []byte("#!/bin/sh\necho tonemapx\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server.watcher.Config().Playback.FFmpegPath = ffmpegPath
+	server.watcher.Config().Playback.HWAccel = playback.HWAccelNone
+	recorder := httptest.NewRecorder()
+
+	server.handleHWCapabilities(recorder, httptest.NewRequest(http.MethodGet, "/hw-capabilities", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	want := float64(tonemap.ProbeRequestTimeout(playback.HWAccelNone, "").Milliseconds())
+	if got := response["probe_request_timeout_ms"]; got != want {
+		t.Fatalf("probe request timeout = %v, want %.0fms", got, want)
+	}
+}
+
 func TestHandleStartRequireReadyRejectsExitedFFmpeg(t *testing.T) {
 	server := newTestServer(t)
 	ffmpegPath := filepath.Join(t.TempDir(), "failing-ffmpeg.sh")
