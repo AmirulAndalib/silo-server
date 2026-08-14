@@ -518,12 +518,19 @@ func (h *PlaybackHandler) planCompatTranscodeSession(ctx context.Context, sessio
 		}
 		return nodepool.Plan{}, errHDRTranscodeUnsupported
 	}
-	return selector.PlanSessionWith(session.ID, session.TranscodeNodeURL, true, bitrateKbps, func(node *nodepool.Node) bool {
-		if node == nil {
-			return false
+	modes := []tonemap.Mode{preferredMode}
+	if preferredMode == tonemap.ModeHardware && policy.Allows(tonemap.ModeSoftware) && available.Supports(tonemap.ModeSoftware, kind) {
+		modes = append(modes, tonemap.ModeSoftware)
+	}
+	for _, mode := range modes {
+		plan := selector.PlanSessionWith(session.ID, session.TranscodeNodeURL, true, bitrateKbps, func(node *nodepool.Node) bool {
+			return node != nil && nodeCapabilities[strings.TrimRight(node.URL, "/")].Supports(mode, kind)
+		})
+		if plan.TranscodeNode != nil {
+			return plan, nil
 		}
-		return nodeCapabilities[strings.TrimRight(node.URL, "/")].Supports(preferredMode, kind)
-	}), nil
+	}
+	return nodepool.Plan{}, nil
 }
 
 // allow4KVideoTranscode reads the allow_4k_transcode server setting,

@@ -1086,6 +1086,11 @@ func (h *PlaybackHandler) prepareTransportV3(r *http.Request, session *playback.
 	}
 	if h.NodePlanner != nil {
 		plan := h.planNodeSessionV3(r.Context(), session, result)
+		if plan.TranscodeNode == nil {
+			if fallback, attempted, fallbackErr := h.prepareSoftwareToneMapFallbackV3(r, session, file, result, timeline); attempted {
+				return fallback, fallbackErr
+			}
+		}
 		if plan.TranscodeNode != nil {
 			transformations, err := h.remoteTransformationsV3(r.Context(), plan.TranscodeNode.URL)
 			if err == nil {

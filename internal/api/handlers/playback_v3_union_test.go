@@ -18,6 +18,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
+	"github.com/Silo-Server/silo-server/internal/transcodenode"
 )
 
 // enumeratingNodePlannerV3 is a SessionPlanner stub that also exposes pooled
@@ -808,6 +809,84 @@ func TestPrepareTransportV3ReportsSoftwareToneMapFallback(t *testing.T) {
 	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
 		t.Fatalf("failed hardware output survived software fallback: %v", err)
 	}
+}
+
+func TestPrepareTransportV3FallsBackToSoftwareCapacity(t *testing.T) {
+	requiredTransformations := []playback.TransformationV3{
+		{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
+		{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+		{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
+	}
+	newToneMapNode := func(capability tonemap.Capability) *httptest.Server {
+		t.Helper()
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
+				writeJSON(w, http.StatusOK, playback.HWAccelInfo{
+					Transformations:     requiredTransformations,
+					ToneMapCapabilities: tonemap.Capabilities{capability},
+				})
+			case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
+				var request transcodenode.TranscodeStartRequest
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Errorf("decode remote start: %v", err)
+					http.Error(w, "invalid request", http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{
+					SessionID: request.SessionID, Status: "started", HWAccel: request.HWAccel, ToneMapMode: request.ToneMapMode,
+				})
+			case r.Method == http.MethodDelete:
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+	}
+	hardware := newToneMapNode(tonemap.Capability{
+		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI,
+		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	})
+	defer hardware.Close()
+	software := newToneMapNode(tonemap.Capability{
+		Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	})
+	defer software.Close()
+
+	limit := 1
+	transcodes := nodepool.NewTranscodePool()
+	transcodes.SetNodes([]*nodepool.Node{
+		{URL: hardware.URL, Enabled: true, Healthy: true, ActiveJobs: 1, MaxJobs: &limit},
+		{URL: software.URL, Enabled: true, Healthy: true},
+	})
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	handler.NodePlanner = nodepool.NewPlanner(nodepool.NewProxyPool(), transcodes)
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{
+		config.PlaybackLocalTranscodeFallbackSettingKey: "false",
+	}}
+	file := stableToneMapTransportFileV3(t)
+	result := playback.PlannerResultV3{
+		Plan: &playback.PlanV3{
+			PlanID: "plan:tone-map-capacity", Delivery: playback.DeliveryTranscodeHLSV3,
+			Transformations: requiredTransformations,
+		},
+		PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac", TargetBitrateKbps: file.Bitrate,
+		SubtitleTrackIndex: -1, SubtitleTransportTrackIndex: -1,
+		ToneMapPolicy: tonemap.PolicyHardwareThenSoftware, ToneMapMode: tonemap.ModeHardware, ToneMapSourceKind: tonemap.SourcePQ,
+		ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3, ToneMapSourceRevision: tonemap.RevisionForFile(file),
+	}
+	transport, transportErr := handler.prepareTransportV3(
+		httptest.NewRequest(http.MethodPost, "/", nil),
+		&playback.Session{ID: "session-tone-map-capacity", UserID: 7, ProfileID: "profile-1"},
+		file,
+		result,
+	)
+	if transportErr != nil || transport.nodeURL != software.URL || transport.toneMapMode != tonemap.ModeSoftware {
+		t.Fatalf("transport = %+v error = %v, want software node fallback", transport, transportErr)
+	}
+	transport.rollback()
 }
 
 func TestPlanRequiresServerTransformationsV3(t *testing.T) {

@@ -117,6 +117,54 @@ func TestCompatToneMapCapabilityInventoryHonorsSharedDeadline(t *testing.T) {
 	}
 }
 
+func TestPlanCompatTranscodeSessionFallsBackToSoftwareCapacity(t *testing.T) {
+	newToneMapNode := func(capability tonemap.Capability) *httptest.Server {
+		t.Helper()
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{ToneMapCapabilities: tonemap.Capabilities{capability}})
+		}))
+	}
+	hardware := newToneMapNode(tonemap.Capability{
+		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI,
+		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	})
+	defer hardware.Close()
+	software := newToneMapNode(tonemap.Capability{
+		Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	})
+	defer software.Close()
+
+	limit := 1
+	transcodes := nodepool.NewTranscodePool()
+	transcodes.SetNodes([]*nodepool.Node{
+		{URL: hardware.URL, Enabled: true, Healthy: true, ActiveJobs: 1, MaxJobs: &limit},
+		{URL: software.URL, Enabled: true, Healthy: true},
+	})
+	handler := &PlaybackHandler{
+		NodePlanner: nodepool.NewPlanner(nodepool.NewProxyPool(), transcodes),
+		SettingsRepo: stubSettingsReader{values: map[string]string{
+			config.PlaybackTranscodeHardwareToneMapSettingKey: "true",
+			config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+			config.PlaybackLocalTranscodeFallbackSettingKey:   "false",
+		}},
+	}
+	file := &models.MediaFile{
+		ID: 42, FilePath: "/media/movie.mkv", Bitrate: 32_000, HDR: true,
+		VideoTracks: []models.VideoTrack{{
+			Codec: "hevc", VideoRangeType: "HDR10", ColorTransfer: "smpte2084",
+			ColorPrimaries: "bt2020", ColorSpace: "bt2020nc", BitDepth: 10,
+		}},
+	}
+	plan, err := handler.planCompatTranscodeSession(
+		context.Background(), &playback.Session{ID: "compat-capacity"}, file,
+		file.Bitrate, true,
+	)
+	if err != nil || plan.TranscodeNode == nil || plan.TranscodeNode.URL != software.URL {
+		t.Fatalf("plan = %+v error = %v, want software node fallback", plan, err)
+	}
+}
+
 func TestHandlePlaybackInfoReturnsServiceUnavailableWhenToneMapProbeIsIncomplete(t *testing.T) {
 	handler, routeID := newSubtitleSelectionHandler(t)
 	version := subtitleSelectionVersion()
