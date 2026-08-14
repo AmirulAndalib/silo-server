@@ -986,6 +986,7 @@ function transcodeModeBadgeColor(label: string): string {
   return "border-cyan-400/20 bg-cyan-400/10 text-cyan-200";
 }
 
+/** Render the compact indicator for the confirmed tone-mapping executor. */
 function ToneMapModeBadge({ label }: { label: string }) {
   return (
     <span className="inline-flex rounded border border-violet-400/25 bg-violet-400/10 px-1.5 py-0.5 text-[9px] font-semibold text-violet-200">

@@ -245,6 +245,8 @@ type proxyNodeEnumeratorV3 interface {
 	ProxyNodeURLs() []string
 }
 
+// hlsToneMapCapabilityInventoryV3 separates locally executable tone-map
+// capabilities from the union advertised by local and pooled-node executors.
 type hlsToneMapCapabilityInventoryV3 struct {
 	local                    tonemap.Capabilities
 	union                    tonemap.Capabilities
@@ -267,6 +269,8 @@ func (h *PlaybackHandler) localHLSExecutionRegistryV3(ctx context.Context) *play
 	return h.localHLSExecutionRegistryWithInputsV3(ctx, settings, inventory)
 }
 
+// localHLSExecutionRegistryWithInputsV3 builds the local HLS execution
+// registry from one consistent settings and capability snapshot.
 func (h *PlaybackHandler) localHLSExecutionRegistryWithInputsV3(
 	ctx context.Context,
 	settings playback.PlannerSettingsV3,
@@ -308,6 +312,8 @@ func (h *PlaybackHandler) hlsPlanningRegistryV3(ctx context.Context) *playback.T
 	return h.hlsPlanningRegistryWithInputsV3(ctx, settings, inventory)
 }
 
+// hlsPlanningRegistryWithInputsV3 combines locally executable
+// transformations with transformations advertised by pooled transcode nodes.
 func (h *PlaybackHandler) hlsPlanningRegistryWithInputsV3(
 	ctx context.Context,
 	settings playback.PlannerSettingsV3,
@@ -329,6 +335,8 @@ func (h *PlaybackHandler) hlsPlanningRegistryWithInputsV3(
 	return local.WithAdvertised(merged)
 }
 
+// localHLSToneMapCapabilitiesV3 reports whether local fallback is permitted
+// and, when it is, which tone-map executors the local FFmpeg can use.
 func (h *PlaybackHandler) localHLSToneMapCapabilitiesV3(ctx context.Context) (bool, tonemap.Capabilities) {
 	localFallbackAllowed := h.NodePlanner == nil || nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo)
 	if !localFallbackAllowed {
@@ -337,6 +345,8 @@ func (h *PlaybackHandler) localHLSToneMapCapabilitiesV3(ctx context.Context) (bo
 	return true, h.localToneMapCapabilitiesV3(ctx)
 }
 
+// hlsToneMapCapabilityInventoryV3 snapshots local and pooled-node tone-map
+// capabilities for a single planning operation.
 func (h *PlaybackHandler) hlsToneMapCapabilityInventoryV3(ctx context.Context) hlsToneMapCapabilityInventoryV3 {
 	localFallbackAllowed, local := h.localHLSToneMapCapabilitiesV3(ctx)
 	inventory := hlsToneMapCapabilityInventoryV3{
