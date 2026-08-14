@@ -73,6 +73,8 @@ type PlannerInputV3 struct {
 // reopen a frozen playback recipe without consuming later catalog drift.
 type SourceExecutionMetadataV3 struct {
 	VideoCodec                 string
+	VideoProfile               string
+	VideoBitDepth              int
 	SoftwareVideoDecode        bool
 	DurationSeconds            float64
 	ToneMapSourceKind          tonemap.SourceKind

@@ -16,9 +16,9 @@ func TestExecutableRecipeV3RoundTripPreservesOperationalFields(t *testing.T) {
 		TargetVideoCodec: "h264", TargetAudioCodec: "aac", TargetAudioChannels: 6, TargetAudioBitrateKbps: 320,
 		TargetResolution: "1080p", TargetBitrateKbps: 18_000,
 		ToneMapPolicy: tonemap.PolicyHardwareThenSoftware, ToneMapMode: tonemap.ModeHardware,
-		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapSourceKind: tonemap.SourceSDRBT709, ToneMapRecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3,
 		ToneMapPreflightRequired: true, ToneMapSourceRevision: revision,
-		FrozenSourceMetadata: &SourceExecutionMetadataV3{VideoCodec: "h264", SoftwareVideoDecode: true, DurationSeconds: 7_201, ToneMapSourceKind: tonemap.SourcePQ, ToneMapPreflightRequired: true, ToneMapSourceRevision: revision, ToneMapDVConfigPresent: true, ToneMapDVBLCompatIDPresent: true, ToneMapDVBLPresent: true, ToneMapDVRPUPresent: true},
+		FrozenSourceMetadata: &SourceExecutionMetadataV3{VideoCodec: "hevc", VideoProfile: "Main 10", VideoBitDepth: 10, SoftwareVideoDecode: false, DurationSeconds: 7_201, ToneMapSourceKind: tonemap.SourceSDRBT709, ToneMapPreflightRequired: true, ToneMapSourceRevision: revision, ToneMapDVConfigPresent: true, ToneMapDVBLCompatIDPresent: true, ToneMapDVBLPresent: true, ToneMapDVRPUPresent: true},
 		SubtitleTrackIndex:   4, SubtitleTransportTrackIndex: 2,
 		SubtitleBurnIn: true, SubtitleCodec: "hdmv_pgs_subtitle", DownloadedSubtitleID: 71,
 	}
@@ -43,7 +43,7 @@ func TestExecutableRecipeV3RoundTripPreservesOperationalFields(t *testing.T) {
 		got.ToneMapSourceKind != want.ToneMapSourceKind || got.ToneMapRecipeVersion != want.ToneMapRecipeVersion || got.ToneMapPreflightRequired != want.ToneMapPreflightRequired || got.ToneMapSourceRevision != revision ||
 		got.SubtitleTransportTrackIndex != want.SubtitleTransportTrackIndex || got.SubtitleBurnIn != want.SubtitleBurnIn ||
 		got.SubtitleCodec != want.SubtitleCodec || got.DownloadedSubtitleID != want.DownloadedSubtitleID || got.FrozenSourceMetadata == nil ||
-		got.FrozenSourceMetadata.VideoCodec != want.FrozenSourceMetadata.VideoCodec || got.FrozenSourceMetadata.SoftwareVideoDecode != want.FrozenSourceMetadata.SoftwareVideoDecode ||
+		got.FrozenSourceMetadata.VideoCodec != want.FrozenSourceMetadata.VideoCodec || got.FrozenSourceMetadata.VideoProfile != "Main 10" || got.FrozenSourceMetadata.VideoBitDepth != 10 || got.FrozenSourceMetadata.SoftwareVideoDecode != want.FrozenSourceMetadata.SoftwareVideoDecode ||
 		got.FrozenSourceMetadata.DurationSeconds != want.FrozenSourceMetadata.DurationSeconds || got.FrozenSourceMetadata.ToneMapSourceKind != want.FrozenSourceMetadata.ToneMapSourceKind || got.FrozenSourceMetadata.ToneMapPreflightRequired != want.FrozenSourceMetadata.ToneMapPreflightRequired || got.FrozenSourceMetadata.ToneMapSourceRevision != revision || !got.FrozenSourceMetadata.ToneMapDVConfigPresent || !got.FrozenSourceMetadata.ToneMapDVBLCompatIDPresent || !got.FrozenSourceMetadata.ToneMapDVBLPresent || !got.FrozenSourceMetadata.ToneMapDVRPUPresent {
 		t.Fatalf("thawed result = %#v, want %#v", got, want)
 	}

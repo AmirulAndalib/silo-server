@@ -2533,6 +2533,18 @@ func TestSourceExecutionMetadataV3FreezesH264High10SoftwareDecode(t *testing.T) 
 	}
 }
 
+func TestSourceVideoTranscodeFactsV3UsesFrozenProfileAndBitDepth(t *testing.T) {
+	var recipe playback.ExecutableRecipeV3
+	if err := json.Unmarshal([]byte(`{"version":2,"plan_id":"plan:frozen-source-facts","play_method":"transcode","source_video_profile":"Main 10","source_video_bit_depth":10}`), &recipe); err != nil {
+		t.Fatalf("unmarshal frozen recipe: %v", err)
+	}
+	result := recipe.PlannerResult(&playback.PlanV3{PlanID: "plan:frozen-source-facts"})
+	profile, depth := sourceVideoTranscodeFactsV3(&models.MediaFile{}, result)
+	if profile != "Main 10" || depth != 10 {
+		t.Fatalf("frozen source facts = %q/%d, want Main 10/10", profile, depth)
+	}
+}
+
 func TestPrepareLocalTransportV3ReturnsStableTerminalWhenFFmpegExitsBeforeReady(t *testing.T) {
 	manager := playback.NewSessionManager(0, 0)
 	handler := NewPlaybackHandler(manager)

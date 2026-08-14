@@ -1911,6 +1911,8 @@ func sourceExecutionMetadataV3(file *models.MediaFile, result playback.PlannerRe
 	}
 	return playback.SourceExecutionMetadataV3{
 		VideoCodec:                 videoCodec,
+		VideoProfile:               profile,
+		VideoBitDepth:              bitDepth,
 		SoftwareVideoDecode:        playback.RequiresSoftwareVideoDecode(videoCodec, profile, bitDepth),
 		DurationSeconds:            float64(file.Duration),
 		ToneMapSourceKind:          result.ToneMapSourceKind,
@@ -1925,7 +1927,7 @@ func sourceExecutionMetadataV3(file *models.MediaFile, result playback.PlannerRe
 
 func sourceVideoTranscodeFactsV3(file *models.MediaFile, result playback.PlannerResultV3) (string, int) {
 	if result.FrozenSourceMetadata != nil {
-		return "", 0
+		return result.FrozenSourceMetadata.VideoProfile, result.FrozenSourceMetadata.VideoBitDepth
 	}
 	_, profile, bitDepth := playback.SourceVideoTranscodeFacts(file)
 	return profile, bitDepth
@@ -2795,6 +2797,8 @@ func (h *PlaybackHandler) freezeExecutableRecipeV3(_ context.Context, file *mode
 	if file != nil {
 		sourceMetadata := sourceExecutionMetadataV3(file, playback.PlannerResultV3{})
 		recipe.SourceVideoCodec = sourceMetadata.VideoCodec
+		recipe.SourceVideoProfile = sourceMetadata.VideoProfile
+		recipe.SourceVideoBitDepth = sourceMetadata.VideoBitDepth
 		recipe.SoftwareVideoDecode = sourceMetadata.SoftwareVideoDecode
 		recipe.SourceDurationSeconds = sourceMetadata.DurationSeconds
 	}

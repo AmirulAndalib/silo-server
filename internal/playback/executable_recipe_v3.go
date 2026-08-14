@@ -20,6 +20,8 @@ type ExecutableRecipeV3 struct {
 	TargetResolution            string                 `json:"target_resolution,omitempty"`
 	TargetBitrateKbps           int                    `json:"target_bitrate_kbps,omitempty"`
 	SourceVideoCodec            string                 `json:"source_video_codec,omitempty"`
+	SourceVideoProfile          string                 `json:"source_video_profile,omitempty"`
+	SourceVideoBitDepth         int                    `json:"source_video_bit_depth,omitempty"`
 	SoftwareVideoDecode         bool                   `json:"software_video_decode,omitempty"`
 	SourceDurationSeconds       float64                `json:"source_duration_seconds,omitempty"`
 	ToneMapPolicy               tonemap.Policy         `json:"tone_map_policy,omitempty"`
@@ -75,6 +77,8 @@ func FreezeExecutableRecipeV3(result PlannerResultV3) ExecutableRecipeV3 {
 		TargetResolution:            result.TargetResolution,
 		TargetBitrateKbps:           result.TargetBitrateKbps,
 		SourceVideoCodec:            sourceMetadata.VideoCodec,
+		SourceVideoProfile:          sourceMetadata.VideoProfile,
+		SourceVideoBitDepth:         sourceMetadata.VideoBitDepth,
 		SoftwareVideoDecode:         sourceMetadata.SoftwareVideoDecode,
 		SourceDurationSeconds:       sourceMetadata.DurationSeconds,
 		ToneMapPolicy:               result.ToneMapPolicy,
@@ -157,6 +161,8 @@ func (r ExecutableRecipeV3) PlannerResult(plan *PlanV3) PlannerResultV3 {
 		ToneMapSourceRevision:    r.ToneMapSourceRevision,
 		FrozenSourceMetadata: &SourceExecutionMetadataV3{
 			VideoCodec:                 r.SourceVideoCodec,
+			VideoProfile:               r.SourceVideoProfile,
+			VideoBitDepth:              r.SourceVideoBitDepth,
 			SoftwareVideoDecode:        r.SoftwareVideoDecode,
 			DurationSeconds:            r.SourceDurationSeconds,
 			ToneMapSourceKind:          r.ToneMapSourceKind,
