@@ -67,6 +67,29 @@ func stableToneMapTransportFileV3(t *testing.T) *models.MediaFile {
 	return file
 }
 
+func writePlaybackArgsRecordingFFmpegV3(t *testing.T, argsPath string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fake-ffmpeg.sh")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$@\" > \"" + argsPath + "\"\n" +
+		"last=\"\"\n" +
+		"for arg in \"$@\"; do last=\"$arg\"; done\n" +
+		"case \"$last\" in\n" +
+		"  *.m3u8) out=\"$(dirname \"$last\")\"; mkdir -p \"$out\"; " +
+		"printf x > \"$out/init.mp4\"; printf x > \"$out/seg_0.m4s\"; " +
+		"printf x > \"$out/seg_1.m4s\"; printf x > \"$out/seg_2.m4s\"; " +
+		"printf '#EXTM3U\\n#EXT-X-VERSION:7\\n#EXT-X-TARGETDURATION:2\\n" +
+		"#EXT-X-MEDIA-SEQUENCE:0\\n#EXT-X-MAP:URI=\"init.mp4\"\\n" +
+		"#EXTINF:2.0,\\nseg_0.m4s\\n#EXTINF:2.0,\\nseg_1.m4s\\n" +
+		"#EXTINF:2.0,\\nseg_2.m4s\\n' > \"$last\" ;;\n" +
+		"esac\n" +
+		"exec sleep 30\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write argument-recording fake ffmpeg: %v", err)
+	}
+	return path
+}
+
 func TestHLSPlanningRegistryV3UnionsPooledNodeCapabilities(t *testing.T) {
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/hw-capabilities" {
@@ -735,6 +758,98 @@ func TestPrepareTransportV3AcceptsEveryValidatedLocalToneMapExecutor(t *testing.
 				t.Fatalf("reused execution facts = hw %q tone_map %q, want %q %q", reused.hwAccel, reused.toneMapMode, test.configuredHW, test.mode)
 			}
 		})
+	}
+}
+
+func TestNVENCSDRBaseInitialAndThawedRecipeUseIdenticalFFmpegArgs(t *testing.T) {
+	file := stableToneMapTransportFileV3(t)
+	file.VideoTracks[0].DVProfile = 8
+	file.VideoTracks[0].DVBLCompatID = 2
+	file.VideoTracks[0].ColorPrimaries = "bt709"
+	file.VideoTracks[0].ColorTransfer = "bt709"
+	file.VideoTracks[0].ColorSpace = "bt709"
+
+	manager := playback.NewSessionManager(0, 0)
+	handler := NewPlaybackHandler(manager)
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{
+		config.PlaybackTranscodeHardwareToneMapSettingKey: "true",
+	}}
+	handler.v3ToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+		return tonemap.Capabilities{{
+			Mode: tonemap.ModeHardware, Backend: tonemap.BackendNVENC, Filter: tonemap.HardwareFilterCUDA,
+			SourceKinds: []tonemap.SourceKind{tonemap.SourceSDRBT709},
+		}}, nil
+	}
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
+		{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},
+		{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
+	}))
+	plan := &playback.PlanV3{
+		PlanID: "plan:nvenc-sdr-base-thaw", Delivery: playback.DeliveryTranscodeHLSV3,
+		Transformations: []playback.TransformationV3{
+			{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
+			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+			{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
+		},
+	}
+	initial := playback.PlannerResultV3{
+		Plan: plan, PlayMethod: playback.PlayTranscode,
+		TargetVideoCodec: "h264", TargetAudioCodec: "aac", TargetResolution: "1080p", TargetBitrateKbps: 10_000,
+		SubtitleTrackIndex: -1, SubtitleTransportTrackIndex: -1,
+		ToneMapPolicy: tonemap.PolicyHardwareOnly, ToneMapMode: tonemap.ModeHardware, ToneMapSourceKind: tonemap.SourceSDRBT709,
+		ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3, ToneMapSourceRevision: tonemap.RevisionForFile(file),
+	}
+	session, err := manager.StartSession(7, "profile-1", file.ID, playback.PlayTranscode, true)
+	if err != nil {
+		t.Fatalf("start playback session: %v", err)
+	}
+	transcodeDir := t.TempDir()
+	run := func(name string, result playback.PlannerResultV3) string {
+		t.Helper()
+		argsPath := filepath.Join(t.TempDir(), name+"-args.txt")
+		ffmpegPath := writePlaybackArgsRecordingFFmpegV3(t, argsPath)
+		handler.PlaybackConfig = func() config.PlaybackConfig {
+			return config.PlaybackConfig{
+				FFmpegPath: ffmpegPath, TranscodeDir: transcodeDir, TranscodeEnabled: true,
+				HWAccel: tonemap.BackendNVENC, HWDevice: "0",
+			}
+		}
+		transport, transportErr := handler.prepareTransportV3(httptest.NewRequest(http.MethodPost, "/", nil), session, file, result)
+		if transportErr != nil {
+			t.Fatalf("prepare %s NVENC transport: %v", name, transportErr)
+		}
+		args, readErr := os.ReadFile(argsPath)
+		transport.rollback()
+		if readErr != nil {
+			t.Fatalf("read %s FFmpeg args: %v", name, readErr)
+		}
+		return string(args)
+	}
+
+	initialArgs := run("initial", initial)
+	recipe, err := handler.freezeExecutableRecipeV3(context.Background(), file, initial)
+	if err != nil {
+		t.Fatalf("freeze initial recipe: %v", err)
+	}
+	file.VideoTracks[0].Profile = "main"
+	file.VideoTracks[0].BitDepth = 8
+	thawedArgs := run("thawed", recipe.PlannerResult(plan))
+
+	normalizeOutputGeneration := func(args string) string {
+		lines := strings.Split(args, "\n")
+		for index, line := range lines {
+			if strings.HasPrefix(line, transcodeDir+string(os.PathSeparator)) {
+				lines[index] = filepath.Join(transcodeDir, "<generation>", filepath.Base(line))
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+	if normalizeOutputGeneration(initialArgs) != normalizeOutputGeneration(thawedArgs) {
+		t.Fatalf("thawed NVENC FFmpeg args changed from initial execution:\ninitial:\n%s\nthawed:\n%s", initialArgs, thawedArgs)
+	}
+	if !strings.Contains(initialArgs, "hwdownload,format=p010le") {
+		t.Fatalf("10-bit NVENC SDR-base args did not preserve p010le: %s", initialArgs)
 	}
 }
 

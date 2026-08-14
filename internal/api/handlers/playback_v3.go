@@ -3086,6 +3086,8 @@ func sameExecutableAVRecipeV3(left, right playback.ExecutableRecipeV3) bool {
 		left.TargetResolution == right.TargetResolution &&
 		left.TargetBitrateKbps == right.TargetBitrateKbps &&
 		left.SourceVideoCodec == right.SourceVideoCodec &&
+		left.SourceVideoProfile == right.SourceVideoProfile &&
+		left.SourceVideoBitDepth == right.SourceVideoBitDepth &&
 		left.SoftwareVideoDecode == right.SoftwareVideoDecode &&
 		left.SourceDurationSeconds == right.SourceDurationSeconds &&
 		left.ToneMapPolicy == right.ToneMapPolicy &&

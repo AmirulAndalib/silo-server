@@ -824,6 +824,8 @@ func (h *DownloadHandler) writeDownloadError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "profile_required", "A profile is required for managed downloads")
 	case errors.Is(err, downloads.ErrBulkQualityUnavailable):
 		writeError(w, http.StatusNotImplemented, "bulk_quality_unavailable", "Bitrate quality is not available for bulk downloads yet")
+	case errors.Is(err, downloads.ErrCapacityUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "capacity_unavailable", "Download preparation capacity is currently unavailable")
 	case errors.Is(err, downloads.ErrQualityUnavailable):
 		writeError(w, http.StatusNotImplemented, "quality_unavailable", "This download quality is not available")
 	case errors.Is(err, downloads.ErrFormatUnavailable):

@@ -431,6 +431,9 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 		if capabilityErr != nil {
 			return target, fmt.Errorf("tone-map capability probe unavailable: %w", capabilityErr)
 		}
+		if capacityAware && remoteCapabilities.SupportsPolicy(policy, kind) {
+			return target, fmt.Errorf("compatible tone-map executors are at capacity: %w", ErrCapacityUnavailable)
+		}
 		return target, fmt.Errorf("no enabled validated tone-map executor is available: %w", ErrQualityUnavailable)
 	}
 	target.ToneMapPolicy = policy

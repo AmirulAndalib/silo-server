@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -228,6 +229,7 @@ func (unavailableToneMapPreparer) LocalFallbackAllowed(context.Context) bool { r
 type capacityAwareToneMapPreparer struct {
 	capabilities tonemap.Capabilities
 	available    map[tonemap.Mode]bool
+	capacityErr  map[tonemap.Mode]error
 }
 
 func (p capacityAwareToneMapPreparer) PrepareFile(context.Context, string, playback.TranscodeOpts, string) (PreparedArtifact, error) {
@@ -241,7 +243,104 @@ func (p capacityAwareToneMapPreparer) ToneMapCapabilities(context.Context) (tone
 func (p capacityAwareToneMapPreparer) LocalFallbackAllowed(context.Context) bool { return false }
 
 func (p capacityAwareToneMapPreparer) ToneMapModeAvailable(_ context.Context, mode tonemap.Mode, _ tonemap.SourceKind) (bool, error) {
-	return p.available[mode], nil
+	return p.available[mode], p.capacityErr[mode]
+}
+
+func TestResolveToneMapTargetDistinguishesSaturatedExecutorsFromUnavailableQuality(t *testing.T) {
+	tests := []struct {
+		name         string
+		hardware     bool
+		software     bool
+		capabilities tonemap.Capabilities
+	}{
+		{
+			name:     "hardware only",
+			hardware: true,
+			capabilities: tonemap.Capabilities{{
+				Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+			}},
+		},
+		{
+			name:     "software only",
+			software: true,
+			capabilities: tonemap.Capabilities{{
+				Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+			}},
+		},
+		{
+			name:     "hardware then software",
+			hardware: true,
+			software: true,
+			capabilities: tonemap.Capabilities{
+				{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+				{Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &ArtifactManager{
+				preparer: capacityAwareToneMapPreparer{capabilities: test.capabilities, available: map[tonemap.Mode]bool{}},
+				settings: staticDownloadSettings{
+					config.Allow4KTranscodeSettingKey:                 "true",
+					config.PlaybackTranscodeHardwareToneMapSettingKey: strconv.FormatBool(test.hardware),
+					config.PlaybackTranscodeSoftwareToneMapSettingKey: strconv.FormatBool(test.software),
+				},
+			}
+			target := playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"}
+			got, err := manager.resolveToneMapTarget(context.Background(), hdrDownloadTestFile(), target)
+			if err == nil {
+				t.Fatal("resolveToneMapTarget() error = nil, want retryable capacity exhaustion")
+			}
+			if !errors.Is(err, ErrCapacityUnavailable) || errors.Is(err, ErrQualityUnavailable) {
+				t.Fatalf("resolveToneMapTarget() error = %v, want ErrCapacityUnavailable distinct from ErrQualityUnavailable", err)
+			}
+			if got != target {
+				t.Fatalf("target = %#v, want unfrozen %#v", got, target)
+			}
+		})
+	}
+}
+
+func TestResolveToneMapTargetKeepsPermanentCapabilityAndPartialInventoryOutcomes(t *testing.T) {
+	t.Run("incompatible permitted mode remains quality unavailable", func(t *testing.T) {
+		manager := &ArtifactManager{
+			preparer: capacityAwareToneMapPreparer{
+				capabilities: tonemap.Capabilities{{
+					Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+				}},
+				available: map[tonemap.Mode]bool{tonemap.ModeSoftware: true},
+			},
+			settings: staticDownloadSettings{
+				config.Allow4KTranscodeSettingKey:                 "true",
+				config.PlaybackTranscodeHardwareToneMapSettingKey: "true",
+			},
+		}
+		_, err := manager.resolveToneMapTarget(context.Background(), hdrDownloadTestFile(), playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"})
+		if !errors.Is(err, ErrQualityUnavailable) {
+			t.Fatalf("resolveToneMapTarget() error = %v, want permanent ErrQualityUnavailable", err)
+		}
+	})
+
+	t.Run("partial inventory error remains retryable when capacity is unknown", func(t *testing.T) {
+		manager := &ArtifactManager{
+			preparer: capacityAwareToneMapPreparer{
+				capabilities: tonemap.Capabilities{{
+					Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+				}},
+				available:   map[tonemap.Mode]bool{},
+				capacityErr: map[tonemap.Mode]error{tonemap.ModeHardware: context.DeadlineExceeded},
+			},
+			settings: staticDownloadSettings{
+				config.Allow4KTranscodeSettingKey:                 "true",
+				config.PlaybackTranscodeHardwareToneMapSettingKey: "true",
+			},
+		}
+		_, err := manager.resolveToneMapTarget(context.Background(), hdrDownloadTestFile(), playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"})
+		if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrCapacityUnavailable) || errors.Is(err, ErrQualityUnavailable) {
+			t.Fatalf("resolveToneMapTarget() error = %v, want partial inventory error", err)
+		}
+	})
 }
 
 func TestResolveToneMapTargetHashesSoftwareWhenHardwareHasNoCapacity(t *testing.T) {

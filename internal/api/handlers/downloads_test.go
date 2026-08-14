@@ -432,6 +432,24 @@ func TestHandleCreateDownloadErrorMapping(t *testing.T) {
 	}
 }
 
+func TestHandleCreateDownloadCapacityUnavailableIsRetryable(t *testing.T) {
+	h := NewDownloadHandler(&fakeDownloadService{createErr: fmt.Errorf("tone-map placement: %w", downloads.ErrCapacityUnavailable)})
+	body, _ := json.Marshal(downloadRequest{ContentID: "c1"})
+	rec := httptest.NewRecorder()
+	h.HandleCreateDownload(rec, downloadTestRequest(http.MethodPost, "/downloads", body, 7, "", ""))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	var response errorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if response.Error != "capacity_unavailable" {
+		t.Fatalf("error = %q, want capacity_unavailable (body: %s)", response.Error, rec.Body.String())
+	}
+}
+
 // TestManagedCreateUsesHeaderDeviceNotBody verifies invariant 2's "device_id
 // authority is the header only": a device_id placed in the JSON body is ignored,
 // and the service receives the X-Silo-Device-Id header value + the profile.

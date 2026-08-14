@@ -3429,6 +3429,53 @@ func TestSidecarOnlyHLSReplanKeepsEffectiveToneMapFallback(t *testing.T) {
 	}
 }
 
+func TestSidecarOnlyHLSReplanRejectsSourceVideoExecutionFactDrift(t *testing.T) {
+	currentPlan := playback.PlanV3{
+		PlanID:               "current-plan",
+		Delivery:             playback.DeliveryTranscodeHLSV3,
+		Stream:               playback.StreamV3{URL: "/stream/current.m3u8"},
+		RequestedMediaFileID: 1,
+		EffectiveMediaFileID: 1,
+	}
+	candidatePlan := currentPlan
+	candidatePlan.PlanID = "candidate-plan"
+	currentSource := playback.SourceExecutionMetadataV3{
+		VideoCodec: "h264", VideoProfile: "High 10", VideoBitDepth: 10,
+	}
+	currentRecipe := playback.FreezeExecutableRecipeV3(playback.PlannerResultV3{
+		Plan: &currentPlan, PlayMethod: playback.PlayTranscode,
+		TargetVideoCodec: "h264", TargetAudioCodec: "aac",
+		FrozenSourceMetadata: &currentSource,
+	})
+	record := &playback.AttemptRecordV3{
+		EffectiveMediaFileID: 1,
+		CurrentPlan:          currentPlan,
+		FrozenRecipe:         currentRecipe,
+	}
+	record.NormalizedRequest.ClientPlaybackContext.Output.OutputContextID = "output-context"
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*playback.SourceExecutionMetadataV3)
+	}{
+		{name: "profile", mutate: func(source *playback.SourceExecutionMetadataV3) { source.VideoProfile = "Main 10" }},
+		{name: "bit depth", mutate: func(source *playback.SourceExecutionMetadataV3) { source.VideoBitDepth = 8 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidateSource := currentSource
+			test.mutate(&candidateSource)
+			candidateRecipe := playback.FreezeExecutableRecipeV3(playback.PlannerResultV3{
+				Plan: &candidatePlan, PlayMethod: playback.PlayTranscode,
+				TargetVideoCodec: "h264", TargetAudioCodec: "aac",
+				FrozenSourceMetadata: &candidateSource,
+			})
+			if _, reused := sidecarOnlyHLSReplanV3(record, &candidatePlan, candidateRecipe, "output-context"); reused {
+				t.Fatalf("sidecar-only replan reused A/V bytes after source video %s changed", test.name)
+			}
+		})
+	}
+}
+
 func TestHandleReplanPlaybackV3FailureRecoveryPreservesOmittedQuality(t *testing.T) {
 	file := v3HandlerFixtureFile(t)
 	manager := playback.NewSessionManager(0, 0)
