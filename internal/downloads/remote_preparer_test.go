@@ -278,6 +278,41 @@ func TestNodeAwarePreparerHonorsDisabledLocalFallback(t *testing.T) {
 	}
 }
 
+func TestNodeAwarePreparerReportsSoftwareCapacityWhenHardwareIsFull(t *testing.T) {
+	limit := 1
+	pool := nodepool.NewTranscodePool()
+	pool.SetNodes([]*nodepool.Node{
+		{URL: "http://hardware", Enabled: true, Healthy: true, ActiveJobs: 1, MaxJobs: &limit},
+		{URL: "http://software", Enabled: true, Healthy: true, MaxJobs: &limit},
+	})
+	preparer := NewNodeAwarePreparer(nil, nodepool.NewPlanner(nodepool.NewProxyPool(), pool), nil)
+	preparer.capabilities = map[string]remoteToneMapCapabilities{
+		"http://hardware": {
+			capabilities: tonemap.Capabilities{{
+				Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV,
+				SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+			}},
+			expiresAt: time.Now().Add(time.Minute),
+		},
+		"http://software": {
+			capabilities: tonemap.Capabilities{{
+				Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+				SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+			}},
+			expiresAt: time.Now().Add(time.Minute),
+		},
+	}
+
+	hardwareAvailable, err := preparer.ToneMapModeAvailable(context.Background(), tonemap.ModeHardware, tonemap.SourcePQ)
+	if err != nil || hardwareAvailable {
+		t.Fatalf("hardware availability = %t, %v; want false", hardwareAvailable, err)
+	}
+	softwareAvailable, err := preparer.ToneMapModeAvailable(context.Background(), tonemap.ModeSoftware, tonemap.SourcePQ)
+	if err != nil || !softwareAvailable {
+		t.Fatalf("software availability = %t, %v; want true", softwareAvailable, err)
+	}
+}
+
 // TestNodeAwarePreparerCollectsToneMapCapabilitiesConcurrently verifies node discovery overlaps.
 func TestNodeAwarePreparerCollectsToneMapCapabilitiesConcurrently(t *testing.T) {
 	var active atomic.Int32

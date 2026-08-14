@@ -225,6 +225,63 @@ func (unavailableToneMapPreparer) ToneMapCapabilities(context.Context) (tonemap.
 
 func (unavailableToneMapPreparer) LocalFallbackAllowed(context.Context) bool { return false }
 
+type capacityAwareToneMapPreparer struct {
+	capabilities tonemap.Capabilities
+	available    map[tonemap.Mode]bool
+}
+
+func (p capacityAwareToneMapPreparer) PrepareFile(context.Context, string, playback.TranscodeOpts, string) (PreparedArtifact, error) {
+	return PreparedArtifact{}, nil
+}
+
+func (p capacityAwareToneMapPreparer) ToneMapCapabilities(context.Context) (tonemap.Capabilities, error) {
+	return p.capabilities, nil
+}
+
+func (p capacityAwareToneMapPreparer) LocalFallbackAllowed(context.Context) bool { return false }
+
+func (p capacityAwareToneMapPreparer) ToneMapModeAvailable(_ context.Context, mode tonemap.Mode, _ tonemap.SourceKind) (bool, error) {
+	return p.available[mode], nil
+}
+
+func TestResolveToneMapTargetHashesSoftwareWhenHardwareHasNoCapacity(t *testing.T) {
+	preparer := capacityAwareToneMapPreparer{
+		capabilities: tonemap.Capabilities{
+			{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+			{Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+		},
+		available: map[tonemap.Mode]bool{tonemap.ModeSoftware: true},
+	}
+	manager := &ArtifactManager{
+		preparer: preparer,
+		settings: staticDownloadSettings{
+			config.Allow4KTranscodeSettingKey:                 "true",
+			config.PlaybackTranscodeHardwareToneMapSettingKey: "true",
+			config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+		},
+	}
+	target, err := manager.resolveToneMapTarget(context.Background(), hdrDownloadTestFile(), playback.PrepareTarget{
+		Container: "mp4", CodecVideo: "h264", CodecAudio: "aac", Resolution: "1080p", AudioTrackIndex: -1, TargetBitrateKbps: 10000,
+	})
+	if err != nil {
+		t.Fatalf("resolveToneMapTarget() error = %v", err)
+	}
+	hashForMode := func(mode tonemap.Mode) string {
+		return paramsHashWithToneMapRevision(paramsHashParams{
+			format: "transcode", container: target.Container, codecVideo: target.CodecVideo, codecAudio: target.CodecAudio, resolution: target.Resolution,
+			audioTrackIndex: target.AudioTrackIndex, targetBitrateKbps: target.TargetBitrateKbps,
+			policy: target.ToneMapPolicy, mode: mode, sourceKind: target.ToneMapSourceKind,
+			recipeVersion: target.ToneMapRecipeVersion, preflightRequired: target.ToneMapPreflightRequired, sourceRevision: target.ToneMapSourceRevision,
+		})
+	}
+	gotHash := hashForMode(target.ToneMapMode)
+	softwareHash := hashForMode(tonemap.ModeSoftware)
+	hardwareHash := hashForMode(tonemap.ModeHardware)
+	if target.ToneMapMode != tonemap.ModeSoftware || gotHash != softwareHash || gotHash == hardwareHash {
+		t.Fatalf("tone-map target = mode %q hash %q; want software hash %q and not hardware hash %q", target.ToneMapMode, gotHash, softwareHash, hardwareHash)
+	}
+}
+
 func TestResolveToneMapTargetReturnsTransientCapabilityErrorBeforeFreezingRecipe(t *testing.T) {
 	manager := &ArtifactManager{
 		preparer: unavailableToneMapPreparer{},

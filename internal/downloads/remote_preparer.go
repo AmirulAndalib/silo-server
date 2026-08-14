@@ -190,6 +190,37 @@ func (p *NodeAwarePreparer) ToneMapCapabilities(ctx context.Context) (tonemap.Ca
 	return result, err
 }
 
+// ToneMapModeAvailable reports whether an enabled compatible node has
+// reservable capacity now. Capability discovery completes before the planner
+// lock is acquired so the eligibility predicate remains lock-safe.
+func (p *NodeAwarePreparer) ToneMapModeAvailable(ctx context.Context, mode tonemap.Mode, kind tonemap.SourceKind) (bool, error) {
+	selector, ok := p.planner.(eligibleTranscodeWorkPlanner)
+	if !ok {
+		return false, nil
+	}
+	byNode, probeErr := p.toneMapCapabilitiesByNode(ctx)
+	capable := make(map[string]struct{})
+	for nodeURL, capabilities := range byNode {
+		if capabilities.Supports(mode, kind) {
+			capable[strings.TrimRight(nodeURL, "/")] = struct{}{}
+		}
+	}
+	node, release := selector.ReserveTranscodeWorkWith("download-tone-map-plan", func(candidate *nodepool.Node) bool {
+		if candidate == nil {
+			return false
+		}
+		_, supported := capable[strings.TrimRight(candidate.URL, "/")]
+		return supported
+	})
+	if release != nil {
+		release()
+	}
+	if node != nil {
+		return true, nil
+	}
+	return false, probeErr
+}
+
 // capableToneMapNodeURLs returns the normalized URLs of nodes that validated
 // the exact mode and source kind frozen in an artifact recipe.
 func (p *NodeAwarePreparer) capableToneMapNodeURLs(ctx context.Context, mode tonemap.Mode, kind tonemap.SourceKind) map[string]struct{} {

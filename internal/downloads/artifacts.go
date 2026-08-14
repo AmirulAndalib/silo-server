@@ -110,6 +110,12 @@ type toneMapCapabilityProvider interface {
 	LocalFallbackAllowed(context.Context) bool
 }
 
+// toneMapCapacityProvider optionally narrows pooled capability inventory to
+// executors with reservable capacity before an artifact recipe is frozen.
+type toneMapCapacityProvider interface {
+	ToneMapModeAvailable(context.Context, tonemap.Mode, tonemap.SourceKind) (bool, error)
+}
+
 // maintenanceInterval spaces the disk-presence and stale-row sweeps: both are
 // O(cache size) (stats / extra queries) and their failure modes self-heal, so
 // running them on every 30s task tick is steady-state waste that grows with
@@ -367,13 +373,13 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 	if kind == "" {
 		return target, fmt.Errorf("HDR source is not safe to tone-map: %w", ErrQualityUnavailable)
 	}
-	capabilities := tonemap.Capabilities(nil)
 	provider, pooled := m.preparer.(toneMapCapabilityProvider)
 	probeCtx, cancelProbe := context.WithTimeout(ctx, toneMapPlanTimeout)
 	defer cancelProbe()
 	type capabilityResult struct {
 		capabilities tonemap.Capabilities
 		err          error
+		local        bool
 	}
 	results := make(chan capabilityResult, 2)
 	resultCount := 0
@@ -381,7 +387,7 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 		resultCount++
 		go func() {
 			local, probeErr := m.localToneMapCapabilities(probeCtx)
-			results <- capabilityResult{capabilities: local, err: probeErr}
+			results <- capabilityResult{capabilities: local, err: probeErr, local: true}
 		}()
 	}
 	if pooled {
@@ -391,14 +397,36 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 			results <- capabilityResult{capabilities: remote, err: probeErr}
 		}()
 	}
+	var localCapabilities, remoteCapabilities tonemap.Capabilities
 	var capabilityErr error
 	for range resultCount {
 		result := <-results
-		capabilities = append(capabilities, result.capabilities...)
+		if result.local {
+			localCapabilities = append(localCapabilities, result.capabilities...)
+		} else {
+			remoteCapabilities = append(remoteCapabilities, result.capabilities...)
+		}
 		capabilityErr = errors.Join(capabilityErr, result.err)
 	}
 	capabilityErr = errors.Join(capabilityErr, probeCtx.Err())
-	mode := capabilities.PreferredMode(policy, kind)
+	var mode tonemap.Mode
+	capacityProvider, capacityAware := m.preparer.(toneMapCapacityProvider)
+	if capacityAware {
+		for _, candidate := range []tonemap.Mode{tonemap.ModeHardware, tonemap.ModeSoftware} {
+			if !policy.Allows(candidate) {
+				continue
+			}
+			remoteAvailable, capacityErr := capacityProvider.ToneMapModeAvailable(probeCtx, candidate, kind)
+			capabilityErr = errors.Join(capabilityErr, capacityErr)
+			if localCapabilities.Supports(candidate, kind) || remoteAvailable {
+				mode = candidate
+				break
+			}
+		}
+	} else {
+		capabilities := append(localCapabilities, remoteCapabilities...)
+		mode = capabilities.PreferredMode(policy, kind)
+	}
 	if mode == "" {
 		if capabilityErr != nil {
 			return target, fmt.Errorf("tone-map capability probe unavailable: %w", capabilityErr)
