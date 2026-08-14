@@ -97,6 +97,7 @@ func (p *NodeAwarePreparer) LocalFallbackAllowed(ctx context.Context) bool {
 	}
 	values, err := p.settings.GetAll(ctx)
 	if err != nil {
+		slog.WarnContext(ctx, "load local transcode fallback setting failed", "component", "downloads", "error", err)
 		return true
 	}
 	return !strings.EqualFold(values[config.PlaybackLocalTranscodeFallbackSettingKey], "false")
@@ -128,6 +129,9 @@ func (p *NodeAwarePreparer) PrepareFile(ctx context.Context, artifactID string, 
 		if ok {
 			capable := p.capableToneMapNodeURLs(ctx, opts.ToneMapMode, opts.ToneMapSourceKind)
 			node, release = selector.ReserveTranscodeWorkWith("download-prepare-"+artifactID, func(candidate *nodepool.Node) bool {
+				if candidate == nil {
+					return false
+				}
 				_, supported := capable[strings.TrimRight(candidate.URL, "/")]
 				return supported
 			})

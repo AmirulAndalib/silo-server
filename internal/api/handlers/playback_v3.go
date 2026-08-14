@@ -2404,7 +2404,14 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 		}
 		artifactRecipe = frozenRecipe
 	}
-	transportReused := trackChange && h.hasActiveHLSTransportV3(session) && sidecarOnlyHLSReplanV3(record, result.Plan, artifactRecipe, req.ClientPlaybackContext.Output.OutputContextID)
+	transportReused := false
+	if trackChange && h.hasActiveHLSTransportV3(session) {
+		if reusedRecipe, ok := sidecarOnlyHLSReplanV3(record, result.Plan, artifactRecipe, req.ClientPlaybackContext.Output.OutputContextID); ok {
+			artifactRecipe = reusedRecipe
+			result.ToneMapMode = reusedRecipe.ToneMapMode
+			transportReused = true
+		}
+	}
 	var transport preparedTransportV3
 	if transportReused {
 		// A sidecar selection changes the plan and subtitle artifact, but it does
@@ -2816,7 +2823,7 @@ func sameStringMultisetV3(left, right []string) bool {
 // those are the point of the replan and are delivered by the independently
 // addressed sidecar artifact. Every field that can change FFmpeg's audio/video
 // output remains part of the comparison.
-func sidecarOnlyHLSReplanV3(record *playback.AttemptRecordV3, candidate *playback.PlanV3, candidateRecipe playback.ExecutableRecipeV3, outputContextID string) bool {
+func sidecarOnlyHLSReplanV3(record *playback.AttemptRecordV3, candidate *playback.PlanV3, candidateRecipe playback.ExecutableRecipeV3, outputContextID string) (playback.ExecutableRecipeV3, bool) {
 	if record == nil || candidate == nil || record.CurrentPlan.Stream.URL == "" ||
 		!record.FrozenRecipe.ValidFor(record.CurrentPlan) || !candidateRecipe.ValidFor(*candidate) ||
 		record.NormalizedRequest.ClientPlaybackContext.Output.OutputContextID != outputContextID ||
@@ -2826,22 +2833,31 @@ func sidecarOnlyHLSReplanV3(record *playback.AttemptRecordV3, candidate *playbac
 		!isHLSDeliveryV3(record.CurrentPlan.Delivery) || record.CurrentPlan.Delivery != candidate.Delivery ||
 		record.CurrentPlan.Subtitle.Mode == playback.SubtitleBurnInV3 || candidate.Subtitle.Mode == playback.SubtitleBurnInV3 ||
 		!sameTrackIdentityV3(record.CurrentPlan.SelectedTracks.Audio, candidate.SelectedTracks.Audio) {
-		return false
+		return candidateRecipe, false
+	}
+	// The planner prefers hardware whenever both executors are currently
+	// available, but the active transport may have fallen back to software after
+	// its plan was accepted. A sidecar-only replan must compare against and carry
+	// that effective mode or it will replace byte-identical running output merely
+	// because planning preferred hardware again.
+	effectiveCandidateRecipe := candidateRecipe
+	if effectiveMode := record.FrozenRecipe.ToneMapMode; effectiveMode != "" && candidateRecipe.ToneMapPolicy.Allows(effectiveMode) {
+		effectiveCandidateRecipe.ToneMapMode = effectiveMode
 	}
 	if record.CurrentPlan.Stream.Protocol != candidate.Stream.Protocol ||
 		record.CurrentPlan.Stream.Container != candidate.Stream.Container ||
 		record.CurrentPlan.Stream.MIMEType != candidate.Stream.MIMEType ||
 		record.CurrentPlan.Stream.HeaderRefresh != candidate.Stream.HeaderRefresh ||
-		!sameExecutableAVRecipeV3(record.FrozenRecipe, candidateRecipe) ||
+		!sameExecutableAVRecipeV3(record.FrozenRecipe, effectiveCandidateRecipe) ||
 		!sameEffectiveAVRecipeV3(record.CurrentPlan.EffectiveRecipe, candidate.EffectiveRecipe) ||
 		record.CurrentPlan.Claims.Video != candidate.Claims.Video ||
 		record.CurrentPlan.Claims.Audio != candidate.Claims.Audio ||
 		!sameTransformationsV3(record.CurrentPlan.Transformations, candidate.Transformations) ||
 		!sameAppliedQuirksV3(record.CurrentPlan.AppliedQuirks, candidate.AppliedQuirks) ||
 		!sameStringMultisetV3(record.CurrentPlan.RuntimeCorrections, candidate.RuntimeCorrections) {
-		return false
+		return candidateRecipe, false
 	}
-	return true
+	return effectiveCandidateRecipe, true
 }
 
 func isHLSDeliveryV3(delivery playback.DeliveryV3) bool {

@@ -159,6 +159,27 @@ func TestStartRemoteTranscodeReportsConfirmedExecutor(t *testing.T) {
 	}
 }
 
+func TestStartRemoteTranscodePreservesRequestedExecutorForLegacyEmptyResponse(t *testing.T) {
+	recipeStore := &stubRecipeNodeStore{}
+	node := fakeTranscodeNode(t, nil)
+	handler, sessionMgr, playbackStore := newRemoteTranscodeHandler(t, node.URL, recipeStore)
+	handler.HWAccel = tonemap.BackendQSV
+	playbackStore.Put(PlaybackSession{ID: "play-1", UpstreamSessionID: "upstream-1"})
+
+	if err := handler.startRemoteTranscode(context.Background(), "play-1", "upstream-1", testRemoteTranscodeSource(), &models.MediaFile{ID: 42, FilePath: "/media/movie.mkv"}, 0, node.URL); err != nil {
+		t.Fatalf("startRemoteTranscode: %v", err)
+	}
+
+	session := sessionMgr.sessions["upstream-1"]
+	if session.TranscodeHWAccel != tonemap.BackendQSV {
+		t.Fatalf("reported executor = %q, want %q", session.TranscodeHWAccel, tonemap.BackendQSV)
+	}
+	card, ok := recipeStore.Get("upstream-1")
+	if !ok || card.HWAccel != tonemap.BackendQSV {
+		t.Fatalf("persisted executor = %q, found=%v", card.HWAccel, ok)
+	}
+}
+
 // TestStartRemoteToneMapReportsConfirmedExecutorAndFallback verifies remote fallback facts remain accurate.
 func TestStartRemoteToneMapReportsConfirmedExecutorAndFallback(t *testing.T) {
 	tests := []struct {

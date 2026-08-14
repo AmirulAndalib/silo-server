@@ -34,6 +34,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
 
+const compatToneMapCapabilityTimeout = 5 * time.Second
+
 type playbackInfoRequest struct {
 	UserID               string          `json:"UserId"`
 	MediaSourceID        string          `json:"MediaSourceId"`
@@ -399,7 +401,7 @@ func (h *PlaybackHandler) compatToneMapCapabilityInventory(ctx context.Context) 
 	byNode := make(map[string]tonemap.Capabilities)
 	if enumerator, ok := h.NodePlanner.(compatTranscodeNodeEnumerator); ok {
 		nodeURLs := enumerator.TranscodeNodeURLs()
-		fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		fetchCtx, cancel := context.WithTimeout(ctx, compatToneMapCapabilityTimeout)
 		results := make([]struct {
 			capabilities tonemap.Capabilities
 			ok           bool
@@ -700,7 +702,9 @@ func (h *PlaybackHandler) startRemoteTranscode(
 		metadata := tonemap.MetadataForFile(file)
 		if metadata.DynamicRange != "" && metadata.DynamicRange != playback.DynamicRangeSDRV3 {
 			var capabilityErr error
-			toneMapCapabilities, capabilityErr = h.remoteToneMapCapabilities(ctx, transcodeNodeURL)
+			capabilityCtx, cancelCapabilityFetch := context.WithTimeout(ctx, compatToneMapCapabilityTimeout)
+			toneMapCapabilities, capabilityErr = h.remoteToneMapCapabilities(capabilityCtx, transcodeNodeURL)
+			cancelCapabilityFetch()
 			if capabilityErr != nil {
 				return fmt.Errorf("load transcode node tone-map capabilities: %w", capabilityErr)
 			}
@@ -836,7 +840,6 @@ func (h *PlaybackHandler) startRemoteTranscode(
 	// Same mirror as the local path: the node runs the encode, but the
 	// upstream session here is what session sync and admin views read.
 	reportedOpts := opts
-	reportedOpts.HWAccel = confirmedHWAccel
 	h.recordTranscodeStreamDetails(ctx, upstreamSessionID, reportedOpts)
 
 	if err := h.persistTranscodeRecipe(ctx, playSessionID, upstreamSessionID, opts); err != nil {

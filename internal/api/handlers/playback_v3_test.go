@@ -25,6 +25,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
@@ -3374,6 +3375,45 @@ func TestHandleReplanPlaybackV3SidecarChangeReusesCopyHLSTransport(t *testing.T)
 	}
 	if record.FrozenRecipe.SubtitleTrackIndex != english || record.CurrentPlan.SelectedTracks.Subtitle == nil || *record.CurrentPlan.SelectedTracks.Subtitle.Index != english {
 		t.Fatalf("durable sidecar selection = %#v", record)
+	}
+}
+
+func TestSidecarOnlyHLSReplanKeepsEffectiveToneMapFallback(t *testing.T) {
+	currentPlan := playback.PlanV3{
+		PlanID:               "current-plan",
+		Delivery:             playback.DeliveryTranscodeHLSV3,
+		Stream:               playback.StreamV3{URL: "/stream/current.m3u8"},
+		RequestedMediaFileID: 1,
+		EffectiveMediaFileID: 1,
+	}
+	candidatePlan := currentPlan
+	candidatePlan.PlanID = "candidate-plan"
+	revision := tonemap.SourceRevision{MediaFileID: 1}
+	currentRecipe := playback.FreezeExecutableRecipeV3(playback.PlannerResultV3{
+		Plan: &currentPlan, PlayMethod: playback.PlayTranscode,
+		ToneMapPolicy: tonemap.PolicyHardwareThenSoftware, ToneMapMode: tonemap.ModeSoftware,
+		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapSourceRevision: revision,
+	})
+	candidateRecipe := playback.FreezeExecutableRecipeV3(playback.PlannerResultV3{
+		Plan: &candidatePlan, PlayMethod: playback.PlayTranscode,
+		ToneMapPolicy: tonemap.PolicyHardwareThenSoftware, ToneMapMode: tonemap.ModeHardware,
+		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapSourceRevision: revision,
+	})
+	record := &playback.AttemptRecordV3{
+		EffectiveMediaFileID: 1,
+		CurrentPlan:          currentPlan,
+		FrozenRecipe:         currentRecipe,
+	}
+	record.NormalizedRequest.ClientPlaybackContext.Output.OutputContextID = "output-context"
+
+	reusedRecipe, ok := sidecarOnlyHLSReplanV3(record, &candidatePlan, candidateRecipe, "output-context")
+	if !ok {
+		t.Fatal("byte-identical sidecar replan did not reuse the active transport")
+	}
+	if reusedRecipe.ToneMapMode != tonemap.ModeSoftware {
+		t.Fatalf("reused tone-map mode = %q, want active software fallback", reusedRecipe.ToneMapMode)
 	}
 }
 

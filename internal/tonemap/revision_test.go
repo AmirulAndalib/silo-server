@@ -60,3 +60,28 @@ func TestRevisionForFileChangesWithDolbyVisionPresenceFacts(t *testing.T) {
 		t.Fatal("Dolby Vision presence change did not invalidate the source revision")
 	}
 }
+
+func TestRevisionForFileNormalizesProbeTimestamp(t *testing.T) {
+	probed := time.Date(2026, time.August, 13, 12, 34, 56, 123456789, time.FixedZone("test", -7*60*60))
+	revision := RevisionForFile(&models.MediaFile{ID: 1, ProbeUpdatedAt: &probed})
+	want := normalizeRevisionTime(probed).UnixNano()
+	if revision.ProbeUpdatedUnixNano != want {
+		t.Fatalf("ProbeUpdatedUnixNano = %d, want %d", revision.ProbeUpdatedUnixNano, want)
+	}
+}
+
+func TestValidatePathRejectsNonPositiveMediaFileID(t *testing.T) {
+	path := t.TempDir() + "/source.mkv"
+	if err := os.WriteFile(path, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	revision := SourceRevision{MediaFileID: -1, FileSize: info.Size()}
+	if err := revision.ValidatePath(path); err == nil {
+		t.Fatal("ValidatePath accepted a non-positive media file id")
+	}
+}

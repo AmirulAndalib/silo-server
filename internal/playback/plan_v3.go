@@ -1063,8 +1063,11 @@ func toneMapRecipeV3(input PlannerInputV3, source SourceDescriptorV3) (tonemap.P
 	}
 	resolution := toneMapSourceResolutionV3(file, source)
 	revision := tonemap.RevisionForFile(file)
-	if policy == tonemap.PolicyNone || resolution.Kind == "" || input.hlsRegistry() == nil ||
-		!input.hlsRegistry().Available(TransformationHDRToSDRToneMapV3) {
+	if policy == tonemap.PolicyNone || resolution.Kind == "" {
+		return policy, "", resolution, revision, false
+	}
+	hlsRegistry := input.hlsRegistry()
+	if hlsRegistry == nil || !hlsRegistry.Available(TransformationHDRToSDRToneMapV3) {
 		return policy, "", resolution, revision, false
 	}
 	mode := input.hlsToneMapCapabilities().PreferredMode(policy, resolution.Kind)

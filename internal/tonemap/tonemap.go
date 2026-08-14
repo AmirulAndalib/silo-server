@@ -4,6 +4,7 @@ package tonemap
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -494,7 +495,7 @@ type Capabilities []Capability
 // lookup finds an executor of the requested mode that supports the source kind.
 func (c Capabilities) lookup(mode Mode, kind SourceKind) (Capability, bool) {
 	for _, capability := range c {
-		if capability.Mode == mode && slicesContain(capability.SourceKinds, kind) {
+		if capability.Mode == mode && slices.Contains(capability.SourceKinds, kind) {
 			return capability, true
 		}
 	}
@@ -521,16 +522,6 @@ func (c Capabilities) BackendFor(mode Mode, kind SourceKind) string {
 		return capability.Backend
 	}
 	return ""
-}
-
-// slicesContain reports whether a capability's source-kind set contains want.
-func slicesContain(values []SourceKind, want SourceKind) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
 
 // SupportsPolicy reports whether at least one allowed executor supports kind.
@@ -564,12 +555,13 @@ func SoftwareFilter(kind SourceKind, filterName string) string {
 		return SourceParameters(kind) +
 			",zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p," + HDRMetadataRemovalFilter()
 	}
-	algorithm := "tonemap=hable"
 	if filterName == SoftwareFilterBT2390 {
-		algorithm = "tonemapx=tonemap=bt2390"
+		return SourceParameters(kind) +
+			",tonemapx=tonemap=bt2390" +
+			",zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p," + HDRMetadataRemovalFilter()
 	}
 	return SourceParameters(kind) +
-		",zscale=t=linear:npl=100,format=gbrpf32le," + algorithm +
+		",zscale=t=linear:npl=100,format=gbrpf32le,tonemap=hable" +
 		",zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p," + HDRMetadataRemovalFilter()
 }
 

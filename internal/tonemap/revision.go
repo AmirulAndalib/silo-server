@@ -42,7 +42,7 @@ func RevisionForFile(file *models.MediaFile) SourceRevision {
 		revision.FileModifiedUnixNano = normalizeRevisionTime(*file.FileModifiedAt).UnixNano()
 	}
 	if file.ProbeUpdatedAt != nil {
-		revision.ProbeUpdatedUnixNano = file.ProbeUpdatedAt.UTC().UnixNano()
+		revision.ProbeUpdatedUnixNano = normalizeRevisionTime(*file.ProbeUpdatedAt).UnixNano()
 	}
 	if len(file.VideoTracks) > 0 {
 		track := file.VideoTracks[0]
@@ -112,6 +112,9 @@ func DecodeSourceRevision(value string) (SourceRevision, error) {
 func (r SourceRevision) ValidatePath(path string) error {
 	if r.IsZero() {
 		return nil
+	}
+	if r.MediaFileID <= 0 {
+		return fmt.Errorf("tone-map source revision changed")
 	}
 	info, err := os.Stat(path)
 	if err != nil {

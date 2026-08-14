@@ -97,6 +97,10 @@ const sessionReapInterval = time.Minute
 // control-plane response depend on Redis latency.
 const sessionTrackingOperationTimeout = 2 * time.Second
 
+// Reconstruct requests are client-driven and must not leave a node probe
+// running indefinitely after the originating request has gone away.
+const toneMapResolveTimeout = 10 * time.Second
+
 type sessionTracker interface {
 	Track(context.Context, nodesessions.SessionInfo)
 	Remove(context.Context, string)
@@ -1063,7 +1067,10 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	opts.NodeType = "transcode"
 	opts.ExecutionMode = "transcode_node"
 	if toneMapRecipeRequested(opts) {
-		if err := resolveToneMapRecipe(context.WithoutCancel(r.Context()), &opts); err != nil {
+		resolveCtx, cancelResolve := context.WithTimeout(context.WithoutCancel(r.Context()), toneMapResolveTimeout)
+		err := resolveToneMapRecipe(resolveCtx, &opts)
+		cancelResolve()
+		if err != nil {
 			slog.ErrorContext(r.Context(), "transcode node reconstruct tone-map recipe unavailable", "component", "transcodenode", "error", err,
 				"session", sessionID, "playback_session_id", sessionID)
 			return nil

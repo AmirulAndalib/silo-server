@@ -7,6 +7,7 @@ const useSettingsFormMock = vi.fn();
 const useHWAccelDetectionMock = vi.fn();
 
 beforeEach(() => {
+  useSettingsFormMock.mockClear();
   useHWAccelDetectionMock.mockReturnValue({ data: undefined, isLoading: false });
 });
 

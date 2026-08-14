@@ -42,6 +42,26 @@ type recordingRemotePreparer struct {
 	deleteURL string
 }
 
+type nilCandidatePlanner struct {
+	invoked bool
+}
+
+func (p *nilCandidatePlanner) ReserveTranscodeWork(string) (*nodepool.Node, func()) {
+	return nil, nil
+}
+
+func (p *nilCandidatePlanner) ReserveTranscodeWorkWith(_ string, eligible func(*nodepool.Node) bool) (*nodepool.Node, func()) {
+	p.invoked = true
+	if eligible(nil) {
+		panic("nil transcode node was eligible")
+	}
+	return nil, nil
+}
+
+func (p *nilCandidatePlanner) TranscodeNode(int) (*nodepool.Node, bool) {
+	return nil, false
+}
+
 func (p *recordingRemotePreparer) Prepare(_ context.Context, nodeURL, secret string, req downloadprepare.Request) (downloadprepare.Result, error) {
 	p.nodeURL, p.secret, p.request = nodeURL, secret, req
 	return downloadprepare.Result{ArtifactID: req.ArtifactID, FileSize: 1234}, nil
@@ -218,6 +238,24 @@ func TestNodeAwarePreparerFallsBackLocallyWithoutEligibleCapacity(t *testing.T) 
 	prepared, err := p.PrepareFile(context.Background(), "artifact-2", playback.TranscodeOpts{}, "/artifacts/job-2.mp4")
 	if err != nil || prepared.OutputPath == "" || local.calls != 1 {
 		t.Fatalf("prepared=%+v err=%v local calls=%d", prepared, err, local.calls)
+	}
+}
+
+func TestNodeAwarePreparerRejectsNilToneMapCandidate(t *testing.T) {
+	planner := &nilCandidatePlanner{}
+	local := &recordingEncodePreparer{}
+	cfg := &config.Config{}
+	cfg.Auth.JWTSecret = "secret"
+	p := NewNodeAwarePreparer(local, planner, func() *config.Config { return cfg })
+
+	prepared, err := p.PrepareFile(context.Background(), "artifact-nil-candidate", playback.TranscodeOpts{
+		ToneMapMode: tonemap.ModeSoftware, ToneMapSourceKind: tonemap.SourcePQ,
+	}, "/artifacts/job.mp4")
+	if err != nil || prepared.OutputPath == "" || local.calls != 1 {
+		t.Fatalf("prepared=%+v err=%v local calls=%d", prepared, err, local.calls)
+	}
+	if !planner.invoked {
+		t.Fatal("eligible planner was not invoked")
 	}
 }
 

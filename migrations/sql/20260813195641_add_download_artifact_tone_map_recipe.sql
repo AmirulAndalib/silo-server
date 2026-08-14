@@ -18,7 +18,7 @@ ALTER TABLE public.download_artifacts
             AND tone_map_source_kind IN ('pq', 'hlg', 'hlg_bt709', 'sdr_bt709', 'sdr_bt2020')
             AND tone_map_recipe_version = '1'
             AND tone_map_source_revision <> '')
-    );
+    ) NOT VALID;
 
 -- +goose Down
 ALTER TABLE public.download_artifacts

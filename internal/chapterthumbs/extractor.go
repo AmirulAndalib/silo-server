@@ -38,7 +38,7 @@ const (
 	reasonFFmpegProbeFailed     = "ffmpeg_probe_failed"
 	reasonToneMapUnsupported    = "tonemap_unsupported"
 	softwareToneMapProbeTimeout = 3 * time.Second
-	softwareToneMapFilterBT2390 = "zscale=t=linear:npl=100,format=gbrpf32le,tonemapx=tonemap=bt2390,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p"
+	softwareToneMapFilterBT2390 = "tonemapx=tonemap=bt2390,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p"
 	softwareToneMapFilterHable  = "zscale=t=linear:npl=100,format=gbrpf32le,tonemap=hable,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p"
 )
 

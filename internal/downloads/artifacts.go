@@ -332,13 +332,9 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 		return target, nil
 	}
 	metadata := tonemap.MetadataForFile(file)
-	if metadata.DynamicRange == "" || metadata.DynamicRange == playback.DynamicRangeSDRV3 {
+	is4K := is4KDownloadSource(file)
+	if !is4K && (metadata.DynamicRange == "" || metadata.DynamicRange == playback.DynamicRangeSDRV3) {
 		return target, nil
-	}
-	resolution := tonemap.ResolveSource(metadata)
-	kind := resolution.Kind
-	if kind == "" {
-		return target, fmt.Errorf("HDR source is not safe to tone-map: %w", ErrQualityUnavailable)
 	}
 	if m.settings == nil {
 		return target, nil
@@ -347,8 +343,11 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 	if err != nil {
 		return target, fmt.Errorf("load tone-map settings: %w", err)
 	}
-	if is4KDownloadSource(file) && !strings.EqualFold(settings[config.Allow4KTranscodeSettingKey], "true") {
+	if is4K && !strings.EqualFold(settings[config.Allow4KTranscodeSettingKey], "true") {
 		return target, fmt.Errorf("4K transcoding is disabled: %w", ErrQualityUnavailable)
+	}
+	if metadata.DynamicRange == "" || metadata.DynamicRange == playback.DynamicRangeSDRV3 {
+		return target, nil
 	}
 	policy := tonemap.NewPolicy(
 		strings.EqualFold(settings[config.PlaybackTranscodeHardwareToneMapSettingKey], "true"),
@@ -356,6 +355,11 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 	)
 	if policy == tonemap.PolicyNone {
 		return target, nil
+	}
+	resolution := tonemap.ResolveSource(metadata)
+	kind := resolution.Kind
+	if kind == "" {
+		return target, fmt.Errorf("HDR source is not safe to tone-map: %w", ErrQualityUnavailable)
 	}
 	capabilities := tonemap.Capabilities(nil)
 	provider, pooled := m.preparer.(toneMapCapabilityProvider)

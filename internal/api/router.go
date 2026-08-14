@@ -1664,7 +1664,6 @@ func NewRouter(deps Dependencies) chi.Router {
 		}
 		if deps.ArtifactManager != nil {
 			// Prepare-to-file pipeline (Phase 3): remux/transcode-to-single-file.
-			deps.ArtifactManager.SetSettingsReader(settingsRepo)
 			downloadSvc.SetArtifactManager(deps.ArtifactManager)
 		}
 		// Series monitoring (auto-download subscriptions). Client-pull only:

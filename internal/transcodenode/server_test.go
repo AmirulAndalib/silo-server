@@ -976,7 +976,7 @@ func TestRemoteSessionTrackingPreservesResolvedToneMapMode(t *testing.T) {
 				"case \" $* \" in\n" +
 				"  *\" -filters \"*) printf ' T.. zscale V->V scale\\n T.. tonemapx V->V tone-map\\n T.. sidedata V->V metadata\\n'; exit 0;;\n" +
 				"  *\" -encoders \"*) printf ' V..... libx264 H.264\\n'; exit 0;;\n" +
-				"  *\" -f null - \"*) exit 0;;\n" +
+				"  *\"-f null\"*) exit 0;;\n" +
 				"esac\n" +
 				"while :; do sleep 0.1; done\n"
 			if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
@@ -1082,7 +1082,10 @@ func TestHandleStartRejectsIncompleteOrStaleToneMapRecipe(t *testing.T) {
 			if recorder.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 			}
-			if server.activeJobs.Load() != 0 || len(server.sessions) != 0 {
+			server.mu.RLock()
+			sessionCount := len(server.sessions)
+			server.mu.RUnlock()
+			if server.activeJobs.Load() != 0 || sessionCount != 0 {
 				t.Fatal("invalid tone-map recipe started a node job")
 			}
 		})

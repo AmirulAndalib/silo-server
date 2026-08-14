@@ -154,6 +154,50 @@ func TestResolveToneMapTargetRetainsFourKRestrictionWhenPolicyDisabled(t *testin
 	}
 }
 
+func TestResolveToneMapTargetAppliesFourKRestrictionBeforeDynamicRangeHandling(t *testing.T) {
+	target := playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"}
+	settings := staticDownloadSettings{
+		config.Allow4KTranscodeSettingKey:                 "false",
+		config.PlaybackTranscodeHardwareToneMapSettingKey: "false",
+		config.PlaybackTranscodeSoftwareToneMapSettingKey: "false",
+	}
+	for _, test := range []struct {
+		name  string
+		track models.VideoTrack
+	}{
+		{name: "SDR", track: models.VideoTrack{Height: 2160, VideoRange: "SDR"}},
+		{name: "unknown dynamic range", track: models.VideoTrack{Height: 2160}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &ArtifactManager{settings: settings}
+			file := &models.MediaFile{VideoTracks: []models.VideoTrack{test.track}}
+			_, err := manager.resolveToneMapTarget(context.Background(), file, target)
+			if !errors.Is(err, ErrQualityUnavailable) || !strings.Contains(err.Error(), "4K transcoding is disabled") {
+				t.Fatalf("resolveToneMapTarget() error = %v, want disabled 4K ErrQualityUnavailable", err)
+			}
+		})
+	}
+}
+
+func TestResolveToneMapTargetPreservesUnclassifiableHDRWhenPolicyDisabled(t *testing.T) {
+	manager := &ArtifactManager{settings: staticDownloadSettings{
+		config.Allow4KTranscodeSettingKey:                 "true",
+		config.PlaybackTranscodeHardwareToneMapSettingKey: "false",
+		config.PlaybackTranscodeSoftwareToneMapSettingKey: "false",
+	}}
+	file := &models.MediaFile{HDR: true, VideoTracks: []models.VideoTrack{{
+		Codec: "hevc", DolbyVision: "Profile 5", DVProfile: 5, VideoRange: "DolbyVision",
+	}}}
+	target := playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"}
+	got, err := manager.resolveToneMapTarget(context.Background(), file, target)
+	if err != nil {
+		t.Fatalf("resolveToneMapTarget() error = %v", err)
+	}
+	if got != target {
+		t.Fatalf("degraded target = %#v, want unchanged %#v", got, target)
+	}
+}
+
 func TestResolveToneMapTargetReturnsCancellationWhenExecutorInventoryIsEmpty(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

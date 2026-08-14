@@ -221,23 +221,25 @@ func convertProbeData(raw *ffprobeOutput) *ProbeData {
 			if !isMainVideoStream(s) {
 				continue
 			}
-			dvProfile := dolbyVisionProfileNumber(s.SideDataList)
+			dvConfig, dvConfigPresent := dolbyVisionConfigRecord(s.SideDataList)
+			dvProfile := dolbyVisionProfileNumber(dvConfig)
+			dvELPresent := dolbyVisionELPresent(dvConfig)
 			// ffprobe omits unspecified optional fields by default; "unknown" is
 			// FFmpeg's canonical name for AVCOL_RANGE_UNSPECIFIED.
 			colorRange := firstNonEmpty(s.ColorRange, "unknown")
 			track := VideoTrackInfo{
 				Title:               firstNonEmpty(s.Tags["title"], s.CodecLongName, strings.ToUpper(s.CodecName)),
 				Codec:               s.CodecName,
-				DolbyVision:         dolbyVisionProfile(s.SideDataList),
+				DolbyVision:         dolbyVisionProfile(dvConfig),
 				DVProfile:           dvProfile,
-				DVLevel:             dolbyVisionLevel(s.SideDataList),
-				DVBLCompatID:        dolbyVisionBLCompatID(s.SideDataList),
-				DVConfigPresent:     dolbyVisionConfigPresent(s.SideDataList),
-				DVBLCompatIDPresent: dolbyVisionBLCompatIDPresent(s.SideDataList),
-				DVBLPresent:         dolbyVisionBLPresent(s.SideDataList),
-				DVRPUPresent:        dolbyVisionRPUPresent(s.SideDataList),
-				DVELPresent:         dolbyVisionELPresent(s.SideDataList),
-				DVEnhancementLayer:  dolbyVisionEnhancementLayer(dolbyVisionELPresent(s.SideDataList)),
+				DVLevel:             dolbyVisionLevel(dvConfig),
+				DVBLCompatID:        dolbyVisionBLCompatID(dvConfig),
+				DVConfigPresent:     dvConfigPresent,
+				DVBLCompatIDPresent: dolbyVisionBLCompatIDPresent(dvConfig, dvConfigPresent),
+				DVBLPresent:         dolbyVisionBLPresent(dvConfig),
+				DVRPUPresent:        dolbyVisionRPUPresent(dvConfig),
+				DVELPresent:         dvELPresent,
+				DVEnhancementLayer:  dolbyVisionEnhancementLayer(dvELPresent),
 				HDR10Plus:           hasHDR10Plus(s.SideDataList),
 				Profile:             s.Profile,
 				Level:               s.Level,
@@ -247,8 +249,8 @@ func convertProbeData(raw *ffprobeOutput) *ProbeData {
 				Interlaced:          isInterlaced(s.FieldOrder),
 				FrameRate:           normalizeFrameRate(s.AvgFrameRate),
 				Bitrate:             parseNumeric(s.BitRate) / 1000,
-				VideoRange:          videoRangeLabel(s),
-				VideoRangeType:      videoRangeType(s),
+				VideoRange:          videoRangeLabel(s, dvConfig),
+				VideoRangeType:      videoRangeType(s, dvConfig),
 				ColorRange:          colorRange,
 				ColorPrimaries:      s.ColorPrimaries,
 				ColorSpace:          s.ColorSpace,
@@ -796,8 +798,8 @@ func isInterlaced(fieldOrder string) bool {
 	}
 }
 
-func videoRangeLabel(s ffprobeStream) string {
-	if dv := dolbyVisionProfile(s.SideDataList); dv != "" {
+func videoRangeLabel(s ffprobeStream, dvConfig ffprobeSideData) string {
+	if dv := dolbyVisionProfile(dvConfig); dv != "" {
 		return "DolbyVision"
 	}
 	if isHDR(s.ColorTransfer) {
@@ -806,96 +808,65 @@ func videoRangeLabel(s ffprobeStream) string {
 	return ""
 }
 
-func dolbyVisionProfile(sideData []ffprobeSideData) string {
-	if profile := dolbyVisionProfileNumber(sideData); profile > 0 {
+func dolbyVisionProfile(config ffprobeSideData) string {
+	if profile := dolbyVisionProfileNumber(config); profile > 0 {
 		return fmt.Sprintf("Profile %d", profile)
 	}
 	return ""
 }
 
-func dolbyVisionProfileNumber(sideData []ffprobeSideData) int {
+func dolbyVisionConfigRecord(sideData []ffprobeSideData) (ffprobeSideData, bool) {
 	for _, data := range sideData {
-		if strings.EqualFold(data.SideDataType, "DOVI configuration record") && data.DVProfile > 0 {
-			return data.DVProfile
+		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
+			return data, true
 		}
+	}
+	return ffprobeSideData{}, false
+}
+
+func dolbyVisionProfileNumber(config ffprobeSideData) int {
+	if config.DVProfile > 0 {
+		return config.DVProfile
 	}
 	return 0
 }
 
-func dolbyVisionLevel(sideData []ffprobeSideData) int {
-	for _, data := range sideData {
-		if strings.EqualFold(data.SideDataType, "DOVI configuration record") && data.DVLevel > 0 {
-			return data.DVLevel
-		}
+func dolbyVisionLevel(config ffprobeSideData) int {
+	if config.DVLevel > 0 {
+		return config.DVLevel
 	}
 	return 0
 }
 
 // dolbyVisionBLCompatID returns the declared Dolby Vision base-layer compatibility identifier.
-func dolbyVisionBLCompatID(sideData []ffprobeSideData) int {
-	for _, data := range sideData {
-		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
-			return data.DVBLCompatID
-		}
-	}
-	return 0
+func dolbyVisionBLCompatID(config ffprobeSideData) int {
+	return config.DVBLCompatID
 }
 
 // dolbyVisionBLCompatIDPresent reports whether the Dolby Vision configuration
 // explicitly carried a base-layer compatibility identifier, including zero.
-func dolbyVisionBLCompatIDPresent(sideData []ffprobeSideData) bool {
-	for _, data := range sideData {
-		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
-			// Non-zero values in hand-built probe fixtures and older callers are
-			// necessarily explicit. JSON decoding separately preserves an
-			// explicitly declared zero so it cannot be confused with omission.
-			return data.DVBLCompatIDPresent || data.DVBLCompatID != 0
-		}
-	}
-	return false
-}
-
-// dolbyVisionConfigPresent reports whether FFprobe emitted a Dolby Vision
-// configuration record for the stream.
-func dolbyVisionConfigPresent(sideData []ffprobeSideData) bool {
-	for _, data := range sideData {
-		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
-			return true
-		}
-	}
-	return false
+func dolbyVisionBLCompatIDPresent(config ffprobeSideData, configPresent bool) bool {
+	// Non-zero values in hand-built probe fixtures and older callers are
+	// necessarily explicit. JSON decoding separately preserves an explicitly
+	// declared zero so it cannot be confused with omission.
+	return configPresent && (config.DVBLCompatIDPresent || config.DVBLCompatID != 0)
 }
 
 // dolbyVisionBLPresent accepts both current and legacy FFprobe field names for
 // the Dolby Vision base-layer presence flag.
-func dolbyVisionBLPresent(sideData []ffprobeSideData) bool {
-	for _, data := range sideData {
-		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
-			return data.DVBlPresent > 0 || data.DVBlPresentLegacy > 0
-		}
-	}
-	return false
+func dolbyVisionBLPresent(config ffprobeSideData) bool {
+	return config.DVBlPresent > 0 || config.DVBlPresentLegacy > 0
 }
 
 // dolbyVisionRPUPresent accepts both current and legacy FFprobe field names for
 // the Dolby Vision RPU metadata presence flag.
-func dolbyVisionRPUPresent(sideData []ffprobeSideData) bool {
-	for _, data := range sideData {
-		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
-			return data.DVRPUPresent > 0 || data.DVRPUPresentLegacy > 0
-		}
-	}
-	return false
+func dolbyVisionRPUPresent(config ffprobeSideData) bool {
+	return config.DVRPUPresent > 0 || config.DVRPUPresentLegacy > 0
 }
 
 // dolbyVisionELPresent reports whether FFprobe found a Dolby Vision enhancement layer.
-func dolbyVisionELPresent(sideData []ffprobeSideData) bool {
-	for _, data := range sideData {
-		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
-			return data.DVElPresent > 0 || data.DVElPresentLegacy > 0
-		}
-	}
-	return false
+func dolbyVisionELPresent(config ffprobeSideData) bool {
+	return config.DVElPresent > 0 || config.DVElPresentLegacy > 0
 }
 
 // dolbyVisionEnhancementLayer remains conservative until a libdovi-backed
@@ -918,8 +889,8 @@ func hasHDR10Plus(sideData []ffprobeSideData) bool {
 	return false
 }
 
-func videoRangeType(s ffprobeStream) string {
-	profile := dolbyVisionProfileNumber(s.SideDataList)
+func videoRangeType(s ffprobeStream, dvConfig ffprobeSideData) string {
+	profile := dolbyVisionProfileNumber(dvConfig)
 	hdr10Plus := hasHDR10Plus(s.SideDataList)
 	if profile > 0 {
 		switch profile {
@@ -934,7 +905,7 @@ func videoRangeType(s ffprobeStream) string {
 			if hdr10Plus {
 				return "DOVIWithHDR10Plus"
 			}
-			switch dolbyVisionBLCompatID(s.SideDataList) {
+			switch dolbyVisionBLCompatID(dvConfig) {
 			case 1:
 				return "DOVIWithHDR10"
 			case 2:

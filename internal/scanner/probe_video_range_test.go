@@ -175,6 +175,24 @@ func TestConvertProbeDataVideoRangeTypes(t *testing.T) {
 			wantCompat:    true,
 		},
 		{
+			name: "uses one dolby vision configuration record consistently",
+			stream: ffprobeStream{
+				CodecType: "video",
+				CodecName: "hevc",
+				SideDataList: []ffprobeSideData{
+					{SideDataType: "DOVI configuration record", DVProfile: 8, DVLevel: 6, DVBLCompatID: 1},
+					{SideDataType: "DOVI configuration record", DVProfile: 7, DVElPresent: 1},
+				},
+			},
+			wantRange:     "DolbyVision",
+			wantRangeType: "DOVIWithHDR10",
+			wantProfile:   8,
+			wantLevel:     6,
+			wantCompatID:  1,
+			wantConfig:    true,
+			wantCompat:    true,
+		},
+		{
 			name: "dolby vision profile 7 uhd bluray fallback",
 			stream: ffprobeStream{
 				CodecType: "video", CodecName: "hevc", ColorRange: "tv",

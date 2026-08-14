@@ -148,7 +148,7 @@ func TestProbeAdvertisesOnlySuccessfulSourceKinds(t *testing.T) {
 	if !got.Supports(ModeSoftware, SourcePQ) || !got.Supports(ModeSoftware, SourceHLG) {
 		t.Fatalf("software capabilities = %#v", got)
 	}
-	if !got.Supports(ModeHardware, SourcePQ) || got.Supports(ModeHardware, SourceHLG) {
+	if !got.Supports(ModeHardware, SourcePQ) || got.Supports(ModeHardware, SourceHLG) || got.Supports(ModeHardware, SourceHLGBT709) {
 		t.Fatalf("hardware capabilities = %#v", got)
 	}
 }
@@ -178,7 +178,7 @@ func TestProbeValidatesEveryConfiguredHardwareDevice(t *testing.T) {
 	if !seenSecondDevice {
 		t.Fatal("second configured render device was not smoke-tested")
 	}
-	if !got.Supports(ModeHardware, SourcePQ) || got.Supports(ModeHardware, SourceHLG) {
+	if !got.Supports(ModeHardware, SourcePQ) || got.Supports(ModeHardware, SourceHLG) || got.Supports(ModeHardware, SourceHLGBT709) {
 		t.Fatalf("hardware capabilities = %#v, want PQ only", got)
 	}
 }
@@ -198,5 +198,26 @@ func TestFiltersDeclareBT709Output(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSoftwareFiltersUseThePixelFormatExpectedByEachToneMapper guards the
+// distinct input contracts of Jellyfin's tonemapx and FFmpeg's tonemap.
+func TestSoftwareFiltersUseThePixelFormatExpectedByEachToneMapper(t *testing.T) {
+	bt2390 := SoftwareFilter(SourcePQ, SoftwareFilterBT2390)
+	for _, unwanted := range []string{"zscale=t=linear", "format=gbrpf32le"} {
+		if strings.Contains(bt2390, unwanted) {
+			t.Fatalf("BT.2390 filter %q unexpectedly contains %q", bt2390, unwanted)
+		}
+	}
+	if !strings.Contains(bt2390, "tonemapx=tonemap=bt2390") {
+		t.Fatalf("BT.2390 filter = %q, want tonemapx", bt2390)
+	}
+
+	hable := SoftwareFilter(SourcePQ, SoftwareFilterHable)
+	for _, required := range []string{"zscale=t=linear", "format=gbrpf32le", "tonemap=hable"} {
+		if !strings.Contains(hable, required) {
+			t.Fatalf("Hable filter %q lacks %q", hable, required)
+		}
 	}
 }
