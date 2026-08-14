@@ -29,6 +29,8 @@ func ProbeTransformationRegistryV3(ctx context.Context, ffmpegPath string) *Tran
 	return ProbeTransformationRegistryWithToneMapV3(ctx, ffmpegPath, nil)
 }
 
+// ProbeTransformationRegistryWithToneMapV3 builds the server transformation
+// registry and advertises HDR-to-SDR only when a smoke-tested executor exists.
 func ProbeTransformationRegistryWithToneMapV3(ctx context.Context, ffmpegPath string, toneMapCapabilities tonemap.Capabilities) *TransformationRegistryV3 {
 	// Resolve exactly like the execution paths (remux and transcode) so every
 	// capability advertised here holds for the binary that later runs.

@@ -116,6 +116,8 @@ type ffprobeSideData struct {
 	DVBLCompatIDPresent bool   `json:"-"`
 }
 
+// UnmarshalJSON preserves whether FFprobe emitted a Dolby Vision compatibility
+// identifier so an explicit zero is not confused with an omitted field.
 func (d *ffprobeSideData) UnmarshalJSON(data []byte) error {
 	type sideDataAlias ffprobeSideData
 	var decoded sideDataAlias
@@ -837,6 +839,8 @@ func dolbyVisionBLCompatID(sideData []ffprobeSideData) int {
 	return 0
 }
 
+// dolbyVisionBLCompatIDPresent reports whether the Dolby Vision configuration
+// explicitly carried a base-layer compatibility identifier, including zero.
 func dolbyVisionBLCompatIDPresent(sideData []ffprobeSideData) bool {
 	for _, data := range sideData {
 		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
@@ -849,6 +853,8 @@ func dolbyVisionBLCompatIDPresent(sideData []ffprobeSideData) bool {
 	return false
 }
 
+// dolbyVisionConfigPresent reports whether FFprobe emitted a Dolby Vision
+// configuration record for the stream.
 func dolbyVisionConfigPresent(sideData []ffprobeSideData) bool {
 	for _, data := range sideData {
 		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
@@ -858,6 +864,8 @@ func dolbyVisionConfigPresent(sideData []ffprobeSideData) bool {
 	return false
 }
 
+// dolbyVisionBLPresent accepts both current and legacy FFprobe field names for
+// the Dolby Vision base-layer presence flag.
 func dolbyVisionBLPresent(sideData []ffprobeSideData) bool {
 	for _, data := range sideData {
 		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {
@@ -867,6 +875,8 @@ func dolbyVisionBLPresent(sideData []ffprobeSideData) bool {
 	return false
 }
 
+// dolbyVisionRPUPresent accepts both current and legacy FFprobe field names for
+// the Dolby Vision RPU metadata presence flag.
 func dolbyVisionRPUPresent(sideData []ffprobeSideData) bool {
 	for _, data := range sideData {
 		if strings.EqualFold(data.SideDataType, "DOVI configuration record") {

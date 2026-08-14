@@ -103,10 +103,14 @@ type sessionStarterContext interface {
 	StartSessionWithContext(ctx context.Context, userID int, profileID string, fileID int, method playback.PlayMethod, transcodeAudio bool) (*playback.Session, error)
 }
 
+// compatCapabilitySessionPlanner restricts session placement with a lock-safe
+// node predicate when Jellyfin-compatible playback needs tone mapping.
 type compatCapabilitySessionPlanner interface {
 	PlanSessionWith(sessionID, currentTranscodeURL string, needsTranscode bool, estBitrateKbps int, eligible func(*nodepool.Node) bool) nodepool.Plan
 }
 
+// compatTranscodeNodeEnumerator lists the enabled transcode pool for capability
+// discovery before a Jellyfin-compatible session is placed.
 type compatTranscodeNodeEnumerator interface {
 	TranscodeNodeURLs() []string
 }
@@ -250,6 +254,8 @@ func (h *PlaybackHandler) playbackThresholds(ctx context.Context) userstore.Prog
 var errTranscode4KDisallowed = errors.New("4k video transcode disallowed by server settings")
 var errHDRTranscodeUnsupported = errors.New("HDR video transcode requires an enabled validated tone-map executor")
 
+// compatToneMapRecipe freezes the safe source classification and executor facts
+// that Jellyfin clients cannot round-trip in their protocol.
 type compatToneMapRecipe struct {
 	policy              tonemap.Policy
 	mode                tonemap.Mode
@@ -265,6 +271,8 @@ type compatToneMapRecipe struct {
 	dvRPUPresent        bool
 }
 
+// downgradeToSoftwareToneMap replaces a failed hardware selection with a
+// validated software executor only when the frozen policy permits the change.
 func downgradeToSoftwareToneMap(
 	policy tonemap.Policy,
 	mode *tonemap.Mode,
@@ -282,6 +290,8 @@ func downgradeToSoftwareToneMap(
 	return true
 }
 
+// apply copies a non-empty compatibility recipe into transcode options without
+// disturbing ordinary SDR or source-preserving requests.
 func (r compatToneMapRecipe) apply(opts *playback.TranscodeOpts) {
 	if opts == nil || r.mode == "" {
 		return
@@ -300,6 +310,8 @@ func (r compatToneMapRecipe) apply(opts *playback.TranscodeOpts) {
 	opts.HWAccel = r.hwAccel
 }
 
+// toneMapPolicy reads the independent hardware and software settings used by
+// Jellyfin-compatible transcode negotiation.
 func (h *PlaybackHandler) toneMapPolicy(ctx context.Context) tonemap.Policy {
 	if h.SettingsRepo == nil {
 		return tonemap.PolicyNone
@@ -309,6 +321,8 @@ func (h *PlaybackHandler) toneMapPolicy(ctx context.Context) tonemap.Policy {
 	return tonemap.NewPolicy(strings.EqualFold(hardware, "true"), strings.EqualFold(software, "true"))
 }
 
+// resolveCompatToneMapRecipe classifies an HDR source and freezes the preferred
+// enabled executor from the supplied validated capability inventory.
 func (h *PlaybackHandler) resolveCompatToneMapRecipe(ctx context.Context, file *models.MediaFile, capabilities tonemap.Capabilities) (compatToneMapRecipe, error) {
 	metadata := tonemap.MetadataForFile(file)
 	if metadata.DynamicRange == "" || metadata.DynamicRange == playback.DynamicRangeSDRV3 {
@@ -337,6 +351,7 @@ func (h *PlaybackHandler) resolveCompatToneMapRecipe(ctx context.Context, file *
 	}, nil
 }
 
+// localToneMapCapabilities probes the API host's live FFmpeg backend and device.
 func (h *PlaybackHandler) localToneMapCapabilities(ctx context.Context) tonemap.Capabilities {
 	backend := playback.ResolveHWAccelWithFFmpeg(h.HWAccel, h.FFmpegPath)
 	hwDevice := ""
@@ -346,6 +361,8 @@ func (h *PlaybackHandler) localToneMapCapabilities(ctx context.Context) tonemap.
 	return tonemap.Probe(ctx, playback.ResolveFFmpegPath(h.FFmpegPath), backend, hwDevice)
 }
 
+// remoteToneMapCapabilities retrieves one transcode node's authenticated,
+// smoke-tested executor inventory under a bounded request deadline.
 func (h *PlaybackHandler) remoteToneMapCapabilities(ctx context.Context, nodeURL string) (tonemap.Capabilities, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -369,11 +386,15 @@ func (h *PlaybackHandler) remoteToneMapCapabilities(ctx context.Context, nodeURL
 	return info.ToneMapCapabilities, nil
 }
 
+// availableCompatToneMapCapabilities returns the union visible to media-source
+// negotiation, including local execution only when fallback is allowed.
 func (h *PlaybackHandler) availableCompatToneMapCapabilities(ctx context.Context) tonemap.Capabilities {
 	capabilities, _ := h.compatToneMapCapabilityInventory(ctx)
 	return capabilities
 }
 
+// compatToneMapCapabilityInventory returns both a planning union and per-node
+// records so heterogeneous pools can be placed without losing executor identity.
 func (h *PlaybackHandler) compatToneMapCapabilityInventory(ctx context.Context) (tonemap.Capabilities, map[string]tonemap.Capabilities) {
 	capabilities := make(tonemap.Capabilities, 0, 4)
 	byNode := make(map[string]tonemap.Capabilities)
@@ -392,6 +413,8 @@ func (h *PlaybackHandler) compatToneMapCapabilityInventory(ctx context.Context) 
 	return capabilities, byNode
 }
 
+// applyCompatToneMapAvailability suppresses unsafe HDR video transcodes from a
+// media source when no enabled validated executor can run them.
 func (h *PlaybackHandler) applyCompatToneMapAvailability(ctx context.Context, source PlaybackMediaSource, capabilities tonemap.Capabilities) PlaybackMediaSource {
 	if !source.SupportsTranscoding || source.TranscodeAudio {
 		return source
@@ -411,11 +434,15 @@ func (h *PlaybackHandler) applyCompatToneMapAvailability(ctx context.Context, so
 	return source
 }
 
+// compatVersionRequiresToneMap reports whether transcoding the catalog version's
+// video would require an HDR-to-SDR executor.
 func compatVersionRequiresToneMap(version catalog.FileVersion) bool {
 	metadata := tonemap.MetadataForFile(&models.MediaFile{HDR: version.HDR, VideoTracks: version.VideoTracks})
 	return metadata.DynamicRange != "" && metadata.DynamicRange != playback.DynamicRangeSDRV3
 }
 
+// planCompatTranscodeSession restricts an HDR video transcode to nodes that
+// support the preferred policy mode and resolved source kind.
 func (h *PlaybackHandler) planCompatTranscodeSession(ctx context.Context, session *playback.Session, file *models.MediaFile, bitrateKbps int, videoTranscode bool) (nodepool.Plan, error) {
 	if h.NodePlanner == nil || session == nil {
 		return nodepool.Plan{}, nil

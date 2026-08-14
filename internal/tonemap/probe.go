@@ -25,8 +25,12 @@ const (
 // availability is itself under test.
 const decodeProbeFixtureBase64 = "AAAAAUABDAH//wIgAAADAJAAAAMAAAMAHpWUCQAAAAFCAQECIAAAAwCQAAADAAADAB6gIIEE2WVlSkwvAWgIAAADAAgAAAMACEAAAAABRAHAc8CJAAABKAGsTtcff/U+nK/q+A=="
 
+// CommandRunner executes a bounded external command and returns its combined
+// output. Tests inject it to model individual FFmpeg capabilities and failures.
 type CommandRunner func(context.Context, string, ...string) ([]byte, error)
 
+// probeCacheEntry stores either a permanent positive capability result or a
+// short-lived negative result that is eligible for retry.
 type probeCacheEntry struct {
 	capabilities Capabilities
 	expiresAt    time.Time
@@ -38,10 +42,14 @@ var probeCache = struct {
 	group   singleflight.Group
 }{entries: make(map[string]probeCacheEntry)}
 
+// Probe returns the cached, smoke-tested tone-map capabilities for an FFmpeg
+// binary and hardware configuration.
 func Probe(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevice string) Capabilities {
 	return probeCached(ctx, ffmpegPath, hardwareBackend, hardwareDevice, runCommand, time.Now)
 }
 
+// probeCached coalesces identical probes without allowing one caller's
+// cancellation to abort the shared work needed by other playback requests.
 func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevice string, run CommandRunner, now func() time.Time) Capabilities {
 	key := strings.Join([]string{strings.TrimSpace(ffmpegPath), strings.ToLower(strings.TrimSpace(hardwareBackend)), strings.TrimSpace(hardwareDevice)}, "\x00")
 	probeCache.Lock()
@@ -83,10 +91,14 @@ func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevic
 	}
 }
 
+// probeCacheEntryCurrent reports whether a positive result or unexpired
+// negative result may be reused.
 func probeCacheEntryCurrent(entry probeCacheEntry, now time.Time) bool {
 	return len(entry.capabilities) > 0 || now.Before(entry.expiresAt)
 }
 
+// probeTotalTimeout budgets one bounded deadline for every listing and smoke
+// command the selected backend and device set can execute.
 func probeTotalTimeout(hardwareBackend, hardwareDevice string) time.Duration {
 	commandCount := 2 + len(AllSourceKinds())
 	backend := strings.ToLower(strings.TrimSpace(hardwareBackend))
@@ -97,6 +109,8 @@ func probeTotalTimeout(hardwareBackend, hardwareDevice string) time.Duration {
 	return time.Duration(commandCount)*probeCommandTimeout + probeTimeoutSlack
 }
 
+// ProbeWithRunner inventories executors by checking FFmpeg listings and then
+// converting a deterministic HEVC frame for every supported source kind.
 func ProbeWithRunner(
 	ctx context.Context,
 	ffmpegPath, hardwareBackend, hardwareDevice string,
@@ -140,6 +154,8 @@ func ProbeWithRunner(
 	return capabilities
 }
 
+// hardwareSmokeSourceKinds returns only source kinds converted successfully on
+// every configured device so the advertised union is safe for later selection.
 func hardwareSmokeSourceKinds(ctx context.Context, run CommandRunner, ffmpegPath, fixturePath, backend, hardwareDevice string) []SourceKind {
 	devices := probeDevices(hardwareDevice, backend)
 	validated := AllSourceKinds()
@@ -155,6 +171,8 @@ func hardwareSmokeSourceKinds(ctx context.Context, run CommandRunner, ffmpegPath
 	return validated
 }
 
+// probeDevices parses the configured device list and supplies the backend's
+// deterministic default when the setting is empty.
 func probeDevices(value, backend string) []string {
 	parts := strings.Split(value, ",")
 	devices := make([]string, 0, len(parts))
@@ -172,6 +190,8 @@ func probeDevices(value, backend string) []string {
 	return devices
 }
 
+// intersectSourceKinds preserves the left-hand ordering while retaining source
+// kinds supported by both sets.
 func intersectSourceKinds(left, right []SourceKind) []SourceKind {
 	result := make([]SourceKind, 0, len(left))
 	for _, kind := range left {
@@ -185,6 +205,7 @@ func intersectSourceKinds(left, right []SourceKind) []SourceKind {
 	return result
 }
 
+// hardwareFilter returns the FFmpeg tone-map filter required by a backend.
 func hardwareFilter(backend string) string {
 	if backend == BackendNVENC {
 		return HardwareFilterCUDA
@@ -192,20 +213,27 @@ func hardwareFilter(backend string) string {
 	return HardwareFilterVAAPI
 }
 
+// runCommand executes a probe command and retains stderr alongside stdout for
+// capability detection and bounded diagnostics.
 func runCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
+// runBounded applies the per-command probe deadline within the caller's total
+// deadline.
 func runBounded(ctx context.Context, run CommandRunner, name string, args ...string) ([]byte, error) {
 	commandCtx, cancel := context.WithTimeout(ctx, probeCommandTimeout)
 	defer cancel()
 	return run(commandCtx, name, args...)
 }
 
+// hasToken performs the case-insensitive listing checks used during probing.
 func hasToken(output []byte, token string) bool {
 	return bytes.Contains(bytes.ToLower(output), []byte(strings.ToLower(token)))
 }
 
+// hardwareProbeAvailable performs the cheap listing gate before device smoke
+// tests are attempted for a configured backend.
 func hardwareProbeAvailable(backend string, filters, encoders []byte) bool {
 	switch backend {
 	case BackendQSV:
@@ -219,6 +247,8 @@ func hardwareProbeAvailable(backend string, filters, encoders []byte) bool {
 	}
 }
 
+// smokeSourceKinds runs one bounded conversion per source kind and returns only
+// the kinds whose command completed successfully.
 func smokeSourceKinds(
 	ctx context.Context,
 	run CommandRunner,
@@ -234,6 +264,8 @@ func smokeSourceKinds(
 	return kinds
 }
 
+// softwareSmokeArgs builds a single-frame software conversion command for the
+// embedded decoder fixture and selected filter.
 func softwareSmokeArgs(fixturePath string, kind SourceKind, filterName string) []string {
 	return []string{
 		ffmpegHideBannerArg, ffmpegLogLevelArg, ffmpegErrorLogLevel,
@@ -243,6 +275,8 @@ func softwareSmokeArgs(fixturePath string, kind SourceKind, filterName string) [
 	}
 }
 
+// hardwareSmokeArgs builds a single-frame decode, conversion, and encode
+// command for one hardware backend, device, and source kind.
 func hardwareSmokeArgs(fixturePath, backend, hardwareDevice string, kind SourceKind) []string {
 	device := firstDevice(hardwareDevice)
 	if device == "" && backend != BackendNVENC {
@@ -274,6 +308,8 @@ func hardwareSmokeArgs(fixturePath, backend, hardwareDevice string, kind SourceK
 	return base
 }
 
+// hardwareSmokeFilter builds the backend-specific graph used to validate both
+// HDR and already-SDR Dolby Vision base layers.
 func hardwareSmokeFilter(backend string, kind SourceKind) string {
 	if backend == BackendNVENC {
 		if IsSDRSource(kind) {
@@ -288,6 +324,8 @@ func hardwareSmokeFilter(backend string, kind SourceKind) string {
 	return filter + "," + HDRMetadataRemovalFilter()
 }
 
+// writeDecodeProbeFixture materializes the embedded HEVC frame and returns an
+// idempotent cleanup function for the caller.
 func writeDecodeProbeFixture() (string, func(), error) {
 	data, err := base64.StdEncoding.DecodeString(decodeProbeFixtureBase64)
 	if err != nil {
@@ -311,6 +349,7 @@ func writeDecodeProbeFixture() (string, func(), error) {
 	return path, cleanup, nil
 }
 
+// hardwareEncoder returns the H.264 encoder paired with a probed backend.
 func hardwareEncoder(backend string) string {
 	switch backend {
 	case BackendQSV:
@@ -322,6 +361,7 @@ func hardwareEncoder(backend string) string {
 	}
 }
 
+// firstDevice extracts the first configured device for a single FFmpeg command.
 func firstDevice(value string) string {
 	if i := strings.IndexByte(value, ','); i >= 0 {
 		value = value[:i]

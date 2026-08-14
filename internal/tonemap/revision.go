@@ -26,6 +26,8 @@ type SourceRevision struct {
 	StreamSignature      string `json:"stream_signature"`
 }
 
+// RevisionForFile captures catalog, filesystem, and primary-video facts that
+// must remain unchanged while a tone-map recipe or preflight verdict is reused.
 func RevisionForFile(file *models.MediaFile) SourceRevision {
 	if file == nil {
 		return SourceRevision{}
@@ -56,21 +58,26 @@ func RevisionForFile(file *models.MediaFile) SourceRevision {
 	return revision
 }
 
+// Stable reports whether the revision contains every fact required for safe
+// cross-request preflight caching.
 func (r SourceRevision) Stable() bool {
 	return r.MediaFileID > 0 && r.FileSize > 0 && r.FileModifiedUnixNano > 0 &&
 		r.FileHash != "" && r.ProbeUpdatedUnixNano > 0 && r.StreamSignature != ""
 }
 
+// IsZero reports whether no source revision was frozen in the recipe.
 func (r SourceRevision) IsZero() bool {
 	return r.MediaFileID == 0 && r.FileSize == 0 && r.FileModifiedUnixNano == 0 &&
 		r.FileHash == "" && r.ProbeUpdatedUnixNano == 0 && r.StreamSignature == ""
 }
 
+// Fingerprint returns the deterministic cache identity of all revision fields.
 func (r SourceRevision) Fingerprint() string {
 	data, _ := json.Marshal(r)
 	return hashRevisionValue(string(data))
 }
 
+// Encode serializes a non-zero revision for transport in a transcode recipe.
 func (r SourceRevision) Encode() string {
 	if r.IsZero() {
 		return ""
@@ -82,6 +89,8 @@ func (r SourceRevision) Encode() string {
 	return base64.RawURLEncoding.EncodeToString(data)
 }
 
+// DecodeSourceRevision parses the URL-safe representation carried by a frozen
+// transcode recipe; an empty value represents a zero revision.
 func DecodeSourceRevision(value string) (SourceRevision, error) {
 	if strings.TrimSpace(value) == "" {
 		return SourceRevision{}, nil
@@ -117,10 +126,13 @@ func (r SourceRevision) ValidatePath(path string) error {
 	return nil
 }
 
+// normalizeRevisionTime matches the database's microsecond timestamp precision
+// before filesystem times are frozen or compared.
 func normalizeRevisionTime(value time.Time) time.Time {
 	return value.UTC().Truncate(time.Microsecond)
 }
 
+// hashRevisionValue returns a fixed-size, non-sensitive identity for cache keys.
 func hashRevisionValue(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])

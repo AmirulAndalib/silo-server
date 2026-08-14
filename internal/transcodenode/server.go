@@ -552,10 +552,14 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 	writeDownloadPrepareResult(w, req.ArtifactID, stat.Size())
 }
 
+// toneMapRecipeRequested reports whether any transported field claims that the
+// request carries a tone-map recipe, including partial recipes that must fail.
 func toneMapRecipeRequested(opts playback.TranscodeOpts) bool {
 	return (opts.ToneMapPolicy != "" && opts.ToneMapPolicy != tonemap.PolicyNone) || opts.ToneMapMode != "" || opts.ToneMapSourceKind != "" || opts.ToneMapRecipeVersion != "" || opts.ToneMapPreflightRequired || !opts.ToneMapSourceRevision.IsZero() || opts.ToneMapDVConfigPresent || opts.ToneMapDVBLCompatIDPresent || opts.ToneMapDVBLPresent || opts.ToneMapDVRPUPresent
 }
 
+// resolveToneMapRecipe validates the frozen selection against this node's live
+// executor and replaces environment-specific filter and backend fields.
 func resolveToneMapRecipe(ctx context.Context, opts *playback.TranscodeOpts) error {
 	if opts == nil {
 		return errors.New("missing tone-map recipe")

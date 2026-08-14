@@ -406,6 +406,8 @@ func normalizeTranscodeOpts(opts TranscodeOpts) TranscodeOpts {
 	return opts
 }
 
+// validateToneMapOpts rejects partial, contradictory, or unsupported frozen
+// recipes before any FFmpeg process can be started.
 func validateToneMapOpts(opts TranscodeOpts) error {
 	if opts.ToneMapMode == "" {
 		if opts.ToneMapPolicy != "" || opts.ToneMapSourceKind != "" || opts.ToneMapFilter != "" || opts.ToneMapRecipeVersion != "" || opts.ToneMapPreflightRequired || !opts.ToneMapSourceRevision.IsZero() || opts.ToneMapDVConfigPresent || opts.ToneMapDVBLCompatIDPresent || opts.ToneMapDVBLPresent || opts.ToneMapDVRPUPresent {
@@ -474,6 +476,8 @@ func ResolveToneMapExecutor(ctx context.Context, opts TranscodeOpts) (TranscodeO
 	return opts, nil
 }
 
+// validateToneMapSource rechecks the source revision and, for ambiguous
+// classifications, runs the selected executor's representative-frame preflight.
 func validateToneMapSource(ctx context.Context, opts TranscodeOpts) error {
 	if opts.ToneMapMode == "" {
 		return nil
@@ -940,6 +944,8 @@ func appendVideoFilterArgs(args []string, opts TranscodeOpts) []string {
 	return args
 }
 
+// appendToneMapFilterArgs selects the subtitle-aware or scale-only tone-map
+// graph and leaves args unchanged if no valid graph exists.
 func appendToneMapFilterArgs(args []string, opts TranscodeOpts) []string {
 	switch {
 	case bitmapBurnInActive(opts):
@@ -959,6 +965,8 @@ func appendToneMapFilterArgs(args []string, opts TranscodeOpts) []string {
 	}
 }
 
+// toneMapScaleFilter builds the subtitle-free graph for the frozen software or
+// hardware executor, including output scaling and HDR metadata removal.
 func toneMapScaleFilter(opts TranscodeOpts) string {
 	switch opts.ToneMapMode {
 	case tonemap.ModeSoftware:
@@ -987,6 +995,8 @@ func toneMapScaleFilter(opts TranscodeOpts) string {
 	return ""
 }
 
+// toneMappedTextSubtitleFilter places CPU subtitle rendering after conversion
+// and downloads or uploads frames only where the selected backend requires it.
 func toneMappedTextSubtitleFilter(opts TranscodeOpts) string {
 	subtitleInputPath := opts.InputPath
 	if opts.subtitleFilterInputPath != "" {
@@ -1017,6 +1027,8 @@ func toneMappedTextSubtitleFilter(opts TranscodeOpts) string {
 	}
 }
 
+// appendToneMappedBitmapSubtitleArgs builds a complex graph that converts the
+// video before overlaying a bitmap subtitle and then restores encoder surfaces.
 func appendToneMappedBitmapSubtitleArgs(args []string, opts TranscodeOpts) []string {
 	subInput := fmt.Sprintf("[0:s:%d]", opts.SubtitleTrackIndex)
 	var graph string
@@ -1057,6 +1069,8 @@ func appendToneMappedBitmapSubtitleArgs(args []string, opts TranscodeOpts) []str
 	return append(args, "-filter_complex", graph)
 }
 
+// nvencSDRFallbackDownload preserves the decoded bit depth while bringing an
+// SDR Dolby Vision base layer to the CPU for unsupported CUDA color conversion.
 func nvencSDRFallbackDownload(opts TranscodeOpts) string {
 	format := "nv12"
 	if opts.SourceVideoBitDepth > 8 {

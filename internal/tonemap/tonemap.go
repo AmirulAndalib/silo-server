@@ -41,6 +41,7 @@ const (
 	codecHEVC              = "hevc"
 )
 
+// Mode identifies the class of executor used to convert an HDR source to SDR.
 type Mode string
 
 const (
@@ -48,6 +49,7 @@ const (
 	ModeSoftware Mode = BackendSoftware
 )
 
+// Policy records which executor modes an administrator permits.
 type Policy string
 
 const (
@@ -57,6 +59,8 @@ const (
 	PolicyHardwareThenSoftware Policy = "hardware_then_software"
 )
 
+// NewPolicy combines the independent hardware and software settings into a
+// stable value that can be frozen in a playback or download recipe.
 func NewPolicy(hardwareEnabled, softwareEnabled bool) Policy {
 	switch {
 	case hardwareEnabled && softwareEnabled:
@@ -70,6 +74,7 @@ func NewPolicy(hardwareEnabled, softwareEnabled bool) Policy {
 	}
 }
 
+// Allows reports whether the policy permits the requested executor mode.
 func (p Policy) Allows(mode Mode) bool {
 	switch p {
 	case PolicyHardwareThenSoftware:
@@ -83,6 +88,8 @@ func (p Policy) Allows(mode Mode) bool {
 	}
 }
 
+// SourceKind describes the transfer function and color primaries of the base
+// signal that an executor must convert.
 type SourceKind string
 
 const (
@@ -93,6 +100,8 @@ const (
 	SourceSDRBT2020 SourceKind = "sdr_bt2020"
 )
 
+// SourceMetadata contains the catalog facts used to resolve an HDR base signal
+// without trusting a single dynamic-range label in isolation.
 type SourceMetadata struct {
 	DynamicRange        string
 	DVProfile           int
@@ -116,6 +125,8 @@ type SourceResolution struct {
 	PreflightRequired bool
 }
 
+// MetadataForFile extracts tone-map classification facts from a media file's
+// primary video track, retaining an HDR fallback for legacy catalog rows.
 func MetadataForFile(file *models.MediaFile) SourceMetadata {
 	if file == nil {
 		return SourceMetadata{}
@@ -165,6 +176,8 @@ func NeedsToneMap(file *models.MediaFile) bool {
 	return false
 }
 
+// DynamicRangeForVideoTrack derives a normalized dynamic-range label from the
+// scanner's Dolby Vision, HDR10+, transfer, and range metadata.
 func DynamicRangeForVideoTrack(track models.VideoTrack) string {
 	if track.DVProfile > 0 || strings.Contains(strings.ToLower(track.VideoRangeType), "dovi") || strings.Contains(strings.ToLower(track.DolbyVision), "dolby") {
 		return DynamicRangeDolbyVision
@@ -185,6 +198,8 @@ func DynamicRangeForVideoTrack(track models.VideoTrack) string {
 	return DynamicRangeSDR
 }
 
+// ResolveSource determines the base signal an executor may use and whether the
+// classification must be confirmed by decoding representative frames.
 func ResolveSource(source SourceMetadata) SourceResolution {
 	dynamicRange := strings.ToLower(strings.TrimSpace(source.DynamicRange))
 	var candidate SourceKind
@@ -227,6 +242,8 @@ func ResolveSource(source SourceMetadata) SourceResolution {
 	return SourceResolution{Kind: candidate, PreflightRequired: preflight}
 }
 
+// ClassifySource returns only classifications that are safe without executor
+// preflight; ambiguous or unsupported sources return an empty kind.
 func ClassifySource(source SourceMetadata) SourceKind {
 	resolution := ResolveSource(source)
 	if resolution.PreflightRequired {
@@ -235,6 +252,8 @@ func ClassifySource(source SourceMetadata) SourceKind {
 	return resolution.Kind
 }
 
+// sourceKindForCompatibilityID maps standardized Dolby Vision base-layer
+// compatibility identifiers to their underlying transfer and primaries.
 func sourceKindForCompatibilityID(id int) SourceKind {
 	switch id {
 	case 1, 6:
@@ -251,6 +270,8 @@ func sourceKindForCompatibilityID(id int) SourceKind {
 	return ""
 }
 
+// standardProfileCompatibility reports whether a Dolby Vision profile and
+// compatibility identifier form a standardized pairing that needs no probe.
 func standardProfileCompatibility(profile, compatibilityID int) bool {
 	switch profile {
 	case 4:
@@ -272,6 +293,8 @@ func standardProfileCompatibility(profile, compatibilityID int) bool {
 	}
 }
 
+// sourceKindFromColorMetadata infers a candidate base signal from explicit
+// transfer and primaries metadata when Dolby Vision signaling is incomplete.
 func sourceKindFromColorMetadata(source SourceMetadata) SourceKind {
 	transfer := normalizeColorValue(source.ColorTransfer)
 	primaries := normalizeColorValue(source.ColorPrimaries)
@@ -290,6 +313,8 @@ func sourceKindFromColorMetadata(source SourceMetadata) SourceKind {
 	return ""
 }
 
+// sourceMetadataCompatibility checks whether the available color fields agree
+// with a candidate source kind and separately reports whether all fields exist.
 func sourceMetadataCompatibility(kind SourceKind, source SourceMetadata) (complete, compatible bool) {
 	values := []string{source.ColorRange, source.ColorPrimaries, source.ColorTransfer, source.ColorSpace}
 	complete = true
@@ -311,10 +336,13 @@ func sourceMetadataCompatibility(kind SourceKind, source SourceMetadata) (comple
 			colorValueMatchesMatrix(kind, matrix)
 }
 
+// normalizeColorValue canonicalizes scanner color fields for comparison.
 func normalizeColorValue(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
+// colorValueMatchesPrimaries accepts missing metadata for preflight while
+// rejecting explicit primaries that contradict the candidate source kind.
 func colorValueMatchesPrimaries(kind SourceKind, value string) bool {
 	if value == "" || value == colorUnknown || value == colorUnspecified {
 		return true
@@ -325,6 +353,8 @@ func colorValueMatchesPrimaries(kind SourceKind, value string) bool {
 	return colorIsBT2020(value)
 }
 
+// colorValueMatchesTransfer accepts missing metadata for preflight while
+// rejecting an explicit transfer function that contradicts the source kind.
 func colorValueMatchesTransfer(kind SourceKind, value string) bool {
 	if value == "" || value == colorUnknown || value == colorUnspecified {
 		return true
@@ -341,6 +371,8 @@ func colorValueMatchesTransfer(kind SourceKind, value string) bool {
 	}
 }
 
+// colorValueMatchesMatrix accepts missing metadata for preflight while
+// validating explicit BT.709 and BT.2020 matrix coefficients.
 func colorValueMatchesMatrix(kind SourceKind, value string) bool {
 	if value == "" || value == colorUnknown || value == colorUnspecified {
 		return true
@@ -354,30 +386,39 @@ func colorValueMatchesMatrix(kind SourceKind, value string) bool {
 	return colorIsBT2020(value)
 }
 
+// transferIsPQ recognizes FFmpeg's names for the SMPTE ST 2084 transfer.
 func transferIsPQ(value string) bool {
 	return strings.Contains(value, ColorTransferPQ) || value == "pq"
 }
 
+// transferIsHLG recognizes FFmpeg's names for the ARIB STD-B67 transfer.
 func transferIsHLG(value string) bool {
 	return strings.Contains(value, ColorTransferHLG) || value == DynamicRangeHLG
 }
 
+// transferIsSDR recognizes the SDR transfer functions accepted as Dolby
+// Vision compatible base layers.
 func transferIsSDR(value string) bool {
 	return value == colorBT709 || value == "bt1886" || value == "bt470bg" || value == "gamma28"
 }
 
+// colorIsBT709 reports whether a normalized color field names BT.709.
 func colorIsBT709(value string) bool {
 	return strings.Contains(value, colorBT709)
 }
 
+// colorIsBT2020 reports whether a normalized color field names BT.2020.
 func colorIsBT2020(value string) bool {
 	return strings.Contains(value, colorBT2020)
 }
 
+// rangeIsLimited recognizes FFmpeg's names for limited-range video levels.
 func rangeIsLimited(value string) bool {
 	return value == "tv" || value == "mpeg" || value == "limited"
 }
 
+// SourceKindFor maps already trusted dynamic-range metadata to a base signal.
+// Call ResolveSource when the completeness of the metadata is not guaranteed.
 func SourceKindFor(dynamicRange string, dvBLCompatID int) SourceKind {
 	switch strings.ToLower(strings.TrimSpace(dynamicRange)) {
 	case DynamicRangeHDR10, DynamicRangeHDR10Plus:
@@ -390,6 +431,7 @@ func SourceKindFor(dynamicRange string, dvBLCompatID int) SourceKind {
 	return ""
 }
 
+// SourceTransfer returns the FFmpeg transfer characteristic for a source kind.
 func SourceTransfer(kind SourceKind) string {
 	if kind == SourceHLG || kind == SourceHLGBT709 {
 		return ColorTransferHLG
@@ -400,6 +442,7 @@ func SourceTransfer(kind SourceKind) string {
 	return ColorTransferPQ
 }
 
+// SourcePrimaries returns the FFmpeg color primaries for a source kind.
 func SourcePrimaries(kind SourceKind) string {
 	if kind == SourceHLGBT709 || kind == SourceSDRBT709 {
 		return colorBT709
@@ -407,6 +450,7 @@ func SourcePrimaries(kind SourceKind) string {
 	return colorBT2020
 }
 
+// SourceMatrix returns the FFmpeg matrix coefficients for a source kind.
 func SourceMatrix(kind SourceKind) string {
 	if kind == SourceHLGBT709 || kind == SourceSDRBT709 {
 		return colorBT709
@@ -414,14 +458,18 @@ func SourceMatrix(kind SourceKind) string {
 	return colorBT2020NC
 }
 
+// IsSDRSource reports whether the Dolby Vision compatible base is already SDR
+// and therefore needs gamut conversion but no luminance tone mapping.
 func IsSDRSource(kind SourceKind) bool {
 	return kind == SourceSDRBT709 || kind == SourceSDRBT2020
 }
 
+// AllSourceKinds returns every base signal supported by capability probes.
 func AllSourceKinds() []SourceKind {
 	return []SourceKind{SourcePQ, SourceHLG, SourceHLGBT709, SourceSDRBT709, SourceSDRBT2020}
 }
 
+// ValidSourceKind reports whether kind is a supported, serializable base signal.
 func ValidSourceKind(kind SourceKind) bool {
 	for _, candidate := range AllSourceKinds() {
 		if candidate == kind {
@@ -431,6 +479,8 @@ func ValidSourceKind(kind SourceKind) bool {
 	return false
 }
 
+// Capability records one validated executor and the source kinds its smoke
+// tests successfully converted.
 type Capability struct {
 	Mode        Mode         `json:"mode"`
 	Backend     string       `json:"backend"`
@@ -438,8 +488,10 @@ type Capability struct {
 	SourceKinds []SourceKind `json:"source_kinds"`
 }
 
+// Capabilities is the validated executor inventory for one server or node.
 type Capabilities []Capability
 
+// lookup finds an executor of the requested mode that supports the source kind.
 func (c Capabilities) lookup(mode Mode, kind SourceKind) (Capability, bool) {
 	for _, capability := range c {
 		if capability.Mode == mode && slicesContain(capability.SourceKinds, kind) {
@@ -449,11 +501,13 @@ func (c Capabilities) lookup(mode Mode, kind SourceKind) (Capability, bool) {
 	return Capability{}, false
 }
 
+// Supports reports whether a validated executor can process the source kind.
 func (c Capabilities) Supports(mode Mode, kind SourceKind) bool {
 	_, ok := c.lookup(mode, kind)
 	return ok
 }
 
+// FilterFor returns the probed FFmpeg filter for a compatible executor.
 func (c Capabilities) FilterFor(mode Mode, kind SourceKind) string {
 	if capability, ok := c.lookup(mode, kind); ok {
 		return capability.Filter
@@ -461,6 +515,7 @@ func (c Capabilities) FilterFor(mode Mode, kind SourceKind) string {
 	return ""
 }
 
+// BackendFor returns the hardware or software backend for a compatible executor.
 func (c Capabilities) BackendFor(mode Mode, kind SourceKind) string {
 	if capability, ok := c.lookup(mode, kind); ok {
 		return capability.Backend
@@ -468,6 +523,7 @@ func (c Capabilities) BackendFor(mode Mode, kind SourceKind) string {
 	return ""
 }
 
+// slicesContain reports whether a capability's source-kind set contains want.
 func slicesContain(values []SourceKind, want SourceKind) bool {
 	for _, value := range values {
 		if value == want {
@@ -477,11 +533,14 @@ func slicesContain(values []SourceKind, want SourceKind) bool {
 	return false
 }
 
+// SupportsPolicy reports whether at least one allowed executor supports kind.
 func (c Capabilities) SupportsPolicy(policy Policy, kind SourceKind) bool {
 	return policy.Allows(ModeHardware) && c.Supports(ModeHardware, kind) ||
 		policy.Allows(ModeSoftware) && c.Supports(ModeSoftware, kind)
 }
 
+// PreferredMode chooses a validated hardware executor before software when the
+// policy permits both, and returns an empty mode when neither is usable.
 func (c Capabilities) PreferredMode(policy Policy, kind SourceKind) Mode {
 	if policy.Allows(ModeHardware) && c.Supports(ModeHardware, kind) {
 		return ModeHardware
@@ -492,10 +551,14 @@ func (c Capabilities) PreferredMode(policy Policy, kind SourceKind) Mode {
 	return ""
 }
 
+// SourceParameters builds the FFmpeg setparams stage that declares the input
+// base signal before conversion.
 func SourceParameters(kind SourceKind) string {
 	return "setparams=range=tv:color_primaries=" + SourcePrimaries(kind) + ":color_trc=" + SourceTransfer(kind) + ":colorspace=" + SourceMatrix(kind)
 }
 
+// SoftwareFilter builds the complete software conversion graph for a source
+// kind using the filter selected during capability probing.
 func SoftwareFilter(kind SourceKind, filterName string) string {
 	if IsSDRSource(kind) {
 		return SourceParameters(kind) +
@@ -528,6 +591,8 @@ func SelectSoftwareFilter(output []byte) (filter string, hasZScale bool) {
 	return "", true
 }
 
+// FilterListingHas reports whether an FFmpeg -filters listing contains an exact
+// filter name rather than an incidental textual match.
 func FilterListingHas(output []byte, name string) bool {
 	for _, line := range bytes.Split(output, []byte{'\n'}) {
 		fields := bytes.Fields(line)
@@ -538,6 +603,7 @@ func FilterListingHas(output []byte, name string) bool {
 	return false
 }
 
+// VAAPIFilter builds the VAAPI conversion graph for the source kind.
 func VAAPIFilter(kind SourceKind) string {
 	if IsSDRSource(kind) {
 		return SourceParameters(kind) + "," + vaapiSDRFilter()
@@ -545,14 +611,18 @@ func VAAPIFilter(kind SourceKind) string {
 	return SourceParameters(kind) + "," + vaapiToneMapFilter()
 }
 
+// vaapiToneMapFilter returns the HDR luminance and color conversion stage.
 func vaapiToneMapFilter() string {
 	return HardwareFilterVAAPI + "=format=nv12:p=bt709:t=bt709:m=bt709"
 }
 
+// vaapiSDRFilter returns the color-only conversion used by SDR base layers.
 func vaapiSDRFilter() string {
 	return "scale_vaapi=format=nv12:out_color_primaries=bt709:out_color_transfer=bt709:out_color_matrix=bt709:out_range=tv"
 }
 
+// CUDAFilter returns the CUDA HDR-to-SDR conversion stage with Dolby Vision
+// enhancement processing disabled so the validated base layer is used.
 func CUDAFilter() string {
 	return HardwareFilterCUDA + "=tonemap=bt2390:format=nv12:p=bt709:t=bt709:m=bt709:r=tv:apply_dovi=0"
 }
@@ -565,10 +635,14 @@ func QSVInteropFilter() string {
 	return "scale_vaapi=format=nv12,hwmap=derive_device=qsv:mode=read+write,format=qsv"
 }
 
+// qsvVAAPIInitDevice builds the Intel-specific VAAPI device declaration used
+// to derive a QSV encoding device.
 func qsvVAAPIInitDevice(device string) string {
 	return "vaapi=va:" + device + ",driver=iHD,kernel_driver=i915,vendor_id=0x8086"
 }
 
+// HDRMetadataRemovalFilter removes side data that would otherwise incorrectly
+// label the converted SDR frames as HDR or Dolby Vision.
 func HDRMetadataRemovalFilter() string {
 	return strings.Join([]string{
 		"sidedata=mode=delete:type=MASTERING_DISPLAY_METADATA",

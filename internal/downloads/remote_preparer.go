@@ -33,6 +33,8 @@ type NodeAwarePreparer struct {
 	capabilities map[string]remoteToneMapCapabilities
 }
 
+// remoteToneMapCapabilities caches one node's validated inventory; an empty
+// slice with a short expiry represents a recent lookup failure.
 type remoteToneMapCapabilities struct {
 	capabilities tonemap.Capabilities
 	expiresAt    time.Time
@@ -44,10 +46,14 @@ const (
 	remoteToneMapCapabilityTimeout  = 5 * time.Second
 )
 
+// eligibleTranscodeWorkPlanner reserves work only on nodes that satisfy a
+// lock-safe capability predicate.
 type eligibleTranscodeWorkPlanner interface {
 	ReserveTranscodeWorkWith(workID string, eligible func(*nodepool.Node) bool) (*nodepool.Node, func())
 }
 
+// transcodeNodeEnumerator lists the currently enabled transcode pool for
+// concurrent capability discovery.
 type transcodeNodeEnumerator interface {
 	TranscodeNodeURLs() []string
 }
@@ -95,6 +101,8 @@ func (p *NodeAwarePreparer) LocalFallbackAllowed(ctx context.Context) bool {
 	return !strings.EqualFold(values[config.PlaybackLocalTranscodeFallbackSettingKey], "false")
 }
 
+// prepareLocally enforces the live local-fallback policy before delegating to
+// the API host's artifact preparer.
 func (p *NodeAwarePreparer) prepareLocally(ctx context.Context, artifactID string, opts playback.TranscodeOpts, outputPath string) (PreparedArtifact, error) {
 	if !p.LocalFallbackAllowed(ctx) {
 		return PreparedArtifact{}, errors.New("no eligible transcode node and local transcode fallback is disabled")
@@ -174,6 +182,8 @@ func (p *NodeAwarePreparer) ToneMapCapabilities(ctx context.Context) tonemap.Cap
 	return result
 }
 
+// capableToneMapNodeURLs returns the normalized URLs of nodes that validated
+// the exact mode and source kind frozen in an artifact recipe.
 func (p *NodeAwarePreparer) capableToneMapNodeURLs(ctx context.Context, mode tonemap.Mode, kind tonemap.SourceKind) map[string]struct{} {
 	result := make(map[string]struct{})
 	for nodeURL, capabilities := range p.toneMapCapabilitiesByNode(ctx) {
@@ -184,6 +194,8 @@ func (p *NodeAwarePreparer) capableToneMapNodeURLs(ctx context.Context, mode ton
 	return result
 }
 
+// toneMapCapabilitiesByNode fetches the enabled pool concurrently and keeps
+// each inventory attached to its node for safe heterogeneous selection.
 func (p *NodeAwarePreparer) toneMapCapabilitiesByNode(ctx context.Context) map[string]tonemap.Capabilities {
 	enumerator, ok := p.planner.(transcodeNodeEnumerator)
 	if !ok {
@@ -212,6 +224,8 @@ func (p *NodeAwarePreparer) toneMapCapabilitiesByNode(ctx context.Context) map[s
 	return byNode
 }
 
+// toneMapCapabilitiesForNode returns a defensive copy of a fresh cached
+// inventory or retrieves the node's authenticated hardware capabilities.
 func (p *NodeAwarePreparer) toneMapCapabilitiesForNode(ctx context.Context, nodeURL string) (tonemap.Capabilities, error) {
 	nodeURL = strings.TrimRight(nodeURL, "/")
 	now := time.Now()
@@ -259,6 +273,8 @@ func (p *NodeAwarePreparer) toneMapCapabilitiesForNode(ctx context.Context, node
 	return append(tonemap.Capabilities(nil), entry.capabilities...), nil
 }
 
+// cacheToneMapCapabilityFailure negatively caches an unreachable or invalid
+// node briefly so repeated artifact planning does not amplify the failure.
 func (p *NodeAwarePreparer) cacheToneMapCapabilityFailure(nodeURL string) {
 	p.capabilityMu.Lock()
 	if p.capabilities == nil {

@@ -101,6 +101,8 @@ type ArtifactManager struct {
 	lastStaleSweep time.Time
 }
 
+// toneMapCapabilityProvider exposes the pooled executor inventory and local
+// fallback policy needed before an artifact recipe can be frozen.
 type toneMapCapabilityProvider interface {
 	ToneMapCapabilities(context.Context) tonemap.Capabilities
 	LocalFallbackAllowed(context.Context) bool
@@ -322,6 +324,8 @@ func (m *ArtifactManager) Ensure(ctx context.Context, file *models.MediaFile, fo
 	return row, nil
 }
 
+// resolveToneMapTarget freezes a safe, enabled, and currently validated
+// executor recipe for HDR video artifacts; source-preserving targets pass through.
 func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models.MediaFile, target playback.PrepareTarget) (playback.PrepareTarget, error) {
 	if strings.EqualFold(target.CodecVideo, "copy") || file == nil || file.IsAudioOnly() {
 		return target, nil
@@ -377,6 +381,8 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 	return target, nil
 }
 
+// localToneMapCapabilities probes the live FFmpeg and hardware configuration
+// used by the API host's artifact worker.
 func (m *ArtifactManager) localToneMapCapabilities(ctx context.Context) tonemap.Capabilities {
 	if m == nil || m.liveCfg == nil {
 		return nil
@@ -389,6 +395,8 @@ func (m *ArtifactManager) localToneMapCapabilities(ctx context.Context) tonemap.
 	return tonemap.Probe(ctx, playback.ResolveFFmpegPath(cfg.Playback.FFmpegPath), backend, cfg.Playback.HWDevice)
 }
 
+// is4KDownloadSource applies the download transcode gate to either probed track
+// height or the legacy file-level resolution label.
 func is4KDownloadSource(file *models.MediaFile) bool {
 	if file == nil {
 		return false

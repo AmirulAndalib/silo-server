@@ -21,6 +21,8 @@ const (
 	sourcePreflightTimeoutSlack = time.Second
 )
 
+// SourcePreflightRequest freezes the source, executor, and environment facts
+// required to validate an ambiguous HDR base signal before output is published.
 type SourcePreflightRequest struct {
 	FFmpegPath        string
 	FFprobePath       string
@@ -37,6 +39,8 @@ type SourcePreflightRequest struct {
 	SourceRevision    SourceRevision
 }
 
+// sourcePreflightCacheEntry stores a permanent success or a short-lived failure
+// for one immutable source and executor identity.
 type sourcePreflightCacheEntry struct {
 	errorMessage string
 	expiresAt    time.Time
@@ -54,10 +58,14 @@ var ffmpegVersionCache = struct {
 	group   singleflight.Group
 }{entries: make(map[string][]byte)}
 
+// ValidateSource confirms that representative decoded source frames match the
+// frozen source kind and that the selected executor emits clean BT.709 output.
 func ValidateSource(ctx context.Context, request SourcePreflightRequest) error {
 	return ValidateSourceWithRunner(ctx, request, runCommand)
 }
 
+// ValidateSourceWithRunner performs source validation with an injectable
+// command runner while preserving production caching and timeout behavior.
 func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightRequest, run CommandRunner) error {
 	if request.Kind == "" || request.Mode == "" || strings.TrimSpace(request.InputPath) == "" {
 		return errors.New("incomplete tone-map source preflight")
@@ -127,19 +135,27 @@ func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightReques
 	return runSourcePreflight(preflightCtx, request, run)
 }
 
+// sourcePreflightCacheEntryCurrent reports whether a permanent success or
+// unexpired negative verdict may be reused.
 func sourcePreflightCacheEntryCurrent(entry sourcePreflightCacheEntry, now time.Time) bool {
 	return entry.errorMessage == "" || now.Before(entry.expiresAt)
 }
 
+// sourcePreflightTotalTimeout includes the FFmpeg identity lookup and the full
+// shared validation command matrix.
 func sourcePreflightTotalTimeout(durationSeconds float64) time.Duration {
 	return probeCommandTimeout + sourcePreflightExecutionTimeout(durationSeconds)
 }
 
+// sourcePreflightExecutionTimeout budgets inspection, conversion, and output
+// validation for every representative source position.
 func sourcePreflightExecutionTimeout(durationSeconds float64) time.Duration {
 	commandCount := 3 * len(sourcePreflightPositions(durationSeconds))
 	return time.Duration(commandCount)*probeCommandTimeout + sourcePreflightTimeoutSlack
 }
 
+// cachedPreflightError reconstructs the stored negative verdict without
+// retaining mutable error implementations in the cache.
 func cachedPreflightError(entry sourcePreflightCacheEntry) error {
 	if entry.errorMessage == "" {
 		return nil
@@ -147,6 +163,8 @@ func cachedPreflightError(entry sourcePreflightCacheEntry) error {
 	return errors.New(entry.errorMessage)
 }
 
+// sourcePreflightKey binds a stable source revision to the exact FFmpeg binary,
+// driver, device, filter, and recipe used by the executor.
 func sourcePreflightKey(ctx context.Context, request SourcePreflightRequest, run CommandRunner) (string, bool) {
 	if !request.SourceRevision.Stable() {
 		return "", false
@@ -170,6 +188,8 @@ func sourcePreflightKey(ctx context.Context, request SourcePreflightRequest, run
 	return request.SourceRevision.Fingerprint() + "\x00" + hashRevisionValue(executor), true
 }
 
+// ffmpegVersionForPreflight coalesces version lookups and invalidates cached
+// output when the resolved binary's modification time changes.
 func ffmpegVersionForPreflight(ctx context.Context, ffmpegPath string, run CommandRunner) ([]byte, error) {
 	resolved, cacheKey, cacheable := ffmpegBinaryCacheKey(ffmpegPath)
 	if !cacheable {
@@ -218,6 +238,8 @@ func ffmpegVersionForPreflight(ctx context.Context, ffmpegPath string, run Comma
 	}
 }
 
+// ffmpegBinaryCacheKey resolves a regular FFmpeg binary and derives an identity
+// that changes when the executable is replaced in place.
 func ffmpegBinaryCacheKey(ffmpegPath string) (string, string, bool) {
 	resolved, err := exec.LookPath(strings.TrimSpace(ffmpegPath))
 	if err != nil {
@@ -234,6 +256,8 @@ func ffmpegBinaryCacheKey(ffmpegPath string) (string, string, bool) {
 	return resolved, strings.Join([]string{resolved, strconv.FormatInt(info.ModTime().UnixNano(), 10)}, "\x00"), true
 }
 
+// driverFingerprint hashes the configured backend and available kernel-driver
+// version facts so cached preflights do not cross driver changes.
 func driverFingerprint(backend, device string) string {
 	values := []string{strings.ToLower(strings.TrimSpace(backend)), strings.TrimSpace(device)}
 	device = firstDevice(device)
@@ -256,6 +280,8 @@ func driverFingerprint(backend, device string) string {
 	return hashRevisionValue(strings.Join(values, "\x00"))
 }
 
+// runSourcePreflight validates representative source frames, converts each one,
+// and inspects every result before accepting the recipe.
 func runSourcePreflight(ctx context.Context, request SourcePreflightRequest, run CommandRunner) error {
 	positions := sourcePreflightPositions(request.DurationSeconds)
 	for _, position := range positions {
@@ -289,6 +315,8 @@ func runSourcePreflight(ctx context.Context, request SourcePreflightRequest, run
 	return nil
 }
 
+// sourcePreflightPositions samples the beginning, middle, and near-end of a
+// source while avoiding redundant positions for very short media.
 func sourcePreflightPositions(duration float64) []float64 {
 	positions := []float64{0}
 	for _, position := range []float64{duration * 0.5, duration * 0.9} {
@@ -309,6 +337,8 @@ func sourcePreflightPositions(duration float64) []float64 {
 	return positions
 }
 
+// preflightFrame is the minimal decoded-frame metadata needed to confirm a base
+// signal classification.
 type preflightFrame struct {
 	ColorRange     string `json:"color_range"`
 	ColorSpace     string `json:"color_space"`
@@ -316,6 +346,7 @@ type preflightFrame struct {
 	ColorPrimaries string `json:"color_primaries"`
 }
 
+// inspectSourceFrame reads color metadata from one decoded frame at position.
 func inspectSourceFrame(ctx context.Context, request SourcePreflightRequest, position float64, run CommandRunner) (preflightFrame, error) {
 	interval := strconv.FormatFloat(position, 'f', 3, 64) + "%+#1"
 	args := []string{
@@ -337,6 +368,8 @@ func inspectSourceFrame(ctx context.Context, request SourcePreflightRequest, pos
 	return payload.Frames[0], nil
 }
 
+// frameMatchesSourceKind requires complete decoded-frame metadata compatible
+// with the frozen base-signal classification.
 func frameMatchesSourceKind(frame preflightFrame, kind SourceKind) bool {
 	complete, compatible := sourceMetadataCompatibility(kind, SourceMetadata{
 		ColorRange: frame.ColorRange, ColorPrimaries: frame.ColorPrimaries,
@@ -345,6 +378,8 @@ func frameMatchesSourceKind(frame preflightFrame, kind SourceKind) bool {
 	return complete && compatible
 }
 
+// sourceConversionPreflightArgs builds a one-frame FFmpeg conversion that uses
+// the same device, filter, and encoder family as the frozen recipe.
 func sourceConversionPreflightArgs(request SourcePreflightRequest, position float64, outputPath string) []string {
 	args := []string{ffmpegHideBannerArg, ffmpegLogLevelArg, ffmpegErrorLogLevel}
 	device := firstDevice(request.HardwareDevice)
@@ -376,6 +411,8 @@ func sourceConversionPreflightArgs(request SourcePreflightRequest, position floa
 	return append(args, "-f", "matroska", "-y", outputPath)
 }
 
+// sourceConversionPreflightFilter builds the selected executor's graph,
+// including the download path needed for CUDA color conversion of SDR bases.
 func sourceConversionPreflightFilter(request SourcePreflightRequest) string {
 	if request.Mode == ModeSoftware {
 		return SoftwareFilter(request.Kind, request.Filter)
@@ -397,6 +434,7 @@ func sourceConversionPreflightFilter(request SourcePreflightRequest) string {
 	return filter + "," + HDRMetadataRemovalFilter()
 }
 
+// sourcePreflightEncoder returns the encoder paired with the selected mode.
 func sourcePreflightEncoder(request SourcePreflightRequest) string {
 	if request.Mode == ModeSoftware {
 		return "libx264"
@@ -404,6 +442,8 @@ func sourcePreflightEncoder(request SourcePreflightRequest) string {
 	return hardwareEncoder(request.Backend)
 }
 
+// inspectPreflightOutput requires H.264 yuv420p, complete limited-range BT.709
+// metadata on stream and frames, and no residual HDR side data.
 func inspectPreflightOutput(ctx context.Context, ffprobePath, outputPath string, run CommandRunner) error {
 	args := []string{
 		"-v", ffmpegErrorLogLevel, "-select_streams", "v:0",
@@ -465,6 +505,8 @@ func inspectPreflightOutput(ctx context.Context, ffprobePath, outputPath string,
 	return nil
 }
 
+// isHDRSideData recognizes HDR and Dolby Vision side-data labels emitted by
+// supported FFprobe versions.
 func isHDRSideData(value string) bool {
 	normalized := strings.ToLower(value)
 	return strings.Contains(normalized, "dovi") || strings.Contains(normalized, "dolby") ||
@@ -472,6 +514,8 @@ func isHDRSideData(value string) bool {
 		strings.Contains(normalized, "hdr")
 }
 
+// ffprobeForFFmpeg selects the sibling ffprobe binary when the configured path
+// names FFmpeg, preserving directory and filename suffixes.
 func ffprobeForFFmpeg(ffmpegPath string) string {
 	dir, base := filepath.Split(ffmpegPath)
 	if index := strings.Index(strings.ToLower(base), "ffmpeg"); index >= 0 {
@@ -481,6 +525,8 @@ func ffprobeForFFmpeg(ffmpegPath string) string {
 	return "ffprobe"
 }
 
+// decodeCommandJSON extracts the outer JSON object from command output that may
+// contain diagnostics before or after the payload.
 func decodeCommandJSON(output []byte, target any) error {
 	start := strings.IndexByte(string(output), '{')
 	end := strings.LastIndexByte(string(output), '}')
@@ -490,6 +536,8 @@ func decodeCommandJSON(output []byte, target any) error {
 	return json.Unmarshal(output[start:end+1], target)
 }
 
+// boundedCommandFailure appends at most the final 512 bytes of command output
+// so returned diagnostics remain useful without becoming unbounded.
 func boundedCommandFailure(err error, output []byte) string {
 	message := err.Error()
 	if detail := strings.TrimSpace(string(output)); detail != "" {

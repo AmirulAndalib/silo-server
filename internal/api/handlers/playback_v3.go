@@ -142,6 +142,8 @@ func (h *PlaybackHandler) transformationRegistryV3(ctx context.Context) *playbac
 	return h.v3Registry
 }
 
+// localToneMapCapabilitiesV3 returns a defensive copy of the capabilities
+// validated for the current local FFmpeg, backend, and device configuration.
 func (h *PlaybackHandler) localToneMapCapabilitiesV3(ctx context.Context) tonemap.Capabilities {
 	cfg := h.playbackConfig()
 	ffmpegPath := playback.ResolveFFmpegPath(cfg.FFmpegPath)
@@ -190,6 +192,8 @@ func (h *PlaybackHandler) lookupRemoteTransformationsV3(ctx context.Context, nod
 	return append([]playback.TransformationV3(nil), entry.transformations...), nil
 }
 
+// lookupRemoteCapabilitiesV3 fetches and jointly caches a node's transformation
+// and tone-map inventory, optionally reusing short-lived fetch failures.
 func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeURL string, honorCachedFailure bool) (v3NodeCapabilityCache, error) {
 	now := time.Now()
 	h.v3NodeCapabilitiesMu.Lock()
@@ -228,6 +232,8 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 	return entry, nil
 }
 
+// remoteToneMapCapabilitiesV3 returns a defensive copy of one node's validated
+// tone-map inventory; planning lookups may honor the negative cache.
 func (h *PlaybackHandler) remoteToneMapCapabilitiesV3(ctx context.Context, nodeURL string, planning bool) (tonemap.Capabilities, error) {
 	entry, err := h.lookupRemoteCapabilitiesV3(ctx, nodeURL, planning)
 	if err != nil {
@@ -296,6 +302,8 @@ func (h *PlaybackHandler) lazyHLSPlanningRegistryV3(ctx context.Context) func() 
 	}
 }
 
+// hlsToneMapCapabilitiesV3 builds the executor union available to HLS planning
+// from eligible local fallback and all reachable transcode nodes.
 func (h *PlaybackHandler) hlsToneMapCapabilitiesV3(ctx context.Context) tonemap.Capabilities {
 	capabilities := tonemap.Capabilities(nil)
 	if h.NodePlanner == nil || nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo) {
@@ -329,6 +337,8 @@ func (h *PlaybackHandler) hlsToneMapCapabilitiesV3(ctx context.Context) tonemap.
 	return capabilities
 }
 
+// lazyHLSToneMapCapabilitiesV3 memoizes the capability union so source-
+// preserving routes never perform tone-map probes or remote lookups.
 func (h *PlaybackHandler) lazyHLSToneMapCapabilitiesV3(ctx context.Context) func() tonemap.Capabilities {
 	var once sync.Once
 	var capabilities tonemap.Capabilities
@@ -412,6 +422,8 @@ func (h *PlaybackHandler) planNodeSessionV3(ctx context.Context, session *playba
 	})
 }
 
+// planRequiresToneMapV3 reports whether a plan contains the server-owned HDR
+// to SDR transformation.
 func planRequiresToneMapV3(plan *playback.PlanV3) bool {
 	if plan == nil {
 		return false
@@ -425,6 +437,8 @@ func planRequiresToneMapV3(plan *playback.PlanV3) bool {
 	return false
 }
 
+// validateToneMapExecutorV3 confirms that the selected executor still supports
+// the exact mode and source kind frozen by planning.
 func validateToneMapExecutorV3(result playback.PlannerResultV3, capabilities tonemap.Capabilities) error {
 	if !planRequiresToneMapV3(result.Plan) {
 		return nil
@@ -891,11 +905,15 @@ func (h *PlaybackHandler) prepareTransportV3(r *http.Request, session *playback.
 	return h.prepareLocalTransportV3(r, session, file, result, timeline)
 }
 
+// canRetrySoftwareToneMapV3 permits a software retry only for an initial
+// hardware selection whose policy allows it; frozen recovery recipes stay exact.
 func canRetrySoftwareToneMapV3(result playback.PlannerResultV3) bool {
 	return result.FrozenSourceMetadata == nil && result.ToneMapMode == tonemap.ModeHardware &&
 		result.ToneMapPolicy.Allows(tonemap.ModeSoftware)
 }
 
+// prepareSoftwareToneMapFallbackV3 retries an eligible failed hardware recipe
+// on a software-capable remote node or, when allowed, on the API host.
 func (h *PlaybackHandler) prepareSoftwareToneMapFallbackV3(r *http.Request, session *playback.Session, file *models.MediaFile, result playback.PlannerResultV3, timeline preparedTimelineV3) (preparedTransportV3, bool, *transportErrorV3) {
 	if !canRetrySoftwareToneMapV3(result) {
 		return preparedTransportV3{}, false, nil
@@ -2413,6 +2431,8 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 	return response, updated, &transport, nil
 }
 
+// applyTransportToneMapModeV3 records an executor fallback in the result before
+// the durable recipe and session state are committed.
 func applyTransportToneMapModeV3(result *playback.PlannerResultV3, transport preparedTransportV3) {
 	if result != nil && transport.toneMapMode != "" {
 		result.ToneMapMode = transport.toneMapMode

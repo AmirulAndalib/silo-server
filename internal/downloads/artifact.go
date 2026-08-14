@@ -72,10 +72,14 @@ func paramsHash(format, container, codecVideo, codecAudio, resolution string, au
 	return paramsHashWithToneMap(format, container, codecVideo, codecAudio, resolution, audioTrackIndex, targetBitrateKbps, subtitleBurnIn, tonemap.PolicyNone, "", "", "")
 }
 
+// paramsHashWithToneMap extends the legacy encode identity with the frozen
+// tone-map policy and recipe while preserving old hashes for ordinary encodes.
 func paramsHashWithToneMap(format, container, codecVideo, codecAudio, resolution string, audioTrackIndex, targetBitrateKbps int, subtitleBurnIn bool, policy tonemap.Policy, mode tonemap.Mode, sourceKind tonemap.SourceKind, recipeVersion string) string {
 	return paramsHashWithToneMapRevision(format, container, codecVideo, codecAudio, resolution, audioTrackIndex, targetBitrateKbps, subtitleBurnIn, policy, mode, sourceKind, recipeVersion, false, tonemap.SourceRevision{})
 }
 
+// paramsHashWithToneMapRevision binds prepared-output deduplication to the
+// source revision and preflight requirement in addition to the executor recipe.
 func paramsHashWithToneMapRevision(format, container, codecVideo, codecAudio, resolution string, audioTrackIndex, targetBitrateKbps int, subtitleBurnIn bool, policy tonemap.Policy, mode tonemap.Mode, sourceKind tonemap.SourceKind, recipeVersion string, preflightRequired bool, sourceRevision tonemap.SourceRevision) string {
 	input := fmt.Sprintf("%s|%s|%s|%s|%s|%d|%d|%t", format, container, codecVideo, codecAudio, resolution, audioTrackIndex, targetBitrateKbps, subtitleBurnIn)
 	if (policy != "" && policy != tonemap.PolicyNone) || mode != "" || sourceKind != "" || recipeVersion != "" || preflightRequired || !sourceRevision.IsZero() {

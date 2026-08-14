@@ -136,6 +136,8 @@ type PlannerResultV3 struct {
 	ToneMapSourceRevision    tonemap.SourceRevision
 }
 
+// hlsToneMapCapabilities resolves the lazy pooled inventory when present and
+// otherwise uses the eagerly supplied local capability set.
 func (input PlannerInputV3) hlsToneMapCapabilities() tonemap.Capabilities {
 	if input.HLSToneMapCapabilities != nil {
 		if capabilities := input.HLSToneMapCapabilities(); capabilities != nil {
@@ -1050,6 +1052,8 @@ func hdrTranscodeUnavailableV3(input PlannerInputV3, source SourceDescriptorV3) 
 	return !ok
 }
 
+// toneMapRecipeV3 freezes the policy, preferred validated executor, safe source
+// resolution, and source revision required by an HDR video transcode plan.
 func toneMapRecipeV3(input PlannerInputV3, source SourceDescriptorV3) (tonemap.Policy, tonemap.Mode, tonemap.SourceResolution, tonemap.SourceRevision, bool) {
 	policy := tonemap.NewPolicy(input.Settings.HardwareToneMapEnabled, input.Settings.SoftwareToneMapEnabled)
 	file := input.EffectiveFile
@@ -1066,6 +1070,8 @@ func toneMapRecipeV3(input PlannerInputV3, source SourceDescriptorV3) (tonemap.P
 	return policy, mode, resolution, revision, mode != ""
 }
 
+// toneMapSourceResolutionV3 combines protocol source facts with the scanner's
+// richer primary-track metadata before resolving a safe base signal.
 func toneMapSourceResolutionV3(file *models.MediaFile, source SourceDescriptorV3) tonemap.SourceResolution {
 	metadata := tonemap.SourceMetadata{
 		DynamicRange: source.DynamicRange,
@@ -1086,6 +1092,8 @@ func toneMapSourceResolutionV3(file *models.MediaFile, source SourceDescriptorV3
 	return tonemap.ResolveSource(metadata)
 }
 
+// toneMapRecipeVersionV3 includes the transformation recipe version only when
+// tone mapping is part of the executable plan.
 func toneMapRecipeVersionV3(enabled bool) string {
 	if enabled {
 		return TransformationHDRToSDRToneMapRecipeVersionV3
