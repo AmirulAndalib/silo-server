@@ -4301,8 +4301,9 @@ func TestLookupRemoteCapabilitiesStartsCacheTTLAfterRequestCompletes(t *testing.
 		{name: "error", status: http.StatusServiceUnavailable, ttl: v3NodeCapabilityErrorTTL},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			const requestDelay = 80 * time.Millisecond
 			remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				time.Sleep(80 * time.Millisecond)
+				time.Sleep(requestDelay)
 				w.WriteHeader(test.status)
 				if test.status == http.StatusOK {
 					_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{})
@@ -4311,11 +4312,12 @@ func TestLookupRemoteCapabilitiesStartsCacheTTLAfterRequestCompletes(t *testing.
 			defer remote.Close()
 
 			handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+			startedAt := time.Now()
 			_, _ = handler.lookupRemoteCapabilitiesV3(context.Background(), remote.URL, false)
-			completedAt := time.Now()
 			entry := handler.v3NodeCapabilities[remote.URL]
-			if remaining := entry.expiresAt.Sub(completedAt); remaining < test.ttl-20*time.Millisecond {
-				t.Fatalf("cache TTL after request completion = %s, want at least %s", remaining, test.ttl-20*time.Millisecond)
+			minimumLifetime := test.ttl + requestDelay - 20*time.Millisecond
+			if lifetime := entry.expiresAt.Sub(startedAt); lifetime < minimumLifetime {
+				t.Fatalf("cache lifetime from request start = %s, want at least %s", lifetime, minimumLifetime)
 			}
 		})
 	}
