@@ -1159,7 +1159,7 @@ func TestPlanPlaybackV3RejectsDolbyOnlyAndFreezesAmbiguousFallbacks(t *testing.T
 		}, wantKind: tonemap.SourceSDRBT709},
 		{name: "legacy missing id presence", mutate: func(track *models.VideoTrack) {
 			track.DVConfigPresent, track.DVBLCompatIDPresent = false, false
-		}, wantKind: tonemap.SourcePQ, wantPreflight: true},
+		}, wantTerminal: true},
 		{name: "contradictory transfer", mutate: func(track *models.VideoTrack) {
 			track.ColorTransfer = "arib-std-b67"
 		}, wantKind: tonemap.SourcePQ, wantPreflight: true},
@@ -2083,6 +2083,10 @@ func unstrippableProfile7FixtureV3() *models.MediaFile {
 	file := detailedFixtureFileV3()
 	file.VideoTracks[0].DVProfile = 7
 	file.VideoTracks[0].DVBLCompatID = 6
+	file.VideoTracks[0].DVConfigPresent = true
+	file.VideoTracks[0].DVBLCompatIDPresent = true
+	file.VideoTracks[0].DVBLPresent = true
+	file.VideoTracks[0].DVRPUPresent = true
 	file.VideoTracks[0].DVELPresent = false
 	file.VideoTracks[0].DVEnhancementLayer = ""
 	file.VideoTracks[0].VideoRange = "DolbyVision"
