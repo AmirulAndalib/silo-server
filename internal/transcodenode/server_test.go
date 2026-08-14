@@ -227,6 +227,39 @@ func TestHandleDownloadPrepareKeepsStartupArtifactRootAcrossReload(t *testing.T)
 	}
 }
 
+func TestHandleDownloadPrepareReusesCompletedArtifactBeforeResolvingStaleRecipe(t *testing.T) {
+	server := newTestServer(t)
+	if err := os.MkdirAll(server.artifactRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(server.artifactRoot, "artifact-existing.mp4")
+	if err := os.WriteFile(outputPath, []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(downloadprepare.Request{
+		ArtifactID: "artifact-existing", InputPath: "/media/movie.mkv",
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac",
+		ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
+		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: "stale",
+		ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.handleDownloadPrepare(recorder, httptest.NewRequest(http.MethodPost, "/downloads/prepare", bytes.NewReader(body)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var result downloadprepare.Result
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ArtifactID != "artifact-existing" || result.FileSize != int64(len("ready")) {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
 func TestSessionOutputDirKeepsStartupPathAcrossReload(t *testing.T) {
 	server := newTestServer(t)
 	startupDir := server.transcodeDir
@@ -929,12 +962,9 @@ func TestHandleStartRejectsIncompleteOrStaleToneMapRecipe(t *testing.T) {
 		mutate func(*TranscodeStartRequest)
 	}{
 		{name: "mode without policy", mutate: func(request *TranscodeStartRequest) {
-			request.ToneMapMode = tonemap.ModeSoftware
+			request.ToneMapPolicy = ""
 		}},
 		{name: "stale version", mutate: func(request *TranscodeStartRequest) {
-			request.ToneMapPolicy = tonemap.PolicySoftwareOnly
-			request.ToneMapMode = tonemap.ModeSoftware
-			request.ToneMapSourceKind = tonemap.SourcePQ
 			request.ToneMapRecipeVersion = "stale"
 		}},
 	}
@@ -944,6 +974,9 @@ func TestHandleStartRejectsIncompleteOrStaleToneMapRecipe(t *testing.T) {
 			request := TranscodeStartRequest{
 				SessionID: "tone-map-invalid", InputPath: "/media/movie.mkv",
 				TargetCodecVideo: "h264", TargetCodecAudio: "aac", SegmentDuration: 2,
+				ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
+				ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+				ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1},
 			}
 			tt.mutate(&request)
 			body, err := json.Marshal(request)

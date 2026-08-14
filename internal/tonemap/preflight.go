@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,7 +16,10 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-const sourcePreflightTimeout = 30 * time.Second
+const (
+	sourcePreflightNegativeTTL  = 15 * time.Second
+	sourcePreflightTimeoutSlack = time.Second
+)
 
 type SourcePreflightRequest struct {
 	FFmpegPath        string
@@ -35,6 +39,7 @@ type SourcePreflightRequest struct {
 
 type sourcePreflightCacheEntry struct {
 	errorMessage string
+	expiresAt    time.Time
 }
 
 var sourcePreflightCache = struct {
@@ -42,6 +47,12 @@ var sourcePreflightCache = struct {
 	entries map[string]sourcePreflightCacheEntry
 	group   singleflight.Group
 }{entries: make(map[string]sourcePreflightCacheEntry)}
+
+var ffmpegVersionCache = struct {
+	sync.Mutex
+	entries map[string][]byte
+	group   singleflight.Group
+}{entries: make(map[string][]byte)}
 
 func ValidateSource(ctx context.Context, request SourcePreflightRequest) error {
 	return ValidateSourceWithRunner(ctx, request, runCommand)
@@ -61,26 +72,27 @@ func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightReques
 		request.FFprobePath = ffprobeForFFmpeg(request.FFmpegPath)
 	}
 
-	preflightCtx, cancel := context.WithTimeout(ctx, sourcePreflightTimeout)
+	preflightCtx, cancel := context.WithTimeout(ctx, sourcePreflightTotalTimeout(request.DurationSeconds))
 	defer cancel()
 	key, cacheable := sourcePreflightKey(preflightCtx, request, run)
 	if cacheable {
 		sourcePreflightCache.Lock()
 		entry, ok := sourcePreflightCache.entries[key]
 		sourcePreflightCache.Unlock()
-		if ok {
+		if ok && sourcePreflightCacheEntryCurrent(entry, time.Now()) {
 			return cachedPreflightError(entry)
 		}
 		value, _, _ := sourcePreflightCache.group.Do(key, func() (any, error) {
 			sourcePreflightCache.Lock()
 			entry, ok := sourcePreflightCache.entries[key]
 			sourcePreflightCache.Unlock()
-			if ok {
+			if ok && sourcePreflightCacheEntryCurrent(entry, time.Now()) {
 				return entry, nil
 			}
 			entry = sourcePreflightCacheEntry{}
 			if err := runSourcePreflight(preflightCtx, request, run); err != nil {
 				entry.errorMessage = err.Error()
+				entry.expiresAt = time.Now().Add(sourcePreflightNegativeTTL)
 			}
 			if preflightCtx.Err() == nil {
 				sourcePreflightCache.Lock()
@@ -98,6 +110,15 @@ func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightReques
 	return runSourcePreflight(preflightCtx, request, run)
 }
 
+func sourcePreflightCacheEntryCurrent(entry sourcePreflightCacheEntry, now time.Time) bool {
+	return entry.errorMessage == "" || now.Before(entry.expiresAt)
+}
+
+func sourcePreflightTotalTimeout(durationSeconds float64) time.Duration {
+	commandCount := 1 + 3*len(sourcePreflightPositions(durationSeconds))
+	return time.Duration(commandCount)*probeCommandTimeout + sourcePreflightTimeoutSlack
+}
+
 func cachedPreflightError(entry sourcePreflightCacheEntry) error {
 	if entry.errorMessage == "" {
 		return nil
@@ -109,7 +130,7 @@ func sourcePreflightKey(ctx context.Context, request SourcePreflightRequest, run
 	if !request.SourceRevision.Stable() {
 		return "", false
 	}
-	version, err := runBounded(ctx, run, request.FFmpegPath, "-version")
+	version, err := ffmpegVersionForPreflight(ctx, request.FFmpegPath, run)
 	if err != nil || len(version) == 0 {
 		return "", false
 	}
@@ -126,6 +147,60 @@ func sourcePreflightKey(ctx context.Context, request SourcePreflightRequest, run
 		string(request.Mode), string(request.Kind), request.Filter, request.RecipeVersion,
 	}, "\x00")
 	return request.SourceRevision.Fingerprint() + "\x00" + hashRevisionValue(executor), true
+}
+
+func ffmpegVersionForPreflight(ctx context.Context, ffmpegPath string, run CommandRunner) ([]byte, error) {
+	resolved, cacheKey, cacheable := ffmpegBinaryCacheKey(ffmpegPath)
+	if !cacheable {
+		return runBounded(ctx, run, ffmpegPath, "-version")
+	}
+	ffmpegVersionCache.Lock()
+	if cached, ok := ffmpegVersionCache.entries[cacheKey]; ok {
+		result := append([]byte(nil), cached...)
+		ffmpegVersionCache.Unlock()
+		return result, nil
+	}
+	ffmpegVersionCache.Unlock()
+	value, err, _ := ffmpegVersionCache.group.Do(cacheKey, func() (any, error) {
+		ffmpegVersionCache.Lock()
+		cached, ok := ffmpegVersionCache.entries[cacheKey]
+		ffmpegVersionCache.Unlock()
+		if ok {
+			return append([]byte(nil), cached...), nil
+		}
+		output, runErr := runBounded(ctx, run, resolved, "-version")
+		if runErr != nil || len(output) == 0 {
+			return output, runErr
+		}
+		ffmpegVersionCache.Lock()
+		ffmpegVersionCache.entries[cacheKey] = append([]byte(nil), output...)
+		ffmpegVersionCache.Unlock()
+		return output, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	output, ok := value.([]byte)
+	if !ok {
+		return nil, errors.New("ffmpeg version unavailable")
+	}
+	return append([]byte(nil), output...), nil
+}
+
+func ffmpegBinaryCacheKey(ffmpegPath string) (string, string, bool) {
+	resolved, err := exec.LookPath(strings.TrimSpace(ffmpegPath))
+	if err != nil {
+		return ffmpegPath, "", false
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return ffmpegPath, "", false
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		return ffmpegPath, "", false
+	}
+	return resolved, strings.Join([]string{resolved, strconv.FormatInt(info.ModTime().UnixNano(), 10)}, "\x00"), true
 }
 
 func driverFingerprint(backend, device string) string {

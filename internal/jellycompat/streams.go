@@ -1714,11 +1714,10 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 		return existing, nil
 	}
 	transcodeSession, err := playback.StartTranscode(context.WithoutCancel(ctx), opts)
-	if err != nil && opts.ToneMapMode == tonemap.ModeHardware && opts.ToneMapPolicy.Allows(tonemap.ModeSoftware) &&
-		toneMapCapabilities.Supports(tonemap.ModeSoftware, opts.ToneMapSourceKind) {
-		opts.ToneMapMode = tonemap.ModeSoftware
-		opts.ToneMapFilter = toneMapCapabilities.FilterFor(tonemap.ModeSoftware, opts.ToneMapSourceKind)
-		opts.HWAccel = playback.HWAccelNone
+	if err != nil && downgradeToSoftwareToneMap(
+		opts.ToneMapPolicy, &opts.ToneMapMode, &opts.ToneMapFilter, &opts.HWAccel,
+		opts.ToneMapSourceKind, toneMapCapabilities,
+	) {
 		transcodeSession, err = playback.StartTranscode(context.WithoutCancel(ctx), opts)
 	}
 	if err != nil {
@@ -1728,14 +1727,13 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 	if opts.ToneMapMode != "" {
 		if _, readyErr := transcodeSession.WaitForManifest(playback.ManifestStartupTimeout); readyErr != nil {
 			_ = transcodeSession.Close()
-			if opts.ToneMapMode != tonemap.ModeHardware || !opts.ToneMapPolicy.Allows(tonemap.ModeSoftware) ||
-				!toneMapCapabilities.Supports(tonemap.ModeSoftware, opts.ToneMapSourceKind) {
+			if !downgradeToSoftwareToneMap(
+				opts.ToneMapPolicy, &opts.ToneMapMode, &opts.ToneMapFilter, &opts.HWAccel,
+				opts.ToneMapSourceKind, toneMapCapabilities,
+			) {
 				unlock()
 				return nil, readyErr
 			}
-			opts.ToneMapMode = tonemap.ModeSoftware
-			opts.ToneMapFilter = toneMapCapabilities.FilterFor(tonemap.ModeSoftware, opts.ToneMapSourceKind)
-			opts.HWAccel = playback.HWAccelNone
 			transcodeSession, err = playback.StartTranscode(context.WithoutCancel(ctx), opts)
 			if err != nil {
 				unlock()

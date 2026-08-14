@@ -26,17 +26,6 @@ function makeForm(values: Record<string, string>) {
   };
 }
 
-function cpuToneMapSwitch(markup: string): Element {
-  const container = document.createElement("div");
-  container.innerHTML = markup;
-  const label = Array.from(container.querySelectorAll("label")).find(
-    (candidate) => candidate.textContent === "Enable CPU Tone Mapping",
-  );
-  const toggle = label?.htmlFor ? container.querySelector(`[id="${label.htmlFor}"]`) : null;
-  if (!toggle) throw new Error("CPU tone-mapping toggle was not rendered");
-  return toggle;
-}
-
 function settingSwitch(markup: string, labelText: string): Element {
   const container = document.createElement("div");
   container.innerHTML = markup;
@@ -57,7 +46,10 @@ describe("PlaybackSettings CPU tone mapping", () => {
       }),
     );
 
-    const toggle = cpuToneMapSwitch(renderToStaticMarkup(<PlaybackSettings />));
+    const toggle = settingSwitch(
+      renderToStaticMarkup(<PlaybackSettings />),
+      "Enable CPU Tone Mapping",
+    );
 
     expect(useSettingsFormMock.mock.calls[0]?.[0]?.keys).toContain(
       "playback.chapter_thumbnail_software_tone_map_enabled",
@@ -75,7 +67,10 @@ describe("PlaybackSettings CPU tone mapping", () => {
       }),
     );
 
-    const toggle = cpuToneMapSwitch(renderToStaticMarkup(<PlaybackSettings />));
+    const toggle = settingSwitch(
+      renderToStaticMarkup(<PlaybackSettings />),
+      "Enable CPU Tone Mapping",
+    );
 
     expect(toggle).toHaveAttribute("aria-checked", "true");
     expect(toggle).toHaveAttribute("disabled");
@@ -120,5 +115,22 @@ describe("PlaybackSettings transcode tone mapping", () => {
       "aria-checked",
       "false",
     );
+  });
+
+  it("preserves but disables hardware tone mapping when hardware acceleration is off", () => {
+    useSettingsFormMock.mockReturnValue(
+      makeForm({
+        "playback.hw_accel": "none",
+        "playback.transcode_hardware_tone_map_enabled": "true",
+      }),
+    );
+
+    const toggle = settingSwitch(
+      renderToStaticMarkup(<PlaybackSettings />),
+      "Enable Hardware HDR Tone Mapping",
+    );
+
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(toggle).toHaveAttribute("disabled");
   });
 });

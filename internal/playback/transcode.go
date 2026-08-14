@@ -945,9 +945,17 @@ func appendToneMapFilterArgs(args []string, opts TranscodeOpts) []string {
 	case bitmapBurnInActive(opts):
 		return appendToneMappedBitmapSubtitleArgs(args, opts)
 	case opts.SubtitleBurnIn && opts.SubtitleTrackIndex >= 0:
-		return append(args, "-vf", toneMappedTextSubtitleFilter(opts))
+		filter := toneMappedTextSubtitleFilter(opts)
+		if filter == "" {
+			return args
+		}
+		return append(args, "-vf", filter)
 	default:
-		return append(args, "-vf", toneMapScaleFilter(opts))
+		filter := toneMapScaleFilter(opts)
+		if filter == "" {
+			return args
+		}
+		return append(args, "-vf", filter)
 	}
 }
 
@@ -1042,6 +1050,9 @@ func appendToneMappedBitmapSubtitleArgs(args []string, opts TranscodeOpts) []str
 			graph += "," + scale
 		}
 		graph += ",format=nv12,hwupload_cuda," + tonemap.HDRMetadataRemovalFilter() + "[vout]"
+	}
+	if graph == "" {
+		return args
 	}
 	return append(args, "-filter_complex", graph)
 }

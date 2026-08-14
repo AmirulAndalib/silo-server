@@ -41,7 +41,7 @@ type TranscodeStartRequest struct {
 	ToneMapSourceKind          tonemap.SourceKind     `json:"tone_map_source_kind,omitempty"`
 	ToneMapRecipeVersion       string                 `json:"tone_map_recipe_version,omitempty"`
 	ToneMapPreflightRequired   bool                   `json:"tone_map_preflight_required,omitempty"`
-	ToneMapSourceRevision      tonemap.SourceRevision `json:"tone_map_source_revision,omitempty,omitzero"`
+	ToneMapSourceRevision      tonemap.SourceRevision `json:"tone_map_source_revision,omitzero"`
 	ToneMapDVConfigPresent     bool                   `json:"tone_map_dv_config_present,omitempty"`
 	ToneMapDVBLCompatIDPresent bool                   `json:"tone_map_dv_bl_compat_id_present,omitempty"`
 	ToneMapDVBLPresent         bool                   `json:"tone_map_dv_bl_present,omitempty"`
@@ -501,12 +501,6 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opts := req.TranscodeOpts(cfg.Playback.FFmpegPath, cfg.Playback.HWAccel, cfg.Playback.HWDevice, s.ffmpegSink)
-	if toneMapRecipeRequested(opts) {
-		if err := resolveToneMapRecipe(r.Context(), &opts); err != nil {
-			http.Error(w, "unsupported or stale tone-map recipe", http.StatusUnprocessableEntity)
-			return
-		}
-	}
 	artifactRoot := s.artifactRoot
 	if err := os.MkdirAll(artifactRoot, 0o755); err != nil {
 		http.Error(w, "artifact directory unavailable", http.StatusInternalServerError)
@@ -518,6 +512,12 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 	if stat, err := os.Stat(outputPath); err == nil && stat.Mode().IsRegular() && stat.Size() > 0 {
 		writeDownloadPrepareResult(w, req.ArtifactID, stat.Size())
 		return
+	}
+	if toneMapRecipeRequested(opts) {
+		if err := resolveToneMapRecipe(r.Context(), &opts); err != nil {
+			http.Error(w, "unsupported or stale tone-map recipe", http.StatusUnprocessableEntity)
+			return
+		}
 	}
 
 	jobCtx := r.Context()

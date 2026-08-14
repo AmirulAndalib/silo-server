@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sync/singleflight"
 )
@@ -60,9 +62,21 @@ func TestValidateSourceCacheInvalidatesExecutorAndSourceFacts(t *testing.T) {
 	validate("initial", request)
 	request.RecipeVersion = "2"
 	validate("recipe", request)
-	request.FFmpegPath = "/opt/ffmpeg"
+	replacementFFmpeg := request.FFmpegPath + "-replacement"
+	if err := os.WriteFile(replacementFFmpeg, []byte("replacement"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	request.FFmpegPath = replacementFFmpeg
 	validate("binary", request)
 	version = "ffmpeg version 2"
+	info, err := os.Stat(request.FFmpegPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := info.ModTime().Add(2 * time.Second)
+	if err := os.Chtimes(request.FFmpegPath, changed, changed); err != nil {
+		t.Fatal(err)
+	}
 	validate("version", request)
 	request.HardwareDevice = "/dev/dri/renderD129"
 	validate("device", request)
@@ -74,6 +88,75 @@ func TestValidateSourceCacheInvalidatesExecutorAndSourceFacts(t *testing.T) {
 	validate("rescan", request)
 	request.SourceRevision.StreamSignature = "replacement-stream"
 	validate("stream signature", request)
+}
+
+func TestValidateSourceRetriesExpiredNegativeVerdict(t *testing.T) {
+	resetSourcePreflightCache(t)
+	request := sourcePreflightTestRequest(t)
+	conversions := 0
+	runner := sourcePreflightTestRunner(&conversions, func() string { return "ffmpeg version 1" }, errors.New("temporary device failure"))
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := ValidateSourceWithRunner(context.Background(), request, runner); err == nil {
+			t.Fatal("temporary failure unexpectedly passed preflight")
+		}
+	}
+	if conversions != 1 {
+		t.Fatalf("conversion calls = %d, want one within the negative-cache TTL", conversions)
+	}
+	sourcePreflightCache.Lock()
+	for key, entry := range sourcePreflightCache.entries {
+		entry.expiresAt = time.Now().Add(-time.Second)
+		sourcePreflightCache.entries[key] = entry
+	}
+	sourcePreflightCache.Unlock()
+	if err := ValidateSourceWithRunner(context.Background(), request, runner); err == nil {
+		t.Fatal("expired temporary failure unexpectedly passed preflight")
+	}
+	if conversions != 2 {
+		t.Fatalf("conversion calls = %d, want a retry after negative-cache expiry", conversions)
+	}
+}
+
+func TestSourcePreflightTimeoutCoversAllBoundedCommands(t *testing.T) {
+	want := 10*probeCommandTimeout + sourcePreflightTimeoutSlack
+	if got := sourcePreflightTotalTimeout(100); got != want {
+		t.Fatalf("sourcePreflightTotalTimeout() = %s, want %s", got, want)
+	}
+}
+
+func TestFFmpegVersionCacheInvalidatesOnBinaryModification(t *testing.T) {
+	resetSourcePreflightCache(t)
+	ffmpegPath := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(ffmpegPath, []byte("one"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	runner := func(context.Context, string, ...string) ([]byte, error) {
+		calls++
+		return []byte("ffmpeg version test"), nil
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := ffmpegVersionForPreflight(context.Background(), ffmpegPath, runner); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("version calls = %d, want one for an unchanged binary", calls)
+	}
+	info, err := os.Stat(ffmpegPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := info.ModTime().Add(2 * time.Second)
+	if err := os.Chtimes(ffmpegPath, changed, changed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ffmpegVersionForPreflight(context.Background(), ffmpegPath, runner); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("version calls = %d, want refresh after binary modification", calls)
+	}
 }
 
 func TestValidateSourceDoesNotCacheWithoutStableRevision(t *testing.T) {
@@ -168,8 +251,13 @@ func TestSourceConversionPreflightUsesSiloQSVDriverSelection(t *testing.T) {
 
 func sourcePreflightTestRequest(t *testing.T) SourcePreflightRequest {
 	t.Helper()
-	path := t.TempDir() + "/source.mkv"
+	dir := t.TempDir()
+	path := dir + "/source.mkv"
 	if err := os.WriteFile(path, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ffmpegPath := dir + "/ffmpeg"
+	if err := os.WriteFile(ffmpegPath, []byte("ffmpeg"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
@@ -177,7 +265,7 @@ func sourcePreflightTestRequest(t *testing.T) SourcePreflightRequest {
 		t.Fatal(err)
 	}
 	return SourcePreflightRequest{
-		FFmpegPath: "/usr/bin/ffmpeg", FFprobePath: "/usr/bin/ffprobe", InputPath: path,
+		FFmpegPath: ffmpegPath, FFprobePath: "/usr/bin/ffprobe", InputPath: path,
 		DurationSeconds: 100, SourceBitDepth: 10, Mode: ModeSoftware, Backend: BackendSoftware,
 		Filter: SoftwareFilterHable, Kind: SourcePQ, RecipeVersion: "1", DriverFingerprint: "driver-1",
 		SourceRevision: SourceRevision{
@@ -210,4 +298,8 @@ func resetSourcePreflightCache(t *testing.T) {
 	sourcePreflightCache.entries = make(map[string]sourcePreflightCacheEntry)
 	sourcePreflightCache.group = singleflight.Group{}
 	sourcePreflightCache.Unlock()
+	ffmpegVersionCache.Lock()
+	ffmpegVersionCache.entries = make(map[string][]byte)
+	ffmpegVersionCache.group = singleflight.Group{}
+	ffmpegVersionCache.Unlock()
 }

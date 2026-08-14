@@ -440,34 +440,30 @@ type Capability struct {
 
 type Capabilities []Capability
 
-func (c Capabilities) Supports(mode Mode, kind SourceKind) bool {
+func (c Capabilities) lookup(mode Mode, kind SourceKind) (Capability, bool) {
 	for _, capability := range c {
-		if capability.Mode != mode {
-			continue
-		}
-		for _, supported := range capability.SourceKinds {
-			if supported == kind {
-				return true
-			}
+		if capability.Mode == mode && slicesContain(capability.SourceKinds, kind) {
+			return capability, true
 		}
 	}
-	return false
+	return Capability{}, false
+}
+
+func (c Capabilities) Supports(mode Mode, kind SourceKind) bool {
+	_, ok := c.lookup(mode, kind)
+	return ok
 }
 
 func (c Capabilities) FilterFor(mode Mode, kind SourceKind) string {
-	for _, capability := range c {
-		if capability.Mode == mode && slicesContain(capability.SourceKinds, kind) {
-			return capability.Filter
-		}
+	if capability, ok := c.lookup(mode, kind); ok {
+		return capability.Filter
 	}
 	return ""
 }
 
 func (c Capabilities) BackendFor(mode Mode, kind SourceKind) string {
-	for _, capability := range c {
-		if capability.Mode == mode && slicesContain(capability.SourceKinds, kind) {
-			return capability.Backend
-		}
+	if capability, ok := c.lookup(mode, kind); ok {
+		return capability.Backend
 	}
 	return ""
 }

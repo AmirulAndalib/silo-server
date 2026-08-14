@@ -197,8 +197,10 @@ type PlaybackHandler struct {
 	PlanStoreV3           playback.PlanStoreV3
 	v3RegistryOnce        sync.Once
 	v3Registry            *playback.TransformationRegistryV3
-	v3ToneMapOnce         sync.Once
+	v3ToneMapMu           sync.Mutex
+	v3ToneMapFingerprint  string
 	v3ToneMapCapabilities tonemap.Capabilities
+	v3ToneMapProbe        func(context.Context, string, string, string) tonemap.Capabilities
 	v3NodeCapabilitiesMu  sync.Mutex
 	v3NodeCapabilities    map[string]v3NodeCapabilityCache
 	v3EventOnce           sync.Once

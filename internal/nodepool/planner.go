@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/Silo-Server/silo-server/internal/config"
 )
 
 // Plan is the result of a node selection for one playback session.
@@ -528,6 +530,6 @@ func LocalTranscodeFallbackAllowed(ctx context.Context, settings interface {
 	if settings == nil {
 		return true
 	}
-	v, _ := settings.Get(ctx, "playback.local_transcode_fallback")
+	v, _ := settings.Get(ctx, config.PlaybackLocalTranscodeFallbackSettingKey)
 	return v != "false"
 }

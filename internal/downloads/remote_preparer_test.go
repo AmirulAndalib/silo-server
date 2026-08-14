@@ -2,14 +2,22 @@ package downloads
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/downloadprepare"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 type recordingEncodePreparer struct{ calls int }
@@ -227,6 +235,80 @@ func TestNodeAwarePreparerHonorsDisabledLocalFallback(t *testing.T) {
 	}
 	if local.calls != 0 {
 		t.Fatalf("local calls = %d, want 0", local.calls)
+	}
+}
+
+func TestNodeAwarePreparerCollectsToneMapCapabilitiesConcurrently(t *testing.T) {
+	var active atomic.Int32
+	var once sync.Once
+	bothStarted := make(chan struct{})
+	release := make(chan struct{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if active.Add(1) == 2 {
+			once.Do(func() { close(bothStarted) })
+		}
+		<-release
+		_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{ToneMapCapabilities: tonemap.Capabilities{{
+			Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+			SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+		}}})
+	})
+	first := httptest.NewServer(handler)
+	defer first.Close()
+	second := httptest.NewServer(handler)
+	defer second.Close()
+	pool := nodepool.NewTranscodePool()
+	pool.SetNodes([]*nodepool.Node{
+		{URL: first.URL, Enabled: true, Healthy: true},
+		{URL: second.URL, Enabled: true, Healthy: true},
+	})
+	cfg := &config.Config{}
+	cfg.Auth.JWTSecret = "secret"
+	preparer := NewNodeAwarePreparer(nil, nodepool.NewPlanner(nodepool.NewProxyPool(), pool), func() *config.Config { return cfg })
+	result := make(chan tonemap.Capabilities, 1)
+	go func() { result <- preparer.ToneMapCapabilities(context.Background()) }()
+	select {
+	case <-bothStarted:
+		close(release)
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("prepared-download node probes did not overlap")
+	}
+	if got := <-result; len(got) != 2 {
+		t.Fatalf("capabilities = %#v, want both nodes", got)
+	}
+}
+
+func TestNodeAwarePreparerCachesCapabilityFailuresBriefly(t *testing.T) {
+	var hits atomic.Int32
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer remote.Close()
+	cfg := &config.Config{}
+	cfg.Auth.JWTSecret = "secret"
+	preparer := NewNodeAwarePreparer(nil, nil, func() *config.Config { return cfg })
+	if _, err := preparer.toneMapCapabilitiesForNode(context.Background(), remote.URL); err == nil {
+		t.Fatal("initial failed capability request returned no error")
+	}
+	if got, err := preparer.toneMapCapabilitiesForNode(context.Background(), remote.URL); err != nil || len(got) != 0 {
+		t.Fatalf("cached failure = %#v, %v", got, err)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("requests = %d, want one during the failure TTL", hits.Load())
+	}
+	key := strings.TrimRight(remote.URL, "/")
+	preparer.capabilityMu.Lock()
+	entry := preparer.capabilities[key]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	preparer.capabilities[key] = entry
+	preparer.capabilityMu.Unlock()
+	if _, err := preparer.toneMapCapabilitiesForNode(context.Background(), remote.URL); err == nil {
+		t.Fatal("expired failure did not trigger a fresh request")
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("requests = %d, want a retry after failure-cache expiry", hits.Load())
 	}
 }
 

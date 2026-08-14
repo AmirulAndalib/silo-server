@@ -1,8 +1,10 @@
 package downloads
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -61,6 +63,18 @@ func TestParamsHashIncludesFrozenToneMapRecipe(t *testing.T) {
 		}
 	}
 	revision := tonemap.SourceRevision{MediaFileID: 1, FileSize: 10, FileModifiedUnixNano: 100, StreamSignature: "stream"}
+	for name, other := range map[string]string{
+		"policy only": paramsHashWithToneMapRevision("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
+			tonemap.PolicySoftwareOnly, "", "", "", false, tonemap.SourceRevision{}),
+		"preflight only": paramsHashWithToneMapRevision("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
+			tonemap.PolicyNone, "", "", "", true, tonemap.SourceRevision{}),
+		"source revision only": paramsHashWithToneMapRevision("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
+			tonemap.PolicyNone, "", "", "", false, revision),
+	} {
+		if other == base {
+			t.Fatalf("%s did not enter the tone-map artifact hash", name)
+		}
+	}
 	revisionHash := paramsHashWithToneMapRevision("transcode", "mp4", "h264", "aac", "1080p", -1, 10000, false,
 		tonemap.PolicyHardwareThenSoftware, tonemap.ModeHardware, tonemap.SourcePQ, playback.TransformationHDRToSDRToneMapRecipeVersionV3, true, revision)
 	for name, other := range map[string]string{
@@ -72,6 +86,27 @@ func TestParamsHashIncludesFrozenToneMapRecipe(t *testing.T) {
 		if other == revisionHash {
 			t.Fatalf("%s did not affect tone-map artifact hash", name)
 		}
+	}
+}
+
+func TestBuildOptsWarnsWithoutLoggingInvalidSourceRevisionValue(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+
+	manager := &ArtifactManager{}
+	artifact := &Artifact{ID: "artifact-invalid-revision", ToneMapMode: tonemap.ModeSoftware, ToneMapSourceRevision: "sensitive-invalid-value"}
+	opts := manager.buildOpts(&models.MediaFile{}, artifact)
+	if opts.ToneMapSourceRevision.MediaFileID != -1 {
+		t.Fatalf("fallback source revision = %#v", opts.ToneMapSourceRevision)
+	}
+	output := logs.String()
+	if !strings.Contains(output, "artifact-invalid-revision") || !strings.Contains(output, `"source_revision_length":23`) {
+		t.Fatalf("warning = %s", output)
+	}
+	if strings.Contains(output, artifact.ToneMapSourceRevision) {
+		t.Fatalf("warning exposed the stored source revision: %s", output)
 	}
 }
 

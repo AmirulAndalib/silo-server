@@ -265,6 +265,23 @@ type compatToneMapRecipe struct {
 	dvRPUPresent        bool
 }
 
+func downgradeToSoftwareToneMap(
+	policy tonemap.Policy,
+	mode *tonemap.Mode,
+	filter, hwAccel *string,
+	kind tonemap.SourceKind,
+	capabilities tonemap.Capabilities,
+) bool {
+	if mode == nil || filter == nil || hwAccel == nil || *mode != tonemap.ModeHardware ||
+		!policy.Allows(tonemap.ModeSoftware) || !capabilities.Supports(tonemap.ModeSoftware, kind) {
+		return false
+	}
+	*mode = tonemap.ModeSoftware
+	*filter = capabilities.FilterFor(tonemap.ModeSoftware, kind)
+	*hwAccel = playback.HWAccelNone
+	return true
+}
+
 func (r compatToneMapRecipe) apply(opts *playback.TranscodeOpts) {
 	if opts == nil || r.mode == "" {
 		return
@@ -353,11 +370,18 @@ func (h *PlaybackHandler) remoteToneMapCapabilities(ctx context.Context, nodeURL
 }
 
 func (h *PlaybackHandler) availableCompatToneMapCapabilities(ctx context.Context) tonemap.Capabilities {
+	capabilities, _ := h.compatToneMapCapabilityInventory(ctx)
+	return capabilities
+}
+
+func (h *PlaybackHandler) compatToneMapCapabilityInventory(ctx context.Context) (tonemap.Capabilities, map[string]tonemap.Capabilities) {
 	capabilities := make(tonemap.Capabilities, 0, 4)
+	byNode := make(map[string]tonemap.Capabilities)
 	if enumerator, ok := h.NodePlanner.(compatTranscodeNodeEnumerator); ok {
 		for _, nodeURL := range enumerator.TranscodeNodeURLs() {
 			remote, err := h.remoteToneMapCapabilities(ctx, nodeURL)
 			if err == nil {
+				byNode[strings.TrimRight(nodeURL, "/")] = remote
 				capabilities = append(capabilities, remote...)
 			}
 		}
@@ -365,7 +389,7 @@ func (h *PlaybackHandler) availableCompatToneMapCapabilities(ctx context.Context
 	if h.NodePlanner == nil || nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo) {
 		capabilities = append(capabilities, h.localToneMapCapabilities(ctx)...)
 	}
-	return capabilities
+	return capabilities, byNode
 }
 
 func (h *PlaybackHandler) applyCompatToneMapAvailability(ctx context.Context, source PlaybackMediaSource, capabilities tonemap.Capabilities) PlaybackMediaSource {
@@ -406,23 +430,11 @@ func (h *PlaybackHandler) planCompatTranscodeSession(ctx context.Context, sessio
 		return nodepool.Plan{}, errHDRTranscodeUnsupported
 	}
 	selector, selectable := h.NodePlanner.(compatCapabilitySessionPlanner)
-	enumerator, enumerable := h.NodePlanner.(compatTranscodeNodeEnumerator)
+	_, enumerable := h.NodePlanner.(compatTranscodeNodeEnumerator)
 	if !selectable || !enumerable {
 		return h.NodePlanner.PlanSession(session.ID, session.TranscodeNodeURL, true, bitrateKbps), nil
 	}
-	nodeCapabilities := make(map[string]tonemap.Capabilities)
-	available := tonemap.Capabilities(nil)
-	for _, nodeURL := range enumerator.TranscodeNodeURLs() {
-		capabilities, err := h.remoteToneMapCapabilities(ctx, nodeURL)
-		if err == nil {
-			normalized := strings.TrimRight(nodeURL, "/")
-			nodeCapabilities[normalized] = capabilities
-			available = append(available, capabilities...)
-		}
-	}
-	if nodepool.LocalTranscodeFallbackAllowed(ctx, h.SettingsRepo) {
-		available = append(available, h.localToneMapCapabilities(ctx)...)
-	}
+	available, nodeCapabilities := h.compatToneMapCapabilityInventory(ctx)
 	preferredMode := available.PreferredMode(policy, kind)
 	if preferredMode == "" {
 		return nodepool.Plan{}, errHDRTranscodeUnsupported
@@ -441,7 +453,7 @@ func (h *PlaybackHandler) allow4KVideoTranscode(ctx context.Context) bool {
 	if h.SettingsRepo == nil {
 		return false
 	}
-	v, _ := h.SettingsRepo.Get(ctx, "allow_4k_transcode")
+	v, _ := h.SettingsRepo.Get(ctx, config.Allow4KTranscodeSettingKey)
 	return v == "true"
 }
 
@@ -724,11 +736,10 @@ func (h *PlaybackHandler) startRemoteTranscode(
 	if err != nil {
 		return err
 	}
-	if status != http.StatusAccepted && toneMapRecipe.mode == tonemap.ModeHardware &&
-		toneMapRecipe.policy.Allows(tonemap.ModeSoftware) && toneMapCapabilities.Supports(tonemap.ModeSoftware, toneMapRecipe.sourceKind) {
-		toneMapRecipe.mode = tonemap.ModeSoftware
-		toneMapRecipe.filter = toneMapCapabilities.FilterFor(tonemap.ModeSoftware, toneMapRecipe.sourceKind)
-		toneMapRecipe.hwAccel = playback.HWAccelNone
+	if status != http.StatusAccepted && downgradeToSoftwareToneMap(
+		toneMapRecipe.policy, &toneMapRecipe.mode, &toneMapRecipe.filter, &toneMapRecipe.hwAccel,
+		toneMapRecipe.sourceKind, toneMapCapabilities,
+	) {
 		reqBody.ToneMapMode = toneMapRecipe.mode
 		reqBody.HWAccel = toneMapRecipe.hwAccel
 		nodeResponse, status, err = dispatch(reqBody)

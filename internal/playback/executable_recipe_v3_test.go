@@ -57,6 +57,26 @@ func TestExecutableRecipeV3RejectsToneMapFieldsOnLegacyVersion(t *testing.T) {
 	if recipe.Valid() {
 		t.Fatal("version 1 recipe accepted tone-map execution fields")
 	}
+	recipe.ToneMapMode = ""
+	recipe.ToneMapDVConfigPresent = true
+	if recipe.Valid() {
+		t.Fatal("version 1 recipe accepted additive Dolby presence fields")
+	}
+}
+
+func TestExecutableRecipeV3AllowsDolbyPresenceMetadataOnSourcePreservingRoutes(t *testing.T) {
+	for _, method := range []PlayMethod{PlayDirect, PlayRemux} {
+		t.Run(string(method), func(t *testing.T) {
+			recipe := ExecutableRecipeV3{
+				Version: executableRecipeVersionV3, PlanID: "plan:source-preserving", PlayMethod: method,
+				ToneMapDVConfigPresent: true, ToneMapDVBLCompatIDPresent: true,
+				ToneMapDVBLPresent: true, ToneMapDVRPUPresent: true,
+			}
+			if !recipe.Valid() {
+				t.Fatalf("source-preserving recipe rejected Dolby source metadata: %#v", recipe)
+			}
+		})
+	}
 }
 
 func TestExecutableRecipeV3RejectsIncompleteOrContradictoryToneMapRecipe(t *testing.T) {

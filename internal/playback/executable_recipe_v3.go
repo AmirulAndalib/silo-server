@@ -101,7 +101,7 @@ func (r ExecutableRecipeV3) Valid() bool {
 	if r.Version == executableRecipeVersionLegacyV3 && (r.ToneMapPolicy != "" || r.ToneMapMode != "" || r.ToneMapSourceKind != "" || r.ToneMapRecipeVersion != "" || r.ToneMapPreflightRequired || !r.ToneMapSourceRevision.IsZero() || r.ToneMapDVConfigPresent || r.ToneMapDVBLCompatIDPresent || r.ToneMapDVBLPresent || r.ToneMapDVRPUPresent) {
 		return false
 	}
-	hasToneMapField := r.ToneMapPolicy != "" || r.ToneMapMode != "" || r.ToneMapSourceKind != "" || r.ToneMapRecipeVersion != "" || r.ToneMapPreflightRequired || !r.ToneMapSourceRevision.IsZero() || r.ToneMapDVConfigPresent || r.ToneMapDVBLCompatIDPresent || r.ToneMapDVBLPresent || r.ToneMapDVRPUPresent
+	hasToneMapField := r.ToneMapPolicy != "" || r.ToneMapMode != "" || r.ToneMapSourceKind != "" || r.ToneMapRecipeVersion != "" || r.ToneMapPreflightRequired || !r.ToneMapSourceRevision.IsZero()
 	validToneMapSource := tonemap.ValidSourceKind(r.ToneMapSourceKind)
 	if hasToneMapField && (r.PlayMethod != PlayTranscode || !r.ToneMapPolicy.Allows(r.ToneMapMode) || !validToneMapSource || r.ToneMapRecipeVersion != TransformationHDRToSDRToneMapRecipeVersionV3 || r.ToneMapSourceRevision.IsZero()) {
 		return false

@@ -755,8 +755,10 @@ compute rungs.
 The source rung is always present, labelled `original`, with
 `preserves_source: true`. Transcode rungs are added only below the source's own
 height, and only when HLS is available to the client, transcoding is enabled,
-4K transcoding is permitted for a 4K source, and the source is not HDR. Ladder
-bitrates:
+and 4K transcoding is permitted for a 4K source. Source-preserving HDR plans
+publish only `original` so they never trigger lazy executor probes; an HDR
+transcode plan adds the lower rungs after its tone-map executor has been
+validated. Ladder bitrates:
 
 | Rung | kbps |
 | --- | --- |
@@ -820,8 +822,9 @@ relevant change forces validation again.
 
 An unavailable transformation is not silently skipped at plan time: it produces
 its own terminal reason (`dv_conversion_unsupported`,
-`audio_conversion_unsupported`, `video_conversion_unsupported`) so the client
-learns which conversion was missing rather than seeing a generic refusal.
+`audio_conversion_unsupported`, `video_conversion_unsupported`,
+`hdr_transcode_unsupported`) so the client learns which conversion was missing
+rather than seeing a generic refusal.
 
 A client may advertise its *own* transformations in a delivery's
 `transformations[]` with `executor: "client"` — Dolby Vision profile 7 → 8.1

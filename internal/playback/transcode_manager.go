@@ -579,8 +579,16 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 	// operator config change applies to reconstructed sessions too.
 	opts.HWAccel = cfg.HWAccel
 	opts.HWDevice = cfg.HWDevice
+	// Bound executor probing and any child validation commands under the same
+	// pacing slot as the eventual ffmpeg spawn. A canceled request must be able
+	// to leave the queue before doing that work.
+	slotRelease, ok := m.acquireReconstructSlot(ctx)
+	if !ok {
+		return nil
+	}
+	defer slotRelease()
 	var toneMapErr error
-	opts, toneMapErr = ResolveToneMapExecutor(context.WithoutCancel(ctx), opts)
+	opts, toneMapErr = ResolveToneMapExecutor(ctx, opts)
 	if toneMapErr != nil {
 		slog.ErrorContext(ctx, "reconstruct tone-map recipe unavailable", "component", "playback", "error", toneMapErr,
 			"session", sessionID, "playback_session_id", sessionID)
@@ -598,14 +606,6 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 		opts.SeekSeconds = seek
 	}
 
-	// Pace the spawn so a post-restart wave of reconstructs does not launch a
-	// thousand cold-start ffmpeg processes at once. A client that disconnects while
-	// waiting releases its place rather than queueing dead work.
-	slotRelease, ok := m.acquireReconstructSlot(ctx)
-	if !ok {
-		return nil
-	}
-
 	// Serialize against every other spawn path (fresh start, restart) for this
 	// session so a reconstruct and a fresh start never run two ffmpeg writers
 	// against the same output dir. reconstructGroup only single-flights reconstructs
@@ -617,12 +617,10 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 	// just before us) may already have a live session. Yield to it instead of
 	// spawning a duplicate writer.
 	if existing := m.GetTranscodeSession(sessionID); existing != nil {
-		slotRelease()
 		return existing
 	}
 
 	transcodeSession, err := StartTranscode(context.WithoutCancel(ctx), opts)
-	slotRelease()
 	if err != nil {
 		slog.ErrorContext(ctx, "reconstruct transcode start failed", "component", "playback", "error", err, "session", sessionID, "playback_session_id", sessionID)
 		return nil

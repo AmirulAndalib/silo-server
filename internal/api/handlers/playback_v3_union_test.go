@@ -4,8 +4,12 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
@@ -78,11 +82,13 @@ func TestHLSPlanningRegistryV3EnablesValidatedLocalToneMapWithoutRestart(t *test
 		Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
 	}})
 	presetLocalRegistryV3(handler, local)
-	handler.v3ToneMapCapabilities = tonemap.Capabilities{{
+	capabilities := tonemap.Capabilities{{
 		Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
 		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
 	}}
-	handler.v3ToneMapOnce.Do(func() {})
+	handler.v3ToneMapProbe = func(context.Context, string, string, string) tonemap.Capabilities {
+		return capabilities
+	}
 	settings := &mutablePlaybackSettingsV3{values: map[string]string{}}
 	handler.SettingsRepo = settings
 
@@ -92,6 +98,100 @@ func TestHLSPlanningRegistryV3EnablesValidatedLocalToneMapWithoutRestart(t *test
 	settings.values["playback.transcode_software_tone_map_enabled"] = "true"
 	if !handler.hlsPlanningRegistryV3(context.Background()).Available(playback.TransformationHDRToSDRToneMapV3) {
 		t.Fatal("enabled validated tone-map executor was not available without restart")
+	}
+}
+
+func TestLocalToneMapCapabilitiesV3RefreshesWhenPlaybackHardwareChanges(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	cfg := config.PlaybackConfig{FFmpegPath: "/opt/ffmpeg-a", HWAccel: "qsv", HWDevice: "/dev/dri/renderD128"}
+	handler.PlaybackConfig = func() config.PlaybackConfig { return cfg }
+	var calls []string
+	handler.v3ToneMapProbe = func(_ context.Context, ffmpegPath, backend, device string) tonemap.Capabilities {
+		calls = append(calls, ffmpegPath+"|"+backend+"|"+device)
+		return tonemap.Capabilities{{Mode: tonemap.ModeHardware, Backend: backend, Filter: tonemap.HardwareFilterVAAPI, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}}}
+	}
+
+	for i := 0; i < 2; i++ {
+		if got := handler.localToneMapCapabilitiesV3(context.Background()); len(got) != 1 || got[0].Backend != "qsv" {
+			t.Fatalf("initial capabilities = %#v", got)
+		}
+	}
+	if len(calls) != 1 {
+		t.Fatalf("unchanged fingerprint probed %d times, want 1", len(calls))
+	}
+
+	cfg.FFmpegPath = "/opt/ffmpeg-b"
+	cfg.HWAccel = "vaapi"
+	cfg.HWDevice = "/dev/dri/renderD129"
+	if got := handler.localToneMapCapabilitiesV3(context.Background()); len(got) != 1 || got[0].Backend != "vaapi" {
+		t.Fatalf("updated capabilities = %#v", got)
+	}
+	if len(calls) != 2 || calls[0] == calls[1] {
+		t.Fatalf("probe fingerprints = %v, want one refresh for the live config change", calls)
+	}
+}
+
+func TestHLSToneMapCapabilitiesV3FetchesNodesConcurrently(t *testing.T) {
+	var active atomic.Int32
+	var startedOnce sync.Once
+	bothStarted := make(chan struct{})
+	release := make(chan struct{})
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if active.Add(1) == 2 {
+			startedOnce.Do(func() { close(bothStarted) })
+		}
+		<-release
+		writeJSON(w, http.StatusOK, playback.HWAccelInfo{ToneMapCapabilities: tonemap.Capabilities{{
+			Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+			SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+		}}})
+	}))
+	defer remote.Close()
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{remote.URL, remote.URL}}
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{config.PlaybackLocalTranscodeFallbackSettingKey: "false"}}
+	result := make(chan tonemap.Capabilities, 1)
+	go func() { result <- handler.hlsToneMapCapabilitiesV3(context.Background()) }()
+	select {
+	case <-bothStarted:
+		close(release)
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("node capability probes did not overlap")
+	}
+	if got := <-result; len(got) != 2 {
+		t.Fatalf("aggregated capabilities = %#v, want both nodes", got)
+	}
+}
+
+func TestHLSToneMapCapabilitiesV3HonorsSharedDeadline(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	}))
+	defer slow.Close()
+	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, playback.HWAccelInfo{ToneMapCapabilities: tonemap.Capabilities{{
+			Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+			SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+		}}})
+	}))
+	defer fast.Close()
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{slow.URL, slow.URL, fast.URL}}
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{config.PlaybackLocalTranscodeFallbackSettingKey: "false"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	got := handler.hlsToneMapCapabilitiesV3(ctx)
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("capability aggregation took %s, want shared caller deadline", elapsed)
+	}
+	if len(got) != 1 || !got.Supports(tonemap.ModeSoftware, tonemap.SourcePQ) {
+		t.Fatalf("aggregated capabilities = %#v, want the successful node retained", got)
 	}
 }
 

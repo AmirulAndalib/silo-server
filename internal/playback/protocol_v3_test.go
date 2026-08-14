@@ -2121,6 +2121,35 @@ func TestAvailableQualitiesV3UnknownSourceHeightPublishesNoFixedRungs(t *testing
 	}
 }
 
+func TestAvailableQualitiesV3KeepsDirectHDRPlanningCapabilityLazy(t *testing.T) {
+	capabilityCalls := 0
+	input := PlannerInputV3{
+		Request:  validStartRequestV3(),
+		Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true},
+		HLSRegistry: func() *TransformationRegistryV3 {
+			capabilityCalls++
+			return testTransformationRegistryV3()
+		},
+		HLSToneMapCapabilities: func() tonemap.Capabilities {
+			capabilityCalls++
+			return nil
+		},
+	}
+	source := SourceDescriptorV3{Height: 2160, BitrateKbps: 80_000, DynamicRange: DynamicRangeHDR10V3}
+	if got := availableQualitiesV3(input, source); len(got) != 1 || got[0].Label != QualityOriginalV3 {
+		t.Fatalf("direct HDR qualities = %#v, want original only", got)
+	}
+	if capabilityCalls != 0 {
+		t.Fatalf("direct HDR quality planning performed %d lazy capability lookups", capabilityCalls)
+	}
+	if got := availableQualitiesForRouteV3(input, source, true); len(got) != 4 {
+		t.Fatalf("validated HDR transcode qualities = %#v, want original plus lower rungs", got)
+	}
+	if capabilityCalls != 0 {
+		t.Fatalf("validated quality ladder unexpectedly performed %d capability lookups", capabilityCalls)
+	}
+}
+
 func audioOnlyFixtureFileV3() *models.MediaFile {
 	return &models.MediaFile{ID: 77, BaseType: "audiobook", FilePath: "/media/audiobook.m4b", Container: "mp4", CodecAudio: "aac", Bitrate: 128, AudioChannels: 2, Duration: 39_600, AudioTracks: []models.AudioTrack{{Codec: "aac", Channels: 2, Layout: "stereo"}}}
 }

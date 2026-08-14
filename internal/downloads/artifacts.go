@@ -342,7 +342,7 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 	if err != nil {
 		return target, fmt.Errorf("load tone-map settings: %w", err)
 	}
-	if is4KDownloadSource(file) && !strings.EqualFold(settings["allow_4k_transcode"], "true") {
+	if is4KDownloadSource(file) && !strings.EqualFold(settings[config.Allow4KTranscodeSettingKey], "true") {
 		return target, fmt.Errorf("4K transcoding is disabled: %w", ErrQualityUnavailable)
 	}
 	policy := tonemap.NewPolicy(
@@ -881,6 +881,7 @@ func (m *ArtifactManager) buildOpts(file *models.MediaFile, a *Artifact) playbac
 	}
 	sourceRevision, err := tonemap.DecodeSourceRevision(a.ToneMapSourceRevision)
 	if err != nil {
+		slog.Warn("download artifact tone-map source revision is invalid", "component", "downloads", "artifact_id", a.ID, "source_revision_length", len(a.ToneMapSourceRevision))
 		sourceRevision = tonemap.SourceRevision{MediaFileID: -1}
 	}
 	return playback.TranscodeOpts{

@@ -52,6 +52,26 @@ func TestToneMapFFmpegGraphsCoverSupportedExecutors(t *testing.T) {
 	}
 }
 
+func TestUnsupportedHardwareToneMapDoesNotAppendEmptyFilterGraph(t *testing.T) {
+	tests := []struct {
+		name string
+		opts TranscodeOpts
+	}{
+		{name: "scale", opts: TranscodeOpts{ToneMapMode: tonemap.ModeHardware, ToneMapSourceKind: tonemap.SourcePQ, HWAccel: HWAccelNone}},
+		{name: "text subtitles", opts: TranscodeOpts{ToneMapMode: tonemap.ModeHardware, ToneMapSourceKind: tonemap.SourcePQ, HWAccel: HWAccelNone, SubtitleBurnIn: true, SubtitleTrackIndex: 0, SubtitleCodec: "ass"}},
+		{name: "bitmap subtitles", opts: TranscodeOpts{ToneMapMode: tonemap.ModeHardware, ToneMapSourceKind: tonemap.SourcePQ, HWAccel: HWAccelNone, SubtitleBurnIn: true, SubtitleTrackIndex: 0, SubtitleCodec: "hdmv_pgs_subtitle"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := []string{"prefix"}
+			got := appendVideoFilterArgs(append([]string(nil), original...), tt.opts)
+			if len(got) != len(original) || got[0] != original[0] {
+				t.Fatalf("unsupported hardware appended a filter graph: %v", got)
+			}
+		})
+	}
+}
+
 func TestEveryToneMapSourceKindBuildsEveryExecutorGraph(t *testing.T) {
 	executors := []struct {
 		name    string

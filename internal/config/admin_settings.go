@@ -26,6 +26,13 @@ const (
 	PlaybackTranscodeSoftwareToneMapSettingKey = "playback.transcode_software_tone_map_enabled"
 )
 
+// Shared server-setting keys used by playback and prepared-download policy
+// readers. Keep them here with the effective admin-setting defaults.
+const (
+	PlaybackLocalTranscodeFallbackSettingKey = "playback.local_transcode_fallback"
+	Allow4KTranscodeSettingKey               = "allow_4k_transcode"
+)
+
 // adminSettingDefaults is the effective value shown by the Admin UI when no
 // row exists in server_settings. Keep these values aligned with the runtime
 // readers that own each setting. The UI must never invent a second set of
@@ -63,7 +70,7 @@ var adminSettingDefaults = map[string]string{
 	playbackTranscodeDirSettingKey:             DefaultTranscodeDir,
 	"playback.hw_accel":                        "auto",
 	"playback.transcode_enabled":               "true",
-	"playback.local_transcode_fallback":        "true",
+	PlaybackLocalTranscodeFallbackSettingKey:   "true",
 	"playback.chapter_thumbnail_workers":       "1",
 	"playback.chapter_thumbnail_execution":     "local",
 	"playback.chapter_thumbnail_node_capacity": "1",
@@ -73,7 +80,7 @@ var adminSettingDefaults = map[string]string{
 	PlaybackTranscodeSoftwareToneMapSettingKey: "false",
 	"playback.watched_threshold":               "90",
 	"playback.min_resume_threshold":            "5",
-	"allow_4k_transcode":                       "false",
+	Allow4KTranscodeSettingKey:                 "false",
 	"enable_transcode_throttle":                "false",
 	"transcode_throttle_seconds":               "300",
 
@@ -280,10 +287,10 @@ func NormalizeAdminSetting(key, raw string) (string, error) {
 	value := strings.TrimSpace(raw)
 
 	switch key {
-	case "metadata.cache_images", "playback.transcode_enabled", "playback.local_transcode_fallback",
+	case "metadata.cache_images", "playback.transcode_enabled", PlaybackLocalTranscodeFallbackSettingKey,
 		chapterThumbnailSoftwareToneMapKey, PlaybackTranscodeHardwareToneMapSettingKey,
 		PlaybackTranscodeSoftwareToneMapSettingKey,
-		"allow_4k_transcode", "enable_transcode_throttle", "audiobookshelf_compat.enabled",
+		Allow4KTranscodeSettingKey, "enable_transcode_throttle", "audiobookshelf_compat.enabled",
 		"jellyfin_compat.enabled", "jellyfin_compat.web_enabled", "recommendations.enabled",
 		"subtitle_ai.enabled", "subtitle_ai.transcribe_enabled", "metadata_ai.enabled",
 		"download.enabled", "download.transcode_enabled", "email.enabled", "signup.enabled",

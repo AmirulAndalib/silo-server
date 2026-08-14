@@ -13,8 +13,11 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-const probeCommandTimeout = 5 * time.Second
-const probeTotalTimeout = 30 * time.Second
+const (
+	probeCommandTimeout = 5 * time.Second
+	probeNegativeTTL    = 15 * time.Second
+	probeTimeoutSlack   = time.Second
+)
 
 // One deterministic 64x64 Main 10 HEVC frame. Keeping the compressed fixture
 // in the binary lets production probes exercise the real decoder without
@@ -24,45 +27,74 @@ const decodeProbeFixtureBase64 = "AAAAAUABDAH//wIgAAADAJAAAAMAAAMAHpWUCQAAAAFCAQ
 
 type CommandRunner func(context.Context, string, ...string) ([]byte, error)
 
+type probeCacheEntry struct {
+	capabilities Capabilities
+	expiresAt    time.Time
+}
+
 var probeCache = struct {
 	sync.Mutex
-	entries map[string]Capabilities
+	entries map[string]probeCacheEntry
 	group   singleflight.Group
-}{entries: make(map[string]Capabilities)}
+}{entries: make(map[string]probeCacheEntry)}
 
 func Probe(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevice string) Capabilities {
+	return probeCached(ctx, ffmpegPath, hardwareBackend, hardwareDevice, runCommand, time.Now)
+}
+
+func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevice string, run CommandRunner, now func() time.Time) Capabilities {
 	key := strings.Join([]string{strings.TrimSpace(ffmpegPath), strings.ToLower(strings.TrimSpace(hardwareBackend)), strings.TrimSpace(hardwareDevice)}, "\x00")
 	probeCache.Lock()
-	if cached, ok := probeCache.entries[key]; ok {
-		result := append(Capabilities(nil), cached...)
+	if cached, ok := probeCache.entries[key]; ok && probeCacheEntryCurrent(cached, now()) {
+		result := append(Capabilities(nil), cached.capabilities...)
 		probeCache.Unlock()
 		return result
 	}
 	probeCache.Unlock()
 
-	value, _, _ := probeCache.group.Do(key, func() (any, error) {
+	resultCh := probeCache.group.DoChan(key, func() (any, error) {
 		probeCache.Lock()
 		cached, ok := probeCache.entries[key]
 		probeCache.Unlock()
-		if ok {
-			return append(Capabilities(nil), cached...), nil
+		if ok && probeCacheEntryCurrent(cached, now()) {
+			return append(Capabilities(nil), cached.capabilities...), nil
 		}
-		probeCtx, cancel := context.WithTimeout(ctx, probeTotalTimeout)
+		probeCtx, cancel := context.WithTimeout(context.Background(), probeTotalTimeout(hardwareBackend, hardwareDevice))
 		defer cancel()
-		result := ProbeWithRunner(probeCtx, ffmpegPath, hardwareBackend, hardwareDevice, runCommand)
-		if probeCtx.Err() != nil {
-			return result, nil
+		result := ProbeWithRunner(probeCtx, ffmpegPath, hardwareBackend, hardwareDevice, run)
+		entry := probeCacheEntry{capabilities: append(Capabilities(nil), result...)}
+		if len(result) == 0 {
+			entry.expiresAt = now().Add(probeNegativeTTL)
 		}
 		probeCache.Lock()
-		probeCache.entries[key] = append(Capabilities(nil), result...)
+		probeCache.entries[key] = entry
 		probeCache.Unlock()
 		return result, nil
 	})
-	capabilities, ok := value.(Capabilities)
-	if !ok {
+	select {
+	case <-ctx.Done():
 		return nil
+	case result := <-resultCh:
+		capabilities, ok := result.Val.(Capabilities)
+		if !ok {
+			return nil
+		}
+		return append(Capabilities(nil), capabilities...)
 	}
-	return append(Capabilities(nil), capabilities...)
+}
+
+func probeCacheEntryCurrent(entry probeCacheEntry, now time.Time) bool {
+	return len(entry.capabilities) > 0 || now.Before(entry.expiresAt)
+}
+
+func probeTotalTimeout(hardwareBackend, hardwareDevice string) time.Duration {
+	commandCount := 2 + len(AllSourceKinds())
+	backend := strings.ToLower(strings.TrimSpace(hardwareBackend))
+	switch backend {
+	case BackendQSV, BackendVAAPI, BackendNVENC:
+		commandCount += len(AllSourceKinds()) * len(probeDevices(hardwareDevice, backend))
+	}
+	return time.Duration(commandCount)*probeCommandTimeout + probeTimeoutSlack
 }
 
 func ProbeWithRunner(

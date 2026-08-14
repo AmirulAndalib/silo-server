@@ -9,6 +9,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
@@ -154,6 +155,8 @@ func TestApplyCompatToneMapAvailability(t *testing.T) {
 		name         string
 		hardware     bool
 		software     bool
+		settingsErr  error
+		nilSettings  bool
 		capabilities tonemap.Capabilities
 		source       PlaybackMediaSource
 		want         bool
@@ -163,6 +166,8 @@ func TestApplyCompatToneMapAvailability(t *testing.T) {
 		{name: "hardware enabled but unavailable", hardware: true, capabilities: tonemap.Capabilities{software}, source: PlaybackMediaSource{SupportsTranscoding: true, Version: hdrVersion}},
 		{name: "software enabled and available", software: true, capabilities: tonemap.Capabilities{software}, source: PlaybackMediaSource{SupportsTranscoding: true, Version: hdrVersion}, want: true},
 		{name: "both enabled prefer any available executor", hardware: true, software: true, capabilities: tonemap.Capabilities{software, hardware}, source: PlaybackMediaSource{SupportsTranscoding: true, Version: hdrVersion}, want: true},
+		{name: "settings error denies HDR transcode", settingsErr: errors.New("read failed"), capabilities: tonemap.Capabilities{software}, source: PlaybackMediaSource{SupportsTranscoding: true, Version: hdrVersion}},
+		{name: "nil settings deny HDR transcode", nilSettings: true, capabilities: tonemap.Capabilities{software}, source: PlaybackMediaSource{SupportsTranscoding: true, Version: hdrVersion}},
 		{name: "audio-only transcode remains available", source: PlaybackMediaSource{SupportsTranscoding: true, TranscodeAudio: true, Version: hdrVersion}, want: true},
 		{name: "direct-only source remains unavailable", source: PlaybackMediaSource{Version: hdrVersion}},
 	}
@@ -172,7 +177,14 @@ func TestApplyCompatToneMapAvailability(t *testing.T) {
 				config.PlaybackTranscodeHardwareToneMapSettingKey: strconv.FormatBool(tt.hardware),
 				config.PlaybackTranscodeSoftwareToneMapSettingKey: strconv.FormatBool(tt.software),
 			}
-			h := &PlaybackHandler{SettingsRepo: stubSettingsReader{values: settings}}
+			var settingsRepo SettingsReader = stubSettingsReader{values: settings, err: tt.settingsErr}
+			if tt.nilSettings {
+				settingsRepo = nil
+			}
+			h := &PlaybackHandler{SettingsRepo: settingsRepo}
+			if tt.nilSettings && h.toneMapPolicy(context.Background()) != tonemap.PolicyNone {
+				t.Fatal("nil settings repository did not resolve to PolicyNone")
+			}
 			got := h.applyCompatToneMapAvailability(context.Background(), tt.source, tt.capabilities)
 			if got.SupportsTranscoding != tt.want {
 				t.Fatalf("SupportsTranscoding = %t, want %t", got.SupportsTranscoding, tt.want)
@@ -197,6 +209,29 @@ func TestApplyCompatToneMapAvailabilityAcceptsProfile7ID6Fallback(t *testing.T) 
 	capabilities := tonemap.Capabilities{{Mode: tonemap.ModeSoftware, Backend: "software", Filter: "tonemapx", SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}}}
 	if got := h.applyCompatToneMapAvailability(context.Background(), source, capabilities); !got.SupportsTranscoding {
 		t.Fatal("Profile 7 compatibility-ID 6 fallback was not advertised as transcodable")
+	}
+}
+
+func TestDowngradeToSoftwareToneMap(t *testing.T) {
+	mode := tonemap.ModeHardware
+	filter := tonemap.HardwareFilterVAAPI
+	hwAccel := "vaapi"
+	capabilities := tonemap.Capabilities{{
+		Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware,
+		Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	}}
+	if !downgradeToSoftwareToneMap(
+		tonemap.PolicyHardwareThenSoftware, &mode, &filter, &hwAccel, tonemap.SourcePQ, capabilities,
+	) {
+		t.Fatal("eligible hardware recipe did not downgrade")
+	}
+	if mode != tonemap.ModeSoftware || filter != tonemap.SoftwareFilterBT2390 || hwAccel != playback.HWAccelNone {
+		t.Fatalf("downgraded recipe = mode %q filter %q hwaccel %q", mode, filter, hwAccel)
+	}
+	if downgradeToSoftwareToneMap(
+		tonemap.PolicyHardwareThenSoftware, &mode, &filter, &hwAccel, tonemap.SourcePQ, capabilities,
+	) {
+		t.Fatal("software recipe downgraded more than once")
 	}
 }
 

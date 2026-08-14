@@ -522,6 +522,14 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 // which source-preserving starts must never pay for, and a rung whose
 // toolchain is missing degrades to a retryable terminal at replan time.
 func availableQualitiesV3(input PlannerInputV3, source SourceDescriptorV3) []AvailableQualityV3 {
+	return availableQualitiesForRouteV3(input, source, false)
+}
+
+// availableQualitiesForRouteV3 keeps source-preserving HDR planning lazy. A
+// direct or remux route publishes only original for HDR; once a video transcode
+// has validated its tone-map executor, includeHDRTranscodeRungs preserves the
+// ordinary lower quality ladder without another capability lookup.
+func availableQualitiesForRouteV3(input PlannerInputV3, source SourceDescriptorV3, includeHDRTranscodeRungs bool) []AvailableQualityV3 {
 	qualities := []AvailableQualityV3{{
 		Label:           QualityOriginalV3,
 		Height:          source.Height,
@@ -539,7 +547,7 @@ func availableQualitiesV3(input PlannerInputV3, source SourceDescriptorV3) []Ava
 	if is4KSourceV3(input.EffectiveFile, source) && !input.Settings.Allow4KTranscode {
 		return qualities
 	}
-	if hdrTranscodeUnavailableV3(input, source) {
+	if source.DynamicRange != "" && source.DynamicRange != DynamicRangeSDRV3 && !includeHDRTranscodeRungs {
 		return qualities
 	}
 	for _, height := range []int{2160, 1080, 720, 480} {
@@ -754,6 +762,9 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 	}
 	if !input.hlsRegistry().Available(TransformationVideoToH264V3) || !input.hlsRegistry().Available(TransformationAudioToAACV3) {
 		return terminalPlannerResultV3("conversion_tool_unavailable", "The required validated H.264/AAC conversion toolchain is unavailable.", true)
+	}
+	if source.DynamicRange != "" && source.DynamicRange != DynamicRangeSDRV3 {
+		base.AvailableQualities = availableQualitiesForRouteV3(input, source, true)
 	}
 	plan := base
 	plan.Delivery = DeliveryTranscodeHLSV3

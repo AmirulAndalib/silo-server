@@ -143,12 +143,27 @@ func (h *PlaybackHandler) transformationRegistryV3(ctx context.Context) *playbac
 }
 
 func (h *PlaybackHandler) localToneMapCapabilitiesV3(ctx context.Context) tonemap.Capabilities {
-	h.v3ToneMapOnce.Do(func() {
-		cfg := h.playbackConfig()
-		resolved := playback.ResolveHWAccelWithFFmpeg(cfg.HWAccel, cfg.FFmpegPath)
-		h.v3ToneMapCapabilities = tonemap.Probe(context.WithoutCancel(ctx), playback.ResolveFFmpegPath(cfg.FFmpegPath), resolved, cfg.HWDevice)
-	})
-	return append(tonemap.Capabilities(nil), h.v3ToneMapCapabilities...)
+	cfg := h.playbackConfig()
+	ffmpegPath := playback.ResolveFFmpegPath(cfg.FFmpegPath)
+	resolved := playback.ResolveHWAccelWithFFmpeg(cfg.HWAccel, cfg.FFmpegPath)
+	hwDevice := strings.TrimSpace(cfg.HWDevice)
+	fingerprint := strings.Join([]string{ffmpegPath, resolved, hwDevice}, "\x00")
+
+	h.v3ToneMapMu.Lock()
+	defer h.v3ToneMapMu.Unlock()
+	if h.v3ToneMapFingerprint == fingerprint && len(h.v3ToneMapCapabilities) > 0 {
+		return append(tonemap.Capabilities(nil), h.v3ToneMapCapabilities...)
+	}
+	probe := tonemap.Probe
+	if h.v3ToneMapProbe != nil {
+		probe = h.v3ToneMapProbe
+	}
+	capabilities := probe(ctx, ffmpegPath, resolved, hwDevice)
+	if ctx.Err() == nil && len(capabilities) > 0 {
+		h.v3ToneMapFingerprint = fingerprint
+		h.v3ToneMapCapabilities = append(tonemap.Capabilities(nil), capabilities...)
+	}
+	return append(tonemap.Capabilities(nil), capabilities...)
 }
 
 // remoteTransformationsV3 is the transport-time capability lookup for a
@@ -290,11 +305,26 @@ func (h *PlaybackHandler) hlsToneMapCapabilitiesV3(ctx context.Context) tonemap.
 	if !ok {
 		return capabilities
 	}
-	for _, nodeURL := range enumerator.TranscodeNodeURLs() {
-		remote, err := h.remoteToneMapCapabilitiesV3(ctx, nodeURL, true)
-		if err == nil {
-			capabilities = append(capabilities, remote...)
-		}
+	nodeURLs := enumerator.TranscodeNodeURLs()
+	fetchCtx, cancel := context.WithTimeout(ctx, v3NodeCapabilityPlanTimeout)
+	defer cancel()
+	results := make([]tonemap.Capabilities, len(nodeURLs))
+	var wg sync.WaitGroup
+	for i, nodeURL := range nodeURLs {
+		wg.Add(1)
+		go func(i int, nodeURL string) {
+			defer wg.Done()
+			remote, err := h.remoteToneMapCapabilitiesV3(fetchCtx, nodeURL, true)
+			if err != nil {
+				slog.DebugContext(ctx, "protocol v3 node tone-map capability unavailable for planning", "component", "api", "node", nodeURL, "error", err)
+				return
+			}
+			results[i] = remote
+		}(i, nodeURL)
+	}
+	wg.Wait()
+	for _, remote := range results {
+		capabilities = append(capabilities, remote...)
 	}
 	return capabilities
 }
@@ -3095,7 +3125,7 @@ func (h *PlaybackHandler) enqueueRouteEventV3(event playback.RouteEventRecordV3)
 func (h *PlaybackHandler) plannerSettingsV3(ctx context.Context) playback.PlannerSettingsV3 {
 	settings := playback.PlannerSettingsV3{TranscodeEnabled: h.playbackConfig().TranscodeEnabled}
 	if h.SettingsRepo != nil {
-		value, _ := h.SettingsRepo.Get(ctx, "allow_4k_transcode")
+		value, _ := h.SettingsRepo.Get(ctx, config.Allow4KTranscodeSettingKey)
 		settings.Allow4KTranscode = strings.EqualFold(value, "true")
 		value, _ = h.SettingsRepo.Get(ctx, config.PlaybackTranscodeHardwareToneMapSettingKey)
 		settings.HardwareToneMapEnabled = strings.EqualFold(value, "true")

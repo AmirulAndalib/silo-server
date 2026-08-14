@@ -64,8 +64,10 @@ type Artifact struct {
 	LastUsedAt                 time.Time
 }
 
-// paramsHash is the dedup key for an encode target:
-// sha256(format | container | codec_video | codec_audio | resolution | audio_track_index | bitrate | subtitle_burn_in).
+// paramsHash is the dedup key for an encode target: format, container, video
+// and audio codecs, resolution, audio track, bitrate, subtitle burn-in, and—
+// when present—tone-map policy, mode, source kind, recipe version, preflight
+// requirement, and source-revision fingerprint.
 func paramsHash(format, container, codecVideo, codecAudio, resolution string, audioTrackIndex, targetBitrateKbps int, subtitleBurnIn bool) string {
 	return paramsHashWithToneMap(format, container, codecVideo, codecAudio, resolution, audioTrackIndex, targetBitrateKbps, subtitleBurnIn, tonemap.PolicyNone, "", "", "")
 }
@@ -76,7 +78,7 @@ func paramsHashWithToneMap(format, container, codecVideo, codecAudio, resolution
 
 func paramsHashWithToneMapRevision(format, container, codecVideo, codecAudio, resolution string, audioTrackIndex, targetBitrateKbps int, subtitleBurnIn bool, policy tonemap.Policy, mode tonemap.Mode, sourceKind tonemap.SourceKind, recipeVersion string, preflightRequired bool, sourceRevision tonemap.SourceRevision) string {
 	input := fmt.Sprintf("%s|%s|%s|%s|%s|%d|%d|%t", format, container, codecVideo, codecAudio, resolution, audioTrackIndex, targetBitrateKbps, subtitleBurnIn)
-	if mode != "" || sourceKind != "" || recipeVersion != "" {
+	if (policy != "" && policy != tonemap.PolicyNone) || mode != "" || sourceKind != "" || recipeVersion != "" || preflightRequired || !sourceRevision.IsZero() {
 		input += fmt.Sprintf("|%s|%s|%s|%s|%t|%s", policy, mode, sourceKind, recipeVersion, preflightRequired, sourceRevision.Fingerprint())
 	}
 	sum := sha256.Sum256([]byte(input))
