@@ -25,6 +25,11 @@ import (
 const (
 	ArtifactDirectoryName = "download-artifacts"
 	RelayReadIdleTimeout  = 2 * time.Minute
+
+	resultToneMapRecipeVersionHeader             = "X-Silo-Tone-Map-Recipe-Version"
+	resultToneMapModeHeader                      = "X-Silo-Tone-Map-Mode"
+	resultToneMapSourceRevisionFingerprintHeader = "X-Silo-Tone-Map-Source-Revision-Fingerprint"
+	maxResultAttestationHeaderBytes              = 1024
 )
 
 var (
@@ -87,8 +92,47 @@ type Request struct {
 // Result identifies a completed artifact without exposing the node's local
 // filesystem layout.
 type Result struct {
-	ArtifactID string `json:"artifact_id"`
-	FileSize   int64  `json:"file_size"`
+	ArtifactID                       string       `json:"artifact_id"`
+	FileSize                         int64        `json:"file_size"`
+	ToneMapRecipeVersion             string       `json:"tone_map_recipe_version,omitempty"`
+	ToneMapMode                      tonemap.Mode `json:"tone_map_mode,omitempty"`
+	ToneMapSourceRevisionFingerprint string       `json:"tone_map_source_revision_fingerprint,omitempty"`
+}
+
+// SetResultHeaders exposes bounded attestation metadata on artifact status
+// responses. Ordinary artifacts add no headers.
+func SetResultHeaders(header http.Header, result Result) {
+	setBoundedResultHeader(header, resultToneMapRecipeVersionHeader, result.ToneMapRecipeVersion)
+	setBoundedResultHeader(header, resultToneMapModeHeader, string(result.ToneMapMode))
+	setBoundedResultHeader(header, resultToneMapSourceRevisionFingerprintHeader, result.ToneMapSourceRevisionFingerprint)
+}
+
+func setBoundedResultHeader(header http.Header, name, value string) {
+	if value == "" || len(value) > maxResultAttestationHeaderBytes || strings.ContainsAny(value, "\r\n") {
+		return
+	}
+	header.Set(name, value)
+}
+
+func resultAttestationFromHeaders(header http.Header) (Result, error) {
+	values := []struct{ name string }{
+		{name: resultToneMapRecipeVersionHeader},
+		{name: resultToneMapModeHeader},
+		{name: resultToneMapSourceRevisionFingerprintHeader},
+	}
+	decoded := make([]string, len(values))
+	for i := range values {
+		value := header.Get(values[i].name)
+		if len(value) > maxResultAttestationHeaderBytes {
+			return Result{}, fmt.Errorf("invalid %s header", values[i].name)
+		}
+		decoded[i] = value
+	}
+	return Result{
+		ToneMapRecipeVersion:             decoded[0],
+		ToneMapMode:                      tonemap.Mode(decoded[1]),
+		ToneMapSourceRevisionFingerprint: decoded[2],
+	}, nil
 }
 
 func ValidArtifactID(id string) bool { return artifactIDPattern.MatchString(id) }
@@ -219,7 +263,13 @@ func (p HTTPPreparer) Stat(ctx context.Context, nodeURL, jwtSecret, artifactID s
 	if err != nil || size < 0 {
 		return Result{}, fmt.Errorf("remote download artifact stat: invalid content length")
 	}
-	return Result{ArtifactID: artifactID, FileSize: size}, nil
+	attestation, err := resultAttestationFromHeaders(resp.Header)
+	if err != nil {
+		return Result{}, fmt.Errorf("remote download artifact stat: %w", err)
+	}
+	attestation.ArtifactID = artifactID
+	attestation.FileSize = size
+	return attestation, nil
 }
 
 func (p HTTPPreparer) Delete(ctx context.Context, nodeURL, jwtSecret, artifactID string) error {

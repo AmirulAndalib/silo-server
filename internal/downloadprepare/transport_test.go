@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,6 +41,35 @@ func TestHTTPPreparerSendsAuthenticatedRecipe(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("request = %+v, want %+v", got, want)
+	}
+}
+
+func TestResultJSONCarriesToneMapAttestationAndOmitsItForOrdinaryArtifacts(t *testing.T) {
+	toneMapped := Result{
+		ArtifactID:                       "artifact-tone-map",
+		FileSize:                         123,
+		ToneMapRecipeVersion:             "1",
+		ToneMapMode:                      tonemap.ModeSoftware,
+		ToneMapSourceRevisionFingerprint: "0123456789abcdef",
+	}
+	wire, err := json.Marshal(toneMapped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Result
+	if err := json.Unmarshal(wire, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded != toneMapped {
+		t.Fatalf("result round trip = %+v, want %+v", decoded, toneMapped)
+	}
+
+	ordinary, err := json.Marshal(Result{ArtifactID: "artifact-ordinary", FileSize: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(ordinary); got != `{"artifact_id":"artifact-ordinary","file_size":42}` {
+		t.Fatalf("ordinary result JSON = %s", got)
 	}
 }
 
@@ -126,6 +156,61 @@ func TestHTTPPreparerManagesOpaqueArtifact(t *testing.T) {
 	}
 	if err := client.Delete(context.Background(), server.URL, "secret", "artifact-1"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHTTPPreparerStatRecoversToneMapAttestationFromHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead {
+			t.Fatalf("method = %s, want HEAD", r.Method)
+		}
+		w.Header().Set("Content-Length", "42")
+		w.Header().Set("X-Silo-Tone-Map-Recipe-Version", "1")
+		w.Header().Set("X-Silo-Tone-Map-Mode", "software")
+		w.Header().Set("X-Silo-Tone-Map-Source-Revision-Fingerprint", "0123456789abcdef")
+	}))
+	defer server.Close()
+
+	result, err := (HTTPPreparer{}).Stat(context.Background(), server.URL, "secret", "artifact-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Result{
+		ArtifactID:                       "artifact-1",
+		FileSize:                         42,
+		ToneMapRecipeVersion:             "1",
+		ToneMapMode:                      tonemap.ModeSoftware,
+		ToneMapSourceRevisionFingerprint: "0123456789abcdef",
+	}
+	if result != want {
+		t.Fatalf("Stat = %+v, want %+v", result, want)
+	}
+}
+
+func TestHTTPPreparerStatRejectsOversizedAttestationHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "42")
+		w.Header().Set("X-Silo-Tone-Map-Recipe-Version", strings.Repeat("x", 1025))
+	}))
+	defer server.Close()
+
+	if _, err := (HTTPPreparer{}).Stat(context.Background(), server.URL, "secret", "artifact-1"); err == nil {
+		t.Fatal("Stat accepted an oversized attestation header")
+	}
+}
+
+func TestSetResultHeadersOmitsOversizedAttestation(t *testing.T) {
+	header := make(http.Header)
+	SetResultHeaders(header, Result{
+		ToneMapRecipeVersion:             strings.Repeat("x", 1025),
+		ToneMapMode:                      tonemap.ModeSoftware,
+		ToneMapSourceRevisionFingerprint: "0123456789abcdef",
+	})
+	if got := header.Get("X-Silo-Tone-Map-Recipe-Version"); got != "" {
+		t.Fatalf("oversized recipe header = %q", got)
+	}
+	if got := header.Get("X-Silo-Tone-Map-Mode"); got != string(tonemap.ModeSoftware) {
+		t.Fatalf("mode header = %q", got)
 	}
 }
 

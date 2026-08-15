@@ -166,6 +166,53 @@ func (mismatchedRecoveryRemotePreparer) Delete(context.Context, string, string, 
 	return nil
 }
 
+type attestationRemotePreparer struct {
+	prepareResult downloadprepare.Result
+	prepareErr    error
+	statResult    downloadprepare.Result
+	statErr       error
+	deleteErr     error
+	deletes       int
+}
+
+func (p *attestationRemotePreparer) Prepare(context.Context, string, string, downloadprepare.Request) (downloadprepare.Result, error) {
+	return p.prepareResult, p.prepareErr
+}
+
+func (p *attestationRemotePreparer) Stat(context.Context, string, string, string) (downloadprepare.Result, error) {
+	return p.statResult, p.statErr
+}
+
+func (p *attestationRemotePreparer) Delete(context.Context, string, string, string) error {
+	p.deletes++
+	return p.deleteErr
+}
+
+func newToneMapPreparerTest(t *testing.T, remote downloadprepare.RemotePreparer) (*NodeAwarePreparer, *recordingEncodePreparer, playback.TranscodeOpts) {
+	t.Helper()
+	const nodeURL = "http://tone-map-node"
+	pool := nodepool.NewTranscodePool()
+	pool.SetNodes([]*nodepool.Node{{ID: 22, URL: nodeURL, Enabled: true, Healthy: true}})
+	local := &recordingEncodePreparer{}
+	cfg := &config.Config{}
+	cfg.Auth.JWTSecret = "secret"
+	preparer := NewNodeAwarePreparer(local, nodepool.NewPlanner(nodepool.NewProxyPool(), pool), func() *config.Config { return cfg })
+	preparer.remote = remote
+	preparer.capabilities[nodeURL] = remoteToneMapCapabilities{
+		capabilities: tonemap.Capabilities{{
+			Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+			SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+		}},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	opts := playback.TranscodeOpts{
+		ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
+		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 42, FileSize: 100, StreamSignature: "stream"},
+	}
+	return preparer, local, opts
+}
+
 func TestNodeAwarePreparerUsesLeastLoadedHealthyNode(t *testing.T) {
 	group := "host-a"
 	pool := nodepool.NewTranscodePool()
@@ -194,6 +241,96 @@ func TestNodeAwarePreparerUsesLeastLoadedHealthyNode(t *testing.T) {
 	}
 	if prepared.OutputPath != "" || prepared.OriginNodeID != 17 || prepared.OriginNodeURL != "http://idle" || prepared.OriginNodeGroup != group || prepared.OriginArtifactID != "artifact-1" || prepared.FileSize != 1234 {
 		t.Fatalf("prepared = %+v", prepared)
+	}
+}
+
+func TestNodeAwarePreparerRejectsUnattestedOrMismatchedToneMapPrepareResult(t *testing.T) {
+	revision := tonemap.SourceRevision{MediaFileID: 42, FileSize: 100, StreamSignature: "stream"}
+	valid := downloadprepare.Result{
+		ArtifactID:                       "artifact-tone-map",
+		FileSize:                         55,
+		ToneMapRecipeVersion:             playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapMode:                      tonemap.ModeSoftware,
+		ToneMapSourceRevisionFingerprint: revision.Fingerprint(),
+	}
+	tests := []struct {
+		name   string
+		result downloadprepare.Result
+	}{
+		{name: "empty artifact id", result: downloadprepare.Result{FileSize: 55}},
+		{name: "old node omits receipt", result: downloadprepare.Result{ArtifactID: "artifact-tone-map", FileSize: 55}},
+		{name: "recipe version", result: func() downloadprepare.Result { result := valid; result.ToneMapRecipeVersion = "stale"; return result }()},
+		{name: "mode", result: func() downloadprepare.Result {
+			result := valid
+			result.ToneMapMode = tonemap.ModeHardware
+			return result
+		}()},
+		{name: "source revision", result: func() downloadprepare.Result {
+			result := valid
+			result.ToneMapSourceRevisionFingerprint = "wrong"
+			return result
+		}()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			remote := &attestationRemotePreparer{prepareResult: test.result, statErr: downloadprepare.ErrArtifactNotFound}
+			preparer, local, opts := newToneMapPreparerTest(t, remote)
+			prepared, err := preparer.PrepareFile(context.Background(), "artifact-tone-map", opts, "/local/artifact.mp4")
+			if err != nil || prepared.OutputPath == "" || local.calls != 1 {
+				t.Fatalf("prepared=%+v err=%v local calls=%d, want local fallback", prepared, err, local.calls)
+			}
+			if remote.deletes != 1 {
+				t.Fatalf("remote deletes = %d, want rejected artifact cleanup", remote.deletes)
+			}
+		})
+	}
+}
+
+func TestNodeAwarePreparerRejectsUnattestedOrMismatchedToneMapRecovery(t *testing.T) {
+	revision := tonemap.SourceRevision{MediaFileID: 42, FileSize: 100, StreamSignature: "stream"}
+	tests := []struct {
+		name      string
+		recovered downloadprepare.Result
+	}{
+		{name: "missing receipt", recovered: downloadprepare.Result{ArtifactID: "artifact-tone-map", FileSize: 55}},
+		{name: "mismatched receipt", recovered: downloadprepare.Result{
+			ArtifactID: "artifact-tone-map", FileSize: 55,
+			ToneMapRecipeVersion:             playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+			ToneMapMode:                      tonemap.ModeSoftware,
+			ToneMapSourceRevisionFingerprint: revision.Fingerprint() + "-wrong",
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			remote := &attestationRemotePreparer{
+				prepareErr: context.DeadlineExceeded,
+				statResult: test.recovered,
+			}
+			preparer, local, opts := newToneMapPreparerTest(t, remote)
+			prepared, err := preparer.PrepareFile(context.Background(), "artifact-tone-map", opts, "/local/artifact.mp4")
+			if err != nil || prepared.OutputPath == "" || local.calls != 1 {
+				t.Fatalf("prepared=%+v err=%v local calls=%d, want local fallback", prepared, err, local.calls)
+			}
+			if remote.deletes != 1 {
+				t.Fatalf("remote deletes = %d, want rejected recovery cleanup", remote.deletes)
+			}
+		})
+	}
+}
+
+func TestNodeAwarePreparerPreservesIndeterminateToneMapResultWhenCleanupFails(t *testing.T) {
+	remote := &attestationRemotePreparer{
+		prepareResult: downloadprepare.Result{ArtifactID: "artifact-tone-map", FileSize: 55},
+		statErr:       downloadprepare.ErrArtifactNotFound,
+		deleteErr:     os.ErrPermission,
+	}
+	preparer, local, opts := newToneMapPreparerTest(t, remote)
+	prepared, err := preparer.PrepareFile(context.Background(), "artifact-tone-map", opts, "/local/artifact.mp4")
+	if err == nil || !prepared.Remote() || prepared.OriginArtifactID != "artifact-tone-map" {
+		t.Fatalf("prepared=%+v err=%v, want indeterminate remote result", prepared, err)
+	}
+	if local.calls != 0 {
+		t.Fatalf("local calls = %d, want no fallback after failed cleanup", local.calls)
 	}
 }
 
@@ -651,14 +788,11 @@ func TestNodeAwarePreparerRetainsRequestedLocatorAfterMismatchedRecovery(t *test
 	p.remote = mismatchedRecoveryRemotePreparer{}
 
 	prepared, err := p.PrepareFile(context.Background(), "artifact-requested", playback.TranscodeOpts{}, "/local/job.mp4")
-	if err == nil {
-		t.Fatal("expected mismatched recovery error")
+	if err != nil || prepared.OutputPath == "" {
+		t.Fatalf("prepared=%+v err=%v, want local fallback after cleanup", prepared, err)
 	}
-	if !prepared.Remote() || prepared.OriginArtifactID != "artifact-requested" || prepared.FileSize != 0 {
-		t.Fatalf("prepared locator = %+v, want requested remote artifact", prepared)
-	}
-	if local.calls != 0 {
-		t.Fatalf("local calls = %d, want no fallback after indeterminate remote result", local.calls)
+	if local.calls != 1 {
+		t.Fatalf("local calls = %d, want fallback after rejected remote result cleanup", local.calls)
 	}
 }
 

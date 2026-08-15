@@ -1,0 +1,60 @@
+package transcodenode
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+
+	"github.com/Silo-Server/silo-server/internal/downloadprepare"
+)
+
+const (
+	downloadArtifactReceiptSuffix   = ".receipt.json"
+	downloadArtifactReceiptMaxBytes = 4 << 10
+)
+
+func downloadArtifactReceiptPath(outputPath string) string {
+	return outputPath + downloadArtifactReceiptSuffix
+}
+
+func writeDownloadArtifactReceipt(outputPath string, receipt downloadprepare.Result) error {
+	data, err := json.Marshal(receipt)
+	if err != nil {
+		return fmt.Errorf("encode download artifact receipt: %w", err)
+	}
+	data = append(data, '\n')
+	if len(data) > downloadArtifactReceiptMaxBytes {
+		return fmt.Errorf("download artifact receipt is too large")
+	}
+	receiptPath := downloadArtifactReceiptPath(outputPath)
+	partPath := receiptPath + ".part"
+	if err := os.WriteFile(partPath, data, 0o600); err != nil {
+		return fmt.Errorf("write download artifact receipt: %w", err)
+	}
+	if err := os.Rename(partPath, receiptPath); err != nil {
+		_ = os.Remove(partPath)
+		return fmt.Errorf("publish download artifact receipt: %w", err)
+	}
+	return nil
+}
+
+func readDownloadArtifactReceipt(outputPath string) (downloadprepare.Result, error) {
+	data, err := os.ReadFile(downloadArtifactReceiptPath(outputPath))
+	if err != nil {
+		return downloadprepare.Result{}, err
+	}
+	if len(data) > downloadArtifactReceiptMaxBytes {
+		return downloadprepare.Result{}, fmt.Errorf("download artifact receipt is too large")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var receipt downloadprepare.Result
+	if err := decoder.Decode(&receipt); err != nil {
+		return downloadprepare.Result{}, fmt.Errorf("decode download artifact receipt: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return downloadprepare.Result{}, fmt.Errorf("decode download artifact receipt: trailing data")
+	}
+	return receipt, nil
+}

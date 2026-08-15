@@ -160,23 +160,37 @@ func (p *NodeAwarePreparer) PrepareFile(ctx context.Context, artifactID string, 
 	slog.InfoContext(ctx, "dispatching download artifact prepare", "component", "downloads", "artifact_id", artifactID, "node", node.URL)
 	result, err := p.remote.Prepare(ctx, node.URL, jwtSecret, downloadprepare.NewRequest(artifactID, opts))
 	release()
-	if err == nil && result.ArtifactID == artifactID {
-		return remotePreparedArtifact(node, result), nil
-	}
-	if err == nil {
-		err = fmt.Errorf("remote download prepare returned artifact id %q, want %q", result.ArtifactID, artifactID)
+	prepareReturned := err == nil
+	if prepareReturned {
+		if remotePrepareResultMatches(result, artifactID, opts) {
+			return remotePreparedArtifact(node, result), nil
+		}
+		err = rejectedRemotePrepareResultError("prepare", result, artifactID)
 	}
 	if ctx.Err() != nil {
 		return remotePreparedArtifact(node, downloadprepare.Result{ArtifactID: artifactID}), ctx.Err()
 	}
+	if prepareReturned {
+		if deleteErr := p.remote.Delete(ctx, node.URL, jwtSecret, artifactID); deleteErr != nil {
+			return remotePreparedArtifact(node, downloadprepare.Result{ArtifactID: artifactID}),
+				errors.Join(err, fmt.Errorf("delete rejected remote download artifact: %w", deleteErr))
+		}
+		slog.WarnContext(ctx, "remote download artifact prepare was not attested; falling back to local", "component", "downloads", "artifact_id", artifactID, "node", node.URL, "error", err)
+		return p.prepareLocally(ctx, artifactID, opts, outputPath)
+	}
 	// A completed encode can outlive a lost HTTP response. Probe the same opaque
 	// id before falling back so retry/recovery does not duplicate expensive work.
-	if recovered, statErr := p.remote.Stat(ctx, node.URL, jwtSecret, artifactID); statErr == nil && recovered.ArtifactID == artifactID {
-		slog.InfoContext(ctx, "recovered completed download artifact after lost response", "component", "downloads", "artifact_id", artifactID, "node", node.URL)
-		return remotePreparedArtifact(node, recovered), nil
-	} else if statErr == nil {
-		return remotePreparedArtifact(node, downloadprepare.Result{ArtifactID: artifactID}),
-			fmt.Errorf("remote download artifact recovery returned artifact id %q, want %q", recovered.ArtifactID, artifactID)
+	if recovered, statErr := p.remote.Stat(ctx, node.URL, jwtSecret, artifactID); statErr == nil {
+		if remotePrepareResultMatches(recovered, artifactID, opts) {
+			slog.InfoContext(ctx, "recovered completed download artifact after lost response", "component", "downloads", "artifact_id", artifactID, "node", node.URL)
+			return remotePreparedArtifact(node, recovered), nil
+		}
+		recoveryErr := rejectedRemotePrepareResultError("recovery", recovered, artifactID)
+		if deleteErr := p.remote.Delete(ctx, node.URL, jwtSecret, artifactID); deleteErr != nil {
+			return remotePreparedArtifact(node, downloadprepare.Result{ArtifactID: artifactID}),
+				errors.Join(err, recoveryErr, fmt.Errorf("delete rejected remote download artifact: %w", deleteErr))
+		}
+		err = errors.Join(err, recoveryErr)
 	} else if !errors.Is(statErr, downloadprepare.ErrArtifactNotFound) {
 		slog.WarnContext(ctx, "remote download artifact recovery probe failed", "component", "downloads", "artifact_id", artifactID, "node", node.URL, "error", statErr)
 		// The POST may have completed even though its response was lost. If the
@@ -189,6 +203,25 @@ func (p *NodeAwarePreparer) PrepareFile(ctx context.Context, artifactID string, 
 	}
 	slog.WarnContext(ctx, "remote download artifact prepare unavailable; falling back to local", "component", "downloads", "artifact_id", artifactID, "node", node.URL, "error", err)
 	return p.prepareLocally(ctx, artifactID, opts, outputPath)
+}
+
+func remotePrepareResultMatches(result downloadprepare.Result, artifactID string, opts playback.TranscodeOpts) bool {
+	if result.ArtifactID != artifactID {
+		return false
+	}
+	if opts.ToneMapMode == "" {
+		return true
+	}
+	return result.ToneMapRecipeVersion == opts.ToneMapRecipeVersion &&
+		result.ToneMapMode == opts.ToneMapMode &&
+		result.ToneMapSourceRevisionFingerprint == opts.ToneMapSourceRevision.Fingerprint()
+}
+
+func rejectedRemotePrepareResultError(operation string, result downloadprepare.Result, artifactID string) error {
+	if result.ArtifactID != artifactID {
+		return fmt.Errorf("remote download artifact %s returned artifact id %q, want %q", operation, result.ArtifactID, artifactID)
+	}
+	return fmt.Errorf("remote download artifact %s returned mismatched tone-map attestation for %q", operation, artifactID)
 }
 
 // ToneMapCapabilities reports the validated executor union of enabled pooled

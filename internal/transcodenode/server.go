@@ -511,8 +511,8 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	outputPath := filepath.Join(artifactRoot, req.ArtifactID+".mp4")
-	if stat, err := os.Stat(outputPath); err == nil && stat.Mode().IsRegular() && stat.Size() > 0 {
-		writeDownloadPrepareResult(w, req.ArtifactID, stat.Size())
+	if result, ok := existingDownloadPrepareResult(outputPath, req); ok {
+		writeDownloadPrepareResult(w, result)
 		return
 	}
 	if toneMapRecipeRequested(opts) {
@@ -523,9 +523,12 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 	}
 	unlock := s.lockSessionLifecycle("download-artifact-" + req.ArtifactID)
 	defer unlock()
-	if stat, err := os.Stat(outputPath); err == nil && stat.Mode().IsRegular() && stat.Size() > 0 {
-		writeDownloadPrepareResult(w, req.ArtifactID, stat.Size())
+	if result, ok := existingDownloadPrepareResult(outputPath, req); ok {
+		writeDownloadPrepareResult(w, result)
 		return
+	}
+	if toneMapRecipeRequested(opts) {
+		_ = os.Remove(downloadArtifactReceiptPath(outputPath))
 	}
 
 	jobCtx := r.Context()
@@ -557,7 +560,41 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "prepared download artifact unavailable", http.StatusInternalServerError)
 		return
 	}
-	writeDownloadPrepareResult(w, req.ArtifactID, stat.Size())
+	result := downloadPrepareResult(req, stat.Size())
+	if result.ToneMapMode != "" {
+		if err := writeDownloadArtifactReceipt(outputPath, result); err != nil {
+			_ = os.Remove(outputPath)
+			http.Error(w, "failed to publish download artifact receipt", http.StatusInternalServerError)
+			return
+		}
+	}
+	writeDownloadPrepareResult(w, result)
+}
+
+func downloadPrepareResult(req downloadprepare.Request, fileSize int64) downloadprepare.Result {
+	result := downloadprepare.Result{ArtifactID: req.ArtifactID, FileSize: fileSize}
+	if req.ToneMapMode != "" {
+		result.ToneMapRecipeVersion = req.ToneMapRecipeVersion
+		result.ToneMapMode = req.ToneMapMode
+		result.ToneMapSourceRevisionFingerprint = req.ToneMapSourceRevision.Fingerprint()
+	}
+	return result
+}
+
+func existingDownloadPrepareResult(outputPath string, req downloadprepare.Request) (downloadprepare.Result, bool) {
+	stat, err := os.Stat(outputPath)
+	if err != nil || !stat.Mode().IsRegular() || stat.Size() <= 0 {
+		return downloadprepare.Result{}, false
+	}
+	want := downloadPrepareResult(req, stat.Size())
+	if req.ToneMapMode == "" {
+		return want, true
+	}
+	receipt, err := readDownloadArtifactReceipt(outputPath)
+	if err != nil || receipt != want {
+		return downloadprepare.Result{}, false
+	}
+	return receipt, true
 }
 
 // toneMapRecipeRequested reports whether any transported field claims that the
@@ -599,9 +636,9 @@ func writeToneMapRecipeError(w http.ResponseWriter, err error) {
 	http.Error(w, "unsupported or stale tone-map recipe", http.StatusUnprocessableEntity)
 }
 
-func writeDownloadPrepareResult(w http.ResponseWriter, artifactID string, fileSize int64) {
+func writeDownloadPrepareResult(w http.ResponseWriter, result downloadprepare.Result) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(downloadprepare.Result{ArtifactID: artifactID, FileSize: fileSize})
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 func (s *Server) sessionOutputDir(sessionID string) string {
@@ -643,6 +680,9 @@ func (s *Server) handleDownloadArtifact(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Disposition", `attachment; filename="`+artifactID+`.mp4"`)
 	w.Header().Set("Content-Type", playback.MimeFromExtension(path))
 	w.Header().Set("ETag", `"`+artifactID+`-`+strconv.FormatInt(stat.Size(), 10)+`"`)
+	if receipt, err := readDownloadArtifactReceipt(path); err == nil && receipt.ArtifactID == artifactID && receipt.FileSize == stat.Size() {
+		downloadprepare.SetResultHeaders(w.Header(), receipt)
+	}
 	http.ServeContent(w, r, stat.Name(), stat.ModTime(), f)
 }
 
@@ -660,7 +700,7 @@ func (s *Server) handleDeleteDownloadArtifact(w http.ResponseWriter, r *http.Req
 	unlock := s.lockSessionLifecycle("download-artifact-" + artifactID)
 	defer unlock()
 	path := filepath.Join(s.artifactRoot, artifactID+".mp4")
-	for _, candidate := range []string{path, path + ".part"} {
+	for _, candidate := range []string{path, path + ".part", downloadArtifactReceiptPath(path), downloadArtifactReceiptPath(path) + ".part"} {
 		if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
 			http.Error(w, "failed to remove artifact", http.StatusInternalServerError)
 			return
