@@ -60,6 +60,26 @@ type HWAccelInfo struct {
 	ProbeRequestTimeoutMillis int64 `json:"probe_request_timeout_ms,omitempty"`
 }
 
+const (
+	probeRequestMinTimeout = 5 * time.Second
+	probeRequestMaxTimeout = 5 * time.Minute
+)
+
+// NormalizeProbeRequestTimeout bounds a node-advertised probe budget while
+// preserving the caller's established fallback for a missing advertisement.
+func NormalizeProbeRequestTimeout(millis int64, fallback time.Duration) time.Duration {
+	if millis <= 0 {
+		return fallback
+	}
+	if millis < probeRequestMinTimeout.Milliseconds() {
+		return probeRequestMinTimeout
+	}
+	if millis > probeRequestMaxTimeout.Milliseconds() {
+		return probeRequestMaxTimeout
+	}
+	return time.Duration(millis) * time.Millisecond
+}
+
 // DetectHWAccel probes this host's GPU hardware and returns structured info.
 func DetectHWAccel() HWAccelInfo {
 	return DetectHWAccelWithFFmpeg("")

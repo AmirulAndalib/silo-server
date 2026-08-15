@@ -1111,7 +1111,7 @@ func TestPlanPlaybackV3ToneMapSettingsSelectValidatedExecutor(t *testing.T) {
 				Registry: registry, ToneMapCapabilities: capabilities,
 			})
 			if tt.wantMode == "" {
-				if result.Terminal == nil || result.Terminal.Reason != "hdr_transcode_unsupported" {
+				if result.Terminal == nil || result.Terminal.Reason != TerminalHDRTranscodeUnsupportedV3 {
 					t.Fatalf("result = %s", ExplainPlannerResultV3(result))
 				}
 				return
@@ -1119,7 +1119,7 @@ func TestPlanPlaybackV3ToneMapSettingsSelectValidatedExecutor(t *testing.T) {
 			if result.Plan == nil || result.ToneMapMode != tt.wantMode || result.ToneMapSourceKind != tonemap.SourcePQ {
 				t.Fatalf("result = %#v", result)
 			}
-			if result.Plan.EffectiveRecipe.DynamicRange != DynamicRangeSDRV3 || !hasDegradationWarningV3(result.Plan.DegradationWarnings, "hdr_tone_mapped") {
+			if result.Plan.EffectiveRecipe.DynamicRange != DynamicRangeSDRV3 || !hasDegradationWarningV3(result.Plan.DegradationWarnings, DegradationWarningHDRToneMappedV3) {
 				t.Fatalf("plan = %#v", result.Plan)
 			}
 			found := false

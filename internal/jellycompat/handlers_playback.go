@@ -412,17 +412,14 @@ func (h *PlaybackHandler) toneMapCapabilityTimeout() time.Duration {
 	return compatRemoteNodeProbeFallbackTimeout
 }
 
-func (h *PlaybackHandler) remoteTranscodeStartTimeout(request transcodenode.TranscodeStartRequest, nodeProbeTimeout time.Duration) time.Duration {
+func (h *PlaybackHandler) remoteTranscodeStartTimeout(request transcodenode.TranscodeStartRequest, nodeProbeTimeoutMillis int64) time.Duration {
 	if compatRemoteTranscodeStartTimeout > 0 {
 		return compatRemoteTranscodeStartTimeout
 	}
 	if request.ToneMapMode == "" {
 		return 20 * time.Second
 	}
-	timeout := nodeProbeTimeout
-	if timeout <= 0 {
-		timeout = h.toneMapCapabilityTimeout()
-	}
+	timeout := playback.NormalizeProbeRequestTimeout(nodeProbeTimeoutMillis, h.toneMapCapabilityTimeout())
 	if request.ToneMapPreflightRequired {
 		timeout += tonemap.SourcePreflightTimeout(request.TotalDuration)
 	}
@@ -776,7 +773,7 @@ func (h *PlaybackHandler) startRemoteTranscode(
 	sourceVideoCodec, sourceVideoProfile, sourceVideoBitDepth := playback.SourceVideoTranscodeFacts(file)
 	toneMapRecipe := compatToneMapRecipe{}
 	var toneMapCapabilities tonemap.Capabilities
-	nodeProbeTimeout := time.Duration(0)
+	nodeProbeTimeoutMillis := int64(0)
 	if !source.TranscodeAudio {
 		metadata := tonemap.MetadataForFile(file)
 		if metadata.DynamicRange != "" && metadata.DynamicRange != playback.DynamicRangeSDRV3 {
@@ -785,7 +782,7 @@ func (h *PlaybackHandler) startRemoteTranscode(
 			var info playback.HWAccelInfo
 			info, capabilityErr = h.remoteToneMapCapabilityInfo(capabilityCtx, transcodeNodeURL)
 			toneMapCapabilities = info.ToneMapCapabilities
-			nodeProbeTimeout = time.Duration(info.ProbeRequestTimeoutMillis) * time.Millisecond
+			nodeProbeTimeoutMillis = info.ProbeRequestTimeoutMillis
 			cancelCapabilityFetch()
 			if capabilityErr != nil {
 				return fmt.Errorf("load transcode node tone-map capabilities: %w", capabilityErr)
@@ -836,7 +833,7 @@ func (h *PlaybackHandler) startRemoteTranscode(
 		if err != nil {
 			return transcodenode.TranscodeStartResponse{}, 0, false, fmt.Errorf("marshal transcode request: %w", err)
 		}
-		requestCtx, cancel := context.WithTimeout(ctx, h.remoteTranscodeStartTimeout(request, nodeProbeTimeout))
+		requestCtx, cancel := context.WithTimeout(ctx, h.remoteTranscodeStartTimeout(request, nodeProbeTimeoutMillis))
 		defer cancel()
 		httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, transcodeNodeURL+"/transcode/start", strings.NewReader(string(body)))
 		if err != nil {

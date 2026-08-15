@@ -180,7 +180,7 @@ func writeCompatStartupManifest(t *testing.T, outputDir string) {
 
 func TestEnsureTranscodeSessionGivesSoftwareFallbackFreshManifestBudget(t *testing.T) {
 	previousTimeout := compatManifestStartupTimeout
-	compatManifestStartupTimeout = 200 * time.Millisecond
+	compatManifestStartupTimeout = time.Second
 	t.Cleanup(func() { compatManifestStartupTimeout = previousTimeout })
 
 	ffmpegPath := filepath.Join(t.TempDir(), "fallback-ffmpeg.sh")

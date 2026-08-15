@@ -29,6 +29,7 @@ type NodeAwarePreparer struct {
 	remote       downloadprepare.RemotePreparer
 	originLookup artifactOriginLookup
 	settings     SettingsReader
+	probeClient  *http.Client
 	capabilityMu sync.Mutex
 	capabilities map[string]remoteToneMapCapabilities
 }
@@ -49,22 +50,17 @@ const (
 )
 
 func normalizeRemoteToneMapProbeTimeout(millis int64) time.Duration {
-	if millis <= 0 {
-		return remoteToneMapProbeMinTimeout
-	}
-	if millis < remoteToneMapProbeMinTimeout.Milliseconds() {
-		return remoteToneMapProbeMinTimeout
-	}
-	if millis > remoteOnlyToneMapPlanTimeout.Milliseconds() {
-		return remoteOnlyToneMapPlanTimeout
-	}
-	return time.Duration(millis) * time.Millisecond
+	return playback.NormalizeProbeRequestTimeout(millis, remoteToneMapProbeMinTimeout)
 }
 
 // eligibleTranscodeWorkPlanner reserves work only on nodes that satisfy a
 // lock-safe capability predicate.
 type eligibleTranscodeWorkPlanner interface {
 	ReserveTranscodeWorkWith(workID string, eligible func(*nodepool.Node) bool) (*nodepool.Node, func())
+}
+
+type transcodeWorkCapacityPlanner interface {
+	TranscodeWorkAvailableWith(eligible func(*nodepool.Node) bool) bool
 }
 
 // transcodeNodeEnumerator lists the currently enabled transcode pool for
@@ -208,7 +204,7 @@ func (p *NodeAwarePreparer) ToneMapCapabilities(ctx context.Context) (tonemap.Ca
 // reservable capacity now. Capability discovery completes before the planner
 // lock is acquired so the eligibility predicate remains lock-safe.
 func (p *NodeAwarePreparer) ToneMapModeAvailable(ctx context.Context, mode tonemap.Mode, kind tonemap.SourceKind) (bool, error) {
-	selector, ok := p.planner.(eligibleTranscodeWorkPlanner)
+	selector, ok := p.planner.(transcodeWorkCapacityPlanner)
 	if !ok {
 		return false, nil
 	}
@@ -219,17 +215,14 @@ func (p *NodeAwarePreparer) ToneMapModeAvailable(ctx context.Context, mode tonem
 			capable[strings.TrimRight(nodeURL, "/")] = struct{}{}
 		}
 	}
-	node, release := selector.ReserveTranscodeWorkWith("download-tone-map-plan", func(candidate *nodepool.Node) bool {
+	available := selector.TranscodeWorkAvailableWith(func(candidate *nodepool.Node) bool {
 		if candidate == nil {
 			return false
 		}
 		_, supported := capable[strings.TrimRight(candidate.URL, "/")]
 		return supported
 	})
-	if release != nil {
-		release()
-	}
-	if node != nil {
+	if available {
 		return true, nil
 	}
 	return false, probeErr
@@ -308,7 +301,11 @@ func (p *NodeAwarePreparer) toneMapCapabilitiesForNode(ctx context.Context, node
 		return nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.Auth.JWTSecret)
-	response, err := http.DefaultClient.Do(request)
+	client := p.probeClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		p.cacheToneMapCapabilityFailure(nodeURL, err)
 		return nil, err

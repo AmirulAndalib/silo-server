@@ -338,6 +338,26 @@ func (p *Planner) ReserveTranscodeWorkWith(workID string, eligible func(*Node) b
 	}
 }
 
+// TranscodeWorkAvailableWith reports whether a healthy, under-cap transcode
+// node satisfies eligible without creating a provisional reservation.
+func (p *Planner) TranscodeWorkAvailableWith(eligible func(*Node) bool) bool {
+	if p == nil || p.transcodes == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.now()
+	for _, node := range p.transcodes.Nodes() {
+		if node == nil || !node.Enabled || !node.Healthy || !p.underCap(node, now) {
+			continue
+		}
+		if eligible == nil || eligible(node) {
+			return true
+		}
+	}
+	return false
+}
+
 // groupHealth reports, for every group label present in either pool, whether
 // all of its enabled members are healthy. Pools only hold enabled nodes, so
 // disabled nodes never count against a group.

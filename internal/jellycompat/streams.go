@@ -299,27 +299,7 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	// Ensure the transcode process is running.
 	manifest, err := h.ensureTranscodeManifest(r.Context(), session, playSession.ID, *source)
 	if err != nil {
-		if errors.Is(err, errToneMapCapabilityUnavailable) {
-			writeError(w, http.StatusServiceUnavailable, "TranscodeUnavailable", err.Error())
-			return
-		}
-		if errors.Is(err, errTranscode4KDisallowed) {
-			writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
-			return
-		}
-		if errors.Is(err, errHDRTranscodeUnsupported) {
-			writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", err.Error())
-			return
-		}
-		if errors.Is(err, playback.ErrManifestNotReady) {
-			writeError(w, http.StatusServiceUnavailable, "NotReady", "Transcode playlist not ready")
-			return
-		}
-		if errors.Is(err, playback.ErrTranscodeFailed) {
-			writeError(w, http.StatusInternalServerError, "TranscodeFailed", "Transcode session failed")
-			return
-		}
-		writeCompatUpstreamError(w, err)
+		writeCompatTranscodeError(w, err)
 		return
 	}
 
@@ -332,6 +312,23 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(rewriteManifest(manifest, playSession.RouteItemID, playSession.ID, source.ID))
+}
+
+func writeCompatTranscodeError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errToneMapCapabilityUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "TranscodeUnavailable", err.Error())
+	case errors.Is(err, errTranscode4KDisallowed):
+		writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
+	case errors.Is(err, errHDRTranscodeUnsupported):
+		writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", err.Error())
+	case errors.Is(err, playback.ErrManifestNotReady):
+		writeError(w, http.StatusServiceUnavailable, "NotReady", "Transcode playlist not ready")
+	case errors.Is(err, playback.ErrTranscodeFailed):
+		writeError(w, http.StatusInternalServerError, "TranscodeFailed", "Transcode session failed")
+	default:
+		writeCompatUpstreamError(w, err)
+	}
 }
 
 // HandleHLSManifest serves the compat playlist route used after the master URL.
@@ -359,27 +356,7 @@ func (h *PlaybackHandler) HandleHLSManifest(w http.ResponseWriter, r *http.Reque
 	// Ensure the transcode process is running.
 	manifest, err := h.ensureTranscodeManifest(r.Context(), session, playSession.ID, *source)
 	if err != nil {
-		if errors.Is(err, errToneMapCapabilityUnavailable) {
-			writeError(w, http.StatusServiceUnavailable, "TranscodeUnavailable", err.Error())
-			return
-		}
-		if errors.Is(err, errTranscode4KDisallowed) {
-			writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
-			return
-		}
-		if errors.Is(err, errHDRTranscodeUnsupported) {
-			writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", err.Error())
-			return
-		}
-		if errors.Is(err, playback.ErrManifestNotReady) {
-			writeError(w, http.StatusServiceUnavailable, "NotReady", "Transcode playlist not ready")
-			return
-		}
-		if errors.Is(err, playback.ErrTranscodeFailed) {
-			writeError(w, http.StatusInternalServerError, "TranscodeFailed", "Transcode session failed")
-			return
-		}
-		writeCompatUpstreamError(w, err)
+		writeCompatTranscodeError(w, err)
 		return
 	}
 

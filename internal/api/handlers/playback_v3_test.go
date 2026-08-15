@@ -4324,8 +4324,9 @@ func TestLookupRemoteCapabilitiesStartsCacheTTLAfterRequestCompletes(t *testing.
 }
 
 func TestRemoteToneMapProbeTimeoutUsesTargetNodeBudget(t *testing.T) {
+	probeTimeoutMillis := int64(137000)
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{ProbeRequestTimeoutMillis: 137000})
+		_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{ProbeRequestTimeoutMillis: probeTimeoutMillis})
 	}))
 	defer remote.Close()
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
@@ -4342,5 +4343,16 @@ func TestRemoteToneMapProbeTimeoutUsesTargetNodeBudget(t *testing.T) {
 	request := transcodenode.TranscodeStartRequest{ToneMapMode: tonemap.ModeHardware}
 	if got, want := handler.remotePlaybackTransportTimeout(remote.URL, request), 137*time.Second; got != want {
 		t.Fatalf("remote start timeout = %s, want target node budget %s", got, want)
+	}
+
+	handler.v3NodeCapabilitiesMu.Lock()
+	delete(handler.v3NodeCapabilities, remote.URL)
+	handler.v3NodeCapabilitiesMu.Unlock()
+	probeTimeoutMillis = (10 * time.Minute).Milliseconds()
+	if _, err := handler.lookupRemoteCapabilitiesV3(context.Background(), remote.URL, false); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := handler.remoteToneMapProbeTimeoutV3(remote.URL), 5*time.Minute; got != want {
+		t.Fatalf("bounded remote probe timeout = %s, want %s", got, want)
 	}
 }

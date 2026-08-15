@@ -39,7 +39,10 @@ func TestSourceRevisionRoundTripAndPathValidation(t *testing.T) {
 	if err := revision.ValidatePath(path); err != nil {
 		t.Fatalf("ValidatePath(original) = %v", err)
 	}
-	if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("replaced"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, info.ModTime().Add(time.Second), info.ModTime().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if err := revision.ValidatePath(path); err == nil {

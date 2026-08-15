@@ -511,8 +511,6 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	outputPath := filepath.Join(artifactRoot, req.ArtifactID+".mp4")
-	unlock := s.lockSessionLifecycle("download-artifact-" + req.ArtifactID)
-	defer unlock()
 	if stat, err := os.Stat(outputPath); err == nil && stat.Mode().IsRegular() && stat.Size() > 0 {
 		writeDownloadPrepareResult(w, req.ArtifactID, stat.Size())
 		return
@@ -522,6 +520,12 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 			writeToneMapRecipeError(w, err)
 			return
 		}
+	}
+	unlock := s.lockSessionLifecycle("download-artifact-" + req.ArtifactID)
+	defer unlock()
+	if stat, err := os.Stat(outputPath); err == nil && stat.Mode().IsRegular() && stat.Size() > 0 {
+		writeDownloadPrepareResult(w, req.ArtifactID, stat.Size())
+		return
 	}
 
 	jobCtx := r.Context()
@@ -1064,30 +1068,12 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 		slog.WarnContext(r.Context(), "transcode node reconstruct input rejected", "component", "transcodenode", "session", sessionID, "error", err)
 		return nil
 	}
-
-	// Pace the cold-start burst so a node restart that loses many sessions does not
-	// launch every ffmpeg at once. A client that disconnects while waiting releases
-	// its slot rather than queueing dead work.
-	release, ok := s.acquireReconstructSlot(r.Context())
-	if !ok {
-		return nil
-	}
-	defer release()
-	s.reloadMu.RLock()
-	defer s.reloadMu.RUnlock()
-
-	// Serialize against a concurrent fresh /transcode/start for this session so the
-	// two never run ffmpeg writers against the same dir. Re-check under the lock and
-	// yield to any live session rather than spawning a duplicate.
-	unlock := s.lockSessionLifecycle(sessionID)
-	defer unlock()
 	s.mu.RLock()
 	existing, ok := s.sessions[sessionID]
 	s.mu.RUnlock()
 	if ok {
 		return existing
 	}
-
 	cfg := s.watcher.Config()
 	if cfg == nil {
 		return nil
@@ -1109,6 +1095,32 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 				"session", sessionID, "playback_session_id", sessionID)
 			return nil
 		}
+	}
+
+	// Pace the cold-start burst so a node restart that loses many sessions does not
+	// launch every ffmpeg at once. A client that disconnects while waiting releases
+	// its slot rather than queueing dead work.
+	release, ok := s.acquireReconstructSlot(r.Context())
+	if !ok {
+		return nil
+	}
+	defer release()
+	s.reloadMu.RLock()
+	defer s.reloadMu.RUnlock()
+	if s.watcher.Config() != cfg {
+		return nil
+	}
+
+	// Serialize against a concurrent fresh /transcode/start for this session so the
+	// two never run ffmpeg writers against the same dir. Re-check under the lock and
+	// yield to any live session rather than spawning a duplicate.
+	unlock := s.lockSessionLifecycle(sessionID)
+	defer unlock()
+	s.mu.RLock()
+	existing, ok = s.sessions[sessionID]
+	s.mu.RUnlock()
+	if ok {
+		return existing
 	}
 
 	// Resume near the segment the client is actually requesting. The card records

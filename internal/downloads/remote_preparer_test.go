@@ -52,6 +52,32 @@ type nilCandidatePlanner struct {
 	invoked bool
 }
 
+type nonReservingCapacityPlanner struct {
+	node            *nodepool.Node
+	reservationUsed bool
+}
+
+func (p *nonReservingCapacityPlanner) ReserveTranscodeWork(string) (*nodepool.Node, func()) {
+	return nil, nil
+}
+
+func (p *nonReservingCapacityPlanner) ReserveTranscodeWorkWith(string, func(*nodepool.Node) bool) (*nodepool.Node, func()) {
+	p.reservationUsed = true
+	return nil, nil
+}
+
+func (p *nonReservingCapacityPlanner) TranscodeWorkAvailableWith(eligible func(*nodepool.Node) bool) bool {
+	return eligible(p.node)
+}
+
+func (p *nonReservingCapacityPlanner) TranscodeNode(int) (*nodepool.Node, bool) {
+	return nil, false
+}
+
+func (p *nonReservingCapacityPlanner) TranscodeNodeURLs() []string {
+	return []string{p.node.URL}
+}
+
 func (p *nilCandidatePlanner) ReserveTranscodeWork(string) (*nodepool.Node, func()) {
 	return nil, nil
 }
@@ -319,6 +345,29 @@ func TestNodeAwarePreparerReportsSoftwareCapacityWhenHardwareIsFull(t *testing.T
 	}
 }
 
+func TestToneMapModeAvailableDoesNotReserveCapacity(t *testing.T) {
+	node := &nodepool.Node{URL: "http://software", Enabled: true, Healthy: true}
+	planner := &nonReservingCapacityPlanner{node: node}
+	preparer := NewNodeAwarePreparer(nil, planner, nil)
+	preparer.capabilities = map[string]remoteToneMapCapabilities{
+		node.URL: {
+			capabilities: tonemap.Capabilities{{
+				Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+				SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+			}},
+			expiresAt: time.Now().Add(time.Minute),
+		},
+	}
+
+	available, err := preparer.ToneMapModeAvailable(context.Background(), tonemap.ModeSoftware, tonemap.SourcePQ)
+	if err != nil || !available {
+		t.Fatalf("software availability = %t, %v; want true", available, err)
+	}
+	if planner.reservationUsed {
+		t.Fatal("capacity probe created a transcode reservation")
+	}
+}
+
 // TestNodeAwarePreparerCollectsToneMapCapabilitiesConcurrently verifies node discovery overlaps.
 func TestNodeAwarePreparerCollectsToneMapCapabilitiesConcurrently(t *testing.T) {
 	var active atomic.Int32
@@ -413,14 +462,12 @@ func TestNodeAwarePreparerUsesTargetNodeProbeBudget(t *testing.T) {
 		}
 		return http.DefaultTransport.RoundTrip(request)
 	})
-	originalClient := http.DefaultClient
-	http.DefaultClient = &http.Client{Transport: transport}
-	t.Cleanup(func() { http.DefaultClient = originalClient })
 	cfg := &config.Config{}
 	cfg.Auth.JWTSecret = "secret"
 	cfg.Playback.HWAccel = tonemap.BackendQSV
 	cfg.Playback.HWDevice = "/central/device"
 	preparer := NewNodeAwarePreparer(nil, nil, func() *config.Config { return cfg })
+	preparer.probeClient = &http.Client{Transport: transport}
 
 	if got, want := preparer.remoteToneMapProbeTimeout(remote.URL), remoteToneMapProbeMinTimeout; got != want {
 		t.Fatalf("unknown-node probe timeout = %s, want cold-node fallback %s", got, want)

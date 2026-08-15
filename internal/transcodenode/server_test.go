@@ -1211,3 +1211,59 @@ func TestToneMapRecipeContextFailuresReturnServiceUnavailable(t *testing.T) {
 		}
 	}
 }
+
+func TestDownloadToneMapRecipeRejectionDoesNotWaitForArtifactLock(t *testing.T) {
+	server := newTestServer(t)
+	const artifactID = "tone-map-lock-order"
+	unlock := server.lockSessionLifecycle("download-artifact-" + artifactID)
+	defer unlock()
+	requestBody, err := json.Marshal(downloadprepare.Request{
+		ArtifactID: artifactID, InputPath: "/media/movie.mkv",
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac",
+		ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
+		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: "stale",
+		ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		server.handleDownloadPrepare(recorder, httptest.NewRequest(http.MethodPost, "/downloads/prepare", bytes.NewReader(requestBody)))
+		close(done)
+	}()
+	select {
+	case <-done:
+		if recorder.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("tone-map recipe rejection waited for the artifact lifecycle lock")
+	}
+}
+
+func TestReconstructToneMapRecipeRejectionDoesNotWaitForReloadLock(t *testing.T) {
+	server := newTestServer(t)
+	server.reloadMu.Lock()
+	defer server.reloadMu.Unlock()
+	card := playback.RecipeCard{
+		SessionID: "tone-map-reconstruct-lock-order", InputPath: "/media/movie.mkv",
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac", SegmentDuration: 2,
+		ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
+		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: "stale",
+		ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1},
+	}
+	done := make(chan *playback.TranscodeSession, 1)
+	go func() {
+		done <- server.spawnReconstruct(httptest.NewRequest(http.MethodGet, "/", nil), card.SessionID, -1, card)
+	}()
+	select {
+	case session := <-done:
+		if session != nil {
+			t.Fatal("stale tone-map reconstruction unexpectedly started")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("tone-map recipe rejection waited for the reload lock")
+	}
+}

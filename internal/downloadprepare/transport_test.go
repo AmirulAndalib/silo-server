@@ -55,7 +55,15 @@ func TestRequestRoundTripPreservesFrozenToneMapRecipe(t *testing.T) {
 		TargetCodecVideo: "h264", TargetCodecAudio: "aac",
 	}
 	request := NewRequest("artifact-1", want)
-	got := request.TranscodeOpts("/usr/bin/ffmpeg", "qsv", "/dev/dri/renderD128", nil)
+	wire, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	var decoded Request
+	if err := json.Unmarshal(wire, &decoded); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	got := decoded.TranscodeOpts("/usr/bin/ffmpeg", "qsv", "/dev/dri/renderD128", nil)
 	if got.ToneMapPolicy != want.ToneMapPolicy || got.ToneMapMode != want.ToneMapMode ||
 		got.ToneMapSourceKind != want.ToneMapSourceKind || got.ToneMapRecipeVersion != want.ToneMapRecipeVersion ||
 		got.ToneMapPreflightRequired != want.ToneMapPreflightRequired || got.ToneMapSourceRevision != revision {

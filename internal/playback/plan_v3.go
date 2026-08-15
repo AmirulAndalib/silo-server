@@ -805,16 +805,13 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 	toneMapOK := toneMapRecipe.ok
 	toneMapSourceKind := toneMapResolution.Kind
 	if source.DynamicRange != "" && source.DynamicRange != DynamicRangeSDRV3 {
-		if !toneMapOK {
-			return terminalPlannerResultV3(TerminalHDRTranscodeUnsupportedV3, "This HDR source requires video encoding, but no enabled validated tone-map recipe is available.", false)
-		}
 		plan.Transformations = append(plan.Transformations, TransformationV3{
 			Name: TransformationHDRToSDRToneMapV3, Executor: ExecutorServerV3,
 			RecipeVersion:   TransformationHDRToSDRToneMapRecipeVersionV3,
 			ValidatedClaims: []string{ClaimHDRMetadataRemovedV3, ClaimSDRBT709OutputV3},
 		})
 		plan.DegradationWarnings = append(plan.DegradationWarnings, DegradationWarningV3{
-			Code: "hdr_tone_mapped", Message: "HDR video is tone-mapped to SDR for this playback route.",
+			Code: DegradationWarningHDRToneMappedV3, Message: "HDR video is tone-mapped to SDR for this playback route.",
 		})
 	} else {
 		// A non-tone-mapped recipe has no execution policy. Keeping PolicyNone

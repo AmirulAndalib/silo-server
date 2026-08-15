@@ -32,6 +32,9 @@ const (
 	DeviceQuirkRegistryRevisionV3 = "2026-07-13.1"
 )
 
+// Degradation warning codes reported by playback plans.
+const DegradationWarningHDRToneMappedV3 = "hdr_tone_mapped"
+
 // ServerFeaturesV3 returns the complete feature set advertised by protocol-v3
 // capability and decision responses. A fresh slice prevents callers from
 // mutating the shared contract.

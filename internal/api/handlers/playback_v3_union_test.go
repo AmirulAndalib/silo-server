@@ -983,6 +983,46 @@ func TestPrepareTransportV3ReportsSoftwareToneMapFallback(t *testing.T) {
 	}
 }
 
+func TestPrepareSoftwareToneMapFallbackV3ValidatesLocalRegistry(t *testing.T) {
+	file := stableToneMapTransportFileV3(t)
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.NodePlanner = staticNodePlannerV3{}
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{
+		config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+	}}
+	handler.v3ToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+		return tonemap.Capabilities{{
+			Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+			SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+		}}, nil
+	}
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
+		{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
+	}))
+	result := playback.PlannerResultV3{
+		Plan: &playback.PlanV3{PlanID: "plan:invalid-local-fallback", Delivery: playback.DeliveryTranscodeHLSV3, Transformations: []playback.TransformationV3{
+			{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
+			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+			{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
+		}},
+		PlayMethod: playback.PlayTranscode, ToneMapPolicy: tonemap.PolicyHardwareThenSoftware,
+		ToneMapMode: tonemap.ModeHardware, ToneMapSourceKind: tonemap.SourcePQ,
+	}
+
+	_, attempted, transportErr := handler.prepareSoftwareToneMapFallbackV3(
+		httptest.NewRequest(http.MethodPost, "/", nil),
+		&playback.Session{ID: "session-invalid-local-fallback", UserID: 7, ProfileID: "profile-1"},
+		file, result, preparedTimelineV3{},
+	)
+	if !attempted {
+		t.Fatal("software fallback was not attempted")
+	}
+	if transportErr == nil || transportErr.reason != "transcode_node_capability_unavailable" || !transportErr.retryable {
+		t.Fatalf("transport error = %#v, want retryable local registry rejection", transportErr)
+	}
+}
+
 func TestPrepareTransportV3FallsBackToSoftwareCapacity(t *testing.T) {
 	requiredTransformations := []playback.TransformationV3{
 		{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},

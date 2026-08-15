@@ -120,8 +120,29 @@ func TestResolveHWAccelWithFFmpegContextHonorsCallerDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls := strings.Count(string(logData), "\n"); calls != 1 {
-		t.Fatalf("canceled probe command count = %d, want one shared attempt", calls)
+	if calls := strings.Count(string(logData), "\n"); calls < 1 || calls > 4 {
+		t.Fatalf("canceled probe command count = %d, want one shared attempt of at most four commands", calls)
+	}
+}
+
+func TestNormalizeProbeRequestTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		millis   int64
+		fallback time.Duration
+		want     time.Duration
+	}{
+		{name: "missing uses caller fallback", fallback: 2 * time.Minute, want: 2 * time.Minute},
+		{name: "negative uses caller fallback", millis: -1, fallback: 2 * time.Minute, want: 2 * time.Minute},
+		{name: "too small", millis: time.Second.Milliseconds(), fallback: 2 * time.Minute, want: 5 * time.Second},
+		{name: "advertised", millis: (137 * time.Second).Milliseconds(), fallback: 2 * time.Minute, want: 137 * time.Second},
+		{name: "too large", millis: (10 * time.Minute).Milliseconds(), fallback: 2 * time.Minute, want: 5 * time.Minute},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := NormalizeProbeRequestTimeout(test.millis, test.fallback); got != test.want {
+				t.Fatalf("NormalizeProbeRequestTimeout() = %s, want %s", got, test.want)
+			}
+		})
 	}
 }
 

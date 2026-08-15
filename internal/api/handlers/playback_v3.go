@@ -255,7 +255,7 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 		transformations:     append([]playback.TransformationV3(nil), info.Transformations...),
 		toneMapCapabilities: append(tonemap.Capabilities(nil), info.ToneMapCapabilities...),
 		expiresAt:           completedAt.Add(v3NodeCapabilityTTL),
-		probeRequestTimeout: time.Duration(info.ProbeRequestTimeoutMillis) * time.Millisecond,
+		probeRequestTimeout: playback.NormalizeProbeRequestTimeout(info.ProbeRequestTimeoutMillis, remoteNodeProbeFallbackTimeout),
 	}
 	h.v3NodeCapabilitiesMu.Lock()
 	if h.v3NodeCapabilities == nil {
@@ -1165,23 +1165,8 @@ func (h *PlaybackHandler) prepareTransportV3(r *http.Request, session *playback.
 	// this fallback spawns an ffmpeg that would fail at runtime. Retryable:
 	// a capable node freeing up satisfies the same plan. Transformation-free
 	// plans skip the check (and the local probe behind it) entirely.
-	if planRequiresServerTransformationsV3(result.Plan) {
-		localRegistry, capabilityErr := h.localHLSExecutionRegistryV3(r.Context())
-		if capabilityErr != nil {
-			return preparedTransportV3{}, &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "Local transcode capability validation is temporarily unavailable.", retryable: true, cause: capabilityErr}
-		}
-		if err := validateAdvertisedTransformationsV3(result.Plan, localRegistry.Advertised()); err != nil {
-			return preparedTransportV3{}, &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "No available transcode executor can run the selected playback recipe.", retryable: true, cause: err}
-		}
-		if planRequiresToneMapV3(result.Plan) {
-			capabilities, capabilityErr := h.localToneMapCapabilitiesForTransportV3(r.Context())
-			if capabilityErr != nil {
-				return preparedTransportV3{}, &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "Local tone-map capability validation is temporarily unavailable.", retryable: true, cause: capabilityErr}
-			}
-			if err := validateToneMapExecutorV3(result, capabilities); err != nil {
-				return preparedTransportV3{}, &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "No available transcode executor can run the selected tone-map recipe.", retryable: true, cause: err}
-			}
-		}
+	if capabilityErr := h.validateLocalTransportCapabilitiesV3(r.Context(), result); capabilityErr != nil {
+		return preparedTransportV3{}, capabilityErr
 	}
 	return h.prepareLocalTransportV3(r, session, file, result, timeline)
 }
@@ -1214,15 +1199,35 @@ func (h *PlaybackHandler) prepareSoftwareToneMapFallbackV3(r *http.Request, sess
 	if !nodepool.LocalTranscodeFallbackAllowed(r.Context(), h.SettingsRepo) {
 		return preparedTransportV3{}, false, nil
 	}
-	capabilities, capabilityErr := h.localToneMapCapabilitiesForTransportV3(r.Context())
+	if capabilityErr := h.validateLocalTransportCapabilitiesV3(r.Context(), fallbackResult); capabilityErr != nil {
+		return preparedTransportV3{}, true, capabilityErr
+	}
+	fallback, fallbackErr := h.prepareLocalTransportV3(r, session, file, fallbackResult, timeline)
+	return fallback, true, fallbackErr
+}
+
+func (h *PlaybackHandler) validateLocalTransportCapabilitiesV3(ctx context.Context, result playback.PlannerResultV3) *transportErrorV3 {
+	if !planRequiresServerTransformationsV3(result.Plan) {
+		return nil
+	}
+	localRegistry, capabilityErr := h.localHLSExecutionRegistryV3(ctx)
 	if capabilityErr != nil {
-		return preparedTransportV3{}, true, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Local tone-map capability validation is temporarily unavailable.", retryable: true, cause: capabilityErr}
+		return &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "Local transcode capability validation is temporarily unavailable.", retryable: true, cause: capabilityErr}
 	}
-	if capabilities.Supports(tonemap.ModeSoftware, fallbackResult.ToneMapSourceKind) {
-		fallback, fallbackErr := h.prepareLocalTransportV3(r, session, file, fallbackResult, timeline)
-		return fallback, true, fallbackErr
+	if err := validateAdvertisedTransformationsV3(result.Plan, localRegistry.Advertised()); err != nil {
+		return &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "No available transcode executor can run the selected playback recipe.", retryable: true, cause: err}
 	}
-	return preparedTransportV3{}, false, nil
+	if !planRequiresToneMapV3(result.Plan) {
+		return nil
+	}
+	capabilities, capabilityErr := h.localToneMapCapabilitiesForTransportV3(ctx)
+	if capabilityErr != nil {
+		return &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "Local tone-map capability validation is temporarily unavailable.", retryable: true, cause: capabilityErr}
+	}
+	if err := validateToneMapExecutorV3(result, capabilities); err != nil {
+		return &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "No available transcode executor can run the selected tone-map recipe.", retryable: true, cause: err}
+	}
+	return nil
 }
 
 func (h *PlaybackHandler) prepareTransportTimelineV3(ctx context.Context, session *playback.Session, file *models.MediaFile, result playback.PlannerResultV3) (preparedTimelineV3, *transportErrorV3) {

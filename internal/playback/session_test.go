@@ -11,6 +11,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/policy"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 func TestSessionManager_StartStop(t *testing.T) {
@@ -772,7 +773,7 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 		SubtitleTrackIndex:   -1,
 		StreamBitrateKbps:    8_000,
 		TranscodeHWAccel:     "qsv",
-		ToneMapMode:          "hardware",
+		ToneMapMode:          tonemap.ModeHardware,
 		TranscodeNodeURL:     "http://old-node",
 		TranscodeTransportID: "old-transport",
 	}); err != nil {
@@ -790,7 +791,7 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 			SubtitleTrackIndex:   1,
 			StreamBitrateKbps:    3_500,
 			TranscodeHWAccel:     "none",
-			ToneMapMode:          "software",
+			ToneMapMode:          tonemap.ModeSoftware,
 			TranscodeNodeURL:     "http://new-node",
 			TranscodeTransportID: "new-transport",
 		},
