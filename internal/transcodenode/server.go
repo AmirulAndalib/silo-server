@@ -682,6 +682,8 @@ func writeToneMapRecipeError(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, tonemap.ErrSourceRevisionChanged) {
 		w.Header().Set(ToneMapExecutionErrorHeader, ToneMapSourceRevisionChangedCode)
+	} else if errors.Is(err, tonemap.ErrSourcePreflightRejected) {
+		w.Header().Set(ToneMapExecutionErrorHeader, ToneMapSourcePreflightRejectedCode)
 	}
 	http.Error(w, "unsupported or stale tone-map recipe", http.StatusUnprocessableEntity)
 }

@@ -39,6 +39,7 @@ func TestWritePlaybackToneMapExecutionError(t *testing.T) {
 		wantCode   string
 	}{
 		{tonemap.ErrSourceRevisionChanged, http.StatusUnprocessableEntity, transcodenode.ToneMapSourceRevisionChangedCode},
+		{tonemap.ErrSourcePreflightRejected, http.StatusUnprocessableEntity, transcodenode.ToneMapSourcePreflightRejectedCode},
 		{playback.ErrToneMapSourceValidationUnavailable, http.StatusServiceUnavailable, transcodenode.ToneMapSourceValidationUnavailableCode},
 	} {
 		rr := httptest.NewRecorder()

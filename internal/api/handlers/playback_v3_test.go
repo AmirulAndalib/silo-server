@@ -32,10 +32,11 @@ import (
 )
 
 type mutablePlaybackSettingsV3 struct {
-	mu       sync.Mutex
-	values   map[string]string
-	getCalls map[string]int
-	err      error
+	mu        sync.Mutex
+	values    map[string]string
+	getCalls  map[string]int
+	err       error
+	getErrors map[string]error
 }
 
 type failingAudioPreferenceStoreV3 struct {
@@ -290,6 +291,9 @@ func (s *mutablePlaybackSettingsV3) Get(_ context.Context, key string) (string, 
 	if s.err != nil {
 		return "", s.err
 	}
+	if err := s.getErrors[key]; err != nil {
+		return "", err
+	}
 	return s.values[key], nil
 }
 
@@ -298,6 +302,22 @@ func TestPlannerSettingsV3ResultPreservesStoreFailure(t *testing.T) {
 	_, err := handler.plannerSettingsV3Result(context.Background())
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("plannerSettingsV3Result() error = %v, want context deadline", err)
+	}
+}
+
+func TestPlannerSettingsV3ResultPreservesAllow4KStoreFailure(t *testing.T) {
+	store := &mutablePlaybackSettingsV3{
+		values: map[string]string{
+			config.PlaybackTranscodeHardwareToneMapSettingKey: "true",
+			config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+		},
+	}
+	store.getErrors = map[string]error{config.Allow4KTranscodeSettingKey: context.DeadlineExceeded}
+	handler := &PlaybackHandler{SettingsRepo: store}
+
+	_, err := handler.plannerSettingsV3Result(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("plannerSettingsV3Result() error = %v, want allow-4K deadline", err)
 	}
 }
 
@@ -2646,7 +2666,9 @@ func TestToneMapExecutionTransportErrorClassifiesLiveValidation(t *testing.T) {
 		wantRetryable bool
 	}{
 		{name: "stale metadata", err: tonemap.ErrSourceRevisionChanged},
+		{name: "preflight rejected", err: tonemap.ErrSourcePreflightRejected},
 		{name: "probe unavailable", err: playback.ErrToneMapSourceValidationUnavailable, wantRetryable: true},
+		{name: "executor unavailable", err: playback.ErrToneMapExecutorUnavailable, wantRetryable: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

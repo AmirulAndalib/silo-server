@@ -2739,8 +2739,11 @@ func (s *Scanner) processFile(
 			if len(updateReasons) > 1 {
 				mf := models.MediaFile{MediaFolderID: folder.ID, FilePath: filePath}
 				populateScanIdentity(&mf, filePath, folder.Type, assignment, groupAssignment, existing)
+				mf.ExternalSubtitles = externalSubtitleModels(loadExternalSubs())
 				applied, persistErr := persistIdentityUpdate(&mf,
-					func(file models.MediaFile) (int, error) { return s.fileRepo.UpdateIdentity(ctx, file) },
+					func(file models.MediaFile) (int, error) {
+						return s.fileRepo.UpdateIdentityAndExternalSubtitles(ctx, file)
+					},
 					func(file *models.MediaFile) error { return s.enqueueMetadataWork(ctx, folder, file) },
 				)
 				switch {
@@ -2786,20 +2789,7 @@ func (s *Scanner) processFile(
 			mf.SubtitleTracks = []models.SubtitleTrack{}
 		}
 
-		modelExternalSubs := make([]models.ExternalSubtitle, len(externalSubs))
-		for i, es := range externalSubs {
-			modelExternalSubs[i] = models.ExternalSubtitle{
-				Path:     es.Path,
-				Language: es.Language,
-				Format:   es.Format,
-				Title:    es.Title,
-				Forced:   es.Forced,
-			}
-		}
-		mf.ExternalSubtitles = modelExternalSubs
-		if mf.ExternalSubtitles == nil {
-			mf.ExternalSubtitles = []models.ExternalSubtitle{}
-		}
+		mf.ExternalSubtitles = externalSubtitleModels(externalSubs)
 
 		upserted, upsertErr := s.fileRepo.Upsert(ctx, mf)
 		if upsertErr != nil {
@@ -3269,12 +3259,23 @@ func shouldPreserveExistingProbeAfterProbeFailure(updateReasons []string, probe 
 		switch reason {
 		case "probe_repair":
 			foundRepair = true
-		case "group_assignment_changed", "root_assignment_changed":
+		case "group_assignment_changed", "root_assignment_changed", "external_subtitle_changed", "external_subtitle_missing":
 		default:
 			return false
 		}
 	}
 	return foundRepair
+}
+
+func externalSubtitleModels(externalSubs []ExternalSubtitleInfo) []models.ExternalSubtitle {
+	result := make([]models.ExternalSubtitle, len(externalSubs))
+	for i, es := range externalSubs {
+		result[i] = models.ExternalSubtitle{
+			Path: es.Path, Language: es.Language, Format: es.Format,
+			Title: es.Title, Forced: es.Forced,
+		}
+	}
+	return result
 }
 
 func persistIdentityUpdate(

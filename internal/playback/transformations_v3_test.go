@@ -20,6 +20,22 @@ func TestProbeTransformationRegistryWithToneMapV3ResultPreservesDeadline(t *test
 	}
 }
 
+func TestProbeTransformationRegistryWithToneMapV3ResultRejectsFailedInventoryCommand(t *testing.T) {
+	ffmpeg := filepath.Join(t.TempDir(), "ffmpeg")
+	script := "#!/bin/sh\ncase \"$2\" in\n-bsfs) echo dovi_rpu; exit 1 ;;\n-encoders) echo ' V....D libx264 H.264'; echo ' A....D aac AAC' ;;\nesac\n"
+	if err := os.WriteFile(ffmpeg, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	registry, err := ProbeTransformationRegistryWithToneMapV3Result(context.Background(), ffmpeg, nil)
+	if err == nil {
+		t.Fatal("failed -bsfs command returned a cacheable registry")
+	}
+	if !registry.Available(TransformationAudioToAACV3) || !registry.Available(TransformationVideoToH264V3) {
+		t.Fatal("successful encoder inventory was not retained in the diagnostic registry")
+	}
+}
+
 func TestH264EncoderAvailabilityAcceptsAnyPipelineEncoder(t *testing.T) {
 	cases := []struct {
 		name    string

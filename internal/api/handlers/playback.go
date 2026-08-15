@@ -1336,13 +1336,8 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
 		return
 	case playback.SessionUnavailable:
-		if errors.Is(reconstructErr, tonemap.ErrSourceRevisionChanged) {
-			w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, transcodenode.ToneMapSourceRevisionChangedCode)
-			writeError(w, http.StatusUnprocessableEntity, "unsupported", "Tone-map source changed")
+		if writePlaybackToneMapExecutionError(w, reconstructErr) {
 			return
-		}
-		if errors.Is(reconstructErr, playback.ErrToneMapSourceValidationUnavailable) {
-			w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, transcodenode.ToneMapSourceValidationUnavailableCode)
 		}
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode session is temporarily unavailable")
 		return
@@ -1401,6 +1396,11 @@ func writePlaybackToneMapExecutionError(w http.ResponseWriter, err error) bool {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode session is temporarily unavailable")
 		return true
 	}
+	if errors.Is(err, tonemap.ErrSourcePreflightRejected) {
+		w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, transcodenode.ToneMapSourcePreflightRejectedCode)
+		writeError(w, http.StatusUnprocessableEntity, "unsupported", "Tone-map source is unsupported by the selected executor")
+		return true
+	}
 	return false
 }
 
@@ -1424,13 +1424,8 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
 		return
 	case playback.SessionUnavailable:
-		if errors.Is(reconstructErr, tonemap.ErrSourceRevisionChanged) {
-			w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, transcodenode.ToneMapSourceRevisionChangedCode)
-			writeError(w, http.StatusUnprocessableEntity, "unsupported", "Tone-map source changed")
+		if writePlaybackToneMapExecutionError(w, reconstructErr) {
 			return
-		}
-		if errors.Is(reconstructErr, playback.ErrToneMapSourceValidationUnavailable) {
-			w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, transcodenode.ToneMapSourceValidationUnavailableCode)
 		}
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode session is temporarily unavailable")
 		return

@@ -373,6 +373,26 @@ func TestIncompleteToneMapPlanningBecomesRetryableStartFailure(t *testing.T) {
 	}
 }
 
+func TestIncompletePlaybackSettingsMakePolicyTerminalsRetryable(t *testing.T) {
+	tests := []playback.TerminalV3{
+		{Reason: playback.TerminalHDRTranscodeUnsupportedV3, Message: "HDR unavailable"},
+		{Reason: terminalSubtitleConversionUnsupportedV3, Message: "The selected subtitle must be burned into the video, but this HDR source cannot be re-encoded."},
+		{Reason: terminalSubtitleConversionUnsupportedV3, Message: "The selected subtitle must be burned into the video, but 4K transcoding is disabled."},
+		{Reason: terminalNoAlternateVersionV3, Message: playback.TerminalMessage4KTranscodeDisabledV3},
+	}
+	for _, terminal := range tests {
+		result := retryIncompletePlaybackSettingsV3(playback.PlannerResultV3{Terminal: &terminal}, context.DeadlineExceeded)
+		if result.Terminal == nil || result.Terminal.Reason != transcodeStartFailedReasonV3 || !result.Terminal.Retryable {
+			t.Fatalf("settings terminal %q = %#v, want retryable %q", terminal.Reason, result.Terminal, transcodeStartFailedReasonV3)
+		}
+	}
+
+	direct := playback.PlannerResultV3{Plan: &playback.PlanV3{Delivery: playback.DeliveryOriginalHTTPV3}}
+	if got := retryIncompletePlaybackSettingsV3(direct, context.DeadlineExceeded); got.Plan == nil || got.Terminal != nil {
+		t.Fatalf("direct HDR-capable route was blocked by unrelated settings failure: %#v", got)
+	}
+}
+
 func TestUnusedToneMapPlanningSnapshotDoesNotInventCapabilityFailure(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	var probes atomic.Int32

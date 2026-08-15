@@ -261,44 +261,45 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 			failedNodeURLs := make(map[string]struct{})
 			for plan.TranscodeNode != nil {
 				tcNode := plan.TranscodeNode
-				if err := h.sessionMgr.SetTranscodeNodeURL(playSession.UpstreamSessionID, tcNode.URL); err != nil {
-					failRemoteStart()
-					writeError(w, http.StatusInternalServerError, "ServerError", "Failed to bind transcode node")
-					return
-				}
 				initialSeekSeconds, _ := compatInitialTranscodePosition(*source, h.compatSegmentDuration(), playSession.InitialSeekSeconds)
+				redirectNodeURL := tcNode.URL
 				if err := h.startRemoteTranscodeWithToneMapMode(r.Context(), playSession.ID, playSession.UpstreamSessionID, *source, file, initialSeekSeconds, tcNode.URL, requiredToneMapMode); err != nil {
 					if errors.Is(err, errRemoteStartAdoptedLocal) {
 						adoptedLocal = true
 						break
 					}
-					if errors.Is(err, errRemoteSoftwareToneMapStartFailed) {
-						exhaustedRemoteToneMapErr = errors.Join(exhaustedRemoteToneMapErr, err)
-						if !errors.Is(err, tonemap.ErrSourceRevisionChanged) && !errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) {
-							remoteValidationOnly = false
+					var adoptedRemote *remoteStartAdoptedRemoteError
+					if errors.As(err, &adoptedRemote) {
+						redirectNodeURL = adoptedRemote.nodeURL
+					} else {
+						if errors.Is(err, errRemoteSoftwareToneMapStartFailed) {
+							exhaustedRemoteToneMapErr = errors.Join(exhaustedRemoteToneMapErr, err)
+							if !isCompatToneMapExecutionError(err) {
+								remoteValidationOnly = false
+							}
+							h.releaseCompatSessionReservation(playSession.UpstreamSessionID)
+							failedNodeURLs[strings.TrimRight(tcNode.URL, "/")] = struct{}{}
+							requiredToneMapMode = tonemap.ModeSoftware
+							plan, planErr = h.planCompatSoftwareToneMapSession(r.Context(), upstreamSession, file, source.Version.Bitrate, failedNodeURLs)
+							if planErr == nil {
+								continue
+							}
+							err = planErr
 						}
-						h.releaseCompatSessionReservation(playSession.UpstreamSessionID)
-						failedNodeURLs[strings.TrimRight(tcNode.URL, "/")] = struct{}{}
-						requiredToneMapMode = tonemap.ModeSoftware
-						plan, planErr = h.planCompatSoftwareToneMapSession(r.Context(), upstreamSession, file, source.Version.Bitrate, failedNodeURLs)
-						if planErr == nil {
-							continue
+						failRemoteStart()
+						if errors.Is(err, errTranscode4KDisallowed) {
+							writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
+							return
 						}
-						err = planErr
-					}
-					failRemoteStart()
-					if errors.Is(err, errTranscode4KDisallowed) {
-						writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
+						if errors.Is(err, errHDRTranscodeUnsupported) {
+							writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", err.Error())
+							return
+						}
+						writeError(w, http.StatusBadGateway, "TranscodeStartFailed", "Transcode node rejected the request")
 						return
 					}
-					if errors.Is(err, errHDRTranscodeUnsupported) {
-						writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", err.Error())
-						return
-					}
-					writeError(w, http.StatusBadGateway, "TranscodeStartFailed", "Transcode node rejected the request")
-					return
 				}
-				redirectURL, redirectErr := h.buildProxyRedirectURL(playSession.ID, playSession.UpstreamSessionID, string(playback.PlayTranscode), file, *source, tcNode.URL, 0, plan.ProxyNode)
+				redirectURL, redirectErr := h.buildProxyRedirectURL(playSession.ID, playSession.UpstreamSessionID, string(playback.PlayTranscode), file, *source, redirectNodeURL, 0, plan.ProxyNode)
 				if redirectErr != nil {
 					failRemoteStart()
 					writeError(w, http.StatusInternalServerError, "ServerError", "Failed to sign proxy stream URL")
@@ -370,6 +371,8 @@ func writeCompatTranscodeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, tonemap.ErrSourceRevisionChanged):
 		slog.Warn("compat transcode source changed", "component", "jellycompat", "error", err)
 		writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", "The media source changed; refresh playback information")
+	case errors.Is(err, tonemap.ErrSourcePreflightRejected):
+		writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", "The media source is unsupported by the selected tone-map executor")
 	case errors.Is(err, errTranscode4KDisallowed):
 		writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
 	case errors.Is(err, errHDRTranscodeUnsupported):
@@ -381,6 +384,13 @@ func writeCompatTranscodeError(w http.ResponseWriter, err error) {
 	default:
 		writeCompatUpstreamError(w, err)
 	}
+}
+
+func isCompatToneMapExecutionError(err error) bool {
+	return errors.Is(err, tonemap.ErrSourceRevisionChanged) ||
+		errors.Is(err, tonemap.ErrSourcePreflightRejected) ||
+		errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) ||
+		errors.Is(err, playback.ErrToneMapExecutorUnavailable)
 }
 
 // HandleHLSManifest serves the compat playlist route used after the master URL.
@@ -613,6 +623,10 @@ func hlsSegmentErrorResponse(err error) (status int, code, message string) {
 		return http.StatusUnsupportedMediaType, "TranscodeUnsupported", "The media source changed; refresh playback information"
 	case errors.Is(err, playback.ErrToneMapSourceValidationUnavailable):
 		return http.StatusServiceUnavailable, "TranscodeUnavailable", "Transcode is temporarily unavailable"
+	case errors.Is(err, playback.ErrToneMapExecutorUnavailable):
+		return http.StatusServiceUnavailable, "TranscodeUnavailable", "Transcode is temporarily unavailable"
+	case errors.Is(err, tonemap.ErrSourcePreflightRejected):
+		return http.StatusUnsupportedMediaType, "TranscodeUnsupported", "The media source is unsupported by the selected tone-map executor"
 	case errors.Is(err, playback.ErrSegmentNotFound), errors.Is(err, playback.ErrTranscodeFailed):
 		return http.StatusNotFound, "NotFound", "Segment not found"
 	default:

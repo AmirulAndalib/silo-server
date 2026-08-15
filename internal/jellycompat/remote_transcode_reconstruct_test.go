@@ -417,6 +417,56 @@ func TestStartRemoteToneMapDelayedSuccessCannotOverwriteLocalSoftwareWinner(t *t
 	}
 }
 
+func TestConcurrentRemoteStartsPublishOneTrackedRoute(t *testing.T) {
+	firstArrived := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseFirst) }) })
+	var starts atomic.Int32
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/transcode/start" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if starts.Add(1) == 1 {
+			close(firstArrived)
+			<-releaseFirst
+		}
+		writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{HWAccel: tonemap.BackendQSV})
+	}))
+	t.Cleanup(node.Close)
+
+	handler, _, store := newRemoteTranscodeHandler(t, node.URL, &stubRecipeNodeStore{})
+	store.Put(PlaybackSession{ID: "play-1", UpstreamSessionID: "upstream-1"})
+	start := func() error {
+		return handler.startRemoteTranscode(context.Background(), "play-1", "upstream-1", testRemoteTranscodeSource(), &models.MediaFile{ID: 42, FilePath: "/media/movie.mkv"}, 0, node.URL)
+	}
+	firstResult := make(chan error, 1)
+	secondResult := make(chan error, 1)
+	go func() { firstResult <- start() }()
+	select {
+	case <-firstArrived:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first remote start did not reach node")
+	}
+	go func() { secondResult <- start() }()
+	time.Sleep(50 * time.Millisecond)
+	startsBeforePublication := starts.Load()
+	releaseOnce.Do(func() { close(releaseFirst) })
+	if err := <-firstResult; err != nil {
+		t.Fatalf("publishing remote start: %v", err)
+	}
+	if err := <-secondResult; !errors.Is(err, errRemoteStartAdoptedRemote) {
+		t.Fatalf("waiting remote start error = %v, want adopted remote", err)
+	}
+	if startsBeforePublication != 1 {
+		t.Fatalf("concurrent remote starts reached node %d times before publication, want 1", startsBeforePublication)
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("node starts = %d, want one tracked remote runtime", got)
+	}
+}
+
 // localSessionRegistry is a GetSession + RegisterReconstructed double for
 // exercising TranscodeManager reconstruction from the jellycompat package
 // (the playback package's own fake is not exported across packages).

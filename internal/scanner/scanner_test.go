@@ -214,6 +214,12 @@ func TestFailedProbeRepairPreservesExistingProbe(t *testing.T) {
 	if shouldPreserveExistingProbeAfterProbeFailure([]string{"probe_repair", "size_changed", "root_assignment_changed"}, nil) {
 		t.Fatal("byte changes must not preserve stale probe metadata")
 	}
+	if !shouldPreserveExistingProbeAfterProbeFailure([]string{"probe_repair", "external_subtitle_changed"}, nil) {
+		t.Fatal("subtitle-only changes must preserve probe metadata when repair probing fails")
+	}
+	if !shouldPreserveExistingProbeAfterProbeFailure([]string{"probe_repair", "external_subtitle_missing", "group_assignment_changed"}, nil) {
+		t.Fatal("missing subtitle and identity changes must preserve probe metadata when repair probing fails")
+	}
 }
 
 func TestPersistIdentityUpdateUsesReturnedIDBeforeEnqueue(t *testing.T) {

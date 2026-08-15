@@ -529,6 +529,26 @@ func retryIncompleteToneMapPlanningV3(result playback.PlannerResultV3, capabilit
 	return result
 }
 
+func retryIncompletePlaybackSettingsV3(result playback.PlannerResultV3, settingsErr error) playback.PlannerResultV3 {
+	if settingsErr == nil || result.Terminal == nil {
+		return result
+	}
+	terminal := result.Terminal
+	settingsDependent := terminal.Reason == playback.TerminalHDRTranscodeUnsupportedV3 ||
+		(terminal.Reason == terminalNoAlternateVersionV3 && terminal.Message == playback.TerminalMessage4KTranscodeDisabledV3) ||
+		(terminal.Reason == terminalSubtitleConversionUnsupportedV3 &&
+			(strings.Contains(terminal.Message, "this HDR source") || strings.Contains(terminal.Message, "4K transcoding is disabled")))
+	if !settingsDependent {
+		return result
+	}
+	result.Terminal = &playback.TerminalV3{
+		Reason:    transcodeStartFailedReasonV3,
+		Message:   "Playback settings are temporarily unavailable.",
+		Retryable: true,
+	}
+	return result
+}
+
 func (h *PlaybackHandler) planPlaybackWithCapabilitiesV3(ctx context.Context, input playback.PlannerInputV3) (playback.PlannerResultV3, error) {
 	snapshot := &hlsPlanningSnapshotV3{handler: h, ctx: ctx, settings: input.Settings}
 	input.HLSRegistry = snapshot.hlsRegistry
@@ -832,10 +852,7 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 		}
 	}
 	result = retryIncompleteToneMapPlanningV3(result, toneMapCapabilityErr)
-	if settingsErr != nil && result.Terminal != nil && result.Terminal.Reason == playback.TerminalHDRTranscodeUnsupportedV3 {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "Playback settings are temporarily unavailable")
-		return
-	}
+	result = retryIncompletePlaybackSettingsV3(result, settingsErr)
 	h.clarifyOriginalQuality4KTerminalV3(r.Context(), result.Terminal, requestedFile, !shouldTryAlternateFileV3(req.QualityPreference))
 	// The exact app identity is logged with every decision so a route or
 	// terminal reported against one build is attributable without asking the
@@ -1897,7 +1914,7 @@ func toneMapExecutionTransportErrorV3(cause error, message string) *transportErr
 	return &transportErrorV3{
 		reason:    transcodeStartFailedReasonV3,
 		message:   message,
-		retryable: errors.Is(cause, playback.ErrToneMapSourceValidationUnavailable) || !errors.Is(cause, tonemap.ErrSourceRevisionChanged),
+		retryable: !errors.Is(cause, tonemap.ErrSourceRevisionChanged) && !errors.Is(cause, tonemap.ErrSourcePreflightRejected),
 		cause:     cause,
 	}
 }
@@ -2693,11 +2710,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 		}
 	}
 	result = retryIncompleteToneMapPlanningV3(result, toneMapCapabilityErr)
-	if plannerSettingsErr != nil && result.Terminal != nil && result.Terminal.Reason == playback.TerminalHDRTranscodeUnsupportedV3 {
-		return playback.DecisionResponseV3{}, *record, nil, &transportErrorV3{
-			reason: "playback_settings_unavailable", message: "Playback settings are temporarily unavailable.", retryable: true, cause: plannerSettingsErr,
-		}
-	}
+	result = retryIncompletePlaybackSettingsV3(result, plannerSettingsErr)
 	h.clarifyOriginalQuality4KTerminalV3(r.Context(), result.Terminal, requestedFile, replanAlternateFilePinnedByOriginalQualityV3(operation, start.QualityPreference))
 	if result.Terminal != nil {
 		return playback.NewTerminalResponseV3(result.Terminal.Reason, result.Terminal.Message, result.Terminal.Retryable), *record, nil, nil
@@ -3601,9 +3614,12 @@ func (h *PlaybackHandler) plannerSettingsV3(ctx context.Context) playback.Planne
 func (h *PlaybackHandler) plannerSettingsV3Result(ctx context.Context) (playback.PlannerSettingsV3, error) {
 	settings := playback.PlannerSettingsV3{TranscodeEnabled: h.playbackConfig().TranscodeEnabled}
 	if h.SettingsRepo != nil {
-		value, _ := h.SettingsRepo.Get(ctx, config.Allow4KTranscodeSettingKey)
+		value, err := h.SettingsRepo.Get(ctx, config.Allow4KTranscodeSettingKey)
+		if err != nil {
+			return settings, fmt.Errorf("load 4K transcode setting: %w", err)
+		}
 		settings.Allow4KTranscode = strings.EqualFold(value, "true")
-		value, err := h.SettingsRepo.Get(ctx, config.PlaybackTranscodeHardwareToneMapSettingKey)
+		value, err = h.SettingsRepo.Get(ctx, config.PlaybackTranscodeHardwareToneMapSettingKey)
 		if err != nil {
 			return settings, fmt.Errorf("load hardware tone-map setting: %w", err)
 		}

@@ -86,6 +86,7 @@ func TestWriteCompatTranscodeErrorClassifiesLiveToneMapValidation(t *testing.T) 
 		wantCode   string
 	}{
 		{name: "stale metadata", err: tonemap.ErrSourceRevisionChanged, wantStatus: http.StatusUnsupportedMediaType, wantCode: "TranscodeUnsupported"},
+		{name: "preflight rejected", err: tonemap.ErrSourcePreflightRejected, wantStatus: http.StatusUnsupportedMediaType, wantCode: "TranscodeUnsupported"},
 		{name: "probe unavailable", err: playback.ErrToneMapSourceValidationUnavailable, wantStatus: http.StatusServiceUnavailable, wantCode: "TranscodeUnavailable"},
 		{name: "executor probe unavailable", err: playback.ErrToneMapExecutorUnavailable, wantStatus: http.StatusServiceUnavailable, wantCode: "TranscodeUnavailable"},
 	}

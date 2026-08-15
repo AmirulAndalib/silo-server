@@ -46,11 +46,11 @@ func ProbeTransformationRegistryWithToneMapV3Result(ctx context.Context, ffmpegP
 	// capability advertised here holds for the binary that later runs.
 	ffmpegPath = ResolveFFmpegPath(ffmpegPath)
 	bsfCtx, cancelBSF := context.WithTimeout(ctx, 3*time.Second)
-	bsfs, _ := exec.CommandContext(bsfCtx, ffmpegPath, "-hide_banner", "-bsfs").Output()
+	bsfs, bsfErr := exec.CommandContext(bsfCtx, ffmpegPath, "-hide_banner", "-bsfs").Output()
 	bsfContextErr := bsfCtx.Err()
 	cancelBSF()
 	encoderCtx, cancelEncoders := context.WithTimeout(ctx, 3*time.Second)
-	encoders, _ := exec.CommandContext(encoderCtx, ffmpegPath, "-hide_banner", "-encoders").Output()
+	encoders, encoderErr := exec.CommandContext(encoderCtx, ffmpegPath, "-hide_banner", "-encoders").Output()
 	encoderContextErr := encoderCtx.Err()
 	cancelEncoders()
 	_, ffmpegErr := exec.LookPath(ffmpegPath)
@@ -60,7 +60,7 @@ func ProbeTransformationRegistryWithToneMapV3Result(ctx context.Context, ffmpegP
 		{Name: TransformationVideoToH264V3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, Available: ffmpegErr == nil && h264EncoderAvailableV3(encoders), RequiredCapability: "ffmpeg_encoder:h264", PromisedDynamicRange: DynamicRangeSDRV3, ValidatedClaims: []string{ClaimH264DecodeV3}, TerminalReason: TerminalVideoConversionUnsupportedV3},
 		{Name: TransformationHDRToSDRToneMapV3, RecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3, Available: len(toneMapCapabilities) > 0, RequiredCapability: "ffmpeg_filter:hdr_to_sdr_tonemap", PromisedDynamicRange: DynamicRangeSDRV3, ValidatedClaims: []string{ClaimHDRMetadataRemovedV3, ClaimSDRBT709OutputV3}, TerminalReason: TerminalHDRTranscodeUnsupportedV3},
 	})
-	return registry, errors.Join(bsfContextErr, encoderContextErr)
+	return registry, errors.Join(bsfErr, encoderErr, bsfContextErr, encoderContextErr)
 }
 
 // h264EncodersV3 lists every H.264 encoder the transcode pipeline can select

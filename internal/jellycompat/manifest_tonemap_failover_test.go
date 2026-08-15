@@ -306,6 +306,8 @@ func TestHandleMasterManifestClassifiesExhaustedRemoteLiveValidation(t *testing.
 	}{
 		{name: "stale metadata", status: http.StatusUnprocessableEntity, validation: transcodenode.ToneMapSourceRevisionChangedCode, wantStatus: http.StatusUnsupportedMediaType, wantCode: "TranscodeUnsupported"},
 		{name: "probe unavailable", status: http.StatusServiceUnavailable, validation: transcodenode.ToneMapSourceValidationUnavailableCode, wantStatus: http.StatusServiceUnavailable, wantCode: "TranscodeUnavailable"},
+		{name: "executor unavailable", status: http.StatusServiceUnavailable, validation: transcodenode.ToneMapExecutorUnavailableCode, wantStatus: http.StatusServiceUnavailable, wantCode: "TranscodeUnavailable"},
+		{name: "preflight rejected", status: http.StatusUnprocessableEntity, validation: "source_preflight_rejected", wantStatus: http.StatusUnsupportedMediaType, wantCode: "TranscodeUnsupported"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
