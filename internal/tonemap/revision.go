@@ -60,10 +60,10 @@ func RevisionForFile(file *models.MediaFile) SourceRevision {
 // into a tone-map recipe.
 func StreamSignatureForTrack(track models.VideoTrack) string {
 	return hashRevisionValue(fmt.Sprintf(
-		"%s|%s|%d|%d|%dx%d|%s|%d|%d|%t|%t|%t|%t|%s|%s|%s|%s|%d|%s",
+		"%s|%s|%d|%d|%dx%d|%s|%d|%d|%t|%t|%t|%t|%t|%s|%s|%s|%s|%d|%s",
 		track.Codec, track.Profile, track.Level, track.DVProfile, track.Width, track.Height,
 		track.FrameRate, track.DVLevel, track.DVBLCompatID, track.DVConfigPresent,
-		track.DVBLCompatIDPresent, track.DVBLPresent, track.DVRPUPresent,
+		track.DVBLCompatIDPresent, track.DVBLPresent, track.DVELPresent, track.DVRPUPresent,
 		track.ColorRange, track.ColorPrimaries, track.ColorTransfer, track.ColorSpace,
 		track.BitDepth, track.PixelFormat,
 	))

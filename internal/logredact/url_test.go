@@ -2,6 +2,7 @@ package logredact
 
 import (
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"testing"
@@ -56,6 +57,58 @@ func TestSanitizeURLErrorFindsWrappedURLError(t *testing.T) {
 	}
 	if !errors.Is(sanitized, cause) {
 		t.Fatalf("sanitized wrapped error does not preserve its cause: %v", sanitized)
+	}
+	if !strings.Contains(sanitized.Error(), "capability request failed") {
+		t.Fatalf("sanitized joined error lost its outer context: %q", sanitized.Error())
+	}
+}
+
+func TestSanitizeURLErrorPreservesSingleWrapperContext(t *testing.T) {
+	cause := errors.New("connection refused")
+	err := fmt.Errorf("fetch node capabilities: %w", &url.Error{
+		Op:  "Get",
+		URL: "https://operator:node-password@node.example/hw-capabilities?access_token=query-secret",
+		Err: cause,
+	})
+
+	sanitized := SanitizeURLError(err)
+	message := sanitized.Error()
+	for _, secret := range []string{"operator", "node-password", "query-secret"} {
+		if strings.Contains(message, secret) {
+			t.Fatalf("sanitized wrapped error contains %q: %q", secret, message)
+		}
+	}
+	if !strings.Contains(message, "fetch node capabilities") ||
+		!strings.Contains(message, "https://node.example/hw-capabilities") ||
+		!strings.Contains(message, "connection refused") {
+		t.Fatalf("sanitized wrapped error lost outer diagnostics: %q", message)
+	}
+	if !errors.Is(sanitized, cause) {
+		t.Fatalf("sanitized wrapped error does not preserve its cause: %v", sanitized)
+	}
+}
+
+func TestSanitizeURLErrorPreservesMultiWrapperChain(t *testing.T) {
+	cause := errors.New("dial tcp: connection refused")
+	err := fmt.Errorf("transcode start failed: %w",
+		fmt.Errorf("request node: %w", &url.Error{
+			Op:  "Post",
+			URL: "http://node-operator:node-secret@node.example:8080/transcode/start",
+			Err: cause,
+		}))
+
+	sanitized := SanitizeURLError(err)
+	message := sanitized.Error()
+	for _, secret := range []string{"node-operator", "node-secret"} {
+		if strings.Contains(message, secret) {
+			t.Fatalf("sanitized chained error contains %q: %q", secret, message)
+		}
+	}
+	if !strings.Contains(message, "transcode start failed") || !strings.Contains(message, "request node") {
+		t.Fatalf("sanitized chained error lost outer messages: %q", message)
+	}
+	if !errors.Is(sanitized, cause) {
+		t.Fatalf("sanitized chained error does not preserve its cause: %v", sanitized)
 	}
 }
 

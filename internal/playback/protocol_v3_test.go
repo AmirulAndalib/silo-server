@@ -224,10 +224,10 @@ func TestReplanRequestV3ValidationRetainsClientBuildChannelNormalization(t *test
 	if err := request.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-	if got, want := request.ClientPlaybackContext.AppBuild, normalizeClientMetadataValue(strings.Repeat("build", 20)+"\x00ignored", 64); got != want {
+	if got, want := request.ClientPlaybackContext.AppBuild, strings.Repeat("build", 12)+"buil"; got != want {
 		t.Fatalf("normalized app_build = %q, want %q", got, want)
 	}
-	if got, want := request.ClientPlaybackContext.AppChannel, normalizeClientMetadataValue(strings.Repeat("channel", 10)+"\x00ignored", 32); got != want {
+	if got, want := request.ClientPlaybackContext.AppChannel, strings.Repeat("channel", 4)+"chan"; got != want {
 		t.Fatalf("normalized app_channel = %q, want %q", got, want)
 	}
 }

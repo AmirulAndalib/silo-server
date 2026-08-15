@@ -963,23 +963,26 @@ func TestHandleDownloadPrepareOptimisticReuseWaitsForInFlightReplacement(t *test
 	}
 }
 
-func TestInvalidateDownloadArtifactReceiptPartFailurePreservesFinalReceipt(t *testing.T) {
+func TestInvalidateDownloadArtifactReceiptRemovesOnlyReceipt(t *testing.T) {
 	outputPath := filepath.Join(t.TempDir(), "artifact.mp4")
 	receiptPath := downloadArtifactReceiptPath(outputPath)
 	if err := os.WriteFile(receiptPath, []byte("valid-final"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(receiptPath+".part", 0o700); err != nil {
+	// A crashed writer's unique temp file must not block invalidation; writers
+	// now use CreateTemp names, so there is no fixed .part path to remove.
+	tempPath, err := os.CreateTemp(filepath.Dir(receiptPath), filepath.Base(receiptPath)+".")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(receiptPath+".part", "blocks-removal"), []byte("x"), 0o600); err != nil {
+	if err := tempPath.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := invalidateDownloadArtifactReceipt(outputPath); err == nil {
-		t.Fatal("expected receipt partial invalidation failure")
+	if err := invalidateDownloadArtifactReceipt(outputPath); err != nil {
+		t.Fatalf("invalidateDownloadArtifactReceipt() = %v", err)
 	}
-	if got, err := os.ReadFile(receiptPath); err != nil || string(got) != "valid-final" {
-		t.Fatalf("final receipt after partial invalidation failure = %q, %v; want preserved", got, err)
+	if _, err := os.Stat(receiptPath); !os.IsNotExist(err) {
+		t.Fatalf("receipt still present after invalidation: %v", err)
 	}
 }
 

@@ -127,8 +127,15 @@ type copySafetyResult struct {
 }
 
 func NewPlaybackProbeEnsurer(fileRepo *FileRepository, ffprobePath, ffmpegPath string, timeout time.Duration) *PlaybackProbeEnsurer {
+	// Assign through a typed nil check so a nil *FileRepository keeps the
+	// interface nil: Ensure's e.fileRepo == nil guard is the constructor's
+	// contract, and a typed-nil interface would panic inside GetByID.
+	var repo playbackProbeFileRepository
+	if fileRepo != nil {
+		repo = fileRepo
+	}
 	return &PlaybackProbeEnsurer{
-		fileRepo:    fileRepo,
+		fileRepo:    repo,
 		ffprobePath: ffprobePath,
 		ffmpegPath:  ffmpegPath,
 		timeout:     timeout,

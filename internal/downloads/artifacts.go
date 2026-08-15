@@ -810,7 +810,13 @@ func (m *ArtifactManager) encodeOne(ctx context.Context, a *Artifact) {
 		return
 	}
 	if err := validateArtifactToneMapRevision(file, a); err != nil {
-		m.failJob(ctx, a, "tone-map source revision changed")
+		// Surface the exact failure in the job reason so a decode failure is
+		// never misreported as a source revision change.
+		reason := fmt.Sprintf("tone-map source revision validation failed: %v", err)
+		if errors.Is(err, tonemap.ErrSourceRevisionChanged) {
+			reason = "tone-map source revision changed"
+		}
+		m.failJob(ctx, a, reason)
 		return
 	}
 
@@ -955,7 +961,7 @@ func validateArtifactToneMapRevision(file *models.MediaFile, artifact *Artifact)
 		return err
 	}
 	if frozen != tonemap.RevisionForFile(file) {
-		return errors.New("tone-map source revision changed")
+		return fmt.Errorf("%w: tone-map source revision changed", tonemap.ErrSourceRevisionChanged)
 	}
 	return nil
 }

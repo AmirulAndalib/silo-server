@@ -611,7 +611,7 @@ func TestRestartSeekTarget_CopyModeReportsUnresolvedWhenManifestNotReady(t *test
 func TestWaitForSegment_RestartingSessionReturnsNotFoundInsteadOfTranscodeFailed(t *testing.T) {
 	session := &TranscodeSession{
 		outputDir:  t.TempDir(),
-		restarting: true,
+		restarting: &restartFlight{done: make(chan struct{})},
 		waitErr:    errors.New("signal: killed"),
 	}
 

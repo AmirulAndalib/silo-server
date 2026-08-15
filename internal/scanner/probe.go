@@ -135,7 +135,7 @@ func convertProbeData(raw *ffprobeOutput) *ProbeData {
 			// picture is ordered ahead of the real stream, the flat
 			// codec_video/resolution/hdr columns describe the poster instead of
 			// the movie.
-			if !isMainVideoStream(s) {
+			if !mediaprobe.IsPrimaryVideoStream(s) {
 				continue
 			}
 			normalized := mediaprobe.NormalizeVideoTrack(s)
@@ -291,7 +291,7 @@ func durationFromProbeMetadata(raw *ffprobeOutput) (int, bool) {
 	}
 
 	for _, stream := range raw.Streams {
-		if !isMainVideoStream(stream) {
+		if !mediaprobe.IsPrimaryVideoStream(stream) {
 			continue
 		}
 		streamDuration := parseFloat(stream.Duration)
@@ -324,7 +324,7 @@ func corroboratedLongVideoDuration(raw *ffprobeOutput, formatDuration float64) (
 	}
 
 	for _, stream := range raw.Streams {
-		if !isMainVideoStream(stream) {
+		if !mediaprobe.IsPrimaryVideoStream(stream) {
 			continue
 		}
 		streamDuration := parseFloat(stream.Duration)
@@ -442,21 +442,13 @@ func truncatedDuration(duration float64) int {
 	return max(1, int(duration))
 }
 
-// isMainVideoStream reports whether the stream is a real video stream.
-// Embedded cover art (attached_pic) is reported by ffprobe as a video stream
-// but must not drive duration decisions: it would route audiobooks and music
-// through the video duration gauntlet and packet-scan a single still image.
-func isMainVideoStream(stream ffprobeStream) bool {
-	return stream.CodecType == "video" && stream.Disposition.AttachedPic == 0
-}
-
 func hasVideoStream(streams []ffprobeStream) bool {
-	return slices.ContainsFunc(streams, isMainVideoStream)
+	return slices.ContainsFunc(streams, mediaprobe.IsPrimaryVideoStream)
 }
 
 func primaryVideoFrameRate(streams []ffprobeStream) (string, bool) {
 	for _, stream := range streams {
-		if isMainVideoStream(stream) {
+		if mediaprobe.IsPrimaryVideoStream(stream) {
 			return stream.AvgFrameRate, true
 		}
 	}

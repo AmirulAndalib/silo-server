@@ -32,27 +32,30 @@ func writeDownloadArtifactReceipt(outputPath string, receipt downloadprepare.Res
 		return fmt.Errorf("download artifact receipt is too large")
 	}
 	receiptPath := downloadArtifactReceiptPath(outputPath)
-	partPath := receiptPath + ".part"
-	file, err := os.OpenFile(partPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	// A unique temp file in the receipt's directory keeps concurrent writers
+	// from clobbering each other's partial data; the rename below publishes
+	// whichever writer completes last as the atomic current receipt.
+	temp, err := os.CreateTemp(filepath.Dir(receiptPath), filepath.Base(receiptPath)+".")
 	if err != nil {
 		return fmt.Errorf("write download artifact receipt: %w", err)
 	}
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
-		_ = os.Remove(partPath)
+	tempPath := temp.Name()
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		_ = os.Remove(tempPath)
 		return fmt.Errorf("write download artifact receipt: %w", err)
 	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		_ = os.Remove(partPath)
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		_ = os.Remove(tempPath)
 		return fmt.Errorf("sync download artifact receipt: %w", err)
 	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(partPath)
+	if err := temp.Close(); err != nil {
+		_ = os.Remove(tempPath)
 		return fmt.Errorf("close download artifact receipt: %w", err)
 	}
-	if err := os.Rename(partPath, receiptPath); err != nil {
-		_ = os.Remove(partPath)
+	if err := os.Rename(tempPath, receiptPath); err != nil {
+		_ = os.Remove(tempPath)
 		return fmt.Errorf("publish download artifact receipt: %w", err)
 	}
 	if err := syncDownloadArtifactDirectory(filepath.Dir(receiptPath)); err != nil {
@@ -99,10 +102,8 @@ func readDownloadArtifactReceipt(outputPath string) (downloadprepare.Result, err
 
 func invalidateDownloadArtifactReceipt(outputPath string) error {
 	receiptPath := downloadArtifactReceiptPath(outputPath)
-	for _, candidate := range []string{receiptPath + ".part", receiptPath} {
-		if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove download artifact receipt: %w", err)
-		}
+	if err := os.Remove(receiptPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove download artifact receipt: %w", err)
 	}
 	return nil
 }

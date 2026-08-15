@@ -456,7 +456,8 @@ func (m *TranscodeManager) doLoadOrReconstructTranscode(
 	requestedSegment int,
 	card *RecipeCard,
 ) transcodeLoadResult {
-	if _, ok := m.Sessions.(atomicSessionReconstructor); !ok {
+	atomicSessions, ok := m.Sessions.(atomicSessionReconstructor)
+	if !ok {
 		return transcodeLoadResult{status: SessionLoadFailed}
 	}
 	session, err := getSession(sessionID)
@@ -478,14 +479,26 @@ func (m *TranscodeManager) doLoadOrReconstructTranscode(
 		return transcodeLoadResult{status: SessionForbidden}
 	}
 	if runtime := m.GetTranscodeSession(sessionID); runtime != nil {
-		return m.completeTranscodeLoad(getSession, session, inserted, runtime)
+		return m.completeTranscodeLoad(atomicSessions, getSession, session, inserted, runtime)
 	}
 	// Remote transcodes keep running on their owning node; only the playback
-	// Session needs reconstructing on this API process.
+	// Session needs reconstructing on this API process. A reconstructed session
+	// still needs its tone-map mode confirmed from the card: the reconstruct
+	// defers it so the live executor's confirmation wins when a runtime exists.
 	if session.TranscodeNodeURL != "" {
+		if inserted != nil {
+			current := atomicSessions.ConfirmReconstructedToneMap(inserted, card.ToneMapMode)
+			if current == nil {
+				return transcodeLoadResult{status: SessionMissing}
+			}
+			session = current
+		}
 		return transcodeLoadResult{session: session, status: SessionLoaded}
 	}
 	if session.PlayMethod != PlayTranscode {
+		if inserted != nil {
+			atomicSessions.ConfirmReconstructedToneMap(inserted, card.ToneMapMode)
+		}
 		return transcodeLoadResult{session: session, status: SessionLoaded}
 	}
 	if card == nil {
@@ -495,29 +508,20 @@ func (m *TranscodeManager) doLoadOrReconstructTranscode(
 	runtime, reconstructErr := m.ReconstructTranscodeWithError(ctx, sessionID, requestedSegment, *card)
 	if runtime == nil {
 		if inserted != nil {
-			atomicSessions, ok := m.Sessions.(atomicSessionReconstructor)
-			if !ok {
-				slog.ErrorContext(ctx, "cannot safely roll back reconstructed playback session", "component", "playback",
-					"session", sessionID, "playback_session_id", sessionID)
-			} else {
-				atomicSessions.RollbackReconstructedToneMap(inserted)
-			}
+			atomicSessions.RollbackReconstructedToneMap(inserted)
 		}
 		return transcodeLoadResult{status: SessionUnavailable, err: reconstructErr}
 	}
-	return m.completeTranscodeLoad(getSession, session, inserted, runtime)
+	return m.completeTranscodeLoad(atomicSessions, getSession, session, inserted, runtime)
 }
 
 func (m *TranscodeManager) completeTranscodeLoad(
+	atomicSessions atomicSessionReconstructor,
 	getSession func(string) (*Session, error),
 	session, inserted *Session,
 	runtime *TranscodeSession,
 ) transcodeLoadResult {
 	if inserted != nil {
-		atomicSessions, ok := m.Sessions.(atomicSessionReconstructor)
-		if !ok {
-			return transcodeLoadResult{status: SessionLoadFailed}
-		}
 		current := atomicSessions.ConfirmReconstructedToneMap(inserted, runtime.Opts().ToneMapMode)
 		if current == nil {
 			m.CloseTranscodeSessionIf(session.ID, runtime, "")

@@ -48,14 +48,18 @@ func TestVideoTrackSerializationKeepsFalseDolbyVisionProvenance(t *testing.T) {
 
 type probeRepairTestRepository struct {
 	mu          sync.Mutex
-	file        *models.MediaFile
+	files       map[int]*models.MediaFile
 	upsertCalls int
 }
 
-func (r *probeRepairTestRepository) GetByID(_ context.Context, _ int) (*models.MediaFile, error) {
+func (r *probeRepairTestRepository) GetByID(_ context.Context, id int) (*models.MediaFile, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	copy := *r.file
+	file, ok := r.files[id]
+	if !ok {
+		return nil, errors.New("media file not found")
+	}
+	copy := *file
 	return &copy, nil
 }
 
@@ -64,7 +68,10 @@ func (r *probeRepairTestRepository) Upsert(_ context.Context, file models.MediaF
 	defer r.mu.Unlock()
 	r.upsertCalls++
 	copy := file
-	r.file = &copy
+	if r.files == nil {
+		r.files = make(map[int]*models.MediaFile)
+	}
+	r.files[copy.ID] = &copy
 	result := copy
 	return &result, nil
 }
@@ -84,7 +91,7 @@ func TestPlaybackProbeEnsurerCoalescesRepairWithoutLeaderCancellationPoison(t *t
 		FileModifiedAt: &modified,
 		FileHash:       "source-hash",
 	}
-	repo := &probeRepairTestRepository{file: stale}
+	repo := &probeRepairTestRepository{files: map[int]*models.MediaFile{stale.ID: stale}}
 	probeStarted := make(chan struct{})
 	releaseProbe := make(chan struct{})
 	var probeCalls atomic.Int32
@@ -188,7 +195,7 @@ func TestPlaybackProbeEnsurerRefetchesBeforeRepairingStaleCaller(t *testing.T) {
 		AudioTracks:    []models.AudioTrack{{Codec: "aac"}},
 		Chapters:       []models.MediaChapter{},
 	}
-	repo := &probeRepairTestRepository{file: repaired}
+	repo := &probeRepairTestRepository{files: map[int]*models.MediaFile{repaired.ID: repaired}}
 	var probeCalls atomic.Int32
 	ensurer := &PlaybackProbeEnsurer{
 		fileRepo:    repo,
@@ -229,7 +236,7 @@ func TestPlaybackProbeEnsurerDoesNotCoalesceDifferentSourceRevisions(t *testing.
 	second.FileModifiedAt = &secondModified
 	second.FileHash = "second-source-hash"
 
-	repo := &probeRepairTestRepository{file: first}
+	repo := &probeRepairTestRepository{files: map[int]*models.MediaFile{first.ID: first}}
 	probeStarted := make(chan struct{}, 2)
 	releaseProbes := make(chan struct{})
 	var probeCalls atomic.Int32
@@ -291,7 +298,7 @@ func TestPlaybackProbeEnsurerBoundsDistinctRepairs(t *testing.T) {
 	second := *first
 	second.ID = 43
 	second.FilePath = "/library/second.mkv"
-	repo := &probeRepairTestRepository{file: first}
+	repo := &probeRepairTestRepository{files: map[int]*models.MediaFile{first.ID: first, second.ID: &second}}
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
 	ensurer := &PlaybackProbeEnsurer{

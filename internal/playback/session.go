@@ -703,7 +703,10 @@ func (m *SessionManager) ConfirmReconstructedToneMap(expected *Session, mode ton
 	defer m.mu.Unlock()
 	current := m.sessions[expected.ID]
 	if current == expected {
-		current.ToneMapMode = mode
+		if current.ToneMapMode != mode {
+			current.ToneMapMode = mode
+			current.streamRevision++
+		}
 		m.touchSessionLocked(current)
 	}
 	return current

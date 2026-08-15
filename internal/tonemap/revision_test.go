@@ -155,6 +155,7 @@ func TestValidateLivePrimaryVideoTrackRequiresExactFrozenSignature(t *testing.T)
 		{name: "color space", mutate: func(track *models.VideoTrack) { track.ColorSpace = "bt709" }},
 		{name: "Dolby Vision profile", mutate: func(track *models.VideoTrack) { track.DVProfile = 8 }},
 		{name: "Dolby Vision provenance", mutate: func(track *models.VideoTrack) { track.DVRPUPresent = false }},
+		{name: "Dolby Vision enhancement layer presence", mutate: func(track *models.VideoTrack) { track.DVELPresent = true }},
 	}
 	for _, tt := range mutations {
 		t.Run(tt.name, func(t *testing.T) {

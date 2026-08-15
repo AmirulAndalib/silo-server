@@ -38,6 +38,9 @@ func FetchHWCapabilities(ctx context.Context, baseClient *http.Client, nodeURL, 
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
+		// Drain the (small) error body so the transport can reuse the
+		// connection instead of tearing it down on every failed probe.
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		return playback.HWAccelInfo{}, response.StatusCode, nil
 	}
 

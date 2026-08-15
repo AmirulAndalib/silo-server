@@ -325,13 +325,14 @@ func TestStartRemoteToneMapDelayedSuccessCannotOverwriteLocalSoftwareWinner(t *t
 	remoteStartArrived := make(chan struct{})
 	releaseRemoteStart := make(chan struct{})
 	var releaseOnce sync.Once
+	var arrivedOnce sync.Once
 	remoteDeleted := make(chan struct{}, 1)
 	remoteNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
 			writeJSON(w, http.StatusOK, playback.HWAccelInfo{ToneMapCapabilities: tonemap.Capabilities{hardware}})
 		case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
-			close(remoteStartArrived)
+			arrivedOnce.Do(func() { close(remoteStartArrived) })
 			<-releaseRemoteStart
 			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{
 				HWAccel: tonemap.BackendQSV, ToneMapMode: tonemap.ModeHardware,

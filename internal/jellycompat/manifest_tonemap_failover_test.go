@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,6 +22,32 @@ import (
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 )
 
+// modeRecorder records tone-map modes appended by HTTP handler goroutines and
+// read by the test goroutine. The mutex keeps the recordings safe even if a
+// late request ever mutates a slice concurrently with assertions or resets.
+type modeRecorder struct {
+	mu    sync.Mutex
+	modes []tonemap.Mode
+}
+
+func (r *modeRecorder) record(mode tonemap.Mode) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.modes = append(r.modes, mode)
+}
+
+func (r *modeRecorder) snapshot() []tonemap.Mode {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]tonemap.Mode(nil), r.modes...)
+}
+
+func (r *modeRecorder) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.modes = nil
+}
+
 func TestHandleMasterManifestReplansAfterRemoteSoftwareToneMapFailure(t *testing.T) {
 	hardware := tonemap.Capability{
 		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI,
@@ -31,7 +58,7 @@ func TestHandleMasterManifestReplansAfterRemoteSoftwareToneMapFailure(t *testing
 		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
 	}
 
-	var failedModes []tonemap.Mode
+	var failedModes = &modeRecorder{}
 	var failedNodeCleaned atomic.Bool
 	failedNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -44,7 +71,7 @@ func TestHandleMasterManifestReplansAfterRemoteSoftwareToneMapFailure(t *testing
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			failedModes = append(failedModes, request.ToneMapMode)
+			failedModes.record(request.ToneMapMode)
 			if request.ToneMapMode == tonemap.ModeHardware {
 				w.WriteHeader(http.StatusUnprocessableEntity)
 				return
@@ -61,7 +88,7 @@ func TestHandleMasterManifestReplansAfterRemoteSoftwareToneMapFailure(t *testing
 	}))
 	t.Cleanup(failedNode.Close)
 
-	var fallbackModes []tonemap.Mode
+	var fallbackModes = &modeRecorder{}
 	fallbackNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
@@ -78,7 +105,7 @@ func TestHandleMasterManifestReplansAfterRemoteSoftwareToneMapFailure(t *testing
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			fallbackModes = append(fallbackModes, request.ToneMapMode)
+			fallbackModes.record(request.ToneMapMode)
 			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{HWAccel: request.HWAccel, ToneMapMode: request.ToneMapMode})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -117,10 +144,10 @@ func TestHandleMasterManifestReplansAfterRemoteSoftwareToneMapFailure(t *testing
 	if recorder.Code != http.StatusTemporaryRedirect {
 		t.Fatalf("status = %d, want 307; body = %s", recorder.Code, recorder.Body.String())
 	}
-	if got := failedModes; len(got) != 2 || got[0] != tonemap.ModeHardware || got[1] != tonemap.ModeSoftware {
+	if got := failedModes.snapshot(); len(got) != 2 || got[0] != tonemap.ModeHardware || got[1] != tonemap.ModeSoftware {
 		t.Fatalf("failed-node modes = %v, want [hardware software]", got)
 	}
-	if got := fallbackModes; len(got) != 1 || got[0] != tonemap.ModeSoftware {
+	if got := fallbackModes.snapshot(); len(got) != 1 || got[0] != tonemap.ModeSoftware {
 		t.Fatalf("fallback-node modes = %v, want [software]", got)
 	}
 	if got := staleStartRequests.Load(); got != 0 {
@@ -162,7 +189,7 @@ func TestHandleMasterManifestFallsBackToValidatedLocalSoftwareAfterRemoteFailure
 		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
 	}
 
-	var firstModes []tonemap.Mode
+	var firstModes = &modeRecorder{}
 	var firstHardwareCleaned atomic.Bool
 	firstNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -175,7 +202,7 @@ func TestHandleMasterManifestFallsBackToValidatedLocalSoftwareAfterRemoteFailure
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			firstModes = append(firstModes, request.ToneMapMode)
+			firstModes.record(request.ToneMapMode)
 			if request.ToneMapMode == tonemap.ModeHardware {
 				// HTTP acceptance without the promised execution fact leaves the
 				// hardware attempt indeterminate. It must be stopped before this same
@@ -198,7 +225,7 @@ func TestHandleMasterManifestFallsBackToValidatedLocalSoftwareAfterRemoteFailure
 	}))
 	t.Cleanup(firstNode.Close)
 
-	var secondModes []tonemap.Mode
+	var secondModes = &modeRecorder{}
 	secondNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
@@ -210,7 +237,7 @@ func TestHandleMasterManifestFallsBackToValidatedLocalSoftwareAfterRemoteFailure
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			secondModes = append(secondModes, request.ToneMapMode)
+			secondModes.record(request.ToneMapMode)
 			w.WriteHeader(http.StatusServiceUnavailable)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -229,8 +256,8 @@ func TestHandleMasterManifestFallsBackToValidatedLocalSoftwareAfterRemoteFailure
 	if probe := disabledPlanner.PlanSession("disabled-reservation-probe", "", true, disabledSource.Version.Bitrate); probe.TranscodeNode == nil {
 		t.Fatal("remote reservations were not released after disabled local fallback")
 	}
-	firstModes = nil
-	secondModes = nil
+	firstModes.reset()
+	secondModes.reset()
 	firstHardwareCleaned.Store(false)
 
 	handler, planner, sessionMgr, store, source := newManifestToneMapFailoverHandler(t, firstNode.URL, true, secondNode.URL)
@@ -264,10 +291,10 @@ func TestHandleMasterManifestFallsBackToValidatedLocalSoftwareAfterRemoteFailure
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
 	}
-	if got := firstModes; len(got) != 2 || got[0] != tonemap.ModeHardware || got[1] != tonemap.ModeSoftware {
+	if got := firstModes.snapshot(); len(got) != 2 || got[0] != tonemap.ModeHardware || got[1] != tonemap.ModeSoftware {
 		t.Fatalf("first-node modes = %v, want [hardware software]", got)
 	}
-	if got := secondModes; len(got) != 1 || got[0] != tonemap.ModeSoftware {
+	if got := secondModes.snapshot(); len(got) != 1 || got[0] != tonemap.ModeSoftware {
 		t.Fatalf("second-node modes = %v, want [software]", got)
 	}
 	if _, err := os.Stat(localHardwareMarker); !os.IsNotExist(err) {

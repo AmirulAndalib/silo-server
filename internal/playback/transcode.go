@@ -126,7 +126,7 @@ type TranscodeSession struct {
 	opts                 TranscodeOpts
 	outputDir            string
 	running              bool
-	restarting           bool
+	restarting           *restartFlight
 	waitErr              error
 	stderr               *boundedTailBuffer
 	mu                   sync.Mutex
@@ -1512,7 +1512,7 @@ func (s *TranscodeSession) GetManifest() ([]byte, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			if !s.running {
-				if s.restarting {
+				if s.restarting != nil {
 					return nil, ErrManifestNotReady
 				}
 				if s.waitErr != nil {
@@ -2042,7 +2042,7 @@ func (s *TranscodeSession) SegmentProgress(time.Time) SegmentProgress {
 	progress := SegmentProgress{
 		ProducedHead:         opts.StartSegmentNumber - 1,
 		Running:              s.running,
-		Restarting:           s.restarting,
+		Restarting:           s.restarting != nil,
 		StartSegmentNumber:   opts.StartSegmentNumber,
 		SegmentDuration:      opts.SegmentDuration,
 		LastRequestedSegment: s.lastRequestedSegment,
@@ -2353,6 +2353,19 @@ func (s *TranscodeSession) RestartWithCopySeekAnchor(
 	return s.restart(ctx, seekSeconds, startSegment, streamOriginSeconds, true)
 }
 
+// restartFlight carries the outcome of an in-flight restart so a concurrent
+// caller waits for it and receives the result instead of assuming success and
+// falling through to a stream the failed restart never produced.
+type restartFlight struct {
+	done chan struct{}
+	err  error
+}
+
+// restartToneMapValidationTimeout bounds the tone-map source recheck on a
+// restart. It is deliberately shorter than the caller's post-restart segment
+// wait (30s) so a slow validation cannot consume the entire recovery window.
+var restartToneMapValidationTimeout = 20 * time.Second
+
 func (s *TranscodeSession) restart(
 	ctx context.Context,
 	seekSeconds float64,
@@ -2363,26 +2376,37 @@ func (s *TranscodeSession) restart(
 	s.mu.Lock()
 	// Single-flight: a second caller arriving while a restart is in
 	// progress must not kill the process the first restart just started.
-	// It returns immediately and the caller falls through to
-	// WaitForSegment, which polls through the in-flight restart.
-	if s.restarting {
+	// It waits for the in-flight restart's outcome and returns it, so a
+	// failed validation is never reported as a successful restart.
+	if s.restarting != nil {
+		flight := s.restarting
 		s.mu.Unlock()
-		return nil
+		<-flight.done
+		return flight.err
 	}
-	s.restarting = true
+	flight := &restartFlight{done: make(chan struct{})}
+	s.restarting = flight
 	opts := s.opts
 	cancelCurrent := s.cancel
 	done := s.done
 	s.mu.Unlock()
 	// A tone-map recipe is valid only for the frozen source revision. Recheck it
 	// while the current process is still serving so replacement bytes can never
-	// displace a valid generation or inherit its cached preflight verdict.
-	if err := validateToneMapSource(ctx, opts); err != nil {
+	// displace a valid generation or inherit its cached preflight verdict. The
+	// recheck is bounded by a restart-specific budget shorter than the caller's
+	// segment wait and detached from request cancellation so a client disconnect
+	// cannot abort a restart mid-flight.
+	validationCtx, cancelValidation := context.WithTimeout(context.WithoutCancel(ctx), restartToneMapValidationTimeout)
+	if err := validateToneMapSource(validationCtx, opts); err != nil {
+		cancelValidation()
+		flight.err = fmt.Errorf("validate tone-map source before restart: %w", err)
 		s.mu.Lock()
-		s.restarting = false
+		s.restarting = nil
 		s.mu.Unlock()
-		return fmt.Errorf("validate tone-map source before restart: %w", err)
+		close(flight.done)
+		return flight.err
 	}
+	cancelValidation()
 	s.StopThrottler()
 
 	// Kill current process without removing output directory.
@@ -2438,9 +2462,11 @@ func (s *TranscodeSession) restart(
 	if err != nil {
 		cancel()
 		s.mu.Lock()
-		s.restarting = false
+		flight.err = err
+		s.restarting = nil
 		s.waitErr = err
 		s.mu.Unlock()
+		close(flight.done)
 		return fmt.Errorf("create stdin pipe: %w", err)
 	}
 	cmd.Dir = opts.OutputDir
@@ -2459,9 +2485,11 @@ func (s *TranscodeSession) restart(
 		cancel()
 		releaseHWDevice()
 		s.mu.Lock()
-		s.restarting = false
+		flight.err = err
+		s.restarting = nil
 		s.waitErr = err
 		s.mu.Unlock()
+		close(flight.done)
 		s.logFFmpegEvent(ctx, "ffmpeg process exit error", err.Error())
 		return fmt.Errorf("restart ffmpeg: %w", err)
 	}
@@ -2474,12 +2502,13 @@ func (s *TranscodeSession) restart(
 	s.cancel = cancel
 	s.opts = opts
 	s.running = true
-	s.restarting = false
+	s.restarting = nil
 	s.stdinPipe = stdinPipe
 	s.lastRequestedSegment = startSegment
 	s.done = make(chan struct{})
 	hook := s.restartHook
 	s.mu.Unlock()
+	close(flight.done)
 
 	go s.monitorFFmpeg(ctx, cmd, s.done, releaseHWDevice)
 
@@ -2510,7 +2539,7 @@ func (s *TranscodeSession) WaitForSegment(name string, timeout time.Duration) (s
 
 		s.mu.Lock()
 		running := s.running
-		restarting := s.restarting
+		restarting := s.restarting != nil
 		waitErr := s.waitErr
 		s.mu.Unlock()
 
