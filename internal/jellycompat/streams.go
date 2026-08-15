@@ -1831,6 +1831,9 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 			}
 		}
 	}
+	if h.compatLocalTranscodeReady != nil {
+		h.compatLocalTranscodeReady(transcodeSession)
+	}
 
 	// Readiness is not ownership: another caller may replace this runtime after
 	// it becomes ready but before its execution facts and durable recipe are

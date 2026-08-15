@@ -234,6 +234,9 @@ type PlaybackHandler struct {
 	// (nil disables it — integrated/no-node deployments need no handoff).
 	RecipeNodeStore    recipeNodePutter
 	compatToneMapProbe func(context.Context, string, string, string) (tonemap.Capabilities, error)
+	// compatLocalTranscodeReady is a test seam invoked after manifest readiness
+	// and before lifecycle-locked publication. Production leaves it nil.
+	compatLocalTranscodeReady func(*playback.TranscodeSession)
 }
 
 // recipeNodePutter persists and removes a remote transcode's reconstruction
