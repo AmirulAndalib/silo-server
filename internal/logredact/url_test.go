@@ -112,6 +112,56 @@ func TestSanitizeURLErrorPreservesMultiWrapperChain(t *testing.T) {
 	}
 }
 
+func TestSanitizeURLErrorReplacesRawTextInPrefixWrapper(t *testing.T) {
+	cause := errors.New("connection refused")
+	err := fmt.Errorf("%w: extra", &url.Error{
+		Op:  "Get",
+		URL: "https://operator:node-password@node.example/hw-capabilities?access_token=query-secret",
+		Err: cause,
+	})
+
+	sanitized := SanitizeURLError(err)
+	message := sanitized.Error()
+	for _, secret := range []string{"operator", "node-password", "query-secret"} {
+		if strings.Contains(message, secret) {
+			t.Fatalf("sanitized prefix-wrapped error contains %q: %q", secret, message)
+		}
+	}
+	if !strings.Contains(message, "https://node.example/hw-capabilities") ||
+		!strings.Contains(message, "extra") ||
+		!strings.Contains(message, "connection refused") {
+		t.Fatalf("sanitized prefix-wrapped error lost diagnostics: %q", message)
+	}
+	if !errors.Is(sanitized, cause) {
+		t.Fatalf("sanitized prefix-wrapped error does not preserve its cause: %v", sanitized)
+	}
+}
+
+func TestSanitizeURLErrorPreservesMultiPercentWFmtMessage(t *testing.T) {
+	cause := errors.New("dial tcp: connection refused")
+	err := fmt.Errorf("capability request failed (%w; %w)",
+		&url.Error{
+			Op:  "Get",
+			URL: "https://operator:node-password@node.example/hw-capabilities?access_token=query-secret",
+			Err: cause,
+		},
+		errors.New("cache miss"))
+
+	sanitized := SanitizeURLError(err)
+	message := sanitized.Error()
+	for _, secret := range []string{"operator", "node-password", "query-secret"} {
+		if strings.Contains(message, secret) {
+			t.Fatalf("sanitized multi-wrapped error contains %q: %q", secret, message)
+		}
+	}
+	if !strings.Contains(message, "capability request failed (") || !strings.Contains(message, "; cache miss)") {
+		t.Fatalf("multi-%%w fmt.Errorf message format was lost: %q", message)
+	}
+	if !errors.Is(sanitized, cause) {
+		t.Fatalf("sanitized multi-wrapped error does not preserve its cause: %v", sanitized)
+	}
+}
+
 func TestSanitizeURLFailsClosedForMalformedInput(t *testing.T) {
 	const secret = "node-password"
 	got := SanitizeURL("https://operator:" + secret + "@node.example/\x00")
