@@ -29,20 +29,25 @@ type stubRecipeNodeStore struct {
 	mu         sync.Mutex
 	cards      map[string]playback.RecipeCard
 	putErr     error
+	restoreErr error
+	deleted    bool
 	operations []string
 }
 
 func (s *stubRecipeNodeStore) Put(_ context.Context, sessionID string, card playback.RecipeCard) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.operations = append(s.operations, "put:"+sessionID)
 	if s.putErr != nil {
 		return s.putErr
+	}
+	if s.deleted && s.restoreErr != nil {
+		return s.restoreErr
 	}
 	if s.cards == nil {
 		s.cards = make(map[string]playback.RecipeCard)
 	}
 	s.cards[sessionID] = card
-	s.operations = append(s.operations, "put:"+sessionID)
 	return nil
 }
 
@@ -76,6 +81,7 @@ func (s *stubRecipeNodeStore) Delete(_ context.Context, sessionID string) error 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.cards, sessionID)
+	s.deleted = true
 	s.operations = append(s.operations, "delete:"+sessionID)
 	return nil
 }
@@ -179,6 +185,214 @@ func TestEnsureLocalTranscodeDeletesRemoteRecipeAndRestoresItWhenCentralUpdateFa
 	stored, ok := baseStore.Get("play-1")
 	if !ok || stored.Recipe == nil || stored.Recipe.TranscodeNodeURL != remoteNode.URL {
 		t.Fatalf("central recipe = %+v, found=%v, want prior remote recipe", stored.Recipe, ok)
+	}
+}
+
+func TestPersistLocalTranscodeReportsFailedRemoteRecipeRestore(t *testing.T) {
+	restoreErr := errors.New("restore node recipe failed")
+	remoteNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && r.URL.Path == "/transcode/upstream-1" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(remoteNode.Close)
+
+	baseStore := NewPlaybackSessionStore(time.Hour, nil)
+	oldRecipe := playback.NewRecipeCard(7, "profile-1", 42, remoteNode.URL, playback.TranscodeOpts{
+		SessionID: "upstream-1", InputPath: "/media/movie.mkv", TargetCodecVideo: "h264", TargetCodecAudio: "aac",
+		SegmentDuration: 2, ToneMapMode: tonemap.ModeHardware,
+	})
+	baseStore.Put(PlaybackSession{
+		ID: "play-1", UpstreamSessionID: "upstream-1", TranscodeStarted: true, Recipe: &oldRecipe,
+	})
+	recipeStore := &stubRecipeNodeStore{
+		cards:      map[string]playback.RecipeCard{"upstream-1": oldRecipe},
+		restoreErr: restoreErr,
+	}
+	sessionMgr := &lockedCompatSessionManager{session: playback.Session{
+		ID: "upstream-1", UserID: 7, ProfileID: "profile-1", MediaFileID: 42,
+		PlayMethod: playback.PlayTranscode, BasePlayMethod: playback.PlayTranscode,
+	}}
+	handler := &PlaybackHandler{
+		playbackStore:   failLocalRecipeStore{CompatPlaybackStore: baseStore},
+		sessionMgr:      sessionMgr,
+		tm:              playback.NewTranscodeManager(),
+		JWTSecret:       "test-secret",
+		RecipeNodeStore: recipeStore,
+	}
+
+	err := handler.persistTranscodeRecipe(context.Background(), "play-1", "upstream-1", playback.TranscodeOpts{
+		SessionID: "upstream-1", InputPath: "/media/movie.mkv", TargetCodecVideo: "h264", TargetCodecAudio: "aac",
+		SegmentDuration: 2, ToneMapMode: tonemap.ModeSoftware, HWAccel: playback.HWAccelNone,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("persist error = %v, want central update failure", err)
+	}
+	if !errors.Is(err, restoreErr) {
+		t.Fatalf("persist error = %v, want observable restore failure", err)
+	}
+	if got := recipeStore.Operations(); len(got) != 2 || got[0] != "delete:upstream-1" || got[1] != "put:upstream-1" {
+		t.Fatalf("node recipe operations = %v, want delete followed by attempted rollback put", got)
+	}
+	if _, ok := recipeStore.Get("upstream-1"); ok {
+		t.Fatal("node recipe unexpectedly present after injected restore failure")
+	}
+	stored, ok := baseStore.Get("play-1")
+	if !ok || stored.Recipe == nil || stored.Recipe.TranscodeNodeURL != remoteNode.URL {
+		t.Fatalf("central recipe = %+v, found=%v, want retryable prior remote state", stored.Recipe, ok)
+	}
+}
+
+type lockedCompatSessionManager struct {
+	mu      sync.Mutex
+	session playback.Session
+}
+
+func (m *lockedCompatSessionManager) StartSession(int, string, int, playback.PlayMethod, bool) (*playback.Session, error) {
+	return nil, errors.New("unexpected StartSession")
+}
+func (m *lockedCompatSessionManager) UpdateProgress(string, float64, bool) error { return nil }
+func (m *lockedCompatSessionManager) UpdateAudioTrack(string, int, playback.PlayMethod) error {
+	return nil
+}
+func (m *lockedCompatSessionManager) StopSession(string) error    { return nil }
+func (m *lockedCompatSessionManager) BeginTransport(string) error { return nil }
+func (m *lockedCompatSessionManager) EndTransport(string) error   { return nil }
+
+func (m *lockedCompatSessionManager) GetSession(string) (*playback.Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copy := m.session
+	return &copy, nil
+}
+
+func (m *lockedCompatSessionManager) SetTranscodeNodeURL(_ string, nodeURL string) error {
+	m.mu.Lock()
+	m.session.TranscodeNodeURL = nodeURL
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *lockedCompatSessionManager) SetTranscodeStreamDetails(
+	_ string,
+	targetVideoCodec, targetAudioCodec string,
+	transcodeAudio bool,
+	hwAccel string,
+	mode tonemap.Mode,
+) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.session.TargetVideoCodec = targetVideoCodec
+	m.session.TargetAudioCodec = targetAudioCodec
+	m.session.TranscodeAudio = transcodeAudio
+	m.session.TranscodeHWAccel = hwAccel
+	m.session.ToneMapMode = mode
+	return nil
+}
+
+func TestStartRemoteToneMapStaleConfirmationCannotCloseLocalSoftwareWinner(t *testing.T) {
+	previousTimeout := compatManifestStartupTimeout
+	compatManifestStartupTimeout = time.Second
+	t.Cleanup(func() { compatManifestStartupTimeout = previousTimeout })
+
+	hardware := tonemap.Capability{
+		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI,
+		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	}
+	software := tonemap.Capability{
+		Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	}
+	remoteStartArrived := make(chan struct{})
+	releaseRemoteStart := make(chan struct{})
+	var releaseOnce sync.Once
+	remoteDeleted := make(chan struct{}, 1)
+	remoteNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
+			writeJSON(w, http.StatusOK, playback.HWAccelInfo{ToneMapCapabilities: tonemap.Capabilities{hardware}})
+		case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
+			close(remoteStartArrived)
+			<-releaseRemoteStart
+			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{})
+		case r.Method == http.MethodDelete && r.URL.Path == "/transcode/upstream-1":
+			remoteDeleted <- struct{}{}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(remoteNode.Close)
+	// Registered after server cleanup so LIFO cleanup releases a blocked handler
+	// before httptest waits for that handler to exit.
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseRemoteStart) }) })
+
+	handler, _, _, _, source := newManifestToneMapFailoverHandler(t, remoteNode.URL, true)
+	handler.compatToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+		return tonemap.Capabilities{software}, nil
+	}
+	handler.HWAccel = playback.HWAccelNone
+	handler.TranscodeDir = t.TempDir()
+	handler.FFmpegPath = filepath.Join(t.TempDir(), "ffmpeg")
+	ffmpegScript := "#!/bin/sh\n" +
+		"out=\"\"\n" +
+		"for arg in \"$@\"; do case \"$arg\" in *.m3u8) out=\"$(dirname \"$arg\")\";; esac; done\n" +
+		"mkdir -p \"$out\"\n" +
+		"for name in seg_00000.m4s seg_00001.m4s seg_00002.m4s; do printf segment > \"$out/$name\"; done\n" +
+		"printf '#EXTM3U\\n#EXT-X-TARGETDURATION:2\\n#EXT-X-MEDIA-SEQUENCE:0\\n#EXTINF:2,\\nseg_00000.m4s\\n#EXTINF:2,\\nseg_00001.m4s\\n#EXTINF:2,\\nseg_00002.m4s\\n' > \"$out/stream.m3u8\"\n" +
+		"sleep 30\n"
+	if err := os.WriteFile(handler.FFmpegPath, []byte(ffmpegScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionMgr := &lockedCompatSessionManager{session: playback.Session{
+		ID: "upstream-1", UserID: 7, ProfileID: "profile-1", MediaFileID: 42,
+		PlayMethod: playback.PlayTranscode, BasePlayMethod: playback.PlayTranscode, TranscodeNodeURL: remoteNode.URL,
+	}}
+	handler.sessionMgr = sessionMgr
+	file, err := handler.fileResolver.GetByID(context.Background(), source.FileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	remoteResult := make(chan error, 1)
+	go func() {
+		remoteResult <- handler.startRemoteTranscode(
+			context.Background(), "play-1", "upstream-1", source, file, 0, remoteNode.URL,
+		)
+	}()
+	select {
+	case <-remoteStartArrived:
+	case <-time.After(3 * time.Second):
+		t.Fatal("remote hardware start did not reach the node")
+	}
+	if err := sessionMgr.SetTranscodeNodeURL("upstream-1", ""); err != nil {
+		t.Fatal(err)
+	}
+	localWinner, err := handler.ensureTranscodeSessionWithToneMapMode(
+		context.Background(), "play-1", "upstream-1", source, tonemap.ModeSoftware,
+	)
+	if err != nil {
+		t.Fatalf("start local software winner: %v", err)
+	}
+	t.Cleanup(func() { handler.tm.CloseTranscodeSessionIf("upstream-1", localWinner, "") })
+
+	releaseOnce.Do(func() { close(releaseRemoteStart) })
+	if err := <-remoteResult; err == nil || !strings.Contains(err.Error(), "did not confirm tone-map mode") {
+		t.Fatalf("stale remote hardware result = %v, want confirmation failure", err)
+	}
+	select {
+	case <-remoteDeleted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stale remote runtime was not cleaned up")
+	}
+	if live := handler.tm.GetTranscodeSession("upstream-1"); live != localWinner || !localWinner.IsRunning() {
+		t.Fatalf("live runtime = %#v running=%v, want local software winner %#v", live, localWinner.IsRunning(), localWinner)
+	}
+	stored, ok := handler.playbackStore.Get("play-1")
+	if !ok || stored.Recipe == nil || stored.Recipe.ToneMapMode != tonemap.ModeSoftware || stored.Recipe.TranscodeNodeURL != "" {
+		t.Fatalf("stored recipe = %+v, found=%v, want local software winner", stored.Recipe, ok)
 	}
 }
 

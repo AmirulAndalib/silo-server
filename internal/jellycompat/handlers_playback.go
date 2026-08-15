@@ -1005,7 +1005,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 	retryWithSoftware := false
 	if err != nil {
 		if cleanupRequired {
-			h.tm.CloseTranscodeSession(upstreamSessionID, transcodeNodeURL)
+			h.tm.StopRemoteTranscode(upstreamSessionID, transcodeNodeURL)
 		}
 		if cleanupRequired && ctx.Err() == nil {
 			retryWithSoftware = downgradeToSoftwareToneMap(
@@ -1028,7 +1028,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		nodeResponse, status, cleanupRequired, err = dispatch(reqBody)
 		if err != nil {
 			if cleanupRequired {
-				h.tm.CloseTranscodeSession(upstreamSessionID, transcodeNodeURL)
+				h.tm.StopRemoteTranscode(upstreamSessionID, transcodeNodeURL)
 			}
 			if initialErr != nil {
 				return fmt.Errorf("%w: remote hardware tone-map start failed: %w; software retry failed: %w", errRemoteSoftwareToneMapStartFailed, initialErr, err)
@@ -1053,7 +1053,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		return startErr
 	}
 	if reqBody.ToneMapMode != "" && nodeResponse.ToneMapMode != reqBody.ToneMapMode {
-		h.tm.CloseTranscodeSession(upstreamSessionID, transcodeNodeURL)
+		h.tm.StopRemoteTranscode(upstreamSessionID, transcodeNodeURL)
 		err := errors.New("remote transcode node did not confirm tone-map mode")
 		if reqBody.ToneMapMode == tonemap.ModeSoftware {
 			return fmt.Errorf("%w: %w", errRemoteSoftwareToneMapStartFailed, err)
@@ -1094,7 +1094,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 
 	if err := h.persistTranscodeRecipe(ctx, playSessionID, upstreamSessionID, opts); err != nil {
 		// Roll back the already-started node ffmpeg so it isn't leaked.
-		h.tm.CloseTranscodeSession(upstreamSessionID, transcodeNodeURL)
+		h.tm.StopRemoteTranscode(upstreamSessionID, transcodeNodeURL)
 		return err
 	}
 
@@ -1172,21 +1172,30 @@ func (h *PlaybackHandler) persistTranscodeRecipe(
 		}
 	}
 
-	if err := h.playbackStore.Update(playSessionID, func(current *PlaybackSession) error {
+	if updateErr := h.playbackStore.Update(playSessionID, func(current *PlaybackSession) error {
 		current.TranscodeStarted = true
 		current.Recipe = recipe
 		return nil
-	}); err != nil {
+	}); updateErr != nil {
+		var restoreErr error
 		if nodeRecipeCommitted || oldNodeRecipeRemoved {
 			restoreCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			if previousRecipe != nil && previousRecipe.TranscodeNodeURL != "" {
-				_ = h.RecipeNodeStore.Put(restoreCtx, upstreamSessionID, *previousRecipe)
+				if err := h.RecipeNodeStore.Put(restoreCtx, upstreamSessionID, *previousRecipe); err != nil {
+					restoreErr = fmt.Errorf("restore prior node transcode recipe: %w", err)
+				}
 			} else {
-				_ = h.RecipeNodeStore.Delete(restoreCtx, upstreamSessionID)
+				if err := h.RecipeNodeStore.Delete(restoreCtx, upstreamSessionID); err != nil {
+					restoreErr = fmt.Errorf("remove uncommitted node transcode recipe: %w", err)
+				}
 			}
 		}
-		return fmt.Errorf("update playback session: %w", err)
+		updateErr = fmt.Errorf("update playback session: %w", updateErr)
+		if restoreErr != nil {
+			return errors.Join(updateErr, restoreErr)
+		}
+		return updateErr
 	}
 	return nil
 }
