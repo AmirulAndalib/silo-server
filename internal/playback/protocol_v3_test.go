@@ -1135,6 +1135,47 @@ func TestPlanPlaybackV3ToneMapSettingsSelectValidatedExecutor(t *testing.T) {
 	}
 }
 
+func TestPlanPlaybackV3ResolvesToneMapRecipeOnce(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.VideoTracks[0].ColorPrimaries = "bt2020"
+	file.VideoTracks[0].ColorTransfer = "smpte2084"
+	file.VideoTracks[0].ColorSpace = "bt2020nc"
+	req := validStartRequestV3()
+	req.QualityPreference = "1080p"
+	registry := NewTransformationRegistryV3([]TransformationSpecV3{
+		{Name: TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: TransformationVideoToH264V3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, Available: true},
+		{Name: TransformationHDRToSDRToneMapV3, RecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3, Available: true},
+	})
+	capabilities := tonemap.Capabilities{{
+		Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	}}
+	registryCalls := 0
+	capabilityCalls := 0
+
+	result := PlanPlaybackV3(PlannerInputV3{
+		Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
+		Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true, SoftwareToneMapEnabled: true},
+		Registry: registry,
+		HLSRegistry: func() *TransformationRegistryV3 {
+			registryCalls++
+			return registry
+		},
+		HLSToneMapCapabilities: func() tonemap.Capabilities {
+			capabilityCalls++
+			return capabilities
+		},
+	})
+
+	if result.Plan == nil || result.ToneMapMode != tonemap.ModeSoftware {
+		t.Fatalf("result = %s, want software tone-map transcode", ExplainPlannerResultV3(result))
+	}
+	if registryCalls != 1 || capabilityCalls != 1 {
+		t.Fatalf("tone-map resolution calls = registry %d capabilities %d, want one each", registryCalls, capabilityCalls)
+	}
+}
+
 // TestPlanPlaybackV3RejectsDolbyOnlyAndFreezesAmbiguousFallbacks verifies unsafe or uncertain sources are handled explicitly.
 func TestPlanPlaybackV3RejectsDolbyOnlyAndFreezesAmbiguousFallbacks(t *testing.T) {
 	registry := NewTransformationRegistryV3([]TransformationSpecV3{

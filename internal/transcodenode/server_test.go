@@ -1151,3 +1151,63 @@ func TestHandleStartRejectsIncompleteOrStaleToneMapRecipe(t *testing.T) {
 		})
 	}
 }
+
+func TestToneMapRecipeContextFailuresReturnServiceUnavailable(t *testing.T) {
+	toneMapRequest := TranscodeStartRequest{
+		SessionID: "tone-map-context", InputPath: "/media/movie.mkv",
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac", SegmentDuration: 2,
+		HWAccel:       tonemap.BackendQSV,
+		ToneMapPolicy: tonemap.PolicyHardwareOnly, ToneMapMode: tonemap.ModeHardware,
+		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1},
+	}
+	downloadRequest := downloadprepare.Request{
+		ArtifactID: "tone-map-context", InputPath: "/media/movie.mkv",
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac",
+		ToneMapPolicy: tonemap.PolicyHardwareOnly, ToneMapMode: tonemap.ModeHardware,
+		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1},
+	}
+	tests := []struct {
+		name   string
+		body   any
+		handle func(*Server, http.ResponseWriter, *http.Request)
+	}{
+		{name: "transcode start", body: toneMapRequest, handle: func(server *Server, w http.ResponseWriter, r *http.Request) { server.handleStart(w, r) }},
+		{name: "download prepare", body: downloadRequest, handle: func(server *Server, w http.ResponseWriter, r *http.Request) { server.handleDownloadPrepare(w, r) }},
+	}
+	contexts := []struct {
+		name string
+		new  func() (context.Context, context.CancelFunc)
+	}{
+		{name: "canceled", new: func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx, cancel
+		}},
+		{name: "deadline exceeded", new: func() (context.Context, context.CancelFunc) {
+			return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		}},
+	}
+	for _, test := range tests {
+		for _, contextTest := range contexts {
+			t.Run(test.name+"/"+contextTest.name, func(t *testing.T) {
+				server := newTestServer(t)
+				body, err := json.Marshal(test.body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := contextTest.new()
+				defer cancel()
+				request := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body)).WithContext(ctx)
+				recorder := httptest.NewRecorder()
+
+				test.handle(server, recorder, request)
+
+				if recorder.Code != http.StatusServiceUnavailable {
+					t.Fatalf("status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
+				}
+			})
+		}
+	}
+}

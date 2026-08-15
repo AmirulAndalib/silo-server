@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -447,7 +448,7 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 			}
 		}
 	} else {
-		capabilities := append(localCapabilities, remoteCapabilities...)
+		capabilities := slices.Concat(localCapabilities, remoteCapabilities)
 		mode = capabilities.PreferredMode(policy, kind)
 	}
 	if mode == "" {

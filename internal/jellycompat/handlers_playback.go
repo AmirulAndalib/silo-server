@@ -932,18 +932,12 @@ func (h *PlaybackHandler) startRemoteTranscode(
 		TargetCodecVideo:    reqBody.TargetCodecVideo,
 		TargetCodecAudio:    reqBody.TargetCodecAudio,
 		SegmentDuration:     reqBody.SegmentDuration,
-		HWAccel:             reqBody.HWAccel,
 		AudioTrackIndex:     reqBody.AudioTrackIndex,
 		TotalDuration:       reqBody.TotalDuration,
 	}
 	toneMapRecipe.apply(&opts)
-	confirmedHWAccel := strings.TrimSpace(nodeResponse.HWAccel)
-	if confirmedHWAccel != "" {
-		opts.HWAccel = confirmedHWAccel
-	}
-	if reqBody.ToneMapMode != "" {
-		opts.ToneMapMode = nodeResponse.ToneMapMode
-	}
+	opts.HWAccel = strings.TrimSpace(nodeResponse.HWAccel)
+	opts.ToneMapMode = nodeResponse.ToneMapMode
 	if source.TranscodeAudio {
 		opts.TargetCodecVideo = "copy"
 	}
@@ -1136,7 +1130,8 @@ func (h *PlaybackHandler) HandlePlaybackInfo(w http.ResponseWriter, r *http.Requ
 			if toneMapCapabilityErr != nil {
 				metadata := tonemap.MetadataForFile(&models.MediaFile{HDR: version.HDR, VideoTracks: version.VideoTracks})
 				resolution := tonemap.ResolveSource(metadata)
-				if resolution.Kind != "" && toneMapCapabilities.PreferredMode(toneMapPolicy, resolution.Kind) == "" {
+				if resolution.Kind != "" && toneMapCapabilities.PreferredMode(toneMapPolicy, resolution.Kind) == "" &&
+					!source.SupportsDirectPlay && !source.SupportsDirectStream {
 					writeError(w, http.StatusServiceUnavailable, "PlaybackUnavailable", "Tone-map capability discovery is temporarily unavailable")
 					return
 				}

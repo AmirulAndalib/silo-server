@@ -50,7 +50,7 @@ const (
 
 func normalizeRemoteToneMapProbeTimeout(millis int64) time.Duration {
 	if millis <= 0 {
-		return remoteOnlyToneMapPlanTimeout
+		return remoteToneMapProbeMinTimeout
 	}
 	if millis < remoteToneMapProbeMinTimeout.Milliseconds() {
 		return remoteToneMapProbeMinTimeout
@@ -352,7 +352,7 @@ func (p *NodeAwarePreparer) remoteToneMapProbeTimeout(nodeURL string) time.Durat
 	if timeout > 0 {
 		return timeout
 	}
-	return remoteOnlyToneMapPlanTimeout
+	return remoteToneMapProbeMinTimeout
 }
 
 // cacheToneMapCapabilityFailure negatively caches an unreachable or invalid

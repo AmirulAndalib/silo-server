@@ -1740,6 +1740,9 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 		opts.ToneMapSourceKind, toneMapCapabilities,
 	) {
 		transcodeSession, err = playback.StartTranscode(context.WithoutCancel(ctx), opts)
+		if err == nil {
+			manifestDeadline = time.Now().Add(compatManifestStartupTimeout)
+		}
 	}
 	if err != nil {
 		unlock()

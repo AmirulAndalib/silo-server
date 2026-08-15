@@ -184,7 +184,7 @@ func TestHandlePlaybackInfoReturnsServiceUnavailableWhenToneMapProbeIsIncomplete
 		return nil, context.DeadlineExceeded
 	}
 
-	request := httptest.NewRequest(http.MethodPost, "/Items/"+routeID+"/PlaybackInfo", strings.NewReader(`{}`))
+	request := httptest.NewRequest(http.MethodPost, "/Items/"+routeID+"/PlaybackInfo", strings.NewReader(`{"EnableDirectPlay":false,"EnableDirectStream":false}`))
 	routeCtx := chi.NewRouteContext()
 	routeCtx.URLParams.Add("id", routeID)
 	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeCtx))
@@ -195,6 +195,43 @@ func TestHandlePlaybackInfoReturnsServiceUnavailableWhenToneMapProbeIsIncomplete
 
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHandlePlaybackInfoKeepsDirectPlaybackWhenToneMapProbeIsIncomplete(t *testing.T) {
+	handler, routeID := newSubtitleSelectionHandler(t)
+	version := subtitleSelectionVersion()
+	version.HDR = true
+	version.VideoTracks = []models.VideoTrack{{
+		Codec: "hevc", Width: 1920, Height: 1080, BitDepth: 10,
+		VideoRangeType: "HDR10", ColorPrimaries: "bt2020", ColorTransfer: "smpte2084", ColorSpace: "bt2020nc",
+	}}
+	handler.content = &stubContentService{detail: &upstreamItemDetail{ContentID: "movie-1", Versions: []catalog.FileVersion{version}}}
+	handler.SettingsRepo = stubSettingsReader{values: map[string]string{
+		config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+	}}
+	handler.compatToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+		return nil, context.DeadlineExceeded
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/Items/"+routeID+"/PlaybackInfo", strings.NewReader(`{}`))
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("id", routeID)
+	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeCtx))
+	request = request.WithContext(context.WithValue(request.Context(), compatSessionKey, &Session{Token: "token-1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.HandlePlaybackInfo(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response playbackInfoResponseDTO
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.MediaSources) != 1 || !response.MediaSources[0].SupportsDirectPlay || response.MediaSources[0].SupportsTranscoding {
+		t.Fatalf("media sources = %#v, want direct play retained with transcoding disabled", response.MediaSources)
 	}
 }
 

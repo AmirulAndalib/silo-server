@@ -161,7 +161,7 @@ func TestStartRemoteTranscodeReportsConfirmedExecutor(t *testing.T) {
 	}
 }
 
-func TestStartRemoteTranscodePreservesRequestedExecutorForLegacyEmptyResponse(t *testing.T) {
+func TestStartRemoteTranscodeRecordsUnknownExecutorForLegacyEmptyResponse(t *testing.T) {
 	recipeStore := &stubRecipeNodeStore{}
 	node := fakeTranscodeNode(t, nil)
 	handler, sessionMgr, playbackStore := newRemoteTranscodeHandler(t, node.URL, recipeStore)
@@ -173,11 +173,11 @@ func TestStartRemoteTranscodePreservesRequestedExecutorForLegacyEmptyResponse(t 
 	}
 
 	session := sessionMgr.sessions["upstream-1"]
-	if session.TranscodeHWAccel != tonemap.BackendQSV {
-		t.Fatalf("reported executor = %q, want %q", session.TranscodeHWAccel, tonemap.BackendQSV)
+	if session.TranscodeHWAccel != "" {
+		t.Fatalf("reported executor = %q, want unknown", session.TranscodeHWAccel)
 	}
 	card, ok := recipeStore.Get("upstream-1")
-	if !ok || card.HWAccel != tonemap.BackendQSV {
+	if !ok || card.HWAccel != "" {
 		t.Fatalf("persisted executor = %q, found=%v", card.HWAccel, ok)
 	}
 }

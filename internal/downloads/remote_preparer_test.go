@@ -422,7 +422,7 @@ func TestNodeAwarePreparerUsesTargetNodeProbeBudget(t *testing.T) {
 	cfg.Playback.HWDevice = "/central/device"
 	preparer := NewNodeAwarePreparer(nil, nil, func() *config.Config { return cfg })
 
-	if got, want := preparer.remoteToneMapProbeTimeout(remote.URL), 5*time.Minute; got != want {
+	if got, want := preparer.remoteToneMapProbeTimeout(remote.URL), remoteToneMapProbeMinTimeout; got != want {
 		t.Fatalf("unknown-node probe timeout = %s, want cold-node fallback %s", got, want)
 	}
 	if _, err := preparer.toneMapCapabilitiesForNode(context.Background(), remote.URL); err != nil {
@@ -468,7 +468,7 @@ func TestNormalizeRemoteToneMapProbeTimeout(t *testing.T) {
 		millis int64
 		want   time.Duration
 	}{
-		{name: "missing", want: 5 * time.Minute},
+		{name: "missing", want: 5 * time.Second},
 		{name: "too small", millis: time.Second.Milliseconds(), want: 5 * time.Second},
 		{name: "node specific", millis: (161 * time.Second).Milliseconds(), want: 161 * time.Second},
 		{name: "too large", millis: (10 * time.Minute).Milliseconds(), want: 5 * time.Minute},
@@ -493,6 +493,14 @@ func TestNodeAwarePreparerCapabilityFailurePreservesNodeProbeBudget(t *testing.T
 
 	if got, want := preparer.remoteToneMapProbeTimeout(nodeURL), 161*time.Second; got != want {
 		t.Fatalf("probe timeout after transient failure = %s, want preserved node budget %s", got, want)
+	}
+}
+
+func TestNodeAwarePreparerUsesMinimumProbeBudgetWithoutCachedAdvertisement(t *testing.T) {
+	preparer := NewNodeAwarePreparer(nil, nil, nil)
+
+	if got := preparer.remoteToneMapProbeTimeout("https://node.example"); got != remoteToneMapProbeMinTimeout {
+		t.Fatalf("uncached probe timeout = %s, want %s", got, remoteToneMapProbeMinTimeout)
 	}
 }
 

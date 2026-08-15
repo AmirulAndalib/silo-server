@@ -243,6 +243,10 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 		if h.v3NodeCapabilities == nil {
 			h.v3NodeCapabilities = make(map[string]v3NodeCapabilityCache)
 		}
+		if current, currentOK := h.v3NodeCapabilities[nodeURL]; currentOK && current.err == nil && completedAt.Before(current.expiresAt) {
+			h.v3NodeCapabilitiesMu.Unlock()
+			return current, nil
+		}
 		h.v3NodeCapabilities[nodeURL] = v3NodeCapabilityCache{err: err, expiresAt: completedAt.Add(v3NodeCapabilityErrorTTL), probeRequestTimeout: entry.probeRequestTimeout}
 		h.v3NodeCapabilitiesMu.Unlock()
 		return v3NodeCapabilityCache{}, err
@@ -669,9 +673,8 @@ func (h *PlaybackHandler) HandlePlaybackCapabilityV3(w http.ResponseWriter, r *h
 	settings := h.plannerSettingsV3(r.Context())
 	policy := tonemap.NewPolicy(settings.HardwareToneMapEnabled, settings.SoftwareToneMapEnabled)
 	inventory := hlsToneMapCapabilityInventoryV3{}
-	var capabilityErr error
 	if policy != tonemap.PolicyNone {
-		inventory, capabilityErr = h.hlsToneMapCapabilityInventoryV3(r.Context())
+		inventory, _ = h.hlsToneMapCapabilityInventoryV3(r.Context())
 	}
 	registry := h.hlsPlanningRegistryWithInputsV3(r.Context(), settings, inventory)
 	toneMapAvailable := false
@@ -682,10 +685,6 @@ func (h *PlaybackHandler) HandlePlaybackCapabilityV3(w http.ResponseWriter, r *h
 				break
 			}
 		}
-	}
-	if capabilityErr != nil && !toneMapAvailable {
-		writeError(w, http.StatusServiceUnavailable, "capability_unavailable", "Tone-map capability discovery is temporarily unavailable")
-		return
 	}
 	for _, transformation := range registry.Advertised() {
 		if transformation.Name == playback.TransformationHDRToSDRToneMapV3 && !toneMapAvailable {

@@ -519,7 +519,7 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 	}
 	if toneMapRecipeRequested(opts) {
 		if err := resolveToneMapRecipe(r.Context(), &opts); err != nil {
-			http.Error(w, "unsupported or stale tone-map recipe", http.StatusUnprocessableEntity)
+			writeToneMapRecipeError(w, err)
 			return
 		}
 	}
@@ -573,12 +573,26 @@ func resolveToneMapRecipe(ctx context.Context, opts *playback.TranscodeOpts) err
 	}
 	resolveCtx, cancel := context.WithTimeout(ctx, tonemap.ProbeEndpointTimeout(opts.HWAccel, opts.HWDevice))
 	defer cancel()
+	if err := resolveCtx.Err(); err != nil {
+		return err
+	}
 	resolved, err := playback.ResolveToneMapExecutor(resolveCtx, *opts)
+	if contextErr := resolveCtx.Err(); contextErr != nil {
+		return contextErr
+	}
 	if err != nil {
 		return err
 	}
 	*opts = resolved
 	return nil
+}
+
+func writeToneMapRecipeError(w http.ResponseWriter, err error) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		http.Error(w, "tone-map capability probe unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	http.Error(w, "unsupported or stale tone-map recipe", http.StatusUnprocessableEntity)
 }
 
 func writeDownloadPrepareResult(w http.ResponseWriter, artifactID string, fileSize int64) {
@@ -858,7 +872,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if toneMapRecipeRequested(opts) {
 		if err := resolveToneMapRecipe(r.Context(), &opts); err != nil {
-			http.Error(w, "unsupported or stale tone-map recipe", http.StatusUnprocessableEntity)
+			writeToneMapRecipeError(w, err)
 			return
 		}
 	}

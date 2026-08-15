@@ -753,7 +753,13 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 		}
 		return terminalPlannerResultV3("transcoding_disabled", "The source requires video adaptation, but transcoding is unavailable.", false)
 	}
-	if hdrTranscodeUnavailableV3(input, source) {
+	var hlsRegistry *TransformationRegistryV3
+	toneMapRecipe := resolvedToneMapRecipeV3{}
+	if source.DynamicRange != "" && source.DynamicRange != DynamicRangeSDRV3 {
+		toneMapRecipe = resolveToneMapRecipeV3(input, source, nil)
+		hlsRegistry = toneMapRecipe.hlsRegistry
+	}
+	if source.DynamicRange != "" && source.DynamicRange != DynamicRangeSDRV3 && !toneMapRecipe.ok {
 		if subtitleForcedAdaptation {
 			return terminalPlannerResultV3("subtitle_conversion_unsupported", "The selected subtitle must be burned into the video, but this HDR source cannot be re-encoded.", false)
 		}
@@ -765,7 +771,10 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 		}
 		return terminalPlannerResultV3("no_alternate_version", TerminalMessage4KTranscodeDisabledV3, false)
 	}
-	if !input.hlsRegistry().Available(TransformationVideoToH264V3) || !input.hlsRegistry().Available(TransformationAudioToAACV3) {
+	if hlsRegistry == nil {
+		hlsRegistry = input.hlsRegistry()
+	}
+	if hlsRegistry == nil || !hlsRegistry.Available(TransformationVideoToH264V3) || !hlsRegistry.Available(TransformationAudioToAACV3) {
 		return terminalPlannerResultV3("conversion_tool_unavailable", "The required validated H.264/AAC conversion toolchain is unavailable.", true)
 	}
 	if source.DynamicRange != "" && source.DynamicRange != DynamicRangeSDRV3 {
@@ -789,7 +798,11 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 		TransformationV3{Name: TransformationVideoToH264V3, Executor: ExecutorServerV3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, ValidatedClaims: []string{ClaimH264DecodeV3}},
 		TransformationV3{Name: TransformationAudioToAACV3, Executor: ExecutorServerV3, RecipeVersion: "1", ValidatedClaims: []string{ClaimAudioDecodeV3}},
 	)
-	toneMapPolicy, toneMapMode, toneMapResolution, toneMapRevision, toneMapOK := toneMapRecipeV3(input, source)
+	toneMapPolicy := toneMapRecipe.policy
+	toneMapMode := toneMapRecipe.mode
+	toneMapResolution := toneMapRecipe.resolution
+	toneMapRevision := toneMapRecipe.revision
+	toneMapOK := toneMapRecipe.ok
 	toneMapSourceKind := toneMapResolution.Kind
 	if source.DynamicRange != "" && source.DynamicRange != DynamicRangeSDRV3 {
 		if !toneMapOK {
@@ -1051,13 +1064,26 @@ func hdrTranscodeUnavailableV3(input PlannerInputV3, source SourceDescriptorV3) 
 	if source.DynamicRange == "" || source.DynamicRange == DynamicRangeSDRV3 {
 		return false
 	}
-	_, _, _, _, ok := toneMapRecipeV3(input, source)
-	return !ok
+	return !resolveToneMapRecipeV3(input, source, nil).ok
+}
+
+type resolvedToneMapRecipeV3 struct {
+	policy      tonemap.Policy
+	mode        tonemap.Mode
+	resolution  tonemap.SourceResolution
+	revision    tonemap.SourceRevision
+	hlsRegistry *TransformationRegistryV3
+	ok          bool
 }
 
 // toneMapRecipeV3 freezes the policy, preferred validated executor, safe source
 // resolution, and source revision required by an HDR video transcode plan.
 func toneMapRecipeV3(input PlannerInputV3, source SourceDescriptorV3) (tonemap.Policy, tonemap.Mode, tonemap.SourceResolution, tonemap.SourceRevision, bool) {
+	recipe := resolveToneMapRecipeV3(input, source, nil)
+	return recipe.policy, recipe.mode, recipe.resolution, recipe.revision, recipe.ok
+}
+
+func resolveToneMapRecipeV3(input PlannerInputV3, source SourceDescriptorV3, hlsRegistry *TransformationRegistryV3) resolvedToneMapRecipeV3 {
 	policy := tonemap.NewPolicy(input.Settings.HardwareToneMapEnabled, input.Settings.SoftwareToneMapEnabled)
 	file := input.EffectiveFile
 	if file == nil {
@@ -1065,15 +1091,20 @@ func toneMapRecipeV3(input PlannerInputV3, source SourceDescriptorV3) (tonemap.P
 	}
 	resolution := toneMapSourceResolutionV3(file, source)
 	revision := tonemap.RevisionForFile(file)
+	recipe := resolvedToneMapRecipeV3{policy: policy, resolution: resolution, revision: revision}
 	if policy == tonemap.PolicyNone || resolution.Kind == "" {
-		return policy, "", resolution, revision, false
+		return recipe
 	}
-	hlsRegistry := input.hlsRegistry()
+	if hlsRegistry == nil {
+		hlsRegistry = input.hlsRegistry()
+	}
+	recipe.hlsRegistry = hlsRegistry
 	if hlsRegistry == nil || !hlsRegistry.Available(TransformationHDRToSDRToneMapV3) {
-		return policy, "", resolution, revision, false
+		return recipe
 	}
-	mode := input.hlsToneMapCapabilities().PreferredMode(policy, resolution.Kind)
-	return policy, mode, resolution, revision, mode != ""
+	recipe.mode = input.hlsToneMapCapabilities().PreferredMode(policy, resolution.Kind)
+	recipe.ok = recipe.mode != ""
+	return recipe
 }
 
 // toneMapSourceResolutionV3 combines protocol source facts with the scanner's

@@ -370,7 +370,7 @@ func TestUnusedToneMapPlanningSnapshotDoesNotInventCapabilityFailure(t *testing.
 	}
 }
 
-func TestHandlePlaybackCapabilityV3ReturnsServiceUnavailableWhenToneMapProbeIsIncomplete(t *testing.T) {
+func TestHandlePlaybackCapabilityV3OmitsToneMapWhenProbeIsIncomplete(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{
 		config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
@@ -383,8 +383,17 @@ func TestHandlePlaybackCapabilityV3ReturnsServiceUnavailableWhenToneMapProbeIsIn
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/playback/capability", nil).WithContext(newAuthorizedPlaybackContext())
 	handler.HandlePlaybackCapabilityV3(recorder, request)
 
-	if recorder.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response playback.CapabilityResponseV3
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	for _, transformation := range response.Transformations {
+		if transformation.Name == playback.TransformationHDRToSDRToneMapV3 {
+			t.Fatal("tone-map transformation was advertised after capability discovery failed")
+		}
 	}
 }
 
@@ -595,6 +604,52 @@ func TestRemoteTransformationsV3FailureCacheSplit(t *testing.T) {
 	}
 	if hits != 2 {
 		t.Fatalf("cached success was refetched (%d hits)", hits)
+	}
+}
+
+func TestLookupRemoteCapabilitiesV3PreservesConcurrentFreshSuccessOnRefetchFailure(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer remote.Close()
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	handler.v3NodeCapabilities = make(map[string]v3NodeCapabilityCache)
+	handler.v3NodeCapabilities[remote.URL] = v3NodeCapabilityCache{
+		expiresAt:           time.Now().Add(-time.Second),
+		probeRequestTimeout: time.Second,
+	}
+	type lookupResult struct {
+		entry v3NodeCapabilityCache
+		err   error
+	}
+	resultCh := make(chan lookupResult, 1)
+	go func() {
+		entry, err := handler.lookupRemoteCapabilitiesV3(context.Background(), remote.URL, false)
+		resultCh <- lookupResult{entry: entry, err: err}
+	}()
+	<-requestStarted
+
+	fresh := v3NodeCapabilityCache{
+		transformations: []playback.TransformationV3{{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"}},
+		expiresAt:       time.Now().Add(time.Minute),
+	}
+	handler.v3NodeCapabilitiesMu.Lock()
+	handler.v3NodeCapabilities[remote.URL] = fresh
+	handler.v3NodeCapabilitiesMu.Unlock()
+	close(releaseRequest)
+
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("lookup error = %v, want concurrent fresh success", result.err)
+	}
+	if len(result.entry.transformations) != 1 || result.entry.transformations[0].Name != playback.TransformationAudioToAACV3 {
+		t.Fatalf("lookup entry = %#v, want concurrent fresh success", result.entry)
 	}
 }
 

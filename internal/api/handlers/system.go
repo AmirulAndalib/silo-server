@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
-	"time"
 
 	"github.com/Silo-Server/silo-server/internal/buildinfo"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
@@ -120,7 +119,7 @@ func (h *SystemHandler) fetchRemoteHWAccel(ctx context.Context, node *nodepool.N
 	// The admin inventory does not carry each node's configured backend/device
 	// list, so give cold probes a generous bound while still preventing a
 	// stalled healthy node from holding the request until client cancellation.
-	requestCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	requestCtx, cancel := context.WithTimeout(ctx, remoteNodeProbeFallbackTimeout)
 	defer cancel()
 	return fetchRemoteTranscodeCapabilities(requestCtx, node.URL, h.jwtSecret)
 }
