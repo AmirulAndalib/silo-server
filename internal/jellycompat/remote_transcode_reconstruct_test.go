@@ -145,6 +145,7 @@ func TestEnsureLocalTranscodeDeletesRemoteRecipeAndRestoresItWhenCentralUpdateFa
 	if err := os.WriteFile(handler.FFmpegPath, []byte(ffmpegScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeMatchingToneMapFFprobe(t, handler.FFmpegPath, source.Version.VideoTracks[0])
 
 	oldRecipe := playback.NewRecipeCard(7, "profile-1", 42, remoteNode.URL, playback.TranscodeOpts{
 		SessionID: "upstream-1", InputPath: "/media/movie.mkv", TargetCodecVideo: "h264", TargetCodecAudio: "aac",
@@ -346,6 +347,7 @@ func TestStartRemoteToneMapStaleConfirmationCannotCloseLocalSoftwareWinner(t *te
 	if err := os.WriteFile(handler.FFmpegPath, []byte(ffmpegScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeMatchingToneMapFFprobe(t, handler.FFmpegPath, source.Version.VideoTracks[0])
 	sessionMgr := &lockedCompatSessionManager{session: playback.Session{
 		ID: "upstream-1", UserID: 7, ProfileID: "profile-1", MediaFileID: 42,
 		PlayMethod: playback.PlayTranscode, BasePlayMethod: playback.PlayTranscode, TranscodeNodeURL: remoteNode.URL,
@@ -810,15 +812,15 @@ func TestRemoteTranscodeStartTimeoutCoversColdProbePreflightAndReadiness(t *test
 		TotalDuration:            100,
 		RequireReady:             true,
 	}
-	want := 137*time.Second + tonemap.SourcePreflightTimeout(100) + transcodenode.TranscodeStartReadinessTimeout
+	want := 137*time.Second + playback.ManifestStartupTimeout + tonemap.SourcePreflightTimeout(100) + transcodenode.TranscodeStartReadinessTimeout
 	if got := handler.remoteTranscodeStartTimeout(request, (137 * time.Second).Milliseconds()); got != want {
 		t.Fatalf("remote transcode start timeout = %v, want %v", got, want)
 	}
-	maxWant := 5*time.Minute + tonemap.SourcePreflightTimeout(100) + transcodenode.TranscodeStartReadinessTimeout
+	maxWant := 5*time.Minute + playback.ManifestStartupTimeout + tonemap.SourcePreflightTimeout(100) + transcodenode.TranscodeStartReadinessTimeout
 	if got := handler.remoteTranscodeStartTimeout(request, (10 * time.Minute).Milliseconds()); got != maxWant {
 		t.Fatalf("bounded remote transcode start timeout = %v, want %v", got, maxWant)
 	}
-	fallbackWant := compatRemoteNodeProbeFallbackTimeout + tonemap.SourcePreflightTimeout(100) + transcodenode.TranscodeStartReadinessTimeout
+	fallbackWant := compatRemoteNodeProbeFallbackTimeout + playback.ManifestStartupTimeout + tonemap.SourcePreflightTimeout(100) + transcodenode.TranscodeStartReadinessTimeout
 	if got := handler.remoteTranscodeStartTimeout(request, 0); got != fallbackWant {
 		t.Fatalf("missing-budget remote transcode start timeout = %v, want %v", got, fallbackWant)
 	}

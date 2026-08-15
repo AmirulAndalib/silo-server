@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -84,7 +85,7 @@ func stableToneMapTransportFileV3(t *testing.T) *models.MediaFile {
 	file.HDR = true
 	file.VideoTracks[0] = models.VideoTrack{
 		Codec: "hevc", Profile: "main 10", Level: 51, Width: 3840, Height: 2160,
-		FrameRate: "24000/1001", Bitrate: 32_000, BitDepth: 10, PixelFormat: "yuv420p10le",
+		FrameRate: "23.976", Bitrate: 32_000, BitDepth: 10, PixelFormat: "yuv420p10le",
 		VideoRange: "DolbyVision", VideoRangeType: "DOVIWithHDR10", DVProfile: 7, DVBLCompatID: 6,
 		DVConfigPresent: true, DVBLCompatIDPresent: true, DVBLPresent: true, DVRPUPresent: true,
 		ColorRange: "tv", ColorPrimaries: "bt2020", ColorTransfer: "smpte2084", ColorSpace: "bt2020nc",
@@ -804,6 +805,7 @@ func TestPrepareTransportV3AcceptsEveryValidatedLocalToneMapExecutor(t *testing.
 			manager := playback.NewSessionManager(0, 0)
 			handler := NewPlaybackHandler(manager)
 			ffmpegPath := writePlaybackTestFFmpeg(t)
+			writePlaybackToneMapFFprobe(t, ffmpegPath, file.VideoTracks[0])
 			transcodeDir := t.TempDir()
 			handler.PlaybackConfig = func() config.PlaybackConfig {
 				return config.PlaybackConfig{
@@ -917,6 +919,7 @@ func TestNVENCSDRBaseInitialAndThawedRecipeUseIdenticalFFmpegArgs(t *testing.T) 
 		ToneMapPolicy: tonemap.PolicyHardwareOnly, ToneMapMode: tonemap.ModeHardware, ToneMapSourceKind: tonemap.SourceSDRBT709,
 		ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3, ToneMapSourceRevision: tonemap.RevisionForFile(file),
 	}
+	liveTrack := file.VideoTracks[0]
 	session, err := manager.StartSession(7, "profile-1", file.ID, playback.PlayTranscode, true)
 	if err != nil {
 		t.Fatalf("start playback session: %v", err)
@@ -926,6 +929,7 @@ func TestNVENCSDRBaseInitialAndThawedRecipeUseIdenticalFFmpegArgs(t *testing.T) 
 		t.Helper()
 		argsPath := filepath.Join(t.TempDir(), name+"-args.txt")
 		ffmpegPath := writePlaybackArgsRecordingFFmpegV3(t, argsPath)
+		writePlaybackToneMapFFprobe(t, ffmpegPath, liveTrack)
 		handler.PlaybackConfig = func() config.PlaybackConfig {
 			return config.PlaybackConfig{
 				FFmpegPath: ffmpegPath, TranscodeDir: transcodeDir, TranscodeEnabled: true,
@@ -986,6 +990,7 @@ func TestPrepareTransportV3ReportsSoftwareToneMapFallback(t *testing.T) {
 	}
 
 	file := stableToneMapTransportFileV3(t)
+	writePlaybackToneMapFFprobe(t, ffmpegPath, file.VideoTracks[0])
 	manager := playback.NewSessionManager(0, 0)
 	handler := NewPlaybackHandler(manager)
 	transcodeDir := t.TempDir()
@@ -1223,6 +1228,75 @@ func TestPrepareTransportV3TriesNextSoftwareNodeAfterStartFailure(t *testing.T) 
 		t.Fatalf("transport = %+v error = %v, want second software node", transport, transportErr)
 	}
 	transport.rollback()
+}
+
+func TestPrepareTransportV3ClassifiesExhaustedRemoteLiveValidation(t *testing.T) {
+	required := []playback.TransformationV3{
+		{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
+		{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+		{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
+	}
+	tests := []struct {
+		name          string
+		status        int
+		validation    string
+		wantCause     error
+		wantRetryable bool
+	}{
+		{name: "stale metadata", status: http.StatusUnprocessableEntity, validation: transcodenode.ToneMapSourceRevisionChangedCode, wantCause: tonemap.ErrSourceRevisionChanged},
+		{name: "probe unavailable", status: http.StatusServiceUnavailable, validation: transcodenode.ToneMapSourceValidationUnavailableCode, wantCause: playback.ErrToneMapSourceValidationUnavailable, wantRetryable: true},
+		{name: "generic recipe rejection", status: http.StatusUnprocessableEntity, wantRetryable: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
+					writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: required, ToneMapCapabilities: tonemap.Capabilities{{
+						Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+						SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+					}}})
+				case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
+					if tt.validation != "" {
+						w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, tt.validation)
+					}
+					w.WriteHeader(tt.status)
+				case r.Method == http.MethodDelete:
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer node.Close()
+
+			transcodes := nodepool.NewTranscodePool()
+			transcodes.SetNodes([]*nodepool.Node{{URL: node.URL, Enabled: true, Healthy: true}})
+			handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+			handler.JWTSecret = "test-secret"
+			handler.NodePlanner = nodepool.NewPlanner(nodepool.NewProxyPool(), transcodes)
+			handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{config.PlaybackLocalTranscodeFallbackSettingKey: "false"}}
+			file := stableToneMapTransportFileV3(t)
+			result := playback.PlannerResultV3{
+				Plan:       &playback.PlanV3{PlanID: "plan:remote-live-validation", Delivery: playback.DeliveryTranscodeHLSV3, Transformations: required},
+				PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac", TargetBitrateKbps: file.Bitrate,
+				SubtitleTrackIndex: -1, SubtitleTransportTrackIndex: -1,
+				ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware, ToneMapSourceKind: tonemap.SourcePQ,
+				ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3, ToneMapSourceRevision: tonemap.RevisionForFile(file),
+			}
+
+			_, transportErr := handler.prepareTransportV3(
+				httptest.NewRequest(http.MethodPost, "/", nil),
+				&playback.Session{ID: "session-remote-live-validation", UserID: 7, ProfileID: "profile-1"},
+				file,
+				result,
+			)
+			if transportErr == nil || transportErr.retryable != tt.wantRetryable ||
+				(tt.wantCause != nil && !errors.Is(transportErr.cause, tt.wantCause)) ||
+				(tt.wantCause == nil && transportErr.cause != nil) {
+				t.Fatalf("transport error = %#v, want retryable=%t wrapping %v", transportErr, tt.wantRetryable, tt.wantCause)
+			}
+		})
+	}
 }
 
 func TestPlanRequiresServerTransformationsV3(t *testing.T) {

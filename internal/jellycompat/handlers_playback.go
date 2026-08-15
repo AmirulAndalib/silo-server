@@ -458,7 +458,7 @@ func (h *PlaybackHandler) remoteTranscodeStartTimeout(request transcodenode.Tran
 	if request.ToneMapMode == "" {
 		return 20 * time.Second
 	}
-	timeout := playback.NormalizeProbeRequestTimeout(nodeProbeTimeoutMillis, h.toneMapCapabilityTimeout())
+	timeout := playback.NormalizeProbeRequestTimeout(nodeProbeTimeoutMillis, h.toneMapCapabilityTimeout()) + playback.ManifestStartupTimeout
 	if request.ToneMapPreflightRequired {
 		timeout += tonemap.SourcePreflightTimeout(request.TotalDuration)
 	}
@@ -984,6 +984,14 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusAccepted {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			if request.ToneMapMode != "" {
+				if validationErr := transcodenode.ToneMapExecutionErrorForResponse(
+					resp.StatusCode,
+					resp.Header.Get(transcodenode.ToneMapExecutionErrorHeader),
+				); validationErr != nil {
+					return transcodenode.TranscodeStartResponse{}, resp.StatusCode, false, validationErr
+				}
+			}
 			return transcodenode.TranscodeStartResponse{}, resp.StatusCode, false, nil
 		}
 		// Older nodes returned an empty 202 response. Accept that response for
@@ -999,12 +1007,18 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		return result, resp.StatusCode, false, nil
 	}
 	nodeResponse, status, cleanupRequired, err := dispatch(reqBody)
+	initialValidationErr := error(nil)
+	if errors.Is(err, tonemap.ErrSourceRevisionChanged) || errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) {
+		initialValidationErr = err
+		err = nil
+	}
 	if err == nil && status == http.StatusAccepted && reqBody.ToneMapMode != "" && nodeResponse.ToneMapMode != reqBody.ToneMapMode {
 		err = errors.New("remote transcode node did not confirm tone-map mode")
 		cleanupRequired = true
 	}
 	initialStatus := status
 	initialErr := err
+	validationErr := initialValidationErr
 	retryWithSoftware := false
 	if err != nil {
 		if cleanupRequired {
@@ -1029,6 +1043,11 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		reqBody.ToneMapMode = toneMapRecipe.mode
 		reqBody.HWAccel = toneMapRecipe.hwAccel
 		nodeResponse, status, cleanupRequired, err = dispatch(reqBody)
+		validationErr = nil
+		if errors.Is(err, tonemap.ErrSourceRevisionChanged) || errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) {
+			validationErr = err
+			err = nil
+		}
 		if err != nil {
 			if cleanupRequired {
 				h.tm.StopRemoteTranscode(upstreamSessionID, transcodeNodeURL)
@@ -1050,7 +1069,13 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		} else {
 			startErr = fmt.Errorf("remote transcode start rejected: status %d", status)
 		}
-		if reqBody.ToneMapMode == tonemap.ModeSoftware {
+		if retryWithSoftware && initialValidationErr != nil && validationErr != nil {
+			validationErr = errors.Join(initialValidationErr, validationErr)
+		}
+		if validationErr != nil {
+			startErr = errors.Join(validationErr, startErr)
+		}
+		if reqBody.ToneMapMode == tonemap.ModeSoftware || validationErr != nil {
 			return fmt.Errorf("%w: %w", errRemoteSoftwareToneMapStartFailed, startErr)
 		}
 		return startErr

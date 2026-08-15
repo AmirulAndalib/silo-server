@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/mediaprobe"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
@@ -256,7 +257,10 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
+	// The synchronous source guard above is bounded by the caller's startup
+	// context. Once it succeeds, keep the established behavior where the
+	// transcode process outlives a disconnected manifest request.
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s := &TranscodeSession{
 		cancel:                   cancel,
 		opts:                     opts,
@@ -486,6 +490,22 @@ func validateToneMapSource(ctx context.Context, opts TranscodeOpts) error {
 		return nil
 	}
 	if err := opts.ToneMapSourceRevision.ValidatePath(opts.InputPath); err != nil {
+		return err
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, ManifestStartupTimeout)
+	defer cancel()
+	liveTrack, err := mediaprobe.ProbePrimaryVideoTrack(
+		probeCtx,
+		mediaprobe.FFprobePathFromFFmpeg(ResolveFFmpegPath(opts.FFmpegPath)),
+		opts.InputPath,
+	)
+	if err != nil {
+		if errors.Is(err, mediaprobe.ErrPrimaryVideoNotFound) {
+			return fmt.Errorf("%w: %w", tonemap.ErrSourceRevisionChanged, err)
+		}
+		return fmt.Errorf("%w: %w", ErrToneMapSourceValidationUnavailable, err)
+	}
+	if err := tonemap.ValidateLivePrimaryVideoTrack(opts.ToneMapSourceRevision, liveTrack); err != nil {
 		return err
 	}
 	if !opts.ToneMapPreflightRequired {
@@ -2399,7 +2419,9 @@ func (s *TranscodeSession) restart(
 	log.Printf("playback: ffmpeg restart cmd: %s %s", bin, strings.Join(args, " "))
 	s.logFFmpegEvent(ctx, "ffmpeg process restart", "")
 
-	ctx, cancel := context.WithCancel(ctx)
+	// As on initial start, the caller bounds synchronous validation; the new
+	// FFmpeg process keeps running after the segment request completes.
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	cmd := exec.CommandContext(ctx, bin, args...)
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {

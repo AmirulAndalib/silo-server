@@ -561,7 +561,11 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 		if jobCtx.Err() == nil {
 			slog.ErrorContext(jobCtx, "prepare download artifact", "component", "transcodenode", "artifact_id", req.ArtifactID, "error", err)
 		}
-		http.Error(w, "failed to prepare download artifact", http.StatusInternalServerError)
+		if errors.Is(err, tonemap.ErrSourceRevisionChanged) || errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) {
+			writeToneMapRecipeError(w, err)
+		} else {
+			http.Error(w, "failed to prepare download artifact", http.StatusInternalServerError)
+		}
 		return
 	}
 	stat, err := os.Stat(outputPath)
@@ -650,9 +654,17 @@ func resolveToneMapRecipe(ctx context.Context, opts *playback.TranscodeOpts) err
 }
 
 func writeToneMapRecipeError(w http.ResponseWriter, err error) {
+	if errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) {
+		w.Header().Set(ToneMapExecutionErrorHeader, ToneMapSourceValidationUnavailableCode)
+		http.Error(w, "tone-map source validation unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		http.Error(w, "tone-map capability probe unavailable", http.StatusServiceUnavailable)
 		return
+	}
+	if errors.Is(err, tonemap.ErrSourceRevisionChanged) {
+		w.Header().Set(ToneMapExecutionErrorHeader, ToneMapSourceRevisionChangedCode)
 	}
 	http.Error(w, "unsupported or stale tone-map recipe", http.StatusUnprocessableEntity)
 }
@@ -977,11 +989,15 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}
 
-	session, err := playback.StartTranscode(context.WithoutCancel(r.Context()), opts)
+	session, err := playback.StartTranscode(r.Context(), opts)
 	if err != nil {
 		unlock()
 		slog.ErrorContext(r.Context(), "start transcode", "component", "transcodenode", "error", err, "session", req.SessionID, "playback_session_id", req.SessionID)
-		http.Error(w, "failed to start transcode", http.StatusInternalServerError)
+		if errors.Is(err, tonemap.ErrSourceRevisionChanged) || errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) {
+			writeToneMapRecipeError(w, err)
+		} else {
+			http.Error(w, "failed to start transcode", http.StatusInternalServerError)
+		}
 		return
 	}
 	if req.RequireReady {
@@ -1209,7 +1225,7 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 		opts.SeekSeconds = float64(requestedSegment * card.SegmentDuration)
 	}
 
-	session, err := playback.StartTranscode(context.WithoutCancel(r.Context()), opts)
+	session, err := playback.StartTranscode(r.Context(), opts)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "transcode node reconstruct start failed", "component", "transcodenode", "error", err,
 			"session", sessionID, "playback_session_id", sessionID)
@@ -1457,7 +1473,7 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 					)
 
 					if restartErr := s.restartSessionLocked(
-						context.WithoutCancel(r.Context()),
+						r.Context(),
 						sessionID,
 						session,
 						seekSeconds,

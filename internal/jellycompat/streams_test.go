@@ -2,6 +2,7 @@ package jellycompat
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/mediaprobe"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -23,6 +25,77 @@ import (
 // ActiveEncodings ownership guard (CompatToken == session.Token) is satisfied.
 func withCompatSession(req *http.Request, tok string) *http.Request {
 	return req.WithContext(context.WithValue(req.Context(), compatSessionKey, &Session{Token: tok}))
+}
+
+func writeMatchingToneMapFFprobe(t *testing.T, ffmpegPath string, track models.VideoTrack) {
+	t.Helper()
+	stream := map[string]any{
+		"index":               0,
+		"codec_name":          track.Codec,
+		"codec_type":          "video",
+		"profile":             track.Profile,
+		"level":               track.Level,
+		"width":               track.Width,
+		"height":              track.Height,
+		"avg_frame_rate":      track.FrameRate,
+		"pix_fmt":             track.PixelFormat,
+		"bits_per_raw_sample": track.BitDepth,
+		"color_range":         track.ColorRange,
+		"color_primaries":     track.ColorPrimaries,
+		"color_transfer":      track.ColorTransfer,
+		"color_space":         track.ColorSpace,
+	}
+	if track.DVConfigPresent {
+		sideData := map[string]any{
+			"side_data_type":   "DOVI configuration record",
+			"dv_profile":       track.DVProfile,
+			"dv_level":         track.DVLevel,
+			"bl_present_flag":  boolInt(track.DVBLPresent),
+			"rpu_present_flag": boolInt(track.DVRPUPresent),
+			"el_present_flag":  boolInt(track.DVELPresent),
+		}
+		if track.DVBLCompatIDPresent {
+			sideData["dv_bl_signal_compatibility_id"] = track.DVBLCompatID
+		}
+		stream["side_data_list"] = []any{sideData}
+	}
+	output, err := json.Marshal(map[string]any{"streams": []any{stream}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	probePath := mediaprobe.FFprobePathFromFFmpeg(ffmpegPath)
+	script := "#!/bin/sh\nprintf '%s' '" + strings.ReplaceAll(string(output), "'", "'\\''") + "'\n"
+	if err := os.WriteFile(probePath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func TestWriteCompatTranscodeErrorClassifiesLiveToneMapValidation(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "stale metadata", err: tonemap.ErrSourceRevisionChanged, wantStatus: http.StatusUnsupportedMediaType, wantCode: "TranscodeUnsupported"},
+		{name: "probe unavailable", err: playback.ErrToneMapSourceValidationUnavailable, wantStatus: http.StatusServiceUnavailable, wantCode: "TranscodeUnavailable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			writeCompatTranscodeError(recorder, tt.err)
+			if recorder.Code != tt.wantStatus || !strings.Contains(recorder.Body.String(), `"Error":"`+tt.wantCode+`"`) {
+				t.Fatalf("response = %d %s, want %d/%s", recorder.Code, recorder.Body.String(), tt.wantStatus, tt.wantCode)
+			}
+		})
+	}
 }
 
 func TestAudioSelectionChanged(t *testing.T) {
@@ -95,6 +168,7 @@ func TestEnsureTranscodeSessionDoesNotHoldLifecycleLockWhileWaitingForManifest(t
 			VideoRange: "HDR10", ColorRange: "tv", ColorPrimaries: "bt2020", ColorTransfer: "smpte2084", ColorSpace: "bt2020nc",
 		}},
 	}
+	writeMatchingToneMapFFprobe(t, ffmpegPath, file.VideoTracks[0])
 	version := testCompatVersion()
 	source := testCompatSource(NewResourceIDCodec(), version)
 	playbackStore := NewPlaybackSessionStore(time.Hour, nil)
@@ -210,6 +284,7 @@ func TestEnsureTranscodeSessionGivesSoftwareFallbackFreshManifestBudget(t *testi
 	modifiedAt := info.ModTime()
 	file.FileSize = info.Size()
 	file.FileModifiedAt = &modifiedAt
+	writeMatchingToneMapFFprobe(t, ffmpegPath, file.VideoTracks[0])
 	version := testCompatVersion()
 	version.FileID = file.ID
 	version.VideoTracks = file.VideoTracks

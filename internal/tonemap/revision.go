@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -13,6 +14,10 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/models"
 )
+
+// ErrSourceRevisionChanged reports that live source facts no longer match the
+// frozen tone-map recipe.
+var ErrSourceRevisionChanged = errors.New("tone-map source revision changed")
 
 // SourceRevision freezes the catalog and filesystem facts used to validate a
 // tone-map recipe. It is carried with the recipe so seeks, node restarts, and
@@ -46,17 +51,31 @@ func RevisionForFile(file *models.MediaFile) SourceRevision {
 		revision.ProbeUpdatedUnixNano = normalizeRevisionTime(*file.ProbeUpdatedAt).UnixNano()
 	}
 	if len(file.VideoTracks) > 0 {
-		track := file.VideoTracks[0]
-		revision.StreamSignature = hashRevisionValue(fmt.Sprintf(
-			"%s|%s|%d|%d|%dx%d|%s|%d|%d|%t|%t|%t|%t|%s|%s|%s|%s|%d|%s",
-			track.Codec, track.Profile, track.Level, track.DVProfile, track.Width, track.Height,
-			track.FrameRate, track.DVLevel, track.DVBLCompatID, track.DVConfigPresent,
-			track.DVBLCompatIDPresent, track.DVBLPresent, track.DVRPUPresent,
-			track.ColorRange, track.ColorPrimaries, track.ColorTransfer, track.ColorSpace,
-			track.BitDepth, track.PixelFormat,
-		))
+		revision.StreamSignature = StreamSignatureForTrack(file.VideoTracks[0])
 	}
 	return revision
+}
+
+// StreamSignatureForTrack returns the normalized primary-video identity frozen
+// into a tone-map recipe.
+func StreamSignatureForTrack(track models.VideoTrack) string {
+	return hashRevisionValue(fmt.Sprintf(
+		"%s|%s|%d|%d|%dx%d|%s|%d|%d|%t|%t|%t|%t|%s|%s|%s|%s|%d|%s",
+		track.Codec, track.Profile, track.Level, track.DVProfile, track.Width, track.Height,
+		track.FrameRate, track.DVLevel, track.DVBLCompatID, track.DVConfigPresent,
+		track.DVBLCompatIDPresent, track.DVBLPresent, track.DVRPUPresent,
+		track.ColorRange, track.ColorPrimaries, track.ColorTransfer, track.ColorSpace,
+		track.BitDepth, track.PixelFormat,
+	))
+}
+
+// ValidateLivePrimaryVideoTrack requires exact agreement between the frozen
+// scanner-normalized stream signature and a freshly normalized live track.
+func ValidateLivePrimaryVideoTrack(frozen SourceRevision, live models.VideoTrack) error {
+	if frozen.StreamSignature == "" || StreamSignatureForTrack(live) != frozen.StreamSignature {
+		return ErrSourceRevisionChanged
+	}
+	return nil
 }
 
 // Stable reports whether the revision contains every fact required for safe
@@ -117,17 +136,17 @@ func (r SourceRevision) ValidatePath(path string) error {
 		return nil
 	}
 	if r.MediaFileID <= 0 {
-		return fmt.Errorf("tone-map source revision changed")
+		return ErrSourceRevisionChanged
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("stat tone-map source: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Size() != r.FileSize {
-		return fmt.Errorf("tone-map source revision changed")
+		return ErrSourceRevisionChanged
 	}
 	if r.FileModifiedUnixNano > 0 && normalizeRevisionTime(info.ModTime()).UnixNano() != r.FileModifiedUnixNano {
-		return fmt.Errorf("tone-map source revision changed")
+		return ErrSourceRevisionChanged
 	}
 	if isOpenSubtitlesHash(r.FileHash) {
 		currentHash, err := computeOpenSubtitlesHash(path, info.Size())
@@ -135,7 +154,7 @@ func (r SourceRevision) ValidatePath(path string) error {
 			return fmt.Errorf("hash tone-map source: %w", err)
 		}
 		if !strings.EqualFold(currentHash, strings.TrimSpace(r.FileHash)) {
-			return fmt.Errorf("tone-map source revision changed")
+			return ErrSourceRevisionChanged
 		}
 	}
 	return nil

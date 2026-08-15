@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/downloadprepare"
+	"github.com/Silo-Server/silo-server/internal/mediaprobe"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
@@ -124,6 +126,149 @@ func newTestServer(t *testing.T) *Server {
 	}
 }
 
+func nodeToneMapTrack() models.VideoTrack {
+	return models.VideoTrack{
+		Codec: "hevc", Profile: "Main 10", BitDepth: 10, PixelFormat: "yuv420p10le",
+		ColorRange: "tv", ColorPrimaries: "bt2020", ColorTransfer: "smpte2084", ColorSpace: "bt2020nc",
+	}
+}
+
+func writeNodeToneMapFFprobe(t *testing.T, ffmpegPath string, track models.VideoTrack) {
+	t.Helper()
+	stream := map[string]any{
+		"index": 0, "codec_name": track.Codec, "codec_type": "video", "profile": track.Profile,
+		"level": track.Level, "width": track.Width, "height": track.Height, "avg_frame_rate": track.FrameRate,
+		"pix_fmt": track.PixelFormat, "bits_per_raw_sample": track.BitDepth, "color_range": track.ColorRange,
+		"color_primaries": track.ColorPrimaries, "color_transfer": track.ColorTransfer, "color_space": track.ColorSpace,
+	}
+	output, err := json.Marshal(map[string]any{"streams": []any{stream}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	probePath := mediaprobe.FFprobePathFromFFmpeg(ffmpegPath)
+	script := "#!/bin/sh\nprintf '%s' '" + strings.ReplaceAll(string(output), "'", "'\\''") + "'\n"
+	if err := os.WriteFile(probePath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriteToneMapRecipeErrorClassifiesLiveValidation(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "stale metadata", err: tonemap.ErrSourceRevisionChanged, wantStatus: http.StatusUnprocessableEntity, wantCode: ToneMapSourceRevisionChangedCode},
+		{name: "probe unavailable", err: playback.ErrToneMapSourceValidationUnavailable, wantStatus: http.StatusServiceUnavailable, wantCode: ToneMapSourceValidationUnavailableCode},
+		{name: "generic capability timeout", err: context.DeadlineExceeded, wantStatus: http.StatusServiceUnavailable},
+		{name: "generic recipe rejection", err: errors.New("unsupported recipe"), wantStatus: http.StatusUnprocessableEntity},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			writeToneMapRecipeError(recorder, tt.err)
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+			if got := recorder.Header().Get(ToneMapExecutionErrorHeader); got != tt.wantCode {
+				t.Fatalf("classification header = %q, want %q", got, tt.wantCode)
+			}
+		})
+	}
+}
+
+func TestToneMapExecutionEndpointsRejectLiveMetadataBeforeFFmpeg(t *testing.T) {
+	for _, validation := range []struct {
+		name       string
+		probeBody  string
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "stale metadata",
+			probeBody:  `printf '%s' '{"streams":[{"index":0,"codec_name":"hevc","codec_type":"video","profile":"Main","pix_fmt":"yuv420p10le","bits_per_raw_sample":10,"color_range":"tv","color_primaries":"bt2020","color_transfer":"smpte2084","color_space":"bt2020nc"}]}'`,
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   ToneMapSourceRevisionChangedCode,
+		},
+		{name: "probe unavailable", probeBody: "exit 1", wantStatus: http.StatusServiceUnavailable, wantCode: ToneMapSourceValidationUnavailableCode},
+	} {
+		t.Run(validation.name, func(t *testing.T) {
+			for _, endpoint := range []string{"start", "download"} {
+				t.Run(endpoint, func(t *testing.T) {
+					server := newTestServer(t)
+					dir := t.TempDir()
+					inputPath := filepath.Join(dir, "source.mkv")
+					if err := os.WriteFile(inputPath, []byte("source"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					info, err := os.Stat(inputPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					ffmpegMarker := filepath.Join(dir, "ffmpeg-ran")
+					ffmpegPath := filepath.Join(dir, "ffmpeg")
+					ffmpegScript := "#!/bin/sh\n" +
+						"case \" $* \" in\n" +
+						"  *\" -filters \"*) printf ' T.. zscale V->V scale\\n T.. tonemapx V->V tone-map\\n T.. sidedata V->V metadata\\n'; exit 0;;\n" +
+						"  *\" -encoders \"*) printf ' V..... libx264 H.264\\n'; exit 0;;\n" +
+						"esac\n" +
+						"case \" $* \" in *\" -i " + inputPath + " \"*) touch '" + ffmpegMarker + "';; esac\nexit 0\n"
+					if err := os.WriteFile(ffmpegPath, []byte(ffmpegScript), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					probePath := mediaprobe.FFprobePathFromFFmpeg(ffmpegPath)
+					if err := os.WriteFile(probePath, []byte("#!/bin/sh\n"+validation.probeBody+"\n"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					server.watcher.Config().Playback.FFmpegPath = ffmpegPath
+					server.watcher.Config().Playback.HWAccel = playback.HWAccelNone
+					track := nodeToneMapTrack()
+					revision := tonemap.RevisionForFile(&models.MediaFile{ID: 1, FileSize: info.Size(), VideoTracks: []models.VideoTrack{track}})
+
+					var body []byte
+					if endpoint == "start" {
+						body, err = json.Marshal(TranscodeStartRequest{
+							SessionID: "metadata-guard", InputPath: inputPath,
+							TargetCodecVideo: "h264", TargetCodecAudio: "aac", SegmentDuration: 2,
+							ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
+							ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+							ToneMapSourceRevision: revision,
+						})
+					} else {
+						body, err = json.Marshal(downloadprepare.Request{
+							ArtifactID: "metadata-guard", InputPath: inputPath,
+							TargetCodecVideo: "h264", TargetCodecAudio: "aac", AudioTrackIndex: -1,
+							ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
+							ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+							ToneMapSourceRevision: revision,
+						})
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					recorder := httptest.NewRecorder()
+					request := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+					if endpoint == "start" {
+						server.handleStart(recorder, request)
+					} else {
+						server.handleDownloadPrepare(recorder, request)
+					}
+					if recorder.Code != validation.wantStatus {
+						t.Fatalf("status = %d, want %d; body = %s", recorder.Code, validation.wantStatus, recorder.Body.String())
+					}
+					if got := recorder.Header().Get(ToneMapExecutionErrorHeader); got != validation.wantCode {
+						t.Fatalf("classification header = %q, want %q", got, validation.wantCode)
+					}
+					if _, statErr := os.Stat(ffmpegMarker); !os.IsNotExist(statErr) {
+						t.Fatalf("FFmpeg ran before live metadata rejection: %v", statErr)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestRestartSessionLockedRejectsChangedToneMapSourceWithoutStoppingLiveSession(t *testing.T) {
 	server := newTestServer(t)
 	dir := t.TempDir()
@@ -140,6 +285,8 @@ func TestRestartSessionLockedRejectsChangedToneMapSourceWithoutStoppingLiveSessi
 	if err := os.WriteFile(ffmpegPath, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	track := nodeToneMapTrack()
+	writeNodeToneMapFFprobe(t, ffmpegPath, track)
 	const sessionID = "tone-map-restart"
 	session, err := playback.StartTranscode(context.Background(), playback.TranscodeOpts{
 		SessionID:             sessionID,
@@ -154,7 +301,7 @@ func TestRestartSessionLockedRejectsChangedToneMapSourceWithoutStoppingLiveSessi
 		ToneMapSourceKind:     tonemap.SourcePQ,
 		ToneMapFilter:         tonemap.SoftwareFilterBT2390,
 		ToneMapRecipeVersion:  playback.TransformationHDRToSDRToneMapRecipeVersionV3,
-		ToneMapSourceRevision: tonemap.RevisionForFile(&models.MediaFile{ID: 42, FileSize: info.Size(), FileModifiedAt: &modified}),
+		ToneMapSourceRevision: tonemap.RevisionForFile(&models.MediaFile{ID: 42, FileSize: info.Size(), FileModifiedAt: &modified, VideoTracks: []models.VideoTrack{track}}),
 	})
 	if err != nil {
 		t.Fatalf("StartTranscode() error = %v", err)
@@ -365,7 +512,9 @@ func TestHandleDownloadPreparePublishesToneMapReceiptAndStatusAttestation(t *tes
 	}
 	server.watcher.Config().Playback.FFmpegPath = ffmpegPath
 	server.watcher.Config().Playback.HWAccel = playback.HWAccelNone
-	revision := tonemap.SourceRevision{MediaFileID: 1, FileSize: info.Size()}
+	track := nodeToneMapTrack()
+	writeNodeToneMapFFprobe(t, ffmpegPath, track)
+	revision := tonemap.RevisionForFile(&models.MediaFile{ID: 1, FileSize: info.Size(), VideoTracks: []models.VideoTrack{track}})
 	body, err := json.Marshal(downloadprepare.Request{
 		ArtifactID: "artifact-tone-map", InputPath: inputPath,
 		TargetCodecVideo: "h264", TargetCodecAudio: "aac", AudioTrackIndex: -1,
@@ -573,6 +722,8 @@ func TestHandleDownloadPrepareReexecutesValidRecipeAfterMissingOrMismatchedRecei
 			}
 			server.watcher.Config().Playback.FFmpegPath = ffmpegPath
 			server.watcher.Config().Playback.HWAccel = playback.HWAccelNone
+			track := nodeToneMapTrack()
+			writeNodeToneMapFFprobe(t, ffmpegPath, track)
 			if err := os.MkdirAll(server.artifactRoot, 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -589,7 +740,7 @@ func TestHandleDownloadPrepareReexecutesValidRecipeAfterMissingOrMismatchedRecei
 					t.Fatal(err)
 				}
 			}
-			revision := tonemap.SourceRevision{MediaFileID: 1, FileSize: info.Size()}
+			revision := tonemap.RevisionForFile(&models.MediaFile{ID: 1, FileSize: info.Size(), VideoTracks: []models.VideoTrack{track}})
 			request := downloadprepare.Request{
 				ArtifactID: "artifact-reexecute", InputPath: inputPath,
 				TargetCodecVideo: "h264", TargetCodecAudio: "aac", AudioTrackIndex: -1,
@@ -685,12 +836,14 @@ func TestHandleDownloadPrepareConcurrentSameArtifactPublishesOnce(t *testing.T) 
 	}
 	server.watcher.Config().Playback.FFmpegPath = ffmpegPath
 	server.watcher.Config().Playback.HWAccel = playback.HWAccelNone
+	track := nodeToneMapTrack()
+	writeNodeToneMapFFprobe(t, ffmpegPath, track)
 	body, err := json.Marshal(downloadprepare.Request{
 		ArtifactID: "artifact-concurrent", InputPath: inputPath,
 		TargetCodecVideo: "h264", TargetCodecAudio: "aac", AudioTrackIndex: -1,
 		ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
 		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
-		ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1, FileSize: info.Size()},
+		ToneMapSourceRevision: tonemap.RevisionForFile(&models.MediaFile{ID: 1, FileSize: info.Size(), VideoTracks: []models.VideoTrack{track}}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -738,6 +891,8 @@ func TestHandleDownloadPrepareOptimisticReuseWaitsForInFlightReplacement(t *test
 	}
 	server.watcher.Config().Playback.FFmpegPath = ffmpegPath
 	server.watcher.Config().Playback.HWAccel = playback.HWAccelNone
+	track := nodeToneMapTrack()
+	writeNodeToneMapFFprobe(t, ffmpegPath, track)
 	if err := os.MkdirAll(server.artifactRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -746,7 +901,7 @@ func TestHandleDownloadPrepareOptimisticReuseWaitsForInFlightReplacement(t *test
 	if err := os.WriteFile(outputPath, []byte("oldbytes"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	revision := tonemap.SourceRevision{MediaFileID: 1, FileSize: 8}
+	revision := tonemap.RevisionForFile(&models.MediaFile{ID: 1, FileSize: 8, VideoTracks: []models.VideoTrack{track}})
 	if err := writeDownloadArtifactReceipt(outputPath, downloadprepare.Result{
 		ArtifactID: artifactID, FileSize: 8,
 		ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3, ToneMapMode: tonemap.ModeSoftware,
@@ -1587,12 +1742,14 @@ func TestRemoteSessionTrackingPreservesResolvedToneMapMode(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			track := nodeToneMapTrack()
+			writeNodeToneMapFFprobe(t, ffmpegPath, track)
 			opts := playback.TranscodeOpts{
 				SessionID: "tracked-tone-map", InputPath: inputPath,
 				TargetCodecVideo: "h264", TargetCodecAudio: "aac", TargetResolution: "1080p", SegmentDuration: 2,
 				ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
 				ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
-				ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1, FileSize: info.Size()},
+				ToneMapSourceRevision: tonemap.RevisionForFile(&models.MediaFile{ID: 1, FileSize: info.Size(), VideoTracks: []models.VideoTrack{track}}),
 			}
 
 			var session *playback.TranscodeSession
@@ -1677,6 +1834,9 @@ func TestHandleStartRejectsIncompleteOrStaleToneMapRecipe(t *testing.T) {
 			if recorder.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 			}
+			if got := recorder.Header().Get(ToneMapExecutionErrorHeader); got != "" {
+				t.Fatalf("invalid recipe carried live-validation classification %q", got)
+			}
 			server.mu.RLock()
 			sessionCount := len(server.sessions)
 			server.mu.RUnlock()
@@ -1684,6 +1844,67 @@ func TestHandleStartRejectsIncompleteOrStaleToneMapRecipe(t *testing.T) {
 				t.Fatal("invalid tone-map recipe started a node job")
 			}
 		})
+	}
+}
+
+func TestHandleStartConfigChangeIsNotLiveSourceValidationFailure(t *testing.T) {
+	server := newTestServer(t)
+	dir := t.TempDir()
+	probeStarted := filepath.Join(dir, "probe-started")
+	releaseProbe := filepath.Join(dir, "release-probe")
+	ffmpegPath := filepath.Join(dir, "ffmpeg")
+	script := "#!/bin/sh\n" +
+		"touch '" + probeStarted + "'\n" +
+		"while [ ! -e '" + releaseProbe + "' ]; do sleep 0.01; done\n" +
+		"case \" $* \" in\n" +
+		"  *\" -filters \"*) printf ' T.. zscale V->V scale\\n T.. tonemapx V->V tone-map\\n T.. sidedata V->V metadata\\n';;\n" +
+		"  *\" -encoders \"*) printf ' V..... libx264 H.264\\n';;\n" +
+		"esac\n"
+	if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server.watcher.Config().Playback.FFmpegPath = ffmpegPath
+	requestBody, err := json.Marshal(TranscodeStartRequest{
+		SessionID: "config-change", InputPath: "/media/movie.mkv",
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac", SegmentDuration: 2,
+		ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
+		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		server.handleStart(recorder, httptest.NewRequest(http.MethodPost, "/transcode/start", bytes.NewReader(requestBody)))
+		close(done)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(probeStarted); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("tone-map capability probe did not start")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	replacement := *server.watcher.Config()
+	server.watcher.SetConfigForTest(&replacement)
+	if err := os.WriteFile(releaseProbe, []byte("release"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("start handler did not return after capability probe release")
+	}
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get(ToneMapExecutionErrorHeader); got != "" {
+		t.Fatalf("configuration change carried live-validation classification %q", got)
 	}
 }
 
@@ -1741,6 +1962,9 @@ func TestToneMapRecipeContextFailuresReturnServiceUnavailable(t *testing.T) {
 
 				if recorder.Code != http.StatusServiceUnavailable {
 					t.Fatalf("status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
+				}
+				if got := recorder.Header().Get(ToneMapExecutionErrorHeader); got != "" {
+					t.Fatalf("generic context failure carried live-validation classification %q", got)
 				}
 			})
 		}

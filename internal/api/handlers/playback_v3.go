@@ -1172,6 +1172,9 @@ func (h *PlaybackHandler) prepareTransportV3(r *http.Request, session *playback.
 					releaser.ReleaseSession(session.ID)
 				}
 				if fallback, attempted, fallbackErr := h.prepareSoftwareToneMapFallbackV3(r, session, file, result, timeline); attempted {
+					if fallbackErr != nil {
+						fallbackErr = combineTransportErrorsV3(transportErr, fallbackErr)
+					}
 					return fallback, fallbackErr
 				}
 				return preparedTransportV3{}, transportErr
@@ -1236,7 +1239,7 @@ func (h *PlaybackHandler) prepareSoftwareToneMapFallbackV3(r *http.Request, sess
 			releaser.ReleaseSession(session.ID)
 		}
 		excluded[nodeURL] = struct{}{}
-		lastRemoteErr = fallbackErr
+		lastRemoteErr = combineTransportErrorsV3(lastRemoteErr, fallbackErr)
 	}
 	if !nodepool.LocalTranscodeFallbackAllowed(r.Context(), h.SettingsRepo) {
 		if lastRemoteErr != nil {
@@ -1249,7 +1252,7 @@ func (h *PlaybackHandler) prepareSoftwareToneMapFallbackV3(r *http.Request, sess
 	}
 	fallback, fallbackErr := h.prepareLocalTransportV3(r, session, file, fallbackResult, timeline)
 	if fallbackErr != nil && lastRemoteErr != nil {
-		fallbackErr.cause = errors.Join(lastRemoteErr.cause, fallbackErr.cause)
+		fallbackErr = combineTransportErrorsV3(lastRemoteErr, fallbackErr)
 	}
 	return fallback, true, fallbackErr
 }
@@ -1788,7 +1791,7 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 	}
 	if startupFailure != nil && startupFailure.failedToStart {
 		unlock()
-		return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Failed to start the playback transport.", retryable: true, cause: startupFailure.cause}
+		return preparedTransportV3{}, toneMapExecutionTransportErrorV3(startupFailure.cause, "Failed to start the playback transport.")
 	}
 	if startupFailure != nil {
 		transportErr := manifestStartupTransportErrorV3(startupFailure.wasRunning, startupFailure.cause)
@@ -1807,7 +1810,7 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 			ts, startupFailure = h.startReadyLocalPlaybackTransportV3(r.Context(), opts)
 			if startupFailure != nil && startupFailure.failedToStart {
 				unlock()
-				return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Failed to start the software tone-map fallback.", retryable: true, cause: startupFailure.cause}
+				return preparedTransportV3{}, toneMapExecutionTransportErrorV3(startupFailure.cause, "Failed to start the software tone-map fallback.")
 			}
 			if startupFailure != nil {
 				unlock()
@@ -1832,7 +1835,7 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 			ts, startupFailure = h.startReadyLocalPlaybackTransportV3(r.Context(), retryOpts)
 			if startupFailure != nil && startupFailure.failedToStart {
 				unlock()
-				return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "Failed to start the playback transport.", retryable: true, cause: startupFailure.cause}
+				return preparedTransportV3{}, toneMapExecutionTransportErrorV3(startupFailure.cause, "Failed to start the playback transport.")
 			}
 			if startupFailure != nil {
 				unlock()
@@ -1890,6 +1893,28 @@ func manifestStartupTransportErrorV3(running bool, cause error) *transportErrorV
 	return &transportErrorV3{reason: transcodeStartFailedReasonV3, message: message, retryable: running, cause: cause}
 }
 
+func toneMapExecutionTransportErrorV3(cause error, message string) *transportErrorV3 {
+	return &transportErrorV3{
+		reason:    transcodeStartFailedReasonV3,
+		message:   message,
+		retryable: errors.Is(cause, playback.ErrToneMapSourceValidationUnavailable) || !errors.Is(cause, tonemap.ErrSourceRevisionChanged),
+		cause:     cause,
+	}
+}
+
+func combineTransportErrorsV3(first, second *transportErrorV3) *transportErrorV3 {
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	combined := *second
+	combined.retryable = first.retryable || second.retryable
+	combined.cause = errors.Join(first.cause, second.cause)
+	return &combined
+}
+
 // prepareRemoteTransportV3 starts an HLS generation on the selected transcode node.
 func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *playback.Session, file *models.MediaFile, result playback.PlannerResultV3, nodePlan nodepool.Plan, timeline preparedTimelineV3) (preparedTransportV3, *transportErrorV3) {
 	node := nodePlan.TranscodeNode
@@ -1921,6 +1946,10 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 	req.ToneMapDVRPUPresent = sourceMetadata.ToneMapDVRPUPresent
 	nodeResp, status, err := h.startRemotePlaybackTransport(r.Context(), node.URL, req)
 	if err != nil {
+		if req.ToneMapMode != "" && (errors.Is(err, tonemap.ErrSourceRevisionChanged) || errors.Is(err, playback.ErrToneMapSourceValidationUnavailable)) {
+			h.tm.StopRemoteTranscode(transportID, node.URL)
+			return preparedTransportV3{}, toneMapExecutionTransportErrorV3(err, "The selected transcode node rejected the playback transport.")
+		}
 		// A timeout can fire after the node actually started the job; the
 		// stop is a harmless 404 when it never did, and reaps an orphan
 		// full-length transcode when it did.

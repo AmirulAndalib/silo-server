@@ -223,6 +223,7 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	var err error
 	requiredToneMapMode := tonemap.Mode("")
 	var exhaustedRemoteToneMapErr error
+	remoteValidationOnly := true
 	if h.NodePlanner != nil && h.JWTSecret != "" {
 		playSession, err = h.ensureUpstreamPlayback(r.Context(), session, playSession.ID, *source, "transcode")
 		if err != nil {
@@ -267,7 +268,10 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 				initialSeekSeconds, _ := compatInitialTranscodePosition(*source, h.compatSegmentDuration(), playSession.InitialSeekSeconds)
 				if err := h.startRemoteTranscodeWithToneMapMode(r.Context(), playSession.ID, playSession.UpstreamSessionID, *source, file, initialSeekSeconds, tcNode.URL, requiredToneMapMode); err != nil {
 					if errors.Is(err, errRemoteSoftwareToneMapStartFailed) {
-						exhaustedRemoteToneMapErr = err
+						exhaustedRemoteToneMapErr = errors.Join(exhaustedRemoteToneMapErr, err)
+						if !errors.Is(err, tonemap.ErrSourceRevisionChanged) && !errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) {
+							remoteValidationOnly = false
+						}
 						h.releaseCompatSessionReservation(playSession.UpstreamSessionID)
 						failedNodeURLs[strings.TrimRight(tcNode.URL, "/")] = struct{}{}
 						requiredToneMapMode = tonemap.ModeSoftware
@@ -309,6 +313,10 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 			h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
 		}
 		if exhaustedRemoteToneMapErr != nil {
+			if remoteValidationOnly {
+				writeCompatTranscodeError(w, exhaustedRemoteToneMapErr)
+				return
+			}
 			writeError(w, http.StatusBadGateway, "TranscodeStartFailed", "Transcode node rejected the request")
 			return
 		}
@@ -327,6 +335,11 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	// Ensure the transcode process is running.
 	manifest, err := h.ensureTranscodeManifestWithToneMapMode(r.Context(), session, playSession.ID, *source, requiredToneMapMode)
 	if err != nil {
+		if exhaustedRemoteToneMapErr != nil && remoteValidationOnly &&
+			(errors.Is(exhaustedRemoteToneMapErr, playback.ErrToneMapSourceValidationUnavailable) ||
+				errors.Is(err, tonemap.ErrSourceRevisionChanged) || errors.Is(err, playback.ErrToneMapSourceValidationUnavailable)) {
+			err = errors.Join(exhaustedRemoteToneMapErr, err)
+		}
 		writeCompatTranscodeError(w, err)
 		return
 	}
@@ -344,8 +357,10 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 
 func writeCompatTranscodeError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, errToneMapCapabilityUnavailable):
+	case errors.Is(err, errToneMapCapabilityUnavailable), errors.Is(err, playback.ErrToneMapSourceValidationUnavailable):
 		writeError(w, http.StatusServiceUnavailable, "TranscodeUnavailable", err.Error())
+	case errors.Is(err, tonemap.ErrSourceRevisionChanged):
+		writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", err.Error())
 	case errors.Is(err, errTranscode4KDisallowed):
 		writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
 	case errors.Is(err, errHDRTranscodeUnsupported):
@@ -548,7 +563,7 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 					)
 
 					if restartErr := h.tm.RestartSessionLocked(
-						context.WithoutCancel(r.Context()),
+						r.Context(),
 						playSession.UpstreamSessionID,
 						transcodeSession,
 						seekSeconds,
@@ -1776,12 +1791,12 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 		h.tm.CloseTranscodeSessionIf(upstreamSessionID, existing, "")
 	}
 	manifestDeadline := time.Now().Add(compatManifestStartupTimeout)
-	transcodeSession, err := playback.StartTranscode(context.WithoutCancel(ctx), opts)
+	transcodeSession, err := playback.StartTranscode(ctx, opts)
 	if err != nil && downgradeToSoftwareToneMap(
 		opts.ToneMapPolicy, &opts.ToneMapMode, &opts.ToneMapFilter, &opts.HWAccel,
 		opts.ToneMapSourceKind, toneMapCapabilities,
 	) {
-		transcodeSession, err = playback.StartTranscode(context.WithoutCancel(ctx), opts)
+		transcodeSession, err = playback.StartTranscode(ctx, opts)
 		if err == nil {
 			manifestDeadline = time.Now().Add(compatManifestStartupTimeout)
 		}
@@ -1815,7 +1830,7 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 				replaceUnlock()
 				return nil, readyErr
 			}
-			transcodeSession, err = playback.StartTranscode(context.WithoutCancel(ctx), opts)
+			transcodeSession, err = playback.StartTranscode(ctx, opts)
 			if err != nil {
 				replaceUnlock()
 				return nil, err
@@ -1983,7 +1998,7 @@ func (h *PlaybackHandler) restartCompatTranscodeForAudioSelection(
 		if segmentDuration := transcodeSession.Opts().SegmentDuration; segmentDuration > 0 && positionSeconds > 0 {
 			startSegment = int(positionSeconds / float64(segmentDuration))
 		}
-		if err := h.tm.RestartSessionLocked(context.WithoutCancel(ctx), playSession.UpstreamSessionID, transcodeSession, positionSeconds, startSegment); err != nil {
+		if err := h.tm.RestartSessionLocked(ctx, playSession.UpstreamSessionID, transcodeSession, positionSeconds, startSegment); err != nil {
 			return false, err
 		}
 		// Re-persist the durable recipe so reconstruct after a central restart

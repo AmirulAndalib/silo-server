@@ -20,7 +20,7 @@ import (
 // locking and decide whether registration is immediate or transactionally
 // staged.
 func (h *PlaybackHandler) startLocalPlaybackTransport(ctx context.Context, opts playback.TranscodeOpts) (*playback.TranscodeSession, error) {
-	return playback.StartTranscode(context.WithoutCancel(ctx), opts)
+	return playback.StartTranscode(ctx, opts)
 }
 
 // startRemotePlaybackTransport is the shared remote-node launch primitive.
@@ -49,6 +49,14 @@ func (h *PlaybackHandler) startRemotePlaybackTransport(ctx context.Context, node
 		// Drain the (small) error body so the transport can reuse the
 		// connection instead of tearing it down on every failed start.
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		if request.ToneMapMode != "" {
+			if validationErr := transcodenode.ToneMapExecutionErrorForResponse(
+				response.StatusCode,
+				response.Header.Get(transcodenode.ToneMapExecutionErrorHeader),
+			); validationErr != nil {
+				return transcodenode.TranscodeStartResponse{}, response.StatusCode, validationErr
+			}
+		}
 		return transcodenode.TranscodeStartResponse{}, response.StatusCode, nil
 	}
 	var result transcodenode.TranscodeStartResponse
@@ -62,7 +70,7 @@ func (h *PlaybackHandler) remotePlaybackTransportTimeout(nodeURL string, request
 	if request.ToneMapMode == "" {
 		return 20 * time.Second
 	}
-	timeout := h.remoteToneMapProbeTimeoutV3(nodeURL)
+	timeout := h.remoteToneMapProbeTimeoutV3(nodeURL) + playback.ManifestStartupTimeout
 	if request.ToneMapPreflightRequired {
 		timeout += tonemap.SourcePreflightTimeout(request.TotalDuration)
 	}

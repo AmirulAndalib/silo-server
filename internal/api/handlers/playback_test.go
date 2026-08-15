@@ -20,6 +20,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/mediaprobe"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
@@ -250,6 +251,43 @@ func withPlaybackRouteParam(req *http.Request, key, value string) *http.Request 
 
 func writePlaybackTestFFmpeg(t *testing.T) string {
 	return writePlaybackTestFFmpegSleep(t, "30")
+}
+
+func writePlaybackToneMapFFprobe(t *testing.T, ffmpegPath string, track models.VideoTrack) {
+	t.Helper()
+	stream := map[string]any{
+		"index": 0, "codec_name": track.Codec, "codec_type": "video", "profile": track.Profile,
+		"level": track.Level, "width": track.Width, "height": track.Height, "avg_frame_rate": track.FrameRate,
+		"pix_fmt": track.PixelFormat, "bits_per_raw_sample": track.BitDepth, "color_range": track.ColorRange,
+		"color_primaries": track.ColorPrimaries, "color_transfer": track.ColorTransfer, "color_space": track.ColorSpace,
+	}
+	if track.DVConfigPresent {
+		sideData := map[string]any{
+			"side_data_type": "DOVI configuration record", "dv_profile": track.DVProfile, "dv_level": track.DVLevel,
+			"bl_present_flag": playbackTestBoolInt(track.DVBLPresent), "rpu_present_flag": playbackTestBoolInt(track.DVRPUPresent),
+			"el_present_flag": playbackTestBoolInt(track.DVELPresent),
+		}
+		if track.DVBLCompatIDPresent {
+			sideData["dv_bl_signal_compatibility_id"] = track.DVBLCompatID
+		}
+		stream["side_data_list"] = []any{sideData}
+	}
+	output, err := json.Marshal(map[string]any{"streams": []any{stream}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := mediaprobe.FFprobePathFromFFmpeg(ffmpegPath)
+	script := "#!/bin/sh\nprintf '%s' '" + strings.ReplaceAll(string(output), "'", "'\\''") + "'\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func playbackTestBoolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func writePlaybackTestFFmpegSleep(t *testing.T, sleepSeconds string) string {

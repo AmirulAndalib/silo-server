@@ -1517,7 +1517,7 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 						"playback_session_id", sessionID,
 					)
 					if restartErr := h.tm.RestartSessionLocked(
-						context.WithoutCancel(r.Context()),
+						r.Context(),
 						sessionID,
 						transcodeSession,
 						seekSeconds,

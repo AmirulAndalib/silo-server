@@ -17,6 +17,11 @@ var (
 	ErrTranscodeFailed    = errors.New("transcode process failed")
 	ErrSegmentNotFound    = errors.New("segment not found")
 	ErrManifestNotReady   = errors.New("manifest not ready")
+	// ErrToneMapSourceValidationUnavailable reports that the executor could not
+	// freshly probe the source metadata needed to validate a tone-map recipe.
+	// The failure is transient: callers may retry after the source or probe
+	// executable becomes available again.
+	ErrToneMapSourceValidationUnavailable = errors.New("tone-map source validation unavailable")
 	// ErrSessionSuperseded means the session a restart was about to re-spawn is
 	// no longer the live mapped session (a concurrent teardown or reconstruct
 	// replaced it while the restart waited for the per-session lifecycle lock).

@@ -252,6 +252,7 @@ func TestHandleMasterManifestFallsBackToValidatedLocalSoftwareAfterRemoteFailure
 	if err := os.WriteFile(handler.FFmpegPath, []byte(ffmpegScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeMatchingToneMapFFprobe(t, handler.FFmpegPath, source.Version.VideoTracks[0])
 
 	request := httptest.NewRequest(http.MethodGet, "/Videos/item/master.m3u8?PlaySessionId=play-1&MediaSourceId="+source.ID, nil)
 	request = request.WithContext(context.WithValue(request.Context(), compatSessionKey, &Session{Token: "compat-token", StreamAppUserID: 7, ProfileID: "profile-1"}))
@@ -284,6 +285,56 @@ func TestHandleMasterManifestFallsBackToValidatedLocalSoftwareAfterRemoteFailure
 	probe := planner.PlanSession("reservation-probe", "", true, source.Version.Bitrate)
 	if probe.TranscodeNode == nil {
 		t.Fatal("remote reservations were not released before local fallback")
+	}
+}
+
+func TestHandleMasterManifestClassifiesExhaustedRemoteLiveValidation(t *testing.T) {
+	hardware := tonemap.Capability{
+		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI,
+		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	}
+	software := tonemap.Capability{
+		Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	}
+	tests := []struct {
+		name       string
+		status     int
+		validation string
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "stale metadata", status: http.StatusUnprocessableEntity, validation: transcodenode.ToneMapSourceRevisionChangedCode, wantStatus: http.StatusUnsupportedMediaType, wantCode: "TranscodeUnsupported"},
+		{name: "probe unavailable", status: http.StatusServiceUnavailable, validation: transcodenode.ToneMapSourceValidationUnavailableCode, wantStatus: http.StatusServiceUnavailable, wantCode: "TranscodeUnavailable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
+					writeJSON(w, http.StatusOK, playback.HWAccelInfo{ToneMapCapabilities: tonemap.Capabilities{hardware, software}})
+				case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
+					w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, tt.validation)
+					w.WriteHeader(tt.status)
+				case r.Method == http.MethodDelete:
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer node.Close()
+
+			handler, _, _, _, source := newManifestToneMapFailoverHandler(t, node.URL, false)
+			request := httptest.NewRequest(http.MethodGet, "/Videos/item/master.m3u8?PlaySessionId=play-1&MediaSourceId="+source.ID, nil)
+			request = request.WithContext(context.WithValue(request.Context(), compatSessionKey, &Session{Token: "compat-token", StreamAppUserID: 7, ProfileID: "profile-1"}))
+			recorder := httptest.NewRecorder()
+
+			handler.HandleMasterManifest(recorder, request)
+
+			if recorder.Code != tt.wantStatus || !strings.Contains(recorder.Body.String(), `"Error":"`+tt.wantCode+`"`) {
+				t.Fatalf("response = %d %s, want %d/%s", recorder.Code, recorder.Body.String(), tt.wantStatus, tt.wantCode)
+			}
+		})
 	}
 }
 
@@ -320,6 +371,7 @@ func TestEnsureTranscodeSessionRequiredSoftwareReplacesExistingHardware(t *testi
 	if err := os.WriteFile(handler.FFmpegPath, []byte(ffmpegScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeMatchingToneMapFFprobe(t, handler.FFmpegPath, source.Version.VideoTracks[0])
 
 	first, err := handler.ensureTranscodeSession(context.Background(), "play-1", "upstream-1", source)
 	if err != nil {
@@ -412,6 +464,7 @@ func TestEnsureTranscodeSessionReadyHardwareYieldsPublicationToSoftwareWinner(t 
 			if err := os.WriteFile(handler.FFmpegPath, []byte(ffmpegScript), 0o755); err != nil {
 				t.Fatal(err)
 			}
+			writeMatchingToneMapFFprobe(t, handler.FFmpegPath, source.Version.VideoTracks[0])
 
 			sessionMgr := &lockedCompatSessionManager{session: playback.Session{
 				ID: "upstream-1", UserID: 7, ProfileID: "profile-1", MediaFileID: 42,

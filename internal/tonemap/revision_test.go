@@ -1,6 +1,7 @@
 package tonemap
 
 import (
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -118,5 +119,41 @@ func TestValidatePathRejectsNonPositiveMediaFileID(t *testing.T) {
 	revision := SourceRevision{MediaFileID: -1, FileSize: info.Size()}
 	if err := revision.ValidatePath(path); err == nil {
 		t.Fatal("ValidatePath accepted a non-positive media file id")
+	}
+}
+
+func TestValidateLivePrimaryVideoTrackRequiresExactFrozenSignature(t *testing.T) {
+	track := models.VideoTrack{
+		Codec: "hevc", Profile: "Main 10", Level: 153, Width: 3840, Height: 2160,
+		FrameRate: "23.976", DVProfile: 7, DVLevel: 6, DVBLCompatID: 6,
+		DVConfigPresent: true, DVBLCompatIDPresent: true, DVBLPresent: true, DVRPUPresent: true,
+		ColorRange: "tv", ColorPrimaries: "bt2020", ColorTransfer: "smpte2084", ColorSpace: "bt2020nc",
+		BitDepth: 10, PixelFormat: "yuv420p10le",
+	}
+	frozen := RevisionForFile(&models.MediaFile{ID: 42, VideoTracks: []models.VideoTrack{track}})
+	if err := ValidateLivePrimaryVideoTrack(frozen, track); err != nil {
+		t.Fatalf("matching live track rejected: %v", err)
+	}
+
+	mutations := []struct {
+		name   string
+		mutate func(*models.VideoTrack)
+	}{
+		{name: "codec profile", mutate: func(track *models.VideoTrack) { track.Profile = "Main" }},
+		{name: "bit depth", mutate: func(track *models.VideoTrack) { track.BitDepth = 8 }},
+		{name: "PQ to HLG", mutate: func(track *models.VideoTrack) { track.ColorTransfer = "arib-std-b67" }},
+		{name: "color primaries", mutate: func(track *models.VideoTrack) { track.ColorPrimaries = "bt709" }},
+		{name: "color space", mutate: func(track *models.VideoTrack) { track.ColorSpace = "bt709" }},
+		{name: "Dolby Vision profile", mutate: func(track *models.VideoTrack) { track.DVProfile = 8 }},
+		{name: "Dolby Vision provenance", mutate: func(track *models.VideoTrack) { track.DVRPUPresent = false }},
+	}
+	for _, tt := range mutations {
+		t.Run(tt.name, func(t *testing.T) {
+			live := track
+			tt.mutate(&live)
+			if err := ValidateLivePrimaryVideoTrack(frozen, live); !errors.Is(err, ErrSourceRevisionChanged) {
+				t.Fatalf("ValidateLivePrimaryVideoTrack() error = %v, want ErrSourceRevisionChanged", err)
+			}
+		})
 	}
 }

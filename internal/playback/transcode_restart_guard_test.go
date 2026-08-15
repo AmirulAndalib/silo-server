@@ -2,6 +2,7 @@ package playback
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,15 +80,8 @@ func TestRestartInvokesRestartHook(t *testing.T) {
 }
 
 func TestRestartRejectsChangedToneMapSourceBeforeStoppingCurrentProcess(t *testing.T) {
-	truePath, err := exec.LookPath("true")
-	if err != nil {
-		t.Skipf("`true` not found in PATH: %v", err)
-	}
-	dir := t.TempDir()
-	inputPath := filepath.Join(dir, "movie.mkv")
-	if err := os.WriteFile(inputPath, []byte("replacement"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	opts, ffmpegMarker := mismatchedToneMapExecutionFixture(t)
+	dir := filepath.Dir(opts.InputPath)
 	done := make(chan struct{})
 	close(done)
 	canceled := false
@@ -96,25 +90,17 @@ func TestRestartRejectsChangedToneMapSourceBeforeStoppingCurrentProcess(t *testi
 		done:      done,
 		running:   true,
 		outputDir: dir,
-		opts: TranscodeOpts{
-			InputPath:             inputPath,
-			OutputDir:             dir,
-			TargetCodecVideo:      "h264",
-			SegmentDuration:       2,
-			FFmpegPath:            truePath,
-			ToneMapMode:           tonemap.ModeSoftware,
-			ToneMapSourceKind:     tonemap.SourcePQ,
-			ToneMapFilter:         tonemap.SoftwareFilterBT2390,
-			ToneMapRecipeVersion:  TransformationHDRToSDRToneMapRecipeVersionV3,
-			ToneMapSourceRevision: tonemap.SourceRevision{FileSize: 1},
-		},
+		opts:      opts,
 	}
 
-	if err := session.Restart(context.Background(), 20, 10); err == nil {
-		t.Fatal("Restart() accepted a changed tone-map source")
+	if err := session.Restart(context.Background(), 20, 10); !errors.Is(err, tonemap.ErrSourceRevisionChanged) {
+		t.Fatalf("Restart() error = %v, want ErrSourceRevisionChanged", err)
 	}
 	if canceled {
 		t.Fatal("Restart() stopped the current process before validating the frozen source")
+	}
+	if _, statErr := os.Stat(ffmpegMarker); !os.IsNotExist(statErr) {
+		t.Fatalf("restart FFmpeg ran before live source rejection: %v", statErr)
 	}
 	session.mu.Lock()
 	restarting := session.restarting
@@ -122,6 +108,34 @@ func TestRestartRejectsChangedToneMapSourceBeforeStoppingCurrentProcess(t *testi
 	session.mu.Unlock()
 	if restarting || restartCount != 0 {
 		t.Fatalf("failed validation left restarting=%v restartCount=%d, want false/0", restarting, restartCount)
+	}
+}
+
+func TestRestartLeavesCurrentProcessRunningWhenLiveProbeTimesOut(t *testing.T) {
+	opts, ffmpegMarker := mismatchedToneMapExecutionFixture(t)
+	ffprobePath := filepath.Join(filepath.Dir(opts.FFmpegPath), "ffprobe")
+	if err := os.WriteFile(ffprobePath, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	close(done)
+	canceled := false
+	session := &TranscodeSession{
+		cancel: func() { canceled = true }, done: done, running: true,
+		outputDir: filepath.Dir(opts.InputPath), opts: opts,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	err := session.Restart(ctx, 20, 10)
+	if !errors.Is(err, ErrToneMapSourceValidationUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Restart() error = %v, want transient source-validation deadline", err)
+	}
+	if canceled {
+		t.Fatal("Restart() stopped the current process after a transient source probe failure")
+	}
+	if _, statErr := os.Stat(ffmpegMarker); !os.IsNotExist(statErr) {
+		t.Fatalf("restart FFmpeg ran after live probe timeout: %v", statErr)
 	}
 }
 

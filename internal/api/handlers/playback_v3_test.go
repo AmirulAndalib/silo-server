@@ -2639,6 +2639,41 @@ func TestManifestStartupTimeoutWhileRunningIsPersistedIdempotently(t *testing.T)
 	}
 }
 
+func TestToneMapExecutionTransportErrorClassifiesLiveValidation(t *testing.T) {
+	tests := []struct {
+		name          string
+		err           error
+		wantRetryable bool
+	}{
+		{name: "stale metadata", err: tonemap.ErrSourceRevisionChanged},
+		{name: "probe unavailable", err: playback.ErrToneMapSourceValidationUnavailable, wantRetryable: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := toneMapExecutionTransportErrorV3(tt.err, "failed")
+			if got.reason != transcodeStartFailedReasonV3 || got.retryable != tt.wantRetryable || !errors.Is(got.cause, tt.err) {
+				t.Fatalf("error = %+v, want retryable=%t wrapping %v", got, tt.wantRetryable, tt.err)
+			}
+		})
+	}
+}
+
+func TestCombineTransportErrorsV3KeepsAnyRetryableValidationFailure(t *testing.T) {
+	stale := toneMapExecutionTransportErrorV3(tonemap.ErrSourceRevisionChanged, "stale")
+	transient := toneMapExecutionTransportErrorV3(playback.ErrToneMapSourceValidationUnavailable, "transient")
+
+	mixed := combineTransportErrorsV3(stale, transient)
+	if mixed == nil || !mixed.retryable || !errors.Is(mixed.cause, tonemap.ErrSourceRevisionChanged) ||
+		!errors.Is(mixed.cause, playback.ErrToneMapSourceValidationUnavailable) {
+		t.Fatalf("mixed error = %#v, want retryable error preserving both causes", mixed)
+	}
+
+	onlyStale := combineTransportErrorsV3(stale, toneMapExecutionTransportErrorV3(tonemap.ErrSourceRevisionChanged, "stale again"))
+	if onlyStale == nil || onlyStale.retryable || !errors.Is(onlyStale.cause, tonemap.ErrSourceRevisionChanged) {
+		t.Fatalf("stale errors = %#v, want permanent stale cause", onlyStale)
+	}
+}
+
 func TestConfigureHLSTimelineV3MatchesTransportSeekSemantics(t *testing.T) {
 	// A copy remux streams FFmpeg's growing playlist, so its seek window must
 	// stay open-ended even though the runtime is known. A bounded window reads
@@ -4303,7 +4338,7 @@ func TestPlaybackV3ToneMapBudgetsCoverColdNodeWork(t *testing.T) {
 		RequireReady:             true,
 		HWAccel:                  tonemap.BackendQSV,
 	}
-	want := remoteNodeProbeFallbackTimeout +
+	want := remoteNodeProbeFallbackTimeout + playback.ManifestStartupTimeout +
 		tonemap.SourcePreflightTimeout(100) + transcodenode.TranscodeStartReadinessTimeout
 	if got := handler.remotePlaybackTransportTimeout("https://unknown.example", request); got != want {
 		t.Fatalf("remote tone-map start timeout = %s, want %s", got, want)
@@ -4360,7 +4395,7 @@ func TestRemoteToneMapProbeTimeoutUsesTargetNodeBudget(t *testing.T) {
 		t.Fatalf("remote probe timeout = %s, want target node budget %s", got, want)
 	}
 	request := transcodenode.TranscodeStartRequest{ToneMapMode: tonemap.ModeHardware}
-	if got, want := handler.remotePlaybackTransportTimeout(remote.URL, request), 137*time.Second; got != want {
+	if got, want := handler.remotePlaybackTransportTimeout(remote.URL, request), 137*time.Second+playback.ManifestStartupTimeout; got != want {
 		t.Fatalf("remote start timeout = %s, want target node budget %s", got, want)
 	}
 
