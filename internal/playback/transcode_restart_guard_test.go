@@ -18,7 +18,7 @@ import (
 func TestSegmentRecoveryDecisionWaitsWhileRestarting(t *testing.T) {
 	session := &TranscodeSession{
 		outputDir:  t.TempDir(),
-		restarting: &restartFlight{},
+		restarting: &restartFlight{done: make(chan struct{})},
 		opts: TranscodeOpts{
 			TargetCodecVideo:   "h264",
 			SegmentDuration:    2,

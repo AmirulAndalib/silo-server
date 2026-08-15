@@ -109,7 +109,7 @@ func TestHandleHLSSegmentRollsBackSessionWhenToneMapReconstructionFails(t *testi
 	handler.HandleHLSSegment(recorder, req.WithContext(ctx))
 
 	if recorder.Code != http.StatusUnsupportedMediaType || !strings.Contains(recorder.Body.String(), `"Error":"TranscodeUnsupported"`) {
-		t.Fatalf("response = %d %s, want stale-source 422", recorder.Code, recorder.Body.String())
+		t.Fatalf("response = %d %s, want stale-source 415", recorder.Code, recorder.Body.String())
 	}
 	if _, err := sessions.GetSession(upstreamID); !errors.Is(err, playback.ErrSessionNotFound) {
 		t.Fatalf("failed reconstruction left a registered playback session: %v", err)

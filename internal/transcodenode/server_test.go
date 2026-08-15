@@ -966,6 +966,9 @@ func TestHandleDownloadPrepareOptimisticReuseWaitsForInFlightReplacement(t *test
 func TestInvalidateDownloadArtifactReceiptRemovesOnlyReceipt(t *testing.T) {
 	outputPath := filepath.Join(t.TempDir(), "artifact.mp4")
 	receiptPath := downloadArtifactReceiptPath(outputPath)
+	if err := os.WriteFile(outputPath, []byte("artifact-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(receiptPath, []byte("valid-final"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -983,6 +986,12 @@ func TestInvalidateDownloadArtifactReceiptRemovesOnlyReceipt(t *testing.T) {
 	}
 	if _, err := os.Stat(receiptPath); !os.IsNotExist(err) {
 		t.Fatalf("receipt still present after invalidation: %v", err)
+	}
+	if _, err := os.Stat(outputPath); err != nil {
+		t.Fatalf("artifact was removed by receipt invalidation: %v", err)
+	}
+	if _, err := os.Stat(tempPath.Name()); err != nil {
+		t.Fatalf("crashed writer temp file was removed by receipt invalidation: %v", err)
 	}
 }
 
