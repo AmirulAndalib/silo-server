@@ -434,14 +434,14 @@ func (h *PlaybackHandler) streamCardFromQuery(r *http.Request, sessionID string)
 // manifest/segment serve routes while keeping stream-token verification off the
 // hot path. The overwhelmingly common case is a live in-memory session, which
 // needs no token at all, so the cheap GetSession lookup runs first and the
-// (HMAC + JSON) token decode is performed only on a not-found miss where a
-// reconstruct is actually required. On that miss it delegates to the shared
-// LoadOrReconstructSession front door so reconstruct/ownership semantics stay
-// identical. The returned card (nil on the live-session path) is the decoded
-// recipe the caller's own reconstruct branch consumes. Tone-mapped local
-// transcodes are the exception: a live Session with no runtime may be a
-// provisional capability reconstruction, so those requests decode the token
-// and join the manager's atomic playback+runtime operation.
+// (HMAC + JSON) token decode is performed only when the session cannot serve by
+// itself: on a not-found miss where a reconstruct is required, and on a live
+// session with no runtime, where any valid recipe card (plain or tone-mapped)
+// joins the manager's atomic playback+runtime reconstruction operation. On the
+// miss it delegates to the shared LoadOrReconstructSession front door so
+// reconstruct/ownership semantics stay identical. The returned card (nil on the
+// live-session path when no token is presented) is the decoded recipe the
+// caller's own reconstruct branch consumes.
 func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID string, requestedSegment int) (*playback.Session, playback.SessionLoadStatus, *playback.RecipeCard, error) {
 	requestUserID := apimw.GetUserID(r.Context())
 	session, err := h.sessionMgr.GetSession(sessionID)
@@ -453,8 +453,12 @@ func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID s
 			return nil, playback.SessionForbidden, nil, nil
 		}
 		if session.TranscodeNodeURL == "" && h.tm.GetTranscodeSession(sessionID) == nil {
+			// A live session whose runtime died can recover from the client's
+			// recipe token. Tone-mapped cards may back a provisional capability
+			// reconstruction; plain cards just respawn the encode. Either way the
+			// atomic playback+runtime operation is the same front door.
 			card := h.streamCardFromQuery(r, sessionID)
-			if card != nil && card.ToneMapMode != "" {
+			if card != nil {
 				session, _, status, reconstructErr := h.tm.LoadOrReconstructTranscodeWithError(r.Context(), h.sessionMgr.GetSession, sessionID, requestUserID, requestedSegment, card)
 				return session, status, card, reconstructErr
 			}
@@ -1322,6 +1326,14 @@ func alignedSeekSeconds(seekSeconds float64, segmentDuration int, targetVideoCod
 // player can seek immediately. Copy-video sessions expose FFmpeg's real
 // keyframe-aligned manifest and use the resolved stream origin the v3 plan
 // reports as the timeline's stream_origin_seconds.
+//
+// Errors: 404 (playback_session_not_found / not_found) when the session is
+// missing or cannot be reconstructed, 503 (unavailable) while the transcode is
+// temporarily unavailable, and — for tone-map execution failures — 422
+// (unsupported) with an X-Silo-Tone-Map-Execution-Error header of
+// source_revision_changed or source_preflight_rejected. The 422 responses are
+// additive to the existing 404 and 503 cases; the Jellyfin-compatible 415
+// mapping is a separate surface and unchanged.
 func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
 	session, status, card, reconstructErr := h.loadTranscodeServeSession(r, sessionID, -1)
@@ -1337,6 +1349,14 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 		return
 	case playback.SessionUnavailable:
 		if writePlaybackToneMapExecutionError(w, reconstructErr) {
+			return
+		}
+		if card == nil || card.ToneMapMode == "" {
+			// A plain (non-tone-mapped) transcode whose token recipe cannot be
+			// rebuilt is served the same 404 the second-chance reconstruct
+			// branch produces: the session is effectively gone, and the client
+			// re-plans rather than retrying a dead encode.
+			writeError(w, http.StatusNotFound, "not_found", "Transcode session not found")
 			return
 		}
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode session is temporarily unavailable")
@@ -1406,6 +1426,15 @@ func writePlaybackToneMapExecutionError(w http.ResponseWriter, err error) bool {
 
 // HandleGetTranscodeSegment handles GET /playback/transcode/{session_id}/segment/{name}.
 // Auth is optional — the session UUID serves as an access token.
+//
+// Errors: 404 (playback_session_not_found / not_found) when the session is
+// missing or cannot be reconstructed, or the segment does not exist; 503
+// (unavailable) while the transcode is temporarily unavailable; and — for
+// tone-map execution failures — 422 (unsupported) with an
+// X-Silo-Tone-Map-Execution-Error header of source_revision_changed or
+// source_preflight_rejected. The 422 responses are additive to the existing
+// 404 and 503 cases; the Jellyfin-compatible 415 mapping is a separate surface
+// and unchanged.
 func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
 	requestedSegment := -1
@@ -1425,6 +1454,14 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 		return
 	case playback.SessionUnavailable:
 		if writePlaybackToneMapExecutionError(w, reconstructErr) {
+			return
+		}
+		if card == nil || card.ToneMapMode == "" {
+			// A plain (non-tone-mapped) transcode whose token recipe cannot be
+			// rebuilt is served the same 404 the second-chance reconstruct
+			// branch produces: the session is effectively gone, and the client
+			// re-plans rather than retrying a dead encode.
+			writeError(w, http.StatusNotFound, "not_found", "Transcode session not found")
 			return
 		}
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode session is temporarily unavailable")
