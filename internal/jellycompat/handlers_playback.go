@@ -434,22 +434,12 @@ func (h *PlaybackHandler) remoteToneMapCapabilities(ctx context.Context, nodeURL
 }
 
 func (h *PlaybackHandler) remoteToneMapCapabilityInfo(ctx context.Context, nodeURL string) (playback.HWAccelInfo, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(nodeURL, "/")+"/hw-capabilities", nil)
+	info, status, err := transcodenode.FetchHWCapabilities(ctx, http.DefaultClient, nodeURL, h.JWTSecret)
 	if err != nil {
 		return playback.HWAccelInfo{}, err
 	}
-	request.Header.Set("Authorization", "Bearer "+h.JWTSecret)
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return playback.HWAccelInfo{}, err
-	}
-	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode != http.StatusOK {
-		return playback.HWAccelInfo{}, fmt.Errorf("transcode node returned %d", response.StatusCode)
-	}
-	var info playback.HWAccelInfo
-	if err := json.NewDecoder(response.Body).Decode(&info); err != nil {
-		return playback.HWAccelInfo{}, err
+	if status != http.StatusOK {
+		return playback.HWAccelInfo{}, fmt.Errorf("transcode node returned %d", status)
 	}
 	return info, nil
 }
@@ -1006,6 +996,10 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		return result, resp.StatusCode, false, nil
 	}
 	nodeResponse, status, cleanupRequired, err := dispatch(reqBody)
+	if err == nil && status == http.StatusAccepted && reqBody.ToneMapMode != "" && nodeResponse.ToneMapMode != reqBody.ToneMapMode {
+		err = errors.New("remote transcode node did not confirm tone-map mode")
+		cleanupRequired = true
+	}
 	initialStatus := status
 	initialErr := err
 	retryWithSoftware := false
@@ -1163,13 +1157,27 @@ func (h *PlaybackHandler) persistTranscodeRecipe(
 			return fmt.Errorf("persist node transcode recipe: %w", err)
 		}
 	}
+	remoteToLocal := recipe != nil && recipe.TranscodeNodeURL == "" && previousRecipe != nil && previousRecipe.TranscodeNodeURL != ""
+	oldNodeRecipeRemoved := false
+	if remoteToLocal {
+		h.tm.StopRemoteTranscode(upstreamSessionID, previousRecipe.TranscodeNodeURL)
+		if h.RecipeNodeStore != nil {
+			deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+			err := h.RecipeNodeStore.Delete(deleteCtx, upstreamSessionID)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("delete replaced node transcode recipe: %w", err)
+			}
+			oldNodeRecipeRemoved = true
+		}
+	}
 
 	if err := h.playbackStore.Update(playSessionID, func(current *PlaybackSession) error {
 		current.TranscodeStarted = true
 		current.Recipe = recipe
 		return nil
 	}); err != nil {
-		if nodeRecipeCommitted {
+		if nodeRecipeCommitted || oldNodeRecipeRemoved {
 			restoreCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			if previousRecipe != nil && previousRecipe.TranscodeNodeURL != "" {

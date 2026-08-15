@@ -1831,6 +1831,23 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 			}
 		}
 	}
+
+	// Readiness is not ownership: another caller may replace this runtime after
+	// it becomes ready but before its execution facts and durable recipe are
+	// published. Fence that publication under the same lifecycle lock used for
+	// replacement, and yield to an exact live successor rather than publishing
+	// stale facts or rolling the successor back.
+	publishUnlock := h.tm.LockSessionLifecycle(upstreamSessionID)
+	if live := h.tm.GetTranscodeSession(upstreamSessionID); live != transcodeSession {
+		publishUnlock()
+		if live != nil && compatTranscodeSessionUsesToneMapMode(live, requiredToneMapMode) {
+			return live, nil
+		}
+		if live != nil {
+			return nil, errHDRTranscodeUnsupported
+		}
+		return nil, playback.ErrSessionSuperseded
+	}
 	effectiveOpts := transcodeSession.Opts()
 
 	// Mirror the actual encode decisions onto the upstream session before the
@@ -1843,9 +1860,11 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 	h.tm.MonitorLocalTranscodeExit(upstreamSessionID, transcodeSession)
 
 	if err := h.persistTranscodeRecipe(ctx, playSessionID, upstreamSessionID, effectiveOpts); err != nil {
-		h.tm.CloseTranscodeSession(upstreamSessionID, "")
+		h.tm.CloseTranscodeSessionIf(upstreamSessionID, transcodeSession, "")
+		publishUnlock()
 		return nil, err
 	}
+	publishUnlock()
 
 	return transcodeSession, nil
 }

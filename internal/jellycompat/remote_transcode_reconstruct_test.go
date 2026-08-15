@@ -7,7 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,11 +26,15 @@ import (
 // store (*noderecipe.Store) so the round-trip tests can assert what central
 // wrote and let the "node" read it back without Redis.
 type stubRecipeNodeStore struct {
-	cards  map[string]playback.RecipeCard
-	putErr error
+	mu         sync.Mutex
+	cards      map[string]playback.RecipeCard
+	putErr     error
+	operations []string
 }
 
 func (s *stubRecipeNodeStore) Put(_ context.Context, sessionID string, card playback.RecipeCard) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.putErr != nil {
 		return s.putErr
 	}
@@ -35,6 +42,7 @@ func (s *stubRecipeNodeStore) Put(_ context.Context, sessionID string, card play
 		s.cards = make(map[string]playback.RecipeCard)
 	}
 	s.cards[sessionID] = card
+	s.operations = append(s.operations, "put:"+sessionID)
 	return nil
 }
 
@@ -58,13 +66,120 @@ func TestStartRemoteTranscodeRequiresDurableNodeRecipe(t *testing.T) {
 }
 
 func (s *stubRecipeNodeStore) Get(sessionID string) (playback.RecipeCard, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	card, ok := s.cards[sessionID]
 	return card, ok
 }
 
 func (s *stubRecipeNodeStore) Delete(_ context.Context, sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.cards, sessionID)
+	s.operations = append(s.operations, "delete:"+sessionID)
 	return nil
+}
+
+func (s *stubRecipeNodeStore) Operations() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.operations...)
+}
+
+type failLocalRecipeStore struct {
+	CompatPlaybackStore
+}
+
+func (s failLocalRecipeStore) Update(id string, fn func(*PlaybackSession) error) error {
+	return s.CompatPlaybackStore.Update(id, func(session *PlaybackSession) error {
+		if err := fn(session); err != nil {
+			return err
+		}
+		if session.Recipe != nil && session.Recipe.TranscodeNodeURL == "" {
+			return context.DeadlineExceeded
+		}
+		return nil
+	})
+}
+
+func TestEnsureLocalTranscodeDeletesRemoteRecipeAndRestoresItWhenCentralUpdateFails(t *testing.T) {
+	previousTimeout := compatManifestStartupTimeout
+	compatManifestStartupTimeout = time.Second
+	t.Cleanup(func() { compatManifestStartupTimeout = previousTimeout })
+
+	remoteStopped := make(chan struct{}, 1)
+	remoteNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && r.URL.Path == "/transcode/upstream-1" {
+			remoteStopped <- struct{}{}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(remoteNode.Close)
+
+	handler, _, sessionMgr, baseStore, source := newManifestToneMapFailoverHandler(t, remoteNode.URL, true)
+	software := tonemap.Capability{
+		Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	}
+	handler.compatToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+		return tonemap.Capabilities{software}, nil
+	}
+	handler.HWAccel = playback.HWAccelNone
+	handler.TranscodeDir = t.TempDir()
+	handler.FFmpegPath = filepath.Join(t.TempDir(), "ffmpeg")
+	ffmpegScript := "#!/bin/sh\n" +
+		"out=\"\"\n" +
+		"for arg in \"$@\"; do case \"$arg\" in *.m3u8) out=\"$(dirname \"$arg\")\";; esac; done\n" +
+		"mkdir -p \"$out\"\n" +
+		"for name in seg_00000.m4s seg_00001.m4s seg_00002.m4s; do printf segment > \"$out/$name\"; done\n" +
+		"printf '#EXTM3U\\n#EXT-X-TARGETDURATION:2\\n#EXT-X-MEDIA-SEQUENCE:0\\n#EXTINF:2,\\nseg_00000.m4s\\n#EXTINF:2,\\nseg_00001.m4s\\n#EXTINF:2,\\nseg_00002.m4s\\n' > \"$out/stream.m3u8\"\n" +
+		"sleep 30\n"
+	if err := os.WriteFile(handler.FFmpegPath, []byte(ffmpegScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRecipe := playback.NewRecipeCard(7, "profile-1", 42, remoteNode.URL, playback.TranscodeOpts{
+		SessionID: "upstream-1", InputPath: "/media/movie.mkv", TargetCodecVideo: "h264", TargetCodecAudio: "aac",
+		SegmentDuration: 2, ToneMapMode: tonemap.ModeHardware,
+	})
+	if err := baseStore.Update("play-1", func(session *PlaybackSession) error {
+		session.TranscodeStarted = true
+		session.Recipe = &oldRecipe
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	recipeStore := &stubRecipeNodeStore{cards: map[string]playback.RecipeCard{"upstream-1": oldRecipe}}
+	handler.RecipeNodeStore = recipeStore
+	handler.playbackStore = failLocalRecipeStore{CompatPlaybackStore: baseStore}
+	if err := sessionMgr.SetTranscodeNodeURL("upstream-1", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := handler.ensureTranscodeSessionWithToneMapMode(
+		context.Background(), "play-1", "upstream-1", source, tonemap.ModeSoftware,
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ensure local transcode error = %v, want central update failure", err)
+	}
+	select {
+	case <-remoteStopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote runtime was not stopped during local replacement")
+	}
+	if got := recipeStore.Operations(); len(got) != 2 || got[0] != "delete:upstream-1" || got[1] != "put:upstream-1" {
+		t.Fatalf("node recipe operations = %v, want delete followed by rollback put", got)
+	}
+	restored, ok := recipeStore.Get("upstream-1")
+	if !ok || restored.TranscodeNodeURL != remoteNode.URL || restored.ToneMapMode != tonemap.ModeHardware {
+		t.Fatalf("restored node recipe = %+v, found=%v, want prior remote recipe", restored, ok)
+	}
+	stored, ok := baseStore.Get("play-1")
+	if !ok || stored.Recipe == nil || stored.Recipe.TranscodeNodeURL != remoteNode.URL {
+		t.Fatalf("central recipe = %+v, found=%v, want prior remote recipe", stored.Recipe, ok)
+	}
 }
 
 // localSessionRegistry is a GetSession + RegisterReconstructed double for

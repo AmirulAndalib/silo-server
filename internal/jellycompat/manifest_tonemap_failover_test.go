@@ -3,12 +3,14 @@ package jellycompat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -163,6 +165,7 @@ func TestHandleMasterManifestFallsBackToValidatedLocalSoftwareAfterRemoteFailure
 	}
 
 	var firstModes []tonemap.Mode
+	var firstHardwareCleaned atomic.Bool
 	firstNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
@@ -176,10 +179,21 @@ func TestHandleMasterManifestFallsBackToValidatedLocalSoftwareAfterRemoteFailure
 			}
 			firstModes = append(firstModes, request.ToneMapMode)
 			if request.ToneMapMode == tonemap.ModeHardware {
-				w.WriteHeader(http.StatusUnprocessableEntity)
+				// HTTP acceptance without the promised execution fact leaves the
+				// hardware attempt indeterminate. It must be stopped before this same
+				// node is retried in software.
+				writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{})
+				return
+			}
+			if !firstHardwareCleaned.Load() {
+				t.Error("remote software retry started before unconfirmed hardware cleanup")
+				w.WriteHeader(http.StatusConflict)
 				return
 			}
 			w.WriteHeader(http.StatusServiceUnavailable)
+		case r.Method == http.MethodDelete && r.URL.Path == "/transcode/upstream-1":
+			firstHardwareCleaned.Store(true)
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -219,6 +233,7 @@ func TestHandleMasterManifestFallsBackToValidatedLocalSoftwareAfterRemoteFailure
 	}
 	firstModes = nil
 	secondModes = nil
+	firstHardwareCleaned.Store(false)
 
 	handler, planner, sessionMgr, store, source := newManifestToneMapFailoverHandler(t, firstNode.URL, true, secondNode.URL)
 	handler.compatToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
@@ -337,6 +352,205 @@ func TestEnsureTranscodeSessionRequiredSoftwareReplacesExistingHardware(t *testi
 	}
 	if _, err := os.Stat(softwareMarker); err != nil {
 		t.Fatalf("software marker: %v", err)
+	}
+}
+
+type blockingToneMapSessionManager struct {
+	mu                    sync.Mutex
+	session               playback.Session
+	hardwareRecordStarted chan struct{}
+	releaseHardwareRecord chan struct{}
+	hardwareRecordOnce    sync.Once
+}
+
+func (m *blockingToneMapSessionManager) StartSession(int, string, int, playback.PlayMethod, bool) (*playback.Session, error) {
+	return nil, errors.New("unexpected StartSession")
+}
+
+func (m *blockingToneMapSessionManager) UpdateProgress(string, float64, bool) error { return nil }
+func (m *blockingToneMapSessionManager) UpdateAudioTrack(string, int, playback.PlayMethod) error {
+	return nil
+}
+func (m *blockingToneMapSessionManager) StopSession(string) error    { return nil }
+func (m *blockingToneMapSessionManager) BeginTransport(string) error { return nil }
+func (m *blockingToneMapSessionManager) EndTransport(string) error   { return nil }
+
+func (m *blockingToneMapSessionManager) GetSession(string) (*playback.Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copy := m.session
+	return &copy, nil
+}
+
+func (m *blockingToneMapSessionManager) SetTranscodeNodeURL(_ string, nodeURL string) error {
+	m.mu.Lock()
+	m.session.TranscodeNodeURL = nodeURL
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *blockingToneMapSessionManager) SetTranscodeStreamDetails(
+	_ string,
+	targetVideoCodec, targetAudioCodec string,
+	transcodeAudio bool,
+	hwAccel string,
+	mode tonemap.Mode,
+) error {
+	if mode == tonemap.ModeHardware {
+		m.hardwareRecordOnce.Do(func() { close(m.hardwareRecordStarted) })
+		<-m.releaseHardwareRecord
+	}
+	m.mu.Lock()
+	m.session.TargetVideoCodec = targetVideoCodec
+	m.session.TargetAudioCodec = targetAudioCodec
+	m.session.TranscodeAudio = transcodeAudio
+	m.session.TranscodeHWAccel = hwAccel
+	m.session.ToneMapMode = mode
+	m.mu.Unlock()
+	return nil
+}
+
+type observingToneMapStore struct {
+	CompatPlaybackStore
+	failHardware       bool
+	softwarePersisted  chan struct{}
+	softwarePersistOne sync.Once
+}
+
+func (s *observingToneMapStore) Update(id string, fn func(*PlaybackSession) error) error {
+	var mode tonemap.Mode
+	err := s.CompatPlaybackStore.Update(id, func(session *PlaybackSession) error {
+		if err := fn(session); err != nil {
+			return err
+		}
+		if session.Recipe != nil {
+			mode = session.Recipe.ToneMapMode
+		}
+		if s.failHardware && mode == tonemap.ModeHardware {
+			select {
+			case <-s.softwarePersisted:
+				return context.DeadlineExceeded
+			default:
+			}
+		}
+		return nil
+	})
+	if err == nil && mode == tonemap.ModeSoftware {
+		s.softwarePersistOne.Do(func() { close(s.softwarePersisted) })
+	}
+	return err
+}
+
+func TestEnsureTranscodeSessionReadyHardwareCannotPublishAfterSoftwareReplacement(t *testing.T) {
+	testReadyHardwareOwnershipFence(t, false)
+}
+
+func TestEnsureTranscodeSessionReadyHardwareRollbackCannotCloseSoftwareReplacement(t *testing.T) {
+	testReadyHardwareOwnershipFence(t, true)
+}
+
+func testReadyHardwareOwnershipFence(t *testing.T, failHardwarePersistence bool) {
+	t.Helper()
+	previousTimeout := compatManifestStartupTimeout
+	compatManifestStartupTimeout = time.Second
+	t.Cleanup(func() { compatManifestStartupTimeout = previousTimeout })
+
+	hardware := tonemap.Capability{
+		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI,
+		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	}
+	software := tonemap.Capability{
+		Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+	}
+	handler, _, _, baseStore, source := newManifestToneMapFailoverHandler(t, "http://unused.invalid", true)
+	handler.compatToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+		return tonemap.Capabilities{hardware, software}, nil
+	}
+	handler.HWAccel = tonemap.BackendQSV
+	handler.TranscodeDir = t.TempDir()
+	handler.FFmpegPath = filepath.Join(t.TempDir(), "ffmpeg")
+	ffmpegScript := "#!/bin/sh\n" +
+		"out=\"\"\n" +
+		"for arg in \"$@\"; do case \"$arg\" in *.m3u8) out=\"$(dirname \"$arg\")\";; esac; done\n" +
+		"mkdir -p \"$out\"\n" +
+		"for name in seg_00000.m4s seg_00001.m4s seg_00002.m4s; do printf segment > \"$out/$name\"; done\n" +
+		"printf '#EXTM3U\\n#EXT-X-TARGETDURATION:2\\n#EXT-X-MEDIA-SEQUENCE:0\\n#EXTINF:2,\\nseg_00000.m4s\\n#EXTINF:2,\\nseg_00001.m4s\\n#EXTINF:2,\\nseg_00002.m4s\\n' > \"$out/stream.m3u8\"\n" +
+		"sleep 30\n"
+	if err := os.WriteFile(handler.FFmpegPath, []byte(ffmpegScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionMgr := &blockingToneMapSessionManager{
+		session: playback.Session{
+			ID: "upstream-1", UserID: 7, ProfileID: "profile-1", MediaFileID: 42,
+			PlayMethod: playback.PlayTranscode, BasePlayMethod: playback.PlayTranscode,
+		},
+		hardwareRecordStarted: make(chan struct{}),
+		releaseHardwareRecord: make(chan struct{}),
+	}
+	store := &observingToneMapStore{
+		CompatPlaybackStore: baseStore,
+		failHardware:        failHardwarePersistence,
+		softwarePersisted:   make(chan struct{}),
+	}
+	handler.sessionMgr = sessionMgr
+	handler.playbackStore = store
+	t.Cleanup(func() { handler.tm.CloseTranscodeSession("upstream-1", "") })
+
+	type result struct {
+		session *playback.TranscodeSession
+		err     error
+	}
+	hardwareResult := make(chan result, 1)
+	go func() {
+		session, err := handler.ensureTranscodeSession(context.Background(), "play-1", "upstream-1", source)
+		hardwareResult <- result{session: session, err: err}
+	}()
+	select {
+	case <-sessionMgr.hardwareRecordStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("hardware caller did not pass manifest readiness")
+	}
+
+	softwareResult := make(chan result, 1)
+	go func() {
+		session, err := handler.ensureTranscodeSessionWithToneMapMode(
+			context.Background(), "play-1", "upstream-1", source, tonemap.ModeSoftware,
+		)
+		softwareResult <- result{session: session, err: err}
+	}()
+
+	// Without the lifecycle fence, software can commit while the ready hardware
+	// caller is paused. With the fence it waits for hardware publication; either
+	// ordering is released deterministically and must end with software ownership.
+	select {
+	case <-store.softwarePersisted:
+	case <-time.After(5 * time.Second):
+	}
+	close(sessionMgr.releaseHardwareRecord)
+
+	hwResult := <-hardwareResult
+	swResult := <-softwareResult
+	if hwResult.err != nil {
+		t.Fatalf("hardware caller: %v", hwResult.err)
+	}
+	if swResult.err != nil {
+		t.Fatalf("software caller: %v", swResult.err)
+	}
+	if swResult.session == nil || swResult.session.Opts().ToneMapMode != tonemap.ModeSoftware {
+		t.Fatalf("software result = %#v, want software runtime", swResult.session)
+	}
+	if live := handler.tm.GetTranscodeSession("upstream-1"); live != swResult.session || !live.IsRunning() {
+		t.Fatalf("live runtime = %#v, want running software winner %#v", live, swResult.session)
+	}
+	stored, ok := store.Get("play-1")
+	if !ok || stored.Recipe == nil || stored.Recipe.ToneMapMode != tonemap.ModeSoftware {
+		t.Fatalf("stored recipe = %+v, found=%v, want software winner", stored.Recipe, ok)
+	}
+	confirmed, err := sessionMgr.GetSession("upstream-1")
+	if err != nil || confirmed.ToneMapMode != tonemap.ModeSoftware {
+		t.Fatalf("reported tone-map mode = %q, err=%v, want software", confirmed.ToneMapMode, err)
 	}
 }
 
