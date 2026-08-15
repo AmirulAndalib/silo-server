@@ -177,12 +177,22 @@ func TestArtifactQueueClaimAndLeaseRecovery(t *testing.T) {
 func TestToneMapArtifactQueueRejectsLegacyWorkers(t *testing.T) {
 	repo, pool, fileID := newArtifactTestRepo(t)
 	ctx := context.Background()
+	// The fence this test exercises is the trigger created by migration
+	// 20260815135416_fence_tone_map_artifact_workers; without it the legacy
+	// claim below would succeed and the test would fail for the wrong reason.
+	var triggerName *string
+	if err := pool.QueryRow(ctx, `SELECT tgname::text FROM pg_trigger WHERE tgname = 'download_artifacts_tone_map_worker_status'`).Scan(&triggerName); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("check tone-map worker fence trigger: %v", err)
+	}
+	if triggerName == nil {
+		t.Skip("migration 20260815135416_fence_tone_map_artifact_workers has not been applied")
+	}
 
 	a := newArtifact(t, fileID, "hash-tone-map-worker-fence")
 	a.ToneMapPolicy = tonemap.PolicySoftwareOnly
 	a.ToneMapMode = tonemap.ModeSoftware
 	a.ToneMapSourceKind = tonemap.SourcePQ
-	a.ToneMapRecipeVersion = "1"
+	a.ToneMapRecipeVersion = playback.TransformationHDRToSDRToneMapRecipeVersionV3
 	a.ToneMapSourceRevision = tonemap.SourceRevision{MediaFileID: fileID, FileSize: 123}.Encode()
 	row, created, err := repo.EnsureQueued(ctx, a)
 	if err != nil || !created || row.Status != ArtifactToneMapQueued {
@@ -233,9 +243,6 @@ func TestToneMapArtifactQueueRejectsLegacyWorkers(t *testing.T) {
 		t.Fatalf("retried = (%+v, %v), want tone-map queued", retried, err)
 	}
 
-	// A merge-base API process can still requeue a ready row with the legacy
-	// status literal. The database fence must normalize that write too, or an old
-	// worker could claim it on the next poll.
 	if _, err := pool.Exec(ctx, `UPDATE download_artifacts SET next_retry_at = now() - interval '1 second' WHERE id = $1`, row.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -255,6 +262,9 @@ func TestToneMapArtifactQueueRejectsLegacyWorkers(t *testing.T) {
 	if !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("merge-base ready reader saw tone-map artifact %q, err %v", legacyReadyID, err)
 	}
+	// A merge-base API process can still requeue a ready row with the legacy
+	// status literal. The database fence must normalize that write too, or an old
+	// worker could claim it on the next poll.
 	if _, err := pool.Exec(ctx, `UPDATE download_artifacts SET status = 'queued' WHERE id = $1`, row.ID); err != nil {
 		t.Fatal(err)
 	}
