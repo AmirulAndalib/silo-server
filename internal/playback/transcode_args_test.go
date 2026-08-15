@@ -62,6 +62,41 @@ func TestStartTranscodeRejectsUnvalidatedBitstreamFilter(t *testing.T) {
 	}
 }
 
+func TestBuildFFmpegArgsCopyVideoAppliesSampleEntry(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry string
+		want  string
+		not   string
+	}{
+		{name: "Dolby Vision", entry: VideoSampleEntryDVH1, want: "-c:v copy -tag:v dvh1 -strict unofficial"},
+		{name: "HDR10", entry: VideoSampleEntryHVC1, want: "-c:v copy -tag:v hvc1", not: "-strict unofficial"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := strings.Join(buildFFmpegArgs(TranscodeOpts{
+				InputPath: "/media/movie.mkv", OutputDir: t.TempDir(),
+				TargetCodecVideo: "copy", TargetCodecAudio: "copy",
+				VideoSampleEntry: tc.entry, SegmentDuration: 2,
+			}), " ")
+			if !strings.Contains(args, tc.want) || tc.not != "" && strings.Contains(args, tc.not) {
+				t.Fatalf("args = %s", args)
+			}
+		})
+	}
+}
+
+func TestStartTranscodeRejectsInvalidVideoSampleEntry(t *testing.T) {
+	for _, opts := range []TranscodeOpts{
+		{TargetCodecVideo: "copy", VideoSampleEntry: "dvhe"},
+		{TargetCodecVideo: "h264", VideoSampleEntry: VideoSampleEntryDVH1},
+	} {
+		if _, err := StartTranscode(context.Background(), opts); err == nil {
+			t.Fatalf("invalid recipe accepted: %+v", opts)
+		}
+	}
+}
+
 func TestBuildFFmpegArgs_QSVDropsSuperfastPreset(t *testing.T) {
 	args := buildFFmpegArgs(TranscodeOpts{
 		InputPath:         "/media/movie.mkv",
