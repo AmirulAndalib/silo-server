@@ -362,7 +362,9 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 
 func writeCompatTranscodeError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, errToneMapCapabilityUnavailable), errors.Is(err, playback.ErrToneMapSourceValidationUnavailable):
+	case errors.Is(err, errToneMapCapabilityUnavailable),
+		errors.Is(err, playback.ErrToneMapSourceValidationUnavailable),
+		errors.Is(err, playback.ErrToneMapExecutorUnavailable):
 		slog.Warn("compat transcode unavailable", "component", "jellycompat", "error", err)
 		writeError(w, http.StatusServiceUnavailable, "TranscodeUnavailable", "Transcode is temporarily unavailable")
 	case errors.Is(err, tonemap.ErrSourceRevisionChanged):
@@ -440,11 +442,17 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 	name := chiURLParam(r, "segmentId")
 	ext := chiURLParam(r, "segmentContainer")
 
-	// Load the upstream native session, reconstructing it from the compat-stored
-	// recipe on a not-found miss (e.g. after a server restart). Ownership is
-	// re-bound to the Jellyfin caller's native user id (StreamAppUserID), matching
-	// the recipe owner.
-	upstreamSession, status := h.tm.LoadOrReconstructSession(r.Context(), h.sessionMgr.GetSession, playSession.UpstreamSessionID, session.StreamAppUserID, playSession.Recipe)
+	requestedSegment := -1
+	if segNum, parseErr := playback.ParseSegmentNumber(name); parseErr == nil {
+		requestedSegment = segNum
+	}
+	// Recover the playback session and local runtime as one transaction. If a
+	// frozen tone-map recipe cannot be rebuilt, the manager rolls back the exact
+	// provisional playback session before this handler returns an error.
+	_, transcodeSession, status, reconstructErr := h.tm.LoadOrReconstructTranscodeWithError(
+		r.Context(), h.sessionMgr.GetSession, playSession.UpstreamSessionID,
+		session.StreamAppUserID, requestedSegment, playSession.Recipe,
+	)
 	switch status {
 	case playback.SessionMissing:
 		writeError(w, http.StatusNotFound, "NotFound", "Upstream session not found")
@@ -455,29 +463,14 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 	case playback.SessionForbidden:
 		writeError(w, http.StatusForbidden, "Forbidden", "Session belongs to another user")
 		return
+	case playback.SessionUnavailable:
+		writeCompatTranscodeError(w, reconstructErr)
+		return
 	}
 
-	transcodeSession := h.tm.GetTranscodeSession(playSession.UpstreamSessionID)
 	if transcodeSession == nil {
-		// Local transcode whose process state was lost (restart): reconstruct it
-		// seeked to the requested segment. Remote-node sessions are served by the
-		// proxy, not here, so only reconstruct an integrated (no node URL) session.
-		if upstreamSession.TranscodeNodeURL == "" && playSession.Recipe != nil {
-			requestedSegment := -1
-			if segNum, parseErr := playback.ParseSegmentNumber(name); parseErr == nil {
-				requestedSegment = segNum
-			}
-			var reconstructErr error
-			transcodeSession, reconstructErr = h.tm.ReconstructTranscodeWithError(r.Context(), playSession.UpstreamSessionID, requestedSegment, *playSession.Recipe)
-			if reconstructErr != nil {
-				writeCompatTranscodeError(w, reconstructErr)
-				return
-			}
-		}
-		if transcodeSession == nil {
-			writeError(w, http.StatusNotFound, "NotFound", "Transcode session not found")
-			return
-		}
+		writeError(w, http.StatusNotFound, "NotFound", "Transcode session not found")
+		return
 	}
 
 	segmentFile := name + "." + ext

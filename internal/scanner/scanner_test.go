@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -212,6 +213,37 @@ func TestFailedProbeRepairPreservesExistingProbe(t *testing.T) {
 	}
 	if shouldPreserveExistingProbeAfterProbeFailure([]string{"probe_repair", "size_changed", "root_assignment_changed"}, nil) {
 		t.Fatal("byte changes must not preserve stale probe metadata")
+	}
+}
+
+func TestPersistIdentityUpdateUsesReturnedIDBeforeEnqueue(t *testing.T) {
+	mf := &models.MediaFile{FilePath: "/library/movie.mkv"}
+	var enqueuedID int
+	applied, err := persistIdentityUpdate(
+		mf,
+		func(models.MediaFile) (int, error) { return 42, nil },
+		func(file *models.MediaFile) error {
+			enqueuedID = file.ID
+			return nil
+		},
+	)
+	if err != nil || !applied {
+		t.Fatalf("persistIdentityUpdate = (%v, %v), want applied", applied, err)
+	}
+	if mf.ID != 42 || enqueuedID != 42 {
+		t.Fatalf("updated/enqueued IDs = %d/%d, want 42/42", mf.ID, enqueuedID)
+	}
+}
+
+func TestPersistIdentityUpdatePropagatesEnqueueFailure(t *testing.T) {
+	want := errors.New("queue unavailable")
+	applied, err := persistIdentityUpdate(
+		&models.MediaFile{FilePath: "/library/movie.mkv"},
+		func(models.MediaFile) (int, error) { return 42, nil },
+		func(*models.MediaFile) error { return want },
+	)
+	if !applied || !errors.Is(err, want) {
+		t.Fatalf("persistIdentityUpdate = (%v, %v), want applied and queue error", applied, err)
 	}
 }
 

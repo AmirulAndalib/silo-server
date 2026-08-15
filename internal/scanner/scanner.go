@@ -2709,20 +2709,20 @@ func (s *Scanner) processFile(
 				FilePath:      filePath,
 			}
 			populateScanIdentity(&mf, filePath, folder.Type, assignment, groupAssignment, existing)
-			switch id, updErr := s.fileRepo.UpdateIdentity(ctx, mf); {
-			case updErr == nil:
-				mf.ID = id
-				if err := s.enqueueMetadataWork(ctx, folder, &mf); err != nil {
-					return 0, nil, fmt.Errorf("enqueueing metadata work for file %s: %w", filePath, err)
-				}
+			applied, persistErr := persistIdentityUpdate(&mf,
+				func(file models.MediaFile) (int, error) { return s.fileRepo.UpdateIdentity(ctx, file) },
+				func(file *models.MediaFile) error { return s.enqueueMetadataWork(ctx, folder, file) },
+			)
+			switch {
+			case persistErr != nil:
+				return 0, nil, fmt.Errorf("persisting identity update for file %s: %w", filePath, persistErr)
+			case applied:
 				return actionUpdated, updateReasons, nil
-			case errors.Is(updErr, ErrFileNotFound):
+			default:
 				// The row vanished between the scan-state snapshot and this
 				// write (concurrent delete). Fall through to the full path,
 				// whose upsert re-ingests the file in this scan — the old
 				// behavior before the fast path existed.
-			default:
-				return 0, nil, fmt.Errorf("updating identity for file %s: %w", filePath, updErr)
 			}
 		}
 
@@ -2739,14 +2739,18 @@ func (s *Scanner) processFile(
 			if len(updateReasons) > 1 {
 				mf := models.MediaFile{MediaFolderID: folder.ID, FilePath: filePath}
 				populateScanIdentity(&mf, filePath, folder.Type, assignment, groupAssignment, existing)
-				switch _, updErr := s.fileRepo.UpdateIdentity(ctx, mf); {
-				case updErr == nil:
+				applied, persistErr := persistIdentityUpdate(&mf,
+					func(file models.MediaFile) (int, error) { return s.fileRepo.UpdateIdentity(ctx, file) },
+					func(file *models.MediaFile) error { return s.enqueueMetadataWork(ctx, folder, file) },
+				)
+				switch {
+				case persistErr != nil:
+					return 0, nil, fmt.Errorf("persisting identity update for file %s: %w", filePath, persistErr)
+				case applied:
 					return actionUpdated, updateReasons, nil
-				case errors.Is(updErr, ErrFileNotFound):
+				default:
 					// The old row is gone, so there is no probe metadata left to
 					// preserve. Continue through the normal upsert path.
-				default:
-					return 0, nil, fmt.Errorf("updating identity for file %s: %w", filePath, updErr)
 				}
 			} else {
 				return actionUnchanged, updateReasons, nil
@@ -3271,6 +3275,25 @@ func shouldPreserveExistingProbeAfterProbeFailure(updateReasons []string, probe 
 		}
 	}
 	return foundRepair
+}
+
+func persistIdentityUpdate(
+	file *models.MediaFile,
+	update func(models.MediaFile) (int, error),
+	enqueue func(*models.MediaFile) error,
+) (bool, error) {
+	id, err := update(*file)
+	if errors.Is(err, ErrFileNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	file.ID = id
+	if err := enqueue(file); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 func (s *Scanner) enqueueMetadataWork(ctx context.Context, folder *models.MediaFolder, file *models.MediaFile) error {

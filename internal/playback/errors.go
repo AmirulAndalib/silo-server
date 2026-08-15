@@ -22,6 +22,10 @@ var (
 	// The failure is transient: callers may retry after the source or probe
 	// executable becomes available again.
 	ErrToneMapSourceValidationUnavailable = errors.New("tone-map source validation unavailable")
+	// ErrToneMapExecutorUnavailable reports a transient failure while probing the
+	// executor needed by an otherwise valid frozen tone-map recipe. Unsupported
+	// executors remain ordinary validation errors and are not retry-classified.
+	ErrToneMapExecutorUnavailable = errors.New("tone-map executor unavailable")
 	// ErrSessionSuperseded means the session a restart was about to re-spawn is
 	// no longer the live mapped session (a concurrent teardown or reconstruct
 	// replaced it while the restart waited for the per-session lifecycle lock).

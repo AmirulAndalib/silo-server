@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Silo-Server/silo-server/internal/downloadprepare"
@@ -166,6 +167,91 @@ func TestArtifactQueueClaimAndLeaseRecovery(t *testing.T) {
 	done, err := repo.GetByKey(ctx, fileID, "transcode", "hash-recovery")
 	if err != nil || done.Status != ArtifactReady || done.FileSize != 4242 {
 		t.Fatalf("final = (%+v, %v), want ready size=4242", done, err)
+	}
+}
+
+// TestToneMapArtifactQueueRejectsLegacyWorkers verifies that the durable queue
+// does not expose a tone-map recipe to workers from before tone-map fields were
+// added. Such a worker would otherwise claim the row and encode ordinary SDR
+// output while silently ignoring the frozen recipe.
+func TestToneMapArtifactQueueRejectsLegacyWorkers(t *testing.T) {
+	repo, pool, fileID := newArtifactTestRepo(t)
+	ctx := context.Background()
+
+	a := newArtifact(t, fileID, "hash-tone-map-worker-fence")
+	a.ToneMapPolicy = tonemap.PolicySoftwareOnly
+	a.ToneMapMode = tonemap.ModeSoftware
+	a.ToneMapSourceKind = tonemap.SourcePQ
+	a.ToneMapRecipeVersion = "1"
+	a.ToneMapSourceRevision = tonemap.SourceRevision{MediaFileID: fileID, FileSize: 123}.Encode()
+	row, created, err := repo.EnsureQueued(ctx, a)
+	if err != nil || !created || row.Status != ArtifactToneMapQueued {
+		t.Fatalf("EnsureQueued = (%+v, created=%v, %v), want new tone-map queued row", row, created, err)
+	}
+
+	// This is the claim predicate used by the merge-base worker. It must not see
+	// the new queue discriminator, even though additive recipe columns are present.
+	var legacyClaimID string
+	err = pool.QueryRow(ctx, `
+		UPDATE download_artifacts SET status = 'running'
+		WHERE id = (
+			SELECT id FROM download_artifacts
+			WHERE status = 'queued' AND (next_retry_at IS NULL OR next_retry_at <= now())
+			ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id
+	`).Scan(&legacyClaimID)
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("legacy worker claim = id %q, err %v; want no row", legacyClaimID, err)
+	}
+
+	claim, err := repo.ClaimNext(ctx, "current-worker", time.Minute)
+	if err != nil || claim.ID != row.ID || claim.Status != ArtifactToneMapRunning {
+		t.Fatalf("current ClaimNext = (%+v, %v), want tone-map running", claim, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE download_artifacts SET lease_expires_at = now() - interval '1 minute' WHERE id = $1`, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ReclaimExpiredLeases(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := repo.GetByID(ctx, row.ID)
+	if err != nil || reclaimed.Status != ArtifactToneMapQueued {
+		t.Fatalf("reclaimed = (%+v, %v), want tone-map queued", reclaimed, err)
+	}
+
+	_, err = repo.ClaimNext(ctx, "current-worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, applied, err := repo.MarkFailedOrRetry(ctx, row.ID, "current-worker", "retry", time.Second)
+	if err != nil || !applied || terminal {
+		t.Fatalf("MarkFailedOrRetry = (%v, %v, %v), want retry", terminal, applied, err)
+	}
+	retried, err := repo.GetByID(ctx, row.ID)
+	if err != nil || retried.Status != ArtifactToneMapQueued {
+		t.Fatalf("retried = (%+v, %v), want tone-map queued", retried, err)
+	}
+
+	// A merge-base API process can still requeue a ready row with the legacy
+	// status literal. The database fence must normalize that write too, or an old
+	// worker could claim it on the next poll.
+	if _, err := pool.Exec(ctx, `UPDATE download_artifacts SET next_retry_at = now() - interval '1 second' WHERE id = $1`, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	claim, err = repo.ClaimNext(ctx, "current-worker", time.Minute)
+	if err != nil || claim.Status != ArtifactToneMapRunning {
+		t.Fatalf("final ClaimNext = (%+v, %v), want tone-map running", claim, err)
+	}
+	if applied, err := repo.MarkReady(ctx, row.ID, "current-worker", row.OutputPath, 0, "", "", "", 4242); err != nil || !applied {
+		t.Fatalf("MarkReady = (%v, %v), want applied", applied, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE download_artifacts SET status = 'queued' WHERE id = $1`, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	legacyRequeue, err := repo.GetByID(ctx, row.ID)
+	if err != nil || legacyRequeue.Status != ArtifactToneMapQueued {
+		t.Fatalf("legacy requeue = (%+v, %v), want database-normalized tone-map queued", legacyRequeue, err)
 	}
 }
 

@@ -115,6 +115,24 @@ func TestToneMapPathHashFailureIsTransient(t *testing.T) {
 	}
 }
 
+func TestResolveToneMapExecutorClassifiesCanceledProbeAsUnavailable(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := ResolveToneMapExecutor(ctx, TranscodeOpts{
+		ToneMapPolicy:        tonemap.PolicySoftwareOnly,
+		ToneMapMode:          tonemap.ModeSoftware,
+		ToneMapSourceKind:    tonemap.SourcePQ,
+		ToneMapRecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapSourceRevision: tonemap.SourceRevision{
+			MediaFileID: 1,
+			FileSize:    5,
+		},
+	})
+	if !errors.Is(err, ErrToneMapExecutorUnavailable) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("ResolveToneMapExecutor() error = %v, want executor unavailable + canceled", err)
+	}
+}
+
 func TestNonToneMapStartDoesNotProbeLiveMetadata(t *testing.T) {
 	dir := t.TempDir()
 	inputPath := filepath.Join(dir, "movie.mkv")

@@ -357,7 +357,7 @@ func (m *ArtifactManager) ensureResolved(ctx context.Context, file *models.Media
 		case err != nil:
 			return nil, err
 		default:
-			row.Status = ArtifactQueued
+			row.Status = queuedArtifactStatus(row.ToneMapMode)
 		}
 		m.triggerDrain()
 		return row, nil

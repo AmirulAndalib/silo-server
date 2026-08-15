@@ -14,11 +14,20 @@ import (
 
 // Artifact status constants (download_artifacts.status).
 const (
-	ArtifactQueued  = "queued"
-	ArtifactRunning = "running"
-	ArtifactReady   = "ready"
-	ArtifactFailed  = "failed"
+	ArtifactQueued         = "queued"
+	ArtifactRunning        = "running"
+	ArtifactToneMapQueued  = "tone_map_queued"
+	ArtifactToneMapRunning = "tone_map_running"
+	ArtifactReady          = "ready"
+	ArtifactFailed         = "failed"
 )
+
+func queuedArtifactStatus(mode tonemap.Mode) string {
+	if mode != "" {
+		return ArtifactToneMapQueued
+	}
+	return ArtifactQueued
+}
 
 // ErrNoArtifactJob is returned by the queue when no claimable job exists.
 var ErrNoArtifactJob = errors.New("no claimable artifact job")

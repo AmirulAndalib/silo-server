@@ -67,16 +67,17 @@ func (r *ArtifactRepository) EnsureQueued(ctx context.Context, a *Artifact) (*Ar
 	if a.ToneMapPolicy == "" {
 		a.ToneMapPolicy = tonemap.PolicyNone
 	}
+	status := queuedArtifactStatus(a.ToneMapMode)
 	tag, err := r.pool.Exec(ctx,
 		`INSERT INTO download_artifacts
 			(id, media_file_id, format, params_hash, container, codec_video, codec_audio,
 			 resolution, audio_track_index, target_bitrate_kbps, tone_map_policy, tone_map_mode, tone_map_source_kind, tone_map_recipe_version, tone_map_preflight_required, tone_map_source_revision,
 			 tone_map_dv_config_present, tone_map_dv_bl_compat_id_present, tone_map_dv_bl_present, tone_map_dv_rpu_present, output_path, status, max_attempts)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, 'queued', $22)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 		 ON CONFLICT (media_file_id, format, params_hash) DO NOTHING`,
 		a.ID, a.MediaFileID, a.Format, a.ParamsHash, a.Container, a.CodecVideo, a.CodecAudio,
 		a.Resolution, a.AudioTrackIndex, a.TargetBitrateKbps, a.ToneMapPolicy, a.ToneMapMode, a.ToneMapSourceKind, a.ToneMapRecipeVersion, a.ToneMapPreflightRequired, a.ToneMapSourceRevision,
-		a.ToneMapDVConfigPresent, a.ToneMapDVBLCompatIDPresent, a.ToneMapDVBLPresent, a.ToneMapDVRPUPresent, a.OutputPath, a.MaxAttempts,
+		a.ToneMapDVConfigPresent, a.ToneMapDVBLCompatIDPresent, a.ToneMapDVBLPresent, a.ToneMapDVRPUPresent, a.OutputPath, status, a.MaxAttempts,
 	)
 	if err != nil {
 		return nil, false, fmt.Errorf("ensuring artifact: %w", err)
@@ -127,12 +128,13 @@ func (r *ArtifactRepository) ClaimNext(ctx context.Context, owner string, lease 
 	}
 	a, err := scanArtifact(r.pool.QueryRow(ctx,
 		`UPDATE download_artifacts
-		 SET status = 'running', lease_owner = $1, lease_expires_at = now() + make_interval(secs => $2),
+		 SET status = CASE WHEN status IN ('tone_map_queued', 'tone_map_running') THEN 'tone_map_running' ELSE 'running' END,
+		     lease_owner = $1, lease_expires_at = now() + make_interval(secs => $2),
 		     attempts = attempts + 1
 		 WHERE id = (
 		     SELECT id FROM download_artifacts
-		     WHERE (status = 'queued' AND (next_retry_at IS NULL OR next_retry_at <= now()))
-		        OR (status = 'running' AND lease_expires_at < now())
+		     WHERE (status IN ('queued', 'tone_map_queued') AND (next_retry_at IS NULL OR next_retry_at <= now()))
+		        OR (status IN ('running', 'tone_map_running') AND lease_expires_at < now())
 		     ORDER BY created_at
 		     LIMIT 1
 		     FOR UPDATE SKIP LOCKED
@@ -158,7 +160,7 @@ func (r *ArtifactRepository) Heartbeat(ctx context.Context, id, owner string, le
 	}
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE download_artifacts SET lease_expires_at = now() + make_interval(secs => $3)
-		 WHERE id = $1 AND lease_owner = $2 AND status = 'running'`,
+		 WHERE id = $1 AND lease_owner = $2 AND status IN ('running', 'tone_map_running')`,
 		id, owner, leaseSecs,
 	)
 	if err != nil {
@@ -180,7 +182,7 @@ func (r *ArtifactRepository) MarkReady(ctx context.Context, id, owner, outputPat
 		     origin_node_group = $5, origin_artifact_id = $6, file_size = $7, error_message = '',
 		     completed_at = now(), last_used_at = now(),
 		     lease_owner = NULL, lease_expires_at = NULL, next_retry_at = NULL
-		 WHERE id = $1 AND lease_owner = $8 AND status = 'running'`,
+		 WHERE id = $1 AND lease_owner = $8 AND status IN ('running', 'tone_map_running')`,
 		id, outputPath, originNodeID, originNodeURL, originNodeGroup, originArtifactID, fileSize, owner,
 	)
 	if err != nil {
@@ -202,12 +204,14 @@ func (r *ArtifactRepository) MarkFailedOrRetry(ctx context.Context, id, owner, e
 	}
 	err = r.pool.QueryRow(ctx,
 		`UPDATE download_artifacts
-		 SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
+		 SET status = CASE WHEN attempts >= max_attempts THEN 'failed'
+		                   WHEN status = 'tone_map_running' THEN 'tone_map_queued'
+		                   ELSE 'queued' END,
 		     error_message = $2,
 		     next_retry_at = CASE WHEN attempts >= max_attempts THEN NULL ELSE now() + make_interval(secs => $3) END,
 		     completed_at = CASE WHEN attempts >= max_attempts THEN now() ELSE NULL END,
 		     lease_owner = NULL, lease_expires_at = NULL
-		 WHERE id = $1 AND lease_owner = $4 AND status = 'running'
+		 WHERE id = $1 AND lease_owner = $4 AND status IN ('running', 'tone_map_running')
 		 RETURNING status = 'failed'`,
 		id, errMsg, backoffSecs, owner,
 	).Scan(&terminal)
@@ -232,11 +236,13 @@ type reclaimedArtifact struct {
 func (r *ArtifactRepository) ReclaimExpiredLeases(ctx context.Context) ([]reclaimedArtifact, error) {
 	rows, err := r.pool.Query(ctx,
 		`UPDATE download_artifacts
-		 SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
+		 SET status = CASE WHEN attempts >= max_attempts THEN 'failed'
+		                   WHEN status = 'tone_map_running' THEN 'tone_map_queued'
+		                   ELSE 'queued' END,
 		     lease_owner = NULL, lease_expires_at = NULL,
 		     error_message = CASE WHEN attempts >= max_attempts THEN 'exceeded max attempts after lease expiry' ELSE error_message END,
 		     completed_at = CASE WHEN attempts >= max_attempts THEN now() ELSE completed_at END
-		 WHERE status = 'running' AND lease_expires_at < now()
+		 WHERE status IN ('running', 'tone_map_running') AND lease_expires_at < now()
 		 RETURNING id, status = 'failed'`,
 	)
 	if err != nil {
@@ -261,7 +267,8 @@ func (r *ArtifactRepository) ReclaimExpiredLeases(ctx context.Context) ([]reclai
 func (r *ArtifactRepository) Requeue(ctx context.Context, id string) error {
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE download_artifacts
-		 SET status = 'queued', attempts = 0, error_message = '', next_retry_at = NULL,
+		 SET status = CASE WHEN tone_map_mode <> '' THEN 'tone_map_queued' ELSE 'queued' END,
+		     attempts = 0, error_message = '', next_retry_at = NULL,
 		     lease_owner = NULL, lease_expires_at = NULL, completed_at = NULL,
 		     origin_node_id = 0, origin_node_url = '', origin_node_group = '', origin_artifact_id = ''
 		 WHERE id = $1`,
@@ -301,7 +308,8 @@ func (r *ArtifactRepository) requeueRemote(ctx context.Context, artifact *Artifa
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	query := `UPDATE download_artifacts
-		 SET status = 'queued', attempts = 0, error_message = '', next_retry_at = NULL,
+		 SET status = CASE WHEN tone_map_mode <> '' THEN 'tone_map_queued' ELSE 'queued' END,
+		     attempts = 0, error_message = '', next_retry_at = NULL,
 		     lease_owner = NULL, lease_expires_at = NULL, completed_at = NULL,
 		     origin_node_id = 0, origin_node_url = '', origin_node_group = '', origin_artifact_id = ''
 		 WHERE id = $1 AND status = 'ready' AND origin_node_id = $2 AND origin_artifact_id = $3`
