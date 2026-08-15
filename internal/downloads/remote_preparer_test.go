@@ -22,6 +22,12 @@ import (
 
 type recordingEncodePreparer struct{ calls int }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
 func (p *recordingEncodePreparer) PrepareFile(_ context.Context, _ string, _ playback.TranscodeOpts, outputPath string) (PreparedArtifact, error) {
 	p.calls++
 	return PreparedArtifact{OutputPath: outputPath, FileSize: 8}, nil
@@ -367,7 +373,22 @@ func TestNodeAwarePreparerCollectsToneMapCapabilitiesConcurrently(t *testing.T) 
 }
 
 func TestNodeAwarePreparerUsesTargetNodeProbeBudget(t *testing.T) {
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			t.Errorf("request method = %q, want GET", request.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if request.URL.Path != "/hw-capabilities" {
+			t.Errorf("request path = %q, want /hw-capabilities", request.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if got, want := request.Header.Get("Authorization"), "Bearer secret"; got != want {
+			t.Errorf("Authorization = %q, want %q", got, want)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{
 			ProbeRequestTimeoutMillis: (161 * time.Second).Milliseconds(),
 			ToneMapCapabilities: tonemap.Capabilities{{
@@ -377,6 +398,24 @@ func TestNodeAwarePreparerUsesTargetNodeProbeBudget(t *testing.T) {
 		})
 	}))
 	defer remote.Close()
+	secondTimeout := make(chan time.Duration, 1)
+	releaseSecond := make(chan struct{})
+	var requests atomic.Int32
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if requests.Add(1) == 2 {
+			deadline, _ := request.Context().Deadline()
+			secondTimeout <- time.Until(deadline)
+			select {
+			case <-releaseSecond:
+			case <-request.Context().Done():
+				return nil, request.Context().Err()
+			}
+		}
+		return http.DefaultTransport.RoundTrip(request)
+	})
+	originalClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: transport}
+	t.Cleanup(func() { http.DefaultClient = originalClient })
 	cfg := &config.Config{}
 	cfg.Auth.JWTSecret = "secret"
 	cfg.Playback.HWAccel = tonemap.BackendQSV
@@ -391,6 +430,32 @@ func TestNodeAwarePreparerUsesTargetNodeProbeBudget(t *testing.T) {
 	}
 	if got, want := preparer.remoteToneMapProbeTimeout(remote.URL), 161*time.Second; got != want {
 		t.Fatalf("cached remote probe timeout = %s, want target-node budget %s", got, want)
+	}
+	key := strings.TrimRight(remote.URL, "/")
+	preparer.capabilityMu.Lock()
+	entry := preparer.capabilities[key]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	preparer.capabilities[key] = entry
+	preparer.capabilityMu.Unlock()
+	probeResult := make(chan error, 1)
+	go func() {
+		_, err := preparer.toneMapCapabilitiesForNode(context.Background(), remote.URL)
+		probeResult <- err
+	}()
+	var remaining time.Duration
+	select {
+	case remaining = <-secondTimeout:
+	case <-time.After(time.Second):
+		close(releaseSecond)
+		t.Fatal("second capability request did not start")
+	}
+	if remaining <= 160*time.Second || remaining > 161*time.Second {
+		close(releaseSecond)
+		t.Fatalf("second request timeout = %s, want cached 161s budget", remaining)
+	}
+	close(releaseSecond)
+	if err := <-probeResult; err != nil {
+		t.Fatal(err)
 	}
 	if got, want := preparer.ToneMapCapabilityTimeout(), 5*time.Minute; got != want {
 		t.Fatalf("remote-only planning timeout = %s, want %s", got, want)
