@@ -78,17 +78,17 @@ func TestBuildPlaybackSourceCodecProfiles_WebOSAnamorphicCondition(t *testing.T)
 			wantTranscoding:  true,
 		},
 		{
-			name: "non-anamorphic 4k hevc remains directly playable when 4k transcode is disabled",
+			name: "non-anamorphic 4k hevc mkv remains playable when 4k transcode is disabled",
 			version: catalog.FileVersion{
 				FileID:      2,
 				Resolution:  "2160p",
-				Container:   "mp4",
+				Container:   "mkv",
 				CodecVideo:  "hevc",
 				CodecAudio:  "aac",
 				VideoTracks: []models.VideoTrack{{Codec: "hevc", Profile: "Main 10", Level: 153, Width: 3840, Height: 2160, VideoRangeType: "SDR"}},
 				AudioTracks: []models.AudioTrack{{Codec: "aac", Channels: 2, Default: true}},
 			},
-			directProfile: DirectPlayProfile{Type: "Video", Container: "mp4", VideoCodec: "hevc", AudioCodec: "aac"},
+			directProfile: DirectPlayProfile{Type: "Video", Container: "mkv", VideoCodec: "hevc", AudioCodec: "aac"},
 			codecProfile: CodecProfile{
 				Type:  "Video",
 				Codec: "hevc",
@@ -210,15 +210,15 @@ Append this test. Making the condition required distinguishes a known `false` va
 ```go
 func TestConditionMatchesRequiredIsAnamorphicUsesReportedFalseValue(t *testing.T) {
 	condition := ProfileCondition{
-		Condition:  "NotEquals",
+		Condition:  "Equals",
 		Property:   "IsAnamorphic",
-		Value:      "true",
+		Value:      "false",
 		IsRequired: true,
 	}
 	values := buildConditionValues(catalog.FileVersion{}, nil)
 
 	if !conditionMatches(condition, values) {
-		t.Fatal("required IsAnamorphic NotEquals true condition failed for Silo's reported false value")
+		t.Fatal("required IsAnamorphic Equals false condition failed for Silo's reported false value")
 	}
 }
 ```

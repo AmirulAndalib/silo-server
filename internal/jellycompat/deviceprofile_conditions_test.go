@@ -492,15 +492,15 @@ func TestConditionMatchesUnknownPropertyHonorsIsRequired(t *testing.T) {
 
 func TestConditionMatchesRequiredIsAnamorphicUsesReportedFalseValue(t *testing.T) {
 	condition := ProfileCondition{
-		Condition:  "NotEquals",
+		Condition:  "Equals",
 		Property:   "IsAnamorphic",
-		Value:      "true",
+		Value:      "false",
 		IsRequired: true,
 	}
 	values := buildConditionValues(catalog.FileVersion{}, nil)
 
 	if !conditionMatches(condition, values) {
-		t.Fatal("required IsAnamorphic NotEquals true condition failed for Silo's reported false value")
+		t.Fatal("required IsAnamorphic Equals false condition failed for Silo's reported false value")
 	}
 }
 
