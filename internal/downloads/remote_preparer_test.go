@@ -318,6 +318,68 @@ func TestNodeAwarePreparerRejectsUnattestedOrMismatchedToneMapRecovery(t *testin
 	}
 }
 
+func TestNodeAwarePreparerRecoversExactlyAttestedToneMapArtifactAfterResponseLoss(t *testing.T) {
+	remote := &attestationRemotePreparer{prepareErr: context.DeadlineExceeded}
+	preparer, local, opts := newToneMapPreparerTest(t, remote)
+	remote.statResult = downloadprepare.Result{
+		ArtifactID:                       "artifact-tone-map",
+		FileSize:                         55,
+		ToneMapRecipeVersion:             opts.ToneMapRecipeVersion,
+		ToneMapMode:                      opts.ToneMapMode,
+		ToneMapSourceRevisionFingerprint: opts.ToneMapSourceRevision.Fingerprint(),
+	}
+
+	prepared, err := preparer.PrepareFile(context.Background(), "artifact-tone-map", opts, "/local/artifact.mp4")
+	if err != nil || !prepared.Remote() || prepared.FileSize != 55 {
+		t.Fatalf("prepared=%+v err=%v, want recovered remote artifact", prepared, err)
+	}
+	if local.calls != 0 || remote.deletes != 0 {
+		t.Fatalf("local calls=%d remote deletes=%d, want neither", local.calls, remote.deletes)
+	}
+}
+
+func TestRemotePrepareResultRejectsPartialToneMapRecipeWithoutAttestation(t *testing.T) {
+	opts := playback.TranscodeOpts{
+		ToneMapPolicy:        tonemap.PolicySoftwareOnly,
+		ToneMapSourceKind:    tonemap.SourcePQ,
+		ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapSourceRevision: tonemap.SourceRevision{
+			MediaFileID: 42,
+			FileSize:    100,
+		},
+	}
+	if remotePrepareResultMatches(downloadprepare.Result{ArtifactID: "artifact-partial", FileSize: 55}, "artifact-partial", downloadprepare.NewRequest("artifact-partial", opts)) {
+		t.Fatal("partial tone-map recipe accepted an unattested result")
+	}
+}
+
+func TestNodeAwarePreparerDoesNotDispatchPartialToneMapRecipeAsOrdinary(t *testing.T) {
+	pool := nodepool.NewTranscodePool()
+	pool.SetNodes([]*nodepool.Node{{ID: 23, URL: "http://ordinary-node", Enabled: true, Healthy: true}})
+	local := &recordingEncodePreparer{}
+	remote := &recordingRemotePreparer{}
+	cfg := &config.Config{}
+	cfg.Auth.JWTSecret = "secret"
+	preparer := NewNodeAwarePreparer(local, nodepool.NewPlanner(nodepool.NewProxyPool(), pool), func() *config.Config { return cfg })
+	preparer.remote = remote
+	preparer.capabilities["http://ordinary-node"] = remoteToneMapCapabilities{
+		capabilities: tonemap.Capabilities{{
+			Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+			SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+		}},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	opts := playback.TranscodeOpts{ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3}
+
+	prepared, err := preparer.PrepareFile(context.Background(), "artifact-partial", opts, "/local/artifact.mp4")
+	if err != nil || prepared.OutputPath == "" || local.calls != 1 {
+		t.Fatalf("prepared=%+v err=%v local calls=%d, want local handling", prepared, err, local.calls)
+	}
+	if remote.request.ArtifactID != "" {
+		t.Fatalf("partial recipe was dispatched as ordinary remote request: %+v", remote.request)
+	}
+}
+
 func TestNodeAwarePreparerPreservesIndeterminateToneMapResultWhenCleanupFails(t *testing.T) {
 	remote := &attestationRemotePreparer{
 		prepareResult: downloadprepare.Result{ArtifactID: "artifact-tone-map", FileSize: 55},

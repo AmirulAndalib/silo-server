@@ -511,11 +511,19 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	outputPath := filepath.Join(artifactRoot, req.ArtifactID+".mp4")
-	if result, ok := existingDownloadPrepareResult(outputPath, req); ok {
-		writeDownloadPrepareResult(w, result)
-		return
+	// The unlocked check is only a hint that avoids making invalid recipes wait
+	// behind a long-running encode. A candidate reuse is always rechecked under
+	// the lifecycle read lock before its result is returned.
+	if _, reusable := existingDownloadPrepareResult(outputPath, req); reusable {
+		readUnlock := s.lockSessionLifecycleRead("download-artifact-" + req.ArtifactID)
+		result, stillReusable := existingDownloadPrepareResult(outputPath, req)
+		readUnlock()
+		if stillReusable {
+			writeDownloadPrepareResult(w, result)
+			return
+		}
 	}
-	if toneMapRecipeRequested(opts) {
+	if req.ToneMapRequested() {
 		if err := resolveToneMapRecipe(r.Context(), &opts); err != nil {
 			writeToneMapRecipeError(w, err)
 			return
@@ -527,8 +535,9 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 		writeDownloadPrepareResult(w, result)
 		return
 	}
-	if toneMapRecipeRequested(opts) {
-		_ = os.Remove(downloadArtifactReceiptPath(outputPath))
+	if err := invalidateDownloadArtifactReceipt(outputPath); err != nil {
+		http.Error(w, "failed to invalidate download artifact receipt", http.StatusInternalServerError)
+		return
 	}
 
 	jobCtx := r.Context()
@@ -560,8 +569,13 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "prepared download artifact unavailable", http.StatusInternalServerError)
 		return
 	}
-	result := downloadPrepareResult(req, stat.Size())
-	if result.ToneMapMode != "" {
+	result, validResult := expectedDownloadPrepareResult(req, stat.Size())
+	if !validResult {
+		_ = os.Remove(outputPath)
+		http.Error(w, "prepared download artifact has invalid attestation", http.StatusInternalServerError)
+		return
+	}
+	if req.ToneMapRequested() {
 		if err := writeDownloadArtifactReceipt(outputPath, result); err != nil {
 			_ = os.Remove(outputPath)
 			http.Error(w, "failed to publish download artifact receipt", http.StatusInternalServerError)
@@ -571,14 +585,18 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 	writeDownloadPrepareResult(w, result)
 }
 
-func downloadPrepareResult(req downloadprepare.Request, fileSize int64) downloadprepare.Result {
+func expectedDownloadPrepareResult(req downloadprepare.Request, fileSize int64) (downloadprepare.Result, bool) {
 	result := downloadprepare.Result{ArtifactID: req.ArtifactID, FileSize: fileSize}
-	if req.ToneMapMode != "" {
-		result.ToneMapRecipeVersion = req.ToneMapRecipeVersion
-		result.ToneMapMode = req.ToneMapMode
-		result.ToneMapSourceRevisionFingerprint = req.ToneMapSourceRevision.Fingerprint()
+	if !req.ToneMapRequested() {
+		return result, true
 	}
-	return result
+	if !req.ValidToneMapAttestation() {
+		return downloadprepare.Result{}, false
+	}
+	result.ToneMapRecipeVersion = req.ToneMapRecipeVersion
+	result.ToneMapMode = req.ToneMapMode
+	result.ToneMapSourceRevisionFingerprint = req.ToneMapSourceRevision.Fingerprint()
+	return result, true
 }
 
 func existingDownloadPrepareResult(outputPath string, req downloadprepare.Request) (downloadprepare.Result, bool) {
@@ -586,8 +604,11 @@ func existingDownloadPrepareResult(outputPath string, req downloadprepare.Reques
 	if err != nil || !stat.Mode().IsRegular() || stat.Size() <= 0 {
 		return downloadprepare.Result{}, false
 	}
-	want := downloadPrepareResult(req, stat.Size())
-	if req.ToneMapMode == "" {
+	want, valid := expectedDownloadPrepareResult(req, stat.Size())
+	if !valid {
+		return downloadprepare.Result{}, false
+	}
+	if !req.ToneMapRequested() {
 		return want, true
 	}
 	receipt, err := readDownloadArtifactReceipt(outputPath)
@@ -600,7 +621,7 @@ func existingDownloadPrepareResult(outputPath string, req downloadprepare.Reques
 // toneMapRecipeRequested reports whether any transported field claims that the
 // request carries a tone-map recipe, including partial recipes that must fail.
 func toneMapRecipeRequested(opts playback.TranscodeOpts) bool {
-	return (opts.ToneMapPolicy != "" && opts.ToneMapPolicy != tonemap.PolicyNone) || opts.ToneMapMode != "" || opts.ToneMapSourceKind != "" || opts.ToneMapRecipeVersion != "" || opts.ToneMapPreflightRequired || !opts.ToneMapSourceRevision.IsZero() || opts.ToneMapDVConfigPresent || opts.ToneMapDVBLCompatIDPresent || opts.ToneMapDVBLPresent || opts.ToneMapDVRPUPresent
+	return downloadprepare.NewRequest("", opts).ToneMapRequested()
 }
 
 // resolveToneMapRecipe validates the frozen selection against this node's live
@@ -700,7 +721,11 @@ func (s *Server) handleDeleteDownloadArtifact(w http.ResponseWriter, r *http.Req
 	unlock := s.lockSessionLifecycle("download-artifact-" + artifactID)
 	defer unlock()
 	path := filepath.Join(s.artifactRoot, artifactID+".mp4")
-	for _, candidate := range []string{path, path + ".part", downloadArtifactReceiptPath(path), downloadArtifactReceiptPath(path) + ".part"} {
+	if err := invalidateDownloadArtifactReceipt(path); err != nil {
+		http.Error(w, "failed to remove artifact receipt", http.StatusInternalServerError)
+		return
+	}
+	for _, candidate := range []string{path, path + ".part"} {
 		if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
 			http.Error(w, "failed to remove artifact", http.StatusInternalServerError)
 			return

@@ -137,6 +137,24 @@ func resultAttestationFromHeaders(header http.Header) (Result, error) {
 
 func ValidArtifactID(id string) bool { return artifactIDPattern.MatchString(id) }
 
+// ToneMapRequested reports whether any transported field claims that the
+// request carries a tone-map recipe, including partial recipes that must fail.
+func (r Request) ToneMapRequested() bool {
+	return (r.ToneMapPolicy != "" && r.ToneMapPolicy != tonemap.PolicyNone) ||
+		r.ToneMapMode != "" || r.ToneMapSourceKind != "" || r.ToneMapRecipeVersion != "" ||
+		r.ToneMapPreflightRequired || !r.ToneMapSourceRevision.IsZero() ||
+		r.ToneMapDVConfigPresent || r.ToneMapDVBLCompatIDPresent || r.ToneMapDVBLPresent || r.ToneMapDVRPUPresent
+}
+
+// ValidToneMapAttestation reports whether a requested recipe carries every
+// frozen field needed to compare a node's artifact receipt exactly.
+func (r Request) ValidToneMapAttestation() bool {
+	return r.ToneMapRequested() && r.ToneMapMode != "" &&
+		r.ToneMapRecipeVersion == playback.TransformationHDRToSDRToneMapRecipeVersionV3 &&
+		!r.ToneMapSourceRevision.IsZero() && r.ToneMapPolicy.Allows(r.ToneMapMode) &&
+		tonemap.ValidSourceKind(r.ToneMapSourceKind)
+}
+
 // NewRequest freezes the byte-affecting recipe while deliberately omitting
 // environment-specific execution settings.
 func NewRequest(artifactID string, opts playback.TranscodeOpts) Request {

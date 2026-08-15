@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -455,6 +456,373 @@ func TestHandleDownloadPrepareDoesNotReuseToneMapArtifactWithoutReceipt(t *testi
 	}
 }
 
+func TestHandleDownloadPrepareDoesNotReuseArtifactForPartialToneMapRecipe(t *testing.T) {
+	server := newTestServer(t)
+	if err := os.MkdirAll(server.artifactRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(server.artifactRoot, "artifact-partial.mp4")
+	if err := os.WriteFile(outputPath, []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(downloadprepare.Request{
+		ArtifactID: "artifact-partial", InputPath: "/media/movie.mkv",
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac",
+		ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.handleDownloadPrepare(recorder, httptest.NewRequest(http.MethodPost, "/downloads/prepare", bytes.NewReader(body)))
+	if recorder.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHandleDownloadPrepareReceiptInvalidationFailurePreservesExistingArtifact(t *testing.T) {
+	server := newTestServer(t)
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "source.mkv")
+	if err := os.WriteFile(inputPath, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(inputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ffmpegPath := filepath.Join(dir, "ffmpeg.sh")
+	script := "#!/bin/sh\n" +
+		"case \" $* \" in\n" +
+		"  *\" -filters \"*) printf ' T.. zscale V->V scale\\n T.. tonemapx V->V tone-map\\n T.. sidedata V->V metadata\\n'; exit 0;;\n" +
+		"  *\" -encoders \"*) printf ' V..... libx264 H.264\\n'; exit 0;;\n" +
+		"  *\" -f null \"*) exit 0;;\n" +
+		"esac\n" +
+		"for last; do :; done\n" +
+		"printf newbytes > \"$last\"\n"
+	if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server.watcher.Config().Playback.FFmpegPath = ffmpegPath
+	server.watcher.Config().Playback.HWAccel = playback.HWAccelNone
+	if err := os.MkdirAll(server.artifactRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(server.artifactRoot, "artifact-invalidation.mp4")
+	if err := os.WriteFile(outputPath, []byte("oldbytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := outputPath + ".receipt.json"
+	if err := os.Mkdir(receiptPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(receiptPath, "blocks-removal"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(downloadprepare.Request{
+		ArtifactID: "artifact-invalidation", InputPath: inputPath,
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac", AudioTrackIndex: -1,
+		ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
+		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1, FileSize: info.Size()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.handleDownloadPrepare(recorder, httptest.NewRequest(http.MethodPost, "/downloads/prepare", bytes.NewReader(body)))
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body = %s", recorder.Code, recorder.Body.String())
+	}
+	got, err := os.ReadFile(outputPath)
+	if err != nil || string(got) != "oldbytes" {
+		t.Fatalf("existing artifact after invalidation failure = %q, %v; want oldbytes", got, err)
+	}
+}
+
+func TestHandleDownloadPrepareReexecutesValidRecipeAfterMissingOrMismatchedReceipt(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		writeMismatch bool
+	}{
+		{name: "missing receipt"},
+		{name: "mismatched receipt", writeMismatch: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := newTestServer(t)
+			dir := t.TempDir()
+			inputPath := filepath.Join(dir, "source.mkv")
+			if err := os.WriteFile(inputPath, []byte("source"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(inputPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ffmpegPath := filepath.Join(dir, "ffmpeg.sh")
+			script := "#!/bin/sh\n" +
+				"case \" $* \" in\n" +
+				"  *\" -filters \"*) printf ' T.. zscale V->V scale\\n T.. tonemapx V->V tone-map\\n T.. sidedata V->V metadata\\n'; exit 0;;\n" +
+				"  *\" -encoders \"*) printf ' V..... libx264 H.264\\n'; exit 0;;\n" +
+				"  *\" -f null \"*) exit 0;;\n" +
+				"esac\n" +
+				"for last; do :; done\n" +
+				"printf newbytes > \"$last\"\n"
+			if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			server.watcher.Config().Playback.FFmpegPath = ffmpegPath
+			server.watcher.Config().Playback.HWAccel = playback.HWAccelNone
+			if err := os.MkdirAll(server.artifactRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			outputPath := filepath.Join(server.artifactRoot, "artifact-reexecute.mp4")
+			if err := os.WriteFile(outputPath, []byte("oldbytes"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if test.writeMismatch {
+				if err := writeDownloadArtifactReceipt(outputPath, downloadprepare.Result{
+					ArtifactID: "artifact-reexecute", FileSize: int64(len("oldbytes")),
+					ToneMapRecipeVersion: "stale", ToneMapMode: tonemap.ModeSoftware,
+					ToneMapSourceRevisionFingerprint: "wrong",
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			revision := tonemap.SourceRevision{MediaFileID: 1, FileSize: info.Size()}
+			request := downloadprepare.Request{
+				ArtifactID: "artifact-reexecute", InputPath: inputPath,
+				TargetCodecVideo: "h264", TargetCodecAudio: "aac", AudioTrackIndex: -1,
+				ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
+				ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+				ToneMapSourceRevision: revision,
+			}
+			body, err := json.Marshal(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recorder := httptest.NewRecorder()
+			server.handleDownloadPrepare(recorder, httptest.NewRequest(http.MethodPost, "/downloads/prepare", bytes.NewReader(body)))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+			if got, err := os.ReadFile(outputPath); err != nil || string(got) != "newbytes" {
+				t.Fatalf("artifact = %q, %v; want re-executed bytes", got, err)
+			}
+			receipt, err := readDownloadArtifactReceipt(outputPath)
+			if err != nil || receipt.ToneMapRecipeVersion != request.ToneMapRecipeVersion ||
+				receipt.ToneMapMode != request.ToneMapMode || receipt.ToneMapSourceRevisionFingerprint != revision.Fingerprint() {
+				t.Fatalf("replacement receipt = %+v, %v", receipt, err)
+			}
+		})
+	}
+}
+
+func TestHandleDownloadPrepareOrdinaryReexecutionClearsStaleReceipt(t *testing.T) {
+	server := newTestServer(t)
+	if err := os.MkdirAll(server.artifactRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(server.artifactRoot, "artifact-ordinary-reexecute.mp4")
+	if err := writeDownloadArtifactReceipt(outputPath, downloadprepare.Result{
+		ArtifactID: "artifact-ordinary-reexecute", FileSize: int64(len("oldbytes")),
+		ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapMode:          tonemap.ModeSoftware,
+		ToneMapSourceRevisionFingerprint: tonemap.SourceRevision{
+			MediaFileID: 1,
+			FileSize:    8,
+		}.Fingerprint(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ffmpegPath := filepath.Join(t.TempDir(), "ffmpeg.sh")
+	if err := os.WriteFile(ffmpegPath, []byte("#!/bin/sh\nfor last; do :; done\nprintf newbytes > \"$last\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server.watcher.Config().Playback.FFmpegPath = ffmpegPath
+	body, err := json.Marshal(downloadprepare.Request{
+		ArtifactID: "artifact-ordinary-reexecute", InputPath: "/media/movie.mkv",
+		TargetCodecVideo: "copy", TargetCodecAudio: "copy", AudioTrackIndex: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.handleDownloadPrepare(recorder, httptest.NewRequest(http.MethodPost, "/downloads/prepare", bytes.NewReader(body)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if _, err := os.Stat(downloadArtifactReceiptPath(outputPath)); !os.IsNotExist(err) {
+		t.Fatalf("stale ordinary receipt remains after re-execution: %v", err)
+	}
+}
+
+func TestHandleDownloadPrepareConcurrentSameArtifactPublishesOnce(t *testing.T) {
+	server := newTestServer(t)
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "source.mkv")
+	if err := os.WriteFile(inputPath, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(inputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counterPath := filepath.Join(dir, "prepare-count")
+	ffmpegPath := filepath.Join(dir, "ffmpeg.sh")
+	script := "#!/bin/sh\n" +
+		"case \" $* \" in\n" +
+		"  *\" -filters \"*) printf ' T.. zscale V->V scale\\n T.. tonemapx V->V tone-map\\n T.. sidedata V->V metadata\\n'; exit 0;;\n" +
+		"  *\" -encoders \"*) printf ' V..... libx264 H.264\\n'; exit 0;;\n" +
+		"  *\" -f null \"*) exit 0;;\n" +
+		"esac\n" +
+		fmt.Sprintf("printf x >> %q\n", counterPath) +
+		"sleep 0.1\n" +
+		"for last; do :; done\n" +
+		"printf newbytes > \"$last\"\n"
+	if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server.watcher.Config().Playback.FFmpegPath = ffmpegPath
+	server.watcher.Config().Playback.HWAccel = playback.HWAccelNone
+	body, err := json.Marshal(downloadprepare.Request{
+		ArtifactID: "artifact-concurrent", InputPath: inputPath,
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac", AudioTrackIndex: -1,
+		ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
+		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1, FileSize: info.Size()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan *httptest.ResponseRecorder, 2)
+	for range 2 {
+		go func() {
+			<-start
+			recorder := httptest.NewRecorder()
+			server.handleDownloadPrepare(recorder, httptest.NewRequest(http.MethodPost, "/downloads/prepare", bytes.NewReader(body)))
+			results <- recorder
+		}()
+	}
+	close(start)
+	for range 2 {
+		recorder := <-results
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+	}
+	if count, err := os.ReadFile(counterPath); err != nil || string(count) != "x" {
+		t.Fatalf("prepare executions = %q, %v; want one", count, err)
+	}
+}
+
+func TestHandleDownloadPrepareOptimisticReuseWaitsForInFlightReplacement(t *testing.T) {
+	server := newTestServer(t)
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "source.mkv")
+	if err := os.WriteFile(inputPath, []byte("source-a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ffmpegPath := filepath.Join(dir, "ffmpeg.sh")
+	script := "#!/bin/sh\n" +
+		"case \" $* \" in\n" +
+		"  *\" -filters \"*) printf ' T.. zscale V->V scale\\n T.. tonemapx V->V tone-map\\n T.. sidedata V->V metadata\\n'; exit 0;;\n" +
+		"  *\" -encoders \"*) printf ' V..... libx264 H.264\\n'; exit 0;;\n" +
+		"  *\" -f null \"*) exit 0;;\n" +
+		"esac\n" +
+		"for last; do :; done\n" +
+		"printf final-a > \"$last\"\n"
+	if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server.watcher.Config().Playback.FFmpegPath = ffmpegPath
+	server.watcher.Config().Playback.HWAccel = playback.HWAccelNone
+	if err := os.MkdirAll(server.artifactRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const artifactID = "artifact-replacement-race"
+	outputPath := filepath.Join(server.artifactRoot, artifactID+".mp4")
+	if err := os.WriteFile(outputPath, []byte("oldbytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	revision := tonemap.SourceRevision{MediaFileID: 1, FileSize: 8}
+	if err := writeDownloadArtifactReceipt(outputPath, downloadprepare.Result{
+		ArtifactID: artifactID, FileSize: 8,
+		ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3, ToneMapMode: tonemap.ModeSoftware,
+		ToneMapSourceRevisionFingerprint: revision.Fingerprint(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(downloadprepare.Request{
+		ArtifactID: artifactID, InputPath: inputPath,
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac",
+		ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
+		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapSourceRevision: revision,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock := server.lockSessionLifecycle("download-artifact-" + artifactID)
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		server.handleDownloadPrepare(recorder, httptest.NewRequest(http.MethodPost, "/downloads/prepare", bytes.NewReader(body)))
+		close(done)
+	}()
+	select {
+	case <-done:
+		unlock()
+		t.Fatal("prepare reused an artifact while its replacement lock was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := os.WriteFile(outputPath, []byte("newbytes"), 0o600); err != nil {
+		unlock()
+		t.Fatal(err)
+	}
+	if err := writeDownloadArtifactReceipt(outputPath, downloadprepare.Result{
+		ArtifactID: artifactID, FileSize: 8,
+		ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3, ToneMapMode: tonemap.ModeSoftware,
+		ToneMapSourceRevisionFingerprint: "replacement-revision",
+	}); err != nil {
+		unlock()
+		t.Fatal(err)
+	}
+	unlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prepare did not resume after replacement completed")
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after re-executing request A; body = %s", recorder.Code, recorder.Body.String())
+	}
+	if receipt, err := readDownloadArtifactReceipt(outputPath); err != nil || receipt.ToneMapSourceRevisionFingerprint != revision.Fingerprint() {
+		t.Fatalf("final receipt = %+v, %v; want request A", receipt, err)
+	}
+}
+
+func TestInvalidateDownloadArtifactReceiptPartFailurePreservesFinalReceipt(t *testing.T) {
+	outputPath := filepath.Join(t.TempDir(), "artifact.mp4")
+	receiptPath := downloadArtifactReceiptPath(outputPath)
+	if err := os.WriteFile(receiptPath, []byte("valid-final"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(receiptPath+".part", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(receiptPath+".part", "blocks-removal"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := invalidateDownloadArtifactReceipt(outputPath); err == nil {
+		t.Fatal("expected receipt partial invalidation failure")
+	}
+	if got, err := os.ReadFile(receiptPath); err != nil || string(got) != "valid-final" {
+		t.Fatalf("final receipt after partial invalidation failure = %q, %v; want preserved", got, err)
+	}
+}
+
 func TestSessionOutputDirKeepsStartupPathAcrossReload(t *testing.T) {
 	server := newTestServer(t)
 	startupDir := server.transcodeDir
@@ -669,6 +1037,35 @@ func TestDownloadArtifactRoutesServeRangeAndDeleteNodeLocalFile(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".receipt.json"); !os.IsNotExist(err) {
 		t.Fatalf("artifact receipt still exists: %v", err)
+	}
+}
+
+func TestDeleteDownloadArtifactReceiptInvalidationFailurePreservesArtifact(t *testing.T) {
+	server := newTestServer(t)
+	if err := os.MkdirAll(server.artifactRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(server.artifactRoot, "artifact-delete-invalidation.mp4")
+	if err := os.WriteFile(outputPath, []byte("oldbytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := outputPath + ".receipt.json"
+	if err := os.Mkdir(receiptPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(receiptPath, "blocks-removal"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodDelete, "/downloads/artifacts/artifact-delete-invalidation", nil)
+	request.Header.Set("Authorization", "Bearer "+testSecret)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body = %s", recorder.Code, recorder.Body.String())
+	}
+	if got, err := os.ReadFile(outputPath); err != nil || string(got) != "oldbytes" {
+		t.Fatalf("artifact after receipt invalidation failure = %q, %v; want oldbytes", got, err)
 	}
 }
 

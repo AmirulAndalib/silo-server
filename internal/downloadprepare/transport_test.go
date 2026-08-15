@@ -119,6 +119,54 @@ func TestRequestRoundTripTreatsNonePolicyAsOrdinaryTranscode(t *testing.T) {
 	}
 }
 
+func TestRequestToneMapRequestedIncludesPartialRecipes(t *testing.T) {
+	tests := []struct {
+		name string
+		req  Request
+		want bool
+	}{
+		{name: "ordinary", req: Request{ToneMapPolicy: tonemap.PolicyNone}},
+		{name: "policy", req: Request{ToneMapPolicy: tonemap.PolicySoftwareOnly}, want: true},
+		{name: "mode", req: Request{ToneMapMode: tonemap.ModeSoftware}, want: true},
+		{name: "source kind", req: Request{ToneMapSourceKind: tonemap.SourcePQ}, want: true},
+		{name: "recipe version", req: Request{ToneMapRecipeVersion: "1"}, want: true},
+		{name: "preflight", req: Request{ToneMapPreflightRequired: true}, want: true},
+		{name: "source revision", req: Request{ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1}}, want: true},
+		{name: "Dolby Vision", req: Request{ToneMapDVConfigPresent: true}, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.req.ToneMapRequested(); got != test.want {
+				t.Fatalf("ToneMapRequested() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRequestValidToneMapAttestationRequiresCompleteCurrentRecipe(t *testing.T) {
+	valid := Request{
+		ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
+		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1, FileSize: 8},
+	}
+	if !valid.ValidToneMapAttestation() {
+		t.Fatal("complete current tone-map recipe was not valid for attestation")
+	}
+	for _, mutate := range []func(*Request){
+		func(req *Request) { req.ToneMapPolicy = tonemap.PolicyNone },
+		func(req *Request) { req.ToneMapMode = "" },
+		func(req *Request) { req.ToneMapSourceKind = "" },
+		func(req *Request) { req.ToneMapRecipeVersion = "stale" },
+		func(req *Request) { req.ToneMapSourceRevision = tonemap.SourceRevision{} },
+	} {
+		req := valid
+		mutate(&req)
+		if req.ValidToneMapAttestation() {
+			t.Fatalf("incomplete or stale recipe was valid for attestation: %+v", req)
+		}
+	}
+}
+
 func TestHTTPPreparerReportsNodeFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "mount unavailable", http.StatusUnprocessableEntity)

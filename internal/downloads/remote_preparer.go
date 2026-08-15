@@ -136,9 +136,10 @@ func (p *NodeAwarePreparer) PrepareFile(ctx context.Context, artifactID string, 
 	if cfg == nil || jwtSecret == "" || p.remote == nil || p.planner == nil || !downloadprepare.ValidArtifactID(artifactID) {
 		return p.prepareLocally(ctx, artifactID, opts, outputPath)
 	}
+	request := downloadprepare.NewRequest(artifactID, opts)
 	var node *nodepool.Node
 	var release func()
-	if opts.ToneMapMode != "" {
+	if request.ToneMapRequested() {
 		selector, ok := p.planner.(eligibleTranscodeWorkPlanner)
 		if ok {
 			capable := p.capableToneMapNodeURLs(ctx, opts.ToneMapMode, opts.ToneMapSourceKind)
@@ -158,11 +159,11 @@ func (p *NodeAwarePreparer) PrepareFile(ctx context.Context, artifactID string, 
 	}
 
 	slog.InfoContext(ctx, "dispatching download artifact prepare", "component", "downloads", "artifact_id", artifactID, "node", node.URL)
-	result, err := p.remote.Prepare(ctx, node.URL, jwtSecret, downloadprepare.NewRequest(artifactID, opts))
+	result, err := p.remote.Prepare(ctx, node.URL, jwtSecret, request)
 	release()
 	prepareReturned := err == nil
 	if prepareReturned {
-		if remotePrepareResultMatches(result, artifactID, opts) {
+		if remotePrepareResultMatches(result, artifactID, request) {
 			return remotePreparedArtifact(node, result), nil
 		}
 		err = rejectedRemotePrepareResultError("prepare", result, artifactID)
@@ -181,7 +182,7 @@ func (p *NodeAwarePreparer) PrepareFile(ctx context.Context, artifactID string, 
 	// A completed encode can outlive a lost HTTP response. Probe the same opaque
 	// id before falling back so retry/recovery does not duplicate expensive work.
 	if recovered, statErr := p.remote.Stat(ctx, node.URL, jwtSecret, artifactID); statErr == nil {
-		if remotePrepareResultMatches(recovered, artifactID, opts) {
+		if remotePrepareResultMatches(recovered, artifactID, request) {
 			slog.InfoContext(ctx, "recovered completed download artifact after lost response", "component", "downloads", "artifact_id", artifactID, "node", node.URL)
 			return remotePreparedArtifact(node, recovered), nil
 		}
@@ -205,16 +206,19 @@ func (p *NodeAwarePreparer) PrepareFile(ctx context.Context, artifactID string, 
 	return p.prepareLocally(ctx, artifactID, opts, outputPath)
 }
 
-func remotePrepareResultMatches(result downloadprepare.Result, artifactID string, opts playback.TranscodeOpts) bool {
+func remotePrepareResultMatches(result downloadprepare.Result, artifactID string, request downloadprepare.Request) bool {
 	if result.ArtifactID != artifactID {
 		return false
 	}
-	if opts.ToneMapMode == "" {
+	if !request.ToneMapRequested() {
 		return true
 	}
-	return result.ToneMapRecipeVersion == opts.ToneMapRecipeVersion &&
-		result.ToneMapMode == opts.ToneMapMode &&
-		result.ToneMapSourceRevisionFingerprint == opts.ToneMapSourceRevision.Fingerprint()
+	if !request.ValidToneMapAttestation() {
+		return false
+	}
+	return result.ToneMapRecipeVersion == request.ToneMapRecipeVersion &&
+		result.ToneMapMode == request.ToneMapMode &&
+		result.ToneMapSourceRevisionFingerprint == request.ToneMapSourceRevision.Fingerprint()
 }
 
 func rejectedRemotePrepareResultError(operation string, result downloadprepare.Result, artifactID string) error {

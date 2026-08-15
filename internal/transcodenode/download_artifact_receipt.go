@@ -41,7 +41,12 @@ func writeDownloadArtifactReceipt(outputPath string, receipt downloadprepare.Res
 }
 
 func readDownloadArtifactReceipt(outputPath string) (downloadprepare.Result, error) {
-	data, err := os.ReadFile(downloadArtifactReceiptPath(outputPath))
+	file, err := os.Open(downloadArtifactReceiptPath(outputPath))
+	if err != nil {
+		return downloadprepare.Result{}, err
+	}
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(io.LimitReader(file, downloadArtifactReceiptMaxBytes+1))
 	if err != nil {
 		return downloadprepare.Result{}, err
 	}
@@ -57,4 +62,14 @@ func readDownloadArtifactReceipt(outputPath string) (downloadprepare.Result, err
 		return downloadprepare.Result{}, fmt.Errorf("decode download artifact receipt: trailing data")
 	}
 	return receipt, nil
+}
+
+func invalidateDownloadArtifactReceipt(outputPath string) error {
+	receiptPath := downloadArtifactReceiptPath(outputPath)
+	for _, candidate := range []string{receiptPath + ".part", receiptPath} {
+		if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove download artifact receipt: %w", err)
+		}
+	}
+	return nil
 }
