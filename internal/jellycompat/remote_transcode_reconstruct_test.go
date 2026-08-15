@@ -275,6 +275,76 @@ func TestStartRemoteToneMapReportsConfirmedExecutorAndFallback(t *testing.T) {
 	}
 }
 
+func TestStartRemoteToneMapTimeoutFallsBackToSoftwareAfterCleanup(t *testing.T) {
+	previousTimeout := compatRemoteTranscodeStartTimeout
+	compatRemoteTranscodeStartTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { compatRemoteTranscodeStartTimeout = previousTimeout })
+
+	var dispatches atomic.Int32
+	var cleaned atomic.Bool
+	capabilities := tonemap.Capabilities{
+		{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+		{Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+	}
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
+			writeJSON(w, http.StatusOK, playback.HWAccelInfo{ToneMapCapabilities: capabilities})
+		case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
+			dispatches.Add(1)
+			var request transcodenode.TranscodeStartRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode start request: %v", err)
+				return
+			}
+			if request.ToneMapMode == tonemap.ModeHardware {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusAccepted)
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+				return
+			}
+			if !cleaned.Load() {
+				t.Error("software retry started before the indeterminate hardware session was cleaned up")
+			}
+			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{HWAccel: request.HWAccel, ToneMapMode: request.ToneMapMode})
+		case r.Method == http.MethodDelete && r.URL.Path == "/transcode/upstream-1":
+			cleaned.Store(true)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(node.Close)
+
+	recipeStore := &stubRecipeNodeStore{}
+	handler, sessionMgr, playbackStore := newRemoteTranscodeHandler(t, node.URL, recipeStore)
+	handler.SettingsRepo = stubSettingsReader{values: map[string]string{
+		config.PlaybackTranscodeHardwareToneMapSettingKey: "true",
+		config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+	}}
+	playbackStore.Put(PlaybackSession{ID: "play-1", UpstreamSessionID: "upstream-1"})
+	file := &models.MediaFile{ID: 42, FilePath: "/media/movie.mkv", HDR: true, VideoTracks: []models.VideoTrack{{Codec: "hevc", VideoRangeType: "HDR10", ColorTransfer: "smpte2084", ColorPrimaries: "bt2020", ColorSpace: "bt2020nc", BitDepth: 10}}}
+
+	if err := handler.startRemoteTranscode(context.Background(), "play-1", "upstream-1", testRemoteTranscodeSource(), file, 0, node.URL); err != nil {
+		t.Fatalf("startRemoteTranscode: %v", err)
+	}
+	if got := dispatches.Load(); got != 2 {
+		t.Fatalf("start dispatches = %d, want hardware attempt plus software retry", got)
+	}
+	if !cleaned.Load() {
+		t.Fatal("indeterminate hardware session was not cleaned up")
+	}
+	session := sessionMgr.sessions["upstream-1"]
+	if session.TranscodeHWAccel != playback.HWAccelNone || session.ToneMapMode != tonemap.ModeSoftware {
+		t.Fatalf("reported execution facts = hw %q tone_map %q, want software", session.TranscodeHWAccel, session.ToneMapMode)
+	}
+	card, ok := recipeStore.Get("upstream-1")
+	if !ok || card.HWAccel != playback.HWAccelNone || card.ToneMapMode != tonemap.ModeSoftware {
+		t.Fatalf("persisted execution facts = hw %q tone_map %q, found=%v", card.HWAccel, card.ToneMapMode, ok)
+	}
+}
+
 func TestStartRemoteToneMapConfirmationMismatchRollsBackNode(t *testing.T) {
 	deleted := make(chan string, 1)
 	capabilities := tonemap.Capabilities{{

@@ -866,19 +866,29 @@ func (h *PlaybackHandler) startRemoteTranscode(
 		return result, resp.StatusCode, false, nil
 	}
 	nodeResponse, status, cleanupRequired, err := dispatch(reqBody)
+	initialStatus := status
+	initialErr := err
+	retryWithSoftware := false
 	if err != nil {
 		if cleanupRequired {
 			h.tm.CloseTranscodeSession(upstreamSessionID, transcodeNodeURL)
 		}
-		return err
+		if cleanupRequired && ctx.Err() == nil {
+			retryWithSoftware = downgradeToSoftwareToneMap(
+				toneMapRecipe.policy, &toneMapRecipe.mode, &toneMapRecipe.filter, &toneMapRecipe.hwAccel,
+				toneMapRecipe.sourceKind, toneMapCapabilities,
+			)
+		}
+		if !retryWithSoftware {
+			return err
+		}
+	} else if status == http.StatusUnprocessableEntity || status == http.StatusNotImplemented {
+		retryWithSoftware = downgradeToSoftwareToneMap(
+			toneMapRecipe.policy, &toneMapRecipe.mode, &toneMapRecipe.filter, &toneMapRecipe.hwAccel,
+			toneMapRecipe.sourceKind, toneMapCapabilities,
+		)
 	}
-	initialStatus := status
-	retriedWithSoftware := false
-	if (status == http.StatusUnprocessableEntity || status == http.StatusNotImplemented) && downgradeToSoftwareToneMap(
-		toneMapRecipe.policy, &toneMapRecipe.mode, &toneMapRecipe.filter, &toneMapRecipe.hwAccel,
-		toneMapRecipe.sourceKind, toneMapCapabilities,
-	) {
-		retriedWithSoftware = true
+	if retryWithSoftware {
 		reqBody.ToneMapMode = toneMapRecipe.mode
 		reqBody.HWAccel = toneMapRecipe.hwAccel
 		nodeResponse, status, cleanupRequired, err = dispatch(reqBody)
@@ -886,11 +896,17 @@ func (h *PlaybackHandler) startRemoteTranscode(
 			if cleanupRequired {
 				h.tm.CloseTranscodeSession(upstreamSessionID, transcodeNodeURL)
 			}
+			if initialErr != nil {
+				return fmt.Errorf("remote hardware tone-map start failed: %w; software retry failed: %w", initialErr, err)
+			}
 			return err
 		}
 	}
 	if status != http.StatusAccepted {
-		if retriedWithSoftware {
+		if retryWithSoftware {
+			if initialErr != nil {
+				return fmt.Errorf("remote hardware tone-map start failed: %w; software tone-map retry status %d", initialErr, status)
+			}
 			return fmt.Errorf("remote transcode start rejected: initial status %d; software tone-map retry status %d", initialStatus, status)
 		}
 		return fmt.Errorf("remote transcode start rejected: status %d", status)

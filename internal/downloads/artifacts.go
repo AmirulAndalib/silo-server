@@ -27,7 +27,7 @@ const (
 	toneMapPlanTimeout  = 5 * time.Second
 	// Used only when remote nodes are the sole eligible executor. In that case
 	// degrading around a cold probe would falsely reject the first request.
-	remoteOnlyToneMapPlanTimeout = 2 * time.Minute
+	remoteOnlyToneMapPlanTimeout = 5 * time.Minute
 )
 
 // PreparedArtifact describes either a local prepared file or an opaque artifact

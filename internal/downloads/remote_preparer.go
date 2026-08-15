@@ -36,15 +36,30 @@ type NodeAwarePreparer struct {
 // remoteToneMapCapabilities caches one node's validated inventory; an empty
 // slice with a short expiry represents a recent lookup failure.
 type remoteToneMapCapabilities struct {
-	capabilities tonemap.Capabilities
-	err          error
-	expiresAt    time.Time
+	capabilities        tonemap.Capabilities
+	err                 error
+	expiresAt           time.Time
+	probeRequestTimeout time.Duration
 }
 
 const (
 	remoteToneMapCapabilityTTL      = time.Minute
 	remoteToneMapCapabilityErrorTTL = 15 * time.Second
+	remoteToneMapProbeMinTimeout    = 5 * time.Second
 )
+
+func normalizeRemoteToneMapProbeTimeout(millis int64) time.Duration {
+	if millis <= 0 {
+		return remoteOnlyToneMapPlanTimeout
+	}
+	if millis < remoteToneMapProbeMinTimeout.Milliseconds() {
+		return remoteToneMapProbeMinTimeout
+	}
+	if millis > remoteOnlyToneMapPlanTimeout.Milliseconds() {
+		return remoteOnlyToneMapPlanTimeout
+	}
+	return time.Duration(millis) * time.Millisecond
+}
 
 // eligibleTranscodeWorkPlanner reserves work only on nodes that satisfy a
 // lock-safe capability predicate.
@@ -285,7 +300,7 @@ func (p *NodeAwarePreparer) toneMapCapabilitiesForNode(ctx context.Context, node
 		p.cacheToneMapCapabilityFailure(nodeURL, err)
 		return nil, err
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, tonemap.ProbeRequestTimeout(cfg.Playback.HWAccel, cfg.Playback.HWDevice))
+	requestCtx, cancel := context.WithTimeout(ctx, p.remoteToneMapProbeTimeout(nodeURL))
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, nodeURL+"/hw-capabilities", nil)
 	if err != nil {
@@ -309,7 +324,11 @@ func (p *NodeAwarePreparer) toneMapCapabilitiesForNode(ctx context.Context, node
 		p.cacheToneMapCapabilityFailure(nodeURL, err)
 		return nil, err
 	}
-	entry = remoteToneMapCapabilities{capabilities: append(tonemap.Capabilities(nil), info.ToneMapCapabilities...), expiresAt: time.Now().Add(remoteToneMapCapabilityTTL)}
+	entry = remoteToneMapCapabilities{
+		capabilities:        append(tonemap.Capabilities(nil), info.ToneMapCapabilities...),
+		expiresAt:           time.Now().Add(remoteToneMapCapabilityTTL),
+		probeRequestTimeout: normalizeRemoteToneMapProbeTimeout(info.ProbeRequestTimeoutMillis),
+	}
 	p.capabilityMu.Lock()
 	if p.capabilities == nil {
 		p.capabilities = make(map[string]remoteToneMapCapabilities)
@@ -322,21 +341,35 @@ func (p *NodeAwarePreparer) toneMapCapabilitiesForNode(ctx context.Context, node
 // ToneMapCapabilityTimeout returns the complete cold-node capability budget
 // used when pooled nodes are the only eligible tone-map executors.
 func (p *NodeAwarePreparer) ToneMapCapabilityTimeout() time.Duration {
-	cfg := p.config()
-	if cfg == nil {
-		return remoteOnlyToneMapPlanTimeout
+	return remoteOnlyToneMapPlanTimeout
+}
+
+func (p *NodeAwarePreparer) remoteToneMapProbeTimeout(nodeURL string) time.Duration {
+	nodeURL = strings.TrimRight(nodeURL, "/")
+	p.capabilityMu.Lock()
+	timeout := p.capabilities[nodeURL].probeRequestTimeout
+	p.capabilityMu.Unlock()
+	if timeout > 0 {
+		return timeout
 	}
-	return tonemap.ProbeRequestTimeout(cfg.Playback.HWAccel, cfg.Playback.HWDevice)
+	return remoteOnlyToneMapPlanTimeout
 }
 
 // cacheToneMapCapabilityFailure negatively caches an unreachable or invalid
 // node briefly so repeated artifact planning does not amplify the failure.
 func (p *NodeAwarePreparer) cacheToneMapCapabilityFailure(nodeURL string, err error) {
+	nodeURL = strings.TrimRight(nodeURL, "/")
 	p.capabilityMu.Lock()
 	if p.capabilities == nil {
 		p.capabilities = make(map[string]remoteToneMapCapabilities)
 	}
-	p.capabilities[nodeURL] = remoteToneMapCapabilities{capabilities: tonemap.Capabilities{}, err: err, expiresAt: time.Now().Add(remoteToneMapCapabilityErrorTTL)}
+	probeRequestTimeout := p.capabilities[nodeURL].probeRequestTimeout
+	p.capabilities[nodeURL] = remoteToneMapCapabilities{
+		capabilities:        tonemap.Capabilities{},
+		err:                 err,
+		expiresAt:           time.Now().Add(remoteToneMapCapabilityErrorTTL),
+		probeRequestTimeout: probeRequestTimeout,
+	}
 	p.capabilityMu.Unlock()
 }
 

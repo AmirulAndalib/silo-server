@@ -366,6 +366,71 @@ func TestNodeAwarePreparerCollectsToneMapCapabilitiesConcurrently(t *testing.T) 
 	}
 }
 
+func TestNodeAwarePreparerUsesTargetNodeProbeBudget(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{
+			ProbeRequestTimeoutMillis: (161 * time.Second).Milliseconds(),
+			ToneMapCapabilities: tonemap.Capabilities{{
+				Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390,
+				SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+			}},
+		})
+	}))
+	defer remote.Close()
+	cfg := &config.Config{}
+	cfg.Auth.JWTSecret = "secret"
+	cfg.Playback.HWAccel = tonemap.BackendQSV
+	cfg.Playback.HWDevice = "/central/device"
+	preparer := NewNodeAwarePreparer(nil, nil, func() *config.Config { return cfg })
+
+	if got, want := preparer.remoteToneMapProbeTimeout(remote.URL), 5*time.Minute; got != want {
+		t.Fatalf("unknown-node probe timeout = %s, want cold-node fallback %s", got, want)
+	}
+	if _, err := preparer.toneMapCapabilitiesForNode(context.Background(), remote.URL); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := preparer.remoteToneMapProbeTimeout(remote.URL), 161*time.Second; got != want {
+		t.Fatalf("cached remote probe timeout = %s, want target-node budget %s", got, want)
+	}
+	if got, want := preparer.ToneMapCapabilityTimeout(), 5*time.Minute; got != want {
+		t.Fatalf("remote-only planning timeout = %s, want %s", got, want)
+	}
+}
+
+func TestNormalizeRemoteToneMapProbeTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		millis int64
+		want   time.Duration
+	}{
+		{name: "missing", want: 5 * time.Minute},
+		{name: "too small", millis: time.Second.Milliseconds(), want: 5 * time.Second},
+		{name: "node specific", millis: (161 * time.Second).Milliseconds(), want: 161 * time.Second},
+		{name: "too large", millis: (10 * time.Minute).Milliseconds(), want: 5 * time.Minute},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := normalizeRemoteToneMapProbeTimeout(test.millis); got != test.want {
+				t.Fatalf("normalized timeout = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
+func TestNodeAwarePreparerCapabilityFailurePreservesNodeProbeBudget(t *testing.T) {
+	const nodeURL = "https://node.example"
+	preparer := NewNodeAwarePreparer(nil, nil, nil)
+	preparer.capabilities[nodeURL] = remoteToneMapCapabilities{
+		probeRequestTimeout: 161 * time.Second,
+		expiresAt:           time.Now().Add(-time.Second),
+	}
+
+	preparer.cacheToneMapCapabilityFailure(nodeURL, context.DeadlineExceeded)
+
+	if got, want := preparer.remoteToneMapProbeTimeout(nodeURL), 161*time.Second; got != want {
+		t.Fatalf("probe timeout after transient failure = %s, want preserved node budget %s", got, want)
+	}
+}
+
 // TestNodeAwarePreparerCachesCapabilityFailuresBriefly verifies transient failures use a bounded cache.
 func TestNodeAwarePreparerCachesCapabilityFailuresBriefly(t *testing.T) {
 	var hits atomic.Int32
