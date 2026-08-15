@@ -87,9 +87,39 @@ audio/video equality. If either changes, the server creates a new audio/video
 transport instead of retaining old bytes while persisting a different frozen
 recipe.
 
-The recipe extension is backward-compatible. Older recipes omit the new JSON
-fields and thaw to their existing zero values; recipe validity and versioning
-are unchanged.
+The persisted recipe extension is backward-compatible. Older recipes omit the
+new JSON fields and thaw to their existing zero values. Tone-map reconstruction
+tokens deliberately use the `transcode_tonemap_v1` play-method discriminator,
+however. Current readers map that discriminator back to an ordinary transcode,
+while older readers reject it instead of silently reconstructing an HDR recipe
+without tone mapping during a rolling deployment.
+
+### Executor-side source verification
+
+Catalog size, modification time, and the OpenSubtitles hash are useful change
+signals but do not prove that a later executor sees the same video metadata.
+Filesystem identity tokens were rejected because their representation is not
+portable across Linux, macOS, Windows, NFS, and SMB mounts, and because a
+pathname can still change after a token is checked.
+
+Every tone-map execution attempt therefore runs a bounded FFprobe on the
+executor immediately before representative-frame preflight or FFmpeg startup.
+Scanner persistence and execution use the same `mediaprobe` normalization for
+the primary video stream, including profile, bit depth, color fields, and Dolby
+Vision provenance. The live stream signature must exactly match the signature
+frozen in the recipe. A successful mismatch is a stale recipe; an unavailable,
+malformed, cancelled, or timed-out probe is a transient validation failure.
+
+The validation runs for initial starts, restarts, reconstructed sessions, and
+prepared downloads, but never for direct play, direct stream, or ordinary
+non-tone-mapped transcodes. Reconstruction preserves stale and transient
+validation errors through local, compatibility, and transcode-node boundaries;
+an existing frozen tone-map recipe is never replaced by a fresh plan merely
+because its reconstruction failed. Existing size, modification-time, and
+edge-hash checks remain defense in depth. Adversarial replacement of a pathname
+after validation begins is outside the supported threat model; eliminating
+that race portably would require a full-file digest and rehash or passing one
+open file handle through the complete probe and FFmpeg lifecycle.
 
 ## Capacity-aware playback placement
 
@@ -118,10 +148,10 @@ The optional capacity-provider interface lets a node-aware preparer answer
 whether a specific mode and source kind currently has an eligible executor.
 
 The preparer collects per-node capabilities first, constructs an in-memory set
-of eligible node URLs, then briefly reserves and releases matching transcode
-capacity. The availability check is a planning snapshot, not a durable claim.
-If capacity changes after queuing, the immutable recipe follows the normal job
-retry lifecycle.
+of eligible node URLs, then performs a non-reserving capacity check. The
+availability check is a planning snapshot, not a durable claim. If capacity
+changes after queuing, the immutable recipe follows the normal job retry
+lifecycle.
 
 Target resolution considers local and remote execution separately:
 
@@ -135,6 +165,49 @@ ID and output path are created. No later worker or retry changes that identity.
 Preparers that do not implement capacity reporting retain the legacy
 capability-union selection path.
 
+### Remote execution attestation
+
+Capability discovery and job execution can observe different node versions. A
+node may advertise tone-map support, then be replaced by an older binary before
+the queued request starts. Older JSON decoders ignore the frozen recipe fields,
+so artifact ID and size alone cannot prove that an HDR source was actually
+tone-mapped.
+
+After a successful tone-map encode, the node publishes a small receipt beside
+the artifact. It records the confirmed execution mode, output size, and a
+canonical execution fingerprint over every transported byte-affecting request
+field. The artifact ID is excluded because it is the idempotency handle rather
+than an encoding input. Prepare responses and artifact status responses return
+the same attestation.
+
+Publication is crash-ordered: the completed output and artifact directory are
+synced before the receipt file and directory are synced. The receipt is
+therefore the commit record for the already-published bytes. The central
+preparer accepts an artifact only when every attested value exactly matches its
+frozen request, including during lost-response recovery and later maintenance.
+Expected size and fingerprint also travel through direct file targets and
+signed proxy claims, so a missing or mismatched receipt fails closed at delivery
+rather than serving unverified bytes. Invalid outputs are requeued or removed
+before retry or local fallback; indeterminate cleanup never masquerades as a
+successful fallback. Ordinary non-tone-mapped prepared artifacts retain their
+existing wire behavior.
+
+## Compatibility runtime ownership
+
+Jellyfin-compatible fallback may replace a hardware runtime with a software
+runtime on the same session ID. Remote and local readiness, durable recipe
+persistence, and rollback are fenced to the exact route and runtime generation
+that still owns the session. A delayed successful remote start cannot overwrite
+the winning local recipe, leak its remote runtime, or close the replacement
+runtime.
+
+An empty or mismatched node-confirmed hardware mode is handled as a failed
+hardware attempt, so `hardware_then_software` continues through validated
+software nodes and then validated local software. When a remote recipe falls
+back to local software, the old remote runtime is stopped and its durable node
+recipe is removed as part of the bounded transition; a failed central-store
+update restores the previous recipe or reports the failed compensation.
+
 ## Error semantics
 
 The server distinguishes executor saturation from permanent unavailability:
@@ -145,6 +218,14 @@ The server distinguishes executor saturation from permanent unavailability:
   `quality_unavailable` with HTTP 501;
 - capability-probe errors take precedence over a definite saturation result
   when the inventory is incomplete.
+
+Internal transcode-node responses distinguish live source mismatches from
+transient live-probe failures with a bounded machine-readable header. Central
+V3 and Jelly handlers require an exact status-and-code pair, so unrelated 422
+recipe errors and 503 node-configuration errors retain their previous meaning.
+Fallback order is unchanged: other validated software executors are attempted
+before the final permanent stale-source or retryable transient outcome is
+returned.
 
 Capacity failure occurs before artifact hashing, ID generation, output-path
 construction, or queue insertion. A failed request therefore cannot create or
@@ -163,6 +244,13 @@ video-track metadata that identifies Dolby Vision but lacks either new
 provenance key. Existing scan and playback repair paths then reprobe the media
 and persist facts derived from the bytes.
 
+New scanner writes always persist both provenance keys, including explicit
+false values. Repair eligibility retains whether those raw keys were present,
+so a legacy writer running after the one-shot migration cannot make an
+incomplete row look current during a rolling upgrade. If a repair probe fails,
+the scanner preserves the previous technical metadata and leaves the probe
+timestamp empty for a later bounded retry.
+
 The migration treats SQL `NULL`, JSON `null`, objects, and scalar JSON values as
 empty track collections before array expansion. This prevents malformed or
 legacy JSONB shapes from aborting an upgrade. Its down section performs no data
@@ -172,7 +260,8 @@ reconstruction because previous probe timestamps cannot be recovered safely.
 
 - Direct HDR paths and default-disabled settings are unchanged.
 - Existing protocol-v3 recipes and non-tone-mapped artifact hashes remain
-  valid.
+  valid. Older processes reject newly minted tone-map reconstruction tokens
+  instead of executing them incompletely.
 - Existing preparers without capacity reporting retain their prior behavior.
 - Operators may temporarily see tone mapping unavailable for affected legacy
   Dolby Vision files until normal reprobe succeeds.
