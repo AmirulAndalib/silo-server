@@ -86,6 +86,20 @@ func TestBuildFFmpegArgsCopyVideoAppliesSampleEntry(t *testing.T) {
 	}
 }
 
+func TestBuildFFmpegArgsCopyVideoAcceptsNoncanonicalCodecCase(t *testing.T) {
+	args := strings.Join(buildFFmpegArgs(TranscodeOpts{
+		InputPath:        "/media/movie.mkv",
+		OutputDir:        t.TempDir(),
+		TargetCodecVideo: "COPY",
+		TargetCodecAudio: "copy",
+		VideoSampleEntry: VideoSampleEntryHVC1,
+		SegmentDuration:  2,
+	}), " ")
+	if !strings.Contains(args, "-c:v copy -tag:v hvc1") {
+		t.Fatalf("case-insensitive copy recipe did not apply its sample entry: %s", args)
+	}
+}
+
 func TestStartTranscodeRejectsInvalidVideoSampleEntry(t *testing.T) {
 	for _, opts := range []TranscodeOpts{
 		{TargetCodecVideo: "copy", VideoSampleEntry: "dvhe"},

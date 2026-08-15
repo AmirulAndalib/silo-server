@@ -35,7 +35,7 @@ import type {
 import { resolvePendingSeekTime } from "../utils/pendingSeek";
 import { resolveVersionAudioLanguage } from "../utils/effectiveAudioLanguage";
 import { HlsStartupGuard } from "../utils/hlsStartupGuard";
-import { selectHLSEngineV3 } from "../utils/hlsEngine";
+import { resolveHLSEngineV3 } from "../utils/hlsEngine";
 import { normalizeSubtitleMode } from "../utils/subtitleMode";
 import type {
   PlaybackExitState,
@@ -166,8 +166,6 @@ interface VideoPlayerProps {
   watchTogetherConnection?: WatchTogetherRoomConnectionResult;
 }
 
-/** Preload hls.js eagerly so it's cached before the first transcode. */
-const hlsPromise: Promise<typeof HlsType> = import("hls.js").then((m) => m.default);
 const EXIT_PROGRESS_FLUSH_TIMEOUT_MS = 1_000;
 const FIREFOX_COMPATIBILITY_FALLBACK_DELAY_MS = 8_000;
 
@@ -1441,15 +1439,16 @@ export function VideoPlayer({
 
       if (isHlsStream) {
         try {
-          const Hls = await hlsPromise;
+          const nativeSupported = video.canPlayType("application/vnd.apple.mpegurl") !== "";
+          const resolution = await resolveHLSEngineV3(plannedDynamicRange, nativeSupported, () =>
+            import("hls.js").then((module) => module.default),
+          );
           if (destroyed || hlsStartupGuardRef.current?.hasFailed()) return;
 
-          const nativeSupported = video.canPlayType("application/vnd.apple.mpegurl") !== "";
-          const engine = selectHLSEngineV3(plannedDynamicRange, nativeSupported, Hls.isSupported());
-
-          if (engine === "native") {
+          if (resolution.engine === "native") {
             attachNativeHLS();
-          } else if (engine === "hlsjs") {
+          } else if (resolution.engine === "hlsjs") {
+            const Hls = resolution.hlsjs;
             const maxBufferLength = plannedBitrateKbps >= 25000 ? 60 : 120;
             const retryingLoadPolicy = {
               maxTimeToFirstByteMs: 45000,

@@ -405,7 +405,7 @@ func normalizeTranscodeOpts(opts TranscodeOpts) TranscodeOpts {
 func buildFFmpegArgs(opts TranscodeOpts) []string {
 	opts = normalizeTranscodeOpts(opts)
 
-	isVideoCopy := opts.TargetCodecVideo == "copy"
+	isVideoCopy := strings.EqualFold(opts.TargetCodecVideo, "copy")
 	isAudioCopy := opts.TargetCodecAudio == "copy"
 
 	args := []string{

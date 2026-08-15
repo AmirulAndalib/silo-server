@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { selectHLSEngineV3 } from "./hlsEngine";
+import { resolveHLSEngineV3, selectHLSEngineV3 } from "./hlsEngine";
 
 describe("selectHLSEngineV3", () => {
   it.each(["dolby_vision", "hdr10"])(
@@ -20,5 +20,34 @@ describe("selectHLSEngineV3", () => {
 
   it("rejects an unavailable transport", () => {
     expect(selectHLSEngineV3("dolby_vision", false, false)).toBe("unsupported");
+  });
+
+  it("selects native HDR without loading hls.js", async () => {
+    const loadHLSJS = vi.fn(async () => ({ isSupported: () => true }));
+
+    await expect(resolveHLSEngineV3("dolby_vision", true, loadHLSJS)).resolves.toEqual({
+      engine: "native",
+    });
+    expect(loadHLSJS).not.toHaveBeenCalled();
+  });
+
+  it("falls back to native HLS when loading hls.js fails", async () => {
+    const loadHLSJS = vi.fn(async () => {
+      throw new Error("chunk unavailable");
+    });
+
+    await expect(resolveHLSEngineV3("sdr", true, loadHLSJS)).resolves.toEqual({
+      engine: "native",
+    });
+    expect(loadHLSJS).toHaveBeenCalledOnce();
+  });
+
+  it("returns the loaded hls.js engine when Media Source Extensions are supported", async () => {
+    const hlsjs = { isSupported: () => true };
+
+    await expect(resolveHLSEngineV3("sdr", false, async () => hlsjs)).resolves.toEqual({
+      engine: "hlsjs",
+      hlsjs,
+    });
   });
 });
