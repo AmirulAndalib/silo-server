@@ -437,8 +437,11 @@ func (h *PlaybackHandler) streamCardFromQuery(r *http.Request, sessionID string)
 // reconstruct is actually required. On that miss it delegates to the shared
 // LoadOrReconstructSession front door so reconstruct/ownership semantics stay
 // identical. The returned card (nil on the live-session path) is the decoded
-// recipe the caller's own reconstruct branch consumes.
-func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID string) (*playback.Session, playback.SessionLoadStatus, *playback.RecipeCard) {
+// recipe the caller's own reconstruct branch consumes. Tone-mapped local
+// transcodes are the exception: a live Session with no runtime may be a
+// provisional capability reconstruction, so those requests decode the token
+// and join the manager's atomic playback+runtime operation.
+func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID string, requestedSegment int) (*playback.Session, playback.SessionLoadStatus, *playback.RecipeCard) {
 	requestUserID := apimw.GetUserID(r.Context())
 	session, err := h.sessionMgr.GetSession(sessionID)
 	if err == nil {
@@ -448,6 +451,13 @@ func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID s
 		if requestUserID != 0 && session.UserID != requestUserID {
 			return nil, playback.SessionForbidden, nil
 		}
+		if session.TranscodeNodeURL == "" && h.tm.GetTranscodeSession(sessionID) == nil {
+			card := h.streamCardFromQuery(r, sessionID)
+			if card != nil && card.ToneMapMode != "" {
+				session, _, status := h.tm.LoadOrReconstructTranscode(r.Context(), h.sessionMgr.GetSession, sessionID, requestUserID, requestedSegment, card)
+				return session, status, card
+			}
+		}
 		return session, playback.SessionLoaded, nil
 	}
 	if !errors.Is(err, playback.ErrSessionNotFound) {
@@ -456,6 +466,10 @@ func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID s
 	// Genuine miss (e.g. after a restart): now — and only now — pay for the token
 	// decode so the recipe is available for reconstruction.
 	card := h.streamCardFromQuery(r, sessionID)
+	if card != nil && card.ToneMapMode != "" {
+		session, _, status := h.tm.LoadOrReconstructTranscode(r.Context(), h.sessionMgr.GetSession, sessionID, requestUserID, requestedSegment, card)
+		return session, status, card
+	}
 	session, status := h.tm.LoadOrReconstructSession(r.Context(), h.sessionMgr.GetSession, sessionID, requestUserID, card)
 	return session, status, card
 }
@@ -1309,7 +1323,7 @@ func alignedSeekSeconds(seekSeconds float64, segmentDuration int, targetVideoCod
 // reports as the timeline's stream_origin_seconds.
 func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
-	session, status, card := h.loadTranscodeServeSession(r, sessionID)
+	session, status, card := h.loadTranscodeServeSession(r, sessionID, -1)
 	switch status {
 	case playback.SessionMissing:
 		writePlaybackSessionNotFound(w)
@@ -1319,6 +1333,9 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 		return
 	case playback.SessionForbidden:
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
+		return
+	case playback.SessionUnavailable:
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode session is temporarily unavailable")
 		return
 	}
 
@@ -1364,7 +1381,11 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 // Auth is optional — the session UUID serves as an access token.
 func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
-	session, status, card := h.loadTranscodeServeSession(r, sessionID)
+	requestedSegment := -1
+	if segNum, parseErr := playback.ParseSegmentNumber(chi.URLParam(r, "name")); parseErr == nil {
+		requestedSegment = segNum
+	}
+	session, status, card := h.loadTranscodeServeSession(r, sessionID, requestedSegment)
 	switch status {
 	case playback.SessionMissing:
 		writePlaybackSessionNotFound(w)
@@ -1374,6 +1395,9 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 		return
 	case playback.SessionForbidden:
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
+		return
+	case playback.SessionUnavailable:
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode session is temporarily unavailable")
 		return
 	}
 
@@ -1389,10 +1413,6 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 		// Resume near the segment the client is fetching so reconstruct does not
 		// restart from the original seek point and stall. A non-segment name
 		// (e.g. init.mp4) parses as negative and falls back to the token position.
-		requestedSegment := -1
-		if segNum, parseErr := playback.ParseSegmentNumber(chi.URLParam(r, "name")); parseErr == nil {
-			requestedSegment = segNum
-		}
 		if card == nil {
 			writeError(w, http.StatusNotFound, "not_found", "Transcode session not found")
 			return

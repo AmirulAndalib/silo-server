@@ -412,6 +412,7 @@ func TestHandleCreateDownloadErrorMapping(t *testing.T) {
 		{"transcode disabled", downloads.ErrTranscodeDisabled, http.StatusForbidden},
 		{"invalid quality", downloads.ErrInvalidQuality, http.StatusBadRequest},
 		{"quality unavailable", downloads.ErrQualityUnavailable, http.StatusNotImplemented},
+		{"capability unavailable", downloads.ErrCapabilityUnavailable, http.StatusServiceUnavailable},
 		{"bulk quality unavailable", downloads.ErrBulkQualityUnavailable, http.StatusNotImplemented},
 		{"format unavailable", downloads.ErrFormatUnavailable, http.StatusNotImplemented},
 		{"profile required", downloads.ErrProfileRequired, http.StatusBadRequest},

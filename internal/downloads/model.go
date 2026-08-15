@@ -92,6 +92,9 @@ var (
 	// ErrCapacityUnavailable means compatible artifact executors exist, but none
 	// currently has reservable capacity. Callers may retry the same request.
 	ErrCapacityUnavailable = errors.New("download preparation capacity is unavailable")
+	// ErrCapabilityUnavailable means executor discovery failed transiently, so
+	// callers may retry without changing the requested quality or policy.
+	ErrCapabilityUnavailable = errors.New("download preparation capability is unavailable")
 	// ErrBulkQualityUnavailable keeps season/series batches original-only until
 	// batch artifact UX and storage reporting are explicit.
 	ErrBulkQualityUnavailable = errors.New("bulk quality downloads are not available")

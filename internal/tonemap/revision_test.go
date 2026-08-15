@@ -50,6 +50,38 @@ func TestSourceRevisionRoundTripAndPathValidation(t *testing.T) {
 	}
 }
 
+func TestValidatePathRejectsReplacementWithPreservedSizeAndModTime(t *testing.T) {
+	path := t.TempDir() + "/source.mkv"
+	original := make([]byte, 128*1024)
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	revision := SourceRevision{
+		MediaFileID:          42,
+		FileSize:             info.Size(),
+		FileModifiedUnixNano: normalizeRevisionTime(info.ModTime()).UnixNano(),
+		// The OpenSubtitles hash of an all-zero 128 KiB file is its size.
+		FileHash: "0000000000020000",
+	}
+	replacement := make([]byte, len(original))
+	replacement[0] = 1
+	if err := os.WriteFile(path, replacement, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := revision.ValidatePath(path); err == nil {
+		t.Fatal("ValidatePath accepted replacement bytes with preserved size and modification time")
+	}
+}
+
 // TestRevisionForFileChangesWithDolbyVisionPresenceFacts verifies metadata presence affects source identity.
 func TestRevisionForFileChangesWithDolbyVisionPresenceFacts(t *testing.T) {
 	modified := time.Now().UTC().Truncate(time.Microsecond)

@@ -40,6 +40,12 @@ func (s staticDownloadSettings) GetAll(context.Context) (map[string]string, erro
 	return s, nil
 }
 
+type failingDownloadSettings struct{ err error }
+
+func (s failingDownloadSettings) GetAll(context.Context) (map[string]string, error) {
+	return nil, s.err
+}
+
 type recordingRemotePreparer struct {
 	nodeURL   string
 	secret    string
@@ -307,6 +313,25 @@ func TestNodeAwarePreparerHonorsDisabledLocalFallback(t *testing.T) {
 	}
 	if local.calls != 0 {
 		t.Fatalf("local calls = %d, want 0", local.calls)
+	}
+}
+
+func TestNodeAwarePreparerSettingsFailureDeniesLocalFallback(t *testing.T) {
+	limit := 1
+	pool := nodepool.NewTranscodePool()
+	pool.SetNodes([]*nodepool.Node{{URL: "http://full", Enabled: true, Healthy: true, ActiveJobs: 1, MaxJobs: &limit}})
+	local := &recordingEncodePreparer{}
+	cfg := &config.Config{}
+	cfg.Auth.JWTSecret = "secret"
+	preparer := NewNodeAwarePreparer(local, nodepool.NewPlanner(nodepool.NewProxyPool(), pool), func() *config.Config { return cfg })
+	preparer.SetSettingsReader(failingDownloadSettings{err: errors.New("settings unavailable")})
+
+	_, err := preparer.PrepareFile(context.Background(), "artifact-settings-unavailable", playback.TranscodeOpts{}, "/artifacts/job.mp4")
+	if err == nil || !strings.Contains(err.Error(), "local transcode fallback is disabled") {
+		t.Fatalf("PrepareFile error = %v, want local fallback denied", err)
+	}
+	if local.calls != 0 {
+		t.Fatalf("local calls = %d, want 0 when fallback policy cannot be read", local.calls)
 	}
 }
 
@@ -582,6 +607,37 @@ func TestNodeAwarePreparerCachesCapabilityFailuresBriefly(t *testing.T) {
 	}
 	if hits.Load() != 2 {
 		t.Fatalf("requests = %d, want a retry after failure-cache expiry", hits.Load())
+	}
+}
+
+func TestNodeAwarePreparerCapabilityErrorsRedactNodeURLSecrets(t *testing.T) {
+	const (
+		username       = "probe-operator"
+		password       = "node-password"
+		querySecret    = "query-secret"
+		fragmentSecret = "fragment-secret"
+	)
+	nodeURL := "https://" + username + ":" + password + "@node.example:9443/transcode?access_token=" + querySecret + "#" + fragmentSecret
+	planner := &nonReservingCapacityPlanner{node: &nodepool.Node{URL: nodeURL}}
+	cfg := &config.Config{}
+	cfg.Auth.JWTSecret = "jwt-secret"
+	preparer := NewNodeAwarePreparer(nil, planner, func() *config.Config { return cfg })
+	preparer.probeClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("connection refused")
+	})}
+
+	_, err := preparer.toneMapCapabilitiesByNode(context.Background())
+	if err == nil {
+		t.Fatal("capability probe returned no error")
+	}
+	message := err.Error()
+	for _, secret := range []string{username, password, querySecret, fragmentSecret} {
+		if strings.Contains(message, secret) {
+			t.Fatalf("capability error contains %q: %q", secret, message)
+		}
+	}
+	if !strings.Contains(message, "https://node.example:9443/transcode") || !strings.Contains(message, "connection refused") {
+		t.Fatalf("capability error lost useful diagnostics: %q", message)
 	}
 }
 

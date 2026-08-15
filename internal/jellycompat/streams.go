@@ -221,6 +221,8 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	}
 
 	var err error
+	requiredToneMapMode := tonemap.Mode("")
+	var exhaustedRemoteToneMapErr error
 	if h.NodePlanner != nil && h.JWTSecret != "" {
 		playSession, err = h.ensureUpstreamPlayback(r.Context(), session, playSession.ID, *source, "transcode")
 		if err != nil {
@@ -228,6 +230,7 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 			return
 		}
 		failRemoteStart := func() {
+			h.releaseCompatSessionReservation(playSession.UpstreamSessionID)
 			h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
 		}
 		upstreamSession, upstreamErr := h.sessionMgr.GetSession(playSession.UpstreamSessionID)
@@ -253,14 +256,27 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 				writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", planErr.Error())
 				return
 			}
-			if tcNode := plan.TranscodeNode; tcNode != nil {
+			failedNodeURLs := make(map[string]struct{})
+			for plan.TranscodeNode != nil {
+				tcNode := plan.TranscodeNode
 				if err := h.sessionMgr.SetTranscodeNodeURL(playSession.UpstreamSessionID, tcNode.URL); err != nil {
 					failRemoteStart()
 					writeError(w, http.StatusInternalServerError, "ServerError", "Failed to bind transcode node")
 					return
 				}
 				initialSeekSeconds, _ := compatInitialTranscodePosition(*source, h.compatSegmentDuration(), playSession.InitialSeekSeconds)
-				if err := h.startRemoteTranscode(r.Context(), playSession.ID, playSession.UpstreamSessionID, *source, file, initialSeekSeconds, tcNode.URL); err != nil {
+				if err := h.startRemoteTranscodeWithToneMapMode(r.Context(), playSession.ID, playSession.UpstreamSessionID, *source, file, initialSeekSeconds, tcNode.URL, requiredToneMapMode); err != nil {
+					if errors.Is(err, errRemoteSoftwareToneMapStartFailed) {
+						exhaustedRemoteToneMapErr = err
+						h.releaseCompatSessionReservation(playSession.UpstreamSessionID)
+						failedNodeURLs[strings.TrimRight(tcNode.URL, "/")] = struct{}{}
+						requiredToneMapMode = tonemap.ModeSoftware
+						plan, planErr = h.planCompatSoftwareToneMapSession(r.Context(), upstreamSession, file, source.Version.Bitrate, failedNodeURLs)
+						if planErr == nil {
+							continue
+						}
+						err = planErr
+					}
 					failRemoteStart()
 					if errors.Is(err, errTranscode4KDisallowed) {
 						writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
@@ -289,15 +305,27 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	// server never transcodes when no eligible node exists.
 	if h.NodePlanner != nil && !nodepool.LocalTranscodeFallbackAllowed(r.Context(), h.SettingsRepo) {
 		if playSession.UpstreamSessionID != "" {
+			h.releaseCompatSessionReservation(playSession.UpstreamSessionID)
 			h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
+		}
+		if exhaustedRemoteToneMapErr != nil {
+			writeError(w, http.StatusBadGateway, "TranscodeStartFailed", "Transcode node rejected the request")
+			return
 		}
 		writeError(w, http.StatusServiceUnavailable, "NoTranscodeNode",
 			"No transcode node is available and local transcode fallback is disabled")
 		return
 	}
+	if requiredToneMapMode != "" && playSession.UpstreamSessionID != "" {
+		if err := h.sessionMgr.SetTranscodeNodeURL(playSession.UpstreamSessionID, ""); err != nil {
+			h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
+			writeError(w, http.StatusInternalServerError, "ServerError", "Failed to bind local transcode")
+			return
+		}
+	}
 
 	// Ensure the transcode process is running.
-	manifest, err := h.ensureTranscodeManifest(r.Context(), session, playSession.ID, *source)
+	manifest, err := h.ensureTranscodeManifestWithToneMapMode(r.Context(), session, playSession.ID, *source, requiredToneMapMode)
 	if err != nil {
 		writeCompatTranscodeError(w, err)
 		return
@@ -1572,12 +1600,22 @@ func (h *PlaybackHandler) recordCompatProgressPersistence(playSessionID string, 
 }
 
 func (h *PlaybackHandler) ensureTranscodeManifest(ctx context.Context, compatSession *Session, playSessionID string, source PlaybackMediaSource) ([]byte, error) {
+	return h.ensureTranscodeManifestWithToneMapMode(ctx, compatSession, playSessionID, source, "")
+}
+
+func (h *PlaybackHandler) ensureTranscodeManifestWithToneMapMode(
+	ctx context.Context,
+	compatSession *Session,
+	playSessionID string,
+	source PlaybackMediaSource,
+	requiredToneMapMode tonemap.Mode,
+) ([]byte, error) {
 	playSession, err := h.ensureUpstreamPlayback(ctx, compatSession, playSessionID, source, "transcode")
 	if err != nil {
 		return nil, err
 	}
 
-	transcodeSession, err := h.ensureTranscodeSession(ctx, playSessionID, playSession.UpstreamSessionID, source)
+	transcodeSession, err := h.ensureTranscodeSessionWithToneMapMode(ctx, playSessionID, playSession.UpstreamSessionID, source, requiredToneMapMode)
 	if err != nil {
 		requestErr := ctx.Err()
 		if requestErr == nil || !errors.Is(err, requestErr) {
@@ -1620,9 +1658,22 @@ func (h *PlaybackHandler) ensureTranscodeManifest(ctx context.Context, compatSes
 
 var compatManifestStartupTimeout = playback.ManifestStartupTimeout
 
+func compatTranscodeSessionUsesToneMapMode(session *playback.TranscodeSession, required tonemap.Mode) bool {
+	return required == "" || (session != nil && session.Opts().ToneMapMode == required)
+}
+
 // ensureTranscodeSession returns, reconstructs, or starts the requested transcode.
 func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessionID, upstreamSessionID string, source PlaybackMediaSource) (*playback.TranscodeSession, error) {
-	if existing := h.tm.GetTranscodeSession(upstreamSessionID); existing != nil {
+	return h.ensureTranscodeSessionWithToneMapMode(ctx, playSessionID, upstreamSessionID, source, "")
+}
+
+func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
+	ctx context.Context,
+	playSessionID, upstreamSessionID string,
+	source PlaybackMediaSource,
+	requiredToneMapMode tonemap.Mode,
+) (*playback.TranscodeSession, error) {
+	if existing := h.tm.GetTranscodeSession(upstreamSessionID); existing != nil && compatTranscodeSessionUsesToneMapMode(existing, requiredToneMapMode) {
 		return existing, nil
 	}
 	// If a recipe survived in the compat store (e.g. a server restart), rebuild
@@ -1631,7 +1682,12 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 	// is a no-op and we fall through to the normal start below.
 	if h.playbackStore != nil {
 		if ps, ok := h.playbackStore.Get(playSessionID); ok && ps.Recipe != nil {
-			if reconstructed := h.tm.ReconstructTranscode(ctx, upstreamSessionID, -1, *ps.Recipe); reconstructed != nil {
+			// A forced software failover must not reconstruct the stale hardware
+			// recipe that preceded it. If a concurrent caller already registered a
+			// runtime, also verify the returned process rather than trusting the card.
+			if requiredToneMapMode != "" && ps.Recipe.ToneMapMode != requiredToneMapMode {
+				// Fall through to build a newly validated recipe in the required mode.
+			} else if reconstructed := h.tm.ReconstructTranscode(ctx, upstreamSessionID, -1, *ps.Recipe); reconstructed != nil && compatTranscodeSessionUsesToneMapMode(reconstructed, requiredToneMapMode) {
 				h.recordTranscodeStreamDetails(ctx, upstreamSessionID, reconstructed.Opts())
 				return reconstructed, nil
 			}
@@ -1697,6 +1753,9 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 		if toneMapErr != nil {
 			return nil, toneMapErr
 		}
+		if toneMapErr = requireCompatToneMapMode(&toneMapRecipe, toneMapCapabilities, requiredToneMapMode); toneMapErr != nil {
+			return nil, toneMapErr
+		}
 		toneMapRecipe.apply(&opts)
 	}
 	opts.SegmentDuration = h.compatSegmentDuration()
@@ -1707,8 +1766,14 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 	// and outside this lock so concurrent manifest requests can use the same session.
 	unlock := h.tm.LockSessionLifecycle(upstreamSessionID)
 	if existing := h.tm.GetTranscodeSession(upstreamSessionID); existing != nil {
-		unlock()
-		return existing, nil
+		if compatTranscodeSessionUsesToneMapMode(existing, requiredToneMapMode) {
+			unlock()
+			return existing, nil
+		}
+		// The failed remote sequence has narrowed this session to software.
+		// Remove a concurrently started or stale hardware writer before spawning
+		// the replacement in the same output directory.
+		h.tm.CloseTranscodeSessionIf(upstreamSessionID, existing, "")
 	}
 	manifestDeadline := time.Now().Add(compatManifestStartupTimeout)
 	transcodeSession, err := playback.StartTranscode(context.WithoutCancel(ctx), opts)
@@ -1737,8 +1802,11 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 			replaceUnlock := h.tm.LockSessionLifecycle(upstreamSessionID)
 			if live := h.tm.GetTranscodeSession(upstreamSessionID); live != transcodeSession {
 				replaceUnlock()
-				if live != nil {
+				if live != nil && compatTranscodeSessionUsesToneMapMode(live, requiredToneMapMode) {
 					return live, nil
+				}
+				if live != nil {
+					return nil, errHDRTranscodeUnsupported
 				}
 				return nil, readyErr
 			}

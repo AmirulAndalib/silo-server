@@ -798,7 +798,10 @@ func NormalizeQualityV3(value string) (string, bool) {
 	}
 }
 
-func (r ReplanRequestV3) Validate() error {
+func (r *ReplanRequestV3) Validate() error {
+	if r == nil {
+		return errors.New("replan request is required")
+	}
 	if r.ProtocolVersion != ProtocolV3 || !boundedIdentifierV3.MatchString(r.PlaybackAttemptID) || !boundedIdentifierV3.MatchString(r.ReplanRequestID) {
 		return errors.New("invalid replan identity")
 	}
@@ -900,14 +903,15 @@ func validateCapabilitiesV3(c *ClientCodecCapabilitiesV3, ctx *ClientPlaybackCon
 	if !validCapabilityEvidenceV3(c.AudioEvidence) {
 		return errors.New("audio_evidence is required and must be exact, platform_attested, or declared")
 	}
-	if len(c.CodecsVideo) > 64 || len(c.CodecsVideoHardware) > 64 || len(c.CodecsAudio) > 64 || len(c.Containers) > 64 || len(c.VideoDecode) > 64 || len(ctx.Deliveries) > 16 || len(ctx.Device.Platform) > 32 || len(ctx.FormFactor) > 32 || len(ctx.AppVersion) > 64 {
+	if len(c.CodecsVideo) > 64 || len(c.CodecsVideoHardware) > 64 || len(c.CodecsAudio) > 64 || len(c.Containers) > 64 || len(c.VideoDecode) > 64 || len(ctx.Deliveries) > 16 || len(ctx.Device.Platform) > 32 || len(ctx.FormFactor) > 32 {
 		return errors.New("capability list exceeds supported size")
 	}
-	// Build and channel are opaque diagnostic labels, so an over-long value is
+	// Version, build, and channel are diagnostic labels, so an over-long value is
 	// worth clamping and never worth refusing playback over. The header route
-	// (X-Silo-Client-Build / -Channel) clamps with the same helper; rejecting
+	// (X-Silo-Client-Version / -Build / -Channel) clamps with the same helper; rejecting
 	// here would mean the same string plays from a header and 400s from the
 	// body.
+	ctx.AppVersion = normalizeClientMetadataValue(ctx.AppVersion, 64)
 	ctx.AppBuild = normalizeClientMetadataValue(ctx.AppBuild, 64)
 	ctx.AppChannel = normalizeClientMetadataValue(ctx.AppChannel, 32)
 	deviceValues := []string{

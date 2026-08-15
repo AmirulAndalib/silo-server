@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
+	"golang.org/x/sync/singleflight"
 )
 
 // NeedsCriticalProbeRepair reports whether playback-critical probe metadata is
@@ -86,11 +88,19 @@ func videoTracksMissingColorRange(tracks []models.VideoTrack) bool {
 
 // PlaybackProbeEnsurer repairs missing playback-critical probe metadata on
 // demand by running a local ffprobe and persisting the result.
+type playbackProbeFileRepository interface {
+	GetByID(ctx context.Context, id int) (*models.MediaFile, error)
+	Upsert(ctx context.Context, file models.MediaFile) (*models.MediaFile, error)
+}
+
 type PlaybackProbeEnsurer struct {
-	fileRepo    *FileRepository
+	fileRepo    playbackProbeFileRepository
 	ffprobePath string
 	ffmpegPath  string
 	timeout     time.Duration
+	probeFile   func(context.Context, string, string) (*ProbeData, error)
+	probeRepair singleflight.Group
+	probeSlots  chan struct{}
 	// copySafety memoizes the multi-PPS bitstream scan per file for the life of
 	// the process. It is never persisted: the scan runs on the first playback
 	// after a restart and is recomputed lazily thereafter.
@@ -108,6 +118,7 @@ func NewPlaybackProbeEnsurer(fileRepo *FileRepository, ffprobePath, ffmpegPath s
 		ffprobePath: ffprobePath,
 		ffmpegPath:  ffmpegPath,
 		timeout:     timeout,
+		probeSlots:  make(chan struct{}, 4),
 	}
 }
 
@@ -118,22 +129,7 @@ func (e *PlaybackProbeEnsurer) Ensure(ctx context.Context, file *models.MediaFil
 
 	current := file
 	if NeedsCriticalProbeRepair(file) && strings.TrimSpace(e.ffprobePath) != "" {
-		timeout := e.timeout
-		if timeout <= 0 {
-			timeout = 5 * time.Second
-		}
-		if reprobeMayScanPackets(file) && timeout < time.Minute {
-			timeout = time.Minute
-		}
-		probeCtx, cancel := context.WithTimeout(ctx, timeout)
-		probe, err := ProbeFile(probeCtx, e.ffprobePath, file.FilePath)
-		cancel()
-		if err != nil || probe == nil {
-			return file, err
-		}
-		updated := *file
-		applyProbeData(&updated, probe, "local")
-		repaired, err := e.fileRepo.Upsert(ctx, updated)
+		repaired, err := e.ensureCriticalProbe(ctx, file)
 		if err != nil {
 			return file, err
 		}
@@ -144,6 +140,67 @@ func (e *PlaybackProbeEnsurer) Ensure(ctx context.Context, file *models.MediaFil
 	// already-probed file still needs its one-time multi-PPS scan before the
 	// planner can decide whether a video stream-copy is safe.
 	return e.ensureCopySafety(ctx, current)
+}
+
+func (e *PlaybackProbeEnsurer) ensureCriticalProbe(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error) {
+	sharedCtx := context.WithoutCancel(ctx)
+	revisionKey := tonemap.RevisionForFile(file).Fingerprint()
+	resultCh := e.probeRepair.DoChan(revisionKey, func() (any, error) {
+		lookupTimeout := e.timeout
+		if lookupTimeout <= 0 {
+			lookupTimeout = 5 * time.Second
+		}
+		lookupCtx, cancelLookup := context.WithTimeout(sharedCtx, lookupTimeout)
+		current, err := e.fileRepo.GetByID(lookupCtx, file.ID)
+		cancelLookup()
+		if err != nil {
+			return nil, err
+		}
+		if current == nil || !NeedsCriticalProbeRepair(current) {
+			return current, nil
+		}
+		timeout := e.timeout
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		if reprobeMayScanPackets(current) && timeout < time.Minute {
+			timeout = time.Minute
+		}
+		probeCtx, cancel := context.WithTimeout(sharedCtx, timeout)
+		defer cancel()
+		if e.probeSlots != nil {
+			select {
+			case e.probeSlots <- struct{}{}:
+				defer func() { <-e.probeSlots }()
+			case <-probeCtx.Done():
+				return nil, probeCtx.Err()
+			}
+		}
+		probeFile := e.probeFile
+		if probeFile == nil {
+			probeFile = ProbeFile
+		}
+		probe, err := probeFile(probeCtx, e.ffprobePath, current.FilePath)
+		if err != nil || probe == nil {
+			return nil, err
+		}
+		updated := *current
+		applyProbeData(&updated, probe, "local")
+		return e.fileRepo.Upsert(probeCtx, updated)
+	})
+	select {
+	case <-ctx.Done():
+		return file, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return file, result.Err
+		}
+		repaired, _ := result.Val.(*models.MediaFile)
+		if repaired == nil {
+			return file, nil
+		}
+		return repaired, nil
+	}
 }
 
 // ensureCopySafety computes the multi-PPS copy-safety flag for H.264 files at

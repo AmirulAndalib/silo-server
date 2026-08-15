@@ -286,6 +286,13 @@ func (m *ArtifactManager) Ensure(ctx context.Context, file *models.MediaFile, fo
 	if err != nil {
 		return nil, err
 	}
+	return m.ensureResolved(ctx, file, format, target)
+}
+
+// ensureResolved persists a target whose executor policy and capability recipe
+// were already frozen. Keeping discovery separate lets quota-serialized callers
+// avoid holding a database lock transaction across remote probes.
+func (m *ArtifactManager) ensureResolved(ctx context.Context, file *models.MediaFile, format string, target playback.PrepareTarget) (*Artifact, error) {
 	if target.ToneMapPolicy == "" {
 		target.ToneMapPolicy = tonemap.PolicyNone
 	}
@@ -369,14 +376,11 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 		return target, nil
 	}
 	if m.settings == nil {
-		if is4K {
-			return target, fmt.Errorf("4K transcode settings are unavailable: %w", ErrQualityUnavailable)
-		}
-		return target, nil
+		return target, fmt.Errorf("transcode settings are unavailable: %w", ErrQualityUnavailable)
 	}
 	settings, err := m.settings.GetAll(ctx)
 	if err != nil {
-		return target, fmt.Errorf("load tone-map settings: %w", err)
+		return target, fmt.Errorf("load tone-map settings: %w", errors.Join(ErrCapabilityUnavailable, err))
 	}
 	if is4K && !strings.EqualFold(settings[config.Allow4KTranscodeSettingKey], "true") {
 		return target, fmt.Errorf("4K transcoding is disabled: %w", ErrQualityUnavailable)
@@ -389,7 +393,7 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 		strings.EqualFold(settings[config.PlaybackTranscodeSoftwareToneMapSettingKey], "true"),
 	)
 	if policy == tonemap.PolicyNone {
-		return target, nil
+		return target, fmt.Errorf("tone mapping is disabled: %w", ErrQualityUnavailable)
 	}
 	resolution := tonemap.ResolveSource(metadata)
 	kind := resolution.Kind
@@ -453,7 +457,7 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 	}
 	if mode == "" {
 		if capabilityErr != nil {
-			return target, fmt.Errorf("tone-map capability probe unavailable: %w", capabilityErr)
+			return target, fmt.Errorf("tone-map capability probe unavailable: %w", errors.Join(ErrCapabilityUnavailable, capabilityErr))
 		}
 		if capacityAware && remoteCapabilities.SupportsPolicy(policy, kind) {
 			return target, fmt.Errorf("compatible tone-map executors are at capacity: %w", ErrCapacityUnavailable)
@@ -471,6 +475,14 @@ func (m *ArtifactManager) resolveToneMapTarget(ctx context.Context, file *models
 	target.ToneMapDVBLPresent = metadata.DVBLPresent
 	target.ToneMapDVRPUPresent = metadata.DVRPUPresent
 	return target, nil
+}
+
+func preparedTargetRequiresToneMap(file *models.MediaFile, target playback.PrepareTarget) bool {
+	if strings.EqualFold(target.CodecVideo, "copy") || file == nil || file.IsAudioOnly() {
+		return false
+	}
+	dynamicRange := tonemap.MetadataForFile(file).DynamicRange
+	return dynamicRange != "" && dynamicRange != playback.DynamicRangeSDRV3
 }
 
 // localToneMapCapabilities probes the live FFmpeg and hardware configuration
@@ -793,6 +805,10 @@ func (m *ArtifactManager) encodeOne(ctx context.Context, a *Artifact) {
 		m.failJob(ctx, a, "source media file unavailable")
 		return
 	}
+	if err := validateArtifactToneMapRevision(file, a); err != nil {
+		m.failJob(ctx, a, "tone-map source revision changed")
+		return
+	}
 
 	opts := m.buildOpts(file, a)
 	// Each lease attempt owns a distinct node-local object. A worker that loses
@@ -907,6 +923,20 @@ func (m *ArtifactManager) enqueueRemoteCleanup(ctx context.Context, artifactID s
 		return false
 	}
 	return true
+}
+
+func validateArtifactToneMapRevision(file *models.MediaFile, artifact *Artifact) error {
+	if artifact == nil || artifact.ToneMapMode == "" {
+		return nil
+	}
+	frozen, err := tonemap.DecodeSourceRevision(artifact.ToneMapSourceRevision)
+	if err != nil {
+		return err
+	}
+	if frozen != tonemap.RevisionForFile(file) {
+		return errors.New("tone-map source revision changed")
+	}
+	return nil
 }
 
 func (m *ArtifactManager) failJob(ctx context.Context, a *Artifact, msg string) {

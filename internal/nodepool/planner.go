@@ -521,6 +521,9 @@ func (p *Planner) effectiveEgressKbps(n *Node, now time.Time) int {
 func (p *Planner) effectiveJobs(n *Node, now time.Time) int {
 	jobs := n.ActiveJobs
 	for _, res := range p.reserved {
+		if now.Sub(res.createdAt) > maxReservationAge {
+			continue
+		}
 		if res.transcodeURL != n.URL && res.proxyURL != n.URL {
 			continue
 		}

@@ -2,7 +2,6 @@ package downloads
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,9 +12,12 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/downloadprepare"
+	"github.com/Silo-Server/silo-server/internal/logredact"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
+	"github.com/Silo-Server/silo-server/internal/transcodenode"
+	"golang.org/x/sync/singleflight"
 )
 
 // NodeAwarePreparer keeps artifact queue ownership central while executing the
@@ -23,15 +25,16 @@ import (
 // The node retains completed bytes behind an authenticated opaque-id endpoint;
 // integrated installations and unavailable pools fall back to local work.
 type NodeAwarePreparer struct {
-	local        EncodePreparer
-	planner      nodepool.TranscodeWorkPlanner
-	liveCfg      func() *config.Config
-	remote       downloadprepare.RemotePreparer
-	originLookup artifactOriginLookup
-	settings     SettingsReader
-	probeClient  *http.Client
-	capabilityMu sync.Mutex
-	capabilities map[string]remoteToneMapCapabilities
+	local            EncodePreparer
+	planner          nodepool.TranscodeWorkPlanner
+	liveCfg          func() *config.Config
+	remote           downloadprepare.RemotePreparer
+	originLookup     artifactOriginLookup
+	settings         SettingsReader
+	probeClient      *http.Client
+	capabilityMu     sync.Mutex
+	capabilities     map[string]remoteToneMapCapabilities
+	capabilityFlight singleflight.Group
 }
 
 // remoteToneMapCapabilities caches one node's validated inventory; an empty
@@ -109,7 +112,7 @@ func (p *NodeAwarePreparer) LocalFallbackAllowed(ctx context.Context) bool {
 	values, err := p.settings.GetAll(ctx)
 	if err != nil {
 		slog.WarnContext(ctx, "load local transcode fallback setting failed", "component", "downloads", "error", err)
-		return true
+		return false
 	}
 	return !strings.EqualFold(values[config.PlaybackLocalTranscodeFallbackSettingKey], "false")
 }
@@ -266,7 +269,7 @@ func (p *NodeAwarePreparer) toneMapCapabilitiesByNode(ctx context.Context) (map[
 	var resultErr error
 	for i, result := range results {
 		if result.err != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("node %s: %w", nodeURLs[i], result.err))
+			resultErr = errors.Join(resultErr, fmt.Errorf("node %s: %w", logredact.SanitizeURL(nodeURLs[i]), result.err))
 			continue
 		}
 		if result.capabilities != nil {
@@ -280,13 +283,44 @@ func (p *NodeAwarePreparer) toneMapCapabilitiesByNode(ctx context.Context) (map[
 // inventory or retrieves the node's authenticated hardware capabilities.
 func (p *NodeAwarePreparer) toneMapCapabilitiesForNode(ctx context.Context, nodeURL string) (tonemap.Capabilities, error) {
 	nodeURL = strings.TrimRight(nodeURL, "/")
-	now := time.Now()
+	if capabilities, err, ok := p.cachedToneMapCapabilitiesForNode(nodeURL, time.Now()); ok {
+		return capabilities, err
+	}
+	// Keep the shared probe alive when one waiter disconnects; fetch applies
+	// the node-specific probe timeout, while each caller may stop waiting below.
+	sharedCtx := context.WithoutCancel(ctx)
+	resultCh := p.capabilityFlight.DoChan(nodeURL, func() (any, error) {
+		if capabilities, err, ok := p.cachedToneMapCapabilitiesForNode(nodeURL, time.Now()); ok {
+			return capabilities, err
+		}
+		return p.fetchToneMapCapabilitiesForNode(sharedCtx, nodeURL)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		capabilities, ok := result.Val.(tonemap.Capabilities)
+		if !ok {
+			return nil, errors.New("invalid shared transcode-node capability result")
+		}
+		return append(tonemap.Capabilities(nil), capabilities...), nil
+	}
+}
+
+func (p *NodeAwarePreparer) cachedToneMapCapabilitiesForNode(nodeURL string, now time.Time) (tonemap.Capabilities, error, bool) {
 	p.capabilityMu.Lock()
 	entry, ok := p.capabilities[nodeURL]
 	p.capabilityMu.Unlock()
-	if ok && now.Before(entry.expiresAt) {
-		return append(tonemap.Capabilities(nil), entry.capabilities...), entry.err
+	if !ok || !now.Before(entry.expiresAt) {
+		return nil, nil, false
 	}
+	return append(tonemap.Capabilities(nil), entry.capabilities...), entry.err, true
+}
+
+func (p *NodeAwarePreparer) fetchToneMapCapabilitiesForNode(ctx context.Context, nodeURL string) (tonemap.Capabilities, error) {
 	cfg := p.config()
 	if cfg == nil || strings.TrimSpace(cfg.Auth.JWTSecret) == "" {
 		err := errors.New("transcode node credentials unavailable")
@@ -295,33 +329,17 @@ func (p *NodeAwarePreparer) toneMapCapabilitiesForNode(ctx context.Context, node
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, p.remoteToneMapProbeTimeout(nodeURL))
 	defer cancel()
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, nodeURL+"/hw-capabilities", nil)
+	info, status, err := transcodenode.FetchHWCapabilities(requestCtx, p.probeClient, nodeURL, cfg.Auth.JWTSecret)
 	if err != nil {
 		p.cacheToneMapCapabilityFailure(nodeURL, err)
 		return nil, err
 	}
-	request.Header.Set("Authorization", "Bearer "+cfg.Auth.JWTSecret)
-	client := p.probeClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	response, err := client.Do(request)
-	if err != nil {
+	if status != http.StatusOK {
+		err := fmt.Errorf("transcode node returned %d", status)
 		p.cacheToneMapCapabilityFailure(nodeURL, err)
 		return nil, err
 	}
-	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode != http.StatusOK {
-		err := fmt.Errorf("transcode node returned %d", response.StatusCode)
-		p.cacheToneMapCapabilityFailure(nodeURL, err)
-		return nil, err
-	}
-	var info playback.HWAccelInfo
-	if err := json.NewDecoder(response.Body).Decode(&info); err != nil {
-		p.cacheToneMapCapabilityFailure(nodeURL, err)
-		return nil, err
-	}
-	entry = remoteToneMapCapabilities{
+	entry := remoteToneMapCapabilities{
 		capabilities:        append(tonemap.Capabilities(nil), info.ToneMapCapabilities...),
 		expiresAt:           time.Now().Add(remoteToneMapCapabilityTTL),
 		probeRequestTimeout: normalizeRemoteToneMapProbeTimeout(info.ProbeRequestTimeoutMillis),

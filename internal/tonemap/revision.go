@@ -3,6 +3,7 @@ package tonemap
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -107,8 +108,10 @@ func DecodeSourceRevision(value string) (SourceRevision, error) {
 }
 
 // ValidatePath rejects a frozen recipe when the source bytes visible to the
-// executor no longer match the scanner revision. FileHash is catalog-owned and
-// participates in cache identity; size and mtime are rechecked on the node.
+// executor no longer match the scanner revision. Current scanner hashes use the
+// 16-character OpenSubtitles format and are rechecked with size and mtime; older
+// catalog values still receive the filesystem checks they had before hashes were
+// validated at execution time.
 func (r SourceRevision) ValidatePath(path string) error {
 	if r.IsZero() {
 		return nil
@@ -126,7 +129,50 @@ func (r SourceRevision) ValidatePath(path string) error {
 	if r.FileModifiedUnixNano > 0 && normalizeRevisionTime(info.ModTime()).UnixNano() != r.FileModifiedUnixNano {
 		return fmt.Errorf("tone-map source revision changed")
 	}
+	if isOpenSubtitlesHash(r.FileHash) {
+		currentHash, err := computeOpenSubtitlesHash(path, info.Size())
+		if err != nil {
+			return fmt.Errorf("hash tone-map source: %w", err)
+		}
+		if !strings.EqualFold(currentHash, strings.TrimSpace(r.FileHash)) {
+			return fmt.Errorf("tone-map source revision changed")
+		}
+	}
 	return nil
+}
+
+const openSubtitlesHashBlockSize = 64 * 1024
+
+func isOpenSubtitlesHash(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 16 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func computeOpenSubtitlesHash(path string, size int64) (string, error) {
+	if size < 2*openSubtitlesHashBlockSize {
+		return "", fmt.Errorf("file is too small for OpenSubtitles hash")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = file.Close() }()
+
+	hash := uint64(size)
+	buffer := make([]byte, openSubtitlesHashBlockSize)
+	for _, offset := range []int64{0, size - openSubtitlesHashBlockSize} {
+		if _, err := file.ReadAt(buffer, offset); err != nil {
+			return "", err
+		}
+		for i := 0; i < len(buffer); i += 8 {
+			hash += binary.LittleEndian.Uint64(buffer[i : i+8])
+		}
+	}
+	return fmt.Sprintf("%016x", hash), nil
 }
 
 // normalizeRevisionTime matches the database's microsecond timestamp precision

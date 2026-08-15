@@ -436,17 +436,38 @@ func (s *Service) createArtifactDownload(ctx context.Context, userID int, req Cr
 		return s.reuseOrReplaceManaged(ctx, existing, replacement)
 	}
 
+	resolvedTarget := decision.PrepareTarget
+	toneMapPreResolved := preparedTargetRequiresToneMap(file, resolvedTarget)
+	if toneMapPreResolved {
+		// A quick, non-authoritative quota check avoids expensive capability work
+		// for requests that are already over quota. The check is repeated under the
+		// advisory lock below to retain the concurrency guarantee.
+		if err := s.limiter.Check(ctx, userID, 1); err != nil {
+			return nil, err
+		}
+		var err error
+		resolvedTarget, err = s.artifacts.resolveToneMapTarget(ctx, file, resolvedTarget)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// New row: the quota lock serializes check + insert across concurrent
-	// creates so they cannot all observe free quota before any row exists. The
-	// limiter must still pass BEFORE artifacts.Ensure — a rejected request must
-	// not leave an encode job behind (the worker would run it even though the
-	// caller saw 429) — so the lock spans Ensure too.
+	// creates so they cannot all observe free quota before any row exists.
+	// Capability discovery is complete, but the lock still spans artifact row
+	// creation so a rejected request cannot leave an encode job behind.
 	var d *Download
 	err := s.repo.WithUserQuotaLock(ctx, userID, func(ctx context.Context) error {
 		if err := s.limiter.Check(ctx, userID, 1); err != nil {
 			return err
 		}
-		artifact, err := s.artifacts.Ensure(ctx, file, decision.DeliveryFormat, decision.PrepareTarget)
+		var artifact *Artifact
+		var err error
+		if toneMapPreResolved {
+			artifact, err = s.artifacts.ensureResolved(ctx, file, decision.DeliveryFormat, resolvedTarget)
+		} else {
+			artifact, err = s.artifacts.Ensure(ctx, file, decision.DeliveryFormat, resolvedTarget)
+		}
 		if err != nil {
 			return err
 		}

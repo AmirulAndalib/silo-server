@@ -354,6 +354,29 @@ func TestReservationsExpire(t *testing.T) {
 	}
 }
 
+func TestTranscodeWorkAvailableIgnoresExpiredReservations(t *testing.T) {
+	capped := transcodeNode(2, "http://tc-1", nil, 0)
+	capped.MaxJobs = intPtr(1)
+	f := newFixture(
+		[]*Node{proxyNode(1, "http://proxy-1", nil)},
+		[]*Node{capped},
+	)
+
+	if f.planner.PlanSession("s1", "", true, 0).TranscodeNode == nil {
+		t.Fatal("first session should be admitted")
+	}
+	if f.planner.TranscodeWorkAvailableWith(nil) {
+		t.Fatal("fresh reservation should consume the only transcode slot")
+	}
+
+	// Availability checks are intentionally read-only, but expired reservations
+	// must not consume capacity while waiting for a later placement to prune them.
+	f.now = f.now.Add(maxReservationAge + time.Second)
+	if !f.planner.TranscodeWorkAvailableWith(nil) {
+		t.Fatal("expired reservation should not consume transcode capacity")
+	}
+}
+
 func TestDirectPlayIgnoresGroups(t *testing.T) {
 	f := newFixture(
 		[]*Node{proxyNode(1, "http://proxy-a", strPtr("rack-a"))},

@@ -1155,6 +1155,7 @@ Errors use a flat envelope:
 | 500  | `internal_error`           | Unexpected server error.                                                  |
 | 501  | `quality_unavailable`      | Tone mapping is disabled, its selected mode is disallowed by policy, or enabled executor capabilities cannot support the requested quality. These configuration and policy failures use HTTP 501, distinct from capability-detection failures. |
 | 501  | `bulk_quality_unavailable` | Series/season batch requested a non-original quality.                     |
+| 503  | `capability_unavailable`   | Executor capability discovery failed temporarily; retry the same request. |
 | 501  | `format_unavailable`       | Legacy/internal non-original direct download or missing prepare pipeline. |
 | 503  | `capacity_unavailable`     | Compatible download-preparation executors are currently saturated.        |
 | 503  | `unavailable`              | Downloads/offline assets/series monitoring service missing.               |

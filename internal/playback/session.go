@@ -674,6 +674,41 @@ func (m *SessionManager) RegisterReconstructedWithLimits(ctx context.Context, s 
 	return s, nil
 }
 
+// RollbackReconstructedToneMap removes a failed tone-map reconstruction only
+// while expected is still the exact session registered by that attempt. A
+// concurrently started or reconstructed successor under the same ID is left
+// untouched.
+func (m *SessionManager) RollbackReconstructedToneMap(expected *Session) bool {
+	if expected == nil || expected.ID == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sessions[expected.ID] != expected {
+		return false
+	}
+	delete(m.sessions, expected.ID)
+	return true
+}
+
+// ConfirmReconstructedToneMap publishes the executor selected by a successful
+// runtime reconstruction only while expected still owns the session ID. It
+// returns the current session so callers yield to a concurrent legitimate
+// successor instead of overwriting it with stale execution facts.
+func (m *SessionManager) ConfirmReconstructedToneMap(expected *Session, mode tonemap.Mode) *Session {
+	if expected == nil || expected.ID == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current := m.sessions[expected.ID]
+	if current == expected {
+		current.ToneMapMode = mode
+		m.touchSessionLocked(current)
+	}
+	return current
+}
+
 func (m *SessionManager) limitsForUser(ctx context.Context, userID int) (SessionLimits, error) {
 	m.mu.RLock()
 	provider := m.limitProvider

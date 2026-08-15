@@ -17,6 +17,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/downloadprepare"
+	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -119,6 +120,55 @@ func newTestServer(t *testing.T) *Server {
 		transcodeDir: cfg.Playback.TranscodeDir,
 		artifactRoot: filepath.Join(cfg.Playback.TranscodeDir, downloadprepare.ArtifactDirectoryName),
 		sessions:     make(map[string]*playback.TranscodeSession),
+	}
+}
+
+func TestRestartSessionLockedRejectsChangedToneMapSourceWithoutStoppingLiveSession(t *testing.T) {
+	server := newTestServer(t)
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "movie.mkv")
+	if err := os.WriteFile(inputPath, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(inputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modified := info.ModTime()
+	ffmpegPath := filepath.Join(dir, "ffmpeg")
+	if err := os.WriteFile(ffmpegPath, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "tone-map-restart"
+	session, err := playback.StartTranscode(context.Background(), playback.TranscodeOpts{
+		SessionID:             sessionID,
+		InputPath:             inputPath,
+		OutputDir:             filepath.Join(dir, "output"),
+		TargetCodecVideo:      "h264",
+		TargetCodecAudio:      "aac",
+		SegmentDuration:       2,
+		FFmpegPath:            ffmpegPath,
+		ToneMapPolicy:         tonemap.PolicySoftwareOnly,
+		ToneMapMode:           tonemap.ModeSoftware,
+		ToneMapSourceKind:     tonemap.SourcePQ,
+		ToneMapFilter:         tonemap.SoftwareFilterBT2390,
+		ToneMapRecipeVersion:  playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapSourceRevision: tonemap.RevisionForFile(&models.MediaFile{ID: 42, FileSize: info.Size(), FileModifiedAt: &modified}),
+	})
+	if err != nil {
+		t.Fatalf("StartTranscode() error = %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	server.sessions[sessionID] = session
+
+	if err := os.WriteFile(inputPath, []byte("replacement bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.restartSessionLocked(context.Background(), sessionID, session, 20, 10); err == nil {
+		t.Fatal("restartSessionLocked() accepted replacement source bytes")
+	}
+	if !session.IsRunning() {
+		t.Fatal("failed restart validation stopped the live transcode session")
 	}
 }
 

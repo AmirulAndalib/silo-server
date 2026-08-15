@@ -37,10 +37,12 @@ type RecipeCard struct {
 
 	// Client metadata mirrored from the session so admin views (client label,
 	// Jellyfin pill) survive reconstruction. Carried only by stored cards —
-	// deliberately NOT projected into stream-token claims, where a user agent
+	// deliberately NOT projected into stream-token claims, where client metadata
 	// would bloat every stream URL.
 	ClientName       string `json:"client_name,omitempty"`
 	ClientVersion    string `json:"client_version,omitempty"`
+	ClientBuild      string `json:"client_build,omitempty"`
+	ClientChannel    string `json:"client_channel,omitempty"`
 	ClientUserAgent  string `json:"client_user_agent,omitempty"`
 	IsJellyfinCompat bool   `json:"is_jellyfin_compat,omitempty"`
 

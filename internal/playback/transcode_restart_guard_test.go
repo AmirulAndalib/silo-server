@@ -2,9 +2,13 @@ package playback
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 // TestSegmentRecoveryDecisionWaitsWhileRestarting covers half of issue #243's
@@ -71,6 +75,53 @@ func TestRestartInvokesRestartHook(t *testing.T) {
 	case <-hookFired:
 	case <-time.After(2 * time.Second):
 		t.Fatal("restart hook was not invoked after successful restart")
+	}
+}
+
+func TestRestartRejectsChangedToneMapSourceBeforeStoppingCurrentProcess(t *testing.T) {
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		t.Skipf("`true` not found in PATH: %v", err)
+	}
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "movie.mkv")
+	if err := os.WriteFile(inputPath, []byte("replacement"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	close(done)
+	canceled := false
+	session := &TranscodeSession{
+		cancel:    func() { canceled = true },
+		done:      done,
+		running:   true,
+		outputDir: dir,
+		opts: TranscodeOpts{
+			InputPath:             inputPath,
+			OutputDir:             dir,
+			TargetCodecVideo:      "h264",
+			SegmentDuration:       2,
+			FFmpegPath:            truePath,
+			ToneMapMode:           tonemap.ModeSoftware,
+			ToneMapSourceKind:     tonemap.SourcePQ,
+			ToneMapFilter:         tonemap.SoftwareFilterBT2390,
+			ToneMapRecipeVersion:  TransformationHDRToSDRToneMapRecipeVersionV3,
+			ToneMapSourceRevision: tonemap.SourceRevision{FileSize: 1},
+		},
+	}
+
+	if err := session.Restart(context.Background(), 20, 10); err == nil {
+		t.Fatal("Restart() accepted a changed tone-map source")
+	}
+	if canceled {
+		t.Fatal("Restart() stopped the current process before validating the frozen source")
+	}
+	session.mu.Lock()
+	restarting := session.restarting
+	restartCount := session.restartCount
+	session.mu.Unlock()
+	if restarting || restartCount != 0 {
+		t.Fatalf("failed validation left restarting=%v restartCount=%d, want false/0", restarting, restartCount)
 	}
 }
 

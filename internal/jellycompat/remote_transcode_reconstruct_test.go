@@ -3,6 +3,7 @@ package jellycompat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,15 +23,38 @@ import (
 // store (*noderecipe.Store) so the round-trip tests can assert what central
 // wrote and let the "node" read it back without Redis.
 type stubRecipeNodeStore struct {
-	cards map[string]playback.RecipeCard
+	cards  map[string]playback.RecipeCard
+	putErr error
 }
 
 func (s *stubRecipeNodeStore) Put(_ context.Context, sessionID string, card playback.RecipeCard) error {
+	if s.putErr != nil {
+		return s.putErr
+	}
 	if s.cards == nil {
 		s.cards = make(map[string]playback.RecipeCard)
 	}
 	s.cards[sessionID] = card
 	return nil
+}
+
+func TestStartRemoteTranscodeRequiresDurableNodeRecipe(t *testing.T) {
+	recipeStore := &stubRecipeNodeStore{putErr: context.DeadlineExceeded}
+	node := fakeTranscodeNode(t, nil)
+	handler, _, playbackStore := newRemoteTranscodeHandler(t, node.URL, recipeStore)
+	playbackStore.Put(PlaybackSession{ID: "play-1", UpstreamSessionID: "upstream-1"})
+
+	err := handler.startRemoteTranscode(context.Background(), "play-1", "upstream-1", testRemoteTranscodeSource(), &models.MediaFile{ID: 42, FilePath: "/media/movie.mkv"}, 0, node.URL)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("startRemoteTranscode() error = %v, want recipe-store deadline", err)
+	}
+	stored, ok := playbackStore.Get("play-1")
+	if !ok {
+		t.Fatal("playback session missing")
+	}
+	if stored.TranscodeStarted || stored.Recipe != nil {
+		t.Fatalf("failed durable commit published transcode state: %+v", stored)
+	}
 }
 
 func (s *stubRecipeNodeStore) Get(sessionID string) (playback.RecipeCard, bool) {

@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -74,22 +73,12 @@ func (h *PlaybackHandler) remotePlaybackTransportTimeout(nodeURL string, request
 }
 
 func fetchRemoteTranscodeCapabilities(ctx context.Context, nodeURL, jwtSecret string) (playback.HWAccelInfo, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(nodeURL, "/")+"/hw-capabilities", nil)
+	info, status, err := transcodenode.FetchHWCapabilities(ctx, http.DefaultClient, nodeURL, jwtSecret)
 	if err != nil {
 		return playback.HWAccelInfo{}, err
 	}
-	request.Header.Set("Authorization", "Bearer "+jwtSecret)
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return playback.HWAccelInfo{}, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return playback.HWAccelInfo{}, fmt.Errorf("node returned %d", response.StatusCode)
-	}
-	var info playback.HWAccelInfo
-	if err := json.NewDecoder(response.Body).Decode(&info); err != nil {
-		return playback.HWAccelInfo{}, err
+	if status != http.StatusOK {
+		return playback.HWAccelInfo{}, fmt.Errorf("node returned %d", status)
 	}
 	info.Source = "transcode_node"
 	info.NodeURL = nodeURL

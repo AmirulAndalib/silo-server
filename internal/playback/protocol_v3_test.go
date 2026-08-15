@@ -203,6 +203,72 @@ func TestReplanRequestV3OperationDefaultsAndValidates(t *testing.T) {
 	}
 }
 
+func TestReplanRequestV3ValidationRetainsClientBuildChannelNormalization(t *testing.T) {
+	start := validStartRequestV3()
+	request := ReplanRequestV3{
+		ProtocolVersion:       ProtocolV3,
+		PlaybackAttemptID:     start.PlaybackAttemptID,
+		ReplanRequestID:       "replan-client-metadata-0001",
+		FailedPlanID:          "plan:client-metadata-0001",
+		PlanAttemptID:         "plan-attempt-client-metadata-0001",
+		PlanAttemptKey:        "v3:0000000000000001",
+		AttemptCount:          1,
+		QualityPreference:     start.QualityPreference,
+		Failure:               FailureV3{Classification: "parser_failure"},
+		Capabilities:          start.Capabilities,
+		ClientPlaybackContext: start.ClientPlaybackContext,
+	}
+	request.ClientPlaybackContext.AppBuild = strings.Repeat("build", 20) + "\x00ignored"
+	request.ClientPlaybackContext.AppChannel = strings.Repeat("channel", 10) + "\x00ignored"
+
+	if err := request.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if got, want := request.ClientPlaybackContext.AppBuild, normalizeClientMetadataValue(strings.Repeat("build", 20)+"\x00ignored", 64); got != want {
+		t.Fatalf("normalized app_build = %q, want %q", got, want)
+	}
+	if got, want := request.ClientPlaybackContext.AppChannel, normalizeClientMetadataValue(strings.Repeat("channel", 10)+"\x00ignored", 32); got != want {
+		t.Fatalf("normalized app_channel = %q, want %q", got, want)
+	}
+}
+
+func TestStartRequestV3NormalizesUnicodeAppVersionAndStripsControls(t *testing.T) {
+	request := validStartRequestV3()
+	request.ClientPlaybackContext.AppVersion = "\x00" + strings.Repeat("δ", 70) + "\nignored"
+
+	if _, err := request.NormalizeAndValidate(); err != nil {
+		t.Fatalf("NormalizeAndValidate() error = %v", err)
+	}
+	if got, want := request.ClientPlaybackContext.AppVersion, strings.Repeat("δ", 64); got != want {
+		t.Fatalf("normalized app_version = %q, want %q", got, want)
+	}
+}
+
+func TestReplanRequestV3NormalizesUnicodeAppVersionAndStripsControls(t *testing.T) {
+	start := validStartRequestV3()
+	request := ReplanRequestV3{
+		ProtocolVersion:       ProtocolV3,
+		PlaybackAttemptID:     start.PlaybackAttemptID,
+		ReplanRequestID:       "replan-client-version-0001",
+		FailedPlanID:          "plan:client-version-0001",
+		PlanAttemptID:         "plan-attempt-client-version-0001",
+		PlanAttemptKey:        "v3:0000000000000001",
+		AttemptCount:          1,
+		QualityPreference:     start.QualityPreference,
+		Failure:               FailureV3{Classification: "parser_failure"},
+		Capabilities:          start.Capabilities,
+		ClientPlaybackContext: start.ClientPlaybackContext,
+	}
+	request.ClientPlaybackContext.AppVersion = "\x00" + strings.Repeat("δ", 70) + "\nignored"
+
+	if err := request.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if got, want := request.ClientPlaybackContext.AppVersion, strings.Repeat("δ", 64); got != want {
+		t.Fatalf("normalized app_version = %q, want %q", got, want)
+	}
+}
+
 func TestHDR10CapabilityLimitsBoundTheClaimedStreamClass(t *testing.T) {
 	width, height, frameRate, bitrate := 3840, 2160, 24.0, 80_000
 	plan := PlanV3{EffectiveRecipe: EffectiveRecipeV3{

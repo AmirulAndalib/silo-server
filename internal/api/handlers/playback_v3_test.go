@@ -35,6 +35,7 @@ type mutablePlaybackSettingsV3 struct {
 	mu       sync.Mutex
 	values   map[string]string
 	getCalls map[string]int
+	err      error
 }
 
 type failingAudioPreferenceStoreV3 struct {
@@ -286,7 +287,18 @@ func (s *mutablePlaybackSettingsV3) Get(_ context.Context, key string) (string, 
 	if s.getCalls != nil {
 		s.getCalls[key]++
 	}
+	if s.err != nil {
+		return "", s.err
+	}
 	return s.values[key], nil
+}
+
+func TestPlannerSettingsV3ResultPreservesStoreFailure(t *testing.T) {
+	handler := &PlaybackHandler{SettingsRepo: &mutablePlaybackSettingsV3{err: context.DeadlineExceeded}}
+	_, err := handler.plannerSettingsV3Result(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("plannerSettingsV3Result() error = %v, want context deadline", err)
+	}
 }
 
 // A build that predates the neutral contract cannot interpret a plan, so the
@@ -742,6 +754,8 @@ func TestHandleReplanPlaybackV3UpdatesSelectedAudioAndReplaysIdempotently(t *tes
 	bandwidthCap := 4_000
 	failedKey := playback.PlanAttemptKeyV3(*started.PlaybackPlan, startRequest.ClientPlaybackContext.Output.OutputContextID, nil)
 	replan := playback.ReplanRequestV3{ProtocolVersion: playback.ProtocolV3, PlaybackAttemptID: startRequest.PlaybackAttemptID, ReplanRequestID: "replan-0001", FailedPlanID: started.PlaybackPlan.PlanID, PlanAttemptID: "plan-attempt-0001", PlanAttemptKey: failedKey, AttemptedPlanKeys: []string{failedKey}, AttemptCount: 1, QualityPreference: "original", PositionSeconds: 12, Metered: true, BandwidthEstimateKbps: &bandwidthEstimate, BandwidthCapKbps: &bandwidthCap, SelectedTracks: playback.SelectedTracksV3{Audio: &playback.TrackIdentityV3{ID: playback.TrackIDV3(file.ID, "audio", audioIndex), Index: &audioIndex}}, Failure: playback.FailureV3{Classification: "audio_renderer_error"}, Capabilities: startRequest.Capabilities, ClientPlaybackContext: startRequest.ClientPlaybackContext}
+	replan.ClientPlaybackContext.AppBuild = "nightly\x00secret"
+	replan.ClientPlaybackContext.AppChannel = "beta\x00secret"
 	replanBody, err := json.Marshal(replan)
 	if err != nil {
 		t.Fatal(err)
@@ -783,6 +797,12 @@ func TestHandleReplanPlaybackV3UpdatesSelectedAudioAndReplaysIdempotently(t *tes
 	}
 	if !playback.HasFeatureV3(record.NormalizedRequest.ClientFeatures, playback.FeatureClientVideoTransforms) {
 		t.Fatalf("omitted replan client_features lost durable start features: %#v", record.NormalizedRequest.ClientFeatures)
+	}
+	if got := record.NormalizedRequest.ClientPlaybackContext.AppBuild; got != "nightlysecret" {
+		t.Fatalf("stored normalized app_build = %q, want %q", got, "nightlysecret")
+	}
+	if got := record.NormalizedRequest.ClientPlaybackContext.AppChannel; got != "betasecret" {
+		t.Fatalf("stored normalized app_channel = %q, want %q", got, "betasecret")
 	}
 	retryReq := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(startBody)).WithContext(newAuthorizedPlaybackContext())
 	retryRR := httptest.NewRecorder()

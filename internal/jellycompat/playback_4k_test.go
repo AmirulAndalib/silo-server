@@ -47,6 +47,14 @@ func TestAllow4KVideoTranscode(t *testing.T) {
 	}
 }
 
+func TestToneMapPolicyResultPreservesStoreFailure(t *testing.T) {
+	handler := &PlaybackHandler{SettingsRepo: stubSettingsReader{err: context.DeadlineExceeded}}
+	_, err := handler.toneMapPolicyResult(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("toneMapPolicyResult() error = %v, want context deadline", err)
+	}
+}
+
 func TestIs4KResolution(t *testing.T) {
 	for res, want := range map[string]bool{
 		"2160p": true,

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/buildinfo"
+	"github.com/Silo-Server/silo-server/internal/logredact"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 )
@@ -87,7 +88,7 @@ func (h *SystemHandler) HandleHWAccel(w http.ResponseWriter, r *http.Request) {
 		entry := NodeHWAccel{NodeURL: node.URL, NodeName: node.Name}
 		if errs[i] != nil {
 			slog.WarnContext(r.Context(), "hw-accel: node probe failed", "component", "api",
-				"node", node.URL, "error", errs[i])
+				"node", logredact.SanitizeURL(node.URL), "error", errs[i])
 			entry.Error = errs[i].Error()
 		} else {
 			entry.Resolved = infos[i].Resolved

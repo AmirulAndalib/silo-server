@@ -2339,9 +2339,19 @@ func (s *TranscodeSession) restart(
 		return nil
 	}
 	s.restarting = true
+	opts := s.opts
 	cancelCurrent := s.cancel
 	done := s.done
 	s.mu.Unlock()
+	// A tone-map recipe is valid only for the frozen source revision. Recheck it
+	// while the current process is still serving so replacement bytes can never
+	// displace a valid generation or inherit its cached preflight verdict.
+	if err := validateToneMapSource(ctx, opts); err != nil {
+		s.mu.Lock()
+		s.restarting = false
+		s.mu.Unlock()
+		return fmt.Errorf("validate tone-map source before restart: %w", err)
+	}
 	s.StopThrottler()
 
 	// Kill current process without removing output directory.
@@ -2359,7 +2369,6 @@ func (s *TranscodeSession) restart(
 		s.stderr.Reset()
 	}
 	s.restartCount++
-	opts := s.opts
 	reserveHWDevice := s.reserveHWDeviceOnRestart
 	s.mu.Unlock()
 

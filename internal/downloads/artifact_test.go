@@ -116,7 +116,23 @@ func TestBuildOptsWarnsWithoutLoggingInvalidSourceRevisionValue(t *testing.T) {
 	}
 }
 
-func TestResolveToneMapTargetPreservesDegradedHDRTranscodeWhenPolicyDisabled(t *testing.T) {
+func TestValidateArtifactToneMapRevisionRejectsCatalogProbeDrift(t *testing.T) {
+	file := hdrDownloadTestFile()
+	revision := tonemap.RevisionForFile(file)
+	artifact := &Artifact{ToneMapMode: tonemap.ModeSoftware, ToneMapSourceRevision: revision.Encode()}
+	if err := validateArtifactToneMapRevision(file, artifact); err != nil {
+		t.Fatalf("validateArtifactToneMapRevision(original) error = %v", err)
+	}
+
+	reprobed := *file
+	reprobed.VideoTracks = append([]models.VideoTrack(nil), file.VideoTracks...)
+	reprobed.VideoTracks[0].BitDepth++
+	if err := validateArtifactToneMapRevision(&reprobed, artifact); err == nil {
+		t.Fatal("validateArtifactToneMapRevision accepted changed probe metadata")
+	}
+}
+
+func TestResolveToneMapTargetRejectsHDRTranscodeWhenToneMapPolicyUnavailable(t *testing.T) {
 	file := hdrDownloadTestFile()
 	target := playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"}
 	for _, test := range []struct {
@@ -132,12 +148,9 @@ func TestResolveToneMapTargetPreservesDegradedHDRTranscodeWhenPolicyDisabled(t *
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			manager := &ArtifactManager{settings: test.settings}
-			got, err := manager.resolveToneMapTarget(context.Background(), file, target)
-			if err != nil {
-				t.Fatalf("resolveToneMapTarget() error = %v", err)
-			}
-			if got != target {
-				t.Fatalf("degraded target = %#v, want unchanged %#v", got, target)
+			_, err := manager.resolveToneMapTarget(context.Background(), file, target)
+			if !errors.Is(err, ErrQualityUnavailable) {
+				t.Fatalf("resolveToneMapTarget() error = %v, want ErrQualityUnavailable", err)
 			}
 		})
 	}
@@ -165,6 +178,15 @@ func TestResolveToneMapTargetFailsClosedForFourKWhenSettingsUnavailable(t *testi
 	_, err := manager.resolveToneMapTarget(context.Background(), file, playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"})
 	if !errors.Is(err, ErrQualityUnavailable) || !strings.Contains(err.Error(), "settings are unavailable") {
 		t.Fatalf("resolveToneMapTarget() error = %v, want unavailable-settings ErrQualityUnavailable", err)
+	}
+}
+
+func TestResolveToneMapTargetClassifiesSettingsReadFailureAsCapabilityUnavailable(t *testing.T) {
+	manager := &ArtifactManager{settings: failingDownloadSettings{err: context.DeadlineExceeded}}
+
+	_, err := manager.resolveToneMapTarget(context.Background(), hdrDownloadTestFile(), playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"})
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrCapabilityUnavailable) || errors.Is(err, ErrQualityUnavailable) {
+		t.Fatalf("resolveToneMapTarget() error = %v, want retryable settings capability failure", err)
 	}
 }
 
@@ -203,7 +225,7 @@ func TestResolveToneMapTargetAppliesFourKRestrictionBeforeDynamicRangeHandling(t
 	}
 }
 
-func TestResolveToneMapTargetPreservesUnclassifiableHDRWhenPolicyDisabled(t *testing.T) {
+func TestResolveToneMapTargetRejectsUnclassifiableHDRWhenPolicyDisabled(t *testing.T) {
 	manager := &ArtifactManager{settings: staticDownloadSettings{
 		config.Allow4KTranscodeSettingKey:                 "true",
 		config.PlaybackTranscodeHardwareToneMapSettingKey: "false",
@@ -213,12 +235,9 @@ func TestResolveToneMapTargetPreservesUnclassifiableHDRWhenPolicyDisabled(t *tes
 		Codec: "hevc", DolbyVision: "Profile 5", DVProfile: 5, VideoRange: "DolbyVision",
 	}}}
 	target := playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"}
-	got, err := manager.resolveToneMapTarget(context.Background(), file, target)
-	if err != nil {
-		t.Fatalf("resolveToneMapTarget() error = %v", err)
-	}
-	if got != target {
-		t.Fatalf("degraded target = %#v, want unchanged %#v", got, target)
+	_, err := manager.resolveToneMapTarget(context.Background(), file, target)
+	if !errors.Is(err, ErrQualityUnavailable) {
+		t.Fatalf("resolveToneMapTarget() error = %v, want ErrQualityUnavailable", err)
 	}
 }
 
@@ -358,8 +377,8 @@ func TestResolveToneMapTargetKeepsPermanentCapabilityAndPartialInventoryOutcomes
 			},
 		}
 		_, err := manager.resolveToneMapTarget(context.Background(), hdrDownloadTestFile(), playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"})
-		if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrCapacityUnavailable) || errors.Is(err, ErrQualityUnavailable) {
-			t.Fatalf("resolveToneMapTarget() error = %v, want partial inventory error", err)
+		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrCapabilityUnavailable) || errors.Is(err, ErrCapacityUnavailable) || errors.Is(err, ErrQualityUnavailable) {
+			t.Fatalf("resolveToneMapTarget() error = %v, want retryable capability error", err)
 		}
 	})
 }

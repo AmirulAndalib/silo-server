@@ -145,6 +145,8 @@ func TestRecipeCardClientMetadataStoredNotInClaims(t *testing.T) {
 	card := NewRecipeCard(1, "p", 2, "", TranscodeOpts{SessionID: "t"})
 	card.ClientName = "Findroid"
 	card.ClientVersion = "0.15"
+	card.ClientBuild = "20260814"
+	card.ClientChannel = "beta"
 	card.ClientUserAgent = "Findroid/0.15"
 
 	encoded, err := json.Marshal(card)
@@ -155,13 +157,13 @@ func TestRecipeCardClientMetadataStoredNotInClaims(t *testing.T) {
 	if err := json.Unmarshal(encoded, &back); err != nil {
 		t.Fatalf("unmarshal card: %v", err)
 	}
-	if back.ClientName != "Findroid" || back.ClientVersion != "0.15" || back.ClientUserAgent != "Findroid/0.15" {
+	if back.ClientName != "Findroid" || back.ClientVersion != "0.15" || back.ClientBuild != "20260814" || back.ClientChannel != "beta" || back.ClientUserAgent != "Findroid/0.15" {
 		t.Fatalf("client metadata lost in stored-card round trip: %+v", back)
 	}
 
 	claims := card.ToClaims()
 	fromClaims := RecipeCardFromClaims(&claims)
-	if fromClaims.ClientName != "" || fromClaims.ClientUserAgent != "" {
+	if fromClaims.ClientName != "" || fromClaims.ClientVersion != "" || fromClaims.ClientBuild != "" || fromClaims.ClientChannel != "" || fromClaims.ClientUserAgent != "" {
 		t.Fatalf("client metadata must not travel via token claims: %+v", fromClaims)
 	}
 }
@@ -173,15 +175,17 @@ func TestReconstructSessionRestoresClientMetadata(t *testing.T) {
 	tm.Sessions = NewSessionManager(0, 0)
 
 	card := NewRecipeCard(42, "profile-1", 77, "", TranscodeOpts{SessionID: "sess-jf", InputPath: "/media/movie.mkv", HWAccel: "qsv", ToneMapMode: tonemap.ModeHardware})
-	card.ClientName = "Findroid"
-	card.ClientVersion = "0.15"
-	card.ClientUserAgent = "Findroid/0.15 (Android)"
+	card.ClientName = "  Findroid  "
+	card.ClientVersion = "  0.15  "
+	card.ClientBuild = "  20260814\x00  "
+	card.ClientChannel = "  beta\t  "
+	card.ClientUserAgent = "  Findroid/0.15 (Android)  "
 
 	session := tm.ReconstructSession(t.Context(), "sess-jf", 42, card)
 	if session == nil {
 		t.Fatal("reconstruct returned nil")
 	}
-	if session.ClientName != "Findroid" || session.ClientVersion != "0.15" || session.ClientUserAgent != "Findroid/0.15 (Android)" {
+	if session.ClientName != "Findroid" || session.ClientVersion != "0.15" || session.ClientBuild != "20260814" || session.ClientChannel != "beta" || session.ClientUserAgent != "Findroid/0.15 (Android)" {
 		t.Fatalf("client metadata not restored: %+v", session)
 	}
 	if !session.TranscodeAudio {
