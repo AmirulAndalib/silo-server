@@ -310,6 +310,18 @@ func (s *Server) relayDownloadArtifact(w http.ResponseWriter, r *http.Request, c
 		http.Error(w, "download unavailable", http.StatusBadGateway)
 		return
 	}
+	if claims.DownloadExecutionFingerprint != "" {
+		attestation, attestationErr := downloadprepare.ResultFromHeaders(resp.Header)
+		if attestationErr != nil || attestation.ExecutionFingerprint != claims.DownloadExecutionFingerprint || attestation.FileSize != claims.DownloadArtifactSize {
+			if s.artifactMissReporter != nil && strings.TrimSpace(claims.DownloadArtifactRowID) != "" {
+				reportCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+				_ = s.artifactMissReporter.ReportRemoteArtifactMissing(reportCtx, claims.DownloadArtifactRowID, claims.TranscodeNode, claims.DownloadArtifactID)
+				cancel()
+			}
+			http.Error(w, "download unavailable", http.StatusBadGateway)
+			return
+		}
+	}
 	downloadprepare.CopyResponseHeaders(w.Header(), resp.Header)
 	if filename := filepath.Base(strings.TrimSpace(claims.DownloadFilename)); filename != "" && filename != "." {
 		if disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filename}); disposition != "" {

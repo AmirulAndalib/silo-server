@@ -26,19 +26,20 @@ const (
 // SourcePreflightRequest freezes the source, executor, and environment facts
 // required to validate an ambiguous HDR base signal before output is published.
 type SourcePreflightRequest struct {
-	FFmpegPath        string
-	FFprobePath       string
-	InputPath         string
-	DurationSeconds   float64
-	SourceBitDepth    int
-	Mode              Mode
-	Backend           string
-	Filter            string
-	Kind              SourceKind
-	RecipeVersion     string
-	HardwareDevice    string
-	DriverFingerprint string
-	SourceRevision    SourceRevision
+	FFmpegPath          string
+	FFprobePath         string
+	InputPath           string
+	DurationSeconds     float64
+	SourceBitDepth      int
+	SoftwareVideoDecode bool
+	Mode                Mode
+	Backend             string
+	Filter              string
+	Kind                SourceKind
+	RecipeVersion       string
+	HardwareDevice      string
+	DriverFingerprint   string
+	SourceRevision      SourceRevision
 }
 
 // sourcePreflightCacheEntry stores a permanent success or a short-lived failure
@@ -218,6 +219,7 @@ func sourcePreflightKey(ctx context.Context, request SourcePreflightRequest, run
 		strings.TrimSpace(request.HardwareDevice),
 		driver,
 		string(request.Mode), string(request.Kind), request.Filter, request.RecipeVersion,
+		strconv.FormatBool(request.SoftwareVideoDecode),
 	}, "\x00")
 	return request.SourceRevision.Fingerprint() + "\x00" + hashRevisionValue(executor), true
 }
@@ -427,12 +429,18 @@ func sourceConversionPreflightArgs(request SourcePreflightRequest, position floa
 			if device == "" {
 				device = defaultDRIRenderDevice
 			}
-			args = append(args, "-init_hw_device", qsvVAAPIInitDevice(device), "-init_hw_device", "qsv=qs@va", "-filter_hw_device", "va", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi")
+			args = append(args, "-init_hw_device", qsvVAAPIInitDevice(device), "-init_hw_device", "qsv=qs@va", "-filter_hw_device", "va")
+			if !request.SoftwareVideoDecode {
+				args = append(args, "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi")
+			}
 		case BackendVAAPI:
 			if device == "" {
 				device = defaultDRIRenderDevice
 			}
-			args = append(args, "-init_hw_device", "vaapi=va:"+device, "-filter_hw_device", "va", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi")
+			args = append(args, "-init_hw_device", "vaapi=va:"+device, "-filter_hw_device", "va")
+			if !request.SoftwareVideoDecode {
+				args = append(args, "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi")
+			}
 		case BackendNVENC:
 			if device == "" {
 				device = "0"
@@ -468,6 +476,9 @@ func sourceConversionPreflightFilter(request SourcePreflightRequest) string {
 		return SourceParameters(request.Kind) + "," + CUDAFilter() + "," + HDRMetadataRemovalFilter()
 	}
 	filter := VAAPIFilter(request.Kind)
+	if request.SoftwareVideoDecode && (request.Backend == BackendQSV || request.Backend == BackendVAAPI) {
+		filter = "format=nv12,hwupload," + filter
+	}
 	if request.Backend == BackendQSV {
 		filter += "," + QSVInteropFilter()
 	}

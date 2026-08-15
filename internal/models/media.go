@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -294,8 +295,12 @@ type VideoTrack struct {
 	DVProfile           int    `json:"dv_profile,omitempty"`
 	DVLevel             int    `json:"dv_level,omitempty"`
 	DVBLCompatID        int    `json:"dv_bl_compat_id,omitempty"`
-	DVConfigPresent     bool   `json:"dv_config_present,omitempty"`
-	DVBLCompatIDPresent bool   `json:"dv_bl_compat_id_present,omitempty"`
+	DVConfigPresent     bool   `json:"dv_config_present"`
+	DVBLCompatIDPresent bool   `json:"dv_bl_compat_id_present"`
+	// DVProvenanceCurrent records whether stored JSON explicitly carried both
+	// provenance booleans. Nil denotes an in-memory track that has not crossed
+	// the storage boundary; false identifies legacy rows written by old nodes.
+	DVProvenanceCurrent *bool  `json:"-"`
 	DVBLPresent         bool   `json:"dv_bl_present,omitempty"`
 	DVRPUPresent        bool   `json:"dv_rpu_present,omitempty"`
 	DVELPresent         bool   `json:"dv_el_present,omitempty"`
@@ -332,6 +337,25 @@ type VideoTrack struct {
 	// safety scan cannot establish that video stream-copy is safe. It is
 	// runtime-only so transient scan failures are retried on a later request.
 	VideoCopyUnsafe bool `json:"-"`
+}
+
+// UnmarshalJSON preserves raw-key presence so rolling older scanners cannot
+// make a legacy Dolby Vision probe look current merely by retaining a non-NULL
+// probe timestamp.
+func (v *VideoTrack) UnmarshalJSON(data []byte) error {
+	type videoTrackAlias VideoTrack
+	var decoded videoTrackAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	current := raw["dv_config_present"] != nil && raw["dv_bl_compat_id_present"] != nil
+	*v = VideoTrack(decoded)
+	v.DVProvenanceCurrent = &current
+	return nil
 }
 
 // AudioTrack represents a probed audio stream stored as JSONB.

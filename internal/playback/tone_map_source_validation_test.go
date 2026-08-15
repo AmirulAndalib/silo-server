@@ -64,9 +64,13 @@ func TestReconstructTranscodeRejectsLivePrimaryVideoMismatchBeforeFFmpeg(t *test
 	}
 	card := NewRecipeCard(7, "profile-1", opts.ToneMapSourceRevision.MediaFileID, "", opts)
 
-	if session := manager.ReconstructTranscode(context.Background(), opts.SessionID, -1, card); session != nil {
+	session, reconstructErr := manager.ReconstructTranscodeWithError(context.Background(), opts.SessionID, -1, card)
+	if session != nil {
 		_ = session.Close()
 		t.Fatal("ReconstructTranscode() started a stale tone-map recipe")
+	}
+	if !errors.Is(reconstructErr, tonemap.ErrSourceRevisionChanged) {
+		t.Fatalf("ReconstructTranscodeWithError() error = %v, want ErrSourceRevisionChanged", reconstructErr)
 	}
 	if _, statErr := os.Stat(ffmpegMarker); !os.IsNotExist(statErr) {
 		t.Fatalf("reconstructed FFmpeg ran before live source rejection: %v", statErr)
@@ -94,6 +98,20 @@ func TestStartTranscodeClassifiesLiveProbeTimeoutAsTransientBeforeFFmpeg(t *test
 	}
 	if _, statErr := os.Stat(ffmpegMarker); !os.IsNotExist(statErr) {
 		t.Fatalf("FFmpeg ran after live probe timeout: %v", statErr)
+	}
+}
+
+func TestToneMapPathHashFailureIsTransient(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "short-source.mkv")
+	if err := os.WriteFile(path, []byte("short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := validateToneMapSource(context.Background(), TranscodeOpts{
+		InputPath: path, ToneMapMode: tonemap.ModeSoftware,
+		ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1, FileSize: 5, FileHash: "0123456789abcdef"},
+	})
+	if !errors.Is(err, ErrToneMapSourceValidationUnavailable) || errors.Is(err, tonemap.ErrSourceRevisionChanged) {
+		t.Fatalf("validateToneMapSource() error = %v, want transient validation unavailable", err)
 	}
 }
 

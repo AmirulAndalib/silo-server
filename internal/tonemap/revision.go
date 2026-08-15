@@ -140,6 +140,9 @@ func (r SourceRevision) ValidatePath(path string) error {
 	}
 	info, err := os.Stat(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: %w", ErrSourceRevisionChanged, err)
+		}
 		return fmt.Errorf("stat tone-map source: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Size() != r.FileSize {

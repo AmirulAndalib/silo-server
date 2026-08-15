@@ -453,13 +453,14 @@ func TestHandleDownloadPrepareKeepsStartupArtifactRootAcrossReload(t *testing.T)
 	server.watcher.Config().Playback.FFmpegPath = ffmpegPath
 	server.watcher.Config().Playback.HWAccel = "none"
 	outputPath := filepath.Join(artifactDir, "artifact-1.mp4")
-	body, err := json.Marshal(downloadprepare.Request{
+	prepareRequest := downloadprepare.Request{
 		ArtifactID:       "artifact-1",
 		InputPath:        "/media/movie.mkv",
 		TargetCodecVideo: "copy",
 		TargetCodecAudio: "copy",
 		AudioTrackIndex:  -1,
-	})
+	}
+	body, err := json.Marshal(prepareRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,13 +516,14 @@ func TestHandleDownloadPreparePublishesToneMapReceiptAndStatusAttestation(t *tes
 	track := nodeToneMapTrack()
 	writeNodeToneMapFFprobe(t, ffmpegPath, track)
 	revision := tonemap.RevisionForFile(&models.MediaFile{ID: 1, FileSize: info.Size(), VideoTracks: []models.VideoTrack{track}})
-	body, err := json.Marshal(downloadprepare.Request{
+	prepareRequest := downloadprepare.Request{
 		ArtifactID: "artifact-tone-map", InputPath: inputPath,
 		TargetCodecVideo: "h264", TargetCodecAudio: "aac", AudioTrackIndex: -1,
 		ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
 		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
 		ToneMapSourceRevision: revision,
-	})
+	}
+	body, err := json.Marshal(prepareRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -537,6 +539,7 @@ func TestHandleDownloadPreparePublishesToneMapReceiptAndStatusAttestation(t *tes
 		ToneMapRecipeVersion:             playback.TransformationHDRToSDRToneMapRecipeVersionV3,
 		ToneMapMode:                      tonemap.ModeSoftware,
 		ToneMapSourceRevisionFingerprint: revision.Fingerprint(),
+		ExecutionFingerprint:             prepareRequest.ExecutionFingerprint(),
 	}
 	var result downloadprepare.Result
 	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
@@ -1407,7 +1410,7 @@ func TestReconstructFromToken_RejectsUnusableTokens(t *testing.T) {
 	s := newTestServer(t)
 
 	t.Run("missing token header", func(t *testing.T) {
-		if got := s.reconstructFromToken(requestWithToken(sid, ""), sid, -1); got != nil {
+		if got, _ := s.reconstructFromToken(requestWithToken(sid, ""), sid, -1); got != nil {
 			t.Fatalf("expected nil for missing token, got %v", got)
 		}
 	})
@@ -1417,21 +1420,21 @@ func TestReconstructFromToken_RejectsUnusableTokens(t *testing.T) {
 		if err != nil {
 			t.Fatalf("sign: %v", err)
 		}
-		if got := s.reconstructFromToken(requestWithToken(sid, bad), sid, -1); got != nil {
+		if got, _ := s.reconstructFromToken(requestWithToken(sid, bad), sid, -1); got != nil {
 			t.Fatalf("expected nil for bad signature, got %v", got)
 		}
 	})
 
 	t.Run("session id mismatch", func(t *testing.T) {
 		tok := signCard(t, transcodeCard("other-session"))
-		if got := s.reconstructFromToken(requestWithToken(sid, tok), sid, -1); got != nil {
+		if got, _ := s.reconstructFromToken(requestWithToken(sid, tok), sid, -1); got != nil {
 			t.Fatalf("expected nil for session id mismatch, got %v", got)
 		}
 	})
 
 	t.Run("non-transcode card", func(t *testing.T) {
 		tok := signCard(t, playback.NewDirectRecipeCard(sid, 7, "profile-1", 42))
-		if got := s.reconstructFromToken(requestWithToken(sid, tok), sid, -1); got != nil {
+		if got, _ := s.reconstructFromToken(requestWithToken(sid, tok), sid, -1); got != nil {
 			t.Fatalf("expected nil for direct-play card, got %v", got)
 		}
 	})
@@ -1447,7 +1450,7 @@ func TestReconstructFromToken_RejectsUnusableTokens(t *testing.T) {
 			PlayMethod: playback.PlayTranscode,
 			InputPath:  "/media/movie.mkv",
 		})
-		if got := s.reconstructFromToken(requestWithToken(sid, tok), sid, 5); got != nil {
+		if got, _ := s.reconstructFromToken(requestWithToken(sid, tok), sid, 5); got != nil {
 			t.Fatalf("expected nil for recipe-less transcode token, got %v", got)
 		}
 	})
@@ -1490,7 +1493,7 @@ func TestReconstructFromToken_JellycompatRecipeFetch(t *testing.T) {
 		s := newTestServer(t)
 		store := &stubRecipeStore{ok: false}
 		s.SetRecipeStore(store)
-		if got := s.reconstructFromToken(requestWithToken(sid, recipeLessToken(t)), sid, 5); got != nil {
+		if got, _ := s.reconstructFromToken(requestWithToken(sid, recipeLessToken(t)), sid, 5); got != nil {
 			t.Fatalf("expected nil on store miss, got %v", got)
 		}
 		if store.hits != 1 {
@@ -1502,7 +1505,7 @@ func TestReconstructFromToken_JellycompatRecipeFetch(t *testing.T) {
 		s := newTestServer(t)
 		// Right session id but missing encode params: must not spawn.
 		s.SetRecipeStore(&stubRecipeStore{ok: true, card: &playback.RecipeCard{SessionID: sid, PlayMethod: playback.PlayTranscode}})
-		if got := s.reconstructFromToken(requestWithToken(sid, recipeLessToken(t)), sid, 5); got != nil {
+		if got, _ := s.reconstructFromToken(requestWithToken(sid, recipeLessToken(t)), sid, 5); got != nil {
 			t.Fatalf("expected nil for incomplete fetched recipe, got %v", got)
 		}
 	})
@@ -1512,7 +1515,7 @@ func TestReconstructFromToken_JellycompatRecipeFetch(t *testing.T) {
 		s.SetRecipeStore(&stubRecipeStore{ok: true, card: &playback.RecipeCard{
 			SessionID: "other", PlayMethod: playback.PlayTranscode, SegmentDuration: 6, TargetCodecVideo: "h264",
 		}})
-		if got := s.reconstructFromToken(requestWithToken(sid, recipeLessToken(t)), sid, 5); got != nil {
+		if got, _ := s.reconstructFromToken(requestWithToken(sid, recipeLessToken(t)), sid, 5); got != nil {
 			t.Fatalf("expected nil for wrong-session recipe, got %v", got)
 		}
 	})
@@ -1755,7 +1758,7 @@ func TestRemoteSessionTrackingPreservesResolvedToneMapMode(t *testing.T) {
 			var session *playback.TranscodeSession
 			if test.reconstruct {
 				card := playback.NewRecipeCard(7, "profile-1", 42, "", opts)
-				session = server.spawnReconstruct(httptest.NewRequest(http.MethodGet, "/", nil), opts.SessionID, -1, card)
+				session, _ = server.spawnReconstruct(httptest.NewRequest(http.MethodGet, "/", nil), opts.SessionID, -1, card)
 				if session == nil {
 					t.Fatal("reconstructed session was not started")
 				}
@@ -2045,7 +2048,8 @@ func TestReconstructToneMapRecipeRejectionDoesNotWaitForReloadLock(t *testing.T)
 	}
 	done := make(chan *playback.TranscodeSession, 1)
 	go func() {
-		done <- server.spawnReconstruct(httptest.NewRequest(http.MethodGet, "/", nil), card.SessionID, -1, card)
+		session, _ := server.spawnReconstruct(httptest.NewRequest(http.MethodGet, "/", nil), card.SessionID, -1, card)
+		done <- session
 	}()
 	select {
 	case session := <-done:

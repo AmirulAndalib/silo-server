@@ -605,16 +605,18 @@ func (h *DownloadHandler) redirectToProxy(w http.ResponseWriter, r *http.Request
 		}
 	}
 	token, err := streamtoken.Sign(streamtoken.Claims{
-		SessionID:             sessionID,
-		MediaPath:             mediaPath,
-		PlayMethod:            streamtoken.PlayMethodDownload,
-		TranscodeNode:         target.OriginNodeURL,
-		DownloadArtifactID:    target.OriginArtifactID,
-		DownloadArtifactRowID: target.ArtifactID,
-		DownloadFilename:      downloadFilename,
-		UserID:                userID,
-		ProfileID:             profileID,
-		MediaFileID:           target.MediaFileID,
+		SessionID:                    sessionID,
+		MediaPath:                    mediaPath,
+		PlayMethod:                   streamtoken.PlayMethodDownload,
+		TranscodeNode:                target.OriginNodeURL,
+		DownloadArtifactID:           target.OriginArtifactID,
+		DownloadArtifactRowID:        target.ArtifactID,
+		DownloadArtifactSize:         target.ExpectedArtifactSize,
+		DownloadExecutionFingerprint: target.ExpectedExecutionFingerprint,
+		DownloadFilename:             downloadFilename,
+		UserID:                       userID,
+		ProfileID:                    profileID,
+		MediaFileID:                  target.MediaFileID,
 	}, secret, proxyDownloadTokenTTL)
 	if err != nil {
 		releaseReservation()

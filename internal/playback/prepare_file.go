@@ -6,11 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
+
+const directorySyncUnsupportedGOOS = "windows"
 
 // PrepareTarget describes the concrete encode target for a prepared download
 // artifact (remux or transcode-to-file).
@@ -111,9 +114,37 @@ func PrepareFile(ctx context.Context, opts TranscodeOpts, outputPath string) err
 		return fmt.Errorf("%w: %w", ErrTranscodeFailed, err)
 	}
 
+	if err := syncPreparedFile(partPath); err != nil {
+		_ = os.Remove(partPath)
+		return fmt.Errorf("prepare-file: sync artifact: %w", err)
+	}
 	if err := os.Rename(partPath, outputPath); err != nil {
 		_ = os.Remove(partPath)
 		return fmt.Errorf("prepare-file: finalize artifact: %w", err)
+	}
+	if err := syncPreparedDirectory(filepath.Dir(outputPath)); err != nil {
+		return fmt.Errorf("prepare-file: sync artifact directory: %w", err)
+	}
+	return nil
+}
+
+func syncPreparedFile(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+	return file.Sync()
+}
+
+func syncPreparedDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	if err := dir.Sync(); err != nil && runtime.GOOS != directorySyncUnsupportedGOOS {
+		return err
 	}
 	return nil
 }

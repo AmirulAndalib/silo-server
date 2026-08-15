@@ -490,7 +490,10 @@ func validateToneMapSource(ctx context.Context, opts TranscodeOpts) error {
 		return nil
 	}
 	if err := opts.ToneMapSourceRevision.ValidatePath(opts.InputPath); err != nil {
-		return err
+		if errors.Is(err, tonemap.ErrSourceRevisionChanged) {
+			return err
+		}
+		return fmt.Errorf("%w: %w", ErrToneMapSourceValidationUnavailable, err)
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, ManifestStartupTimeout)
 	defer cancel()
@@ -516,17 +519,18 @@ func validateToneMapSource(ctx context.Context, opts TranscodeOpts) error {
 		backend = tonemap.BackendSoftware
 	}
 	if err := tonemap.ValidateSource(ctx, tonemap.SourcePreflightRequest{
-		FFmpegPath:      ResolveFFmpegPath(opts.FFmpegPath),
-		InputPath:       opts.InputPath,
-		DurationSeconds: opts.TotalDuration,
-		SourceBitDepth:  opts.SourceVideoBitDepth,
-		Mode:            opts.ToneMapMode,
-		Backend:         backend,
-		Filter:          opts.ToneMapFilter,
-		Kind:            opts.ToneMapSourceKind,
-		RecipeVersion:   opts.ToneMapRecipeVersion,
-		HardwareDevice:  opts.HWDevice,
-		SourceRevision:  opts.ToneMapSourceRevision,
+		FFmpegPath:          ResolveFFmpegPath(opts.FFmpegPath),
+		InputPath:           opts.InputPath,
+		DurationSeconds:     opts.TotalDuration,
+		SourceBitDepth:      opts.SourceVideoBitDepth,
+		SoftwareVideoDecode: opts.SoftwareVideoDecode,
+		Mode:                opts.ToneMapMode,
+		Backend:             backend,
+		Filter:              opts.ToneMapFilter,
+		Kind:                opts.ToneMapSourceKind,
+		RecipeVersion:       opts.ToneMapRecipeVersion,
+		HardwareDevice:      opts.HWDevice,
+		SourceRevision:      opts.ToneMapSourceRevision,
 	}); err != nil {
 		return fmt.Errorf("tone-map source preflight failed: %w", err)
 	}

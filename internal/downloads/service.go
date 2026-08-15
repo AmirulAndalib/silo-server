@@ -80,14 +80,16 @@ type Capability struct {
 // from the request-scoped resolver methods below; a path alone is never an
 // authorization grant.
 type FileTarget struct {
-	Path             string
-	DownloadID       string
-	MediaFileID      int
-	ArtifactID       string
-	OriginNodeID     int
-	OriginNodeURL    string
-	OriginNodeGroup  string
-	OriginArtifactID string
+	Path                         string
+	DownloadID                   string
+	MediaFileID                  int
+	ArtifactID                   string
+	OriginNodeID                 int
+	OriginNodeURL                string
+	OriginNodeGroup              string
+	OriginArtifactID             string
+	ExpectedArtifactSize         int64
+	ExpectedExecutionFingerprint string
 	// ProxyEligible is true when a proxy can read the path directly or relay the
 	// opaque artifact from its owning transcode node.
 	ProxyEligible bool
@@ -1139,16 +1141,22 @@ func (s *Service) resolveDownloadBytesTarget(ctx context.Context, dl *Download, 
 		if !catalog.FileAllowedByAccess(&served, filter) {
 			return nil, catalog.ErrItemNotFound
 		}
+		expectedFingerprint := ""
+		if artifact.ToneMapMode != "" {
+			expectedFingerprint = artifact.ParamsHash
+		}
 		return &FileTarget{
-			Path:             artifact.OutputPath,
-			DownloadID:       dl.ID,
-			MediaFileID:      file.ID,
-			ArtifactID:       artifact.ID,
-			OriginNodeID:     artifact.OriginNodeID,
-			OriginNodeURL:    artifact.OriginNodeURL,
-			OriginNodeGroup:  artifact.OriginNodeGroup,
-			OriginArtifactID: artifact.OriginArtifactID,
-			ProxyEligible:    preparedProxyEligible,
+			Path:                         artifact.OutputPath,
+			DownloadID:                   dl.ID,
+			MediaFileID:                  file.ID,
+			ArtifactID:                   artifact.ID,
+			OriginNodeID:                 artifact.OriginNodeID,
+			OriginNodeURL:                artifact.OriginNodeURL,
+			OriginNodeGroup:              artifact.OriginNodeGroup,
+			OriginArtifactID:             artifact.OriginArtifactID,
+			ExpectedArtifactSize:         artifact.FileSize,
+			ExpectedExecutionFingerprint: expectedFingerprint,
+			ProxyEligible:                preparedProxyEligible,
 		}, nil
 	}
 	if file.MissingSince != nil {
@@ -1236,6 +1244,16 @@ func (s *Service) serveFileTarget(ctx context.Context, w http.ResponseWriter, r 
 	}
 	if !downloadprepare.RelayStatusAllowed(resp.StatusCode) {
 		return fmt.Errorf("remote artifact node returned %d", resp.StatusCode)
+	}
+	if target.ExpectedExecutionFingerprint != "" {
+		attestation, attestationErr := downloadprepare.ResultFromHeaders(resp.Header)
+		if attestationErr != nil || attestation.ExecutionFingerprint != target.ExpectedExecutionFingerprint || attestation.FileSize != target.ExpectedArtifactSize {
+			artifact := &Artifact{ID: target.ArtifactID, OriginNodeID: target.OriginNodeID, OriginNodeURL: target.OriginNodeURL, OriginNodeGroup: target.OriginNodeGroup, OriginArtifactID: target.OriginArtifactID}
+			if _, err := s.artifacts.requeueRemoteArtifactExactNow(ctx, artifact, "remote output attestation mismatch"); err != nil {
+				return err
+			}
+			return fmt.Errorf("remote artifact attestation mismatch: %w", ErrDownloadNotActive)
+		}
 	}
 	// Preserve an origin-provided disposition, but supply the same sanitized
 	// attachment filename as local delivery when the node omits one.

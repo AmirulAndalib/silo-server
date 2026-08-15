@@ -316,3 +316,22 @@ func TestRecipeCardFromClaimsEmptyMethodIsTranscode(t *testing.T) {
 		t.Fatalf("empty method should decode as transcode, got %q", got.PlayMethod)
 	}
 }
+
+func TestToneMapRecipeClaimsUseOldReaderVisibleDiscriminator(t *testing.T) {
+	card := RecipeCard{PlayMethod: PlayTranscode, ToneMapMode: tonemap.ModeHardware}
+
+	claims := card.ToClaims()
+	if claims.PlayMethod == string(PlayTranscode) || claims.PlayMethod == "" {
+		t.Fatalf("tone-map token method = %q, want a method rejected by pre-tone-map readers", claims.PlayMethod)
+	}
+	if got := RecipeCardFromClaims(&claims).PlayMethod; got != PlayTranscode {
+		t.Fatalf("current reader method = %q, want %q", got, PlayTranscode)
+	}
+}
+
+func TestOrdinaryTranscodeRecipeClaimsKeepLegacyMethod(t *testing.T) {
+	claims := (RecipeCard{PlayMethod: PlayTranscode}).ToClaims()
+	if got := claims.PlayMethod; got != string(PlayTranscode) {
+		t.Fatalf("ordinary transcode token method = %q, want %q", got, PlayTranscode)
+	}
+}

@@ -91,6 +91,8 @@ func TestValidateSourceCacheInvalidatesExecutorAndSourceFacts(t *testing.T) {
 	validate("rescan", request)
 	request.SourceRevision.StreamSignature = "replacement-stream"
 	validate("stream signature", request)
+	request.SoftwareVideoDecode = true
+	validate("software decode", request)
 }
 
 // TestValidateSourceRetriesExpiredNegativeVerdict verifies transient failures are retried.
@@ -495,6 +497,20 @@ func TestSourceConversionPreflightUsesSiloQSVDriverSelection(t *testing.T) {
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "vaapi=va:/dev/dri/renderD129,driver=iHD,kernel_driver=i915,vendor_id=0x8086") {
 		t.Fatalf("QSV preflight did not mirror runtime driver selection: %s", joined)
+	}
+}
+
+func TestSourceConversionPreflightMirrorsSoftwareDecodeForVAAPI(t *testing.T) {
+	args := sourceConversionPreflightArgs(SourcePreflightRequest{
+		Mode: ModeHardware, Backend: BackendVAAPI, Kind: SourcePQ,
+		HardwareDevice: "/dev/dri/renderD129", SoftwareVideoDecode: true,
+	}, 0, "")
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "-hwaccel") {
+		t.Fatalf("software-decode preflight requested hardware decode: %s", joined)
+	}
+	if !strings.Contains(joined, "format=nv12,hwupload") {
+		t.Fatalf("software-decode preflight did not upload frames before VAAPI tone mapping: %s", joined)
 	}
 }
 

@@ -600,6 +600,7 @@ func expectedDownloadPrepareResult(req downloadprepare.Request, fileSize int64) 
 	result.ToneMapRecipeVersion = req.ToneMapRecipeVersion
 	result.ToneMapMode = req.ToneMapMode
 	result.ToneMapSourceRevisionFingerprint = req.ToneMapSourceRevision.Fingerprint()
+	result.ExecutionFingerprint = req.ExecutionFingerprint()
 	return result, true
 }
 
@@ -1073,20 +1074,20 @@ func (s *Server) requireApprovedInputPath(w http.ResponseWriter, r *http.Request
 // requestedSegment is the segment the client is fetching, or negative on the
 // manifest path. Reconstruction is single-flighted per session id so concurrent
 // manifest and segment requests for the same lost session share one ffmpeg.
-func (s *Server) reconstructFromToken(r *http.Request, sessionID string, requestedSegment int) *playback.TranscodeSession {
+func (s *Server) reconstructFromToken(r *http.Request, sessionID string, requestedSegment int) (*playback.TranscodeSession, error) {
 	tokenStr := r.Header.Get("X-Silo-Stream-Token")
 	if tokenStr == "" {
-		return nil
+		return nil, nil
 	}
 	cfg := s.watcher.Config()
 	if cfg == nil {
-		return nil
+		return nil, nil
 	}
 	claims, err := streamtoken.Verify(tokenStr, cfg.Auth.JWTSecret)
 	if err != nil {
 		slog.WarnContext(r.Context(), "transcode node reconstruct: invalid stream token", "component", "transcodenode", "error", err,
 			"session", sessionID, "playback_session_id", sessionID)
-		return nil
+		return nil, nil
 	}
 	card := playback.RecipeCardFromClaims(claims)
 	// The token's recipe must be a transcode card for the session id in the URL: a
@@ -1097,7 +1098,7 @@ func (s *Server) reconstructFromToken(r *http.Request, sessionID string, request
 		expectedTransportID = card.TranscodeTransportID
 	}
 	if expectedTransportID != sessionID || (card.PlayMethod != "" && card.PlayMethod != playback.PlayTranscode) {
-		return nil
+		return nil, nil
 	}
 	// A native token carries the full byte-affecting recipe. The jellycompat node
 	// hop signs an identity-only token by design (see internal/noderecipe for why),
@@ -1106,10 +1107,10 @@ func (s *Server) reconstructFromToken(r *http.Request, sessionID string, request
 	// store there is nothing to rebuild from, so 404.
 	tokenComplete := card.SegmentDuration > 0 && card.TargetCodecVideo != ""
 	if !tokenComplete && s.recipeStore == nil {
-		return nil
+		return nil, nil
 	}
 
-	v, _, _ := s.reconstructGroup.Do(sessionID, func() (interface{}, error) {
+	v, err, _ := s.reconstructGroup.Do(sessionID, func() (interface{}, error) {
 		// A concurrent reconstruct (or a fresh start) may already have registered the
 		// session; serve it rather than spawning a duplicate ffmpeg.
 		s.mu.RLock()
@@ -1130,37 +1131,37 @@ func (s *Server) reconstructFromToken(r *http.Request, sessionID string, request
 			}
 			resolved = *fetched
 		}
-		return s.spawnReconstruct(r, sessionID, requestedSegment, resolved), nil
+		return s.spawnReconstruct(r, sessionID, requestedSegment, resolved)
 	})
 	if session, _ := v.(*playback.TranscodeSession); session != nil {
-		return session
+		return session, nil
 	}
-	return nil
+	return nil, err
 }
 
 // spawnReconstruct re-spawns ffmpeg for a lost session from its recipe card and
 // registers it in the live map. It is only ever called inside the per-session
 // single-flight in reconstructFromToken, so it is the sole writer racing to
 // register sessionID. Returns nil if the spawn fails or the slot wait is canceled.
-func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSegment int, card playback.RecipeCard) *playback.TranscodeSession {
+func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSegment int, card playback.RecipeCard) (*playback.TranscodeSession, error) {
 	if s.inputPaths == nil {
 		slog.ErrorContext(r.Context(), "transcode node reconstruct input authority unavailable", "component", "transcodenode", "session", sessionID)
-		return nil
+		return nil, nil
 	}
 	allowed, err := s.inputPaths.Allowed(r.Context(), card.InputPath)
 	if err != nil || !allowed {
 		slog.WarnContext(r.Context(), "transcode node reconstruct input rejected", "component", "transcodenode", "session", sessionID, "error", err)
-		return nil
+		return nil, nil
 	}
 	s.mu.RLock()
 	existing, ok := s.sessions[sessionID]
 	s.mu.RUnlock()
 	if ok {
-		return existing
+		return existing, nil
 	}
 	cfg := s.watcher.Config()
 	if cfg == nil {
-		return nil
+		return nil, nil
 	}
 	outputDir := s.sessionOutputDir(sessionID)
 	opts := card.TranscodeOpts(outputDir, cfg.Playback.FFmpegPath, s.ffmpegSink)
@@ -1177,7 +1178,7 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 		if err != nil {
 			slog.ErrorContext(r.Context(), "transcode node reconstruct tone-map recipe unavailable", "component", "transcodenode", "error", err,
 				"session", sessionID, "playback_session_id", sessionID)
-			return nil
+			return nil, err
 		}
 	}
 
@@ -1186,13 +1187,13 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	// its slot rather than queueing dead work.
 	release, ok := s.acquireReconstructSlot(r.Context())
 	if !ok {
-		return nil
+		return nil, r.Context().Err()
 	}
 	defer release()
 	s.reloadMu.RLock()
 	defer s.reloadMu.RUnlock()
 	if s.watcher.Config() != cfg {
-		return nil
+		return nil, nil
 	}
 
 	// Serialize against a concurrent fresh /transcode/start for this session so the
@@ -1204,7 +1205,7 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	existing, ok = s.sessions[sessionID]
 	s.mu.RUnlock()
 	if ok {
-		return existing
+		return existing, nil
 	}
 
 	// Resume near the segment the client is actually requesting. The card records
@@ -1229,7 +1230,7 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	if err != nil {
 		slog.ErrorContext(r.Context(), "transcode node reconstruct start failed", "component", "transcodenode", "error", err,
 			"session", sessionID, "playback_session_id", sessionID)
-		return nil
+		return nil, err
 	}
 
 	// Yield to a winner registered by another path; close only the duplicate ffmpeg,
@@ -1238,7 +1239,7 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	if existing, ok := s.sessions[sessionID]; ok {
 		s.mu.Unlock()
 		_ = session.CloseProcess()
-		return existing
+		return existing, nil
 	}
 	s.sessions[sessionID] = session
 	s.noteSessionAccessLocked(sessionID)
@@ -1265,7 +1266,7 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	slog.InfoContext(r.Context(), "transcode node session reconstructed from token", "component", "transcodenode",
 		"session", sessionID, "playback_session_id", sessionID,
 		"requested_segment", requestedSegment, "start_segment_number", opts.StartSegmentNumber)
-	return session
+	return session, nil
 }
 
 // acquireReconstructSlot blocks until a reconstruct slot is free or the request
@@ -1344,8 +1345,13 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 		// Lost the in-memory session (this node restarted): rebuild it from the
 		// stream token the proxy forwarded. The manifest path carries no segment
 		// context, so reconstruct at the recipe's original start position.
-		session = s.reconstructFromToken(r, sessionID, -1)
+		var reconstructErr error
+		session, reconstructErr = s.reconstructFromToken(r, sessionID, -1)
 		if session == nil {
+			if reconstructErr != nil && (errors.Is(reconstructErr, tonemap.ErrSourceRevisionChanged) || errors.Is(reconstructErr, playback.ErrToneMapSourceValidationUnavailable)) {
+				writeToneMapRecipeError(w, reconstructErr)
+				return
+			}
 			http.Error(w, "session not found", http.StatusNotFound)
 			return
 		}
@@ -1389,8 +1395,13 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 		if n, parseErr := playback.ParseSegmentNumber(name); parseErr == nil {
 			requestedSegment = n
 		}
-		session = s.reconstructFromToken(r, sessionID, requestedSegment)
+		var reconstructErr error
+		session, reconstructErr = s.reconstructFromToken(r, sessionID, requestedSegment)
 		if session == nil {
+			if reconstructErr != nil && (errors.Is(reconstructErr, tonemap.ErrSourceRevisionChanged) || errors.Is(reconstructErr, playback.ErrToneMapSourceValidationUnavailable)) {
+				writeToneMapRecipeError(w, reconstructErr)
+				return
+			}
 			http.Error(w, "session not found", http.StatusNotFound)
 			return
 		}

@@ -293,7 +293,7 @@ func (m *lockedCompatSessionManager) SetTranscodeStreamDetails(
 	return nil
 }
 
-func TestStartRemoteToneMapStaleConfirmationCannotCloseLocalSoftwareWinner(t *testing.T) {
+func TestStartRemoteToneMapDelayedSuccessCannotOverwriteLocalSoftwareWinner(t *testing.T) {
 	previousTimeout := compatManifestStartupTimeout
 	compatManifestStartupTimeout = time.Second
 	t.Cleanup(func() { compatManifestStartupTimeout = previousTimeout })
@@ -317,7 +317,9 @@ func TestStartRemoteToneMapStaleConfirmationCannotCloseLocalSoftwareWinner(t *te
 		case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
 			close(remoteStartArrived)
 			<-releaseRemoteStart
-			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{})
+			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{
+				HWAccel: tonemap.BackendQSV, ToneMapMode: tonemap.ModeHardware,
+			})
 		case r.Method == http.MethodDelete && r.URL.Path == "/transcode/upstream-1":
 			remoteDeleted <- struct{}{}
 			w.WriteHeader(http.StatusNoContent)
@@ -381,8 +383,8 @@ func TestStartRemoteToneMapStaleConfirmationCannotCloseLocalSoftwareWinner(t *te
 	t.Cleanup(func() { handler.tm.CloseTranscodeSessionIf("upstream-1", localWinner, "") })
 
 	releaseOnce.Do(func() { close(releaseRemoteStart) })
-	if err := <-remoteResult; err == nil || !strings.Contains(err.Error(), "did not confirm tone-map mode") {
-		t.Fatalf("stale remote hardware result = %v, want confirmation failure", err)
+	if err := <-remoteResult; err != nil {
+		t.Fatalf("stale remote hardware result = %v, want clean adoption of local winner", err)
 	}
 	select {
 	case <-remoteDeleted:

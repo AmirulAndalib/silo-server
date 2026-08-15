@@ -11,6 +11,9 @@ const (
 	// PlayMethodDownload identifies a token minted only after the API has
 	// authorized a file download. Proxy download routes reject playback tokens.
 	PlayMethodDownload = "download"
+	// PlayMethodToneMapTranscode makes frozen tone-map reconstruction fail
+	// closed on older readers that do not understand its recipe fields.
+	PlayMethodToneMapTranscode = "transcode_tonemap_v1"
 )
 
 // Claims holds everything a stateless proxy or transcode node needs
@@ -56,7 +59,9 @@ type Claims struct {
 	DownloadArtifactID string `json:"daid,omitempty"`
 	// DownloadArtifactRowID identifies the authoritative database row so a
 	// proxy can fence and requeue a signed remote locator that returns 404.
-	DownloadArtifactRowID string `json:"darid,omitempty"`
+	DownloadArtifactRowID        string `json:"darid,omitempty"`
+	DownloadArtifactSize         int64  `json:"dasz,omitempty"`
+	DownloadExecutionFingerprint string `json:"daef,omitempty"`
 	// DownloadFilename is the client-facing attachment name. Remote artifact
 	// ids are internal attempt handles and must never become saved filenames.
 	DownloadFilename string `json:"dfn,omitempty"`

@@ -119,6 +119,38 @@ func TestRequestRoundTripTreatsNonePolicyAsOrdinaryTranscode(t *testing.T) {
 	}
 }
 
+func TestRequestExecutionFingerprintBindsRecipeButNotArtifactHandle(t *testing.T) {
+	base := Request{
+		ArtifactID: "attempt-a", InputPath: "/media/hdr.mkv", SourceVideoCodec: "h264",
+		SourceVideoProfile: "High 10", SourceVideoBitDepth: 10, SoftwareVideoDecode: true,
+		ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
+		ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapPreflightRequired: true, ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 42, FileSize: 100},
+		ToneMapDVConfigPresent: true, ToneMapDVBLCompatIDPresent: true, ToneMapDVBLPresent: true, ToneMapDVRPUPresent: true,
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac", TargetResolution: "1080p",
+		TargetBitrateKbps: 8000, AudioTrackIndex: 1, TotalDuration: 7200,
+	}
+	want := base.ExecutionFingerprint()
+	if want == "" {
+		t.Fatal("ExecutionFingerprint() is empty")
+	}
+	handleOnly := base
+	handleOnly.ArtifactID = "attempt-b"
+	if got := handleOnly.ExecutionFingerprint(); got != want {
+		t.Fatalf("artifact handle changed execution fingerprint: %q != %q", got, want)
+	}
+	changed := base
+	changed.SoftwareVideoDecode = false
+	if got := changed.ExecutionFingerprint(); got == want {
+		t.Fatal("byte-affecting software decode did not change execution fingerprint")
+	}
+	changed = base
+	changed.TotalDuration++
+	if got := changed.ExecutionFingerprint(); got == want {
+		t.Fatal("byte-affecting duration did not change execution fingerprint")
+	}
+}
+
 func TestRequestToneMapRequestedIncludesPartialRecipes(t *testing.T) {
 	tests := []struct {
 		name string

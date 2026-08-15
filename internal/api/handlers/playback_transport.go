@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/logredact"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
@@ -36,13 +37,13 @@ func (h *PlaybackHandler) startRemotePlaybackTransport(ctx context.Context, node
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(requestCtx, http.MethodPost, nodeURL+"/transcode/start", bytes.NewReader(body))
 	if err != nil {
-		return transcodenode.TranscodeStartResponse{}, 0, err
+		return transcodenode.TranscodeStartResponse{}, 0, logredact.SanitizeURLError(err)
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Authorization", "Bearer "+h.JWTSecret)
 	response, err := http.DefaultClient.Do(httpRequest)
 	if err != nil {
-		return transcodenode.TranscodeStartResponse{}, 0, err
+		return transcodenode.TranscodeStartResponse{}, 0, logredact.SanitizeURLError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusAccepted {

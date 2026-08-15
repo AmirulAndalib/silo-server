@@ -460,7 +460,12 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 			if segNum, parseErr := playback.ParseSegmentNumber(name); parseErr == nil {
 				requestedSegment = segNum
 			}
-			transcodeSession = h.tm.ReconstructTranscode(r.Context(), playSession.UpstreamSessionID, requestedSegment, *playSession.Recipe)
+			var reconstructErr error
+			transcodeSession, reconstructErr = h.tm.ReconstructTranscodeWithError(r.Context(), playSession.UpstreamSessionID, requestedSegment, *playSession.Recipe)
+			if reconstructErr != nil {
+				writeCompatTranscodeError(w, reconstructErr)
+				return
+			}
 		}
 		if transcodeSession == nil {
 			writeError(w, http.StatusNotFound, "NotFound", "Transcode session not found")
@@ -1702,7 +1707,11 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 			// runtime, also verify the returned process rather than trusting the card.
 			if requiredToneMapMode != "" && ps.Recipe.ToneMapMode != requiredToneMapMode {
 				// Fall through to build a newly validated recipe in the required mode.
-			} else if reconstructed := h.tm.ReconstructTranscode(ctx, upstreamSessionID, -1, *ps.Recipe); reconstructed != nil && compatTranscodeSessionUsesToneMapMode(reconstructed, requiredToneMapMode) {
+			} else if reconstructed, reconstructErr := h.tm.ReconstructTranscodeWithError(ctx, upstreamSessionID, -1, *ps.Recipe); reconstructErr != nil && ps.Recipe.ToneMapMode != "" {
+				// A frozen tone-map recipe must not be bypassed by a fresh plan after
+				// execution-time source validation fails.
+				return nil, reconstructErr
+			} else if reconstructed != nil && compatTranscodeSessionUsesToneMapMode(reconstructed, requiredToneMapMode) {
 				h.recordTranscodeStreamDetails(ctx, upstreamSessionID, reconstructed.Opts())
 				return reconstructed, nil
 			}

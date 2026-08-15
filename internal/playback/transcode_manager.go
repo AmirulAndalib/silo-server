@@ -393,6 +393,7 @@ type transcodeLoadResult struct {
 	session *Session
 	runtime *TranscodeSession
 	status  SessionLoadStatus
+	err     error
 }
 
 // LoadOrReconstructTranscode atomically recovers the playback Session and its
@@ -409,15 +410,27 @@ func (m *TranscodeManager) LoadOrReconstructTranscode(
 	requestedSegment int,
 	card *RecipeCard,
 ) (*Session, *TranscodeSession, SessionLoadStatus) {
+	session, runtime, status, _ := m.LoadOrReconstructTranscodeWithError(ctx, getSession, sessionID, requestUserID, requestedSegment, card)
+	return session, runtime, status
+}
+
+func (m *TranscodeManager) LoadOrReconstructTranscodeWithError(
+	ctx context.Context,
+	getSession func(string) (*Session, error),
+	sessionID string,
+	requestUserID int,
+	requestedSegment int,
+	card *RecipeCard,
+) (*Session, *TranscodeSession, SessionLoadStatus, error) {
 	if m == nil {
-		return nil, nil, SessionMissing
+		return nil, nil, SessionMissing, nil
 	}
 	if card != nil {
 		if card.SessionID == "" || card.SessionID != sessionID {
-			return nil, nil, SessionMissing
+			return nil, nil, SessionMissing, nil
 		}
 		if requestUserID != 0 && requestUserID != card.UserID {
-			return nil, nil, SessionMissing
+			return nil, nil, SessionMissing, nil
 		}
 	}
 
@@ -430,9 +443,9 @@ func (m *TranscodeManager) LoadOrReconstructTranscode(
 	defer unlock()
 	result := m.doLoadOrReconstructTranscode(ctx, getSession, sessionID, requestUserID, requestedSegment, card)
 	if result.session != nil && requestUserID != 0 && result.session.UserID != requestUserID {
-		return nil, nil, SessionForbidden
+		return nil, nil, SessionForbidden, nil
 	}
-	return result.session, result.runtime, result.status
+	return result.session, result.runtime, result.status, result.err
 }
 
 func (m *TranscodeManager) doLoadOrReconstructTranscode(
@@ -479,7 +492,7 @@ func (m *TranscodeManager) doLoadOrReconstructTranscode(
 		return transcodeLoadResult{session: session, status: SessionMissing}
 	}
 
-	runtime := m.ReconstructTranscode(ctx, sessionID, requestedSegment, *card)
+	runtime, reconstructErr := m.ReconstructTranscodeWithError(ctx, sessionID, requestedSegment, *card)
 	if runtime == nil {
 		if inserted != nil {
 			atomicSessions, ok := m.Sessions.(atomicSessionReconstructor)
@@ -490,7 +503,7 @@ func (m *TranscodeManager) doLoadOrReconstructTranscode(
 				atomicSessions.RollbackReconstructedToneMap(inserted)
 			}
 		}
-		return transcodeLoadResult{status: SessionUnavailable}
+		return transcodeLoadResult{status: SessionUnavailable, err: reconstructErr}
 	}
 	return m.completeTranscodeLoad(getSession, session, inserted, runtime)
 }
@@ -671,27 +684,34 @@ func (m *TranscodeManager) reconstructSession(ctx context.Context, sessionID str
 // token; it carries the encode parameters formerly read from the Postgres store.
 // Returns the live session, or nil if reconstruct was not possible.
 func (m *TranscodeManager) ReconstructTranscode(ctx context.Context, sessionID string, requestedSegment int, card RecipeCard) *TranscodeSession {
+	session, _ := m.ReconstructTranscodeWithError(ctx, sessionID, requestedSegment, card)
+	return session
+}
+
+// ReconstructTranscodeWithError preserves execution-time recipe failures for
+// callers that must distinguish stale source facts from transient validation.
+func (m *TranscodeManager) ReconstructTranscodeWithError(ctx context.Context, sessionID string, requestedSegment int, card RecipeCard) (*TranscodeSession, error) {
 	if m == nil {
-		return nil
+		return nil, nil
 	}
 	if card.SessionID == "" || card.SessionID != sessionID {
-		return nil
+		return nil, nil
 	}
 
 	// A concurrent reconstruct may already have registered the session; serve it
 	// directly so we never enter single-flight only to discard a duplicate.
 	if existing := m.GetTranscodeSession(sessionID); existing != nil {
-		return existing
+		return existing, nil
 	}
 
 	v, err, _ := m.reconstructGroup.Do(sessionID, func() (interface{}, error) {
-		return m.doReconstructTranscode(ctx, sessionID, requestedSegment, card), nil
+		return m.doReconstructTranscode(ctx, sessionID, requestedSegment, card)
 	})
 	if err != nil || v == nil {
-		return nil
+		return nil, err
 	}
 	session, _ := v.(*TranscodeSession)
-	return session
+	return session, nil
 }
 
 // fastResumeSeek decides whether a reconstructed ffmpeg should be spawned at the
@@ -721,14 +741,14 @@ func fastResumeSeek(card RecipeCard, requestedSegment int) (segment int, seekSec
 // doReconstructTranscode performs the actual rebuild for a single reconstruct
 // leader. It is only ever invoked inside reconstructGroup.Do, so it is the sole
 // writer racing to register sessionID for this session.
-func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID string, requestedSegment int, card RecipeCard) *TranscodeSession {
+func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID string, requestedSegment int, card RecipeCard) (*TranscodeSession, error) {
 	// Only transcode cards drive ffmpeg reconstruction. Direct/remux sessions
 	// reconstruct without a runtime and must never reach here; guard so a
 	// direct/remux card ID cannot accidentally spawn an encode. An empty
 	// PlayMethod is back-compat for a token minted before the discriminator
 	// (transcode).
 	if card.PlayMethod != "" && card.PlayMethod != PlayTranscode {
-		return nil
+		return nil, nil
 	}
 
 	// Mark in-flight for the whole rebuild so a concurrent cleanup never reaps the
@@ -748,7 +768,7 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 	// to leave the queue before doing that work.
 	slotRelease, ok := m.acquireReconstructSlot(ctx)
 	if !ok {
-		return nil
+		return nil, ctx.Err()
 	}
 	defer slotRelease()
 	var toneMapErr error
@@ -760,7 +780,7 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 	if toneMapErr != nil {
 		slog.ErrorContext(ctx, "reconstruct tone-map recipe unavailable", "component", "playback", "error", toneMapErr,
 			"session", sessionID, "playback_session_id", sessionID)
-		return nil
+		return nil, toneMapErr
 	}
 
 	// Resume near the segment the client is actually requesting. The card records
@@ -785,7 +805,7 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 	// just before us) may already have a live session. Yield to it instead of
 	// spawning a duplicate writer.
 	if existing := m.GetTranscodeSession(sessionID); existing != nil {
-		return existing
+		return existing, nil
 	}
 
 	startTranscode := m.startTranscode
@@ -795,7 +815,7 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 	transcodeSession, err := startTranscode(ctx, opts)
 	if err != nil {
 		slog.ErrorContext(ctx, "reconstruct transcode start failed", "component", "playback", "error", err, "session", sessionID, "playback_session_id", sessionID)
-		return nil
+		return nil, err
 	}
 
 	// Register under the map lock. The lifecycle lock guarantees no other path
@@ -806,7 +826,7 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 	if existing := m.transcodes[sessionID]; existing != nil {
 		m.transcodeMu.Unlock()
 		_ = transcodeSession.CloseProcess()
-		return existing
+		return existing, nil
 	}
 	m.transcodes[sessionID] = transcodeSession
 	m.transcodeMu.Unlock()
@@ -828,7 +848,7 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 	slog.InfoContext(ctx, "transcode process reconstructed from recipe card", "component", "playback",
 		"session", sessionID, "playback_session_id", sessionID,
 		"requested_segment", requestedSegment, "start_segment_number", opts.StartSegmentNumber)
-	return transcodeSession
+	return transcodeSession, nil
 }
 
 func reconstructionOutputDir(root, sessionID, signedSubdir string) string {

@@ -34,6 +34,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
+	"github.com/Silo-Server/silo-server/internal/transcodenode"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchstate"
 	"github.com/Silo-Server/silo-server/internal/watchsync"
@@ -441,7 +442,7 @@ func (h *PlaybackHandler) streamCardFromQuery(r *http.Request, sessionID string)
 // transcodes are the exception: a live Session with no runtime may be a
 // provisional capability reconstruction, so those requests decode the token
 // and join the manager's atomic playback+runtime operation.
-func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID string, requestedSegment int) (*playback.Session, playback.SessionLoadStatus, *playback.RecipeCard) {
+func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID string, requestedSegment int) (*playback.Session, playback.SessionLoadStatus, *playback.RecipeCard, error) {
 	requestUserID := apimw.GetUserID(r.Context())
 	session, err := h.sessionMgr.GetSession(sessionID)
 	if err == nil {
@@ -449,29 +450,29 @@ func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID s
 		// (a zero caller is allowed; a non-zero mismatch is refused). No token
 		// verification on this hot path.
 		if requestUserID != 0 && session.UserID != requestUserID {
-			return nil, playback.SessionForbidden, nil
+			return nil, playback.SessionForbidden, nil, nil
 		}
 		if session.TranscodeNodeURL == "" && h.tm.GetTranscodeSession(sessionID) == nil {
 			card := h.streamCardFromQuery(r, sessionID)
 			if card != nil && card.ToneMapMode != "" {
-				session, _, status := h.tm.LoadOrReconstructTranscode(r.Context(), h.sessionMgr.GetSession, sessionID, requestUserID, requestedSegment, card)
-				return session, status, card
+				session, _, status, reconstructErr := h.tm.LoadOrReconstructTranscodeWithError(r.Context(), h.sessionMgr.GetSession, sessionID, requestUserID, requestedSegment, card)
+				return session, status, card, reconstructErr
 			}
 		}
-		return session, playback.SessionLoaded, nil
+		return session, playback.SessionLoaded, nil, nil
 	}
 	if !errors.Is(err, playback.ErrSessionNotFound) {
-		return nil, playback.SessionLoadFailed, nil
+		return nil, playback.SessionLoadFailed, nil, nil
 	}
 	// Genuine miss (e.g. after a restart): now — and only now — pay for the token
 	// decode so the recipe is available for reconstruction.
 	card := h.streamCardFromQuery(r, sessionID)
 	if card != nil && card.ToneMapMode != "" {
-		session, _, status := h.tm.LoadOrReconstructTranscode(r.Context(), h.sessionMgr.GetSession, sessionID, requestUserID, requestedSegment, card)
-		return session, status, card
+		session, _, status, reconstructErr := h.tm.LoadOrReconstructTranscodeWithError(r.Context(), h.sessionMgr.GetSession, sessionID, requestUserID, requestedSegment, card)
+		return session, status, card, reconstructErr
 	}
 	session, status := h.tm.LoadOrReconstructSession(r.Context(), h.sessionMgr.GetSession, sessionID, requestUserID, card)
-	return session, status, card
+	return session, status, card, nil
 }
 
 // streamCardFromToken verifies a stream token and decodes its reconstruction
@@ -1323,7 +1324,7 @@ func alignedSeekSeconds(seekSeconds float64, segmentDuration int, targetVideoCod
 // reports as the timeline's stream_origin_seconds.
 func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
-	session, status, card := h.loadTranscodeServeSession(r, sessionID, -1)
+	session, status, card, reconstructErr := h.loadTranscodeServeSession(r, sessionID, -1)
 	switch status {
 	case playback.SessionMissing:
 		writePlaybackSessionNotFound(w)
@@ -1335,6 +1336,14 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
 		return
 	case playback.SessionUnavailable:
+		if errors.Is(reconstructErr, tonemap.ErrSourceRevisionChanged) {
+			w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, transcodenode.ToneMapSourceRevisionChangedCode)
+			writeError(w, http.StatusUnprocessableEntity, "unsupported", "Tone-map source changed")
+			return
+		}
+		if errors.Is(reconstructErr, playback.ErrToneMapSourceValidationUnavailable) {
+			w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, transcodenode.ToneMapSourceValidationUnavailableCode)
+		}
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode session is temporarily unavailable")
 		return
 	}
@@ -1385,7 +1394,7 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 	if segNum, parseErr := playback.ParseSegmentNumber(chi.URLParam(r, "name")); parseErr == nil {
 		requestedSegment = segNum
 	}
-	session, status, card := h.loadTranscodeServeSession(r, sessionID, requestedSegment)
+	session, status, card, reconstructErr := h.loadTranscodeServeSession(r, sessionID, requestedSegment)
 	switch status {
 	case playback.SessionMissing:
 		writePlaybackSessionNotFound(w)
@@ -1397,6 +1406,14 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
 		return
 	case playback.SessionUnavailable:
+		if errors.Is(reconstructErr, tonemap.ErrSourceRevisionChanged) {
+			w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, transcodenode.ToneMapSourceRevisionChangedCode)
+			writeError(w, http.StatusUnprocessableEntity, "unsupported", "Tone-map source changed")
+			return
+		}
+		if errors.Is(reconstructErr, playback.ErrToneMapSourceValidationUnavailable) {
+			w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, transcodenode.ToneMapSourceValidationUnavailableCode)
+		}
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode session is temporarily unavailable")
 		return
 	}

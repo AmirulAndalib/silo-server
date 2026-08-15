@@ -2733,6 +2733,11 @@ func (s *Scanner) processFile(
 
 		// Try to get probe data.
 		probe, probeSource := s.probeFile(ctx, filePath)
+		if shouldPreserveExistingProbeAfterProbeFailure(updateReasons, probe) {
+			// Leave the migrated row's probe_updated_at NULL so a later scan
+			// retries without replacing valid metadata with zero values.
+			return actionUnchanged, updateReasons, nil
+		}
 
 		// Detect external subtitles.
 		externalSubs = loadExternalSubs()
@@ -3191,6 +3196,9 @@ func needsCriticalProbeRepairScanState(file *scanStateFile) bool {
 	if file == nil {
 		return true
 	}
+	if file.DVProvenanceCurrent != nil && !*file.DVProvenanceCurrent {
+		return true
+	}
 	if strings.TrimSpace(file.ProbeSource) == "" || file.ProbeUpdatedAt == nil {
 		return true
 	}
@@ -3232,6 +3240,10 @@ func needsCriticalProbeRepairScanState(file *scanStateFile) bool {
 		return true
 	}
 	return false
+}
+
+func shouldPreserveExistingProbeAfterProbeFailure(updateReasons []string, probe *ProbeData) bool {
+	return probe == nil && len(updateReasons) == 1 && updateReasons[0] == "probe_repair"
 }
 
 func (s *Scanner) enqueueMetadataWork(ctx context.Context, folder *models.MediaFolder, file *models.MediaFile) error {

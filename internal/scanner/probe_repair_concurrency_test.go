@@ -2,7 +2,9 @@ package scanner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +12,39 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/models"
 )
+
+func TestLegacyDolbyVisionProbeRemainsRepairableAfterRollingWriter(t *testing.T) {
+	probedAt := time.Now()
+	base := models.MediaFile{
+		ProbeSource: "local", ProbeUpdatedAt: &probedAt, Duration: 100, Container: "mkv",
+		CodecVideo: "hevc", Resolution: "2160p", Chapters: []models.MediaChapter{},
+	}
+	if err := json.Unmarshal([]byte(`[{"codec":"hevc","dv_profile":8,"color_range":"tv"}]`), &base.VideoTracks); err != nil {
+		t.Fatal(err)
+	}
+	if !NeedsCriticalProbeRepair(&base) {
+		t.Fatal("legacy writer output with missing DV provenance keys was accepted as current")
+	}
+
+	if err := json.Unmarshal([]byte(`[{"codec":"hevc","dv_profile":8,"dv_config_present":false,"dv_bl_compat_id_present":false,"color_range":"tv"}]`), &base.VideoTracks); err != nil {
+		t.Fatal(err)
+	}
+	if NeedsCriticalProbeRepair(&base) {
+		t.Fatal("current probe with explicit false DV provenance was treated as legacy")
+	}
+}
+
+func TestVideoTrackSerializationKeepsFalseDolbyVisionProvenance(t *testing.T) {
+	data, err := json.Marshal(models.VideoTrack{Codec: "hevc", DVProfile: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"dv_config_present", "dv_bl_compat_id_present"} {
+		if !strings.Contains(string(data), `"`+key+`":false`) {
+			t.Fatalf("serialized track omitted %s: %s", key, data)
+		}
+	}
+}
 
 type probeRepairTestRepository struct {
 	mu          sync.Mutex

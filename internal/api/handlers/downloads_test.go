@@ -563,14 +563,16 @@ func TestManagedFileRedirectsNodeLocalArtifactThroughSameGroupProxy(t *testing.T
 	svc := &proxyDownloadService{
 		fakeDownloadService: &fakeDownloadService{},
 		managedTarget: &downloads.FileTarget{
-			DownloadID:       "dl-remote",
-			ArtifactID:       "artifact-row",
-			Path:             "/prepared/Movie Final.mp4",
-			MediaFileID:      42,
-			OriginNodeURL:    "http://transcode-b.internal:8096",
-			OriginNodeGroup:  "host-b",
-			OriginArtifactID: "artifact-remote",
-			ProxyEligible:    true,
+			DownloadID:                   "dl-remote",
+			ArtifactID:                   "artifact-row",
+			Path:                         "/prepared/Movie Final.mp4",
+			MediaFileID:                  42,
+			OriginNodeURL:                "http://transcode-b.internal:8096",
+			OriginNodeGroup:              "host-b",
+			OriginArtifactID:             "artifact-remote",
+			ExpectedArtifactSize:         123,
+			ExpectedExecutionFingerprint: "recipe-fingerprint",
+			ProxyEligible:                true,
 		},
 	}
 	groupA, groupB := "host-a", "host-b"
@@ -597,7 +599,8 @@ func TestManagedFileRedirectsNodeLocalArtifactThroughSameGroupProxy(t *testing.T
 		t.Fatal(err)
 	}
 	if claims.MediaPath != "" || claims.DownloadFilename != "Movie Final.mp4" || claims.TranscodeNode != "http://transcode-b.internal:8096" ||
-		claims.DownloadArtifactID != "artifact-remote" || claims.DownloadArtifactRowID != "artifact-row" {
+		claims.DownloadArtifactID != "artifact-remote" || claims.DownloadArtifactRowID != "artifact-row" ||
+		claims.DownloadArtifactSize != 123 || claims.DownloadExecutionFingerprint != "recipe-fingerprint" {
 		t.Fatalf("claims = %+v", claims)
 	}
 }

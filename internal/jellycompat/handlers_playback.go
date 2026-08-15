@@ -795,6 +795,9 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 		TranscodeNode:   transcodeNodeURL,
 		DVProfile:       file.PrimaryDVProfile(),
 	}
+	if method == string(playback.PlayTranscode) && !source.TranscodeAudio && compatVersionRequiresToneMap(source.Version) {
+		claims.PlayMethod = streamtoken.PlayMethodToneMapTranscode
+	}
 	token, err := streamtoken.Sign(claims, h.JWTSecret, 24*time.Hour)
 	if err != nil {
 		return "", err
@@ -1088,6 +1091,37 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		}
 		return err
 	}
+
+	// A remote HTTP start may finish after another request has installed a
+	// local fallback for the same upstream generation. Serialize publication
+	// with local replacement and adopt that winner without overwriting its
+	// execution facts or durable recipe.
+	publishUnlock := h.tm.LockSessionLifecycle(upstreamSessionID)
+	remoteStillOwnsRoute := true
+	localWinner := h.tm.GetTranscodeSession(upstreamSessionID) != nil
+	if h.playbackStore != nil {
+		if currentPlay, ok := h.playbackStore.Get(playSessionID); !ok || currentPlay.UpstreamSessionID != upstreamSessionID {
+			remoteStillOwnsRoute = false
+		}
+	}
+	if h.sessionMgr != nil {
+		if currentUpstream, currentErr := h.sessionMgr.GetSession(upstreamSessionID); currentErr != nil || currentUpstream == nil ||
+			strings.TrimRight(currentUpstream.TranscodeNodeURL, "/") != strings.TrimRight(transcodeNodeURL, "/") {
+			remoteStillOwnsRoute = false
+		}
+	}
+	if localWinner {
+		remoteStillOwnsRoute = false
+	}
+	if !remoteStillOwnsRoute {
+		publishUnlock()
+		h.tm.StopRemoteTranscode(upstreamSessionID, transcodeNodeURL)
+		if localWinner {
+			return nil
+		}
+		return errors.New("remote transcode route ownership changed before publication")
+	}
+	defer publishUnlock()
 
 	// Mirror the byte-affecting opts sent to the node into a RecipeCard and persist
 	// it for restart resilience. The node-hop token is identity-only by design (see

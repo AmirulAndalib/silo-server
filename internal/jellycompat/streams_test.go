@@ -394,6 +394,26 @@ func TestBuildProxyRedirectURLRequestsSourceAlignedCompatManifest(t *testing.T) 
 	}
 }
 
+func TestBuildProxyRedirectURLMarksToneMapForOldReaderRejection(t *testing.T) {
+	h := &PlaybackHandler{JWTSecret: "test-secret"}
+	source := PlaybackMediaSource{Version: catalog.FileVersion{HDR: true, VideoTracks: []models.VideoTrack{{VideoRangeType: "HDR10", ColorTransfer: "smpte2084"}}}}
+	redirectURL, err := h.buildProxyRedirectURL("play-1", "upstream-1", string(playback.PlayTranscode), &models.MediaFile{FilePath: "/media/hdr.mkv"}, source, "http://transcode-1", 0, &nodepool.Node{URL: "http://proxy-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := strings.TrimSuffix(
+		strings.TrimPrefix(redirectURL, "http://proxy-1/stream/transcode/"),
+		"/master.m3u8?"+playback.SourceTimelineQueryParam+"=1",
+	)
+	claims, err := streamtoken.Verify(token, h.JWTSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.PlayMethod != streamtoken.PlayMethodToneMapTranscode {
+		t.Fatalf("tone-map proxy token method = %q", claims.PlayMethod)
+	}
+}
+
 func TestBuildProxyRedirectURLCarriesAudioOnlyRemuxClaim(t *testing.T) {
 	h := &PlaybackHandler{JWTSecret: "test-secret"}
 	redirectURL, err := h.buildProxyRedirectURL(

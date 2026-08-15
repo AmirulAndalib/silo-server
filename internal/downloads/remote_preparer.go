@@ -218,7 +218,8 @@ func remotePrepareResultMatches(result downloadprepare.Result, artifactID string
 	}
 	return result.ToneMapRecipeVersion == request.ToneMapRecipeVersion &&
 		result.ToneMapMode == request.ToneMapMode &&
-		result.ToneMapSourceRevisionFingerprint == request.ToneMapSourceRevision.Fingerprint()
+		result.ToneMapSourceRevisionFingerprint == request.ToneMapSourceRevision.Fingerprint() &&
+		result.ExecutionFingerprint == request.ExecutionFingerprint()
 }
 
 func rejectedRemotePrepareResultError(operation string, result downloadprepare.Result, artifactID string) error {

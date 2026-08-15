@@ -70,9 +70,23 @@ func NeedsCriticalProbeRepair(file *models.MediaFile) bool {
 		if videoTracksMissingColorRange(file.VideoTracks) {
 			return true
 		}
+		if videoTracksHaveLegacyDVProvenance(file.VideoTracks) {
+			return true
+		}
 	}
 	if file.Chapters == nil {
 		return true
+	}
+	return false
+}
+
+func videoTracksHaveLegacyDVProvenance(tracks []models.VideoTrack) bool {
+	for _, track := range tracks {
+		isDV := track.DVProfile > 0 || strings.Contains(strings.ToLower(track.VideoRangeType), "dovi") ||
+			strings.Contains(strings.ToLower(track.DolbyVision), "dolby")
+		if isDV && track.DVProvenanceCurrent != nil && !*track.DVProvenanceCurrent {
+			return true
+		}
 	}
 	return false
 }

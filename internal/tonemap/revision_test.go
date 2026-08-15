@@ -3,6 +3,7 @@ package tonemap
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -119,6 +120,14 @@ func TestValidatePathRejectsNonPositiveMediaFileID(t *testing.T) {
 	revision := SourceRevision{MediaFileID: -1, FileSize: info.Size()}
 	if err := revision.ValidatePath(path); err == nil {
 		t.Fatal("ValidatePath accepted a non-positive media file id")
+	}
+}
+
+func TestValidatePathClassifiesMissingSourceAsChanged(t *testing.T) {
+	revision := SourceRevision{MediaFileID: 1, FileSize: 1}
+	err := revision.ValidatePath(filepath.Join(t.TempDir(), "missing.mkv"))
+	if !errors.Is(err, ErrSourceRevisionChanged) {
+		t.Fatalf("ValidatePath(missing) = %v, want ErrSourceRevisionChanged", err)
 	}
 }
 

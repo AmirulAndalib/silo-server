@@ -327,6 +327,7 @@ func TestNodeAwarePreparerRecoversExactlyAttestedToneMapArtifactAfterResponseLos
 		ToneMapRecipeVersion:             opts.ToneMapRecipeVersion,
 		ToneMapMode:                      opts.ToneMapMode,
 		ToneMapSourceRevisionFingerprint: opts.ToneMapSourceRevision.Fingerprint(),
+		ExecutionFingerprint:             downloadprepare.NewRequest("artifact-tone-map", opts).ExecutionFingerprint(),
 	}
 
 	prepared, err := preparer.PrepareFile(context.Background(), "artifact-tone-map", opts, "/local/artifact.mp4")

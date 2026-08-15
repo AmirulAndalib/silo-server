@@ -2658,6 +2658,23 @@ func TestToneMapExecutionTransportErrorClassifiesLiveValidation(t *testing.T) {
 	}
 }
 
+func TestRemotePlaybackTransportSanitizesNodeURLFromTransportError(t *testing.T) {
+	handler := &PlaybackHandler{}
+	_, _, err := handler.startRemotePlaybackTransport(
+		context.Background(),
+		"http://node-user:node-password@127.0.0.1:1?api_key=node-secret#node-fragment",
+		transcodenode.TranscodeStartRequest{},
+	)
+	if err == nil {
+		t.Fatal("startRemotePlaybackTransport() error = nil, want connection failure")
+	}
+	for _, secret := range []string{"node-user", "node-password", "node-secret", "node-fragment"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("transport error leaked %q: %v", secret, err)
+		}
+	}
+}
+
 func TestCombineTransportErrorsV3KeepsAnyRetryableValidationFailure(t *testing.T) {
 	stale := toneMapExecutionTransportErrorV3(tonemap.ErrSourceRevisionChanged, "stale")
 	transient := toneMapExecutionTransportErrorV3(playback.ErrToneMapSourceValidationUnavailable, "transient")

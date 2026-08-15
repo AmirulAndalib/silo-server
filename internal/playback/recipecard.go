@@ -246,11 +246,18 @@ const MaxTokenTTL = 24 * time.Hour
 // they are re-resolved from live config on reconstruct, so an operator's config
 // change applies to reconstructed sessions too.
 func (c RecipeCard) ToClaims() streamtoken.Claims {
+	playMethod := string(c.PlayMethod)
+	if c.PlayMethod == PlayTranscode && c.ToneMapMode != "" {
+		// Older binaries do not understand the frozen tone-map claims. Give
+		// them a method they reject instead of silently reconstructing SDR
+		// output without the required recipe.
+		playMethod = streamtoken.PlayMethodToneMapTranscode
+	}
 	return streamtoken.Claims{
 		SessionID:                  c.SessionID,
 		MediaPath:                  c.InputPath,
 		OutputSubdir:               c.OutputSubdir,
-		PlayMethod:                 string(c.PlayMethod),
+		PlayMethod:                 playMethod,
 		TranscodeAudio:             c.TranscodeAudio,
 		RemuxDVMode:                string(c.RemuxDVMode),
 		TranscodeNode:              c.TranscodeNodeURL,
@@ -303,6 +310,9 @@ func RecipeCardFromClaims(c *streamtoken.Claims) RecipeCard {
 		return RecipeCard{}
 	}
 	method := PlayMethod(c.PlayMethod)
+	if c.PlayMethod == streamtoken.PlayMethodToneMapTranscode {
+		method = PlayTranscode
+	}
 	if method == "" {
 		method = PlayTranscode
 	}

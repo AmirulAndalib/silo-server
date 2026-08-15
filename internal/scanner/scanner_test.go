@@ -200,6 +200,15 @@ func TestIdentityOnlyUpdateReasons(t *testing.T) {
 	}
 }
 
+func TestFailedProbeRepairPreservesExistingProbe(t *testing.T) {
+	if !shouldPreserveExistingProbeAfterProbeFailure([]string{"probe_repair"}, nil) {
+		t.Fatal("migration-triggered repair failure would overwrite existing probe metadata")
+	}
+	if shouldPreserveExistingProbeAfterProbeFailure([]string{"probe_repair", "mtime_changed"}, nil) {
+		t.Fatal("changed source must not preserve stale probe metadata")
+	}
+}
+
 func TestIdentityOnlyFastPathEligible(t *testing.T) {
 	t.Parallel()
 

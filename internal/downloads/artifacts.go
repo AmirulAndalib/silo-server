@@ -330,6 +330,10 @@ func (m *ArtifactManager) ensureResolved(ctx context.Context, file *models.Media
 		OutputPath:                 artifactOutputPath(m.artifactDir(), file.ID, format, hash),
 		MaxAttempts:                artifactMaxAttempts,
 	}
+	if a.ToneMapMode != "" {
+		a.ParamsHash = downloadprepare.NewRequest(a.ID, m.buildOpts(file, a)).ExecutionFingerprint()
+		a.OutputPath = artifactOutputPath(m.artifactDir(), file.ID, format, a.ParamsHash)
+	}
 	row, created, err := m.repo.EnsureQueued(ctx, a)
 	if err != nil {
 		return nil, err
@@ -657,7 +661,7 @@ func (m *ArtifactManager) probeRemoteArtifactGroup(ctx context.Context, lifecycl
 			// One node-level failure suppresses the rest of this origin's batch.
 			slog.WarnContext(ctx, "remote download artifact check failed; skipping remaining origin batch", "component", "downloads", "artifact_id", a.ID, "node", a.OriginNodeURL, "error", err)
 			return
-		case result.FileSize != a.FileSize:
+		case result.FileSize != a.FileSize || (a.ToneMapMode != "" && result.ExecutionFingerprint != a.ParamsHash):
 			m.requeueWrongSizedRemoteArtifact(ctx, lifecycle, a)
 		}
 	}
@@ -1023,6 +1027,7 @@ func (m *ArtifactManager) buildOpts(file *models.MediaFile, a *Artifact) playbac
 		SourceVideoCodec:           sourceVideoCodec,
 		SourceVideoProfile:         sourceVideoProfile,
 		SourceVideoBitDepth:        sourceVideoBitDepth,
+		SoftwareVideoDecode:        playback.RequiresSoftwareVideoDecode(sourceVideoCodec, sourceVideoProfile, sourceVideoBitDepth),
 		TargetCodecVideo:           a.CodecVideo,
 		TargetCodecAudio:           a.CodecAudio,
 		TargetResolution:           a.Resolution,

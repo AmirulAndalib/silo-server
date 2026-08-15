@@ -5,6 +5,8 @@ package downloadprepare
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +31,8 @@ const (
 	resultToneMapRecipeVersionHeader             = "X-Silo-Tone-Map-Recipe-Version"
 	resultToneMapModeHeader                      = "X-Silo-Tone-Map-Mode"
 	resultToneMapSourceRevisionFingerprintHeader = "X-Silo-Tone-Map-Source-Revision-Fingerprint"
+	resultExecutionFingerprintHeader             = "X-Silo-Download-Execution-Fingerprint"
+	resultArtifactSizeHeader                     = "X-Silo-Download-Artifact-Size"
 	maxResultAttestationHeaderBytes              = 1024
 )
 
@@ -97,6 +101,7 @@ type Result struct {
 	ToneMapRecipeVersion             string       `json:"tone_map_recipe_version,omitempty"`
 	ToneMapMode                      tonemap.Mode `json:"tone_map_mode,omitempty"`
 	ToneMapSourceRevisionFingerprint string       `json:"tone_map_source_revision_fingerprint,omitempty"`
+	ExecutionFingerprint             string       `json:"execution_fingerprint,omitempty"`
 }
 
 // SetResultHeaders exposes bounded attestation metadata on artifact status
@@ -105,6 +110,10 @@ func SetResultHeaders(header http.Header, result Result) {
 	setBoundedResultHeader(header, resultToneMapRecipeVersionHeader, result.ToneMapRecipeVersion)
 	setBoundedResultHeader(header, resultToneMapModeHeader, string(result.ToneMapMode))
 	setBoundedResultHeader(header, resultToneMapSourceRevisionFingerprintHeader, result.ToneMapSourceRevisionFingerprint)
+	setBoundedResultHeader(header, resultExecutionFingerprintHeader, result.ExecutionFingerprint)
+	if result.ExecutionFingerprint != "" && result.FileSize > 0 {
+		header.Set(resultArtifactSizeHeader, strconv.FormatInt(result.FileSize, 10))
+	}
 }
 
 func setBoundedResultHeader(header http.Header, name, value string) {
@@ -119,6 +128,7 @@ func resultAttestationFromHeaders(header http.Header) (Result, error) {
 		{name: resultToneMapRecipeVersionHeader},
 		{name: resultToneMapModeHeader},
 		{name: resultToneMapSourceRevisionFingerprintHeader},
+		{name: resultExecutionFingerprintHeader},
 	}
 	decoded := make([]string, len(values))
 	for i := range values {
@@ -128,11 +138,26 @@ func resultAttestationFromHeaders(header http.Header) (Result, error) {
 		}
 		decoded[i] = value
 	}
+	fileSize := int64(0)
+	if raw := header.Get(resultArtifactSizeHeader); raw != "" {
+		var err error
+		fileSize, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || fileSize <= 0 {
+			return Result{}, fmt.Errorf("invalid %s header", resultArtifactSizeHeader)
+		}
+	}
 	return Result{
+		FileSize:                         fileSize,
 		ToneMapRecipeVersion:             decoded[0],
 		ToneMapMode:                      tonemap.Mode(decoded[1]),
 		ToneMapSourceRevisionFingerprint: decoded[2],
+		ExecutionFingerprint:             decoded[3],
 	}, nil
+}
+
+// ResultFromHeaders decodes the bounded receipt attestation returned by a node.
+func ResultFromHeaders(header http.Header) (Result, error) {
+	return resultAttestationFromHeaders(header)
 }
 
 func ValidArtifactID(id string) bool { return artifactIDPattern.MatchString(id) }
@@ -153,6 +178,18 @@ func (r Request) ValidToneMapAttestation() bool {
 		r.ToneMapRecipeVersion == playback.TransformationHDRToSDRToneMapRecipeVersionV3 &&
 		!r.ToneMapSourceRevision.IsZero() && r.ToneMapPolicy.Allows(r.ToneMapMode) &&
 		tonemap.ValidSourceKind(r.ToneMapSourceKind)
+}
+
+// ExecutionFingerprint identifies every transported byte-affecting field while
+// deliberately excluding the idempotency handle.
+func (r Request) ExecutionFingerprint() string {
+	r.ArtifactID = ""
+	data, err := json.Marshal(r)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // NewRequest freezes the byte-affecting recipe while deliberately omitting
@@ -286,7 +323,9 @@ func (p HTTPPreparer) Stat(ctx context.Context, nodeURL, jwtSecret, artifactID s
 		return Result{}, fmt.Errorf("remote download artifact stat: %w", err)
 	}
 	attestation.ArtifactID = artifactID
-	attestation.FileSize = size
+	if attestation.FileSize == 0 {
+		attestation.FileSize = size
+	}
 	return attestation, nil
 }
 
