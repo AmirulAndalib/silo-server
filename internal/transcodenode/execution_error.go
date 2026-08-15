@@ -17,6 +17,7 @@ const (
 
 	ToneMapSourceRevisionChangedCode       = "source_revision_changed"
 	ToneMapSourceValidationUnavailableCode = "source_validation_unavailable"
+	ToneMapExecutorUnavailableCode         = "executor_unavailable"
 )
 
 // ToneMapExecutionStatusError preserves a transcode node's live source
@@ -38,6 +39,8 @@ func (e *ToneMapExecutionStatusError) Unwrap() error {
 		return tonemap.ErrSourceRevisionChanged
 	case ToneMapSourceValidationUnavailableCode:
 		return playback.ErrToneMapSourceValidationUnavailable
+	case ToneMapExecutorUnavailableCode:
+		return playback.ErrToneMapExecutorUnavailable
 	default:
 		return nil
 	}
@@ -52,6 +55,8 @@ func ToneMapExecutionErrorForResponse(statusCode int, code string) error {
 	case statusCode == http.StatusUnprocessableEntity && code == ToneMapSourceRevisionChangedCode:
 		return &ToneMapExecutionStatusError{StatusCode: statusCode, Code: code}
 	case statusCode == http.StatusServiceUnavailable && code == ToneMapSourceValidationUnavailableCode:
+		return &ToneMapExecutionStatusError{StatusCode: statusCode, Code: code}
+	case statusCode == http.StatusServiceUnavailable && code == ToneMapExecutorUnavailableCode:
 		return &ToneMapExecutionStatusError{StatusCode: statusCode, Code: code}
 	default:
 		return nil

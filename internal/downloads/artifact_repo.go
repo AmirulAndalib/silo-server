@@ -178,7 +178,8 @@ func (r *ArtifactRepository) Heartbeat(ctx context.Context, id, owner string, le
 func (r *ArtifactRepository) MarkReady(ctx context.Context, id, owner, outputPath string, originNodeID int, originNodeURL, originNodeGroup, originArtifactID string, fileSize int64) (bool, error) {
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE download_artifacts
-		 SET status = 'ready', output_path = $2, origin_node_id = $3, origin_node_url = $4,
+		 SET status = CASE WHEN tone_map_mode <> '' THEN 'tone_map_ready' ELSE 'ready' END,
+		     output_path = $2, origin_node_id = $3, origin_node_url = $4,
 		     origin_node_group = $5, origin_artifact_id = $6, file_size = $7, error_message = '',
 		     completed_at = now(), last_used_at = now(),
 		     lease_owner = NULL, lease_expires_at = NULL, next_retry_at = NULL
@@ -312,7 +313,7 @@ func (r *ArtifactRepository) requeueRemote(ctx context.Context, artifact *Artifa
 		     attempts = 0, error_message = '', next_retry_at = NULL,
 		     lease_owner = NULL, lease_expires_at = NULL, completed_at = NULL,
 		     origin_node_id = 0, origin_node_url = '', origin_node_group = '', origin_artifact_id = ''
-		 WHERE id = $1 AND status = 'ready' AND origin_node_id = $2 AND origin_artifact_id = $3`
+		 WHERE id = $1 AND status IN ('ready', 'tone_map_ready') AND origin_node_id = $2 AND origin_artifact_id = $3`
 	args := []any{artifact.ID, artifact.OriginNodeID, artifact.OriginArtifactID}
 	if fenceURL {
 		query += ` AND origin_node_url = $4`
@@ -375,7 +376,7 @@ func (r *ArtifactRepository) RefreshRemoteLocator(ctx context.Context, artifact 
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE download_artifacts
 		 SET origin_node_url = $2, origin_node_group = $3
-		 WHERE id = $1 AND status = 'ready'
+		 WHERE id = $1 AND status IN ('ready', 'tone_map_ready')
 		   AND origin_node_id = $4 AND origin_artifact_id = $5`,
 		artifact.ID, artifact.OriginNodeURL, artifact.OriginNodeGroup,
 		artifact.OriginNodeID, artifact.OriginArtifactID,
@@ -389,7 +390,7 @@ func (r *ArtifactRepository) RefreshRemoteLocator(ctx context.Context, artifact 
 // ListReady returns ready artifacts ordered by least-recently-used first.
 func (r *ArtifactRepository) ListReady(ctx context.Context) ([]*Artifact, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT `+artifactColumns+` FROM download_artifacts WHERE status = 'ready' ORDER BY last_used_at ASC`)
+		`SELECT `+artifactColumns+` FROM download_artifacts WHERE status IN ('ready', 'tone_map_ready') ORDER BY last_used_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("listing ready artifacts: %w", err)
 	}
@@ -413,7 +414,7 @@ func scanArtifacts(rows pgx.Rows) ([]*Artifact, error) {
 func (r *ArtifactRepository) TotalReadyBytes(ctx context.Context) (int64, error) {
 	var total int64
 	if err := r.pool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(file_size), 0) FROM download_artifacts WHERE status = 'ready'`).Scan(&total); err != nil {
+		`SELECT COALESCE(SUM(file_size), 0) FROM download_artifacts WHERE status IN ('ready', 'tone_map_ready')`).Scan(&total); err != nil {
 		return 0, fmt.Errorf("summing ready artifacts: %w", err)
 	}
 	return total, nil
@@ -456,7 +457,7 @@ func (r *ArtifactRepository) ListFailedBefore(ctx context.Context, cutoff time.T
 func (r *ArtifactRepository) ListUnlinkedReadyBefore(ctx context.Context, cutoff time.Time) ([]*Artifact, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT `+artifactColumns+` FROM download_artifacts a
-		 WHERE a.status = 'ready' AND a.last_used_at < $1
+		 WHERE a.status IN ('ready', 'tone_map_ready') AND a.last_used_at < $1
 		   AND NOT EXISTS (SELECT 1 FROM downloads d WHERE d.artifact_id = a.id)`, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("listing unlinked artifacts: %w", err)

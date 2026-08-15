@@ -532,9 +532,16 @@ func validateToneMapSource(ctx context.Context, opts TranscodeOpts) error {
 		HardwareDevice:      opts.HWDevice,
 		SourceRevision:      opts.ToneMapSourceRevision,
 	}); err != nil {
-		return fmt.Errorf("tone-map source preflight failed: %w", err)
+		return classifyToneMapPreflightError(err)
 	}
 	return nil
+}
+
+func classifyToneMapPreflightError(err error) error {
+	if errors.Is(err, tonemap.ErrSourcePreflightUnavailable) {
+		return fmt.Errorf("%w: tone-map source preflight failed: %w", ErrToneMapSourceValidationUnavailable, err)
+	}
+	return fmt.Errorf("tone-map source preflight failed: %w", err)
 }
 
 // buildFFmpegArgs constructs the full ffmpeg argument list from TranscodeOpts.

@@ -556,6 +556,56 @@ func TestAcquireReconstructSlot(t *testing.T) {
 	release2()
 }
 
+func TestReconstructLifecycleWaitDoesNotConsumeGlobalSlot(t *testing.T) {
+	m := NewTranscodeManager()
+	m.reconstructSem = make(chan struct{}, 1)
+	m.Config = func() TranscodeRuntimeConfig { return TranscodeRuntimeConfig{TranscodeDir: t.TempDir()} }
+	sessionID := "blocked-reconstruct"
+	unlock := m.LockSessionLifecycle(sessionID)
+	card := NewRecipeCard(1, "profile", 1, "", TranscodeOpts{
+		SessionID: sessionID, InputPath: "/media/movie.mkv",
+		TargetCodecVideo: "h264", SegmentDuration: 2,
+	})
+	done := make(chan struct{})
+	go func() {
+		_, _ = m.ReconstructTranscodeWithError(context.Background(), sessionID, -1, card)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		m.lifecycleMu.Lock()
+		lock := m.lifecycleLocks[sessionID]
+		refs := 0
+		if lock != nil {
+			refs = lock.refs
+		}
+		m.lifecycleMu.Unlock()
+		if refs == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			unlock()
+			t.Fatal("reconstruct did not begin waiting for the session lifecycle lock")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	probeCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	slotRelease, available := m.acquireReconstructSlot(probeCtx)
+	cancel()
+	if available {
+		slotRelease()
+	}
+	// Let the waiter finish before reporting the assertion so no goroutine is
+	// left behind on the failure path.
+	m.RegisterTranscodeSession(sessionID, &TranscodeSession{})
+	unlock()
+	<-done
+	if !available {
+		t.Fatal("session-lock waiter consumed the only global reconstruct slot")
+	}
+}
+
 func TestLockSessionLifecycle_MutualExclusionAndCleanup(t *testing.T) {
 	m := NewTranscodeManager()
 

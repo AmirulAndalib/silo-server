@@ -3,6 +3,7 @@ package playback
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -130,6 +131,22 @@ func TestResolveToneMapExecutorClassifiesCanceledProbeAsUnavailable(t *testing.T
 	})
 	if !errors.Is(err, ErrToneMapExecutorUnavailable) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("ResolveToneMapExecutor() error = %v, want executor unavailable + canceled", err)
+	}
+}
+
+func TestClassifyToneMapPreflightErrorPreservesTransientIdentity(t *testing.T) {
+	transient := fmt.Errorf("%w: %w", tonemap.ErrSourcePreflightUnavailable, context.DeadlineExceeded)
+	err := classifyToneMapPreflightError(transient)
+	if !errors.Is(err, ErrToneMapSourceValidationUnavailable) ||
+		!errors.Is(err, tonemap.ErrSourcePreflightUnavailable) ||
+		!errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("transient preflight = %v, want playback, preflight, and deadline identities", err)
+	}
+
+	rejected := fmt.Errorf("%w: mismatched decoded frame", tonemap.ErrSourcePreflightRejected)
+	err = classifyToneMapPreflightError(rejected)
+	if !errors.Is(err, tonemap.ErrSourcePreflightRejected) || errors.Is(err, ErrToneMapSourceValidationUnavailable) {
+		t.Fatalf("deterministic preflight = %v, want rejection only", err)
 	}
 }
 

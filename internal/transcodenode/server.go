@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -139,6 +140,9 @@ type Server struct {
 	// of stampeding the host. Lazily sized to NumCPU on first use.
 	reconstructSemOnce sync.Once
 	reconstructSem     chan struct{}
+	// resolveToneMapRecipeFn is a package-private execution seam for error and
+	// lifecycle tests. Production uses resolveToneMapRecipe.
+	resolveToneMapRecipeFn func(context.Context, *playback.TranscodeOpts) error
 
 	// lifecycleMu guards lifecycleLocks, the per-session locks that serialize
 	// every path which spawns ffmpeg into a session's output dir (fresh start and
@@ -152,6 +156,13 @@ type Server struct {
 	// recipeStore is the control-plane recipe store consulted when a forwarded
 	// token carries no recipe (the jellycompat node hop). Nil disables that path.
 	recipeStore recipeStore
+}
+
+func (s *Server) resolveToneMapRecipe(ctx context.Context, opts *playback.TranscodeOpts) error {
+	if s.resolveToneMapRecipeFn != nil {
+		return s.resolveToneMapRecipeFn(ctx, opts)
+	}
+	return resolveToneMapRecipe(ctx, opts)
 }
 
 // sessionLifecycleLock is a refcounted per-session lock; the refcount lets the
@@ -524,7 +535,7 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.ToneMapRequested() {
-		if err := resolveToneMapRecipe(r.Context(), &opts); err != nil {
+		if err := s.resolveToneMapRecipe(r.Context(), &opts); err != nil {
 			writeToneMapRecipeError(w, err)
 			return
 		}
@@ -561,7 +572,7 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 		if jobCtx.Err() == nil {
 			slog.ErrorContext(jobCtx, "prepare download artifact", "component", "transcodenode", "artifact_id", req.ArtifactID, "error", err)
 		}
-		if errors.Is(err, tonemap.ErrSourceRevisionChanged) || errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) {
+		if isToneMapRecipeError(err) {
 			writeToneMapRecipeError(w, err)
 		} else {
 			http.Error(w, "failed to prepare download artifact", http.StatusInternalServerError)
@@ -645,7 +656,7 @@ func resolveToneMapRecipe(ctx context.Context, opts *playback.TranscodeOpts) err
 	}
 	resolved, err := playback.ResolveToneMapExecutor(resolveCtx, *opts)
 	if contextErr := resolveCtx.Err(); contextErr != nil {
-		return contextErr
+		return fmt.Errorf("%w: %w", playback.ErrToneMapExecutorUnavailable, contextErr)
 	}
 	if err != nil {
 		return err
@@ -655,6 +666,11 @@ func resolveToneMapRecipe(ctx context.Context, opts *playback.TranscodeOpts) err
 }
 
 func writeToneMapRecipeError(w http.ResponseWriter, err error) {
+	if errors.Is(err, playback.ErrToneMapExecutorUnavailable) {
+		w.Header().Set(ToneMapExecutionErrorHeader, ToneMapExecutorUnavailableCode)
+		http.Error(w, "tone-map executor unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) {
 		w.Header().Set(ToneMapExecutionErrorHeader, ToneMapSourceValidationUnavailableCode)
 		http.Error(w, "tone-map source validation unavailable", http.StatusServiceUnavailable)
@@ -668,6 +684,13 @@ func writeToneMapRecipeError(w http.ResponseWriter, err error) {
 		w.Header().Set(ToneMapExecutionErrorHeader, ToneMapSourceRevisionChangedCode)
 	}
 	http.Error(w, "unsupported or stale tone-map recipe", http.StatusUnprocessableEntity)
+}
+
+func isToneMapRecipeError(err error) bool {
+	return errors.Is(err, playback.ErrToneMapExecutorUnavailable) ||
+		errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) ||
+		errors.Is(err, tonemap.ErrSourceRevisionChanged) ||
+		errors.Is(err, tonemap.ErrSourcePreflightRejected)
 }
 
 func writeDownloadPrepareResult(w http.ResponseWriter, result downloadprepare.Result) {
@@ -950,7 +973,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		opts.HWAccel = cfg.Playback.HWAccel
 	}
 	if toneMapRecipeRequested(opts) {
-		if err := resolveToneMapRecipe(r.Context(), &opts); err != nil {
+		if err := s.resolveToneMapRecipe(r.Context(), &opts); err != nil {
 			writeToneMapRecipeError(w, err)
 			return
 		}
@@ -994,7 +1017,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		unlock()
 		slog.ErrorContext(r.Context(), "start transcode", "component", "transcodenode", "error", err, "session", req.SessionID, "playback_session_id", req.SessionID)
-		if errors.Is(err, tonemap.ErrSourceRevisionChanged) || errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) {
+		if isToneMapRecipeError(err) {
 			writeToneMapRecipeError(w, err)
 		} else {
 			http.Error(w, "failed to start transcode", http.StatusInternalServerError)
@@ -1174,7 +1197,7 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	opts.NodeType = "transcode"
 	opts.ExecutionMode = "transcode_node"
 	if toneMapRecipeRequested(opts) {
-		err := resolveToneMapRecipe(context.WithoutCancel(r.Context()), &opts)
+		err := s.resolveToneMapRecipe(context.WithoutCancel(r.Context()), &opts)
 		if err != nil {
 			slog.ErrorContext(r.Context(), "transcode node reconstruct tone-map recipe unavailable", "component", "transcodenode", "error", err,
 				"session", sessionID, "playback_session_id", sessionID)
@@ -1182,14 +1205,6 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 		}
 	}
 
-	// Pace the cold-start burst so a node restart that loses many sessions does not
-	// launch every ffmpeg at once. A client that disconnects while waiting releases
-	// its slot rather than queueing dead work.
-	release, ok := s.acquireReconstructSlot(r.Context())
-	if !ok {
-		return nil, r.Context().Err()
-	}
-	defer release()
 	s.reloadMu.RLock()
 	defer s.reloadMu.RUnlock()
 	if s.watcher.Config() != cfg {
@@ -1207,6 +1222,15 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	if ok {
 		return existing, nil
 	}
+
+	// Pace the cold-start burst only after this session owns its lifecycle lock.
+	// A waiter behind an in-flight start must not consume capacity that unrelated
+	// sessions need to reconstruct.
+	release, ok := s.acquireReconstructSlot(r.Context())
+	if !ok {
+		return nil, r.Context().Err()
+	}
+	defer release()
 
 	// Resume near the segment the client is actually requesting. The card records
 	// the original start; if the client has played past it, spawning at the old
@@ -1348,7 +1372,7 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 		var reconstructErr error
 		session, reconstructErr = s.reconstructFromToken(r, sessionID, -1)
 		if session == nil {
-			if reconstructErr != nil && (errors.Is(reconstructErr, tonemap.ErrSourceRevisionChanged) || errors.Is(reconstructErr, playback.ErrToneMapSourceValidationUnavailable)) {
+			if reconstructErr != nil && isToneMapRecipeError(reconstructErr) {
 				writeToneMapRecipeError(w, reconstructErr)
 				return
 			}
@@ -1398,7 +1422,7 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 		var reconstructErr error
 		session, reconstructErr = s.reconstructFromToken(r, sessionID, requestedSegment)
 		if session == nil {
-			if reconstructErr != nil && (errors.Is(reconstructErr, tonemap.ErrSourceRevisionChanged) || errors.Is(reconstructErr, playback.ErrToneMapSourceValidationUnavailable)) {
+			if reconstructErr != nil && isToneMapRecipeError(reconstructErr) {
 				writeToneMapRecipeError(w, reconstructErr)
 				return
 			}
@@ -1506,7 +1530,7 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
-		if errors.Is(err, tonemap.ErrSourceRevisionChanged) || errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) {
+		if isToneMapRecipeError(err) {
 			writeToneMapRecipeError(w, err)
 			return
 		}

@@ -132,6 +132,18 @@ func TestValidateArtifactToneMapRevisionRejectsCatalogProbeDrift(t *testing.T) {
 	}
 }
 
+func TestArtifactReadyStatusIncludesFencedToneMapRows(t *testing.T) {
+	if !artifactReady(&Artifact{Status: ArtifactReady}) {
+		t.Fatal("ordinary ready artifact was not ready")
+	}
+	if !artifactReady(&Artifact{Status: ArtifactToneMapReady}) {
+		t.Fatal("fenced tone-map ready artifact was not ready")
+	}
+	if artifactReady(&Artifact{Status: ArtifactToneMapRunning}) {
+		t.Fatal("running tone-map artifact was ready")
+	}
+}
+
 func TestToneMapArtifactExecutionFingerprintRejectsRefreshedPathOrDuration(t *testing.T) {
 	manager := &ArtifactManager{}
 	file := hdrDownloadTestFile()

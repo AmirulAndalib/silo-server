@@ -206,7 +206,7 @@ func (m *ArtifactManager) ReportRemoteArtifactMissing(ctx context.Context, artif
 		}
 		return err
 	}
-	if artifact.Status != ArtifactReady || artifact.OriginNodeURL != originNodeURL || artifact.OriginArtifactID != originArtifactID {
+	if !artifactReady(artifact) || artifact.OriginNodeURL != originNodeURL || artifact.OriginArtifactID != originArtifactID {
 		return nil
 	}
 	linked, applied, err := m.repo.RequeueRemoteExactLocator(ctx, artifact)
@@ -236,7 +236,7 @@ func (m *ArtifactManager) Ready(ctx context.Context, id string) (*Artifact, erro
 	if err != nil {
 		return nil, err
 	}
-	if a.Status != ArtifactReady {
+	if !artifactReady(a) {
 		return nil, fmt.Errorf("artifact is %s: %w", a.Status, ErrDownloadNotActive)
 	}
 	if lifecycle, ok := m.preparer.(remoteArtifactLifecycle); ok && a.OriginArtifactID != "" {
@@ -338,7 +338,7 @@ func (m *ArtifactManager) ensureResolved(ctx context.Context, file *models.Media
 	if err != nil {
 		return nil, err
 	}
-	if row.Status == ArtifactReady {
+	if artifactReady(row) {
 		_ = m.repo.TouchLastUsed(ctx, row.ID)
 		return row, nil
 	}
@@ -907,7 +907,7 @@ func (m *ArtifactManager) cleanupRejectedPrepared(ctx context.Context, artifactI
 	// the locator that actually won the readiness fence.
 	current, err := m.repo.GetByID(ctx, artifactID)
 	if err == nil {
-		if current.Status == ArtifactReady &&
+		if artifactReady(current) &&
 			current.OriginNodeID == prepared.OriginNodeID &&
 			current.OriginArtifactID == prepared.OriginArtifactID {
 			return

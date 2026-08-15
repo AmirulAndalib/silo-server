@@ -161,6 +161,8 @@ func TestWriteToneMapRecipeErrorClassifiesLiveValidation(t *testing.T) {
 	}{
 		{name: "stale metadata", err: tonemap.ErrSourceRevisionChanged, wantStatus: http.StatusUnprocessableEntity, wantCode: ToneMapSourceRevisionChangedCode},
 		{name: "probe unavailable", err: playback.ErrToneMapSourceValidationUnavailable, wantStatus: http.StatusServiceUnavailable, wantCode: ToneMapSourceValidationUnavailableCode},
+		{name: "executor unavailable", err: playback.ErrToneMapExecutorUnavailable, wantStatus: http.StatusServiceUnavailable, wantCode: ToneMapExecutorUnavailableCode},
+		{name: "preflight rejected", err: tonemap.ErrSourcePreflightRejected, wantStatus: http.StatusUnprocessableEntity},
 		{name: "generic capability timeout", err: context.DeadlineExceeded, wantStatus: http.StatusServiceUnavailable},
 		{name: "generic recipe rejection", err: errors.New("unsupported recipe"), wantStatus: http.StatusUnprocessableEntity},
 	}
@@ -1456,6 +1458,44 @@ func TestReconstructFromToken_RejectsUnusableTokens(t *testing.T) {
 	})
 }
 
+func TestReconstructionEndpointsClassifyExecutorDiscoveryFailure(t *testing.T) {
+	for _, endpoint := range []string{"manifest", "segment"} {
+		t.Run(endpoint, func(t *testing.T) {
+			const sid = "tone-map-executor-unavailable"
+			server := newTestServer(t)
+			server.resolveToneMapRecipeFn = func(context.Context, *playback.TranscodeOpts) error {
+				return fmt.Errorf("%w: %w", playback.ErrToneMapExecutorUnavailable, context.DeadlineExceeded)
+			}
+			card := transcodeCard(sid)
+			card.ToneMapPolicy = tonemap.PolicySoftwareOnly
+			card.ToneMapMode = tonemap.ModeSoftware
+			card.ToneMapSourceKind = tonemap.SourcePQ
+			card.ToneMapRecipeVersion = playback.TransformationHDRToSDRToneMapRecipeVersionV3
+			card.ToneMapSourceRevision = tonemap.SourceRevision{MediaFileID: 42, FileSize: 1}
+
+			request := requestWithToken(sid, signCard(t, card))
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("session_id", sid)
+			if endpoint == "segment" {
+				rctx.URLParams.Add("name", "0.ts")
+			}
+			request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, rctx))
+			recorder := httptest.NewRecorder()
+			if endpoint == "manifest" {
+				server.handleManifest(recorder, request)
+			} else {
+				server.handleSegment(recorder, request)
+			}
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
+			}
+			if got := recorder.Header().Get(ToneMapExecutionErrorHeader); got != ToneMapExecutorUnavailableCode {
+				t.Fatalf("classification = %q, want %q", got, ToneMapExecutorUnavailableCode)
+			}
+		})
+	}
+}
+
 // stubRecipeStore is a recipeStore for the jellycompat node-restart fetch path.
 type stubRecipeStore struct {
 	card    *playback.RecipeCard
@@ -2058,5 +2098,51 @@ func TestReconstructToneMapRecipeRejectionDoesNotWaitForReloadLock(t *testing.T)
 		}
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("tone-map recipe rejection waited for the reload lock")
+	}
+}
+
+func TestNodeReconstructLifecycleWaitDoesNotConsumeGlobalSlot(t *testing.T) {
+	server := newTestServer(t)
+	server.reconstructSem = make(chan struct{}, 1)
+	server.reconstructSemOnce.Do(func() {})
+	const sessionID = "blocked-node-reconstruct"
+	unlock := server.lockSessionLifecycle(sessionID)
+	done := make(chan struct{})
+	go func() {
+		_, _ = server.spawnReconstruct(httptest.NewRequest(http.MethodGet, "/", nil), sessionID, -1, transcodeCard(sessionID))
+		close(done)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.lifecycleMu.Lock()
+		lock := server.lifecycleLocks[sessionID]
+		refs := 0
+		if lock != nil {
+			refs = lock.refs
+		}
+		server.lifecycleMu.Unlock()
+		if refs == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			unlock()
+			t.Fatal("node reconstruct did not begin waiting for the session lifecycle lock")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	probeCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	slotRelease, available := server.acquireReconstructSlot(probeCtx)
+	cancel()
+	if available {
+		slotRelease()
+	}
+	server.mu.Lock()
+	server.sessions[sessionID] = &playback.TranscodeSession{}
+	server.mu.Unlock()
+	unlock()
+	<-done
+	if !available {
+		t.Fatal("node session-lock waiter consumed the only global reconstruct slot")
 	}
 }

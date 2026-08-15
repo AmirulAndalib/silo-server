@@ -18,6 +18,7 @@ const (
 	ArtifactRunning        = "running"
 	ArtifactToneMapQueued  = "tone_map_queued"
 	ArtifactToneMapRunning = "tone_map_running"
+	ArtifactToneMapReady   = "tone_map_ready"
 	ArtifactReady          = "ready"
 	ArtifactFailed         = "failed"
 )
@@ -27,6 +28,10 @@ func queuedArtifactStatus(mode tonemap.Mode) string {
 		return ArtifactToneMapQueued
 	}
 	return ArtifactQueued
+}
+
+func artifactReady(artifact *Artifact) bool {
+	return artifact != nil && (artifact.Status == ArtifactReady || artifact.Status == ArtifactToneMapReady)
 }
 
 // ErrNoArtifactJob is returned by the queue when no claimable job exists.

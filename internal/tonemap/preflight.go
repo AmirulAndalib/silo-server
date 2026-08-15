@@ -63,6 +63,15 @@ var ffmpegVersionCache = struct {
 	group   singleflight.Group
 }{entries: make(map[string][]byte)}
 
+var (
+	// ErrSourcePreflightUnavailable identifies an operational validation failure
+	// that may succeed when the executor or probe is retried.
+	ErrSourcePreflightUnavailable = errors.New("tone-map source preflight unavailable")
+	// ErrSourcePreflightRejected identifies a completed validation whose decoded
+	// source or converted output did not satisfy the frozen recipe.
+	ErrSourcePreflightRejected = errors.New("tone-map source preflight rejected")
+)
+
 // ValidateSource confirms that representative decoded source frames match the
 // frozen source kind and that the selected executor emits clean BT.709 output.
 func ValidateSource(ctx context.Context, request SourcePreflightRequest) error {
@@ -73,7 +82,7 @@ func ValidateSource(ctx context.Context, request SourcePreflightRequest) error {
 // command runner while preserving production caching and timeout behavior.
 func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightRequest, run CommandRunner) error {
 	if request.Kind == "" || request.Mode == "" || strings.TrimSpace(request.InputPath) == "" {
-		return errors.New("incomplete tone-map source preflight")
+		return fmt.Errorf("%w: incomplete tone-map source preflight", ErrSourcePreflightRejected)
 	}
 	if err := request.SourceRevision.ValidatePath(request.InputPath); err != nil {
 		return err
@@ -89,7 +98,7 @@ func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightReques
 	defer cancel()
 	key, cacheable := sourcePreflightKey(preflightCtx, request, run)
 	if err := preflightCtx.Err(); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrSourcePreflightUnavailable, err)
 	}
 	if cacheable {
 		entry, ok := sourcePreflightCacheLookup(key, time.Now())
@@ -105,10 +114,13 @@ func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightReques
 			defer sharedCancel()
 			preflightErr := runSourcePreflight(sharedCtx, request, run)
 			if err := sharedCtx.Err(); err != nil {
-				return sourcePreflightCacheEntry{}, err
+				return sourcePreflightCacheEntry{}, fmt.Errorf("%w: %w", ErrSourcePreflightUnavailable, err)
 			}
 			entry = sourcePreflightCacheEntry{}
 			if preflightErr != nil {
+				if !errors.Is(preflightErr, ErrSourcePreflightRejected) {
+					return sourcePreflightCacheEntry{}, preflightErr
+				}
 				entry.errorMessage = preflightErr.Error()
 				entry.expiresAt = time.Now().Add(sourcePreflightNegativeTTL)
 			}
@@ -117,7 +129,7 @@ func ValidateSourceWithRunner(ctx context.Context, request SourcePreflightReques
 		})
 		select {
 		case <-preflightCtx.Done():
-			return preflightCtx.Err()
+			return fmt.Errorf("%w: %w", ErrSourcePreflightUnavailable, preflightCtx.Err())
 		case result := <-resultCh:
 			if result.Err != nil {
 				return result.Err
@@ -195,7 +207,7 @@ func cachedPreflightError(entry sourcePreflightCacheEntry) error {
 	if entry.errorMessage == "" {
 		return nil
 	}
-	return errors.New(entry.errorMessage)
+	return fmt.Errorf("%w: %s", ErrSourcePreflightRejected, entry.errorMessage)
 }
 
 // sourcePreflightKey binds a stable source revision to the exact FFmpeg binary,
@@ -330,21 +342,21 @@ func runSourcePreflight(ctx context.Context, request SourcePreflightRequest, run
 			return err
 		}
 		if !frameMatchesSourceKind(frame, request.Kind) {
-			return fmt.Errorf("decoded frame metadata does not match %s fallback", request.Kind)
+			return fmt.Errorf("%w: decoded frame metadata does not match %s fallback", ErrSourcePreflightRejected, request.Kind)
 		}
 		file, err := os.CreateTemp("", "silo-tonemap-preflight-*.mkv")
 		if err != nil {
-			return fmt.Errorf("create tone-map preflight output: %w", err)
+			return fmt.Errorf("%w: create tone-map preflight output: %w", ErrSourcePreflightUnavailable, err)
 		}
 		outputPath := file.Name()
 		if err := file.Close(); err != nil {
 			_ = os.Remove(outputPath)
-			return fmt.Errorf("close tone-map preflight output: %w", err)
+			return fmt.Errorf("%w: close tone-map preflight output: %w", ErrSourcePreflightUnavailable, err)
 		}
 		args := sourceConversionPreflightArgs(request, position, outputPath)
 		if output, err := runBounded(ctx, run, request.FFmpegPath, args...); err != nil {
 			_ = os.Remove(outputPath)
-			return fmt.Errorf("tone-map source conversion failed: %s", boundedCommandFailure(err, output))
+			return fmt.Errorf("%w: tone-map source conversion failed: %w (%s)", ErrSourcePreflightUnavailable, err, boundedCommandFailure(err, output))
 		}
 		if err := inspectPreflightOutput(ctx, request.FFprobePath, outputPath, run); err != nil {
 			_ = os.Remove(outputPath)
@@ -397,13 +409,13 @@ func inspectSourceFrame(ctx context.Context, request SourcePreflightRequest, pos
 	}
 	output, err := runBounded(ctx, run, request.FFprobePath, args...)
 	if err != nil {
-		return preflightFrame{}, fmt.Errorf("inspect tone-map source frame: %s", boundedCommandFailure(err, output))
+		return preflightFrame{}, fmt.Errorf("%w: inspect tone-map source frame: %w (%s)", ErrSourcePreflightUnavailable, err, boundedCommandFailure(err, output))
 	}
 	var payload struct {
 		Frames []preflightFrame `json:"frames"`
 	}
 	if err := decodeCommandJSON(output, &payload); err != nil || len(payload.Frames) == 0 {
-		return preflightFrame{}, errors.New("tone-map source frame metadata unavailable")
+		return preflightFrame{}, fmt.Errorf("%w: tone-map source frame metadata unavailable", ErrSourcePreflightRejected)
 	}
 	return payload.Frames[0], nil
 }
@@ -504,7 +516,7 @@ func inspectPreflightOutput(ctx context.Context, ffprobePath, outputPath string,
 	}
 	output, err := runBounded(ctx, run, ffprobePath, args...)
 	if err != nil {
-		return fmt.Errorf("inspect tone-map preflight output: %s", boundedCommandFailure(err, output))
+		return fmt.Errorf("%w: inspect tone-map preflight output: %w (%s)", ErrSourcePreflightUnavailable, err, boundedCommandFailure(err, output))
 	}
 	type sideDataRecord struct {
 		Type string `json:"side_data_type"`
@@ -528,15 +540,15 @@ func inspectPreflightOutput(ctx context.Context, ffprobePath, outputPath string,
 		} `json:"frames"`
 	}
 	if err := decodeCommandJSON(output, &payload); err != nil || len(payload.Streams) != 1 {
-		return errors.New("tone-map preflight output metadata unavailable")
+		return fmt.Errorf("%w: tone-map preflight output metadata unavailable", ErrSourcePreflightRejected)
 	}
 	stream := payload.Streams[0]
 	if stream.CodecName != "h264" || stream.PixelFormat != "yuv420p" || !rangeIsLimited(normalizeColorValue(stream.ColorRange)) ||
 		!colorIsBT709(normalizeColorValue(stream.ColorSpace)) || !colorIsBT709(normalizeColorValue(stream.ColorTransfer)) || !colorIsBT709(normalizeColorValue(stream.ColorPrimaries)) {
-		return errors.New("tone-map preflight output is not limited-range BT.709 H.264")
+		return fmt.Errorf("%w: tone-map preflight output is not limited-range BT.709 H.264", ErrSourcePreflightRejected)
 	}
 	if len(payload.Frames) == 0 {
-		return errors.New("tone-map preflight output frame metadata unavailable")
+		return fmt.Errorf("%w: tone-map preflight output frame metadata unavailable", ErrSourcePreflightRejected)
 	}
 	allSideData := append([]sideDataRecord(nil), stream.SideData...)
 	for _, frame := range payload.Frames {
@@ -544,13 +556,13 @@ func inspectPreflightOutput(ctx context.Context, ffprobePath, outputPath string,
 			ColorRange: frame.ColorRange, ColorPrimaries: frame.ColorPrimaries,
 			ColorTransfer: frame.ColorTransfer, ColorSpace: frame.ColorSpace,
 		}); !complete || !compatible {
-			return errors.New("tone-map preflight output frame is not limited-range BT.709")
+			return fmt.Errorf("%w: tone-map preflight output frame is not limited-range BT.709", ErrSourcePreflightRejected)
 		}
 		allSideData = append(allSideData, frame.SideData...)
 	}
 	for _, sideData := range allSideData {
 		if isHDRSideData(sideData.Type) {
-			return errors.New("tone-map preflight output retains HDR metadata")
+			return fmt.Errorf("%w: tone-map preflight output retains HDR metadata", ErrSourcePreflightRejected)
 		}
 	}
 	return nil

@@ -14,27 +14,24 @@ import (
 	"time"
 )
 
-// TestValidateSourceCachesPositiveAndNegativeVerdicts verifies both verdict classes are reused appropriately.
-func TestValidateSourceCachesPositiveAndNegativeVerdicts(t *testing.T) {
+// TestValidateSourceCachesPositiveVerdicts verifies completed successful validation is reused.
+func TestValidateSourceCachesPositiveVerdicts(t *testing.T) {
 	tests := []struct {
 		name            string
-		conversionErr   error
-		wantErr         bool
 		wantConversions int
 	}{
 		{name: "positive", wantConversions: 3},
-		{name: "negative", conversionErr: errors.New("decode failed"), wantErr: true, wantConversions: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resetSourcePreflightCache(t)
 			request := sourcePreflightTestRequest(t)
 			conversions := 0
-			runner := sourcePreflightTestRunner(&conversions, func() string { return "ffmpeg version 1" }, tt.conversionErr)
+			runner := sourcePreflightTestRunner(&conversions, func() string { return "ffmpeg version 1" }, nil)
 			for attempt := 0; attempt < 2; attempt++ {
 				err := ValidateSourceWithRunner(context.Background(), request, runner)
-				if (err != nil) != tt.wantErr {
-					t.Fatalf("ValidateSourceWithRunner() error = %v, want error %t", err, tt.wantErr)
+				if err != nil {
+					t.Fatalf("ValidateSourceWithRunner() error = %v", err)
 				}
 			}
 			if conversions != tt.wantConversions {
@@ -95,31 +92,37 @@ func TestValidateSourceCacheInvalidatesExecutorAndSourceFacts(t *testing.T) {
 	validate("software decode", request)
 }
 
-// TestValidateSourceRetriesExpiredNegativeVerdict verifies transient failures are retried.
-func TestValidateSourceRetriesExpiredNegativeVerdict(t *testing.T) {
+// TestValidateSourceDoesNotCacheOperationalFailure verifies transient failures are retried immediately.
+func TestValidateSourceDoesNotCacheOperationalFailure(t *testing.T) {
 	resetSourcePreflightCache(t)
 	request := sourcePreflightTestRequest(t)
 	conversions := 0
 	runner := sourcePreflightTestRunner(&conversions, func() string { return "ffmpeg version 1" }, errors.New("temporary device failure"))
 	for attempt := 0; attempt < 2; attempt++ {
-		if err := ValidateSourceWithRunner(context.Background(), request, runner); err == nil {
-			t.Fatal("temporary failure unexpectedly passed preflight")
+		if err := ValidateSourceWithRunner(context.Background(), request, runner); !errors.Is(err, ErrSourcePreflightUnavailable) {
+			t.Fatalf("temporary failure = %v, want ErrSourcePreflightUnavailable", err)
 		}
 	}
-	if conversions != 1 {
-		t.Fatalf("conversion calls = %d, want one within the negative-cache TTL", conversions)
-	}
-	sourcePreflightCache.Lock()
-	for key, entry := range sourcePreflightCache.entries {
-		entry.expiresAt = time.Now().Add(-time.Second)
-		sourcePreflightCache.entries[key] = entry
-	}
-	sourcePreflightCache.Unlock()
-	if err := ValidateSourceWithRunner(context.Background(), request, runner); err == nil {
-		t.Fatal("expired temporary failure unexpectedly passed preflight")
-	}
 	if conversions != 2 {
-		t.Fatalf("conversion calls = %d, want a retry after negative-cache expiry", conversions)
+		t.Fatalf("conversion calls = %d, want every operational failure retried", conversions)
+	}
+}
+
+func TestValidateSourceClassifiesDeterministicRejection(t *testing.T) {
+	resetSourcePreflightCache(t)
+	request := sourcePreflightTestRequest(t)
+	runner := func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) == 1 && args[0] == "-version" {
+			return []byte("ffmpeg version deterministic"), nil
+		}
+		if strings.Contains(name, "ffprobe") {
+			return []byte(`{"frames":[{"color_range":"tv","color_space":"bt709","color_transfer":"bt709","color_primaries":"bt709"}]}`), nil
+		}
+		return nil, nil
+	}
+	err := ValidateSourceWithRunner(context.Background(), request, runner)
+	if !errors.Is(err, ErrSourcePreflightRejected) || errors.Is(err, ErrSourcePreflightUnavailable) {
+		t.Fatalf("deterministic mismatch = %v, want ErrSourcePreflightRejected only", err)
 	}
 }
 
@@ -375,8 +378,8 @@ func TestSourcePreflightSharedExecutionSurvivesFirstCallerCancellation(t *testin
 	cancelFirst()
 	select {
 	case err := <-first:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("first preflight error = %v, want context canceled", err)
+		if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrSourcePreflightUnavailable) {
+			t.Fatalf("first preflight error = %v, want unavailable + context canceled", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("canceled preflight caller did not stop waiting")

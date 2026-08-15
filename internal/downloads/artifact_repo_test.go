@@ -246,6 +246,15 @@ func TestToneMapArtifactQueueRejectsLegacyWorkers(t *testing.T) {
 	if applied, err := repo.MarkReady(ctx, row.ID, "current-worker", row.OutputPath, 0, "", "", "", 4242); err != nil || !applied {
 		t.Fatalf("MarkReady = (%v, %v), want applied", applied, err)
 	}
+	ready, err := repo.GetByID(ctx, row.ID)
+	if err != nil || ready.Status != ArtifactToneMapReady {
+		t.Fatalf("tone-map ready row = (%+v, %v), want tone_map_ready", ready, err)
+	}
+	var legacyReadyID string
+	err = pool.QueryRow(ctx, `SELECT id FROM download_artifacts WHERE id = $1 AND status = 'ready'`, row.ID).Scan(&legacyReadyID)
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("merge-base ready reader saw tone-map artifact %q, err %v", legacyReadyID, err)
+	}
 	if _, err := pool.Exec(ctx, `UPDATE download_artifacts SET status = 'queued' WHERE id = $1`, row.ID); err != nil {
 		t.Fatal(err)
 	}

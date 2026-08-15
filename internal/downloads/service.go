@@ -533,7 +533,7 @@ func (s *Service) createArtifactDownload(ctx context.Context, userID int, req Cr
 // artifactRowStatus maps an ensured artifact to the download row status and
 // recorded size: ready artifacts serve immediately, anything else is preparing.
 func artifactRowStatus(artifact *Artifact, file *models.MediaFile) (string, int64) {
-	if artifact.Status == ArtifactReady {
+	if artifactReady(artifact) {
 		return StatusReady, artifact.FileSize
 	}
 	return StatusPreparing, file.FileSize

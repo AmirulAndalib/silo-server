@@ -763,6 +763,16 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 	// operator config change applies to reconstructed sessions too.
 	opts.HWAccel = cfg.HWAccel
 	opts.HWDevice = cfg.HWDevice
+
+	// Serialize before taking a global pacing slot. A reconstruct stalled behind
+	// another start for this session must not consume capacity needed by unrelated
+	// sessions after a restart.
+	unlock := m.LockSessionLifecycle(sessionID)
+	defer unlock()
+	if existing := m.GetTranscodeSession(sessionID); existing != nil {
+		return existing, nil
+	}
+
 	// Bound executor probing and any child validation commands under the same
 	// pacing slot as the eventual ffmpeg spawn. A canceled request must be able
 	// to leave the queue before doing that work.
@@ -792,20 +802,6 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 	if seg, seek, ok := fastResumeSeek(card, requestedSegment); ok {
 		opts.StartSegmentNumber = seg
 		opts.SeekSeconds = seek
-	}
-
-	// Serialize against every other spawn path (fresh start, restart) for this
-	// session so a reconstruct and a fresh start never run two ffmpeg writers
-	// against the same output dir. reconstructGroup only single-flights reconstructs
-	// against each other, not against starts.
-	unlock := m.LockSessionLifecycle(sessionID)
-	defer unlock()
-
-	// Re-check under the lifecycle lock: a fresh start (or a reconstruct that ran
-	// just before us) may already have a live session. Yield to it instead of
-	// spawning a duplicate writer.
-	if existing := m.GetTranscodeSession(sessionID); existing != nil {
-		return existing, nil
 	}
 
 	startTranscode := m.startTranscode
