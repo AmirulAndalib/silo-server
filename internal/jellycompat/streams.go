@@ -224,6 +224,7 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	requiredToneMapMode := tonemap.Mode("")
 	var exhaustedRemoteToneMapErr error
 	remoteValidationOnly := true
+	adoptedLocal := false
 	if h.NodePlanner != nil && h.JWTSecret != "" {
 		playSession, err = h.ensureUpstreamPlayback(r.Context(), session, playSession.ID, *source, "transcode")
 		if err != nil {
@@ -267,6 +268,10 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 				}
 				initialSeekSeconds, _ := compatInitialTranscodePosition(*source, h.compatSegmentDuration(), playSession.InitialSeekSeconds)
 				if err := h.startRemoteTranscodeWithToneMapMode(r.Context(), playSession.ID, playSession.UpstreamSessionID, *source, file, initialSeekSeconds, tcNode.URL, requiredToneMapMode); err != nil {
+					if errors.Is(err, errRemoteStartAdoptedLocal) {
+						adoptedLocal = true
+						break
+					}
 					if errors.Is(err, errRemoteSoftwareToneMapStartFailed) {
 						exhaustedRemoteToneMapErr = errors.Join(exhaustedRemoteToneMapErr, err)
 						if !errors.Is(err, tonemap.ErrSourceRevisionChanged) && !errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) {
@@ -307,7 +312,7 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 
 	// In distributed mode admins can disable the local fallback so the API
 	// server never transcodes when no eligible node exists.
-	if h.NodePlanner != nil && !nodepool.LocalTranscodeFallbackAllowed(r.Context(), h.SettingsRepo) {
+	if h.NodePlanner != nil && !adoptedLocal && !nodepool.LocalTranscodeFallbackAllowed(r.Context(), h.SettingsRepo) {
 		if playSession.UpstreamSessionID != "" {
 			h.releaseCompatSessionReservation(playSession.UpstreamSessionID)
 			h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
@@ -324,7 +329,7 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 			"No transcode node is available and local transcode fallback is disabled")
 		return
 	}
-	if requiredToneMapMode != "" && playSession.UpstreamSessionID != "" {
+	if requiredToneMapMode != "" && !adoptedLocal && playSession.UpstreamSessionID != "" {
 		if err := h.sessionMgr.SetTranscodeNodeURL(playSession.UpstreamSessionID, ""); err != nil {
 			h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
 			writeError(w, http.StatusInternalServerError, "ServerError", "Failed to bind local transcode")
@@ -358,9 +363,11 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 func writeCompatTranscodeError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errToneMapCapabilityUnavailable), errors.Is(err, playback.ErrToneMapSourceValidationUnavailable):
-		writeError(w, http.StatusServiceUnavailable, "TranscodeUnavailable", err.Error())
+		slog.Warn("compat transcode unavailable", "component", "jellycompat", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "TranscodeUnavailable", "Transcode is temporarily unavailable")
 	case errors.Is(err, tonemap.ErrSourceRevisionChanged):
-		writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", err.Error())
+		slog.Warn("compat transcode source changed", "component", "jellycompat", "error", err)
+		writeError(w, http.StatusUnsupportedMediaType, "TranscodeUnsupported", "The media source changed; refresh playback information")
 	case errors.Is(err, errTranscode4KDisallowed):
 		writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
 	case errors.Is(err, errHDRTranscodeUnsupported):
@@ -575,6 +582,8 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 						segNum,
 					); restartErr == nil {
 						segmentPath, err = transcodeSession.WaitForSegment(segmentFile, 30*time.Second)
+					} else {
+						err = restartErr
 					}
 				}
 			}
@@ -607,6 +616,10 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 // failure on a file that does exist).
 func hlsSegmentErrorResponse(err error) (status int, code, message string) {
 	switch {
+	case errors.Is(err, tonemap.ErrSourceRevisionChanged):
+		return http.StatusUnsupportedMediaType, "TranscodeUnsupported", "The media source changed; refresh playback information"
+	case errors.Is(err, playback.ErrToneMapSourceValidationUnavailable):
+		return http.StatusServiceUnavailable, "TranscodeUnavailable", "Transcode is temporarily unavailable"
 	case errors.Is(err, playback.ErrSegmentNotFound), errors.Is(err, playback.ErrTranscodeFailed):
 		return http.StatusNotFound, "NotFound", "Segment not found"
 	default:
@@ -2041,6 +2054,9 @@ func (h *PlaybackHandler) restartCompatTranscodeForAudioSelection(
 		return false, err
 	}
 	if err := h.startRemoteTranscode(context.WithoutCancel(ctx), playSession.ID, playSession.UpstreamSessionID, source, file, positionSeconds, upstreamSession.TranscodeNodeURL); err != nil {
+		if errors.Is(err, errRemoteStartAdoptedLocal) {
+			return true, nil
+		}
 		return false, err
 	}
 	return true, nil

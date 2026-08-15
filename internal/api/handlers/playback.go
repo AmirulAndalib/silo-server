@@ -1364,7 +1364,11 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 			writeError(w, http.StatusNotFound, "not_found", "Transcode session not found")
 			return
 		}
-		transcodeSession = h.tm.ReconstructTranscode(r.Context(), sessionID, -1, *card)
+		var secondChanceErr error
+		transcodeSession, secondChanceErr = h.tm.ReconstructTranscodeWithError(r.Context(), sessionID, -1, *card)
+		if secondChanceErr != nil && writePlaybackToneMapExecutionError(w, secondChanceErr) {
+			return
+		}
 		if transcodeSession == nil {
 			writeError(w, http.StatusNotFound, "not_found", "Transcode session not found")
 			return
@@ -1384,6 +1388,20 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 	w.Header().Set("Pragma", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(manifest)
+}
+
+func writePlaybackToneMapExecutionError(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, tonemap.ErrSourceRevisionChanged) {
+		w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, transcodenode.ToneMapSourceRevisionChangedCode)
+		writeError(w, http.StatusUnprocessableEntity, "unsupported", "Tone-map source changed")
+		return true
+	}
+	if errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) {
+		w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, transcodenode.ToneMapSourceValidationUnavailableCode)
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode session is temporarily unavailable")
+		return true
+	}
+	return false
 }
 
 // HandleGetTranscodeSegment handles GET /playback/transcode/{session_id}/segment/{name}.
@@ -1434,7 +1452,11 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 			writeError(w, http.StatusNotFound, "not_found", "Transcode session not found")
 			return
 		}
-		transcodeSession = h.tm.ReconstructTranscode(r.Context(), sessionID, requestedSegment, *card)
+		var secondChanceErr error
+		transcodeSession, secondChanceErr = h.tm.ReconstructTranscodeWithError(r.Context(), sessionID, requestedSegment, *card)
+		if secondChanceErr != nil && writePlaybackToneMapExecutionError(w, secondChanceErr) {
+			return
+		}
 		if transcodeSession == nil {
 			writeError(w, http.StatusNotFound, "not_found", "Transcode session not found")
 			return
@@ -1552,6 +1574,8 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 							nextSegmentName := fmt.Sprintf("seg_%05d.m4s", segNum+1)
 							_, _ = transcodeSession.WaitForSegment(nextSegmentName, 1200*time.Millisecond)
 						}
+					} else {
+						err = restartErr
 					}
 				}
 			}
@@ -1562,6 +1586,9 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 		}
 	}
 	if err != nil {
+		if writePlaybackToneMapExecutionError(w, err) {
+			return
+		}
 		if errors.Is(err, playback.ErrSegmentNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "Segment not found")
 			return

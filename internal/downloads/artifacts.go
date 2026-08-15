@@ -815,6 +815,10 @@ func (m *ArtifactManager) encodeOne(ctx context.Context, a *Artifact) {
 	}
 
 	opts := m.buildOpts(file, a)
+	if !toneMapArtifactExecutionFingerprintMatches(a, opts) {
+		m.failJob(ctx, a, "frozen tone-map execution recipe no longer matches source metadata")
+		return
+	}
 	// Each lease attempt owns a distinct node-local object. A worker that loses
 	// the readiness fence can therefore queue its object for deletion without
 	// racing the replacement worker's output on the same node.
@@ -841,6 +845,11 @@ func (m *ArtifactManager) encodeOne(ctx context.Context, a *Artifact) {
 	}
 
 	remoteFieldsPresent := prepared.OriginNodeID != 0 || prepared.OriginNodeURL != "" || prepared.OriginNodeGroup != "" || prepared.OriginArtifactID != ""
+	if !toneMapArtifactExecutionFingerprintMatches(a, opts) {
+		m.cleanupRejectedPrepared(ctx, a.ID, prepared)
+		m.failJob(ctx, a, "frozen tone-map execution recipe changed before commit")
+		return
+	}
 	if prepared.FileSize <= 0 || (remoteFieldsPresent && !prepared.Remote()) || (!prepared.Remote() && prepared.OutputPath == "") {
 		msg := "prepared artifact returned an invalid storage locator"
 		slog.WarnContext(ctx, "prepared artifact returned an invalid storage locator", "component", "downloads", "artifact_id", a.ID)
@@ -879,6 +888,14 @@ func (m *ArtifactManager) encodeOne(ctx context.Context, a *Artifact) {
 	for _, d := range flipped {
 		m.publish(ctx, d)
 	}
+}
+
+func toneMapArtifactExecutionFingerprintMatches(a *Artifact, opts playback.TranscodeOpts) bool {
+	if a == nil || a.ToneMapMode == "" {
+		return true
+	}
+	fingerprint := downloadprepare.NewRequest(a.ID, opts).ExecutionFingerprint()
+	return fingerprint != "" && fingerprint == a.ParamsHash
 }
 
 func (m *ArtifactManager) cleanupRejectedPrepared(ctx context.Context, artifactID string, prepared PreparedArtifact) {

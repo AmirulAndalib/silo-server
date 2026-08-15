@@ -232,7 +232,10 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	remoteArtifact := claims.DownloadArtifactID != "" && strings.TrimSpace(claims.TranscodeNode) != ""
-	if claims.PlayMethod != streamtoken.PlayMethodDownload || (strings.TrimSpace(claims.MediaPath) == "" && !remoteArtifact) {
+	attestedRemote := claims.PlayMethod == streamtoken.PlayMethodToneMapDownload
+	if (claims.PlayMethod != streamtoken.PlayMethodDownload && !attestedRemote) ||
+		(strings.TrimSpace(claims.MediaPath) == "" && !remoteArtifact) ||
+		(attestedRemote && (!remoteArtifact || claims.DownloadArtifactSize <= 0 || strings.TrimSpace(claims.DownloadExecutionFingerprint) == "")) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -310,7 +313,7 @@ func (s *Server) relayDownloadArtifact(w http.ResponseWriter, r *http.Request, c
 		http.Error(w, "download unavailable", http.StatusBadGateway)
 		return
 	}
-	if claims.DownloadExecutionFingerprint != "" {
+	if claims.PlayMethod == streamtoken.PlayMethodToneMapDownload {
 		attestation, attestationErr := downloadprepare.ResultFromHeaders(resp.Header)
 		if attestationErr != nil || attestation.ExecutionFingerprint != claims.DownloadExecutionFingerprint || attestation.FileSize != claims.DownloadArtifactSize {
 			if s.artifactMissReporter != nil && strings.TrimSpace(claims.DownloadArtifactRowID) != "" {

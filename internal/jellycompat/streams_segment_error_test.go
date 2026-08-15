@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 // TestHLSSegmentErrorResponse pins the never-500 contract for the HLS segment
@@ -22,6 +23,8 @@ func TestHLSSegmentErrorResponse(t *testing.T) {
 	}{
 		{"segment not found", playback.ErrSegmentNotFound, http.StatusNotFound, "NotFound"},
 		{"transcode failed", playback.ErrTranscodeFailed, http.StatusNotFound, "NotFound"},
+		{"tone-map source changed", tonemap.ErrSourceRevisionChanged, http.StatusUnsupportedMediaType, "TranscodeUnsupported"},
+		{"tone-map validation unavailable", playback.ErrToneMapSourceValidationUnavailable, http.StatusServiceUnavailable, "TranscodeUnavailable"},
 		{
 			// WaitForSegment wraps the ffmpeg exit error as
 			// fmt.Errorf("%w: %v", ErrTranscodeFailed, waitErr) — this is exactly the

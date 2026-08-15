@@ -2736,7 +2736,21 @@ func (s *Scanner) processFile(
 		if shouldPreserveExistingProbeAfterProbeFailure(updateReasons, probe) {
 			// Leave the migrated row's probe_updated_at NULL so a later scan
 			// retries without replacing valid metadata with zero values.
-			return actionUnchanged, updateReasons, nil
+			if len(updateReasons) > 1 {
+				mf := models.MediaFile{MediaFolderID: folder.ID, FilePath: filePath}
+				populateScanIdentity(&mf, filePath, folder.Type, assignment, groupAssignment, existing)
+				switch _, updErr := s.fileRepo.UpdateIdentity(ctx, mf); {
+				case updErr == nil:
+					return actionUpdated, updateReasons, nil
+				case errors.Is(updErr, ErrFileNotFound):
+					// The old row is gone, so there is no probe metadata left to
+					// preserve. Continue through the normal upsert path.
+				default:
+					return 0, nil, fmt.Errorf("updating identity for file %s: %w", filePath, updErr)
+				}
+			} else {
+				return actionUnchanged, updateReasons, nil
+			}
 		}
 
 		// Detect external subtitles.
@@ -3243,7 +3257,20 @@ func needsCriticalProbeRepairScanState(file *scanStateFile) bool {
 }
 
 func shouldPreserveExistingProbeAfterProbeFailure(updateReasons []string, probe *ProbeData) bool {
-	return probe == nil && len(updateReasons) == 1 && updateReasons[0] == "probe_repair"
+	if probe != nil || len(updateReasons) == 0 {
+		return false
+	}
+	foundRepair := false
+	for _, reason := range updateReasons {
+		switch reason {
+		case "probe_repair":
+			foundRepair = true
+		case "group_assignment_changed", "root_assignment_changed":
+		default:
+			return false
+		}
+	}
+	return foundRepair
 }
 
 func (s *Scanner) enqueueMetadataWork(ctx context.Context, folder *models.MediaFolder, file *models.MediaFile) error {

@@ -132,6 +132,34 @@ func TestValidateArtifactToneMapRevisionRejectsCatalogProbeDrift(t *testing.T) {
 	}
 }
 
+func TestToneMapArtifactExecutionFingerprintRejectsRefreshedPathOrDuration(t *testing.T) {
+	manager := &ArtifactManager{}
+	file := hdrDownloadTestFile()
+	file.FilePath = "/media/original.mkv"
+	file.Duration = 3600
+	artifact := &Artifact{
+		ID: "artifact-1", CodecVideo: "h264", CodecAudio: "aac", ToneMapMode: tonemap.ModeSoftware,
+		ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapSourceKind: tonemap.SourcePQ,
+		ToneMapRecipeVersion:  playback.TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapSourceRevision: tonemap.RevisionForFile(file).Encode(),
+	}
+	original := manager.buildOpts(file, artifact)
+	artifact.ParamsHash = downloadprepare.NewRequest(artifact.ID, original).ExecutionFingerprint()
+	if !toneMapArtifactExecutionFingerprintMatches(artifact, original) {
+		t.Fatal("frozen execution request did not match its artifact hash")
+	}
+	changedPath := original
+	changedPath.InputPath = "/media/replaced.mkv"
+	if toneMapArtifactExecutionFingerprintMatches(artifact, changedPath) {
+		t.Fatal("changed input path reused the frozen artifact hash")
+	}
+	changedDuration := original
+	changedDuration.TotalDuration++
+	if toneMapArtifactExecutionFingerprintMatches(artifact, changedDuration) {
+		t.Fatal("changed duration reused the frozen artifact hash")
+	}
+}
+
 func TestResolveToneMapTargetRejectsHDRTranscodeWhenToneMapPolicyUnavailable(t *testing.T) {
 	file := hdrDownloadTestFile()
 	target := playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"}

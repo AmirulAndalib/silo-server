@@ -604,10 +604,18 @@ func (h *DownloadHandler) redirectToProxy(w http.ResponseWriter, r *http.Request
 			downloadFilename = filepath.Base(target.Path)
 		}
 	}
+	playMethod := streamtoken.PlayMethodDownload
+	if target.ExpectedExecutionFingerprint != "" {
+		if target.ExpectedArtifactSize <= 0 {
+			releaseReservation()
+			return false, nil
+		}
+		playMethod = streamtoken.PlayMethodToneMapDownload
+	}
 	token, err := streamtoken.Sign(streamtoken.Claims{
 		SessionID:                    sessionID,
 		MediaPath:                    mediaPath,
-		PlayMethod:                   streamtoken.PlayMethodDownload,
+		PlayMethod:                   playMethod,
 		TranscodeNode:                target.OriginNodeURL,
 		DownloadArtifactID:           target.OriginArtifactID,
 		DownloadArtifactRowID:        target.ArtifactID,

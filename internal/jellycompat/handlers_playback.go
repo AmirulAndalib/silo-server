@@ -23,6 +23,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/logredact"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -273,6 +274,7 @@ var errTranscode4KDisallowed = errors.New("4k video transcode disallowed by serv
 var errHDRTranscodeUnsupported = errors.New("HDR video transcode requires an enabled validated tone-map executor")
 var errToneMapCapabilityUnavailable = errors.New("tone-map capability discovery is temporarily unavailable")
 var errRemoteSoftwareToneMapStartFailed = errors.New("remote software tone-map start failed")
+var errRemoteStartAdoptedLocal = errors.New("remote start superseded by local transcode")
 
 // compatToneMapRecipe freezes the safe source classification and executor facts
 // that Jellyfin clients cannot round-trip in their protocol.
@@ -976,13 +978,13 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		defer cancel()
 		httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, transcodeNodeURL+"/transcode/start", strings.NewReader(string(body)))
 		if err != nil {
-			return transcodenode.TranscodeStartResponse{}, 0, false, fmt.Errorf("build transcode request: %w", err)
+			return transcodenode.TranscodeStartResponse{}, 0, false, fmt.Errorf("build transcode request: %w", logredact.SanitizeURLError(err))
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+h.JWTSecret)
 		resp, err := http.DefaultClient.Do(httpReq)
 		if err != nil {
-			return transcodenode.TranscodeStartResponse{}, 0, true, fmt.Errorf("remote transcode start failed: %w", err)
+			return transcodenode.TranscodeStartResponse{}, 0, true, fmt.Errorf("remote transcode start failed: %w", logredact.SanitizeURLError(err))
 		}
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusAccepted {
@@ -1117,7 +1119,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		publishUnlock()
 		h.tm.StopRemoteTranscode(upstreamSessionID, transcodeNodeURL)
 		if localWinner {
-			return nil
+			return errRemoteStartAdoptedLocal
 		}
 		return errors.New("remote transcode route ownership changed before publication")
 	}

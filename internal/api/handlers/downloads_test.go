@@ -599,6 +599,7 @@ func TestManagedFileRedirectsNodeLocalArtifactThroughSameGroupProxy(t *testing.T
 		t.Fatal(err)
 	}
 	if claims.MediaPath != "" || claims.DownloadFilename != "Movie Final.mp4" || claims.TranscodeNode != "http://transcode-b.internal:8096" ||
+		claims.PlayMethod != streamtoken.PlayMethodToneMapDownload ||
 		claims.DownloadArtifactID != "artifact-remote" || claims.DownloadArtifactRowID != "artifact-row" ||
 		claims.DownloadArtifactSize != 123 || claims.DownloadExecutionFingerprint != "recipe-fingerprint" {
 		t.Fatalf("claims = %+v", claims)
@@ -623,6 +624,31 @@ func TestManagedFileFallsBackWhenRemoteLocatorHasNoOriginURL(t *testing.T) {
 	h.HandleDownloadFileViaProxy(rec, req)
 	if rec.Code != http.StatusOK || rec.Body.String() != "served" {
 		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestManagedToneMapFileFallsBackWhenLegacyProxyRejectsToken(t *testing.T) {
+	legacyProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer legacyProxy.Close()
+	svc := &proxyDownloadService{
+		fakeDownloadService: &fakeDownloadService{},
+		managedTarget: &downloads.FileTarget{
+			DownloadID: "dl-attested", ArtifactID: "artifact-row", Path: "/prepared/movie.mp4", MediaFileID: 42,
+			OriginNodeURL: "http://transcode.internal", OriginArtifactID: "artifact-remote",
+			ExpectedArtifactSize: 123, ExpectedExecutionFingerprint: "fingerprint", ProxyEligible: true,
+		},
+	}
+	proxies := nodepool.NewProxyPool()
+	proxies.SetNodes([]*nodepool.Node{{URL: legacyProxy.URL, Enabled: true, Healthy: true}})
+	h := NewDownloadHandler(svc)
+	h.SetProxyDelivery(nodepool.NewPlanner(proxies, nodepool.NewTranscodePool()), func() string { return "secret" })
+	req := withChiID(downloadTestRequest(http.MethodGet, "/downloads/dl-attested/file-proxy", nil, 7, "pA", "devA"), "dl-attested")
+	rec := httptest.NewRecorder()
+	h.HandleDownloadFileViaProxy(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != "served" {
+		t.Fatalf("fallback response = %d %q, want central serve", rec.Code, rec.Body.String())
 	}
 }
 

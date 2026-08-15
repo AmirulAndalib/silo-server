@@ -207,6 +207,12 @@ func TestFailedProbeRepairPreservesExistingProbe(t *testing.T) {
 	if shouldPreserveExistingProbeAfterProbeFailure([]string{"probe_repair", "mtime_changed"}, nil) {
 		t.Fatal("changed source must not preserve stale probe metadata")
 	}
+	if !shouldPreserveExistingProbeAfterProbeFailure([]string{"probe_repair", "root_assignment_changed", "group_assignment_changed"}, nil) {
+		t.Fatal("identity-only changes must preserve probe metadata when repair probing fails")
+	}
+	if shouldPreserveExistingProbeAfterProbeFailure([]string{"probe_repair", "size_changed", "root_assignment_changed"}, nil) {
+		t.Fatal("byte changes must not preserve stale probe metadata")
+	}
 }
 
 func TestIdentityOnlyFastPathEligible(t *testing.T) {

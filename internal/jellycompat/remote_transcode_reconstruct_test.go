@@ -70,6 +70,21 @@ func TestStartRemoteTranscodeRequiresDurableNodeRecipe(t *testing.T) {
 	}
 }
 
+func TestStartRemoteTranscodeRedactsInvalidNodeURL(t *testing.T) {
+	handler, _, _ := newRemoteTranscodeHandler(t, "http://node.invalid", &stubRecipeNodeStore{})
+	err := handler.startRemoteTranscode(
+		context.Background(), "play-1", "upstream-1", testRemoteTranscodeSource(),
+		&models.MediaFile{ID: 42, FilePath: "/media/movie.mkv"}, 0,
+		"http://user:super-secret@%zz",
+	)
+	if err == nil {
+		t.Fatal("startRemoteTranscode() error = nil")
+	}
+	if strings.Contains(err.Error(), "user") || strings.Contains(err.Error(), "super-secret") {
+		t.Fatalf("startRemoteTranscode() leaked credentials: %v", err)
+	}
+}
+
 func (s *stubRecipeNodeStore) Get(sessionID string) (playback.RecipeCard, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -355,16 +370,13 @@ func TestStartRemoteToneMapDelayedSuccessCannotOverwriteLocalSoftwareWinner(t *t
 		PlayMethod: playback.PlayTranscode, BasePlayMethod: playback.PlayTranscode, TranscodeNodeURL: remoteNode.URL,
 	}}
 	handler.sessionMgr = sessionMgr
-	file, err := handler.fileResolver.GetByID(context.Background(), source.FileID)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	remoteResult := make(chan error, 1)
+	request := httptest.NewRequest(http.MethodGet, "/Videos/item/master.m3u8?PlaySessionId=play-1&MediaSourceId="+source.ID, nil)
+	request = request.WithContext(context.WithValue(request.Context(), compatSessionKey, &Session{Token: "compat-token", StreamAppUserID: 7, ProfileID: "profile-1"}))
+	recorder := httptest.NewRecorder()
+	remoteResult := make(chan struct{}, 1)
 	go func() {
-		remoteResult <- handler.startRemoteTranscode(
-			context.Background(), "play-1", "upstream-1", source, file, 0, remoteNode.URL,
-		)
+		handler.HandleMasterManifest(recorder, request)
+		remoteResult <- struct{}{}
 	}()
 	select {
 	case <-remoteStartArrived:
@@ -383,8 +395,13 @@ func TestStartRemoteToneMapDelayedSuccessCannotOverwriteLocalSoftwareWinner(t *t
 	t.Cleanup(func() { handler.tm.CloseTranscodeSessionIf("upstream-1", localWinner, "") })
 
 	releaseOnce.Do(func() { close(releaseRemoteStart) })
-	if err := <-remoteResult; err != nil {
-		t.Fatalf("stale remote hardware result = %v, want clean adoption of local winner", err)
+	select {
+	case <-remoteResult:
+	case <-time.After(5 * time.Second):
+		t.Fatal("master manifest did not adopt the local winner")
+	}
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "seg_00000") {
+		t.Fatalf("manifest response = %d %q, want adopted local manifest", recorder.Code, recorder.Body.String())
 	}
 	select {
 	case <-remoteDeleted:

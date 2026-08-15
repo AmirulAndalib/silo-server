@@ -25,10 +25,31 @@ import (
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
 	"github.com/Silo-Server/silo-server/internal/settingskeys"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
+	"github.com/Silo-Server/silo-server/internal/transcodenode"
 	"github.com/Silo-Server/silo-server/internal/userdb"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
+
+func TestWritePlaybackToneMapExecutionError(t *testing.T) {
+	for _, tt := range []struct {
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{tonemap.ErrSourceRevisionChanged, http.StatusUnprocessableEntity, transcodenode.ToneMapSourceRevisionChangedCode},
+		{playback.ErrToneMapSourceValidationUnavailable, http.StatusServiceUnavailable, transcodenode.ToneMapSourceValidationUnavailableCode},
+	} {
+		rr := httptest.NewRecorder()
+		if !writePlaybackToneMapExecutionError(rr, tt.err) {
+			t.Fatalf("error %v was not handled", tt.err)
+		}
+		if rr.Code != tt.wantStatus || rr.Header().Get(transcodenode.ToneMapExecutionErrorHeader) != tt.wantCode {
+			t.Fatalf("response = %d/%q, want %d/%q", rr.Code, rr.Header().Get(transcodenode.ToneMapExecutionErrorHeader), tt.wantStatus, tt.wantCode)
+		}
+	}
+}
 
 type testUserStoreProvider struct {
 	store userstore.UserStore

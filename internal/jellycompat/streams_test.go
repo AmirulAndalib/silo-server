@@ -3,6 +3,7 @@ package jellycompat
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -90,9 +91,12 @@ func TestWriteCompatTranscodeErrorClassifiesLiveToneMapValidation(t *testing.T) 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			writeCompatTranscodeError(recorder, tt.err)
+			writeCompatTranscodeError(recorder, fmt.Errorf("validate /secret/media/movie.mkv: %w", tt.err))
 			if recorder.Code != tt.wantStatus || !strings.Contains(recorder.Body.String(), `"Error":"`+tt.wantCode+`"`) {
 				t.Fatalf("response = %d %s, want %d/%s", recorder.Code, recorder.Body.String(), tt.wantStatus, tt.wantCode)
+			}
+			if strings.Contains(recorder.Body.String(), "/secret/media/movie.mkv") {
+				t.Fatalf("response leaked source path: %s", recorder.Body.String())
 			}
 		})
 	}

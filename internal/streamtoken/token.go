@@ -11,6 +11,9 @@ const (
 	// PlayMethodDownload identifies a token minted only after the API has
 	// authorized a file download. Proxy download routes reject playback tokens.
 	PlayMethodDownload = "download"
+	// PlayMethodToneMapDownload makes attested prepared downloads fail closed on
+	// older proxies that do not validate the receipt fields.
+	PlayMethodToneMapDownload = "download_tonemap_v1"
 	// PlayMethodToneMapTranscode makes frozen tone-map reconstruction fail
 	// closed on older readers that do not understand its recipe fields.
 	PlayMethodToneMapTranscode = "transcode_tonemap_v1"

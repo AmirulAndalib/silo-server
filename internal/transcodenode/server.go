@@ -1491,6 +1491,8 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 						segNum,
 					); restartErr == nil {
 						segPath, err = session.WaitForSegment(name, 30*time.Second)
+					} else {
+						err = restartErr
 					}
 				}
 				if !ok && session.IsCopyVideo() {
@@ -1504,6 +1506,10 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
+		if errors.Is(err, tonemap.ErrSourceRevisionChanged) || errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) {
+			writeToneMapRecipeError(w, err)
+			return
+		}
 		http.Error(w, "segment not found", http.StatusNotFound)
 		return
 	}
