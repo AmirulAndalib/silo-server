@@ -378,6 +378,132 @@ func TestCodecProfileAVCRefFramesConstraint(t *testing.T) {
 	}
 }
 
+func TestBuildPlaybackSourceCodecProfiles_WebOSAnamorphicCondition(t *testing.T) {
+	tests := []struct {
+		name             string
+		version          catalog.FileVersion
+		directProfile    DirectPlayProfile
+		codecProfile     CodecProfile
+		allow4KTranscode bool
+		wantTranscoding  bool
+	}{
+		{
+			name: "non-anamorphic h264 remains directly playable",
+			version: catalog.FileVersion{
+				FileID:      1,
+				Resolution:  "1080p",
+				Container:   "mp4",
+				CodecVideo:  "h264",
+				CodecAudio:  "aac",
+				VideoTracks: []models.VideoTrack{{Codec: "h264", Profile: "High", Level: 42, Width: 1920, Height: 1080, VideoRangeType: "SDR"}},
+				AudioTracks: []models.AudioTrack{{Codec: "aac", Channels: 2, Default: true}},
+			},
+			directProfile: DirectPlayProfile{Type: "Video", Container: "mp4", VideoCodec: "h264", AudioCodec: "aac"},
+			codecProfile: CodecProfile{
+				Type:  "Video",
+				Codec: "h264",
+				Conditions: []ProfileCondition{
+					{Condition: "NotEquals", Property: "IsAnamorphic", Value: "true", IsRequired: false},
+					{Condition: "EqualsAny", Property: "VideoProfile", Value: "high|main|baseline|constrained baseline", IsRequired: false},
+					{Condition: "EqualsAny", Property: "VideoRangeType", Value: "SDR", IsRequired: false},
+					{Condition: "LessThanEqual", Property: "VideoLevel", Value: "51", IsRequired: false},
+				},
+			},
+			allow4KTranscode: true,
+			wantTranscoding:  true,
+		},
+		{
+			name: "non-anamorphic 4k hevc mkv remains playable when 4k transcode is disabled",
+			version: catalog.FileVersion{
+				FileID:      2,
+				Resolution:  "2160p",
+				Container:   "mkv",
+				CodecVideo:  "hevc",
+				CodecAudio:  "aac",
+				VideoTracks: []models.VideoTrack{{Codec: "hevc", Profile: "Main 10", Level: 153, Width: 3840, Height: 2160, VideoRangeType: "SDR"}},
+				AudioTracks: []models.AudioTrack{{Codec: "aac", Channels: 2, Default: true}},
+			},
+			directProfile: DirectPlayProfile{Type: "Video", Container: "mkv", VideoCodec: "hevc", AudioCodec: "aac"},
+			codecProfile: CodecProfile{
+				Type:  "Video",
+				Codec: "hevc",
+				Conditions: []ProfileCondition{
+					{Condition: "NotEquals", Property: "IsAnamorphic", Value: "true", IsRequired: false},
+					{Condition: "EqualsAny", Property: "VideoProfile", Value: "main|main 10", IsRequired: false},
+					{Condition: "EqualsAny", Property: "VideoRangeType", Value: "SDR|HDR10|HLG|DOVI|DOVIWithHDR10|DOVIWithHLG|DOVIWithSDR", IsRequired: false},
+					{Condition: "LessThanEqual", Property: "VideoLevel", Value: "183", IsRequired: false},
+				},
+			},
+			allow4KTranscode: false,
+			wantTranscoding:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile := DeviceProfile{
+				DirectPlayProfiles: []DirectPlayProfile{tt.directProfile},
+				TranscodingProfiles: []TranscodingProfile{{
+					Type: "Video", Protocol: "hls", Container: "ts", VideoCodec: "h264", AudioCodec: "aac",
+				}},
+				CodecProfiles: []CodecProfile{tt.codecProfile},
+			}
+
+			source := (&PlaybackHandler{codec: NewResourceIDCodec()}).buildPlaybackSource(
+				"item", "play", tt.version, profile, playbackInfoRequest{}, tt.allow4KTranscode,
+			)
+			if !source.SupportsDirectPlay {
+				t.Fatal("SupportsDirectPlay = false, want true")
+			}
+			if !source.SupportsDirectStream {
+				t.Fatal("SupportsDirectStream = false, want true")
+			}
+			if source.SupportsTranscoding != tt.wantTranscoding {
+				t.Fatalf("SupportsTranscoding = %v, want %v", source.SupportsTranscoding, tt.wantTranscoding)
+			}
+		})
+	}
+}
+
+func TestConditionMatchesUnknownPropertyHonorsIsRequired(t *testing.T) {
+	tests := []struct {
+		name       string
+		isRequired bool
+		want       bool
+	}{
+		{name: "optional unknown property is satisfied", want: true},
+		{name: "required unknown property fails", isRequired: true, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			condition := ProfileCondition{
+				Condition:  "Equals",
+				Property:   "UnsupportedProperty",
+				Value:      "value",
+				IsRequired: tt.isRequired,
+			}
+			if got := conditionMatches(condition, conditionValues{}); got != tt.want {
+				t.Fatalf("conditionMatches() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConditionMatchesRequiredIsAnamorphicUsesReportedFalseValue(t *testing.T) {
+	condition := ProfileCondition{
+		Condition:  "NotEquals",
+		Property:   "IsAnamorphic",
+		Value:      "true",
+		IsRequired: true,
+	}
+	values := buildConditionValues(catalog.FileVersion{}, nil)
+
+	if !conditionMatches(condition, values) {
+		t.Fatal("required IsAnamorphic NotEquals true condition failed for Silo's reported false value")
+	}
+}
+
 func withVideoTrack(version catalog.FileVersion, track models.VideoTrack, resolution string) catalog.FileVersion {
 	version.VideoTracks = []models.VideoTrack{track}
 	version.Resolution = resolution

@@ -149,7 +149,7 @@ func conditionsMatch(conditions []ProfileCondition, values conditionValues) bool
 func conditionMatches(condition ProfileCondition, values conditionValues) bool {
 	actual, ok := values[normalizeConditionToken(condition.Property)]
 	if !ok {
-		return false
+		return !condition.IsRequired
 	}
 
 	switch normalizeConditionToken(condition.Condition) {
@@ -185,6 +185,7 @@ func buildConditionValues(version catalog.FileVersion, audioStreamIndex *int) co
 	values := conditionValues{
 		"videorangetype": {text: compatVideoRangeType(video, version.HDR)},
 		"videoprofile":   {text: video.Profile},
+		"isanamorphic":   {text: strconv.FormatBool(false)},
 		"videolevel":     intConditionValue(video.Level),
 		"refframes":      intConditionValue(video.ReferenceFrames),
 		"width":          intConditionValue(video.Width),
