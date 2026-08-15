@@ -2,7 +2,6 @@ package nodepool
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
 
@@ -134,7 +133,7 @@ func (p *Planner) TranscodeNodeHealthy(nodeURL string) bool {
 	if p == nil || p.transcodes == nil || nodeURL == "" {
 		return false
 	}
-	node := p.transcodes.FindByURL(strings.TrimRight(nodeURL, "/"))
+	node := p.transcodes.FindByURL(normalizeNodeURL(nodeURL))
 	return node != nil && node.Healthy && node.Enabled
 }
 

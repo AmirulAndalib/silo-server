@@ -39,6 +39,25 @@ func transcodeNode(id int, url string, group *string, activeJobs int) *Node {
 	return &Node{ID: id, Name: url, Type: NodeTypeTranscode, URL: url, Enabled: true, Healthy: true, Group: group, ActiveJobs: activeJobs}
 }
 
+func TestTranscodeNodeHealthyNormalizesTrailingSlash(t *testing.T) {
+	f := newFixture(nil, []*Node{
+		{URL: "http://tc-node:8080/", Enabled: true, Healthy: true},
+	})
+
+	if !f.planner.TranscodeNodeHealthy("http://tc-node:8080") {
+		t.Fatal("stored trailing-slash URL did not match a lookup without the slash")
+	}
+	if !f.planner.TranscodeNodeHealthy("http://tc-node:8080/") {
+		t.Fatal("stored trailing-slash URL did not match a lookup with the slash")
+	}
+	if f.planner.TranscodeNodeHealthy("http://other-node:8080") {
+		t.Fatal("unknown node URL reported healthy")
+	}
+	if f.planner.TranscodeNodeHealthy("") {
+		t.Fatal("empty node URL reported healthy")
+	}
+}
+
 func TestPlanTranscodePairsProxyFromSameGroup(t *testing.T) {
 	f := newFixture(
 		[]*Node{
