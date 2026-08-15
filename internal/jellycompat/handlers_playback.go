@@ -38,7 +38,10 @@ import (
 // waiting through the production cold-probe budget.
 var compatRemoteTranscodeStartTimeout time.Duration
 
-const compatRemoteNodeProbeFallbackTimeout = 2 * time.Minute
+const (
+	compatRemoteNodeProbeFallbackTimeout = 2 * time.Minute
+	compatToneMapNegotiationTimeout      = 5 * time.Second
+)
 
 type playbackInfoRequest struct {
 	UserID               string          `json:"UserId"`
@@ -431,17 +434,17 @@ func (h *PlaybackHandler) remoteTranscodeStartTimeout(request transcodenode.Tran
 
 // availableCompatToneMapCapabilities returns the union visible to media-source
 // negotiation, including local execution only when fallback is allowed.
-func (h *PlaybackHandler) availableCompatToneMapCapabilities(ctx context.Context) (tonemap.Capabilities, error) {
-	capabilities, _, err := h.compatToneMapCapabilityInventory(ctx)
+func (h *PlaybackHandler) availableCompatToneMapCapabilities(ctx context.Context, timeout time.Duration) (tonemap.Capabilities, error) {
+	capabilities, _, err := h.compatToneMapCapabilityInventory(ctx, timeout)
 	return capabilities, err
 }
 
 // compatToneMapCapabilityInventory returns both a planning union and per-node
 // records so heterogeneous pools can be placed without losing executor identity.
-func (h *PlaybackHandler) compatToneMapCapabilityInventory(ctx context.Context) (tonemap.Capabilities, map[string]tonemap.Capabilities, error) {
+func (h *PlaybackHandler) compatToneMapCapabilityInventory(ctx context.Context, timeout time.Duration) (tonemap.Capabilities, map[string]tonemap.Capabilities, error) {
 	capabilities := make(tonemap.Capabilities, 0, 4)
 	byNode := make(map[string]tonemap.Capabilities)
-	fetchCtx, cancel := context.WithTimeout(ctx, h.toneMapCapabilityTimeout())
+	fetchCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	type capabilityResult struct {
@@ -547,7 +550,7 @@ func (h *PlaybackHandler) planCompatTranscodeSession(ctx context.Context, sessio
 	if !selectable || !enumerable {
 		return h.NodePlanner.PlanSession(session.ID, session.TranscodeNodeURL, true, bitrateKbps), nil
 	}
-	available, nodeCapabilities, capabilityErr := h.compatToneMapCapabilityInventory(ctx)
+	available, nodeCapabilities, capabilityErr := h.compatToneMapCapabilityInventory(ctx, h.toneMapCapabilityTimeout())
 	preferredMode := available.PreferredMode(policy, kind)
 	if preferredMode == "" {
 		if capabilityErr != nil {
@@ -1120,7 +1123,7 @@ func (h *PlaybackHandler) HandlePlaybackInfo(w http.ResponseWriter, r *http.Requ
 			}
 			if !toneMapCapabilitiesLoaded {
 				if toneMapPolicy != tonemap.PolicyNone {
-					toneMapCapabilities, toneMapCapabilityErr = h.availableCompatToneMapCapabilities(r.Context())
+					toneMapCapabilities, toneMapCapabilityErr = h.availableCompatToneMapCapabilities(r.Context(), compatToneMapNegotiationTimeout)
 				}
 				toneMapCapabilitiesLoaded = true
 			}

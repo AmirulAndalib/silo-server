@@ -33,8 +33,31 @@ func (p enumeratingNodePlannerV3) TranscodeNodeURLs() []string { return p.urls }
 // presetLocalRegistryV3 pins the handler's local transformation registry so
 // tests never probe the machine's real ffmpeg.
 func presetLocalRegistryV3(h *PlaybackHandler, registry *playback.TransformationRegistryV3) {
-	h.v3RegistryOnce.Do(func() {})
 	h.v3Registry = registry
+}
+
+func TestTransformationRegistryV3RetriesIncompleteProbe(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	failed := playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{Name: "partial", Available: true}})
+	succeeded := playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{Name: "complete", Available: true}})
+	var calls int
+	handler.v3RegistryProbe = func(context.Context, string, tonemap.Capabilities) (*playback.TransformationRegistryV3, error) {
+		calls++
+		if calls == 1 {
+			return failed, context.DeadlineExceeded
+		}
+		return succeeded, nil
+	}
+
+	if got := handler.transformationRegistryV3(context.Background()); got != failed {
+		t.Fatalf("failed probe registry = %p, want current partial result %p", got, failed)
+	}
+	if got := handler.transformationRegistryV3(context.Background()); got != succeeded {
+		t.Fatalf("retry registry = %p, want successful result %p", got, succeeded)
+	}
+	if got := handler.transformationRegistryV3(context.Background()); got != succeeded || calls != 2 {
+		t.Fatalf("cached registry = %p after %d probes, want successful registry after two probes", got, calls)
+	}
 }
 
 // stableToneMapTransportFileV3 returns an HDR source whose filesystem and

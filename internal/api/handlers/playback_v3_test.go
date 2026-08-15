@@ -3488,7 +3488,6 @@ func TestHandleReplanPlaybackV3FailureRecoveryPreservesOmittedQuality(t *testing
 		{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
 		{Name: playback.TransformationVideoToH264V3, RecipeVersion: "2", Available: true},
 	})
-	handler.v3RegistryOnce.Do(func() {})
 
 	startRequest := v3HandlerStartRequest()
 	startRequest.ClientPlaybackContext.Deliveries[playback.DeliveryClassHLSV3] = playback.DeliveryCapabilityV3{Enabled: true, SupportedOnDevice: true}

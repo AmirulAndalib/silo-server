@@ -225,6 +225,7 @@ export function formatTranscodeModeSummary(session: AdminSession): string | null
 export interface ToneMapSummary {
   badge: "HW Tone map" | "SW Tone map";
   detail: "Hardware" | "Software";
+  mode: "hardware" | "software";
 }
 
 /** Format a confirmed HDR-to-SDR executor without guessing from legacy data. */
@@ -236,9 +237,9 @@ export function formatToneMapSummary(session: AdminSession): ToneMapSummary | nu
 
   switch (session.tone_map_mode?.trim().toLowerCase()) {
     case "hardware":
-      return { badge: "HW Tone map", detail: "Hardware" };
+      return { badge: "HW Tone map", detail: "Hardware", mode: "hardware" };
     case "software":
-      return { badge: "SW Tone map", detail: "Software" };
+      return { badge: "SW Tone map", detail: "Software", mode: "software" };
     default:
       return null;
   }

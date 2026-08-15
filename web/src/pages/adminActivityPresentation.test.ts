@@ -165,10 +165,12 @@ describe("adminActivityPresentation", () => {
     expect(formatToneMapSummary(makeSession({ tone_map_mode: "hardware" }))).toEqual({
       badge: "HW Tone map",
       detail: "Hardware",
+      mode: "hardware",
     });
     expect(formatToneMapSummary(makeSession({ tone_map_mode: "software" }))).toEqual({
       badge: "SW Tone map",
       detail: "Software",
+      mode: "software",
     });
     expect(formatToneMapSummary(makeSession())).toBeNull();
     expect(formatToneMapSummary(makeSession({ tone_map_mode: "future-mode" }))).toBeNull();

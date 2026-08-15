@@ -814,9 +814,6 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	if !s.requireApprovedInputPath(w, r, req.InputPath) {
 		return
 	}
-	s.reloadMu.RLock()
-	defer s.reloadMu.RUnlock()
-
 	cfg := s.watcher.Config()
 	if cfg == nil {
 		http.Error(w, "node not configured", http.StatusServiceUnavailable)
@@ -879,6 +876,12 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 			writeToneMapRecipeError(w, err)
 			return
 		}
+	}
+	s.reloadMu.RLock()
+	defer s.reloadMu.RUnlock()
+	if s.watcher.Config() != cfg {
+		http.Error(w, "node configuration changed", http.StatusServiceUnavailable)
+		return
 	}
 
 	// Hold the per-session lifecycle lock across teardown → spawn → register so a

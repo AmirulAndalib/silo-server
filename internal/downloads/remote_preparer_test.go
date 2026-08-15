@@ -469,8 +469,8 @@ func TestNodeAwarePreparerUsesTargetNodeProbeBudget(t *testing.T) {
 	preparer := NewNodeAwarePreparer(nil, nil, func() *config.Config { return cfg })
 	preparer.probeClient = &http.Client{Transport: transport}
 
-	if got, want := preparer.remoteToneMapProbeTimeout(remote.URL), remoteToneMapProbeMinTimeout; got != want {
-		t.Fatalf("unknown-node probe timeout = %s, want cold-node fallback %s", got, want)
+	if got, want := preparer.remoteToneMapProbeTimeout(remote.URL), tonemap.ProbeRequestTimeout(tonemap.BackendQSV, "/central/device"); got != want {
+		t.Fatalf("unknown-node probe timeout = %s, want configured probe budget %s", got, want)
 	}
 	if _, err := preparer.toneMapCapabilitiesForNode(context.Background(), remote.URL); err != nil {
 		t.Fatal(err)
@@ -543,11 +543,11 @@ func TestNodeAwarePreparerCapabilityFailurePreservesNodeProbeBudget(t *testing.T
 	}
 }
 
-func TestNodeAwarePreparerUsesMinimumProbeBudgetWithoutCachedAdvertisement(t *testing.T) {
+func TestNodeAwarePreparerDerivesProbeBudgetWithoutCachedAdvertisement(t *testing.T) {
 	preparer := NewNodeAwarePreparer(nil, nil, nil)
 
-	if got := preparer.remoteToneMapProbeTimeout("https://node.example"); got != remoteToneMapProbeMinTimeout {
-		t.Fatalf("uncached probe timeout = %s, want %s", got, remoteToneMapProbeMinTimeout)
+	if got, want := preparer.remoteToneMapProbeTimeout("https://node.example"), tonemap.ProbeRequestTimeout("", ""); got != want {
+		t.Fatalf("uncached probe timeout = %s, want derived budget %s", got, want)
 	}
 }
 

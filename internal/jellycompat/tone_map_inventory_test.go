@@ -62,7 +62,7 @@ func TestCompatToneMapCapabilityInventoryFetchesNodesConcurrently(t *testing.T) 
 	}
 	result := make(chan tonemap.Capabilities, 1)
 	go func() {
-		capabilities, _, _ := handler.compatToneMapCapabilityInventory(context.Background())
+		capabilities, _, _ := handler.compatToneMapCapabilityInventory(context.Background(), time.Second)
 		result <- capabilities
 	}()
 	select {
@@ -99,7 +99,7 @@ func TestCompatToneMapCapabilityInventoryHonorsSharedDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	capabilities, byNode, err := handler.compatToneMapCapabilityInventory(ctx)
+	capabilities, byNode, err := handler.compatToneMapCapabilityInventory(ctx, 25*time.Millisecond)
 	if elapsed := time.Since(started); elapsed >= time.Second {
 		t.Fatalf("capability aggregation took %s, want shared caller deadline", elapsed)
 	}

@@ -141,10 +141,20 @@ func (e *transportErrorV3) Error() string {
 }
 
 func (h *PlaybackHandler) transformationRegistryV3(ctx context.Context) *playback.TransformationRegistryV3 {
-	h.v3RegistryOnce.Do(func() {
-		h.v3Registry = playback.ProbeTransformationRegistryV3(context.WithoutCancel(ctx), h.playbackConfig().FFmpegPath)
-	})
-	return h.v3Registry
+	h.v3RegistryMu.Lock()
+	defer h.v3RegistryMu.Unlock()
+	if h.v3Registry != nil {
+		return h.v3Registry
+	}
+	probe := playback.ProbeTransformationRegistryWithToneMapV3Result
+	if h.v3RegistryProbe != nil {
+		probe = h.v3RegistryProbe
+	}
+	registry, err := probe(context.WithoutCancel(ctx), h.playbackConfig().FFmpegPath, nil)
+	if err == nil {
+		h.v3Registry = registry
+	}
+	return registry
 }
 
 // localToneMapCapabilitiesV3 returns a defensive copy of the capabilities

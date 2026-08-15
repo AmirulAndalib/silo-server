@@ -5,11 +5,14 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/buildinfo"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 )
+
+const remoteNodeInventoryProbeTimeout = 5 * time.Second
 
 // SystemHandler serves read-only system inspection endpoints.
 type SystemHandler struct {
@@ -116,10 +119,9 @@ func (h *SystemHandler) HandleBuildInfo(w http.ResponseWriter, _ *http.Request) 
 }
 
 func (h *SystemHandler) fetchRemoteHWAccel(ctx context.Context, node *nodepool.Node) (playback.HWAccelInfo, error) {
-	// The admin inventory does not carry each node's configured backend/device
-	// list, so give cold probes a generous bound while still preventing a
-	// stalled healthy node from holding the request until client cancellation.
-	requestCtx, cancel := context.WithTimeout(ctx, remoteNodeProbeFallbackTimeout)
+	// Inventory is an interactive admin request, so a stalled healthy node must
+	// fail quickly and surface through the node entry's existing Error field.
+	requestCtx, cancel := context.WithTimeout(ctx, remoteNodeInventoryProbeTimeout)
 	defer cancel()
 	return fetchRemoteTranscodeCapabilities(requestCtx, node.URL, h.jwtSecret)
 }

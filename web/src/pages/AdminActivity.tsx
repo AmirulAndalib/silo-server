@@ -35,6 +35,7 @@ import {
   formatVideoSummary,
   normalizeContainerDecision,
   normalizeStreamDecision,
+  type ToneMapSummary,
 } from "@/pages/adminActivityPresentation";
 import {
   Table,
@@ -667,7 +668,7 @@ function StreamRow({
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-1.5">
             {transcodeMode ? <TranscodeModeBadge label={transcodeMode} /> : null}
-            {toneMap ? <ToneMapModeBadge label={toneMap.badge} /> : null}
+            {toneMap ? <ToneMapModeBadge summary={toneMap} /> : null}
             <button
               type="button"
               onClick={toggleDetails}
@@ -858,7 +859,7 @@ function StreamRow({
           <div className="mt-2 rounded-md border border-white/6 bg-white/[0.03] px-2 py-1.5">
             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               {transcodeMode ? <TranscodeModeBadge label={transcodeMode} /> : null}
-              {toneMap ? <ToneMapModeBadge label={toneMap.badge} /> : null}
+              {toneMap ? <ToneMapModeBadge summary={toneMap} /> : null}
               <button
                 type="button"
                 onClick={toggleDetails}
@@ -992,18 +993,18 @@ function transcodeModeBadgeColor(label: string): string {
 }
 
 /** Render the compact indicator for the confirmed tone-mapping executor. */
-function ToneMapModeBadge({ label }: { label: string }) {
+function ToneMapModeBadge({ summary }: { summary: ToneMapSummary }) {
   return (
     <span
-      className={`inline-flex rounded border px-1.5 py-0.5 text-[9px] font-semibold ${toneMapModeBadgeColor(label)}`}
+      className={`inline-flex rounded border px-1.5 py-0.5 text-[9px] font-semibold ${toneMapModeBadgeColor(summary.mode)}`}
     >
-      {label}
+      {summary.badge}
     </span>
   );
 }
 
-function toneMapModeBadgeColor(label: string): string {
-  if (label.trim().toLowerCase() === "sw tone map") {
+function toneMapModeBadgeColor(mode: ToneMapSummary["mode"]): string {
+  if (mode === "software") {
     return "border-destructive/30 bg-destructive/10 text-destructive";
   }
   return "border-violet-400/25 bg-violet-400/10 text-violet-200";

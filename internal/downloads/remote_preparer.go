@@ -349,7 +349,11 @@ func (p *NodeAwarePreparer) remoteToneMapProbeTimeout(nodeURL string) time.Durat
 	if timeout > 0 {
 		return timeout
 	}
-	return remoteToneMapProbeMinTimeout
+	cfg := p.config()
+	if cfg == nil {
+		return tonemap.ProbeRequestTimeout("", "")
+	}
+	return tonemap.ProbeRequestTimeout(cfg.Playback.HWAccel, cfg.Playback.HWDevice)
 }
 
 // cacheToneMapCapabilityFailure negatively caches an unreachable or invalid

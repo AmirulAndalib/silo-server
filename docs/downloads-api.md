@@ -1153,7 +1153,7 @@ Errors use a flat envelope:
 | 429  | `download_limit_exceeded`  | Concurrent download cap hit.                                              |
 | 429  | `download_quota_exceeded`  | Period quota hit.                                                         |
 | 500  | `internal_error`           | Unexpected server error.                                                  |
-| 501  | `quality_unavailable`      | Requested quality is unsupported by enabled executor capabilities.        |
+| 501  | `quality_unavailable`      | Tone mapping is disabled, its selected mode is disallowed by policy, or enabled executor capabilities cannot support the requested quality. These configuration and policy failures use HTTP 501, distinct from capability-detection failures. |
 | 501  | `bulk_quality_unavailable` | Series/season batch requested a non-original quality.                     |
 | 501  | `format_unavailable`       | Legacy/internal non-original direct download or missing prepare pipeline. |
 | 503  | `capacity_unavailable`     | Compatible download-preparation executors are currently saturated.        |

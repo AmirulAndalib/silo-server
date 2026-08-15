@@ -196,8 +196,9 @@ type PlaybackHandler struct {
 	// PlanStoreV3 owns the short-lived protocol-v3 control-plane state. Router
 	// wiring replaces the in-memory default with PostgreSQL in integrated mode.
 	PlanStoreV3          playback.PlanStoreV3
-	v3RegistryOnce       sync.Once
+	v3RegistryMu         sync.Mutex
 	v3Registry           *playback.TransformationRegistryV3
+	v3RegistryProbe      func(context.Context, string, tonemap.Capabilities) (*playback.TransformationRegistryV3, error)
 	v3ToneMapProbe       func(context.Context, string, string, string) (tonemap.Capabilities, error)
 	v3NodeCapabilitiesMu sync.Mutex
 	v3NodeCapabilities   map[string]v3NodeCapabilityCache
