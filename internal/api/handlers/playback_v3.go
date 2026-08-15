@@ -1963,7 +1963,10 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 	req.ToneMapDVRPUPresent = sourceMetadata.ToneMapDVRPUPresent
 	nodeResp, status, err := h.startRemotePlaybackTransport(r.Context(), node.URL, req)
 	if err != nil {
-		if req.ToneMapMode != "" && (errors.Is(err, tonemap.ErrSourceRevisionChanged) || errors.Is(err, playback.ErrToneMapSourceValidationUnavailable)) {
+		if req.ToneMapMode != "" && (errors.Is(err, tonemap.ErrSourceRevisionChanged) ||
+			errors.Is(err, tonemap.ErrSourcePreflightRejected) ||
+			errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) ||
+			errors.Is(err, playback.ErrToneMapExecutorUnavailable)) {
 			h.tm.StopRemoteTranscode(transportID, node.URL)
 			return preparedTransportV3{}, toneMapExecutionTransportErrorV3(err, "The selected transcode node rejected the playback transport.")
 		}

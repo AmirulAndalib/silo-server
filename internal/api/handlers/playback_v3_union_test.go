@@ -1264,7 +1264,9 @@ func TestPrepareTransportV3ClassifiesExhaustedRemoteLiveValidation(t *testing.T)
 		wantRetryable bool
 	}{
 		{name: "stale metadata", status: http.StatusUnprocessableEntity, validation: transcodenode.ToneMapSourceRevisionChangedCode, wantCause: tonemap.ErrSourceRevisionChanged},
+		{name: "preflight rejected", status: http.StatusUnprocessableEntity, validation: transcodenode.ToneMapSourcePreflightRejectedCode, wantCause: tonemap.ErrSourcePreflightRejected},
 		{name: "probe unavailable", status: http.StatusServiceUnavailable, validation: transcodenode.ToneMapSourceValidationUnavailableCode, wantCause: playback.ErrToneMapSourceValidationUnavailable, wantRetryable: true},
+		{name: "executor unavailable", status: http.StatusServiceUnavailable, validation: transcodenode.ToneMapExecutorUnavailableCode, wantCause: playback.ErrToneMapExecutorUnavailable, wantRetryable: true},
 		{name: "generic recipe rejection", status: http.StatusUnprocessableEntity, wantRetryable: true},
 	}
 	for _, tt := range tests {

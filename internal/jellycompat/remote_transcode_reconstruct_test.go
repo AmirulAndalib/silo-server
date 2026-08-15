@@ -17,6 +17,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
@@ -464,6 +465,64 @@ func TestConcurrentRemoteStartsPublishOneTrackedRoute(t *testing.T) {
 	}
 	if got := starts.Load(); got != 1 {
 		t.Fatalf("node starts = %d, want one tracked remote runtime", got)
+	}
+}
+
+// TestMasterManifestGatesUnhealthyRemoteAdoption verifies the adoption redirect
+// only fires while the winner's node is still healthy: a recipe another API
+// server published is re-checked against the local pool before the client is
+// sent to it.
+func TestMasterManifestGatesUnhealthyRemoteAdoption(t *testing.T) {
+	const adoptedURL = "http://adopted.invalid"
+	const healthyURL = "http://healthy.invalid"
+	newPool := func(adoptedHealthy bool) *nodepool.Planner {
+		transcodes := nodepool.NewTranscodePool()
+		transcodes.SetNodes([]*nodepool.Node{
+			{URL: adoptedURL, Enabled: true, Healthy: adoptedHealthy},
+			{URL: healthyURL, Enabled: true, Healthy: true},
+		})
+		proxies := nodepool.NewProxyPool()
+		proxies.SetNodes([]*nodepool.Node{{URL: "https://proxy.example", Enabled: true, Healthy: true}})
+		return nodepool.NewPlanner(proxies, transcodes)
+	}
+
+	tests := []struct {
+		name            string
+		adoptedHealthy  bool
+		wantStatus      int
+		wantRedirectURL string
+	}{
+		{name: "healthy winner adopts", adoptedHealthy: true, wantStatus: http.StatusTemporaryRedirect, wantRedirectURL: "https://proxy.example/stream/transcode/"},
+		{name: "unhealthy winner is rejected", adoptedHealthy: false, wantStatus: http.StatusBadGateway},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler, _, playbackStore := newRemoteTranscodeHandler(t, adoptedURL, &stubRecipeNodeStore{})
+			handler.NodePlanner = newPool(tt.adoptedHealthy)
+			source := testRemoteTranscodeSource()
+			playbackStore.Put(PlaybackSession{
+				ID: "play-1", CompatToken: "compat-token", RouteItemID: "item",
+				MediaSources:      []PlaybackMediaSource{source},
+				UpstreamSessionID: "upstream-1", UpstreamPlayMethod: "transcode",
+				TranscodeStarted: true,
+				Recipe:           &playback.RecipeCard{TranscodeNodeURL: adoptedURL},
+			})
+			request := httptest.NewRequest(http.MethodGet, "/Videos/item/master.m3u8?PlaySessionId=play-1&MediaSourceId="+source.ID, nil)
+			request = request.WithContext(context.WithValue(request.Context(), compatSessionKey, &Session{Token: "compat-token", StreamAppUserID: 7, ProfileID: "profile-1"}))
+			recorder := httptest.NewRecorder()
+			handler.HandleMasterManifest(recorder, request)
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+			if tt.wantRedirectURL != "" {
+				location := recorder.Header().Get("Location")
+				if !strings.HasPrefix(location, tt.wantRedirectURL) {
+					t.Fatalf("redirect = %q, want prefix %q", location, tt.wantRedirectURL)
+				}
+			} else if _, ok := playbackStore.Get("play-1"); ok {
+				t.Fatal("rejected adoption left the published session in place")
+			}
+		})
 	}
 }
 

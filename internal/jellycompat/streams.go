@@ -270,6 +270,16 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 					}
 					var adoptedRemote *remoteStartAdoptedRemoteError
 					if errors.As(err, &adoptedRemote) {
+						if health, ok := h.NodePlanner.(compatTranscodeNodeHealth); ok && !health.TranscodeNodeHealthy(adoptedRemote.nodeURL) {
+							// The winner published this recipe while its node was
+							// healthy, but the node is no longer serving; don't
+							// redirect the client into it. Tear down and fail
+							// retryable so the client restarts the session on a
+							// healthy node and the orphaned winner is reaped.
+							failRemoteStart()
+							writeError(w, http.StatusBadGateway, "TranscodeStartFailed", "Transcode node rejected the request")
+							return
+						}
 						redirectNodeURL = adoptedRemote.nodeURL
 					} else {
 						if errors.Is(err, errRemoteSoftwareToneMapStartFailed) {

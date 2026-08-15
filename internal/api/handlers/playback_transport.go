@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -62,7 +63,14 @@ func (h *PlaybackHandler) startRemotePlaybackTransport(ctx context.Context, node
 	}
 	var result transcodenode.TranscodeStartResponse
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
-		slog.WarnContext(ctx, "remote transcode start response decode failed", "component", "api", "node", nodeURL, "error", err)
+		// Older nodes returned an empty 202 response; accept that for ordinary
+		// transcodes while treating any other malformed 202 body as a failed
+		// start instead of fabricating a success from a zero-value response.
+		if errors.Is(err, io.EOF) && request.ToneMapMode == "" {
+			return transcodenode.TranscodeStartResponse{}, response.StatusCode, nil
+		}
+		slog.WarnContext(ctx, "remote transcode start response decode failed", "component", "api", "node", logredact.SanitizeURL(nodeURL), "error", err)
+		return transcodenode.TranscodeStartResponse{}, response.StatusCode, fmt.Errorf("decode remote transcode start response: %w", err)
 	}
 	return result, response.StatusCode, nil
 }

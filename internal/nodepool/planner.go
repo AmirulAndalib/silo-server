@@ -2,6 +2,7 @@ package nodepool
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -123,6 +124,18 @@ func (p *Planner) TranscodeNode(nodeID int) (*Node, bool) {
 		}
 	}
 	return nil, false
+}
+
+// TranscodeNodeHealthy reports whether the pooled transcode node serving a URL
+// is currently healthy and enabled. Remote-start adoption gates its redirect
+// on this: a recipe another API server published is only trustworthy while
+// its node still serves.
+func (p *Planner) TranscodeNodeHealthy(nodeURL string) bool {
+	if p == nil || p.transcodes == nil || nodeURL == "" {
+		return false
+	}
+	node := p.transcodes.FindByURL(strings.TrimRight(nodeURL, "/"))
+	return node != nil && node.Healthy && node.Enabled
 }
 
 // PlanDownload picks a healthy proxy for an unbounded file transfer. A

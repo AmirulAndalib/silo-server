@@ -130,6 +130,14 @@ type compatSessionReservationReleaser interface {
 	ReleaseSession(sessionID string)
 }
 
+// compatTranscodeNodeHealth reports whether a pooled transcode node is
+// currently healthy and enabled. Remote-start adoption is gated on it so a
+// recipe another API server published is only adopted while its node still
+// serves; *nodepool.Planner implements it.
+type compatTranscodeNodeHealth interface {
+	TranscodeNodeHealthy(nodeURL string) bool
+}
+
 // transcodeStreamDetailsSetter is implemented by the native SessionManager.
 // Optional (like sessionStarterContext) so lightweight test fakes don't have
 // to; without it the session keeps transport-level defaults only.
