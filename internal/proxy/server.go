@@ -415,15 +415,21 @@ func (s *Server) touchTranscodeSession(r *http.Request, claims *streamtoken.Clai
 // sessionInfo builds the node-session tracker record for a verified token,
 // copying the numeric ownership keys the node-session tracker needs.
 func sessionInfo(tr *nodesessions.Tracker, claims *streamtoken.Claims, kind string) nodesessions.SessionInfo {
+	startedAt, source := claims.StartedAt()
+	if source == streamtoken.StartedAtSourceNone {
+		startedAt = time.Now().UTC()
+	}
 	return nodesessions.SessionInfo{
-		SessionID:   claims.SessionID,
-		NodeURL:     tr.NodeURL(),
-		NodeName:    tr.NodeName(),
-		Type:        kind,
-		StartedAt:   time.Now().UTC().Format(time.RFC3339),
-		AuthUserID:  claims.UserID,
-		ProfileID:   claims.ProfileID,
-		MediaFileID: claims.MediaFileID,
+		SessionID:         claims.SessionID,
+		NodeURL:           tr.NodeURL(),
+		NodeName:          tr.NodeName(),
+		Type:              kind,
+		StartedAt:         startedAt.Format(time.RFC3339),
+		StartedAtUnixNano: startedAt.UnixNano(),
+		StartedAtSource:   string(source),
+		AuthUserID:        claims.UserID,
+		ProfileID:         claims.ProfileID,
+		MediaFileID:       claims.MediaFileID,
 	}
 }
 

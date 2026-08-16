@@ -506,16 +506,18 @@ func (h *PlaybackHandler) playbackStreamURL(s *playback.Session) string {
 // the bytes are served by HTTP Range / a re-spawned remux pipe at the
 // client-supplied position.
 func identityRecipeCard(s *playback.Session) playback.RecipeCard {
+	var card playback.RecipeCard
 	switch s.PlayMethod {
 	case playback.PlayRemux:
-		card := playback.NewRemuxRecipeCard(s.ID, s.UserID, s.ProfileID, s.MediaFileID, s.TranscodeAudio, s.AudioTrackIndex, s.RemuxDVMode)
+		card = playback.NewRemuxRecipeCard(s.ID, s.UserID, s.ProfileID, s.MediaFileID, s.TranscodeAudio, s.AudioTrackIndex, s.RemuxDVMode)
 		card.TargetCodecAudio = s.TargetAudioCodec
 		card.TargetAudioChannels = s.TargetAudioChannels
 		card.TargetAudioBitrateKbps = s.TargetAudioBitrateKbps
-		return card
 	default:
-		return playback.NewDirectRecipeCard(s.ID, s.UserID, s.ProfileID, s.MediaFileID)
+		card = playback.NewDirectRecipeCard(s.ID, s.UserID, s.ProfileID, s.MediaFileID)
 	}
+	card.OriginalStartedAt = s.StartedAt
+	return card
 }
 
 func fileBitrateKbps(file *models.MediaFile) int {
