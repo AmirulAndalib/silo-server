@@ -36,6 +36,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/historyimport"
+	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/Silo-Server/silo-server/internal/intromarkers"
 	"github.com/Silo-Server/silo-server/internal/invitations"
 	"github.com/Silo-Server/silo-server/internal/libraryingest"
@@ -217,26 +218,7 @@ func (d *Dependencies) CurrentConfig() *config.Config {
 func NewRouter(deps Dependencies) chi.Router {
 	r := chi.NewRouter()
 
-	// Standard middleware.
-	r.Use(middleware.RequestID)
-
-	// Client IP resolution must run before request logging.
-	if deps.ClientIPResolver != nil {
-		r.Use(clientip.Middleware(deps.ClientIPResolver))
-	}
-
-	r.Use(apimw.RequestLogger(deps.NodeID))
-	r.Use(middleware.Recoverer)
-	r.Use(apimw.Metrics)
-
-	// Compress text-like responses (JSON, SVG, …); media content types are
-	// not in the middleware's allowlist and stream through untouched.
-	r.Use(middleware.Compress(5))
-
-	// Activity logging (before auth — captures all requests including failed auth).
-	if deps.ActivityLogWriter != nil {
-		r.Use(activitylog.NewMiddleware(deps.ActivityLogWriter, deps.NodeID))
-	}
+	useBaseMiddleware(r, deps)
 
 	// Build the readiness handler with optional S3 check.
 	var s3Checker handlers.S3HealthChecker
@@ -3275,6 +3257,58 @@ func NewRouter(deps Dependencies) chi.Router {
 	})
 
 	return r
+}
+
+// useBaseMiddleware mounts the middleware chain every native request passes
+// through, in order. It is factored out of NewRouter so a test can drive the
+// real chain over a real socket: re-declaring the stack in a test would let the
+// two drift, and a drifted copy is exactly how a broken writer chain passes its
+// own tests (see the §4.4 conformance requirement in the stream-telemetry design).
+func useBaseMiddleware(r chi.Router, deps Dependencies) {
+	// Standard middleware.
+	r.Use(middleware.RequestID)
+
+	// Client IP resolution must run before request logging.
+	if deps.ClientIPResolver != nil {
+		r.Use(clientip.Middleware(deps.ClientIPResolver))
+	}
+
+	r.Use(apimw.RequestLogger(deps.NodeID))
+	r.Use(middleware.Recoverer)
+	r.Use(apimw.Metrics)
+
+	// Compress text-like responses (JSON, SVG, …), while leaving exact bulk
+	// media routes unwrapped so their io.ReaderFrom/sendfile path survives.
+	r.Use(httpstream.CompressExcept(5, skipNativeMediaCompression))
+
+	// Activity logging (before auth — captures all requests including failed auth).
+	if deps.ActivityLogWriter != nil {
+		r.Use(activitylog.NewMiddleware(deps.ActivityLogWriter, deps.NodeID))
+	}
+}
+
+func skipNativeMediaCompression(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	p := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	if len(p) < 3 || p[0] != "api" || p[1] != "v1" {
+		return false
+	}
+	switch {
+	case len(p) == 4 && p[2] == "stream" && p[3] != "":
+		return true
+	case len(p) == 7 && p[2] == "playback" && p[3] == "transcode" && p[4] != "" && p[5] == "segment" && p[6] != "":
+		return true
+	case len(p) == 5 && p[2] == "downloads" && p[3] != "" && (p[4] == "file" || p[4] == "file-proxy"):
+		return true
+	case len(p) == 3 && (p[2] == "direct-download" || p[2] == "direct-download-proxy"):
+		return true
+	case len(p) == 7 && p[2] == "ebooks" && p[3] != "" && p[4] == "files" && p[5] != "" && p[6] == "read":
+		return true
+	default:
+		return false
+	}
 }
 
 // optionalProfileViewerAccess preserves the established profile-less plugin

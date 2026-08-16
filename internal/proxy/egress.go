@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"io"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/Silo-Server/silo-server/internal/httpstream"
 )
 
 // meterWindowSeconds is the averaging window for the egress rate. HLS clients
@@ -57,9 +60,8 @@ func (m *egressMeter) RateKbps() int {
 	return int(total * 8 / 1000 / meterWindowSeconds)
 }
 
-// meteredResponseWriter counts every byte written to the client.
-// Embedding the interface intentionally hides optimizations like
-// io.ReaderFrom so all writes flow through Write.
+// meteredResponseWriter counts every byte written to the client. Chunked
+// ReaderFrom delegation preserves both sendfile and the rolling rate window.
 type meteredResponseWriter struct {
 	http.ResponseWriter
 	meter *egressMeter
@@ -69,6 +71,16 @@ func (w *meteredResponseWriter) Write(b []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(b)
 	w.meter.Add(int64(n))
 	return n, err
+}
+
+func (w *meteredResponseWriter) ReadFrom(src io.Reader) (int64, error) {
+	rf, ok := httpstream.ReaderFromOf(w.ResponseWriter)
+	if !ok {
+		return io.Copy(httpstream.WriterOnly(w), src)
+	}
+	return httpstream.CopyChunked(rf, src, httpstream.ReadFromChunkDefault, func(n int64, _ error) {
+		w.meter.Add(n)
+	})
 }
 
 func (w *meteredResponseWriter) Flush() {

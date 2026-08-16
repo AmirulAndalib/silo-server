@@ -40,6 +40,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/api"
 	"github.com/Silo-Server/silo-server/internal/api/handlers"
 	"github.com/Silo-Server/silo-server/internal/audiobooks"
+	"github.com/Silo-Server/silo-server/internal/audiobooks/abs"
 	"github.com/Silo-Server/silo-server/internal/audiobooks/podcastfeed"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/autoscan"
@@ -56,6 +57,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/ebooks"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/historyimport"
+	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/Silo-Server/silo-server/internal/imagecache"
 	"github.com/Silo-Server/silo-server/internal/intromarkers"
 	"github.com/Silo-Server/silo-server/internal/jellycompat"
@@ -2730,7 +2732,7 @@ func main() {
 			absRouter.Use(clientip.Middleware(ipResolver))
 		}
 		absRouter.Use(chimiddleware.Recoverer)
-		absRouter.Use(chimiddleware.Compress(5))
+		absRouter.Use(httpstream.CompressExcept(5, abs.SkipMediaCompression))
 		deps.ABSHandler.Mount(absRouter)
 		absSrv = &http.Server{
 			Addr:              cfg.AudiobookshelfCompat.Listen,

@@ -32,9 +32,10 @@ const (
 	// SetWriteDeadline per step rather than one per 32 KB chunk.
 	bumpStep = 15 * time.Second
 
-	// readFromChunk bounds each ReadFrom slice so the deadline keeps rolling
-	// during zero-copy (sendfile) transfers of large files.
-	readFromChunk int64 = 64 << 20
+	// readFromChunk bounds each ReadFrom slice so the deadline keeps rolling.
+	// At the default 180s window, 4 MiB permits steady clients down to roughly
+	// 186 kbit/s without expiring mid-slice.
+	readFromChunk int64 = ReadFromChunkDefault
 )
 
 // StreamOutcome classifies how a streaming response ended.
@@ -131,28 +132,19 @@ func (s *RollingDeadlineWriter) Write(p []byte) (int, error) {
 // (sendfile for *os.File bodies, as used by http.ServeContent) while still
 // rolling the deadline between bounded slices.
 func (s *RollingDeadlineWriter) ReadFrom(r io.Reader) (int64, error) {
-	rf, ok := s.w.(io.ReaderFrom)
+	rf, ok := ReaderFromOf(s.w)
 	if !ok {
-		// writerOnly hides this method so io.Copy doesn't recurse into it.
+		// WriterOnly hides this method so io.Copy doesn't recurse into it.
 		s.bump()
-		return io.Copy(writerOnly{s}, r)
+		return io.Copy(WriterOnly(s), r)
 	}
-	var total int64
-	for {
+	if s.statusCode == 0 {
+		s.statusCode = http.StatusOK
+	}
+	return CopyChunked(rf, r, readFromChunk, func(n int64, err error) {
 		s.bump()
-		if s.statusCode == 0 {
-			s.statusCode = http.StatusOK
-		}
-		n, err := rf.ReadFrom(io.LimitReader(r, readFromChunk))
-		total += n
 		s.recordWrite(n, err)
-		if err != nil {
-			return total, err
-		}
-		if n < readFromChunk {
-			return total, nil
-		}
-	}
+	})
 }
 
 func (s *RollingDeadlineWriter) Flush() {
@@ -203,5 +195,3 @@ func isTimeoutError(err error) bool {
 	var netErr net.Error
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
-
-type writerOnly struct{ io.Writer }

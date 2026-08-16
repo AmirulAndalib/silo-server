@@ -15,6 +15,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/clientip"
+	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/recommendations"
 	"github.com/Silo-Server/silo-server/internal/sections"
@@ -42,7 +43,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		MaxAge:           86400,
 	}))
 	r.Use(normalizeCompatPathMiddleware)
-	r.Use(middleware.Compress(5, "application/json"))
+	r.Use(httpstream.CompressExcept(5, skipCompatMediaCompression, "application/json"))
 	if debugPath := os.Getenv("JELLYCOMPAT_DEBUG_LOG"); debugPath != "" {
 		rotator := &lumberjack.Logger{
 			Filename:   debugPath,
@@ -271,6 +272,28 @@ func NewRouter(deps Dependencies) chi.Router {
 	r.Head("/", systemHandler.HandlePing)
 
 	return r
+}
+
+func skipCompatMediaCompression(r *http.Request) bool {
+	const (
+		videosSegment = "Videos"
+		hlsSegment    = "hls"
+		hlsManifest   = "stream.m3u8"
+	)
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	p := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	switch {
+	case len(p) == 3 && p[0] == videosSegment && p[1] != "" && (p[2] == "stream" || strings.HasPrefix(p[2], "stream.")):
+		return p[2] == "stream" || len(strings.TrimPrefix(p[2], "stream.")) > 0
+	case len(p) == 5 && p[0] == videosSegment && p[1] != "" && p[2] == hlsSegment && p[3] != "" && p[4] != "":
+		return p[4] != hlsManifest && strings.Contains(p[4], ".")
+	case len(p) == 3 && p[0] == "Items" && p[1] != "" && p[2] == "Download":
+		return true
+	default:
+		return false
+	}
 }
 
 func withDefaults(deps Dependencies) Dependencies {
