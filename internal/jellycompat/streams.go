@@ -109,7 +109,7 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 	}
 	if h.NodePlanner != nil && h.JWTSecret != "" {
 		plan := h.NodePlanner.PlanSession(playSession.UpstreamSessionID, "", false, source.Version.Bitrate)
-		if redirectURL, redirectErr := h.buildProxyRedirectURL(playSession.ID, playSession.UpstreamSessionID, method, file, *source, "", seekSeconds, plan.ProxyNode); redirectErr == nil {
+		if redirectURL, redirectErr := h.buildProxyRedirectURL(playSession.ID, playSession.UpstreamSessionID, method, file, *source, session, playSession.CreatedAt, "", seekSeconds, plan.ProxyNode); redirectErr == nil {
 			http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 			return
 		}
@@ -259,7 +259,7 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 					writeError(w, http.StatusBadGateway, "TranscodeStartFailed", "Transcode node rejected the request")
 					return
 				}
-				redirectURL, redirectErr := h.buildProxyRedirectURL(playSession.ID, playSession.UpstreamSessionID, string(playback.PlayTranscode), file, *source, tcNode.URL, 0, plan.ProxyNode)
+				redirectURL, redirectErr := h.buildProxyRedirectURL(playSession.ID, playSession.UpstreamSessionID, string(playback.PlayTranscode), file, *source, session, playSession.CreatedAt, tcNode.URL, 0, plan.ProxyNode)
 				if redirectErr != nil {
 					failRemoteStart()
 					writeError(w, http.StatusInternalServerError, "ServerError", "Failed to sign proxy stream URL")
@@ -1354,13 +1354,18 @@ func (h *PlaybackHandler) handlePlaybackReport(w http.ResponseWriter, r *http.Re
 // (PlaybackSession.Recipe); direct/remux need only identity, rebuilt here from
 // the compat session and the negotiated source.
 func (h *PlaybackHandler) upstreamRecipeCard(ps *PlaybackSession, cs *Session, source PlaybackMediaSource, method string) playback.RecipeCard {
+	var card playback.RecipeCard
 	if ps != nil && ps.Recipe != nil {
-		return *ps.Recipe
+		card = *ps.Recipe
+	} else if method == "remux" {
+		card = playback.NewRemuxRecipeCard(ps.UpstreamSessionID, cs.StreamAppUserID, cs.ProfileID, source.FileID, source.TranscodeAudio, compatAudioTrackIndexOrDefault(source))
+	} else {
+		card = playback.NewDirectRecipeCard(ps.UpstreamSessionID, cs.StreamAppUserID, cs.ProfileID, source.FileID)
 	}
-	if method == "remux" {
-		return playback.NewRemuxRecipeCard(ps.UpstreamSessionID, cs.StreamAppUserID, cs.ProfileID, source.FileID, source.TranscodeAudio, compatAudioTrackIndexOrDefault(source))
+	if ps != nil && !ps.CreatedAt.IsZero() {
+		card.OriginalStartedAt = ps.CreatedAt
 	}
-	return playback.NewDirectRecipeCard(ps.UpstreamSessionID, cs.StreamAppUserID, cs.ProfileID, source.FileID)
+	return card
 }
 
 // reportMatchesPlaySession rejects an alias-resolved session whose item or
