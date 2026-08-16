@@ -447,6 +447,7 @@ func (s *Server) SetInputPathAuthorizer(authorizer InputPathAuthorizer) {
 
 // Handler returns the chi.Router with all transcode routes.
 func (s *Server) Handler() http.Handler {
+	declareTranscodeNodeMediaRoutes()
 	s.startIdleReaper()
 	r := chi.NewRouter()
 	r.Get("/api/v1/health", s.handleHealth)

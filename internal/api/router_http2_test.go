@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 )
 
 // TestMountedNativeRouterServesMediaOverHTTP2 is a does-not-regress check.
@@ -24,7 +25,9 @@ func TestMountedNativeRouterServesMediaOverHTTP2(t *testing.T) {
 		t.Fatalf("LoadFromDB: %v", err)
 	}
 
-	routes := &socketRoutes{}
+	telemetryConfig := streamtelemetry.DefaultConfig("http2-test")
+	telemetryConfig.Enabled = true
+	routes := &socketRoutes{telemetry: streamtelemetry.NewRegistry(telemetryConfig, streamtelemetry.NewLocalStore(), nil)}
 	root := chi.NewRouter()
 	useBaseMiddleware(root, Dependencies{
 		Config:            cfg,
@@ -76,5 +79,8 @@ func TestMountedNativeRouterServesMediaOverHTTP2(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusPartialContent || string(body) != "2345" {
 		t.Fatalf("HTTP/2 Range = %d %q, want 206 %q", resp.StatusCode, body, "2345")
+	}
+	if snapshot := routes.telemetry.Sweep(); len(snapshot.Sessions) != 1 || snapshot.Sessions[0].RequestCount != 2 {
+		t.Fatalf("HTTP/2 telemetry snapshot = %+v", snapshot)
 	}
 }

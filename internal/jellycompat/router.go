@@ -24,6 +24,7 @@ import (
 
 // NewRouter builds the Jellyfin-compatibility router.
 func NewRouter(deps Dependencies) chi.Router {
+	declareJellycompatMediaRoutes()
 	deps = withDefaults(deps)
 
 	r := chi.NewRouter()

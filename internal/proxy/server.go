@@ -101,6 +101,7 @@ func newStreamTransport() *http.Transport {
 
 // Handler returns the chi.Router with all proxy routes mounted.
 func (s *Server) Handler() http.Handler {
+	declareProxyMediaRoutes()
 	r := chi.NewRouter()
 	if s.clientIP != nil {
 		r.Use(clientip.Middleware(s.clientIP))

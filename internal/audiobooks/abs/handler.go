@@ -361,6 +361,7 @@ func New(deps Dependencies) *Handler {
 // here so stage-by-stage handlers land in the right places without needing to
 // revisit Mount later.
 func (h *Handler) Mount(parent chi.Router) {
+	declareABSMediaRoutes()
 	parent.Group(func(r chi.Router) {
 		r.Use(h.accessLog)
 		h.mountRoutes(r)

@@ -31,6 +31,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
 	"github.com/Silo-Server/silo-server/internal/settingskeys"
 	"github.com/Silo-Server/silo-server/internal/settingsresolve"
+	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/userstore"
@@ -159,6 +160,7 @@ type PlaybackHandler struct {
 	MissingMarker           MissingFileMarker
 	NodePlanner             nodepool.SessionPlanner   // optional; enables proxy/transcode node selection
 	JWTSecret               string                    // needed for signing stream tokens
+	StreamTelemetry         *streamtelemetry.Registry // local observation-only telemetry
 	ItemAccess              PlaybackItemAccessChecker // optional; enables file authorization checks
 	EpisodeLookup           PlaybackEpisodeLookup     // optional; resolves episode files to their series
 	ExtraLookup             PlaybackExtraLookup       // optional; resolves extras files to their parent item
@@ -417,15 +419,6 @@ func (h *PlaybackHandler) signStreamClaims(claims streamtoken.Claims) string {
 	return token
 }
 
-// streamCardFromQuery verifies the stream token in the request's ?st= parameter
-// and returns the decoded reconstruction recipe, or nil when the token is
-// absent, invalid/expired, or bound to a different session. A live session needs
-// no token (the result is simply nil); the recipe is consumed only on
-// reconstruct.
-func (h *PlaybackHandler) streamCardFromQuery(r *http.Request, sessionID string) *playback.RecipeCard {
-	return streamCardFromToken(r.URL.Query().Get(streamTokenParam), sessionID, h.JWTSecret)
-}
-
 // loadTranscodeServeSession resolves the playback Session for the transcode
 // manifest/segment serve routes while keeping stream-token verification off the
 // hot path. The overwhelmingly common case is a live in-memory session, which
@@ -435,7 +428,7 @@ func (h *PlaybackHandler) streamCardFromQuery(r *http.Request, sessionID string)
 // LoadOrReconstructSession front door so reconstruct/ownership semantics stay
 // identical. The returned card (nil on the live-session path) is the decoded
 // recipe the caller's own reconstruct branch consumes.
-func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID string) (*playback.Session, playback.SessionLoadStatus, *playback.RecipeCard) {
+func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID string) (*playback.Session, playback.SessionLoadStatus, *playback.RecipeCard, *streamtoken.Claims) {
 	requestUserID := apimw.GetUserID(r.Context())
 	session, err := h.sessionMgr.GetSession(sessionID)
 	if err == nil {
@@ -443,34 +436,72 @@ func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID s
 		// (a zero caller is allowed; a non-zero mismatch is refused). No token
 		// verification on this hot path.
 		if requestUserID != 0 && session.UserID != requestUserID {
-			return nil, playback.SessionForbidden, nil
+			return nil, playback.SessionForbidden, nil, nil
 		}
-		return session, playback.SessionLoaded, nil
+		return session, playback.SessionLoaded, nil, nil
 	}
 	if !errors.Is(err, playback.ErrSessionNotFound) {
-		return nil, playback.SessionLoadFailed, nil
+		return nil, playback.SessionLoadFailed, nil, nil
 	}
 	// Genuine miss (e.g. after a restart): now — and only now — pay for the token
 	// decode so the recipe is available for reconstruction.
-	card := h.streamCardFromQuery(r, sessionID)
+	card, claims := verifiedStreamCardFromToken(r.URL.Query().Get(streamTokenParam), sessionID, h.JWTSecret)
 	session, status := h.tm.LoadOrReconstructSession(r.Context(), h.sessionMgr.GetSession, sessionID, requestUserID, card)
-	return session, status, card
+	return session, status, card, claims
 }
 
 // streamCardFromToken verifies a stream token and decodes its reconstruction
 // recipe, returning nil when the token is absent, unparseable/expired, or bound
 // to a different session id. Shared by the native serve handlers (PlaybackHandler
 // and StreamHandler).
-func streamCardFromToken(tokenStr, sessionID, secret string) *playback.RecipeCard {
+func verifiedStreamCardFromToken(tokenStr, sessionID, secret string) (*playback.RecipeCard, *streamtoken.Claims) {
 	if tokenStr == "" || secret == "" {
-		return nil
+		return nil, nil
 	}
 	claims, err := streamtoken.Verify(tokenStr, secret)
 	if err != nil || claims.SessionID != sessionID {
-		return nil
+		return nil, nil
 	}
 	card := playback.RecipeCardFromClaims(claims)
-	return &card
+	return &card, claims
+}
+
+func attachPlaybackSession(ctx context.Context, session *playback.Session, claims *streamtoken.Claims) {
+	if session == nil {
+		return
+	}
+	startedAt := session.StartedAt
+	startedSource := streamtelemetry.StartedAtSourceSession
+	tokenIssuedAt := time.Time{}
+	tokenSource := streamtelemetry.TokenIssuedAtSourceNone
+	if claims != nil {
+		if resolved, source := claims.StartedAt(); !resolved.IsZero() {
+			switch source {
+			case streamtoken.StartedAtSourceClaim:
+				startedAt = resolved
+				startedSource = streamtelemetry.StartedAtSourceClaim
+			case streamtoken.StartedAtSourceIssuedAt:
+				if startedAt.IsZero() {
+					startedAt = resolved
+					startedSource = streamtelemetry.StartedAtSourceIssuedAt
+				}
+			}
+		}
+		if claims.IssuedAt != nil {
+			tokenIssuedAt = claims.IssuedAt.Time
+			tokenSource = streamtelemetry.TokenIssuedAtSourceVerified
+		}
+	}
+	streamtelemetry.Attach(ctx, streamtelemetry.Attachment{Subject: streamtelemetry.UserSubject(session.UserID),
+		ProfileID: session.ProfileID, SessionID: session.ID, MediaFileID: session.MediaFileID,
+		PlayMethod: string(session.PlayMethod), StartedAt: startedAt, StartedAtSource: startedSource,
+		TokenIssuedAt: tokenIssuedAt, TokenIssuedAtSource: tokenSource})
+}
+
+func attachTransfer(ctx context.Context, userID int, profileID string, mediaFileID int) {
+	streamtelemetry.Attach(ctx, streamtelemetry.Attachment{Subject: streamtelemetry.UserSubject(userID),
+		ProfileID: profileID, MediaFileID: mediaFileID, StartedAtSource: streamtelemetry.StartedAtSourceFirstSeen,
+		TokenIssuedAtSource: streamtelemetry.TokenIssuedAtSourceNone})
 }
 
 // appendStreamToken adds the ?st=<token> parameter to a native serve URL.
@@ -1077,7 +1108,9 @@ func (h *PlaybackHandler) HandleStartPlayback(w http.ResponseWriter, r *http.Req
 	h.handleStartPlaybackV3(w, r, body)
 }
 
-func playbackClientInfoFromRequest(r *http.Request) playback.ClientInfo {
+// PlaybackClientInfoFromRequest captures and normalizes playback client headers
+// at the HTTP request boundary.
+func PlaybackClientInfoFromRequest(r *http.Request) playback.ClientInfo {
 	if r == nil {
 		return playback.ClientInfo{}
 	}
@@ -1093,6 +1126,10 @@ func playbackClientInfoFromRequest(r *http.Request) playback.ClientInfo {
 		Channel:   r.Header.Get("X-Silo-Client-Channel"),
 		UserAgent: r.UserAgent(),
 	}.Normalized()
+}
+
+func playbackClientInfoFromRequest(r *http.Request) playback.ClientInfo {
+	return PlaybackClientInfoFromRequest(r)
 }
 
 // HandleUpdateProgress handles POST /playback/{session_id}/progress.
@@ -1308,7 +1345,7 @@ func alignedSeekSeconds(seekSeconds float64, segmentDuration int, targetVideoCod
 // reports as the timeline's stream_origin_seconds.
 func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
-	session, status, card := h.loadTranscodeServeSession(r, sessionID)
+	session, status, card, claims := h.loadTranscodeServeSession(r, sessionID)
 	switch status {
 	case playback.SessionMissing:
 		writePlaybackSessionNotFound(w)
@@ -1320,6 +1357,7 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
 		return
 	}
+	attachPlaybackSession(r.Context(), session, claims)
 
 	transcodeSession := h.tm.GetTranscodeSession(sessionID)
 	if transcodeSession == nil {
@@ -1363,7 +1401,7 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 // Auth is optional — the session UUID serves as an access token.
 func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
-	session, status, card := h.loadTranscodeServeSession(r, sessionID)
+	session, status, card, claims := h.loadTranscodeServeSession(r, sessionID)
 	switch status {
 	case playback.SessionMissing:
 		writePlaybackSessionNotFound(w)
@@ -1375,6 +1413,7 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
 		return
 	}
+	attachPlaybackSession(r.Context(), session, claims)
 
 	transcodeSession := h.tm.GetTranscodeSession(sessionID)
 	if transcodeSession == nil {

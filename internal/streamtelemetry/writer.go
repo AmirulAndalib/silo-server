@@ -1,0 +1,116 @@
+package streamtelemetry
+
+import (
+	"bufio"
+	"context"
+	"io"
+	"net"
+	"net/http"
+
+	"github.com/Silo-Server/silo-server/internal/httpstream"
+)
+
+const OutcomeUnknown httpstream.StreamOutcome = "unknown"
+
+func (r *Registry) Observe(route MediaRoute) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		if r == nil || !r.cfg.Enabled || !route.Enrolled {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			var capture CaptureSet
+			if route.Capture != nil {
+				capture = route.Capture(request)
+				if capture.Method == "" {
+					capture.Method = request.Method
+				}
+				if capture.Pattern == "" {
+					capture.Pattern = route.Pattern
+				}
+				if capture.ReceivedAt.IsZero() {
+					capture.ReceivedAt = now()
+				}
+			} else {
+				capture = genericCapture(request)
+			}
+			obs := r.begin(route, capture)
+			observed := &observedWriter{w: w, observation: obs, bodyEligible: request.Method != http.MethodHead}
+			request = request.WithContext(context.WithValue(request.Context(), observationContextKey{}, obs))
+			completed := false
+			defer func() {
+				r.release(obs, obs.outcome(request.Context().Err(), completed))
+			}()
+			next.ServeHTTP(observed, request)
+			completed = true
+		})
+	}
+}
+
+type observedWriter struct {
+	w            http.ResponseWriter
+	observation  *Observation
+	bodyEligible bool
+	statusCode   int
+}
+
+func (w *observedWriter) Header() http.Header { return w.w.Header() }
+
+func (w *observedWriter) WriteHeader(statusCode int) {
+	if w.statusCode == 0 {
+		w.statusCode = statusCode
+	}
+	w.w.WriteHeader(statusCode)
+}
+
+func (w *observedWriter) Write(p []byte) (int, error) {
+	if w.observation.cut.Load() {
+		return 0, context.Canceled
+	}
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
+	}
+	n, err := w.w.Write(p)
+	if w.bodyEligible {
+		w.observation.AddBytes(int64(n))
+	}
+	w.observation.recordWriteError(err)
+	return n, err
+}
+
+func (w *observedWriter) ReadFrom(reader io.Reader) (int64, error) {
+	if w.observation.cut.Load() {
+		return 0, context.Canceled
+	}
+	readerFrom, ok := httpstream.ReaderFromOf(w.w)
+	if !ok {
+		return io.Copy(httpstream.WriterOnly(w), reader)
+	}
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
+	}
+	return httpstream.CopyChunked(readerFrom, reader, httpstream.ReadFromChunkDefault, func(n int64, err error) {
+		if w.bodyEligible {
+			w.observation.AddBytes(n)
+		}
+		w.observation.recordWriteError(err)
+	})
+}
+
+func (w *observedWriter) Unwrap() http.ResponseWriter { return w.w }
+func (w *observedWriter) Flush()                      { _ = http.NewResponseController(w.w).Flush() }
+
+func (w *observedWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.w.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	return hijacker.Hijack()
+}
+
+func (w *observedWriter) Push(target string, options *http.PushOptions) error {
+	pusher, ok := w.w.(http.Pusher)
+	if !ok {
+		return http.ErrNotSupported
+	}
+	return pusher.Push(target, options)
+}

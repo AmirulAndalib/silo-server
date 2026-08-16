@@ -99,6 +99,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/server"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
+	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
 	taskrepository "github.com/Silo-Server/silo-server/internal/taskmanager/repository"
@@ -690,6 +691,12 @@ func main() {
 
 	appCtx, appCancel := context.WithCancel(ctx)
 	defer appCancel()
+	var streamTelemetryRegistry *streamtelemetry.Registry
+	if mode == "" || mode == "integrated" || mode == "api" {
+		streamTelemetryConfig := streamtelemetry.ConfigFromEnv(nodeID)
+		streamTelemetryRegistry = streamtelemetry.NewRegistry(streamTelemetryConfig, streamtelemetry.NewLocalStore(), slog.Default())
+		streamTelemetryRegistry.Start(appCtx)
+	}
 	restartReqCh := make(chan struct{}, 1)
 	var restartRequested atomic.Bool
 
@@ -859,6 +866,7 @@ func main() {
 		BootstrapSensitiveValues:     bootstrapSensitiveValues,
 		RedisBootstrapAvailable:      redisBootstrapAvailable,
 		AppContext:                   appCtx,
+		StreamTelemetry:              streamTelemetryRegistry,
 		DB:                           pool,
 		SecretCipher:                 dataCipher,
 		EventBus:                     eventBus,

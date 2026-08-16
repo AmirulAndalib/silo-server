@@ -166,10 +166,21 @@ func (s *RollingDeadlineWriter) BytesWritten() int64 {
 // Outcome classifies the first write failure, or a canceled request when no
 // write failure was surfaced by the transport.
 func (s *RollingDeadlineWriter) Outcome(ctx context.Context) StreamOutcome {
-	if isTimeoutError(s.firstWriteErr) {
+	var ctxErr error
+	if ctx != nil {
+		ctxErr = ctx.Err()
+	}
+	return ClassifyOutcome(s.firstWriteErr, ctxErr)
+}
+
+// ClassifyOutcome classifies a streaming response from its first write error
+// and request-context error. It is shared by every streaming writer so stalled
+// connections have one definition throughout the server.
+func ClassifyOutcome(firstWriteErr, ctxErr error) StreamOutcome {
+	if isTimeoutError(firstWriteErr) {
 		return OutcomeStalledReap
 	}
-	if s.firstWriteErr != nil || (ctx != nil && ctx.Err() != nil) {
+	if firstWriteErr != nil || ctxErr != nil {
 		return OutcomeClientGone
 	}
 	return OutcomeCompleted

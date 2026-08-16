@@ -19,6 +19,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/activitylog"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 )
 
 const nativeSocketMediaETag = `"native-socket-media-v1"`
@@ -30,23 +31,41 @@ func (socketActivityWriter) Close() error               { return nil }
 
 type socketRoutes struct {
 	readerFromSeen atomic.Bool
+	telemetry      *streamtelemetry.Registry
 }
 
 func (h *socketRoutes) Mount(r chi.Router) {
 	media := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
 	serveMedia := func(w http.ResponseWriter, req *http.Request) {
+		streamtelemetry.Attach(req.Context(), streamtelemetry.Attachment{Subject: streamtelemetry.UserSubject(7),
+			ProfileID: "socket-profile", SessionID: "socket-session", MediaFileID: 42,
+			PlayMethod: "direct", StartedAt: time.Unix(1_700_000_000, 0), StartedAtSource: streamtelemetry.StartedAtSourceSession})
 		_, ok := w.(io.ReaderFrom)
 		h.readerFromSeen.Store(ok)
 		w.Header().Set("Content-Type", "video/mp4")
 		w.Header().Set("ETag", nativeSocketMediaETag)
 		http.ServeContent(w, req, "movie.mp4", time.Unix(1_700_000_000, 0), bytes.NewReader(media))
 	}
-	r.Get("/api/v1/stream/socket-test", serveMedia)
-	r.Head("/api/v1/stream/socket-test", serveMedia)
-	r.Get("/api/v1/stream/socket-test/subtitles/1/fonts", func(w http.ResponseWriter, _ *http.Request) {
+	wrap := func(method, pattern string, handler http.HandlerFunc) http.HandlerFunc {
+		if h.telemetry == nil {
+			return handler
+		}
+		route := streamtelemetry.MediaRoute{Family: streamtelemetry.FamilyNative, Method: method, Pattern: pattern,
+			Class: streamtelemetry.ClassPlayback, Role: streamtelemetry.RoleViewerEgress, CapRelevant: true, Enrolled: true,
+			Capture: func(r *http.Request) streamtelemetry.CaptureSet {
+				return streamtelemetry.CaptureSet{Method: r.Method, Pattern: pattern, ReceivedAt: time.Now()}
+			}}
+		return h.telemetry.Observe(route)(handler).ServeHTTP
+	}
+	r.Get("/api/v1/stream/socket-test", wrap(http.MethodGet, "/api/v1/stream/socket-test", serveMedia))
+	r.Head("/api/v1/stream/socket-test", wrap(http.MethodHead, "/api/v1/stream/socket-test", serveMedia))
+	r.Get("/api/v1/stream/socket-test/subtitles/1/fonts", wrap(http.MethodGet, "/api/v1/stream/socket-test/subtitles/1/fonts", func(w http.ResponseWriter, req *http.Request) {
+		streamtelemetry.Attach(req.Context(), streamtelemetry.Attachment{Subject: streamtelemetry.UserSubject(7),
+			ProfileID: "socket-profile", SessionID: "socket-session", MediaFileID: 42,
+			PlayMethod: "direct", StartedAt: time.Unix(1_700_000_000, 0), StartedAtSource: streamtelemetry.StartedAtSourceSession})
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"payload": strings.Repeat("compressible-json-", 128)})
-	})
+	}))
 }
 
 func TestMountedNativeRouterPreservesMediaHTTPAndCompression(t *testing.T) {
@@ -54,7 +73,9 @@ func TestMountedNativeRouterPreservesMediaHTTPAndCompression(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
 	}
-	routes := &socketRoutes{}
+	telemetryConfig := streamtelemetry.DefaultConfig("socket-test")
+	telemetryConfig.Enabled = true
+	routes := &socketRoutes{telemetry: streamtelemetry.NewRegistry(telemetryConfig, streamtelemetry.NewLocalStore(), nil)}
 	// Drive the real middleware chain (useBaseMiddleware is what NewRouter
 	// itself mounts) rather than NewRouter's full route tree: the media routes
 	// are only registered when their handler dependencies are non-nil, which a
@@ -109,6 +130,10 @@ func TestMountedNativeRouterPreservesMediaHTTPAndCompression(t *testing.T) {
 	defer func() { _ = zr.Close() }()
 	if body, err := io.ReadAll(zr); err != nil || !bytes.Contains(body, []byte("compressible-json")) {
 		t.Fatalf("compressed JSON body invalid: body=%q err=%v", body, err)
+	}
+	snapshot := routes.telemetry.Sweep()
+	if len(snapshot.Sessions) != 1 || snapshot.Sessions[0].RequestCount != 9 || snapshot.Sessions[0].BytesAccepted == 0 {
+		t.Fatalf("mounted telemetry snapshot = %+v", snapshot)
 	}
 }
 
