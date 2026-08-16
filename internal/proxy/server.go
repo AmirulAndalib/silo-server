@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 
+	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/downloadprepare"
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
@@ -33,6 +34,7 @@ type Server struct {
 	httpClient           *http.Client
 	artifactMissReporter remoteArtifactMissReporter
 	egress               *egressMeter
+	clientIP             *clientip.Resolver
 	// subCache stores full-track PGS (.sup) extracts under the transcode dir
 	// so repeat selections skip the whole-file ffmpeg demux.
 	subCache *playback.SubtitleCache
@@ -77,6 +79,12 @@ func (s *Server) SetRemoteArtifactMissReporter(reporter remoteArtifactMissReport
 	s.artifactMissReporter = reporter
 }
 
+// SetClientIPResolver wires trusted-proxy client IP resolution. It must be
+// called during construction, before the server begins handling requests.
+func (s *Server) SetClientIPResolver(resolver *clientip.Resolver) {
+	s.clientIP = resolver
+}
+
 // newStreamTransport tunes the proxy→transcode-node connection pool. Many
 // concurrent viewers fan their segment fetches through one proxy→node pair,
 // and Go's default of 2 idle connections per host causes constant connection
@@ -94,6 +102,9 @@ func newStreamTransport() *http.Transport {
 // Handler returns the chi.Router with all proxy routes mounted.
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
+	if s.clientIP != nil {
+		r.Use(clientip.Middleware(s.clientIP))
+	}
 	// hls.js uses XHR for manifest/segment fetches which are subject to
 	// CORS when the proxy runs on a different origin than the web app.
 	r.Use(cors.Handler(cors.Options{

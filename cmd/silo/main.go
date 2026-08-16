@@ -133,6 +133,39 @@ func resolveNodeIdentity() string {
 	return h
 }
 
+func clientIPResolverFromConfig(cfg *config.Config) (*clientip.Resolver, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is not loaded")
+	}
+	raw := cfg.ClientIP.TrustedProxies
+	if raw == "" {
+		raw = clientip.DefaultTrustedProxies
+	}
+	cidrs, err := clientip.ParseCIDRs(raw)
+	if err != nil {
+		return nil, err
+	}
+	return clientip.NewResolver(cidrs), nil
+}
+
+func registerClientIPConfigReload(watcher *nodeconfig.Watcher, resolver *clientip.Resolver) {
+	watcher.OnChange(func(old, updated *config.Config) {
+		if old != nil && old.ClientIP.TrustedProxies == updated.ClientIP.TrustedProxies {
+			return
+		}
+		raw := updated.ClientIP.TrustedProxies
+		if raw == "" {
+			raw = clientip.DefaultTrustedProxies
+		}
+		cidrs, err := clientip.ParseCIDRs(raw)
+		if err != nil {
+			slog.WarnContext(context.Background(), "clientip config reload failed", "component", "app", "error", err)
+			return
+		}
+		resolver.UpdateTrustedCIDRs(cidrs)
+	})
+}
+
 func resolvePluginCacheDir() string {
 	if v := strings.TrimSpace(os.Getenv("SILO_PLUGIN_CACHE_DIR")); v != "" {
 		return v
@@ -718,6 +751,12 @@ func main() {
 		var handler http.Handler
 		if mode == "proxy" {
 			srv := proxy.NewServer(watcher, tracker)
+			proxyIPResolver, resolverErr := clientIPResolverFromConfig(watcher.Config())
+			if resolverErr != nil {
+				log.Fatalf("load trusted CIDRs: %v", resolverErr)
+			}
+			registerClientIPConfigReload(watcher, proxyIPResolver)
+			srv.SetClientIPResolver(proxyIPResolver)
 			srv.SetRemoteArtifactMissReporter(downloads.NewArtifactManager(
 				downloads.NewArtifactRepository(pool),
 				downloads.NewRepository(pool),
@@ -1846,21 +1885,7 @@ func main() {
 	})
 	// The config watcher covers the Redis-less poll/RequestReload path, so
 	// admin UI edits apply without a restart on single-node deployments too.
-	configWatcher.OnChange(func(old, updated *config.Config) {
-		if old != nil && old.ClientIP.TrustedProxies == updated.ClientIP.TrustedProxies {
-			return
-		}
-		raw := updated.ClientIP.TrustedProxies
-		if raw == "" {
-			raw = clientip.DefaultTrustedProxies
-		}
-		cidrs, parseErr := clientip.ParseCIDRs(raw)
-		if parseErr != nil {
-			slog.WarnContext(context.Background(), "clientip config reload failed", "component", "app", "error", parseErr)
-			return
-		}
-		ipResolver.UpdateTrustedCIDRs(cidrs)
-	})
+	registerClientIPConfigReload(configWatcher, ipResolver)
 
 	// Step 6b: Create rate limiter.
 	if cfg.RateLimit.Enabled && deps.DB != nil {
@@ -2701,6 +2726,9 @@ func main() {
 	var absSrv *http.Server
 	if (mode == "integrated" || mode == "api") && deps.ABSHandler != nil && cfg.AudiobookshelfCompat.Listen != "" {
 		absRouter := chi.NewRouter()
+		if ipResolver != nil {
+			absRouter.Use(clientip.Middleware(ipResolver))
+		}
 		absRouter.Use(chimiddleware.Recoverer)
 		absRouter.Use(chimiddleware.Compress(5))
 		deps.ABSHandler.Mount(absRouter)
