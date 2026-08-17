@@ -86,12 +86,21 @@ Key points:
 - Bumps are rate-limited (`step`, ~15s) so we do one `SetWriteDeadline` per ~15s of
   wall time, not one per 32 KB chunk.
 - **`ReadFrom` must be implemented** and delegate to the underlying writer in bounded
-  slices (e.g. `io.CopyN(underlying, r, 64<<20)` per iteration, bumping the deadline
-  between iterations). Rationale: `http.ServeContent` → `io.Copy` uses the
-  `io.ReaderFrom` fast path on the response writer (sendfile for `*os.File`); a naive
-  wrapper without `ReadFrom` silently forfeits sendfile and burns CPU copying 15 GB
-  through userspace. Bounded-slice delegation keeps sendfile *and* the rolling
-  deadline.
+  slices, bumping the deadline between iterations. Rationale: `http.ServeContent` →
+  `io.Copy` uses the `io.ReaderFrom` fast path on the response writer (sendfile for
+  `*os.File`); a naive wrapper without `ReadFrom` silently forfeits sendfile and burns
+  CPU copying 15 GB through userspace. Bounded-slice delegation keeps sendfile *and*
+  the rolling deadline.
+  - **Slice size is a correctness constraint, not a tuning knob.** The deadline is an
+    *absolute* time, so a write attempted after it fails immediately — which means the
+    slice size divided by the window is a hard floor on the sustained client rate. The
+    original 64 MiB slice against the 180s window implied ~3 Mbit/s: any slower client
+    had its deadline expire part-way through a single slice and was reaped despite
+    making continuous progress. The slice is now `httpstream.ReadFromChunkDefault`
+    (4 MiB, ~186 kbit/s floor). Raising it re-introduces the reap.
+  - The shared helpers live in `internal/httpstream/readfrom.go` (`ReaderFromOf`,
+    `CopyChunked`, `WriterOnly`) and are reused by every response-writer wrapper on a
+    media chain, not just this one — see "Writer-chain conformance" below.
 - First bump happens in `New` (covers the header write + first body bytes).
 - `window` default 180s, overridable via env `SILO_STREAM_WRITE_STALL_TIMEOUT`
   (seconds). 180s > the Apple client's longest observed benign backpressure park
@@ -124,6 +133,54 @@ Explicitly **unchanged**:
 
 `cmd/silo/main.go:2374` itself stays at `WriteTimeout: 120s`. That is the point: the
 global guard remains, streaming handlers opt out per-response with a better contract.
+
+### Writer-chain conformance (added 2026-08-16)
+
+This wrapper is not the only `http.ResponseWriter` on a media route, and the ones
+above it in the chain can silently defeat it. Two rules now apply to *every* wrapper
+mounted on a path that serves media:
+
+- **Forward `ReadFrom`.** `io.Copy` discovers `io.ReaderFrom` by direct type assertion
+  and never consults `Unwrap()`, so a single wrapper without `ReadFrom` disables
+  sendfile for everything below it. Wrappers that count bytes must transfer in bounded
+  slices and credit each one, or a large transfer lands in a single accounting bucket.
+- **Implement `Unwrap()`.** Without it, `http.ResponseController` dead-ends at that
+  wrapper and `SetWriteDeadline` fails, which degrades this writer to a plain
+  pass-through — the deadline is silently gone. Preserve `Hijacker` too wherever a
+  wrapper could sit over an upgradable route (ABS socket.io, the playback control
+  websocket).
+
+chi's `middleware.Compress` is the one that cannot be repaired: `compressResponseWriter`
+implements `Unwrap`/`Flush`/`Hijack`/`Push` but **not** `ReadFrom`, and its handler wraps
+unconditionally — the encoder is selected later, so even a non-compressible content type
+still gets a sendfile-killing wrapper. It is therefore bypassed on exact bulk-media
+routes via `httpstream.CompressExcept`, matching only the registered GET/HEAD methods
+with exact segment counts and exact casing. A *blanket* bypass would be wrong: subtitle
+font bundles are JSON served under the same global compressor, and bypassing them would
+drop `Content-Encoding`/`Vary` and change the wire contract.
+
+Because handler-level tests bypass exactly the middleware this concerns, conformance is
+verified by driving the **mounted routers over real sockets** (`internal/api`,
+`internal/jellycompat`, `internal/audiobooks/abs`, `internal/proxy`), covering GET/HEAD,
+single and multi-range, conditional responses, `Accept-Encoding` present and absent,
+HTTP/2, the proxy→node hop, and the socket.io upgrade.
+
+Stream telemetry adds `streamtelemetry.observedWriter` between an enrolled route
+handler's `RollingDeadlineWriter` and the real response writer, on every enrolled route
+family. It follows the same conformance contract: bounded `ReadFrom` forwarding
+preserves sendfile, `Unwrap` preserves deadline traversal, and `Flush`, `Hijack`, and
+`Push` retain their optional-interface behavior. The outer compressor still bypasses
+only exact bulk routes; subtitle-font JSON remains compressible.
+
+**Forwarding `ReadFrom` is necessary but not sufficient.** Go's kernel sendfile path
+unwraps exactly one `io.LimitedReader` before it looks for the `*os.File`, and
+`http.ServeContent`'s `io.CopyN` already contributes that one — so an accounting layer
+that hands down a *freshly nested* limiter forfeits sendfile even though it forwards
+`ReadFrom` correctly. `CopyChunked` therefore slices the caller's limiter over the same
+underlying reader instead of nesting a new one. If you change it, re-run the
+`strace -f -e trace=sendfile` comparison over a mounted router: a byte-exact body and a
+correct `Range` status prove HTTP correctness, not sendfile. See
+[stream telemetry §4.4](2026-08-17-stream-telemetry.md).
 
 ## Server tests
 
