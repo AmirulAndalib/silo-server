@@ -12,6 +12,10 @@
 // where Observe is enrolled. It is wire bytes on bulk routes that bypass outer
 // compression, and pre-compression bytes on compressible subtitle/font routes.
 //
-// P0b is deliberately local and observational. This package performs no
-// admission, throttling, cutting, persistence, or distributed publication.
+// The package is deliberately observational. It performs no admission,
+// throttling, cutting, or PostgreSQL persistence. It does publish: when
+// distributed mode is on, each process publishes its own snapshot to Redis and
+// BuildGlobalView merges every fresh publisher into one read-only view. That
+// path is still write-only telemetry — no enforcement reads it, and no /api/v1
+// response is served from it.
 package streamtelemetry

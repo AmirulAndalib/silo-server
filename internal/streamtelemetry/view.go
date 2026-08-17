@@ -81,6 +81,8 @@ type TransferView struct {
 type Snapshot struct {
 	PublisherID              string
 	NodeID                   string
+	PublisherEpoch           int64
+	Sequence                 uint64
 	CapturedAt               time.Time
 	Sessions                 []SessionView
 	Transfers                []TransferView

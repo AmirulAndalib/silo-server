@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,7 @@ func testConfig() Config {
 	cfg := DefaultConfig("test-node")
 	cfg.Enabled = true
 	cfg.PublisherID = "test-publisher"
+	cfg.PublisherEpoch = 1
 	cfg.Retention = time.Millisecond
 	return cfg
 }
@@ -253,8 +255,158 @@ func TestStartContinuesAfterPublishError(t *testing.T) {
 	registry.Start(ctx)
 	time.Sleep(8 * time.Millisecond)
 	cancel()
+	// Wait for the collector to actually exit. Returning while it still runs
+	// leaks a goroutine that keeps reading the package-level now() seam, which
+	// races with any later test that replaces it.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := registry.Stop(stopCtx); err != nil {
+		t.Fatal(err)
+	}
 	if store.published.Load() < 2 {
 		t.Fatalf("collector stopped after publish error: %d publishes", store.published.Load())
+	}
+}
+
+type lifecycleStore struct {
+	mu             sync.Mutex
+	published      []Snapshot
+	leaveCalls     int
+	failFirstLeave bool
+}
+
+func (s *lifecycleStore) Publish(_ context.Context, snapshot Snapshot) error {
+	s.mu.Lock()
+	s.published = append(s.published, snapshot)
+	s.mu.Unlock()
+	return nil
+}
+func (s *lifecycleStore) Load(context.Context) (Snapshot, error)        { return Snapshot{}, nil }
+func (s *lifecycleStore) LoadAll(context.Context) (PublisherSet, error) { return PublisherSet{}, nil }
+func (s *lifecycleStore) Leave(ctx context.Context) error {
+	s.mu.Lock()
+	s.leaveCalls++
+	call := s.leaveCalls
+	s.mu.Unlock()
+	if s.failFirstLeave && call == 1 {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
+}
+
+func TestRegistryStartOnceAndPublishedSequence(t *testing.T) {
+	cfg := testConfig()
+	cfg.SweepInterval = time.Millisecond
+	store := &lifecycleStore{}
+	registry := NewRegistry(cfg, store, slog.New(slog.DiscardHandler))
+	ctx, cancel := context.WithCancel(context.Background())
+	registry.Start(ctx)
+	registry.Start(ctx)
+	time.Sleep(6 * time.Millisecond)
+	cancel()
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := registry.Stop(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.published) < 2 {
+		t.Fatalf("publishes = %d", len(store.published))
+	}
+	for index, snapshot := range store.published {
+		if snapshot.Sequence != uint64(index+1) {
+			t.Fatalf("sequence[%d] = %d", index, snapshot.Sequence)
+		}
+		if snapshot.PublisherEpoch != cfg.PublisherEpoch {
+			t.Fatalf("epoch = %d", snapshot.PublisherEpoch)
+		}
+	}
+}
+
+func TestRegistryConcurrentStopLeavesOnce(t *testing.T) {
+	store := &lifecycleStore{}
+	registry := NewRegistry(testConfig(), store, nil)
+	registry.Start(context.Background())
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := registry.Stop(context.Background()); err != nil {
+				t.Errorf("Stop: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.leaveCalls != 1 {
+		t.Fatalf("leave calls = %d", store.leaveCalls)
+	}
+}
+
+func TestRegistryStopTimeoutCanRetryLeave(t *testing.T) {
+	store := &lifecycleStore{failFirstLeave: true}
+	registry := NewRegistry(testConfig(), store, nil)
+	registry.Start(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	if err := registry.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Stop = %v", err)
+	}
+	if err := registry.Stop(context.Background()); err != nil {
+		t.Fatalf("retry Stop = %v", err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.leaveCalls != 2 {
+		t.Fatalf("leave calls = %d", store.leaveCalls)
+	}
+}
+
+func TestRegistryStopNilDisabledAndNeverStarted(t *testing.T) {
+	var nilRegistry *Registry
+	if err := nilRegistry.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	disabled := testConfig()
+	disabled.Enabled = false
+	if err := NewRegistry(disabled, NewLocalStore(), nil).Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewRegistry(testConfig(), NewLocalStore(), nil).Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRegistryGlobalView(t *testing.T) {
+	at := time.Now()
+	store := NewLocalStore()
+	registry := NewRegistry(testConfig(), store, nil)
+	if err := store.Publish(context.Background(), Snapshot{PublisherID: "test-publisher", PublisherEpoch: 1, Sequence: 1, CapturedAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	originalNow := now
+	now = func() time.Time { return at }
+	defer func() { now = originalNow }()
+	view, err := registry.GlobalView(context.Background())
+	if err != nil || !view.Complete || len(view.Publishers) != 1 {
+		t.Fatalf("view = %+v, err=%v", view, err)
+	}
+	unsupported := NewRegistry(testConfig(), &failingStore{}, nil)
+	if _, err := unsupported.GlobalView(context.Background()); err == nil {
+		t.Fatal("non-global store accepted")
+	} else {
+		var typed errGlobalSnapshotStoreUnsupported
+		if !errors.As(err, &typed) {
+			t.Fatalf("error = %T %v", err, err)
+		}
+	}
+	var nilRegistry *Registry
+	if zero, err := nilRegistry.GlobalView(context.Background()); err != nil || !reflect.DeepEqual(zero, GlobalMonitoringView{}) {
+		t.Fatalf("nil view = %+v, %v", zero, err)
 	}
 }
 

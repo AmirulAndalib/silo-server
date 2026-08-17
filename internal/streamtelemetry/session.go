@@ -151,7 +151,7 @@ func (s *logicalSession) recordConflicts(a Attachment, observedAt time.Time, max
 	checks := []struct{ field, existing, offered string }{
 		{"subject.kind", string(s.subject.Kind), string(a.Subject.Kind)},
 		{"subject.id", s.subject.ID, a.Subject.ID},
-		{"profile_id", s.profileID, a.ProfileID},
+		{identityFieldProfileID, s.profileID, a.ProfileID},
 	}
 	for _, check := range checks {
 		if check.existing == "" || check.offered == "" || check.existing == check.offered {

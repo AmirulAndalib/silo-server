@@ -692,11 +692,6 @@ func main() {
 	appCtx, appCancel := context.WithCancel(ctx)
 	defer appCancel()
 	var streamTelemetryRegistry *streamtelemetry.Registry
-	if mode == "" || mode == "integrated" || mode == "api" {
-		streamTelemetryConfig := streamtelemetry.ConfigFromEnv(nodeID)
-		streamTelemetryRegistry = streamtelemetry.NewRegistry(streamTelemetryConfig, streamtelemetry.NewLocalStore(), slog.Default())
-		streamTelemetryRegistry.Start(appCtx)
-	}
 	restartReqCh := make(chan struct{}, 1)
 	var restartRequested atomic.Bool
 
@@ -848,6 +843,25 @@ func main() {
 		slog.Warn("redis client init failed; multi-node websocket tickets disabled", "error", apiRedisErr)
 	} else if apiRedisClient != nil {
 		defer func() { _ = apiRedisClient.Close() }()
+	}
+
+	if mode == "" || mode == "integrated" || mode == "api" {
+		streamTelemetryConfig := streamtelemetry.ConfigFromEnv(nodeID)
+		store := streamtelemetry.GlobalSnapshotStore(streamtelemetry.NewLocalStore())
+		if streamTelemetryConfig.Enabled && streamTelemetryConfig.Distributed {
+			if apiRedisClient != nil {
+				store = streamtelemetry.NewRedisStore(apiRedisClient, streamTelemetryConfig, slog.Default())
+				pingCtx, pingCancel := context.WithTimeout(appCtx, 2*time.Second)
+				if pingErr := apiRedisClient.Ping(pingCtx).Err(); pingErr != nil {
+					slog.Error("stream telemetry distributed mode cannot reach redis; publisher will retry each sweep", "address", apiRedisClient.Options().Addr, "error", pingErr)
+				}
+				pingCancel()
+			} else {
+				slog.Error("stream telemetry distributed mode requested but redis is not configured; using local store")
+			}
+		}
+		streamTelemetryRegistry = streamtelemetry.NewRegistry(streamTelemetryConfig, store, slog.Default())
+		streamTelemetryRegistry.Start(appCtx)
 	}
 
 	// Assigned below once the trusted-proxy config is seeded; captured by the
@@ -2835,6 +2849,9 @@ func main() {
 		if shutdownErr := absSrv.Shutdown(shutdownCtx); shutdownErr != nil {
 			slog.Error("abs compat shutdown error", "error", shutdownErr)
 		}
+	}
+	if stopErr := streamTelemetryRegistry.Stop(shutdownCtx); stopErr != nil {
+		slog.Error("stream telemetry shutdown error", "error", stopErr)
 	}
 
 	// 2. Clean up stale sessions.
