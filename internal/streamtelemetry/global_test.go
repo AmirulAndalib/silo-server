@@ -3,6 +3,7 @@ package streamtelemetry
 import (
 	"encoding/json"
 	"math"
+	"net/http"
 	"reflect"
 	"slices"
 	"testing"
@@ -120,6 +121,68 @@ func TestBuildGlobalViewStartedAtDegradedRules(t *testing.T) {
 	snapshot := Snapshot{PublisherID: "p", CapturedAt: at, Sessions: []SessionView{{SessionID: "s", StartedAt: at.Add(-time.Minute), StartedAtSource: StartedAtSourceFirstSeen, Routes: []RouteActivityView{viewerRoute(0)}}}}
 	if !BuildGlobalView(globalSet(at, snapshot), at, globalTestParams()).Sessions[0].StartedAtDegraded {
 		t.Fatal("first_seen winner not degraded")
+	}
+}
+
+func TestBuildGlobalViewStartAuthorityComesFromViewerEdges(t *testing.T) {
+	at := time.Unix(1_700_000_000, 0)
+	proxyStart := at.Add(-time.Minute)
+	nodeStart := at.Add(-30 * time.Second)
+	proxy := Snapshot{PublisherID: "proxy", CapturedAt: at, Sessions: []SessionView{{
+		SessionID: "session", StartedAt: proxyStart, StartedAtSource: StartedAtSourceClaim,
+		Routes: []RouteActivityView{viewerRoute(10)},
+	}}}
+	node := Snapshot{PublisherID: "node", CapturedAt: at, Sessions: []SessionView{{
+		SessionID: "session", StartedAt: nodeStart, StartedAtSource: StartedAtSourceFirstSeen, StartedAtDegraded: true,
+		Routes: []RouteActivityView{{Role: RoleInternalRelay, BytesAccepted: 5}},
+	}}}
+	session := BuildGlobalView(globalSet(at, proxy, node), at, globalTestParams()).Sessions[0]
+	if !session.StartedAt.Equal(proxyStart) || session.StartedAtSource != StartedAtSourceClaim || session.StartedAtDegraded {
+		t.Fatalf("viewer-edge start authority = %+v", session)
+	}
+
+	nodeOnly := BuildGlobalView(globalSet(at, node), at, globalTestParams()).Sessions[0]
+	if !nodeOnly.StartedAt.Equal(nodeStart) || !nodeOnly.StartedAtDegraded {
+		t.Fatalf("node-only fallback = %+v", nodeOnly)
+	}
+
+	otherProxy := proxy
+	otherProxy.PublisherID = "proxy-2"
+	otherProxy.Sessions = []SessionView{{SessionID: "session", StartedAt: proxyStart.Add(time.Second), StartedAtSource: StartedAtSourceClaim, Routes: []RouteActivityView{viewerRoute(1)}}}
+	conflicted := BuildGlobalView(globalSet(at, proxy, otherProxy), at, globalTestParams()).Sessions[0]
+	if !conflicted.StartedAtDegraded {
+		t.Fatalf("equal-rank viewer-edge disagreement was not degraded: %+v", conflicted)
+	}
+}
+
+func TestBuildGlobalViewMergesSeparateViewerAndRelayPublishers(t *testing.T) {
+	at := time.Unix(1_700_000_000, 0)
+	started := at.Add(-time.Minute)
+	proxy := Snapshot{PublisherID: "proxy", NodeID: "proxy-node", CapturedAt: at, Sessions: []SessionView{{
+		SessionID: "session", Subject: UserSubject(7), ProfileID: "profile", MediaFileID: 42,
+		StartedAt: started, StartedAtSource: StartedAtSourceClaim,
+		Routes: []RouteActivityView{{Method: http.MethodGet, Pattern: "/stream", Role: RoleViewerEgress, BytesAccepted: 100}},
+	}}}
+	node := Snapshot{PublisherID: "node", NodeID: "transcode-node", CapturedAt: at, Sessions: []SessionView{{
+		SessionID: "session", StartedAt: at.Add(-30 * time.Second), StartedAtSource: StartedAtSourceFirstSeen, StartedAtDegraded: true,
+		Routes: []RouteActivityView{{Method: http.MethodGet, Pattern: "/segment", Role: RoleInternalRelay, BytesAccepted: 40}},
+	}}}
+	view := BuildGlobalView(globalSet(at, proxy, node), at, globalTestParams())
+	if len(view.Sessions) != 1 {
+		t.Fatalf("sessions = %+v", view.Sessions)
+	}
+	session := view.Sessions[0]
+	if session.ViewerBytesAccepted != 100 || session.RelayBytesAccepted != 40 {
+		t.Fatalf("bytes = viewer %d relay %d", session.ViewerBytesAccepted, session.RelayBytesAccepted)
+	}
+	if session.Subject != UserSubject(7) || session.ProfileID != "profile" || session.MediaFileID != 42 || session.HasIdentityConflict {
+		t.Fatalf("identity = %+v", session)
+	}
+	if len(session.ViewerEdgePublishers) != 1 || session.ViewerEdgePublishers[0].PublisherID != "proxy" || len(session.Publishers) != 2 {
+		t.Fatalf("publishers = all %+v viewer %+v", session.Publishers, session.ViewerEdgePublishers)
+	}
+	if !session.StartedAt.Equal(started) || session.StartedAtSource != StartedAtSourceClaim || session.StartedAtDegraded {
+		t.Fatalf("started = %+v", session)
 	}
 }
 

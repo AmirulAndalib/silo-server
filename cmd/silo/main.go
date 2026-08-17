@@ -30,6 +30,7 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	sdkcapability "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/capability"
@@ -167,6 +168,29 @@ func registerClientIPConfigReload(watcher *nodeconfig.Watcher, resolver *clienti
 		}
 		resolver.UpdateTrustedCIDRs(cidrs)
 	})
+}
+
+// newStreamTelemetryRegistry builds the telemetry registry for this process,
+// preferring the Redis-backed store in distributed mode. It never falls back to
+// LocalStore on a failed ping: cache.NewRedisClient builds a lazy client that
+// never dials, and a Redis restart mid-deploy must not strand a publisher
+// local-only for the life of the process.
+func newStreamTelemetryRegistry(ctx context.Context, nodeID string, redisClient *redis.Client) *streamtelemetry.Registry {
+	streamTelemetryConfig := streamtelemetry.ConfigFromEnv(nodeID)
+	store := streamtelemetry.GlobalSnapshotStore(streamtelemetry.NewLocalStore())
+	if streamTelemetryConfig.Enabled && streamTelemetryConfig.Distributed {
+		if redisClient != nil {
+			store = streamtelemetry.NewRedisStore(redisClient, streamTelemetryConfig, slog.Default())
+			pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
+			if pingErr := redisClient.Ping(pingCtx).Err(); pingErr != nil {
+				slog.ErrorContext(ctx, "stream telemetry distributed mode cannot reach redis; publisher will retry each sweep", "address", redisClient.Options().Addr, "error", pingErr)
+			}
+			pingCancel()
+		} else {
+			slog.ErrorContext(ctx, "stream telemetry distributed mode requested but redis is not configured; using local store")
+		}
+	}
+	return streamtelemetry.NewRegistry(streamTelemetryConfig, store, slog.Default())
 }
 
 func resolvePluginCacheDir() string {
@@ -720,6 +744,8 @@ func main() {
 			slog.Error("redis is required for this mode", "mode", mode, "error", err)
 			os.Exit(1)
 		}
+		streamTelemetryRegistry = newStreamTelemetryRegistry(appCtx, nodeID, redisClient)
+		streamTelemetryRegistry.Start(appCtx)
 
 		bootstrap := nodeconfig.BootstrapOverrides{
 			Listen:      cfg.Server.Listen,
@@ -751,6 +777,13 @@ func main() {
 			defer cleanupCancel()
 			tracker.Cleanup(cleanupCtx)
 		}()
+		defer func() {
+			telemetryCtx, telemetryCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer telemetryCancel()
+			if stopErr := streamTelemetryRegistry.Stop(telemetryCtx); stopErr != nil {
+				slog.Error("stream telemetry shutdown error", "error", stopErr)
+			}
+		}()
 
 		var handler http.Handler
 		if mode == "proxy" {
@@ -761,6 +794,7 @@ func main() {
 			}
 			registerClientIPConfigReload(watcher, proxyIPResolver)
 			srv.SetClientIPResolver(proxyIPResolver)
+			srv.SetStreamTelemetry(streamTelemetryRegistry)
 			srv.SetRemoteArtifactMissReporter(downloads.NewArtifactManager(
 				downloads.NewArtifactRepository(pool),
 				downloads.NewRepository(pool),
@@ -779,6 +813,7 @@ func main() {
 			// start, so this node can rebuild a Jellyfin transcode after its own
 			// restart (the node hop token is recipe-less). Shares the offload Redis.
 			srv.SetRecipeStore(noderecipe.NewStore(redisClient, 0))
+			srv.SetStreamTelemetry(streamTelemetryRegistry)
 			// Reclaim orphaned transcode dirs at boot and hourly thereafter, bound
 			// to appCtx so it stops on shutdown.
 			srv.StartOrphanSweeper(appCtx)
@@ -846,21 +881,7 @@ func main() {
 	}
 
 	if mode == "" || mode == "integrated" || mode == "api" {
-		streamTelemetryConfig := streamtelemetry.ConfigFromEnv(nodeID)
-		store := streamtelemetry.GlobalSnapshotStore(streamtelemetry.NewLocalStore())
-		if streamTelemetryConfig.Enabled && streamTelemetryConfig.Distributed {
-			if apiRedisClient != nil {
-				store = streamtelemetry.NewRedisStore(apiRedisClient, streamTelemetryConfig, slog.Default())
-				pingCtx, pingCancel := context.WithTimeout(appCtx, 2*time.Second)
-				if pingErr := apiRedisClient.Ping(pingCtx).Err(); pingErr != nil {
-					slog.Error("stream telemetry distributed mode cannot reach redis; publisher will retry each sweep", "address", apiRedisClient.Options().Addr, "error", pingErr)
-				}
-				pingCancel()
-			} else {
-				slog.Error("stream telemetry distributed mode requested but redis is not configured; using local store")
-			}
-		}
-		streamTelemetryRegistry = streamtelemetry.NewRegistry(streamTelemetryConfig, store, slog.Default())
+		streamTelemetryRegistry = newStreamTelemetryRegistry(appCtx, nodeID, apiRedisClient)
 		streamTelemetryRegistry.Start(appCtx)
 	}
 

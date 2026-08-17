@@ -35,6 +35,17 @@ type observationTarget struct {
 	transfer *transfer
 }
 
+// Observing reports whether this request is being observed, so a caller can
+// skip building an Attachment — and any verification work it needs — when
+// telemetry is off or the route is not enrolled.
+func Observing(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	obs, _ := ctx.Value(observationContextKey{}).(*Observation)
+	return obs != nil && obs.registry != nil
+}
+
 func (o *Observation) AddBytes(n int64) {
 	if o != nil && n > 0 {
 		o.bytesAccepted.Add(n)

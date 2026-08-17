@@ -333,6 +333,18 @@ func mergeSession(id string, contributions []sessionContribution, params ViewPar
 	subjectValues, profileValues, mediaValues := map[string][]PublisherRef{}, map[string][]PublisherRef{}, map[string][]PublisherRef{}
 	winningRank := 0
 	winningTimes := map[int64]struct{}{}
+	hasViewerEdge := false
+	for _, contribution := range contributions {
+		for _, route := range contribution.view.Routes {
+			if route.Role == RoleViewerEgress {
+				hasViewerEdge = true
+				break
+			}
+		}
+		if hasViewerEdge {
+			break
+		}
+	}
 	for _, contribution := range contributions {
 		session, ref := contribution.view, contribution.ref
 		result.Publishers = append(result.Publishers, ref)
@@ -356,21 +368,23 @@ func mergeSession(id string, contributions []sessionContribution, params ViewPar
 				mediaValues[strconv.Itoa(session.MediaFileID)] = append(mediaValues[strconv.Itoa(session.MediaFileID)], ref)
 			}
 		}
-		rank := startedAtRank(session.StartedAtSource)
-		if !session.StartedAt.IsZero() && rank > 0 {
-			if rank > winningRank {
-				winningRank = rank
-				result.StartedAt = session.StartedAt
-				result.StartedAtSource = session.StartedAtSource
-				winningTimes = map[int64]struct{}{session.StartedAt.UnixNano(): {}}
-			} else if rank == winningRank {
-				winningTimes[session.StartedAt.UnixNano()] = struct{}{}
-				if session.StartedAt.Before(result.StartedAt) {
+		if viewerEdge || !hasViewerEdge {
+			rank := startedAtRank(session.StartedAtSource)
+			if !session.StartedAt.IsZero() && rank > 0 {
+				if rank > winningRank {
+					winningRank = rank
 					result.StartedAt = session.StartedAt
+					result.StartedAtSource = session.StartedAtSource
+					winningTimes = map[int64]struct{}{session.StartedAt.UnixNano(): {}}
+				} else if rank == winningRank {
+					winningTimes[session.StartedAt.UnixNano()] = struct{}{}
+					if session.StartedAt.Before(result.StartedAt) {
+						result.StartedAt = session.StartedAt
+					}
 				}
 			}
+			result.StartedAtDegraded = result.StartedAtDegraded || session.StartedAtDegraded
 		}
-		result.StartedAtDegraded = result.StartedAtDegraded || session.StartedAtDegraded
 		result.OpenObservations = saturatingAdd(result.OpenObservations, int64(session.OpenObservations))
 		result.RequestCount = saturatingAdd(result.RequestCount, session.RequestCount)
 		result.RealtimeConnectionAlive = result.RealtimeConnectionAlive || session.RealtimeConnectionAlive

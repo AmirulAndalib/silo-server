@@ -42,8 +42,8 @@ func TestMediaRouteManifest(t *testing.T) {
 		t.Fatalf("route manifest changed; inspect it and run go test . -update-route-manifest")
 	}
 	for _, route := range transcodeNodeMediaRoutes {
-		if route.Enrolled {
-			t.Fatalf("transcode-node route enrolled: %s %s", route.Method, route.Pattern)
+		if !route.Enrolled || route.Capture == nil {
+			t.Fatalf("transcode-node route not fully enrolled: %s %s", route.Method, route.Pattern)
 		}
 	}
 }

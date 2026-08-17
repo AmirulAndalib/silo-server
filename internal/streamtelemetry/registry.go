@@ -422,8 +422,14 @@ func (r *Registry) sweep(sweepStart time.Time) Snapshot {
 	return r.SnapshotAt(sweepStart)
 }
 
+// Snapshot renders the registry state without sweeping live observations. Byte
+// totals and LastByteAccepted reflect lastSweptBytes from the most recent sweep;
+// callers that need current totals must call Sweep.
 func (r *Registry) Snapshot() Snapshot { return r.SnapshotAt(now()) }
 
+// SnapshotAt renders the registry state at capturedAt without sweeping live
+// observations. Byte totals and LastByteAccepted reflect lastSweptBytes from the
+// most recent sweep; callers that need current totals must call Sweep.
 func (r *Registry) SnapshotAt(capturedAt time.Time) Snapshot {
 	view := Snapshot{PublisherID: r.cfg.PublisherID, NodeID: r.cfg.NodeID, PublisherEpoch: r.cfg.PublisherEpoch, Sequence: r.sequence.Load(), CapturedAt: capturedAt,
 		Truncated: r.truncated.Load(), DroppedObservations: r.droppedObservations.Load(),

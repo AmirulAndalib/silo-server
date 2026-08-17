@@ -1111,21 +1111,7 @@ func (h *PlaybackHandler) HandleStartPlayback(w http.ResponseWriter, r *http.Req
 // PlaybackClientInfoFromRequest captures and normalizes playback client headers
 // at the HTTP request boundary.
 func PlaybackClientInfoFromRequest(r *http.Request) playback.ClientInfo {
-	if r == nil {
-		return playback.ClientInfo{}
-	}
-	// Clamped here, at the boundary, rather than only where the session stamps
-	// them: the decision logs and playback_route_events are written from this
-	// value directly, so a client sending a header-sized build would otherwise
-	// reach both despite the published bound. Values stay opaque — trimmed and
-	// length-clamped, never parsed or validated against an enum.
-	return playback.ClientInfo{
-		Name:      r.Header.Get("X-Silo-Client"),
-		Version:   r.Header.Get("X-Silo-Client-Version"),
-		Build:     r.Header.Get("X-Silo-Client-Build"),
-		Channel:   r.Header.Get("X-Silo-Client-Channel"),
-		UserAgent: r.UserAgent(),
-	}.Normalized()
+	return playback.ClientInfoFromRequest(r)
 }
 
 func playbackClientInfoFromRequest(r *http.Request) playback.ClientInfo {

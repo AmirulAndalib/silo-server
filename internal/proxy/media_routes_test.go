@@ -44,8 +44,8 @@ func assertMediaManifest(t *testing.T, fixtures []chi.Routes, declared []streamt
 		t.Fatalf("route manifest changed; inspect it and run go test . -update-route-manifest")
 	}
 	for _, route := range declared {
-		if route.Enrolled {
-			t.Fatalf("non-native route enrolled: %s %s", route.Method, route.Pattern)
+		if !route.Enrolled || route.Capture == nil {
+			t.Fatalf("proxy route not fully enrolled: %s %s", route.Method, route.Pattern)
 		}
 	}
 }

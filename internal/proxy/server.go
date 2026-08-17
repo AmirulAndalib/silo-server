@@ -24,6 +24,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 )
 
@@ -35,6 +36,7 @@ type Server struct {
 	artifactMissReporter remoteArtifactMissReporter
 	egress               *egressMeter
 	clientIP             *clientip.Resolver
+	telemetry            *streamtelemetry.Registry
 	// subCache stores full-track PGS (.sup) extracts under the transcode dir
 	// so repeat selections skip the whole-file ffmpeg demux.
 	subCache *playback.SubtitleCache
@@ -85,6 +87,12 @@ func (s *Server) SetClientIPResolver(resolver *clientip.Resolver) {
 	s.clientIP = resolver
 }
 
+// SetStreamTelemetry wires local stream observation. A nil registry is a
+// complete no-op.
+func (s *Server) SetStreamTelemetry(registry *streamtelemetry.Registry) {
+	s.telemetry = registry
+}
+
 // newStreamTransport tunes the proxy→transcode-node connection pool. Many
 // concurrent viewers fan their segment fetches through one proxy→node pair,
 // and Go's default of 2 idle connections per host causes constant connection
@@ -132,17 +140,17 @@ func (s *Server) Handler() http.Handler {
 	r.Group(func(r chi.Router) {
 		// Streaming and download bytes count toward the node's measured egress.
 		r.Use(s.meterEgress)
-		r.Head("/stream/direct/{token}", s.handleDirectPlay)
-		r.Get("/stream/direct/{token}", s.handleDirectPlay)
-		r.Head("/stream/remux/{token}", s.handleRemux)
-		r.Get("/stream/remux/{token}", s.handleRemux)
-		r.Head("/stream/transcode/{token}/master.m3u8", s.handleTranscodeManifest)
-		r.Get("/stream/transcode/{token}/master.m3u8", s.handleTranscodeManifest)
-		r.Get("/stream/transcode/{token}/segment/{name}", s.handleTranscodeSegment)
-		r.Get("/stream/subtitles/{token}/{track}/fonts", s.handleSubtitleFonts)
-		r.Get("/stream/subtitles/{token}/{track}", s.handleSubtitle)
-		r.Head("/downloads/file/{token}", s.handleDownloadFile)
-		r.Get("/downloads/file/{token}", s.handleDownloadFile)
+		r.Head("/stream/direct/{token}", observeProxy(s.telemetry, http.MethodHead, "/stream/direct/{token}", s.handleDirectPlay))
+		r.Get("/stream/direct/{token}", observeProxy(s.telemetry, http.MethodGet, "/stream/direct/{token}", s.handleDirectPlay))
+		r.Head("/stream/remux/{token}", observeProxy(s.telemetry, http.MethodHead, "/stream/remux/{token}", s.handleRemux))
+		r.Get("/stream/remux/{token}", observeProxy(s.telemetry, http.MethodGet, "/stream/remux/{token}", s.handleRemux))
+		r.Head("/stream/transcode/{token}/master.m3u8", observeProxy(s.telemetry, http.MethodHead, "/stream/transcode/{token}/master.m3u8", s.handleTranscodeManifest))
+		r.Get("/stream/transcode/{token}/master.m3u8", observeProxy(s.telemetry, http.MethodGet, "/stream/transcode/{token}/master.m3u8", s.handleTranscodeManifest))
+		r.Get("/stream/transcode/{token}/segment/{name}", observeProxy(s.telemetry, http.MethodGet, "/stream/transcode/{token}/segment/{name}", s.handleTranscodeSegment))
+		r.Get("/stream/subtitles/{token}/{track}/fonts", observeProxy(s.telemetry, http.MethodGet, "/stream/subtitles/{token}/{track}/fonts", s.handleSubtitleFonts))
+		r.Get("/stream/subtitles/{token}/{track}", observeProxy(s.telemetry, http.MethodGet, "/stream/subtitles/{token}/{track}", s.handleSubtitle))
+		r.Head("/downloads/file/{token}", observeProxy(s.telemetry, http.MethodHead, "/downloads/file/{token}", s.handleDownloadFile))
+		r.Get("/downloads/file/{token}", observeProxy(s.telemetry, http.MethodGet, "/downloads/file/{token}", s.handleDownloadFile))
 	})
 
 	// Admin routes — bearer-auth protected.
@@ -225,6 +233,7 @@ func (s *Server) handleDirectPlay(w http.ResponseWriter, r *http.Request) {
 	if claims == nil {
 		return
 	}
+	attachStream(r.Context(), claims)
 
 	info := sessionInfo(s.tracker, claims, "direct_play")
 	s.tracker.Track(r.Context(), info)
@@ -247,6 +256,9 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	if claims.PlayMethod != streamtoken.PlayMethodDownload || (strings.TrimSpace(claims.MediaPath) == "" && !remoteArtifact) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
+	}
+	if !remoteArtifact {
+		attachTransfer(r.Context(), claims)
 	}
 
 	// HEAD is a capability/path preflight, not an active transfer. Counting it
@@ -291,6 +303,7 @@ func (s *Server) relayDownloadArtifact(w http.ResponseWriter, r *http.Request, c
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	attachTransfer(r.Context(), claims)
 	cfg := s.watcher.Config()
 	if cfg == nil || strings.TrimSpace(cfg.Auth.JWTSecret) == "" {
 		http.Error(w, "download unavailable", http.StatusServiceUnavailable)
@@ -363,6 +376,7 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 	if claims == nil {
 		return
 	}
+	attachStream(r.Context(), claims)
 
 	info := sessionInfo(s.tracker, claims, "remux")
 	s.tracker.Track(r.Context(), info)
@@ -392,6 +406,7 @@ func (s *Server) handleTranscodeManifest(w http.ResponseWriter, r *http.Request)
 	if claims == nil {
 		return
 	}
+	attachStream(r.Context(), claims)
 	s.touchTranscodeSession(r, claims)
 	s.proxyToTranscodeNode(w, r, claims, "/transcode/"+transcodeTransportIDFromClaims(claims)+"/master.m3u8")
 }
@@ -401,6 +416,7 @@ func (s *Server) handleTranscodeSegment(w http.ResponseWriter, r *http.Request) 
 	if claims == nil {
 		return
 	}
+	attachStream(r.Context(), claims)
 	s.touchTranscodeSession(r, claims)
 	name := chi.URLParam(r, "name")
 	s.proxyToTranscodeNode(w, r, claims, "/transcode/"+transcodeTransportIDFromClaims(claims)+"/segment/"+name)
@@ -450,6 +466,7 @@ func (s *Server) handleSubtitle(w http.ResponseWriter, r *http.Request) {
 	if claims == nil {
 		return
 	}
+	attachStream(r.Context(), claims)
 	cfg := s.watcher.Config()
 	trackParam := chi.URLParam(r, "track")
 	trackIndex, requestedFormat, err := playback.ParseSubtitleTrackParam(trackParam)
@@ -523,6 +540,7 @@ func (s *Server) handleSubtitleFonts(w http.ResponseWriter, r *http.Request) {
 	if claims == nil {
 		return
 	}
+	attachStream(r.Context(), claims)
 	cfg := s.watcher.Config()
 	trackParam := chi.URLParam(r, "track")
 	trackIndex, _, err := playback.ParseSubtitleTrackParam(trackParam)

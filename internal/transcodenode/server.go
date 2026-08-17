@@ -24,6 +24,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 )
 
@@ -101,6 +102,7 @@ type Server struct {
 	inputPaths   InputPathAuthorizer
 	transcodeDir string
 	artifactRoot string
+	telemetry    *streamtelemetry.Registry
 	sessions     map[string]*playback.TranscodeSession
 	// lastAccess records, per registered session id, when a manifest or segment
 	// request last touched the job (registration counts as the first access).
@@ -445,6 +447,12 @@ func (s *Server) SetInputPathAuthorizer(authorizer InputPathAuthorizer) {
 	s.inputPaths = authorizer
 }
 
+// SetStreamTelemetry wires local stream observation. A nil registry is a
+// complete no-op.
+func (s *Server) SetStreamTelemetry(registry *streamtelemetry.Registry) {
+	s.telemetry = registry
+}
+
 // Handler returns the chi.Router with all transcode routes.
 func (s *Server) Handler() http.Handler {
 	declareTranscodeNodeMediaRoutes()
@@ -457,13 +465,13 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/hw-capabilities", s.handleHWCapabilities)
 		r.Post("/chapter-thumbnails/extract", s.handleChapterThumbnailExtract)
 		r.Post("/downloads/prepare", s.handleDownloadPrepare)
-		r.Head("/downloads/artifacts/{artifact_id}", s.handleDownloadArtifact)
-		r.Get("/downloads/artifacts/{artifact_id}", s.handleDownloadArtifact)
+		r.Head("/downloads/artifacts/{artifact_id}", observeNode(s.telemetry, http.MethodHead, "/downloads/artifacts/{artifact_id}", s.handleDownloadArtifact))
+		r.Get("/downloads/artifacts/{artifact_id}", observeNode(s.telemetry, http.MethodGet, "/downloads/artifacts/{artifact_id}", s.handleDownloadArtifact))
 		r.Delete("/downloads/artifacts/{artifact_id}", s.handleDeleteDownloadArtifact)
 		r.Post("/transcode/start", s.handleStart)
 		r.Delete("/transcode/{session_id}", s.handleStop)
-		r.Get("/transcode/{session_id}/master.m3u8", s.handleManifest)
-		r.Get("/transcode/{session_id}/segment/{name}", s.handleSegment)
+		r.Get("/transcode/{session_id}/master.m3u8", observeNode(s.telemetry, http.MethodGet, "/transcode/{session_id}/master.m3u8", s.handleManifest))
+		r.Get("/transcode/{session_id}/segment/{name}", observeNode(s.telemetry, http.MethodGet, "/transcode/{session_id}/segment/{name}", s.handleSegment))
 		r.Post("/admin/force-reload", s.handleForceReload)
 		r.Get("/status", s.handleStatus)
 	})
@@ -576,6 +584,7 @@ func (s *Server) handleDownloadArtifact(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "artifact unavailable", http.StatusInternalServerError)
 		return
 	}
+	streamtelemetry.Attach(r.Context(), streamtelemetry.Attachment{})
 	w.Header().Set("Content-Disposition", `attachment; filename="`+artifactID+`.mp4"`)
 	w.Header().Set("Content-Type", playback.MimeFromExtension(path))
 	w.Header().Set("ETag", `"`+artifactID+`-`+strconv.FormatInt(stat.Size(), 10)+`"`)
@@ -1145,6 +1154,7 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 		// not recorded this hit; count it so the reaper sees the liveness.
 		s.touchSession(sessionID)
 	}
+	s.attachTelemetrySession(r, sessionID)
 
 	var manifest []byte
 	var err error
@@ -1190,6 +1200,7 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 		// not recorded this hit; count it so the reaper sees the liveness.
 		s.touchSession(sessionID)
 	}
+	s.attachTelemetrySession(r, sessionID)
 
 	segPath, err := session.GetSegment(name)
 	if err != nil && err == playback.ErrSegmentNotFound {

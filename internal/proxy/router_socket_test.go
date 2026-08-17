@@ -1,12 +1,16 @@
 package proxy
 
 import (
+	"bytes"
+	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +21,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
+	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 )
 
@@ -35,6 +40,11 @@ func newSocketProxyServer(t *testing.T, secret string, resolver *clientip.Resolv
 	w.SetConfigForTest(cfg)
 	srv := NewServer(w, nodesessions.NewTracker(nil, "http://proxy", "proxy", "proxy"))
 	srv.SetClientIPResolver(resolver)
+	telemetryConfig := streamtelemetry.DefaultConfig("socket-proxy")
+	telemetryConfig.Enabled = true
+	registry := streamtelemetry.NewRegistry(telemetryConfig, streamtelemetry.NewLocalStore(), nil)
+	srv.SetStreamTelemetry(registry)
+	t.Cleanup(func() { _ = registry.Stop(context.Background()) })
 	return srv
 }
 
@@ -111,6 +121,17 @@ func TestMountedProxyRouterServesMediaOverSocket(t *testing.T) {
 	if got.status != http.StatusOK || got.body != socketProxyMedia {
 		t.Fatalf("GET = %d %q, want 200 %q", got.status, got.body, socketProxyMedia)
 	}
+	snapshot := srv.telemetry.Sweep()
+	if len(snapshot.Sessions) != 1 {
+		t.Fatalf("sessions = %+v", snapshot.Sessions)
+	}
+	session := snapshot.Sessions[0]
+	if session.SessionID != "socket-proxy-1" || session.Subject != streamtelemetry.UserSubject(7) || session.ProfileID != "profile-1" || session.MediaFileID != 42 {
+		t.Fatalf("session identity = %+v", session)
+	}
+	if len(session.Routes) != 1 || session.Routes[0].Role != streamtelemetry.RoleViewerEgress || session.Routes[0].BytesAccepted != int64(len(socketProxyMedia)) {
+		t.Fatalf("session routes = %+v", session.Routes)
+	}
 	etag := got.header.Get("ETag")
 
 	if got = socketProxyRequest(t, client, http.MethodHead, mediaURL, nil); got.status != http.StatusOK {
@@ -137,6 +158,93 @@ func TestMountedProxyRouterServesMediaOverSocket(t *testing.T) {
 		if got.status != http.StatusNotModified {
 			t.Fatalf("If-None-Match = %d, want 304", got.status)
 		}
+	}
+}
+
+func TestMountedProxyRouterAuthorizationAndTransfersOverSocket(t *testing.T) {
+	const secret = "socket-proxy-auth-secret"
+	path := writeSocketProxyMedia(t)
+	tests := []struct {
+		name          string
+		claims        streamtoken.Claims
+		signingSecret string
+		routePrefix   string
+		wantStatus    int
+		wantSessions  int
+		wantTransfers int
+	}{
+		{name: "wrong signature", claims: streamtoken.Claims{SessionID: "bad", MediaPath: path, PlayMethod: "direct"}, signingSecret: "wrong", routePrefix: "/stream/direct/", wantStatus: http.StatusUnauthorized},
+		{name: "download transfer", claims: streamtoken.Claims{SessionID: "download", MediaPath: path, PlayMethod: streamtoken.PlayMethodDownload, UserID: 7, ProfileID: "profile-1", MediaFileID: 42}, signingSecret: secret, wantStatus: http.StatusOK, wantTransfers: 1},
+		{name: "playback token rejected from download", claims: streamtoken.Claims{SessionID: "playback", MediaPath: path, PlayMethod: "direct"}, signingSecret: secret, wantStatus: http.StatusUnauthorized},
+		{name: "invalid remote artifact rejected", claims: streamtoken.Claims{SessionID: "artifact", PlayMethod: streamtoken.PlayMethodDownload, DownloadArtifactID: "../bad", TranscodeNode: "http://127.0.0.1"}, signingSecret: secret, wantStatus: http.StatusUnauthorized},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv := newSocketProxyServer(t, secret, nil)
+			server := httptest.NewServer(srv.Handler())
+			t.Cleanup(server.Close)
+			token, err := streamtoken.Sign(test.claims, test.signingSecret, time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			routePrefix := test.routePrefix
+			if routePrefix == "" {
+				routePrefix = "/downloads/file/"
+			}
+			got := socketProxyRequest(t, server.Client(), http.MethodGet, server.URL+routePrefix+token, nil)
+			if got.status != test.wantStatus {
+				t.Fatalf("status = %d, want %d", got.status, test.wantStatus)
+			}
+			snapshot := srv.telemetry.Sweep()
+			if len(snapshot.Sessions) != test.wantSessions || len(snapshot.Transfers) != test.wantTransfers {
+				t.Fatalf("snapshot = %+v", snapshot)
+			}
+			if test.wantTransfers == 1 {
+				transfer := snapshot.Transfers[0]
+				if transfer.Subject != streamtelemetry.UserSubject(7) || transfer.BytesAccepted != int64(len(socketProxyMedia)) {
+					t.Fatalf("transfer = %+v", transfer)
+				}
+			}
+		})
+	}
+}
+
+func TestMountedProxyRouterLargeRangeIsByteExact(t *testing.T) {
+	const secret = "socket-proxy-range-secret"
+	body := bytes.Repeat([]byte("range-body-"), 400_000)
+	path := filepath.Join(t.TempDir(), "large.mp4")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := newSocketProxyServer(t, secret, nil)
+	server := httptest.NewServer(srv.Handler())
+	t.Cleanup(server.Close)
+	start, end := 12345, len(body)-23456
+	got := socketProxyRequest(t, server.Client(), http.MethodGet, server.URL+"/stream/direct/"+socketProxyMediaToken(t, secret, path), map[string]string{
+		"Range": "bytes=" + strconv.Itoa(start) + "-" + strconv.Itoa(end),
+	})
+	if got.status != http.StatusPartialContent || got.header.Get("Content-Range") != fmt.Sprintf("bytes %d-%d/%d", start, end, len(body)) || got.body != string(body[start:end+1]) {
+		t.Fatalf("large range = status %d content-range %q body bytes %d", got.status, got.header.Get("Content-Range"), len(got.body))
+	}
+}
+
+func TestMountedProxyRouterTelemetryDisabledIsInert(t *testing.T) {
+	const secret = "socket-proxy-disabled-secret"
+	path := writeSocketProxyMedia(t)
+	srv := newSocketProxyServer(t, secret, nil)
+	cfg := streamtelemetry.DefaultConfig("disabled")
+	disabled := streamtelemetry.NewRegistry(cfg, streamtelemetry.NewLocalStore(), nil)
+	t.Cleanup(func() { _ = disabled.Stop(context.Background()) })
+	srv.SetStreamTelemetry(disabled)
+	server := httptest.NewServer(srv.Handler())
+	t.Cleanup(server.Close)
+	got := socketProxyRequest(t, server.Client(), http.MethodGet, server.URL+"/stream/direct/"+socketProxyMediaToken(t, secret, path), nil)
+	if got.status != http.StatusOK || got.body != socketProxyMedia {
+		t.Fatalf("request = %d %q", got.status, got.body)
+	}
+	snapshot := disabled.Snapshot()
+	if len(snapshot.Sessions) != 0 || len(snapshot.Transfers) != 0 {
+		t.Fatalf("disabled snapshot = %+v", snapshot)
 	}
 }
 
@@ -170,6 +278,16 @@ func TestMountedProxyRouterResolvesViewerIPOverSocket(t *testing.T) {
 	})
 	server := httptest.NewServer(mounted)
 	t.Cleanup(server.Close)
+	path := writeSocketProxyMedia(t)
+	mediaURL := server.URL + "/stream/direct/" + socketProxyMediaToken(t, secret, path)
+	mediaResult := socketProxyRequest(t, server.Client(), http.MethodGet, mediaURL, map[string]string{"X-Forwarded-For": "203.0.113.9"})
+	if mediaResult.status != http.StatusOK {
+		t.Fatalf("media status = %d", mediaResult.status)
+	}
+	snapshot := srv.telemetry.Sweep()
+	if len(snapshot.Sessions) != 1 || len(snapshot.Sessions[0].ViewerIPs) != 1 || snapshot.Sessions[0].ViewerIPs[0] != "203.0.113.9" {
+		t.Fatalf("viewer IPs = %+v", snapshot.Sessions)
+	}
 
 	probe := func(t *testing.T, headers map[string]string) string {
 		t.Helper()
@@ -223,11 +341,13 @@ func TestMountedProxyRouterRelaysToNode(t *testing.T) {
 	const secret = "socket-proxy-relay-secret"
 	const segment = "segment-bytes-from-node"
 
+	var forwardedToken string
 	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.Contains(r.URL.Path, "/segment/") {
 			http.NotFound(w, r)
 			return
 		}
+		forwardedToken = r.Header.Get("X-Silo-Stream-Token")
 		w.Header().Set("Content-Type", "video/mp2t")
 		_, _ = io.WriteString(w, segment)
 	}))
@@ -260,5 +380,13 @@ func TestMountedProxyRouterRelaysToNode(t *testing.T) {
 	}
 	if srv.egress.RateKbps() < before {
 		t.Fatal("relayed bytes were not counted by the egress meter")
+	}
+	snapshot := srv.telemetry.Sweep()
+	if len(snapshot.Sessions) != 1 || len(snapshot.Sessions[0].Routes) != 1 || snapshot.Sessions[0].Routes[0].Role != streamtelemetry.RoleViewerEgress || snapshot.Sessions[0].Routes[0].BytesAccepted != int64(len(segment)) {
+		t.Fatalf("proxy telemetry = %+v", snapshot.Sessions)
+	}
+	forwardedClaims, err := streamtoken.Verify(forwardedToken, secret)
+	if err != nil || forwardedClaims.SessionID != snapshot.Sessions[0].SessionID {
+		t.Fatalf("forwarded claims = %+v, err=%v", forwardedClaims, err)
 	}
 }

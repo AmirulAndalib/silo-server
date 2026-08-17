@@ -28,6 +28,32 @@ func CopyChunked(rf io.ReaderFrom, src io.Reader, chunk int64, record func(n int
 		return n, err
 	}
 
+	// A nested *io.LimitedReader defeats the kernel sendfile path, which unwraps
+	// exactly one limiter before it looks for the *os.File. When src is already
+	// limited, slice it by handing down a limiter over the same underlying reader
+	// and decrementing the caller's budget, so the innermost ReaderFrom still sees
+	// one limiter over the file.
+	if lr, ok := src.(*io.LimitedReader); ok {
+		var total int64
+		for lr.N > 0 {
+			sliceSize := min(chunk, lr.N)
+			slice := &io.LimitedReader{R: lr.R, N: sliceSize}
+			n, err := rf.ReadFrom(slice)
+			lr.N -= n
+			total += n
+			if record != nil {
+				record(n, err)
+			}
+			if err != nil {
+				return total, err
+			}
+			if n < sliceSize {
+				return total, nil
+			}
+		}
+		return total, nil
+	}
+
 	var total int64
 	for {
 		n, err := rf.ReadFrom(io.LimitReader(src, chunk))
