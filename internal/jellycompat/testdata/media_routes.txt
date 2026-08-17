@@ -16,8 +16,8 @@ GET /Items/Filters2	non-media
 GET /Items/Latest	non-media
 GET /Items/Suggestions	non-media
 GET /Items/{id}	non-media
-GET /Items/{id}/Download	media	transfer	viewer_egress	false	false
-HEAD /Items/{id}/Download	media	transfer	viewer_egress	false	false
+GET /Items/{id}/Download	media	transfer	viewer_egress	false	true
+HEAD /Items/{id}/Download	media	transfer	viewer_egress	false	true
 GET /Items/{id}/Images/{imageType}	non-media
 GET /Items/{id}/Images/{imageType}/{index}	non-media
 GET /Items/{id}/Intros	non-media
@@ -33,7 +33,7 @@ GET /MediaSegments/{id}	non-media
 GET /Movies/Recommendations	non-media
 GET /Movies/{id}/Similar	non-media
 GET /Persons	non-media
-GET /Playback/BitrateTest	media	transfer	viewer_egress	false	false
+GET /Playback/BitrateTest	media	transfer	viewer_egress	false	true
 GET /QuickConnect/Enabled	non-media
 GET /Search/Hints	non-media
 GET /Sessions	non-media
@@ -91,15 +91,15 @@ DELETE /Users/{userId}/PlayedItems/{itemId}	non-media
 POST /Users/{userId}/PlayedItems/{itemId}	non-media
 GET /Users/{userId}/Views	non-media
 DELETE /Videos/ActiveEncodings	non-media
-GET /Videos/{id}/hls/{playlistId}/stream.m3u8	media	manifest	viewer_egress	true	false
-GET /Videos/{id}/hls/{playlistId}/{segmentId}.{segmentContainer}	media	playback	viewer_egress	true	false
-GET /Videos/{id}/master.m3u8	media	manifest	viewer_egress	true	false
-GET /Videos/{id}/stream	media	playback	viewer_egress	true	false
-HEAD /Videos/{id}/stream	media	playback	viewer_egress	true	false
-GET /Videos/{id}/stream.{container}	media	playback	viewer_egress	true	false
-HEAD /Videos/{id}/stream.{container}	media	playback	viewer_egress	true	false
-GET /Videos/{routeItemId}/{routeMediaSourceId}/Subtitles/{routeIndex}/stream.{routeFormat}	media	playback	viewer_egress	true	false
-GET /Videos/{routeItemId}/{routeMediaSourceId}/Subtitles/{routeIndex}/{routeDeliveryIndex}/stream.{routeFormat}	media	playback	viewer_egress	true	false
+GET /Videos/{id}/hls/{playlistId}/stream.m3u8	media	manifest	viewer_egress	true	true
+GET /Videos/{id}/hls/{playlistId}/{segmentId}.{segmentContainer}	media	playback	viewer_egress	true	true
+GET /Videos/{id}/master.m3u8	media	manifest	viewer_egress	true	true
+GET /Videos/{id}/stream	media	playback	viewer_egress	true	true
+HEAD /Videos/{id}/stream	media	playback	viewer_egress	true	true
+GET /Videos/{id}/stream.{container}	media	playback	viewer_egress	true	true
+HEAD /Videos/{id}/stream.{container}	media	playback	viewer_egress	true	true
+GET /Videos/{routeItemId}/{routeMediaSourceId}/Subtitles/{routeIndex}/stream.{routeFormat}	media	playback	viewer_egress	true	true
+GET /Videos/{routeItemId}/{routeMediaSourceId}/Subtitles/{routeIndex}/{routeDeliveryIndex}/stream.{routeFormat}	media	playback	viewer_egress	true	true
 GET /socket	non-media
 GET /web	non-media
 CONNECT /web/*	non-media
@@ -129,8 +129,8 @@ GET /Items/Filters2	non-media
 GET /Items/Latest	non-media
 GET /Items/Suggestions	non-media
 GET /Items/{id}	non-media
-GET /Items/{id}/Download	media	transfer	viewer_egress	false	false
-HEAD /Items/{id}/Download	media	transfer	viewer_egress	false	false
+GET /Items/{id}/Download	media	transfer	viewer_egress	false	true
+HEAD /Items/{id}/Download	media	transfer	viewer_egress	false	true
 GET /Items/{id}/Images/{imageType}	non-media
 GET /Items/{id}/Images/{imageType}/{index}	non-media
 GET /Items/{id}/Intros	non-media
@@ -146,7 +146,7 @@ GET /MediaSegments/{id}	non-media
 GET /Movies/Recommendations	non-media
 GET /Movies/{id}/Similar	non-media
 GET /Persons	non-media
-GET /Playback/BitrateTest	media	transfer	viewer_egress	false	false
+GET /Playback/BitrateTest	media	transfer	viewer_egress	false	true
 GET /QuickConnect/Enabled	non-media
 GET /Search/Hints	non-media
 GET /Sessions	non-media
@@ -204,15 +204,15 @@ DELETE /Users/{userId}/PlayedItems/{itemId}	non-media
 POST /Users/{userId}/PlayedItems/{itemId}	non-media
 GET /Users/{userId}/Views	non-media
 DELETE /Videos/ActiveEncodings	non-media
-GET /Videos/{id}/hls/{playlistId}/stream.m3u8	media	manifest	viewer_egress	true	false
-GET /Videos/{id}/hls/{playlistId}/{segmentId}.{segmentContainer}	media	playback	viewer_egress	true	false
-GET /Videos/{id}/master.m3u8	media	manifest	viewer_egress	true	false
-GET /Videos/{id}/stream	media	playback	viewer_egress	true	false
-HEAD /Videos/{id}/stream	media	playback	viewer_egress	true	false
-GET /Videos/{id}/stream.{container}	media	playback	viewer_egress	true	false
-HEAD /Videos/{id}/stream.{container}	media	playback	viewer_egress	true	false
-GET /Videos/{routeItemId}/{routeMediaSourceId}/Subtitles/{routeIndex}/stream.{routeFormat}	media	playback	viewer_egress	true	false
-GET /Videos/{routeItemId}/{routeMediaSourceId}/Subtitles/{routeIndex}/{routeDeliveryIndex}/stream.{routeFormat}	media	playback	viewer_egress	true	false
+GET /Videos/{id}/hls/{playlistId}/stream.m3u8	media	manifest	viewer_egress	true	true
+GET /Videos/{id}/hls/{playlistId}/{segmentId}.{segmentContainer}	media	playback	viewer_egress	true	true
+GET /Videos/{id}/master.m3u8	media	manifest	viewer_egress	true	true
+GET /Videos/{id}/stream	media	playback	viewer_egress	true	true
+HEAD /Videos/{id}/stream	media	playback	viewer_egress	true	true
+GET /Videos/{id}/stream.{container}	media	playback	viewer_egress	true	true
+HEAD /Videos/{id}/stream.{container}	media	playback	viewer_egress	true	true
+GET /Videos/{routeItemId}/{routeMediaSourceId}/Subtitles/{routeIndex}/stream.{routeFormat}	media	playback	viewer_egress	true	true
+GET /Videos/{routeItemId}/{routeMediaSourceId}/Subtitles/{routeIndex}/{routeDeliveryIndex}/stream.{routeFormat}	media	playback	viewer_egress	true	true
 GET /socket	non-media
 GET /web	non-media
 CONNECT /web/*	non-media

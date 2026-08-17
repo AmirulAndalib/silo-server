@@ -190,6 +190,10 @@ func newStreamTelemetryRegistry(ctx context.Context, nodeID string, redisClient 
 			slog.ErrorContext(ctx, "stream telemetry distributed mode requested but redis is not configured; using local store")
 		}
 	}
+	if streamTelemetryConfig.Enabled {
+		slog.InfoContext(ctx, "stream telemetry observing families",
+			"families", strings.Join(streamTelemetryConfig.ObservedFamilies(), ","))
+	}
 	return streamtelemetry.NewRegistry(streamTelemetryConfig, store, slog.Default())
 }
 
@@ -2385,6 +2389,8 @@ func main() {
 			SessionSyncer:  deps.SessionSyncer,
 		}
 		absH := audiobooksService.BuildABSHandler(absHDeps)
+		// Must precede Mount: Mount is what registers the observed handlers.
+		absH.SetStreamTelemetry(streamTelemetryRegistry)
 		deps.ABSHandler = absH
 	}
 	_ = audiobooksService
@@ -2626,6 +2632,7 @@ func main() {
 			DB:               deps.DB,
 			SecretCipher:     dataCipher,
 			ClientIPResolver: ipResolver,
+			StreamTelemetry:  streamTelemetryRegistry,
 			NodePlanner:      deps.NodePlanner,
 			JWTSecret:        cfg.Auth.JWTSecret,
 			RecWorker:        recWorker,

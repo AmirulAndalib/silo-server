@@ -39,9 +39,15 @@ func TestMediaRouteManifest(t *testing.T) {
 	if string(want) != actual {
 		t.Fatalf("route manifest changed; inspect it and run go test . -update-route-manifest")
 	}
+	// Every declared ABS route is enrolled and carries a capture hook. A nil
+	// Capture would fall back to genericCapture and lose the client identity
+	// absCapture reads through absPlaybackClientInfoFromRequest.
 	for _, route := range absMediaRoutes {
-		if route.Enrolled {
-			t.Fatalf("ABS route enrolled: %s %s", route.Method, route.Pattern)
+		if !route.Enrolled {
+			t.Fatalf("abs route not enrolled: %s %s", route.Method, route.Pattern)
+		}
+		if route.Capture == nil {
+			t.Fatalf("abs route has no capture hook: %s %s", route.Method, route.Pattern)
 		}
 	}
 }

@@ -19,11 +19,11 @@ GET /abs/api/healthcheck	non-media
 GET /abs/api/init	non-media
 GET /abs/api/items/{id}	non-media
 GET /abs/api/items/{id}/cover	non-media
-GET /abs/api/items/{id}/ebook/{fileid}	media	transfer	viewer_egress	false	false
+GET /abs/api/items/{id}/ebook/{fileid}	media	transfer	viewer_egress	false	true
 PATCH /abs/api/items/{id}/ebook/{fileid}/status	non-media
 GET /abs/api/items/{id}/similar	non-media
-GET /abs/api/items/{libraryItemId}/file/{ino}	media	transfer	viewer_egress	false	false
-GET /abs/api/items/{libraryItemId}/file/{ino}/download	media	transfer	viewer_egress	false	false
+GET /abs/api/items/{libraryItemId}/file/{ino}	media	transfer	viewer_egress	false	true
+GET /abs/api/items/{libraryItemId}/file/{ino}/download	media	transfer	viewer_egress	false	true
 POST /abs/api/items/{libraryItemId}/play	non-media
 POST /abs/api/items/{libraryItemId}/play/{episodeId}	non-media
 GET /abs/api/libraries	non-media
@@ -86,8 +86,8 @@ GET /abs/auth-settings	non-media
 GET /abs/healthcheck	non-media
 GET /abs/init	non-media
 GET /abs/ping	non-media
-GET /abs/public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	false
-HEAD /abs/public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	false
+GET /abs/public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	true
+HEAD /abs/public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	true
 GET /api/auth-settings	non-media
 POST /api/auth/refresh	non-media
 POST /api/authorize	non-media
@@ -108,11 +108,11 @@ GET /api/healthcheck	non-media
 GET /api/init	non-media
 GET /api/items/{id}	non-media
 GET /api/items/{id}/cover	non-media
-GET /api/items/{id}/ebook/{fileid}	media	transfer	viewer_egress	false	false
+GET /api/items/{id}/ebook/{fileid}	media	transfer	viewer_egress	false	true
 PATCH /api/items/{id}/ebook/{fileid}/status	non-media
 GET /api/items/{id}/similar	non-media
-GET /api/items/{libraryItemId}/file/{ino}	media	transfer	viewer_egress	false	false
-GET /api/items/{libraryItemId}/file/{ino}/download	media	transfer	viewer_egress	false	false
+GET /api/items/{libraryItemId}/file/{ino}	media	transfer	viewer_egress	false	true
+GET /api/items/{libraryItemId}/file/{ino}/download	media	transfer	viewer_egress	false	true
 POST /api/items/{libraryItemId}/play	non-media
 POST /api/items/{libraryItemId}/play/{episodeId}	non-media
 GET /api/libraries	non-media
@@ -173,14 +173,14 @@ POST /api/session/{sid}/sync	non-media
 POST /auth/refresh	non-media
 GET /feed/{slug}	non-media
 GET /feed/{slug}.xml	non-media
-GET /feed/{slug}/file/{ino}	media	transfer	viewer_egress	false	false
+GET /feed/{slug}/file/{ino}	media	transfer	viewer_egress	false	true
 GET /healthcheck	non-media
 GET /init	non-media
 POST /login	non-media
 POST /logout	non-media
 GET /ping	non-media
-GET /public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	false
-HEAD /public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	false
+GET /public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	true
+HEAD /public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	true
 GET /status	non-media
 # fixture 2
 POST /abs/api/auth/logout	non-media
@@ -203,11 +203,11 @@ GET /abs/api/healthcheck	non-media
 GET /abs/api/init	non-media
 GET /abs/api/items/{id}	non-media
 GET /abs/api/items/{id}/cover	non-media
-GET /abs/api/items/{id}/ebook/{fileid}	media	transfer	viewer_egress	false	false
+GET /abs/api/items/{id}/ebook/{fileid}	media	transfer	viewer_egress	false	true
 PATCH /abs/api/items/{id}/ebook/{fileid}/status	non-media
 GET /abs/api/items/{id}/similar	non-media
-GET /abs/api/items/{libraryItemId}/file/{ino}	media	transfer	viewer_egress	false	false
-GET /abs/api/items/{libraryItemId}/file/{ino}/download	media	transfer	viewer_egress	false	false
+GET /abs/api/items/{libraryItemId}/file/{ino}	media	transfer	viewer_egress	false	true
+GET /abs/api/items/{libraryItemId}/file/{ino}/download	media	transfer	viewer_egress	false	true
 POST /abs/api/items/{libraryItemId}/play	non-media
 POST /abs/api/items/{libraryItemId}/play/{episodeId}	non-media
 GET /abs/api/libraries	non-media
@@ -270,8 +270,8 @@ GET /abs/auth-settings	non-media
 GET /abs/healthcheck	non-media
 GET /abs/init	non-media
 GET /abs/ping	non-media
-GET /abs/public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	false
-HEAD /abs/public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	false
+GET /abs/public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	true
+HEAD /abs/public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	true
 GET /api/auth-settings	non-media
 POST /api/auth/refresh	non-media
 POST /api/authorize	non-media
@@ -292,11 +292,11 @@ GET /api/healthcheck	non-media
 GET /api/init	non-media
 GET /api/items/{id}	non-media
 GET /api/items/{id}/cover	non-media
-GET /api/items/{id}/ebook/{fileid}	media	transfer	viewer_egress	false	false
+GET /api/items/{id}/ebook/{fileid}	media	transfer	viewer_egress	false	true
 PATCH /api/items/{id}/ebook/{fileid}/status	non-media
 GET /api/items/{id}/similar	non-media
-GET /api/items/{libraryItemId}/file/{ino}	media	transfer	viewer_egress	false	false
-GET /api/items/{libraryItemId}/file/{ino}/download	media	transfer	viewer_egress	false	false
+GET /api/items/{libraryItemId}/file/{ino}	media	transfer	viewer_egress	false	true
+GET /api/items/{libraryItemId}/file/{ino}/download	media	transfer	viewer_egress	false	true
 POST /api/items/{libraryItemId}/play	non-media
 POST /api/items/{libraryItemId}/play/{episodeId}	non-media
 GET /api/libraries	non-media
@@ -357,12 +357,12 @@ POST /api/session/{sid}/sync	non-media
 POST /auth/refresh	non-media
 GET /feed/{slug}	non-media
 GET /feed/{slug}.xml	non-media
-GET /feed/{slug}/file/{ino}	media	transfer	viewer_egress	false	false
+GET /feed/{slug}/file/{ino}	media	transfer	viewer_egress	false	true
 GET /healthcheck	non-media
 GET /init	non-media
 POST /login	non-media
 POST /logout	non-media
 GET /ping	non-media
-GET /public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	false
-HEAD /public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	false
+GET /public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	true
+HEAD /public/session/{sid}/track/{idx}	media	playback	viewer_egress	true	true
 GET /status	non-media

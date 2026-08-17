@@ -3,6 +3,7 @@ package streamtelemetry
 import (
 	"log/slog"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 const (
 	enabledEnv            = "SILO_STREAM_TELEMETRY_ENABLED"
+	familiesEnv           = "SILO_STREAM_TELEMETRY_FAMILIES"
 	sweepIntervalEnv      = "SILO_STREAM_TELEMETRY_SWEEP_INTERVAL"
 	retentionEnv          = "SILO_STREAM_TELEMETRY_RETENTION"
 	maxSessionsEnv        = "SILO_STREAM_TELEMETRY_MAX_SESSIONS"
@@ -26,12 +28,31 @@ const (
 	maxMergedTransfersEnv = "SILO_STREAM_TELEMETRY_MAX_MERGED_TRANSFERS"
 )
 
+// defaultObservedFamilies is the set observed when SILO_STREAM_TELEMETRY_FAMILIES
+// is unset. It is deliberately NOT "every declared family": jellycompat and ABS
+// share the API process with native, so defaulting them on would widen
+// instrumentation across a live byte path on upgrade alone, which is exactly what
+// §6's one-family-at-a-time rollout exists to prevent. Proxy and transcode node
+// are separate processes, so their own SILO_STREAM_TELEMETRY_ENABLED already gates
+// them and they stay in the default set. Name a family in the variable to observe
+// it; move it in here once it has run in production, and delete this set when all
+// five have.
+var defaultObservedFamilies = map[Family]bool{
+	FamilyNative:        true,
+	FamilyProxy:         true,
+	FamilyTranscodeNode: true,
+}
+
 type Config struct {
 	Enabled        bool
 	NodeID         string
 	PublisherID    string
 	PublisherEpoch int64
 	Distributed    bool
+	// Families narrows which route families are observed. Empty means
+	// defaultObservedFamilies. It is a kill switch as much as a rollout control:
+	// one misbehaving family can be dropped without losing all observation.
+	Families map[Family]bool
 
 	SweepInterval      time.Duration
 	Retention          time.Duration
@@ -138,6 +159,13 @@ func ConfigFromEnv(nodeID string) Config {
 	parseDistributedPositive(maxPublishersEnv, &cfg.MaxPublishers)
 	parseDistributedPositive(maxMergedSessionsEnv, &cfg.MaxMergedSessions)
 	parseDistributedPositive(maxMergedTransfersEnv, &cfg.MaxMergedTransfers)
+	if value := strings.TrimSpace(os.Getenv(familiesEnv)); value != "" {
+		if families, ok := parseFamilies(value); ok {
+			cfg.Families = families
+		} else {
+			coreInvalid = append(coreInvalid, familiesEnv)
+		}
+	}
 	if value := os.Getenv(keyPrefixEnv); value != "" {
 		if strings.TrimSpace(value) == "" || strings.IndexFunc(value, unicode.IsSpace) >= 0 {
 			distributedInvalid = append(distributedInvalid, keyPrefixEnv)
@@ -171,6 +199,53 @@ func ConfigFromEnv(nodeID string) Config {
 		}
 	}
 	return cfg
+}
+
+// ObservesFamily reports whether routes in this family are wrapped. It is read
+// once per route at mount time, never on the hot path.
+func (c Config) ObservesFamily(family Family) bool {
+	if len(c.Families) == 0 {
+		return defaultObservedFamilies[family]
+	}
+	return c.Families[family]
+}
+
+// ObservedFamilies lists the observed families in a stable order, for the
+// startup log that makes the resolved set visible.
+func (c Config) ObservedFamilies() []string {
+	set := c.Families
+	if len(set) == 0 {
+		set = defaultObservedFamilies
+	}
+	names := make([]string, 0, len(set))
+	for family, observed := range set {
+		if observed {
+			names = append(names, string(family))
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// parseFamilies decodes the comma-separated family list. An unrecognized name is
+// a core-invalid setting rather than a distributed-only one: a typo that silently
+// observed nothing would be worse than no telemetry at all.
+func parseFamilies(value string) (map[Family]bool, bool) {
+	families := make(map[Family]bool)
+	for _, entry := range strings.Split(value, ",") {
+		name := strings.ToLower(strings.TrimSpace(entry))
+		if name == "" {
+			continue
+		}
+		family := Family(name)
+		switch family {
+		case FamilyNative, FamilyJellycompat, FamilyProxy, FamilyABS, FamilyTranscodeNode:
+			families[family] = true
+		default:
+			return nil, false
+		}
+	}
+	return families, true
 }
 
 func envEnabled(value string) bool {

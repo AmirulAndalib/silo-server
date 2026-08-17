@@ -41,9 +41,16 @@ func TestMediaRouteManifest(t *testing.T) {
 	if string(want) != actual {
 		t.Fatalf("route manifest changed; inspect it and run go test . -update-route-manifest")
 	}
+	// Every declared compat route is enrolled and carries a capture hook. A route
+	// that is declared but not enrolled, or enrolled with a nil Capture, would
+	// fall back to genericCapture and quietly lose the Jellyfin client identity
+	// compatCapture reads from the MediaBrowser authorization header.
 	for _, route := range jellycompatMediaRoutes {
-		if route.Enrolled {
-			t.Fatalf("jellycompat route enrolled: %s %s", route.Method, route.Pattern)
+		if !route.Enrolled {
+			t.Fatalf("jellycompat route not enrolled: %s %s", route.Method, route.Pattern)
+		}
+		if route.Capture == nil {
+			t.Fatalf("jellycompat route has no capture hook: %s %s", route.Method, route.Pattern)
 		}
 	}
 }

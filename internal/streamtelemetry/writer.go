@@ -14,7 +14,10 @@ const OutcomeUnknown httpstream.StreamOutcome = "unknown"
 
 func (r *Registry) Observe(route MediaRoute) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		if r == nil || !r.cfg.Enabled || !route.Enrolled {
+		// Evaluated once at mount time — Observe returns the middleware, and the
+		// closure below is what runs per request — so the family gate costs
+		// nothing on the hot path.
+		if r == nil || !r.cfg.Enabled || !route.Enrolled || !r.cfg.ObservesFamily(route.Family) {
 			return next
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

@@ -76,6 +76,7 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "BadRequest", "Media source is required")
 		return
 	}
+	attachCompatStream(r.Context(), session, playSession, source.FileID)
 
 	method := "direct"
 	if !staticRequest && !source.SupportsDirectPlay {
@@ -186,6 +187,9 @@ func (h *PlaybackHandler) HandleDownload(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "NotFound", "Media file not found")
 		return
 	}
+	// §4.2b: a download has a user but no stable playback session, so it is a
+	// Transfer rather than a logical session.
+	attachCompatTransfer(r.Context(), session, version.FileID)
 
 	w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(filepath.Base(file.FilePath)))
 	_ = playback.ServeDirectPlay(w, r, file.FilePath)
@@ -218,6 +222,11 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "BadRequest", "Media source is required")
 		return
 	}
+	// Attach BEFORE ensureUpstreamPlayback below: this route can start a
+	// transcode before it writes a byte, which is the whole reason §4.2 enrolls
+	// manifest routes. A cut has to be able to act here, not after the side
+	// effect. See the boundary note in streamtelemetry.go.
+	attachCompatStream(r.Context(), session, playSession, source.FileID)
 
 	var err error
 	if h.NodePlanner != nil && h.JWTSecret != "" {
@@ -333,6 +342,8 @@ func (h *PlaybackHandler) HandleHLSManifest(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "BadRequest", "Media source is required")
 		return
 	}
+	// Before ensureTranscodeManifest, for the same reason as the master manifest.
+	attachCompatStream(r.Context(), session, playSession, source.FileID)
 
 	// Ensure the transcode process is running.
 	manifest, err := h.ensureTranscodeManifest(r.Context(), session, playSession.ID, *source)
@@ -379,6 +390,11 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusNotFound, "NotFound", "Playback session not found")
 		return
 	}
+	segmentSourceFileID := 0
+	if source := firstMediaSource(playSession); source != nil {
+		segmentSourceFileID = source.FileID
+	}
+	attachCompatStream(r.Context(), session, playSession, segmentSourceFileID)
 
 	name := chiURLParam(r, "segmentId")
 	ext := chiURLParam(r, "segmentContainer")
@@ -567,7 +583,7 @@ func (h *PlaybackHandler) HandleSubtitleStream(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	_, source, err := h.resolvePlaybackRoute(r, session, chiURLParam(r, "routeMediaSourceId"), chiURLParam(r, "routeMediaSourceId"))
+	playSession, source, err := h.resolvePlaybackRoute(r, session, chiURLParam(r, "routeMediaSourceId"), chiURLParam(r, "routeMediaSourceId"))
 	if err != nil || source == nil {
 		writeError(w, http.StatusNotFound, "NotFound", "Playback session not found")
 		return
@@ -582,6 +598,10 @@ func (h *PlaybackHandler) HandleSubtitleStream(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusNotFound, "NotFound", "Media file not found")
 		return
 	}
+	// Identity is fully known here. The later 400/404 branches for a bad index or
+	// a missing subtitle then record an outcome on a real session, which is
+	// correct: they are failures by an already-authorized principal.
+	attachCompatStream(r.Context(), session, playSession, source.FileID)
 
 	routeIndex := chiURLParam(r, "routeIndex")
 	trackIndex, parseErr := strconv.Atoi(routeIndex)
