@@ -98,68 +98,71 @@ type Dependencies struct {
 	DB                           *pgxpool.Pool
 	SecretCipher                 *secret.Cipher // at-rest credential cipher (required when DB is set)
 	FrontendFS                   fs.FS
-	S3Public                     *s3client.Client                 // public assets bucket client (may be nil)
-	S3Private                    *s3client.Client                 // private internal bucket client (may be nil)
-	S3UserDB                     *s3client.Client                 // user-db bucket client (may be nil)
-	BrandingService              *branding.Service                // white-label branding (nil when DB unavailable)
-	FolderRepo                   *catalog.FolderRepository        // media folder repository (may be nil)
-	FileRepo                     *scanner.FileRepository          // media file repository (may be nil)
-	Scanner                      *scanner.Scanner                 // scanner instance (may be nil)
-	LibraryIngester              *libraryingest.Executor          // shared library ingest executor (may be nil)
-	ProbeEnsurer                 handlers.PlaybackProbeEnsurer    // on-demand probe repair for playback/detail (may be nil)
-	UserStoreProvider            userstore.UserStoreProvider      // user store provider (may be nil)
-	SessionMgr                   *playback.SessionManager         // playback session manager (may be nil)
-	StreamTelemetry              *streamtelemetry.Registry        // local observation-only stream telemetry (may be nil)
-	SkippedRootRepo              *metadata.SkippedRootRepository  // skipped root repository (may be nil)
-	StaleIDRepo                  *metadata.StaleMediaIDRepository // stale media ID repository (may be nil)
-	MovieMatchQueueRepo          *metadata.MovieMatchQueueRepository
-	SeriesRootMatchQueueRepo     *metadata.SeriesRootMatchQueueRepository
-	Refresher                    handlers.AdminMetadataRefresher // metadata refresher (may be nil)
-	NodeRepo                     *nodepool.Repository            // stream node repository (may be nil)
-	ProxyPool                    *nodepool.ProxyPool             // proxy node pool (may be nil)
-	TranscodePool                *nodepool.TranscodePool         // transcode node pool (may be nil)
-	NodePlanner                  *nodepool.Planner               // group/cap-aware node selection (may be nil)
-	SessionSyncer                handlers.PlaybackSessionSyncer  // optional; immediate playback session sync trigger
-	EventBus                     cache.EventBus
-	AdminStatsProvider           handlers.AdminStatsSource
-	Recommender                  recommendations.Recommender // nil when disabled
-	RecWorker                    *recommendations.Worker     // nil when disabled
-	CatalogSearchVectorizer      catalog.CatalogSearchQueryVectorizer
-	RatingsRepo                  *catalog.RatingsRepo
-	PersonRepo                   *catalog.PersonRepository
-	PersonRefreshQueue           handlers.PersonRefreshQueue
-	PersonRefresher              handlers.PersonRefresher
-	RateLimitMW                  *ratelimit.Middleware
-	ClientIPResolver             *clientip.Resolver
-	NodeID                       string
-	LogStreamHub                 *logstream.Hub
-	RealtimeHub                  *notifications.Hub
-	Notifications                *notifications.System // user-facing release notifications (may be nil)
-	PolicySystem                 *policy.System        // policy engine lifecycle (may be nil)
-	EventsHub                    *evt.Hub
-	ScanRegistry                 *evt.ScanRegistry
-	LibraryScanQueue             *scanqueue.Service
-	ActivityLogWriter            activitylog.Writer
-	ActivityLogRepo              *activitylog.Repo
-	OpsLogRepo                   *opslog.Repo
-	FFmpegLogSink                playback.FFmpegLogSink
-	RedisClient                  *redis.Client              // for session listing (may be nil)
-	TaskManager                  *taskmanager.TaskManager   // task manager (may be nil)
-	ArtifactManager              *downloads.ArtifactManager // download prepare-to-file pipeline (may be nil)
-	AdminJobCancelRegistry       *adminjob.CancelRegistry
-	IntroRepository              *intromarkers.Repository
-	IntroAnalyzer                *intromarkers.Analyzer
-	MarkerRegistry               *markers.Registry
-	MarkerResolver               markers.ExternalIDResolver
-	MarkerProviderConfig         *markers.ProviderConfigStore
-	MarkerContributionStore      *markers.ContributionStore
-	MarkerContributionService    *markers.ContributionService
-	WatchProviderService         handlers.WatchProviderService
-	WatchCompletionObserver      watchstate.CompletionObserver
-	PluginService                *plugins.Service
-	PluginHTTPProxy              *plugins.HTTPProxy
-	PluginUserConfig             *plugins.UserConfigStore
-	AuthProviders                []auth.RegisteredProvider
+	S3Public                     *s3client.Client              // public assets bucket client (may be nil)
+	S3Private                    *s3client.Client              // private internal bucket client (may be nil)
+	S3UserDB                     *s3client.Client              // user-db bucket client (may be nil)
+	BrandingService              *branding.Service             // white-label branding (nil when DB unavailable)
+	FolderRepo                   *catalog.FolderRepository     // media folder repository (may be nil)
+	FileRepo                     *scanner.FileRepository       // media file repository (may be nil)
+	Scanner                      *scanner.Scanner              // scanner instance (may be nil)
+	LibraryIngester              *libraryingest.Executor       // shared library ingest executor (may be nil)
+	ProbeEnsurer                 handlers.PlaybackProbeEnsurer // on-demand probe repair for playback/detail (may be nil)
+	UserStoreProvider            userstore.UserStoreProvider   // user store provider (may be nil)
+	SessionMgr                   *playback.SessionManager      // playback session manager (may be nil)
+	StreamTelemetry              *streamtelemetry.Registry     // local observation-only stream telemetry (may be nil)
+	// StreamTelemetryViewCache serves the merged global view with bounded
+	// staleness so the admin parity endpoint never rebuilds it per request.
+	StreamTelemetryViewCache  *streamtelemetry.ViewCache
+	SkippedRootRepo           *metadata.SkippedRootRepository  // skipped root repository (may be nil)
+	StaleIDRepo               *metadata.StaleMediaIDRepository // stale media ID repository (may be nil)
+	MovieMatchQueueRepo       *metadata.MovieMatchQueueRepository
+	SeriesRootMatchQueueRepo  *metadata.SeriesRootMatchQueueRepository
+	Refresher                 handlers.AdminMetadataRefresher // metadata refresher (may be nil)
+	NodeRepo                  *nodepool.Repository            // stream node repository (may be nil)
+	ProxyPool                 *nodepool.ProxyPool             // proxy node pool (may be nil)
+	TranscodePool             *nodepool.TranscodePool         // transcode node pool (may be nil)
+	NodePlanner               *nodepool.Planner               // group/cap-aware node selection (may be nil)
+	SessionSyncer             handlers.PlaybackSessionSyncer  // optional; immediate playback session sync trigger
+	EventBus                  cache.EventBus
+	AdminStatsProvider        handlers.AdminStatsSource
+	Recommender               recommendations.Recommender // nil when disabled
+	RecWorker                 *recommendations.Worker     // nil when disabled
+	CatalogSearchVectorizer   catalog.CatalogSearchQueryVectorizer
+	RatingsRepo               *catalog.RatingsRepo
+	PersonRepo                *catalog.PersonRepository
+	PersonRefreshQueue        handlers.PersonRefreshQueue
+	PersonRefresher           handlers.PersonRefresher
+	RateLimitMW               *ratelimit.Middleware
+	ClientIPResolver          *clientip.Resolver
+	NodeID                    string
+	LogStreamHub              *logstream.Hub
+	RealtimeHub               *notifications.Hub
+	Notifications             *notifications.System // user-facing release notifications (may be nil)
+	PolicySystem              *policy.System        // policy engine lifecycle (may be nil)
+	EventsHub                 *evt.Hub
+	ScanRegistry              *evt.ScanRegistry
+	LibraryScanQueue          *scanqueue.Service
+	ActivityLogWriter         activitylog.Writer
+	ActivityLogRepo           *activitylog.Repo
+	OpsLogRepo                *opslog.Repo
+	FFmpegLogSink             playback.FFmpegLogSink
+	RedisClient               *redis.Client              // for session listing (may be nil)
+	TaskManager               *taskmanager.TaskManager   // task manager (may be nil)
+	ArtifactManager           *downloads.ArtifactManager // download prepare-to-file pipeline (may be nil)
+	AdminJobCancelRegistry    *adminjob.CancelRegistry
+	IntroRepository           *intromarkers.Repository
+	IntroAnalyzer             *intromarkers.Analyzer
+	MarkerRegistry            *markers.Registry
+	MarkerResolver            markers.ExternalIDResolver
+	MarkerProviderConfig      *markers.ProviderConfigStore
+	MarkerContributionStore   *markers.ContributionStore
+	MarkerContributionService *markers.ContributionService
+	WatchProviderService      handlers.WatchProviderService
+	WatchCompletionObserver   watchstate.CompletionObserver
+	PluginService             *plugins.Service
+	PluginHTTPProxy           *plugins.HTTPProxy
+	PluginUserConfig          *plugins.UserConfigStore
+	AuthProviders             []auth.RegisteredProvider
 	// PublicURL is the externally-reachable origin (scheme + host) for this
 	// silo instance. Used to build redirect_uri values handed to OAuth
 	// IdPs. Empty disables the /oauth/{install_id}/{init,callback} routes.
@@ -2822,6 +2825,16 @@ func NewRouter(deps Dependencies) chi.Router {
 							}
 
 							r.Get("/sessions", adminHandler.HandleListSessions)
+							// P0d parity projection: the merged telemetry view beside
+							// both legacy live-session projections and their diff. It
+							// compares only — the repoint is the separate retirement
+							// change, which this endpoint exists to give evidence for.
+							r.Get("/stream-telemetry/parity", (&handlers.StreamTelemetryParityHandler{
+								Registry:  deps.StreamTelemetry,
+								ViewCache: deps.StreamTelemetryViewCache,
+								Pool:      deps.DB,
+								Redis:     deps.RedisClient,
+							}).HandleGetStreamTelemetryParity)
 							r.Get("/sessions/capabilities", adminHandler.HandleGetSessionsCapabilities)
 							r.Get("/playback-history", adminHandler.HandleListPlaybackHistory)
 							r.Get("/unmatched", adminHandler.HandleListUnmatched)

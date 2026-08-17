@@ -26,6 +26,7 @@ const (
 	maxPublishersEnv      = "SILO_STREAM_TELEMETRY_MAX_PUBLISHERS"
 	maxMergedSessionsEnv  = "SILO_STREAM_TELEMETRY_MAX_MERGED_SESSIONS"
 	maxMergedTransfersEnv = "SILO_STREAM_TELEMETRY_MAX_MERGED_TRANSFERS"
+	viewTTLEnv            = "SILO_STREAM_TELEMETRY_VIEW_TTL"
 )
 
 // defaultObservedFamilies is the set observed when SILO_STREAM_TELEMETRY_FAMILIES
@@ -54,11 +55,15 @@ type Config struct {
 	// one misbehaving family can be dropped without losing all observation.
 	Families map[Family]bool
 
-	SweepInterval      time.Duration
-	Retention          time.Duration
-	Freshness          time.Duration
-	MembershipTTL      time.Duration
-	KeyPrefix          string
+	SweepInterval time.Duration
+	Retention     time.Duration
+	Freshness     time.Duration
+	MembershipTTL time.Duration
+	KeyPrefix     string
+	// ViewTTL bounds how stale a served merged view may be. It gates a rebuild
+	// that measured ~347 ms at the 50 000-session cap, so it is a cost control
+	// rather than a freshness preference.
+	ViewTTL            time.Duration
 	FullResyncEvery    int
 	MaxPublishers      int
 	MaxMergedSessions  int
@@ -82,6 +87,7 @@ func DefaultConfig(nodeID string) Config {
 	return Config{
 		NodeID: nodeID, SweepInterval: time.Second, Retention: 5 * time.Minute,
 		Freshness: 5 * time.Second, MembershipTTL: time.Minute, KeyPrefix: "silo:stelem",
+		ViewTTL:         DefaultViewTTL,
 		FullResyncEvery: 60, MaxPublishers: 256, MaxMergedSessions: 50_000, MaxMergedTransfers: 50_000,
 		MaxSessions: 10_000, MaxTransfers: 10_000, MaxObservations: 50_000,
 		MaxObservationsPerSession: 64, MaxViewerIPsPerSession: 32,
@@ -155,6 +161,7 @@ func ConfigFromEnv(nodeID string) Config {
 	parsePositive(maxObservationsEnv, &cfg.MaxObservations)
 	parseDistributedDuration(freshnessEnv, &cfg.Freshness)
 	parseDistributedDuration(membershipTTLEnv, &cfg.MembershipTTL)
+	parseDistributedDuration(viewTTLEnv, &cfg.ViewTTL)
 	parseDistributedPositive(fullResyncEveryEnv, &cfg.FullResyncEvery)
 	parseDistributedPositive(maxPublishersEnv, &cfg.MaxPublishers)
 	parseDistributedPositive(maxMergedSessionsEnv, &cfg.MaxMergedSessions)

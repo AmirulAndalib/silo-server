@@ -197,6 +197,16 @@ func newStreamTelemetryRegistry(ctx context.Context, nodeID string, redisClient 
 	return streamtelemetry.NewRegistry(streamTelemetryConfig, store, slog.Default())
 }
 
+// newStreamTelemetryViewCache builds the bounded-staleness cache the admin
+// parity endpoint reads. It shares one cached view across every reader so the
+// merged rebuild is paid at most once per TTL, not once per request.
+func newStreamTelemetryViewCache(registry *streamtelemetry.Registry, nodeID string) *streamtelemetry.ViewCache {
+	if registry == nil {
+		return nil
+	}
+	return streamtelemetry.NewViewCache(registry, streamtelemetry.ConfigFromEnv(nodeID).ViewTTL, slog.Default())
+}
+
 func resolvePluginCacheDir() string {
 	if v := strings.TrimSpace(os.Getenv("SILO_PLUGIN_CACHE_DIR")); v != "" {
 		return v
@@ -720,6 +730,7 @@ func main() {
 	appCtx, appCancel := context.WithCancel(ctx)
 	defer appCancel()
 	var streamTelemetryRegistry *streamtelemetry.Registry
+	var streamTelemetryViewCache *streamtelemetry.ViewCache
 	restartReqCh := make(chan struct{}, 1)
 	var restartRequested atomic.Bool
 
@@ -887,6 +898,7 @@ func main() {
 	if mode == "" || mode == "integrated" || mode == "api" {
 		streamTelemetryRegistry = newStreamTelemetryRegistry(appCtx, nodeID, apiRedisClient)
 		streamTelemetryRegistry.Start(appCtx)
+		streamTelemetryViewCache = newStreamTelemetryViewCache(streamTelemetryRegistry, nodeID)
 	}
 
 	// Assigned below once the trusted-proxy config is seeded; captured by the
@@ -906,6 +918,7 @@ func main() {
 		RedisBootstrapAvailable:      redisBootstrapAvailable,
 		AppContext:                   appCtx,
 		StreamTelemetry:              streamTelemetryRegistry,
+		StreamTelemetryViewCache:     streamTelemetryViewCache,
 		DB:                           pool,
 		SecretCipher:                 dataCipher,
 		EventBus:                     eventBus,

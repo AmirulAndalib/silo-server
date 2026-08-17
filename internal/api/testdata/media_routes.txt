@@ -149,6 +149,7 @@ GET /api/v1/admin/settings/sensitive-status	non-media
 GET /api/v1/admin/settings/{key}	non-media
 PUT /api/v1/admin/settings/{key}	non-media
 GET /api/v1/admin/stats	non-media
+GET /api/v1/admin/stream-telemetry/parity	non-media
 GET /api/v1/admin/subtitle-providers/	non-media
 PUT /api/v1/admin/subtitle-providers/{provider}/	non-media
 POST /api/v1/admin/subtitle-providers/{provider}/test	non-media

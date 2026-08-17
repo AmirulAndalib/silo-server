@@ -129,7 +129,7 @@ func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{enabledEnv, sweepIntervalEnv, retentionEnv, maxSessionsEnv, maxTransfersEnv, maxObservationsEnv,
 		distributedEnv, freshnessEnv, membershipTTLEnv, keyPrefixEnv, fullResyncEveryEnv, maxPublishersEnv, maxMergedSessionsEnv, maxMergedTransfersEnv,
-		familiesEnv} {
+		familiesEnv, viewTTLEnv} {
 		t.Setenv(name, "")
 	}
 }

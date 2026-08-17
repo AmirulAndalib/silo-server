@@ -13,7 +13,9 @@ const (
 	publisherReasonMetaMissing      = "meta_missing"
 	publisherReasonIdentityMismatch = "identity_mismatch"
 	publisherReasonCountMismatch    = "count_mismatch"
+	identityFieldSubject            = "subject"
 	identityFieldProfileID          = "profile_id"
+	identityFieldMediaFileID        = "media_file_id"
 )
 
 type SnapshotStore interface {

@@ -469,9 +469,9 @@ func mergeSession(id string, contributions []sessionContribution, params ViewPar
 	if winningRank == 1 || len(winningTimes) > 1 {
 		result.StartedAtDegraded = true
 	}
-	applyIdentity(&result, "subject", subjectValues)
+	applyIdentity(&result, identityFieldSubject, subjectValues)
 	applyIdentity(&result, identityFieldProfileID, profileValues)
-	applyIdentity(&result, "media_file_id", mediaValues)
+	applyIdentity(&result, identityFieldMediaFileID, mediaValues)
 	result.ViewerIPs, result.ViewerIPsOverflowed = cappedStrings(viewerIPs, params.MaxViewerIPsPerSession, result.ViewerIPsOverflowed)
 	result.DeviceIDs, result.DeviceIDsOverflowed = cappedStrings(deviceIDs, params.MaxDeviceIDsPerSession, result.DeviceIDsOverflowed)
 	result.UserAgents, result.UserAgentsOverflowed = cappedStrings(userAgents, params.MaxUserAgentsPerSession, result.UserAgentsOverflowed)
@@ -529,12 +529,12 @@ func applyIdentity(result *GlobalSessionView, field string, values map[string][]
 	if len(values) == 1 {
 		for value := range values {
 			switch field {
-			case "subject":
+			case identityFieldSubject:
 				parts := strings.SplitN(value, "\x00", 2)
 				result.Subject = Subject{Kind: SubjectKind(parts[0]), ID: parts[1]}
 			case identityFieldProfileID:
 				result.ProfileID = value
-			case "media_file_id":
+			case identityFieldMediaFileID:
 				result.MediaFileID, _ = strconv.Atoi(value)
 			}
 		}
