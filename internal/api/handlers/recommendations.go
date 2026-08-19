@@ -88,7 +88,7 @@ type forYouMainResponse struct {
 	Row *recommendations.ForYouRow `json:"row"`
 }
 
-func recommendationsEngineUnavailable(h *RecommendationsHandler) bool {
+func (h *RecommendationsHandler) engineUnavailable() bool {
 	return !h.enabled || h.engine == nil
 }
 
@@ -102,7 +102,7 @@ func emptyTasteProfileSummary() recommendations.TasteProfileSummary {
 
 // HandleSimilar handles GET /recommendations/similar/{item_id}.
 func (h *RecommendationsHandler) HandleSimilar(w http.ResponseWriter, r *http.Request) {
-	if recommendationsEngineUnavailable(h) {
+	if h.engineUnavailable() {
 		writeJSON(w, http.StatusOK, scoredItemsResponse{Items: []recommendations.ScoredItem{}})
 		return
 	}
@@ -192,7 +192,7 @@ func (h *RecommendationsHandler) HandleForYouRows(w http.ResponseWriter, r *http
 
 // HandleBecauseWatched handles GET /recommendations/because-watched/{item_id}.
 func (h *RecommendationsHandler) HandleBecauseWatched(w http.ResponseWriter, r *http.Request) {
-	if recommendationsEngineUnavailable(h) {
+	if h.engineUnavailable() {
 		writeJSON(w, http.StatusOK, scoredItemsResponse{Items: []recommendations.ScoredItem{}})
 		return
 	}
@@ -259,7 +259,7 @@ func (h *RecommendationsHandler) HandleSimilarUsers(w http.ResponseWriter, r *ht
 
 // HandleTasteProfile handles GET /recommendations/taste-profile.
 func (h *RecommendationsHandler) HandleTasteProfile(w http.ResponseWriter, r *http.Request) {
-	if recommendationsEngineUnavailable(h) {
+	if h.engineUnavailable() {
 		writeJSON(w, http.StatusOK, emptyTasteProfileSummary())
 		return
 	}
