@@ -1,5 +1,12 @@
 # Feature Changelog
 
+## 2026-08-19
+
+### Stop crashing the taste-profile screen when recommendations are off
+Opening "your taste profile" (or Because You Watched) no longer returns HTTP 500 on a default install.
+- Recommendations stay disabled unless an admin turns them on, but those two endpoints were still registered and called a nil engine.
+- They now return the same empty payload the handlers already used on an engine error, matching Similar / For You.
+
 ## 2026-08-16
 
 ### Let viewers turn the intro prompt off
