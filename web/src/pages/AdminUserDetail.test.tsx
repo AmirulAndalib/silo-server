@@ -33,14 +33,27 @@ const adminUser: AdminUser = {
   enabled: true,
   library_ids: null,
   access_group_id: null,
-  max_playback_quality: "source",
-  max_streams: 0,
-  max_transcodes: 0,
-  transcode_allowed: true,
-  audio_transcode_allowed: true,
+  max_playback_quality: null,
+  max_streams: null,
+  max_transcodes: null,
+  transcode_allowed: null,
+  audio_transcode_allowed: null,
   max_profiles: 4,
-  download_allowed: true,
-  download_transcode_allowed: true,
+  download_allowed: null,
+  download_transcode_allowed: null,
+  requests_allowed: null,
+  effective_policy: {
+    library_ids: null,
+    max_playback_quality: "",
+    max_streams: 0,
+    max_transcodes: 0,
+    transcode_allowed: true,
+    audio_transcode_allowed: true,
+    download_allowed: true,
+    download_transcode_allowed: true,
+    requests_allowed: true,
+    permissions: [],
+  },
   created_at: "2026-07-01T12:00:00Z",
   updated_at: "2026-07-01T12:00:00Z",
 };
@@ -97,6 +110,8 @@ vi.mock("@/hooks/queries/admin/accessGroups", () => ({
         max_playback_quality: "source",
         download_allowed: true,
         download_transcode_allowed: true,
+        transcode_allowed: true,
+        audio_transcode_allowed: true,
         max_streams: 0,
         max_transcodes: 0,
         allowed_permissions: null,
@@ -113,6 +128,8 @@ vi.mock("@/hooks/queries/admin/accessGroups", () => ({
         max_playback_quality: "720p",
         download_allowed: false,
         download_transcode_allowed: false,
+        transcode_allowed: false,
+        audio_transcode_allowed: true,
         max_streams: 1,
         max_transcodes: 0,
         allowed_permissions: [],
@@ -317,20 +334,20 @@ describe("AdminUserDetail user settings tab", () => {
 });
 
 describe("AdminUserDetail transcode limits", () => {
-  it("disables transcoding and includes the flag in the save payload", async () => {
+  it("overrides transcoding gates and includes them in the save payload", async () => {
     const user = userEvent.setup();
     renderUserDetail();
 
     await user.click(screen.getByRole("button", { name: /edit/i }));
     await user.click(screen.getByRole("tab", { name: "Limits" }));
-    expect(screen.queryByRole("switch", { name: "Audio transcodes" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Disable video transcoding" }));
 
-    expect(screen.getByText("Video transcoding disabled")).toBeInTheDocument();
-    expect(screen.getByRole("spinbutton", { name: "Max Transcodes" })).toBeDisabled();
-    const audioTranscodeSwitch = screen.getByRole("switch", { name: "Audio transcodes" });
-    expect(audioTranscodeSwitch).toBeChecked();
-    await user.click(audioTranscodeSwitch);
+    // Inheriting fields show the group-derived effective value.
+    expect(screen.getAllByText("Inherited: Unlimited").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("combobox", { name: "Video Transcoding" }));
+    await user.click(screen.getByRole("option", { name: "Not allowed" }));
+    await user.click(screen.getByRole("combobox", { name: "Audio Transcoding" }));
+    await user.click(screen.getByRole("option", { name: "Not allowed" }));
 
     await user.click(screen.getByRole("button", { name: "Save" }));
 
@@ -338,5 +355,10 @@ describe("AdminUserDetail transcode limits", () => {
     const call = mocks.updateUserMutate.mock.calls[0]?.[0] as UpdateUserMutationArg | undefined;
     expect(call?.body.transcode_allowed).toBe(false);
     expect(call?.body.audio_transcode_allowed).toBe(false);
+    // Untouched policy fields stay inherited (explicit null, not a pinned value).
+    expect(call?.body.max_streams).toBeNull();
+    expect(call?.body.max_transcodes).toBeNull();
+    expect(call?.body.download_allowed).toBeNull();
+    expect(call?.body.library_ids).toBeNull();
   });
 });

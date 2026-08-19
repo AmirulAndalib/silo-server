@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -52,7 +53,7 @@ func NewUserRepository(pool *pgxpool.Pool) *UserRepository {
 const allColumns = `id, email, username, password_hash, local_password_login_enabled, role, permissions, enabled,
 	library_ids, max_playback_quality, access_policy_revision,
 	max_streams, max_transcodes, transcode_allowed, audio_transcode_allowed, max_profiles, download_allowed,
-	download_transcode_allowed, access_group_id, created_at, updated_at`
+	download_transcode_allowed, requests_allowed, access_group_id, created_at, updated_at`
 
 // scanUser scans a single row into a *models.User.
 func scanUser(row pgx.Row) (*models.User, error) {
@@ -76,6 +77,7 @@ func scanUser(row pgx.Row) (*models.User, error) {
 		&u.MaxProfiles,
 		&u.DownloadAllowed,
 		&u.DownloadTranscodeAllowed,
+		&u.RequestsAllowed,
 		&u.AccessGroupID,
 		&u.CreatedAt,
 		&u.UpdatedAt,
@@ -113,6 +115,7 @@ func scanUsers(rows pgx.Rows) ([]*models.User, error) {
 			&u.MaxProfiles,
 			&u.DownloadAllowed,
 			&u.DownloadTranscodeAllowed,
+			&u.RequestsAllowed,
 			&u.AccessGroupID,
 			&u.CreatedAt,
 			&u.UpdatedAt,
@@ -150,7 +153,14 @@ func (r *UserRepository) Create(ctx context.Context, input models.CreateUserInpu
 		return nil, err
 	}
 
-	cols := []string{"email", "username", "password_hash", "local_password_login_enabled", "role", "permissions", "library_ids", "max_playback_quality"}
+	// Policy columns are written explicitly: a nil pointer stores NULL, which
+	// means "inherit from the access group" (the columns carry no defaults).
+	cols := []string{
+		"email", "username", "password_hash", "local_password_login_enabled", "role", "permissions",
+		"library_ids", "max_playback_quality", "max_streams", "max_transcodes",
+		"transcode_allowed", "audio_transcode_allowed", "download_allowed", "download_transcode_allowed",
+		"requests_allowed",
+	}
 	args := []any{
 		NormalizeEmail(input.Email),
 		NormalizeUsername(input.Username),
@@ -159,37 +169,20 @@ func (r *UserRepository) Create(ctx context.Context, input models.CreateUserInpu
 		input.Role,
 		permissions,
 		input.LibraryIDs,
-		input.MaxPlaybackQuality,
+		normalizeQualityOverride(input.MaxPlaybackQuality),
+		input.MaxStreams,
+		input.MaxTranscodes,
+		input.TranscodeAllowed,
+		input.AudioTranscodeAllowed,
+		input.DownloadAllowed,
+		input.DownloadTranscodeAllowed,
+		input.RequestsAllowed,
 	}
 
 	// Optional columns: nil means use DB default.
-	if input.MaxStreams != nil {
-		cols = append(cols, "max_streams")
-		args = append(args, *input.MaxStreams)
-	}
-	if input.MaxTranscodes != nil {
-		cols = append(cols, "max_transcodes")
-		args = append(args, *input.MaxTranscodes)
-	}
-	if input.TranscodeAllowed != nil {
-		cols = append(cols, "transcode_allowed")
-		args = append(args, *input.TranscodeAllowed)
-	}
-	if input.AudioTranscodeAllowed != nil {
-		cols = append(cols, "audio_transcode_allowed")
-		args = append(args, *input.AudioTranscodeAllowed)
-	}
 	if input.MaxProfiles != nil {
 		cols = append(cols, "max_profiles")
 		args = append(args, *input.MaxProfiles)
-	}
-	if input.DownloadAllowed != nil {
-		cols = append(cols, "download_allowed")
-		args = append(args, *input.DownloadAllowed)
-	}
-	if input.DownloadTranscodeAllowed != nil {
-		cols = append(cols, "download_transcode_allowed")
-		args = append(args, *input.DownloadTranscodeAllowed)
 	}
 	if input.AccessGroupID != nil {
 		cols = append(cols, "access_group_id")
@@ -300,37 +293,37 @@ func (r *UserRepository) Update(ctx context.Context, id int, input models.Update
 		args = append(args, *input.Enabled)
 		argIndex++
 	}
-	if input.LibraryIDs != nil {
+	if input.LibraryIDs.Set {
 		setClauses = append(setClauses, fmt.Sprintf("library_ids = $%d", argIndex))
 		// Library scope is resolved from users.library_ids on each request, so
 		// changing it must not invalidate durable profile/session tokens.
-		args = append(args, *input.LibraryIDs)
+		args = append(args, derefSlice(input.LibraryIDs.Value))
 		argIndex++
 	}
-	if input.MaxPlaybackQuality != nil {
+	if input.MaxPlaybackQuality.Set {
 		setClauses = append(setClauses, fmt.Sprintf("max_playback_quality = $%d", argIndex))
 		accessPolicyPredicates = append(accessPolicyPredicates, fmt.Sprintf("max_playback_quality IS DISTINCT FROM $%d", argIndex))
-		args = append(args, *input.MaxPlaybackQuality)
+		args = append(args, normalizeQualityOverride(input.MaxPlaybackQuality.Value))
 		argIndex++
 	}
-	if input.MaxStreams != nil {
+	if input.MaxStreams.Set {
 		setClauses = append(setClauses, fmt.Sprintf("max_streams = $%d", argIndex))
-		args = append(args, *input.MaxStreams)
+		args = append(args, input.MaxStreams.Value)
 		argIndex++
 	}
-	if input.MaxTranscodes != nil {
+	if input.MaxTranscodes.Set {
 		setClauses = append(setClauses, fmt.Sprintf("max_transcodes = $%d", argIndex))
-		args = append(args, *input.MaxTranscodes)
+		args = append(args, input.MaxTranscodes.Value)
 		argIndex++
 	}
-	if input.TranscodeAllowed != nil {
+	if input.TranscodeAllowed.Set {
 		setClauses = append(setClauses, fmt.Sprintf("transcode_allowed = $%d", argIndex))
-		args = append(args, *input.TranscodeAllowed)
+		args = append(args, input.TranscodeAllowed.Value)
 		argIndex++
 	}
-	if input.AudioTranscodeAllowed != nil {
+	if input.AudioTranscodeAllowed.Set {
 		setClauses = append(setClauses, fmt.Sprintf("audio_transcode_allowed = $%d", argIndex))
-		args = append(args, *input.AudioTranscodeAllowed)
+		args = append(args, input.AudioTranscodeAllowed.Value)
 		argIndex++
 	}
 	if input.MaxProfiles != nil {
@@ -338,14 +331,19 @@ func (r *UserRepository) Update(ctx context.Context, id int, input models.Update
 		args = append(args, *input.MaxProfiles)
 		argIndex++
 	}
-	if input.DownloadAllowed != nil {
+	if input.DownloadAllowed.Set {
 		setClauses = append(setClauses, fmt.Sprintf("download_allowed = $%d", argIndex))
-		args = append(args, *input.DownloadAllowed)
+		args = append(args, input.DownloadAllowed.Value)
 		argIndex++
 	}
-	if input.DownloadTranscodeAllowed != nil {
+	if input.DownloadTranscodeAllowed.Set {
 		setClauses = append(setClauses, fmt.Sprintf("download_transcode_allowed = $%d", argIndex))
-		args = append(args, *input.DownloadTranscodeAllowed)
+		args = append(args, input.DownloadTranscodeAllowed.Value)
+		argIndex++
+	}
+	if input.RequestsAllowed.Set {
+		setClauses = append(setClauses, fmt.Sprintf("requests_allowed = $%d", argIndex))
+		args = append(args, input.RequestsAllowed.Value)
 		argIndex++
 	}
 	if input.AccessGroupIDSet {
@@ -441,4 +439,26 @@ func extractConstraint(err error) string {
 		return pgErr.ConstraintName
 	}
 	return "unknown"
+}
+
+// normalizeQualityOverride keeps the stored quality preset canonical while
+// preserving nil (inherit).
+func normalizeQualityOverride(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	normalized := access.NormalizePlaybackQuality(*value)
+	return &normalized
+}
+
+// derefSlice maps a nil pointer to a NULL array and a non-nil pointer to its
+// (possibly empty) slice, so Postgres distinguishes "inherit" from "none".
+func derefSlice(value *[]int) []int {
+	if value == nil {
+		return nil
+	}
+	if *value == nil {
+		return []int{}
+	}
+	return *value
 }

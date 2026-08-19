@@ -64,6 +64,7 @@ type Service struct {
 	router            RequestRouterProvider
 	entitlements      EntitlementResolver
 	groupProvider     access.GroupPolicyProvider
+	users             access.UserRepository
 	requesterIdentity RequesterIdentityResolver
 	notifier          FulfillmentNotifier
 	lifecycle         LifecycleNotifier
@@ -99,6 +100,10 @@ func (s *Service) SetRouterProvider(p RequestRouterProvider) { s.router = p }
 func (s *Service) SetEntitlementResolver(r EntitlementResolver) { s.entitlements = r }
 
 func (s *Service) SetGroupPolicyProvider(p access.GroupPolicyProvider) { s.groupProvider = p }
+
+// SetUserRepository wires the account loader so the per-user requests_allowed
+// override is honored on top of the access group's gate.
+func (s *Service) SetUserRepository(users access.UserRepository) { s.users = users }
 
 func (s *Service) SetRequesterIdentityResolver(r RequesterIdentityResolver) {
 	s.requesterIdentity = r
@@ -1066,6 +1071,20 @@ func (s *Service) ensureRequestsEnabled(ctx context.Context) error {
 }
 
 func (s *Service) ensureViewerRequestsAllowed(ctx context.Context, userID int) error {
+	if s.users != nil {
+		user, err := s.users.GetByID(ctx, userID)
+		if err != nil {
+			return ErrForbidden
+		}
+		effective, err := access.EffectivePolicyForUser(ctx, user, s.groupProvider)
+		if err != nil {
+			return ErrForbidden
+		}
+		if !effective.RequestsAllowed {
+			return ErrForbidden
+		}
+		return nil
+	}
 	if s.groupProvider == nil {
 		return nil
 	}

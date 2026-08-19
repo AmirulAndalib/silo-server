@@ -108,6 +108,7 @@ type ItemsHandler struct {
 	ebookReadStateStore      EbookReadStateStore
 	EventsHub                *evt.Hub
 	UserRepo                 *auth.UserRepository
+	AccessGroups             access.GroupPolicyProvider // optional; resolves inherited library access when no scope is in context
 }
 
 // NewItemsHandler creates a new ItemsHandler.
@@ -2154,11 +2155,13 @@ func (h *ItemsHandler) accessFilter(r *http.Request) catalog.AccessFilter {
 			user, userErr := h.UserRepo.GetByID(r.Context(), userID)
 			if userErr != nil {
 				slog.ErrorContext(r.Context(), "looking up user for library access", "component", "api", "error", userErr)
+			} else if effective, policyErr := access.EffectivePolicyForUser(r.Context(), user, h.AccessGroups); policyErr != nil {
+				slog.ErrorContext(r.Context(), "resolving user policy for library access", "component", "api", "error", policyErr)
 			} else {
-				if user.LibraryIDs != nil {
-					libraryIDs = user.LibraryIDs
+				if effective.LibraryIDs != nil {
+					libraryIDs = effective.LibraryIDs
 				}
-				maxPlaybackQuality = access.NormalizePlaybackQuality(user.MaxPlaybackQuality)
+				maxPlaybackQuality = access.NormalizePlaybackQuality(effective.MaxPlaybackQuality)
 			}
 		}
 	}

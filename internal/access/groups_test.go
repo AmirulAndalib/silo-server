@@ -7,23 +7,27 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
-func TestApplyGroupPolicyNoGroupMirrorsUser(t *testing.T) {
+func ptr[T any](value T) *T { return &value }
+
+func TestApplyGroupPolicyNoGroupUsesOverridesOverPermissiveDefault(t *testing.T) {
 	user := &models.User{
 		ID:                       7,
 		LibraryIDs:               []int{3, 1, 3},
-		MaxPlaybackQuality:       "2160P",
-		DownloadAllowed:          false,
-		DownloadTranscodeAllowed: true,
-		MaxStreams:               6,
-		MaxTranscodes:            2,
+		MaxPlaybackQuality:       ptr("2160P"),
+		DownloadAllowed:          ptr(false),
+		DownloadTranscodeAllowed: ptr(true),
+		MaxStreams:               ptr(6),
+		MaxTranscodes:            ptr(2),
 		Permissions:              []string{"metadata_curation", "marker_edit", "marker_edit"},
 	}
 	got := ApplyGroupPolicy(user, nil)
 	want := EffectiveUserPolicy{
-		LibraryIDs:               []int{3, 1, 3},
-		MaxPlaybackQuality:       "2160P",
+		LibraryIDs:               []int{1, 3},
+		MaxPlaybackQuality:       PlaybackQuality4K,
 		DownloadAllowed:          false,
 		DownloadTranscodeAllowed: true,
+		TranscodeAllowed:         true,
+		AudioTranscodeAllowed:    true,
 		MaxStreams:               6,
 		MaxTranscodes:            2,
 		Permissions:              []string{"metadata_curation", "marker_edit", "marker_edit"},
@@ -34,7 +38,52 @@ func TestApplyGroupPolicyNoGroupMirrorsUser(t *testing.T) {
 	}
 }
 
+func TestApplyGroupPolicyUnsetUserInheritsNoGroupDefaults(t *testing.T) {
+	got := ApplyGroupPolicy(&models.User{ID: 1}, nil)
+	want := EffectiveUserPolicy{
+		LibraryIDs:               nil,
+		MaxPlaybackQuality:       "",
+		DownloadAllowed:          true,
+		DownloadTranscodeAllowed: true,
+		TranscodeAllowed:         true,
+		AudioTranscodeAllowed:    true,
+		MaxStreams:               0,
+		MaxTranscodes:            0,
+		Permissions:              nil,
+		RequestsAllowed:          true,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ApplyGroupPolicy(unset, no group) = %#v, want %#v", got, want)
+	}
+}
+
 func TestApplyGroupPolicyRules(t *testing.T) {
+	restrictive := &GroupPolicy{
+		ID:                       9,
+		LibraryIDs:               []int{4, 2, 4},
+		MaxPlaybackQuality:       "standard",
+		DownloadAllowed:          false,
+		DownloadTranscodeAllowed: false,
+		TranscodeAllowed:         false,
+		AudioTranscodeAllowed:    true,
+		MaxStreams:               4,
+		MaxTranscodes:            1,
+		AllowedPermissions:       nil,
+		RequestsAllowed:          false,
+	}
+	inherited := EffectiveUserPolicy{
+		LibraryIDs:               []int{2, 4},
+		MaxPlaybackQuality:       PlaybackQualityStandard,
+		DownloadAllowed:          false,
+		DownloadTranscodeAllowed: false,
+		TranscodeAllowed:         false,
+		AudioTranscodeAllowed:    true,
+		MaxStreams:               4,
+		MaxTranscodes:            1,
+		Permissions:              nil,
+		RequestsAllowed:          false,
+	}
+
 	tests := []struct {
 		name  string
 		user  *models.User
@@ -42,142 +91,166 @@ func TestApplyGroupPolicyRules(t *testing.T) {
 		want  EffectiveUserPolicy
 	}{
 		{
-			name: "group libraries restrict unrestricted user",
-			user: &models.User{DownloadAllowed: true, DownloadTranscodeAllowed: true},
-			group: &GroupPolicy{
-				LibraryIDs:               []int{4, 2, 4},
-				DownloadAllowed:          true,
-				DownloadTranscodeAllowed: true,
-				RequestsAllowed:          true,
-			},
-			want: EffectiveUserPolicy{
-				LibraryIDs:               []int{2, 4},
-				DownloadAllowed:          true,
-				DownloadTranscodeAllowed: true,
-				RequestsAllowed:          true,
-			},
+			name:  "fully unset user inherits every group field",
+			user:  &models.User{},
+			group: restrictive,
+			want:  inherited,
 		},
 		{
-			name: "user libraries pass through unrestricted group",
+			name: "grant overrides beat a restrictive group",
 			user: &models.User{
-				LibraryIDs:               []int{5, 1},
-				DownloadAllowed:          true,
-				DownloadTranscodeAllowed: true,
+				DownloadAllowed:          ptr(true),
+				DownloadTranscodeAllowed: ptr(true),
+				TranscodeAllowed:         ptr(true),
+				RequestsAllowed:          ptr(true),
+			},
+			group: restrictive,
+			want: func() EffectiveUserPolicy {
+				want := inherited
+				want.DownloadAllowed = true
+				want.DownloadTranscodeAllowed = true
+				want.TranscodeAllowed = true
+				want.RequestsAllowed = true
+				return want
+			}(),
+		},
+		{
+			name: "restrict overrides beat a permissive group",
+			user: &models.User{
+				DownloadAllowed:       ptr(false),
+				AudioTranscodeAllowed: ptr(false),
+				MaxStreams:            ptr(1),
 			},
 			group: &GroupPolicy{
 				DownloadAllowed:          true,
 				DownloadTranscodeAllowed: true,
-				RequestsAllowed:          true,
-			},
-			want: EffectiveUserPolicy{
-				LibraryIDs:               []int{5, 1},
-				DownloadAllowed:          true,
-				DownloadTranscodeAllowed: true,
-				RequestsAllowed:          true,
-			},
-		},
-		{
-			name: "libraries intersect with empty boundary",
-			user: &models.User{
-				LibraryIDs:               []int{1},
-				DownloadAllowed:          true,
-				DownloadTranscodeAllowed: true,
-			},
-			group: &GroupPolicy{
-				LibraryIDs:               []int{2},
-				DownloadAllowed:          true,
-				DownloadTranscodeAllowed: true,
-				RequestsAllowed:          true,
-			},
-			want: EffectiveUserPolicy{
-				LibraryIDs:               []int{},
-				DownloadAllowed:          true,
-				DownloadTranscodeAllowed: true,
-				RequestsAllowed:          true,
-			},
-		},
-		{
-			name: "quality and booleans use strictest values",
-			user: &models.User{
-				MaxPlaybackQuality:       "4k",
-				DownloadAllowed:          true,
-				DownloadTranscodeAllowed: true,
-			},
-			group: &GroupPolicy{
-				MaxPlaybackQuality:       "standard",
-				DownloadAllowed:          false,
-				DownloadTranscodeAllowed: true,
-				RequestsAllowed:          false,
-			},
-			want: EffectiveUserPolicy{
-				MaxPlaybackQuality:       PlaybackQualityStandard,
-				DownloadAllowed:          false,
-				DownloadTranscodeAllowed: true,
-				RequestsAllowed:          false,
-			},
-		},
-		{
-			name: "zero limits inherit positive layer",
-			user: &models.User{
-				DownloadAllowed:          true,
-				DownloadTranscodeAllowed: true,
+				TranscodeAllowed:         true,
+				AudioTranscodeAllowed:    true,
 				MaxStreams:               0,
-				MaxTranscodes:            3,
+				RequestsAllowed:          true,
 			},
-			group: &GroupPolicy{
-				DownloadAllowed:          true,
+			want: EffectiveUserPolicy{
+				DownloadAllowed:          false,
 				DownloadTranscodeAllowed: true,
-				MaxStreams:               4,
+				TranscodeAllowed:         true,
+				AudioTranscodeAllowed:    false,
+				MaxStreams:               1,
 				MaxTranscodes:            0,
 				RequestsAllowed:          true,
 			},
-			want: EffectiveUserPolicy{
-				DownloadAllowed:          true,
-				DownloadTranscodeAllowed: true,
-				MaxStreams:               4,
-				MaxTranscodes:            3,
-				RequestsAllowed:          true,
-			},
 		},
 		{
-			name: "positive limits pick min",
+			name: "positive cap above the group cap wins outright",
 			user: &models.User{
-				DownloadAllowed:          true,
-				DownloadTranscodeAllowed: true,
-				MaxStreams:               6,
-				MaxTranscodes:            2,
+				MaxStreams:    ptr(6),
+				MaxTranscodes: ptr(2),
 			},
+			group: restrictive,
+			want: func() EffectiveUserPolicy {
+				want := inherited
+				want.MaxStreams = 6
+				want.MaxTranscodes = 2
+				return want
+			}(),
+		},
+		{
+			name:  "zero is an explicit unlimited override",
+			user:  &models.User{MaxStreams: ptr(0)},
+			group: restrictive,
+			want: func() EffectiveUserPolicy {
+				want := inherited
+				want.MaxStreams = 0
+				return want
+			}(),
+		},
+		{
+			name:  "negative overrides clamp to unlimited",
+			user:  &models.User{MaxTranscodes: ptr(-3)},
+			group: restrictive,
+			want: func() EffectiveUserPolicy {
+				want := inherited
+				want.MaxTranscodes = 0
+				return want
+			}(),
+		},
+		{
+			name:  "quality override replaces the group ceiling",
+			user:  &models.User{MaxPlaybackQuality: ptr("4k")},
+			group: restrictive,
+			want: func() EffectiveUserPolicy {
+				want := inherited
+				want.MaxPlaybackQuality = PlaybackQuality4K
+				return want
+			}(),
+		},
+		{
+			name:  "empty quality override means no ceiling",
+			user:  &models.User{MaxPlaybackQuality: ptr("")},
+			group: restrictive,
+			want: func() EffectiveUserPolicy {
+				want := inherited
+				want.MaxPlaybackQuality = ""
+				return want
+			}(),
+		},
+		{
+			name:  "library override replaces the group list without intersecting",
+			user:  &models.User{LibraryIDs: []int{5, 1, 5}},
+			group: restrictive,
+			want: func() EffectiveUserPolicy {
+				want := inherited
+				want.LibraryIDs = []int{1, 5}
+				return want
+			}(),
+		},
+		{
+			name:  "empty library override restricts to nothing",
+			user:  &models.User{LibraryIDs: []int{}},
+			group: restrictive,
+			want: func() EffectiveUserPolicy {
+				want := inherited
+				want.LibraryIDs = []int{}
+				return want
+			}(),
+		},
+		{
+			name: "group libraries apply to a user without an override",
+			user: &models.User{},
 			group: &GroupPolicy{
+				LibraryIDs:               nil,
 				DownloadAllowed:          true,
 				DownloadTranscodeAllowed: true,
-				MaxStreams:               4,
-				MaxTranscodes:            5,
+				TranscodeAllowed:         true,
+				AudioTranscodeAllowed:    true,
 				RequestsAllowed:          true,
 			},
 			want: EffectiveUserPolicy{
+				LibraryIDs:               nil,
 				DownloadAllowed:          true,
 				DownloadTranscodeAllowed: true,
-				MaxStreams:               4,
-				MaxTranscodes:            2,
+				TranscodeAllowed:         true,
+				AudioTranscodeAllowed:    true,
 				RequestsAllowed:          true,
 			},
 		},
 		{
 			name: "permissions intersect sorted deduped",
 			user: &models.User{
-				DownloadAllowed:          true,
-				DownloadTranscodeAllowed: true,
-				Permissions:              []string{"metadata_curation", "marker_edit", "marker_edit"},
+				Permissions: []string{"metadata_curation", "marker_edit", "marker_edit"},
 			},
 			group: &GroupPolicy{
 				DownloadAllowed:          true,
 				DownloadTranscodeAllowed: true,
+				TranscodeAllowed:         true,
+				AudioTranscodeAllowed:    true,
 				AllowedPermissions:       []string{"marker_edit", "marker_edit"},
 				RequestsAllowed:          true,
 			},
 			want: EffectiveUserPolicy{
 				DownloadAllowed:          true,
 				DownloadTranscodeAllowed: true,
+				TranscodeAllowed:         true,
+				AudioTranscodeAllowed:    true,
 				Permissions:              []string{"marker_edit"},
 				RequestsAllowed:          true,
 			},
@@ -185,19 +258,21 @@ func TestApplyGroupPolicyRules(t *testing.T) {
 		{
 			name: "empty permission mask removes all",
 			user: &models.User{
-				DownloadAllowed:          true,
-				DownloadTranscodeAllowed: true,
-				Permissions:              []string{"marker_edit"},
+				Permissions: []string{"marker_edit"},
 			},
 			group: &GroupPolicy{
 				DownloadAllowed:          true,
 				DownloadTranscodeAllowed: true,
+				TranscodeAllowed:         true,
+				AudioTranscodeAllowed:    true,
 				AllowedPermissions:       []string{},
 				RequestsAllowed:          true,
 			},
 			want: EffectiveUserPolicy{
 				DownloadAllowed:          true,
 				DownloadTranscodeAllowed: true,
+				TranscodeAllowed:         true,
+				AudioTranscodeAllowed:    true,
 				Permissions:              []string{},
 				RequestsAllowed:          true,
 			},
@@ -205,19 +280,21 @@ func TestApplyGroupPolicyRules(t *testing.T) {
 		{
 			name: "nil permission mask leaves user set unchanged",
 			user: &models.User{
-				DownloadAllowed:          true,
-				DownloadTranscodeAllowed: true,
-				Permissions:              []string{"metadata_curation", "marker_edit", "marker_edit"},
+				Permissions: []string{"metadata_curation", "marker_edit", "marker_edit"},
 			},
 			group: &GroupPolicy{
 				DownloadAllowed:          true,
 				DownloadTranscodeAllowed: true,
+				TranscodeAllowed:         true,
+				AudioTranscodeAllowed:    true,
 				AllowedPermissions:       nil,
 				RequestsAllowed:          true,
 			},
 			want: EffectiveUserPolicy{
 				DownloadAllowed:          true,
 				DownloadTranscodeAllowed: true,
+				TranscodeAllowed:         true,
+				AudioTranscodeAllowed:    true,
 				Permissions:              []string{"metadata_curation", "marker_edit", "marker_edit"},
 				RequestsAllowed:          true,
 			},
@@ -231,5 +308,21 @@ func TestApplyGroupPolicyRules(t *testing.T) {
 				t.Fatalf("ApplyGroupPolicy() = %#v, want %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestOverrideSources(t *testing.T) {
+	user := &models.User{
+		LibraryIDs:      []int{},
+		MaxStreams:      ptr(0),
+		DownloadAllowed: ptr(false),
+	}
+	got := OverrideSources(user)
+	want := PolicySource{LibraryIDs: true, MaxStreams: true, DownloadAllowed: true}
+	if got != want {
+		t.Fatalf("OverrideSources() = %#v, want %#v", got, want)
+	}
+	if (OverrideSources(nil) != PolicySource{}) {
+		t.Fatalf("OverrideSources(nil) should report no overrides")
 	}
 }

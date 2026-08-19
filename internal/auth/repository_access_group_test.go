@@ -249,10 +249,11 @@ func insertAuthAccessGroupTestUser(t *testing.T, ctx context.Context, pool *pgxp
 	t.Helper()
 	var id int
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO users (username, role, enabled)
-		VALUES ($1, 'user', true)
+		INSERT INTO users (username, email, password_hash, role, enabled)
+		VALUES ($1, $2, 'x', 'user', true)
 		RETURNING id`,
 		"auth-access-group-test-"+suffix,
+		"auth-access-group-test-"+suffix+"@example.invalid",
 	).Scan(&id); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}

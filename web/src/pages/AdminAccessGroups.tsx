@@ -244,6 +244,8 @@ function AccessGroupEditor({ group, onDeleted }: AccessGroupEditorProps) {
   );
   const [downloadAllowed, setDownloadAllowed] = useState(group.download_allowed);
   const [transcodeAllowed, setTranscodeAllowed] = useState(group.download_transcode_allowed);
+  const [videoTranscodeAllowed, setVideoTranscodeAllowed] = useState(group.transcode_allowed);
+  const [audioTranscodeAllowed, setAudioTranscodeAllowed] = useState(group.audio_transcode_allowed);
   const [maxStreams, setMaxStreams] = useState(group.max_streams);
   const [maxTranscodes, setMaxTranscodes] = useState(group.max_transcodes);
   const [permissions, setPermissions] = useState<string[] | null>(group.allowed_permissions);
@@ -270,6 +272,8 @@ function AccessGroupEditor({ group, onDeleted }: AccessGroupEditorProps) {
       // The transcode toggle is disabled (not reset) when downloads are off,
       // so clamp it here to avoid saving a contradictory record.
       download_transcode_allowed: downloadAllowed && transcodeAllowed,
+      transcode_allowed: videoTranscodeAllowed,
+      audio_transcode_allowed: audioTranscodeAllowed,
       max_streams: maxStreams,
       max_transcodes: maxTranscodes,
       allowed_permissions: permissions,
@@ -384,6 +388,18 @@ function AccessGroupEditor({ group, onDeleted }: AccessGroupEditorProps) {
             onChange={setMaxTranscodes}
           />
         </div>
+        <ToggleRow
+          label="Allow video transcoding"
+          description="Members may play items that need server-side video conversion."
+          checked={videoTranscodeAllowed}
+          onCheckedChange={setVideoTranscodeAllowed}
+        />
+        <ToggleRow
+          label="Allow audio transcoding"
+          description="Members may play items that need audio conversion without video encoding."
+          checked={audioTranscodeAllowed}
+          onCheckedChange={setAudioTranscodeAllowed}
+        />
       </section>
 
       <section className="surface-panel space-y-3 rounded-2xl border-0 p-5">

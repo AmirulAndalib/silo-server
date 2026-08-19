@@ -2,6 +2,14 @@
 
 ## 2026-08-19
 
+### Per-user policy overrides inherit from the access group
+User policy fields stop being "strictest of user and group wins" and become inherit/override: a field left unset on the account takes the access group's value, and a field set on the account is authoritative in either direction — an admin can grant downloads to one member of a no-downloads plan, or cap one member of an unlimited plan.
+- Makes every user policy field nullable (`max_streams`, `max_transcodes`, `max_playback_quality`, `transcode_allowed`, `audio_transcode_allowed`, `download_allowed`, `download_transcode_allowed`, `library_ids`, plus a new `requests_allowed`); `null` means inherit. `0` on a stream or transcode cap now means an explicit "unlimited" override instead of "defer to the group".
+- Adds `transcode_allowed` and `audio_transcode_allowed` to access groups so every account field has a group value to inherit, and lets users override the group's media-request gate.
+- Admin user API: `GET` responses carry the stored overrides (null when inherited) plus an `effective_policy` block with the resolved values; `PUT` accepts an explicit `null` on any policy field to clear an override back to inherit. Login and `/auth/me` now report the resolved `download_allowed`.
+- Migration maps existing rows so behavior is preserved where the account was deferring to the group (0 / '' / true become inherit) and keeps explicit restrictions (false, positive caps, named quality, library lists) as overrides. The one deliberate change: a stored cap above the group's cap now wins instead of being clamped.
+- Web admin: user forms gain per-field Inherit/Override controls and show the effective value next to each inherited field; the access-group editor gains the two transcode gates.
+
 ### Make published server builds easy to compare
 Every successful default-branch container build now carries an ordered build number alongside its exact source revision.
 - Publishes `build-N` beside the existing mutable `latest` and short-commit-SHA image tags.

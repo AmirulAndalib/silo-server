@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
@@ -100,7 +101,9 @@ func (m *PermissionMiddleware) RequireMetadataCurationForItem(next http.Handler)
 			writePermissionError(w, http.StatusNotFound, "not_found", "Item not found")
 			return
 		}
-		if !metadataTargetWithinUserLibraries(user.LibraryIDs, targetLibraries) {
+		// Legacy gate has no access-group provider: resolve the account layer
+		// alone (an unset library override reads as unrestricted here).
+		if !metadataTargetWithinUserLibraries(access.ApplyGroupPolicy(user, nil).LibraryIDs, targetLibraries) {
 			writeForbidden(w, "Item is outside your assigned libraries")
 			return
 		}

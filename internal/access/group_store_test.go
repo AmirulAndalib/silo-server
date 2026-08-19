@@ -91,6 +91,23 @@ func TestGroupStoreGetPolicyForUserDB(t *testing.T) {
 	if policy == nil || policy.ID != group.ID || !reflect.DeepEqual(policy.LibraryIDs, []int{1, 3}) {
 		t.Fatalf("policy = %#v, want group policy", policy)
 	}
+	if policy.TranscodeAllowed || !policy.AudioTranscodeAllowed {
+		t.Fatalf("policy transcode gates = %t/%t, want false/true", policy.TranscodeAllowed, policy.AudioTranscodeAllowed)
+	}
+	if !reflect.DeepEqual(group.Policy(), *policy) {
+		t.Fatalf("Group.Policy() = %#v, want GetPolicyForUser %#v", group.Policy(), *policy)
+	}
+	transcodeAllowed := true
+	if _, err := store.Update(ctx, group.ID, UpdateGroupInput{TranscodeAllowed: &transcodeAllowed}); err != nil {
+		t.Fatalf("Update(transcode_allowed) error: %v", err)
+	}
+	policy, err = store.GetPolicyForUser(ctx, memberID)
+	if err != nil {
+		t.Fatalf("GetPolicyForUser(after update) error: %v", err)
+	}
+	if policy == nil || !policy.TranscodeAllowed {
+		t.Fatalf("policy after update = %#v, want transcode_allowed true", policy)
+	}
 	policy, err = store.GetPolicyForUser(ctx, noGroupID)
 	if err != nil {
 		t.Fatalf("GetPolicyForUser(no group) error: %v", err)
@@ -361,6 +378,8 @@ func createTestGroup(t *testing.T, ctx context.Context, store *GroupStore, suffi
 		MaxPlaybackQuality:       PlaybackQuality4K,
 		DownloadAllowed:          true,
 		DownloadTranscodeAllowed: true,
+		TranscodeAllowed:         false,
+		AudioTranscodeAllowed:    true,
 		MaxStreams:               3,
 		MaxTranscodes:            2,
 		AllowedPermissions:       []string{"marker_edit"},
