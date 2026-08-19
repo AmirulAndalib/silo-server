@@ -191,6 +191,8 @@ export default function StorageSettings() {
     try {
       await form.save();
       setEditingSensitiveKeys(new Set());
+    } catch {
+      // The mutation reports the error; keep credential editors open for retry.
     } finally {
       credentialSaveInProgressRef.current = false;
       setCredentialSaveInProgress(false);

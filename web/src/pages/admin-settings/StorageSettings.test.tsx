@@ -137,6 +137,38 @@ describe("StorageSettings", () => {
     expect(screen.queryByLabelText("Access Key")).not.toBeInTheDocument();
   });
 
+  it("keeps a credential replacement open when saving fails", async () => {
+    const save = vi.fn().mockRejectedValue(new Error("save failed"));
+    useCheckAdminSettingsConnectionMock.mockReturnValue({
+      isPending: false,
+      mutateAsync: vi.fn(),
+    });
+    useSettingsFormMock.mockReturnValue({
+      isLoading: false,
+      getValue: (key: string) => (key === "s3.public_url_auth" ? "presigned" : ""),
+      setValue: vi.fn(),
+      resetValue: vi.fn(),
+      dirtyCount: 1,
+      save,
+      discard: vi.fn(),
+      isSaving: false,
+      restartRequired: false,
+      sensitiveConfigured: ["s3.public_access_key"],
+      sensitiveStatusReady: true,
+      sensitiveStatusError: false,
+      buildConnectionCheckRequest: vi.fn(),
+      isDirty: () => false,
+    });
+
+    render(<StorageSettings />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Replace Access Key" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(screen.getByLabelText("Access Key")).toHaveAttribute("type", "password");
+  });
+
   it("keeps credential inputs unmounted until protected status is available", () => {
     let sensitiveStatusReady = false;
     useCheckAdminSettingsConnectionMock.mockReturnValue({
