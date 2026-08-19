@@ -1059,6 +1059,11 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
   const metadataCurationId = useId();
   const updateMutation = useUpdateUser();
   const accessGroupValue = accessGroupID === null ? "none" : String(accessGroupID);
+  // effective_policy was resolved against the user's saved group; once the
+  // admin picks a different group in this dialog, those values are wrong, so
+  // degrade the inherit hints to generic labels rather than show stale ones.
+  const effectiveForHints =
+    accessGroupID === user.access_group_id ? user.effective_policy : undefined;
   const selectedGroupMissing =
     accessGroupID !== null && !accessGroups.some((group) => group.id === accessGroupID);
 
@@ -1206,7 +1211,7 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
             <PolicyAccessFields
               state={policy}
               onChange={setPolicy}
-              effective={user.effective_policy}
+              effective={effectiveForHints}
               libraries={libraries}
             />
           </TabsContent>

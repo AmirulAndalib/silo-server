@@ -126,6 +126,25 @@ func TestToAdminUserResponseReportsOverridesAndEffectivePolicy(t *testing.T) {
 		t.Fatalf("effective_policy JSON = %v", decoded["effective_policy"])
 	}
 
+	// An explicit empty library override must round-trip as [], never null:
+	// null is the wire encoding for inherit, and collapsing it would let an
+	// open+save silently delete a deny-all override.
+	locked := toAdminUserResponse(&models.User{ID: 2, LibraryIDs: []int{}}, group)
+	if locked.LibraryIDs == nil || len(locked.LibraryIDs) != 0 {
+		t.Fatalf("empty library override = %#v, want non-nil empty", locked.LibraryIDs)
+	}
+	lockedJSON, err := json.Marshal(locked)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var lockedDecoded map[string]any
+	if err := json.Unmarshal(lockedJSON, &lockedDecoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if list, ok := lockedDecoded["library_ids"].([]any); !ok || len(list) != 0 {
+		t.Fatalf("empty library override JSON = %v, want []", lockedDecoded["library_ids"])
+	}
+
 	// Ungrouped: the permissive no-group default fills the gaps.
 	ungrouped := toAdminUserResponse(&models.User{ID: 1, MaxStreams: ptrOf(2)}, nil)
 	if ungrouped.EffectivePolicy.MaxStreams != 2 || !ungrouped.EffectivePolicy.DownloadAllowed || ungrouped.EffectivePolicy.LibraryIDs != nil {

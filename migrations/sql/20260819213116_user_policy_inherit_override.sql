@@ -34,18 +34,27 @@ ALTER TABLE public.users
 -- positive caps, a named quality, an explicit library list) stay as explicit
 -- overrides. The one deliberate change: a positive cap that exceeds the
 -- group's cap now wins instead of being clamped.
+-- Boolean mapping: NOT col (rather than a bare ELSE) keeps a pre-existing
+-- NULL — possible on the download columns, which were always nullable — as
+-- NULL/inherit instead of inventing an explicit deny override.
 UPDATE public.users SET
     max_streams = NULLIF(max_streams, 0),
     max_transcodes = NULLIF(max_transcodes, 0),
     max_playback_quality = NULLIF(max_playback_quality, ''),
-    transcode_allowed = CASE WHEN transcode_allowed THEN NULL ELSE false END,
-    audio_transcode_allowed = CASE WHEN audio_transcode_allowed THEN NULL ELSE false END,
-    download_allowed = CASE WHEN download_allowed THEN NULL ELSE false END,
-    download_transcode_allowed = CASE WHEN download_transcode_allowed THEN NULL ELSE false END;
+    transcode_allowed = CASE WHEN NOT transcode_allowed THEN false ELSE NULL END,
+    audio_transcode_allowed = CASE WHEN NOT audio_transcode_allowed THEN false ELSE NULL END,
+    download_allowed = CASE WHEN NOT download_allowed THEN false ELSE NULL END,
+    download_transcode_allowed = CASE WHEN NOT download_transcode_allowed THEN false ELSE NULL END;
 -- +goose StatementEnd
 
 -- +goose Down
 -- +goose StatementBegin
+-- Lossy by construction: the old schema cannot represent the distinction
+-- between inherit and an explicit permissive override. An explicit unlimited
+-- cap (0), an explicit '' quality, and explicit-true booleans collapse into
+-- the old delegate sentinels — under restored strictest-merge semantics such
+-- users fall back to their group's values. requests_allowed overrides are
+-- dropped entirely.
 UPDATE public.users SET
     max_streams = COALESCE(max_streams, 0),
     max_transcodes = COALESCE(max_transcodes, 0),

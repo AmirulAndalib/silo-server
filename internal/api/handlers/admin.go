@@ -409,7 +409,7 @@ func toAdminUserResponse(u *models.User, group *access.GroupPolicy) adminUserRes
 		Role:                     u.Role,
 		Permissions:              append([]string{}, u.Permissions...),
 		Enabled:                  u.Enabled,
-		LibraryIDs:               append([]int(nil), u.LibraryIDs...),
+		LibraryIDs:               cloneIntSlice(u.LibraryIDs),
 		MaxPlaybackQuality:       normalizedQualityPtr(u.MaxPlaybackQuality),
 		MaxStreams:               cloneIntPtr(u.MaxStreams),
 		MaxTranscodes:            cloneIntPtr(u.MaxTranscodes),
@@ -449,6 +449,17 @@ func normalizedQualityPtr(value *string) *string {
 	return &normalized
 }
 
+// cloneIntSlice preserves the nil/empty distinction: nil stays nil (JSON
+// null = inherit) and an empty override stays an empty array.
+func cloneIntSlice(values []int) []int {
+	if values == nil {
+		return nil
+	}
+	out := make([]int, len(values))
+	copy(out, values)
+	return out
+}
+
 func cloneIntPtr(value *int) *int {
 	if value == nil {
 		return nil
@@ -475,38 +486,40 @@ func (h *AdminHandler) groupPolicyProvider() access.GroupPolicyProvider {
 }
 
 // groupPolicies loads every access group's policy keyed by ID so a list of
-// users can be resolved without a query per user.
-func (h *AdminHandler) groupPolicies(ctx context.Context) map[int64]access.GroupPolicy {
+// users can be resolved without a query per user. A lookup failure is an
+// error, not an empty map: rendering a group-restricted user against
+// NoGroupPolicy would report a fully permissive effective_policy.
+func (h *AdminHandler) groupPolicies(ctx context.Context) (map[int64]access.GroupPolicy, error) {
 	policies := map[int64]access.GroupPolicy{}
 	if h == nil || h.AccessGroups == nil {
-		return policies
+		return policies, nil
 	}
 	groups, err := h.AccessGroups.List(ctx)
 	if err != nil {
-		slog.WarnContext(ctx, "failed to load access groups for effective policy", "component", "api", "error", err)
-		return policies
+		return nil, fmt.Errorf("loading access groups for effective policy: %w", err)
 	}
 	for _, group := range groups {
 		policies[group.ID] = group.Policy()
 	}
-	return policies
+	return policies, nil
 }
 
 // groupPolicyFor returns the user's group policy, or nil when the user is
-// ungrouped (or the group is unknown).
-func (h *AdminHandler) groupPolicyFor(ctx context.Context, u *models.User) *access.GroupPolicy {
+// ungrouped (or the group row is gone — the FK clears membership on delete,
+// so a residual not-found is treated as ungrouped, not an error).
+func (h *AdminHandler) groupPolicyFor(ctx context.Context, u *models.User) (*access.GroupPolicy, error) {
 	if u == nil || u.AccessGroupID == nil || h == nil || h.AccessGroups == nil {
-		return nil
+		return nil, nil
 	}
 	group, err := h.AccessGroups.Get(ctx, *u.AccessGroupID)
 	if err != nil {
-		if !errors.Is(err, access.ErrGroupNotFound) {
-			slog.WarnContext(ctx, "failed to load access group for effective policy", "component", "api", "user_id", u.ID, "error", err)
+		if errors.Is(err, access.ErrGroupNotFound) {
+			return nil, nil
 		}
-		return nil
+		return nil, fmt.Errorf("loading access group for effective policy: %w", err)
 	}
 	policy := group.Policy()
-	return &policy
+	return &policy, nil
 }
 
 func lookupGroupPolicy(policies map[int64]access.GroupPolicy, u *models.User) *access.GroupPolicy {
@@ -570,7 +583,11 @@ func (h *AdminHandler) HandleListUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	policies := h.groupPolicies(r.Context())
+	policies, err := h.groupPolicies(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to resolve effective policy")
+		return
+	}
 	resp := make([]adminUserResponse, 0, len(users))
 	userIDs := make([]int, 0, len(users))
 	for _, u := range users {
@@ -603,7 +620,12 @@ func (h *AdminHandler) HandleGetUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := toAdminUserResponse(user, h.groupPolicyFor(r.Context(), user))
+	groupPolicy, err := h.groupPolicyFor(r.Context(), user)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to resolve effective policy")
+		return
+	}
+	resp := toAdminUserResponse(user, groupPolicy)
 	lastActive, err := h.loadUserLastActiveAt(r.Context(), []int{user.ID})
 	if err != nil {
 		slog.WarnContext(r.Context(), "failed to load admin user last activity", "component", "api", "user_id", user.ID, "error", err)
@@ -704,7 +726,12 @@ func (h *AdminHandler) HandleCreateUser(w http.ResponseWriter, r *http.Request) 
 	}
 	h.invalidateStats(r.Context(), cache.ChannelAdmin, cache.EventAdminStatsInvalidated, strconv.Itoa(user.ID))
 
-	writeJSON(w, http.StatusCreated, toAdminUserResponse(user, h.groupPolicyFor(r.Context(), user)))
+	createdGroupPolicy, err := h.groupPolicyFor(r.Context(), user)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to resolve effective policy")
+		return
+	}
+	writeJSON(w, http.StatusCreated, toAdminUserResponse(user, createdGroupPolicy))
 }
 
 // HandleUpdateUser handles PUT /admin/users/{id}.
@@ -825,7 +852,12 @@ func (h *AdminHandler) HandleUpdateUser(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, toAdminUserResponse(user, h.groupPolicyFor(r.Context(), user)))
+	updatedGroupPolicy, err := h.groupPolicyFor(r.Context(), user)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to resolve effective policy")
+		return
+	}
+	writeJSON(w, http.StatusOK, toAdminUserResponse(user, updatedGroupPolicy))
 }
 
 // HandleDeleteUser handles DELETE /admin/users/{id}.
