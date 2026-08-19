@@ -36,17 +36,23 @@ type apiKeyResponse struct {
 	Label      string     `json:"label"`
 	Key        string     `json:"key"`
 	RateTier   string     `json:"rate_tier"`
+	Scopes     []string   `json:"scopes"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }
 
 func toAPIKeyResponse(k *models.APIKey) apiKeyResponse {
+	scopes := k.Scopes
+	if scopes == nil {
+		scopes = []string{}
+	}
 	return apiKeyResponse{
 		ID:         k.ID,
 		UserID:     k.UserID,
 		Label:      k.Label,
 		Key:        k.Key,
 		RateTier:   k.RateTier,
+		Scopes:     scopes,
 		CreatedAt:  k.CreatedAt,
 		LastUsedAt: k.LastUsedAt,
 	}
@@ -59,13 +65,15 @@ type adminApiKeyResponse struct {
 	Label      string     `json:"label"`
 	Key        string     `json:"key"`
 	RateTier   string     `json:"rate_tier"`
+	Scopes     []string   `json:"scopes"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }
 
 type adminCreateAPIKeyRequest struct {
-	Label  string `json:"label"`
-	UserID *int   `json:"user_id,omitempty"`
+	Label  string   `json:"label"`
+	UserID *int     `json:"user_id,omitempty"`
+	Scopes []string `json:"scopes,omitempty"`
 }
 
 // requireJWTAuth checks that the request was authenticated with a JWT, not an API key.
@@ -101,7 +109,7 @@ func (h *APIKeyHandler) HandleCreateAPIKey(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	key, err := h.repo.Create(r.Context(), claims.UserID, req.Label)
+	key, err := h.repo.Create(r.Context(), claims.UserID, req.Label, nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to create API key")
 		return
@@ -208,6 +216,10 @@ func (h *APIKeyHandler) HandleAdminListAllAPIKeys(w http.ResponseWriter, r *http
 
 	resp := make([]adminApiKeyResponse, 0, len(keys))
 	for _, k := range keys {
+		scopes := k.Scopes
+		if scopes == nil {
+			scopes = []string{}
+		}
 		resp = append(resp, adminApiKeyResponse{
 			ID:         k.ID,
 			UserID:     k.UserID,
@@ -215,6 +227,7 @@ func (h *APIKeyHandler) HandleAdminListAllAPIKeys(w http.ResponseWriter, r *http
 			Label:      k.Label,
 			Key:        k.Key,
 			RateTier:   k.RateTier,
+			Scopes:     scopes,
 			CreatedAt:  k.CreatedAt,
 			LastUsedAt: k.LastUsedAt,
 		})
@@ -276,12 +289,18 @@ func (h *APIKeyHandler) HandleAdminCreateAPIKey(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	scopes, err := auth.NormalizeAPIKeyScopes(req.Scopes)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+
 	targetUserID := claims.UserID
 	if req.UserID != nil {
 		targetUserID = *req.UserID
 	}
 
-	key, err := h.repo.Create(r.Context(), targetUserID, req.Label)
+	key, err := h.repo.Create(r.Context(), targetUserID, req.Label, scopes)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to create API key")
 		return

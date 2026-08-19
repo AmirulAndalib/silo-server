@@ -3395,6 +3395,11 @@ func resolveOptionalPluginAccessUser(
 		if err != nil {
 			return false, false, 0, ""
 		}
+		// Scoped keys are allowlist credentials for the routes their scopes
+		// name; plugin access is not on any scope's allowlist.
+		if len(apiKey.Scopes) > 0 {
+			return false, false, 0, ""
+		}
 		user, err := userRepo.GetByID(r.Context(), apiKey.UserID)
 		if err != nil || !user.Enabled {
 			return false, false, 0, ""

@@ -175,6 +175,7 @@ type createUserRequest struct {
 	MaxProfiles              *int                   `json:"max_profiles,omitempty"`
 	DownloadAllowed          *bool                  `json:"download_allowed,omitempty"`
 	DownloadTranscodeAllowed *bool                  `json:"download_transcode_allowed,omitempty"`
+	AccessGroupID            *int64                 `json:"access_group_id,omitempty"`
 }
 
 type createStringSliceField struct {
@@ -494,6 +495,20 @@ func (h *AdminHandler) HandleCreateUser(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	if req.AccessGroupID != nil {
+		if h.AccessGroups == nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "Access groups are not configured")
+			return
+		}
+		if _, err := h.AccessGroups.Get(r.Context(), *req.AccessGroupID); err != nil {
+			if errors.Is(err, access.ErrGroupNotFound) {
+				writeError(w, http.StatusUnprocessableEntity, "unprocessable_entity", "Invalid access_group_id")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to validate access group")
+			return
+		}
+	}
 
 	user, err := h.accountProvisioner.CreateAccount(r.Context(), auth.CreateAccountInput{
 		User: models.CreateUserInput{
@@ -502,6 +517,7 @@ func (h *AdminHandler) HandleCreateUser(w http.ResponseWriter, r *http.Request) 
 			Password:                 req.Password,
 			Role:                     req.Role,
 			Permissions:              permissions,
+			AccessGroupID:            req.AccessGroupID,
 			LibraryIDs:               req.LibraryIDs,
 			MaxPlaybackQuality:       maxPlaybackQuality,
 			MaxStreams:               req.MaxStreams,
@@ -518,6 +534,10 @@ func (h *AdminHandler) HandleCreateUser(w http.ResponseWriter, r *http.Request) 
 		},
 	})
 	if err != nil {
+		if auth.IsDuplicate(err) {
+			writeError(w, http.StatusConflict, "duplicate", "A user with that username or email already exists")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to create user")
 		return
 	}
@@ -653,6 +673,10 @@ func (h *AdminHandler) HandleDeleteUser(w http.ResponseWriter, r *http.Request) 
 
 	err = h.userRepo.Delete(r.Context(), id)
 	if err != nil {
+		if auth.IsNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "User not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to delete user")
 		return
 	}
