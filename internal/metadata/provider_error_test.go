@@ -40,9 +40,11 @@ func TestClassifyProviderErrorUsesTypedGRPCCodes(t *testing.T) {
 
 func TestClassifyProviderErrorFallsBackToNativeErrorText(t *testing.T) {
 	for message, want := range map[string]ProviderErrorClass{
-		"HTTP 429 too many requests": ProviderErrorRateLimited,
-		"HTTP 403 forbidden":         ProviderErrorPermanent,
-		"connection reset by peer":   ProviderErrorTransient,
+		"HTTP 429 too many requests":   ProviderErrorRateLimited,
+		"HTTP 403 forbidden":           ProviderErrorPermanent,
+		"connection reset by peer":     ProviderErrorTransient,
+		"provider item OL1429M failed": ProviderErrorTransient,
+		"provider item GB403M failed":  ProviderErrorTransient,
 	} {
 		got, _ := ClassifyProviderError(errors.New(message))
 		if got != want {

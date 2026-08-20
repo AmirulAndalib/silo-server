@@ -13,9 +13,11 @@ import (
 )
 
 type fakeMangaMetadataProvider struct {
-	slug    string
-	results []metadata.SearchResult
-	result  *metadata.MetadataResult
+	slug      string
+	results   []metadata.SearchResult
+	searchErr error
+	result    *metadata.MetadataResult
+	getErr    error
 }
 
 type fakeMangaProviderIDOwner struct {
@@ -35,10 +37,10 @@ func (f *fakeMangaMetadataProvider) Slug() string       { return f.slug }
 func (f *fakeMangaMetadataProvider) Name() string       { return f.slug }
 func (f *fakeMangaMetadataProvider) ForTypes() []string { return []string{"manga"} }
 func (f *fakeMangaMetadataProvider) Search(context.Context, metadata.SearchQuery) ([]metadata.SearchResult, error) {
-	return f.results, nil
+	return f.results, f.searchErr
 }
 func (f *fakeMangaMetadataProvider) GetMetadata(context.Context, metadata.MetadataRequest) (*metadata.MetadataResult, error) {
-	return f.result, nil
+	return f.result, f.getErr
 }
 
 func TestClaimBatchQueryTargetsManga(t *testing.T) {
@@ -233,6 +235,31 @@ func TestCollectMangaMetadataRejectsEachProviderAuthorBeforeMerging(t *testing.T
 	}
 	if accumulator.Overview != "" || accumulator.HasMetadata {
 		t.Fatalf("contradictory provider metadata was merged before validation: %+v", accumulator)
+	}
+}
+
+func TestEnrichWithProvidersRetriesProviderErrorBeforeAuthorMismatch(t *testing.T) {
+	providerErr := errors.New("provider unavailable")
+	providers := []metadata.Provider{
+		&fakeMangaMetadataProvider{slug: "broken", searchErr: providerErr, getErr: providerErr},
+		&fakeMangaMetadataProvider{
+			slug:    "wrong-author",
+			results: []metadata.SearchResult{{Name: "Shared Title", ProviderIDs: map[string]string{"wrong": "1"}}},
+			result: &metadata.MetadataResult{
+				HasMetadata: true,
+				People: []models.ItemPerson{{
+					Person: models.Person{Name: "Wrong Author"}, Kind: models.PersonKindAuthor,
+				}},
+			},
+		},
+	}
+
+	e := &Enricher{}
+	err := e.enrichWithProviders(context.Background(), enrichmentItemRow{
+		ContentID: "shared", FolderID: 7, Title: "Shared Title", Author: "Right Author",
+	}, providers)
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("enrichment error = %v, want provider failure to remain retryable", err)
 	}
 }
 

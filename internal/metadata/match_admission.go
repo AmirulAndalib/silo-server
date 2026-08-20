@@ -13,15 +13,17 @@ const (
 	SearchMatchAccepted             SearchMatchAdmissionStatus = "accepted"
 	SearchMatchNoCredibleMatch      SearchMatchAdmissionStatus = "no_credible_match"
 	SearchMatchProviderDisagreement SearchMatchAdmissionStatus = "provider_disagreement"
+	SearchMatchProviderIDConflict   SearchMatchAdmissionStatus = "provider_id_conflict"
 	SearchMatchNoUsableProviderIDs  SearchMatchAdmissionStatus = "no_usable_provider_ids"
 )
 
-// ProviderIDConflict identifies a durable identity already owned by another
-// content item.
+// ProviderIDConflict identifies either a durable identity owned by another
+// item or a candidate that contradicts this item's existing provider ID.
 type ProviderIDConflict struct {
-	Provider   string
-	ProviderID string
-	OwnedBy    string
+	Provider           string
+	ProviderID         string
+	ExistingProviderID string
+	OwnedBy            string
 }
 
 // ProviderIDAdmissionRequest contains the shared durable-identity inputs used
@@ -38,9 +40,10 @@ type ProviderIDAdmissionRequest struct {
 // candidate already present on the current item counts as usable but is not
 // repeated in ProviderIDs.
 type ProviderIDAdmission struct {
-	ProviderIDs       map[string]string
-	Conflicts         []ProviderIDConflict
-	HasUsableIdentity bool
+	ProviderIDs         map[string]string
+	Conflicts           []ProviderIDConflict
+	HasUsableIdentity   bool
+	ContradictsExisting bool
 }
 
 // SearchMatchAdmissionRequest contains the shared policy inputs used by book
@@ -95,6 +98,10 @@ func AdmitSearchMatch(ctx context.Context, req SearchMatchAdmissionRequest) (Sea
 	if err != nil {
 		return SearchMatchAdmission{}, err
 	}
+	if identity.ContradictsExisting {
+		result.Status = SearchMatchProviderIDConflict
+		return result, nil
+	}
 	result.Conflicts = identity.Conflicts
 
 	if !identity.HasUsableIdentity {
@@ -134,6 +141,12 @@ func AdmitProviderIDs(ctx context.Context, req ProviderIDAdmissionRequest) (Prov
 		if current, exists := existing[provider]; exists {
 			if current == providerID {
 				result.HasUsableIdentity = true
+			} else {
+				result.ContradictsExisting = true
+				result.Conflicts = append(result.Conflicts, ProviderIDConflict{
+					Provider: provider, ProviderID: providerID,
+					ExistingProviderID: current, OwnedBy: req.ContentID,
+				})
 			}
 			continue
 		}

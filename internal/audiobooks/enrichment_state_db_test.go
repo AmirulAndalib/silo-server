@@ -20,7 +20,7 @@ func TestRecordFailureParksARetryWithoutStampingAnOutcome(t *testing.T) {
 
 	contentID := seedAudiobook(t, pool, "failure", "/covers/embedded.jpg", false)
 
-	if err := store.RecordFailure(ctx, contentID, EnrichmentErrorRateLimited, "429 too many requests"); err != nil {
+	if err := store.RecordFailure(ctx, contentID, "", EnrichmentErrorRateLimited, "429 too many requests"); err != nil {
 		t.Fatalf("RecordFailure: %v", err)
 	}
 
@@ -77,12 +77,12 @@ func TestRepeatedFailuresAccumulateAttemptsAndWidenBackoff(t *testing.T) {
 		return attempts, nextAt
 	}
 
-	if err := store.RecordFailure(ctx, contentID, EnrichmentErrorTransient, "boom"); err != nil {
+	if err := store.RecordFailure(ctx, contentID, "", EnrichmentErrorTransient, "boom"); err != nil {
 		t.Fatalf("RecordFailure: %v", err)
 	}
 	attempts1, next1 := readState()
 
-	if err := store.RecordFailure(ctx, contentID, EnrichmentErrorTransient, "boom again"); err != nil {
+	if err := store.RecordFailure(ctx, contentID, "", EnrichmentErrorTransient, "boom again"); err != nil {
 		t.Fatalf("RecordFailure: %v", err)
 	}
 	attempts2, next2 := readState()
@@ -104,10 +104,10 @@ func TestRecordOutcomeClearsTheParkedRetry(t *testing.T) {
 
 	contentID := seedAudiobook(t, pool, "outcome", "", false)
 
-	if err := store.RecordFailure(ctx, contentID, EnrichmentErrorTransient, "temporary"); err != nil {
+	if err := store.RecordFailure(ctx, contentID, "", EnrichmentErrorTransient, "temporary"); err != nil {
 		t.Fatalf("RecordFailure: %v", err)
 	}
-	if err := store.RecordOutcome(ctx, contentID, EnrichmentOutcomeSuccess); err != nil {
+	if err := store.RecordOutcome(ctx, contentID, "", EnrichmentOutcomeSuccess); err != nil {
 		t.Fatalf("RecordOutcome: %v", err)
 	}
 
@@ -153,7 +153,7 @@ func TestClaimBatchSkipsItemsParkedForALaterRetry(t *testing.T) {
 	parked := seedAudiobook(t, pool, "parked", "/covers/embedded.jpg", false)
 	ready := seedAudiobook(t, pool, "ready", "/covers/embedded.jpg", false)
 
-	if err := e.state.RecordFailure(ctx, parked, EnrichmentErrorRateLimited, "429"); err != nil {
+	if err := e.state.RecordFailure(ctx, parked, "", EnrichmentErrorRateLimited, "429"); err != nil {
 		t.Fatalf("RecordFailure: %v", err)
 	}
 
@@ -186,7 +186,7 @@ func TestHasPendingItemsRespectsParkedRetries(t *testing.T) {
 	e := newTestEnricher(pool)
 
 	only := seedAudiobook(t, pool, "onlyparked", "/covers/embedded.jpg", false)
-	if err := e.state.RecordFailure(ctx, only, EnrichmentErrorPermanent, "403 forbidden"); err != nil {
+	if err := e.state.RecordFailure(ctx, only, "", EnrichmentErrorPermanent, "403 forbidden"); err != nil {
 		t.Fatalf("RecordFailure: %v", err)
 	}
 
@@ -267,7 +267,7 @@ func TestRecordFailureTruncatesCauseOnARuneBoundary(t *testing.T) {
 
 	// 499 ASCII bytes then a 3-byte rune: the byte-index cut lands mid-rune.
 	cause := strings.Repeat("x", 499) + "日本語エラー"
-	if err := store.RecordFailure(ctx, contentID, EnrichmentErrorTransient, cause); err != nil {
+	if err := store.RecordFailure(ctx, contentID, "", EnrichmentErrorTransient, cause); err != nil {
 		t.Fatalf("RecordFailure with multi-byte cause: %v", err)
 	}
 

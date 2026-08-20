@@ -790,6 +790,10 @@ func (e *Enricher) enrichWithProvidersOutcome(
 	}
 	accumulator, accumulatedIDs, providerErrs, authorMismatch := collectEbookMetadata(ctx, item, providers, owner)
 	if authorMismatch {
+		if len(providerErrs) > 0 {
+			return "", fmt.Errorf("author mismatch observed after %d provider error(s): %w",
+				len(providerErrs), errors.Join(providerErrs...))
+		}
 		if err := requireEnrichmentClaim(ctx); err != nil {
 			return "", err
 		}
@@ -1004,6 +1008,12 @@ func collectEbookMetadata(ctx context.Context, item enrichmentItemRow, providers
 				"rejected_title", admission.MatchedTitle,
 			)
 			continue
+		case metadata.SearchMatchProviderIDConflict:
+			slog.WarnContext(ctx, "ebook enrichment: provider identity contradicts an existing ID; skipping", "component", "ebooks",
+				"provider", p.Slug(),
+				"content_id", item.ContentID,
+			)
+			continue
 		case metadata.SearchMatchNoUsableProviderIDs:
 			continue
 		}
@@ -1058,6 +1068,13 @@ func collectEbookMetadata(ctx context.Context, item enrichmentItemRow, providers
 		})
 		if identityErr != nil {
 			providerErrs = append(providerErrs, fmt.Errorf("%s metadata identity admission: %w", p.Slug(), identityErr))
+			continue
+		}
+		if identity.ContradictsExisting {
+			slog.WarnContext(ctx, "ebook enrichment: metadata identity contradicts an existing ID; skipping", "component", "ebooks",
+				"provider", p.Slug(),
+				"content_id", item.ContentID,
+			)
 			continue
 		}
 		for _, conflict := range identity.Conflicts {
@@ -1415,7 +1432,7 @@ var ebookTrailingGroupRE = regexp.MustCompile(`\s*[\(\[]([^\)\]]*)[\)\]]\s*$`)
 // year -- not merely a marker word. The word alone is not evidence: matching
 // bare "book" discarded meaningful suffixes like "(The Book Thief)", which is
 // a title, not furniture.
-var ebookSeriesNoiseRE = regexp.MustCompile(`(?i)\b(?:book|bk|vol|volume|series|part|saga|novella?)\b\.?\s*#?\s*\d{1,4}\b|#\s*\d|^\s*\d{1,4}\s*$|\b(19|20)\d{2}\b`)
+var ebookSeriesNoiseRE = regexp.MustCompile(`(?i)\b(?:book|bk|vol|volume|series|part|saga|novella?)\b\.?\s*#?\s*\d{1,4}\b|#\s*\d|^\s*\d{1,4}\s*$`)
 
 // ebookEditionNoiseRE flags a parenthetical as retail edition furniture that
 // providers never carry in their titles: anything ending in "Edition(s)" or

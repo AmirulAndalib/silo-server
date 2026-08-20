@@ -198,7 +198,7 @@ func TestPersistReturnsProviderIDFailure(t *testing.T) {
 	replaceErr := errors.New("provider identity already belongs to another item")
 	e := &Enricher{providerIDs: &failingAudiobookProviderIDRepository{err: replaceErr}}
 
-	err := e.persist(context.Background(), "audiobook-1", map[string]string{"asin": "B001"}, &metadata.MetadataResult{
+	err := e.persist(context.Background(), enrichmentItemRow{ContentID: "audiobook-1"}, map[string]string{"asin": "B001"}, &metadata.MetadataResult{
 		HasMetadata: true,
 		Overview:    "remote overview",
 	})

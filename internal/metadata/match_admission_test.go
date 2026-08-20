@@ -124,3 +124,48 @@ func TestAdmitProviderIDsQuarantinesOwnedCrossIDs(t *testing.T) {
 		t.Fatalf("provider-ID admission = %+v, want one quarantined conflict and one usable ID", got)
 	}
 }
+
+func TestAdmitProviderIDsRejectsConflictingIDForExistingProvider(t *testing.T) {
+	got, err := AdmitProviderIDs(context.Background(), ProviderIDAdmissionRequest{
+		CandidateProviderIDs: map[string]string{
+			"openlibrary": "OL-new",
+			"googlebooks": "GB-free",
+		},
+		ExistingProviderIDs: map[string]string{"openlibrary": "OL-current"},
+		ItemType:            "ebook",
+		ContentID:           "this-book",
+	})
+	if err != nil {
+		t.Fatalf("AdmitProviderIDs: %v", err)
+	}
+	if !got.ContradictsExisting || len(got.Conflicts) != 1 {
+		t.Fatalf("admission = %+v, want one contradiction", got)
+	}
+	conflict := got.Conflicts[0]
+	if conflict.Provider != "openlibrary" || conflict.ProviderID != "OL-new" ||
+		conflict.ExistingProviderID != "OL-current" || conflict.OwnedBy != "this-book" {
+		t.Fatalf("conflict = %+v", conflict)
+	}
+}
+
+func TestAdmitSearchMatchRejectsConflictingExistingProviderID(t *testing.T) {
+	got, err := AdmitSearchMatch(context.Background(), SearchMatchAdmissionRequest{
+		WantTitle: "Mother of Storms",
+		Results: []SearchResult{{
+			Name: "Mother of Storms",
+			ProviderIDs: map[string]string{
+				"openlibrary": "OL-new",
+				"googlebooks": "GB-free",
+			},
+		}},
+		ExistingProviderIDs: map[string]string{"openlibrary": "OL-current"},
+		ItemType:            "ebook",
+		ContentID:           "this-book",
+	})
+	if err != nil {
+		t.Fatalf("AdmitSearchMatch: %v", err)
+	}
+	if got.Status != SearchMatchProviderIDConflict || len(got.ProviderIDs) != 0 {
+		t.Fatalf("admission = %+v, want provider-ID conflict with no admitted IDs", got)
+	}
+}

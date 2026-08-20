@@ -396,6 +396,10 @@ func (e *Enricher) enrichWithProviders(ctx context.Context, item enrichmentItemR
 	}
 	accumulator, accumulatedIDs, providerErrs, authorMismatch := collectMangaMetadata(ctx, item, providers, owner)
 	if authorMismatch {
+		if len(providerErrs) > 0 {
+			return fmt.Errorf("author mismatch observed after %d provider error(s): %w",
+				len(providerErrs), errors.Join(providerErrs...))
+		}
 		if err := e.stampLastRefreshed(ctx, item.ContentID); err != nil {
 			return err
 		}
@@ -580,6 +584,12 @@ func collectMangaMetadata(ctx context.Context, item enrichmentItemRow, providers
 				"rejected_title", admission.MatchedTitle,
 			)
 			continue
+		case metadata.SearchMatchProviderIDConflict:
+			slog.WarnContext(ctx, "manga enrichment: provider identity contradicts an existing ID; skipping", "component", "manga",
+				"provider", p.Slug(),
+				"content_id", item.ContentID,
+			)
+			continue
 		case metadata.SearchMatchNoUsableProviderIDs:
 			continue
 		}
@@ -634,6 +644,13 @@ func collectMangaMetadata(ctx context.Context, item enrichmentItemRow, providers
 		})
 		if identityErr != nil {
 			providerErrs = append(providerErrs, fmt.Errorf("%s metadata identity admission: %w", p.Slug(), identityErr))
+			continue
+		}
+		if identity.ContradictsExisting {
+			slog.WarnContext(ctx, "manga enrichment: metadata identity contradicts an existing ID; skipping", "component", "manga",
+				"provider", p.Slug(),
+				"content_id", item.ContentID,
+			)
 			continue
 		}
 		for _, conflict := range identity.Conflicts {

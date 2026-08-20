@@ -723,6 +723,31 @@ func TestCollectEbookMetadataRejectsEachProviderAuthorBeforeMerging(t *testing.T
 	}
 }
 
+func TestEnrichWithProvidersRetriesProviderErrorBeforeAuthorMismatch(t *testing.T) {
+	providerErr := errors.New("provider unavailable")
+	providers := []metadata.Provider{
+		&fakeEbookMetadataProvider{slug: "broken", searchErr: providerErr, getErr: providerErr},
+		&fakeEbookMetadataProvider{
+			slug:    "wrong-author",
+			results: []metadata.SearchResult{{Name: "Shared Title", ProviderIDs: map[string]string{"wrong": "1"}}},
+			result: &metadata.MetadataResult{
+				HasMetadata: true,
+				People: []models.ItemPerson{{
+					Person: models.Person{Name: "Wrong Author"}, Kind: models.PersonKindAuthor,
+				}},
+			},
+		},
+	}
+
+	e := &Enricher{}
+	_, err := e.enrichWithProvidersOutcome(context.Background(), enrichmentItemRow{
+		ContentID: "shared", FolderID: 7, Title: "Shared Title", Author: "Right Author",
+	}, providers)
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("enrichment error = %v, want provider failure to remain retryable", err)
+	}
+}
+
 type fakeProviderIDOwner struct {
 	ownerByID map[string]string // provider_id -> owning content id
 	err       error
@@ -1600,6 +1625,7 @@ func TestCleanEbookSearchTitle(t *testing.T) {
 		{"Anthology (Complete Series)", "", "Anthology (Complete Series)"},
 		{"White Out [Badlands Thriller]", "", "White Out [Badlands Thriller]"},
 		{"Salem's Lot (2019)", "", "Salem's Lot"},
+		{"Title (A Story of 1969)", "", "Title (A Story of 1969)"},
 		{"The Hobbit (Illustrated)", "", "The Hobbit (Illustrated)"},
 		// Retail edition suffixes are furniture too: providers index the work,
 		// not the storefront's packaging of it.

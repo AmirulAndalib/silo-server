@@ -163,6 +163,97 @@ func TestHasPendingItemsMirrorsClaimBatch(t *testing.T) {
 	}
 }
 
+// Every server process runs the audiobook task. The database lease is the
+// cross-replica boundary: a second process must not receive the first one's
+// item, and an expired worker must not be able to stamp state after reclaim.
+func TestClaimBatchLeasesAcrossReplicasAndFencesExpiredWorker(t *testing.T) {
+	pool := newClaimTestPool(t)
+	ctx := context.Background()
+	contentID := seedAudiobook(t, pool, "replica-lease", "/covers/embedded.jpg", false)
+	if _, err := pool.Exec(ctx, `
+		UPDATE media_items SET created_at = '1900-01-01' WHERE content_id = $1
+	`, contentID); err != nil {
+		t.Fatalf("age lease fixture: %v", err)
+	}
+
+	firstReplica := newTestEnricher(pool)
+	firstReplica.batchSize = 1
+	secondReplica := newTestEnricher(pool)
+	secondReplica.batchSize = 1
+
+	firstBatch, err := firstReplica.claimBatch(ctx)
+	if err != nil {
+		t.Fatalf("first claimBatch: %v", err)
+	}
+	if len(firstBatch) != 1 || firstBatch[0].ContentID != contentID || firstBatch[0].ClaimToken == "" {
+		t.Fatalf("first batch = %+v, want leased fixture %q", firstBatch, contentID)
+	}
+	firstToken := firstBatch[0].ClaimToken
+
+	secondBatch, err := secondReplica.claimBatch(ctx)
+	if err != nil {
+		t.Fatalf("second claimBatch: %v", err)
+	}
+	for _, item := range secondBatch {
+		if item.ContentID == contentID {
+			t.Fatal("second replica claimed an item whose lease is still active")
+		}
+		// Do not leave a lease on an unrelated shared-test row.
+		_, _ = pool.Exec(ctx, `
+			UPDATE audiobook_enrichment_state
+			SET claim_token = NULL, lease_until = NULL
+			WHERE content_id = $1 AND claim_token = $2
+		`, item.ContentID, item.ClaimToken)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE audiobook_enrichment_state
+		SET lease_until = now() - interval '1 minute'
+		WHERE content_id = $1 AND claim_token = $2
+	`, contentID, firstToken); err != nil {
+		t.Fatalf("expire first lease: %v", err)
+	}
+
+	reclaimed, err := secondReplica.claimBatch(ctx)
+	if err != nil {
+		t.Fatalf("reclaim batch: %v", err)
+	}
+	if len(reclaimed) != 1 || reclaimed[0].ContentID != contentID || reclaimed[0].ClaimToken == firstToken {
+		t.Fatalf("reclaimed batch = %+v, want fixture with a fresh token", reclaimed)
+	}
+
+	if err := firstReplica.state.RecordFailure(
+		ctx,
+		contentID,
+		firstToken,
+		EnrichmentErrorTransient,
+		"stale worker",
+	); !errors.Is(err, ErrAudiobookEnrichmentClaimLost) {
+		t.Fatalf("stale RecordFailure error = %v, want %v", err, ErrAudiobookEnrichmentClaimLost)
+	}
+
+	if err := secondReplica.completeWithoutMetadata(ctx, reclaimed[0], EnrichmentOutcomeNoMatch); err != nil {
+		t.Fatalf("complete current claim: %v", err)
+	}
+	var (
+		lastRefreshed *time.Time
+		outcome       string
+		claimToken    *string
+		leaseUntil    *time.Time
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT mi.last_refreshed, s.outcome, s.claim_token, s.lease_until
+		FROM media_items mi
+		JOIN audiobook_enrichment_state s ON s.content_id = mi.content_id
+		WHERE mi.content_id = $1
+	`, contentID).Scan(&lastRefreshed, &outcome, &claimToken, &leaseUntil); err != nil {
+		t.Fatalf("read completed lease fixture: %v", err)
+	}
+	if lastRefreshed == nil || outcome != string(EnrichmentOutcomeNoMatch) || claimToken != nil || leaseUntil != nil {
+		t.Fatalf("completed state = refreshed:%v outcome:%q token:%v lease:%v", lastRefreshed, outcome, claimToken, leaseUntil)
+	}
+}
+
 type failingTxAudiobookItemRepository struct {
 	err error
 }
@@ -189,7 +280,7 @@ func TestPersistRollsBackProviderIDsWhenMetadataWriteFails(t *testing.T) {
 		providerIDs: catalog.NewProviderIDRepository(pool),
 	}
 
-	err := e.persist(context.Background(), contentID, map[string]string{
+	err := e.persist(context.Background(), enrichmentItemRow{ContentID: contentID}, map[string]string{
 		"asin": fmt.Sprintf("B0TX%d", time.Now().UnixNano()),
 	}, &metadata.MetadataResult{HasMetadata: true, Overview: "remote overview"})
 	if !errors.Is(err, updateErr) {

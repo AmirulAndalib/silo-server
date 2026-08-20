@@ -2,12 +2,16 @@ package audiobooks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var ErrAudiobookEnrichmentClaimLost = errors.New("audiobook enrichment claim lost")
 
 // Audiobook enrichment used to record its outcome in exactly one place:
 // media_items.last_refreshed. That stamp had to mean "matched", "genuinely
@@ -72,16 +76,45 @@ func newEnrichmentStateStore(pool *pgxpool.Pool) *enrichmentStateStore {
 	return &enrichmentStateStore{pool: pool}
 }
 
-// RecordOutcome stamps a terminal result and clears any parked retry.
-func (s *enrichmentStateStore) RecordOutcome(ctx context.Context, contentID string, outcome EnrichmentOutcome) error {
+// RecordOutcome stamps a terminal result and clears any parked retry or active
+// lease. Production passes the claim token; an empty token is reserved for
+// administrative repair paths and DB tests that intentionally write state
+// without claiming work first.
+func (s *enrichmentStateStore) RecordOutcome(ctx context.Context, contentID, claimToken string, outcome EnrichmentOutcome) error {
 	if s == nil || s.pool == nil || contentID == "" {
+		return nil
+	}
+	if claimToken != "" {
+		tag, err := s.pool.Exec(ctx, `
+			UPDATE audiobook_enrichment_state
+			SET attempts         = attempts + 1,
+			    outcome          = $3,
+			    last_error_class = NULL,
+			    last_error       = NULL,
+			    next_attempt_at  = NULL,
+			    last_attempt_at  = now(),
+			    completed_at     = now(),
+			    claim_token      = NULL,
+			    lease_until      = NULL,
+			    updated_at       = now()
+			WHERE content_id = $1
+			  AND claim_token = $2
+			  AND lease_until > now()
+		`, contentID, claimToken, string(outcome))
+		if err != nil {
+			return fmt.Errorf("recording claimed audiobook enrichment outcome: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrAudiobookEnrichmentClaimLost
+		}
 		return nil
 	}
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO audiobook_enrichment_state (
 			content_id, attempts, outcome, last_error_class, last_error,
-			next_attempt_at, last_attempt_at, completed_at, updated_at
-		) VALUES ($1, 1, $2, NULL, NULL, NULL, now(), now(), now())
+			next_attempt_at, last_attempt_at, completed_at, claim_token,
+			lease_until, updated_at
+		) VALUES ($1, 1, $2, NULL, NULL, NULL, now(), now(), NULL, NULL, now())
 		ON CONFLICT (content_id) DO UPDATE SET
 			attempts         = audiobook_enrichment_state.attempts + 1,
 			outcome          = EXCLUDED.outcome,
@@ -90,6 +123,8 @@ func (s *enrichmentStateStore) RecordOutcome(ctx context.Context, contentID stri
 			next_attempt_at  = NULL,
 			last_attempt_at  = now(),
 			completed_at     = now(),
+			claim_token      = NULL,
+			lease_until      = NULL,
 			updated_at       = now()
 	`, contentID, string(outcome))
 	if err != nil {
@@ -104,7 +139,7 @@ func (s *enrichmentStateStore) RecordOutcome(ctx context.Context, contentID stri
 // unreadable.
 func (s *enrichmentStateStore) RecordFailure(
 	ctx context.Context,
-	contentID string,
+	contentID, claimToken string,
 	class EnrichmentErrorClass,
 	cause string,
 ) error {
@@ -128,6 +163,34 @@ func (s *enrichmentStateStore) RecordFailure(
 	// just failed. The parked interval is min(step * attempts, cap), computed
 	// on the post-increment attempts value inside the upsert.
 	step, ceiling := backoffParams(class)
+	if claimToken != "" {
+		tag, err := s.pool.Exec(ctx, `
+			UPDATE audiobook_enrichment_state
+			SET attempts         = attempts + 1,
+			    outcome          = NULL,
+			    last_error_class = $3,
+			    last_error       = $4,
+			    next_attempt_at  = now() + make_interval(secs => LEAST(
+			        $5::double precision * (attempts + 1),
+			        $6::double precision
+			    )),
+			    last_attempt_at  = now(),
+			    completed_at     = NULL,
+			    claim_token      = NULL,
+			    lease_until      = NULL,
+			    updated_at       = now()
+			WHERE content_id = $1
+			  AND claim_token = $2
+			  AND lease_until > now()
+		`, contentID, claimToken, string(class), cause, step.Seconds(), ceiling.Seconds())
+		if err != nil {
+			return fmt.Errorf("recording claimed audiobook enrichment failure: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrAudiobookEnrichmentClaimLost
+		}
+		return nil
+	}
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO audiobook_enrichment_state (
 			content_id, attempts, last_error_class, last_error,
@@ -139,6 +202,7 @@ func (s *enrichmentStateStore) RecordFailure(
 		)
 		ON CONFLICT (content_id) DO UPDATE SET
 			attempts         = audiobook_enrichment_state.attempts + 1,
+			outcome          = NULL,
 			last_error_class = EXCLUDED.last_error_class,
 			last_error       = EXCLUDED.last_error,
 			next_attempt_at  = now() + make_interval(secs => LEAST(
@@ -146,10 +210,89 @@ func (s *enrichmentStateStore) RecordFailure(
 				$5::double precision
 			)),
 			last_attempt_at  = now(),
+			completed_at     = NULL,
+			claim_token      = NULL,
+			lease_until      = NULL,
 			updated_at       = now()
 	`, contentID, string(class), cause, step.Seconds(), ceiling.Seconds())
 	if err != nil {
 		return fmt.Errorf("recording audiobook enrichment failure: %w", err)
+	}
+	return nil
+}
+
+// AssertClaimTx fences terminal media writes with the durable claim row. The
+// row lock prevents another replica from replacing the token between this
+// check and the transaction's metadata/state commit.
+func (s *enrichmentStateStore) AssertClaimTx(ctx context.Context, tx pgx.Tx, contentID, claimToken string) error {
+	if s == nil || tx == nil || claimToken == "" {
+		return nil
+	}
+	// claimBatch locks media_items before it inserts or updates the state row.
+	// Keep terminal transactions in the same lock order to avoid a deadlock at
+	// the instant an old lease expires and another replica tries to reclaim it.
+	var lockedContentID string
+	err := tx.QueryRow(ctx, `
+		SELECT content_id
+		FROM media_items
+		WHERE content_id = $1
+		FOR UPDATE
+	`, contentID).Scan(&lockedContentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrAudiobookEnrichmentClaimLost
+	}
+	if err != nil {
+		return fmt.Errorf("locking claimed audiobook: %w", err)
+	}
+	var token string
+	err = tx.QueryRow(ctx, `
+		SELECT claim_token
+		FROM audiobook_enrichment_state
+		WHERE content_id = $1
+		  AND claim_token = $2
+		  AND lease_until > now()
+		FOR UPDATE
+	`, contentID, claimToken).Scan(&token)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrAudiobookEnrichmentClaimLost
+	}
+	if err != nil {
+		return fmt.Errorf("checking audiobook enrichment claim: %w", err)
+	}
+	return nil
+}
+
+// RecordOutcomeTx completes a claim inside the same transaction as its durable
+// provider IDs, scalar metadata, search event, and terminal media timestamp.
+func (s *enrichmentStateStore) RecordOutcomeTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	contentID, claimToken string,
+	outcome EnrichmentOutcome,
+) error {
+	if s == nil || tx == nil || claimToken == "" {
+		return nil
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE audiobook_enrichment_state
+		SET attempts         = attempts + 1,
+		    outcome          = $3,
+		    last_error_class = NULL,
+		    last_error       = NULL,
+		    next_attempt_at  = NULL,
+		    last_attempt_at  = now(),
+		    completed_at     = now(),
+		    claim_token      = NULL,
+		    lease_until      = NULL,
+		    updated_at       = now()
+		WHERE content_id = $1
+		  AND claim_token = $2
+	`, contentID, claimToken, string(outcome))
+	if err != nil {
+		return fmt.Errorf("completing audiobook enrichment claim: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrAudiobookEnrichmentClaimLost
 	}
 	return nil
 }

@@ -1,12 +1,18 @@
 package metadata
 
 import (
+	"regexp"
 	"strings"
 	"time"
 
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+)
+
+var (
+	httpRateLimitCodeRE = regexp.MustCompile(`\b429\b`)
+	httpPermanentCodeRE = regexp.MustCompile(`\b(?:401|403)\b`)
 )
 
 // ProviderErrorClass is the provider-agnostic retry disposition shared by
@@ -104,7 +110,7 @@ func classifyProviderErrorText(message string) ProviderErrorClass {
 	switch {
 	case strings.Contains(msg, "resourceexhausted"),
 		strings.Contains(msg, "resource exhausted"),
-		strings.Contains(msg, "429"),
+		httpRateLimitCodeRE.MatchString(msg),
 		strings.Contains(msg, "rate limit"),
 		strings.Contains(msg, "ratelimit"),
 		strings.Contains(msg, "too many requests"),
@@ -122,8 +128,7 @@ func classifyProviderErrorText(message string) ProviderErrorClass {
 		strings.Contains(msg, "failed precondition"),
 		strings.Contains(msg, "unimplemented"),
 		strings.Contains(msg, "not implemented"),
-		strings.Contains(msg, "401"),
-		strings.Contains(msg, "403"),
+		httpPermanentCodeRE.MatchString(msg),
 		strings.Contains(msg, "forbidden"):
 		return ProviderErrorPermanent
 	default:
