@@ -6,18 +6,27 @@ import (
 	"os"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Silo-Server/silo-server/internal/metadata"
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
 )
 
 const (
 	cacheMetadataImagesIntervalMs = int64(60 * 1000)
-	cacheMetadataImagesBatchSize  = 1000
+	// Claim only work that can start immediately. Claiming a large queue page
+	// stamps one lease on every row up front; with two workers, the unstarted
+	// tail could expire and be reclaimed before this execution reaches it.
+	cacheMetadataImagesClaimLimit = 2
 	cacheMetadataImagesWorkers    = 2
 	cacheMetadataImagesMaxRuntime = 10 * time.Minute
 )
 
 type MetadataImageCacheRunner interface {
+	DrainUntilIdle(ctx context.Context, workerID string, claimLimit int, concurrency int, maxRuntime time.Duration, reportProgress metadata.ImageCacheRunProgressReporter) (metadata.ImageCacheRunStats, error)
+}
+
+type MetadataImageBackfillRunner interface {
 	RunUntilIdle(ctx context.Context, workerID string, claimLimit int, concurrency int, maxRuntime time.Duration, reportProgress metadata.ImageCacheRunProgressReporter) (metadata.ImageCacheRunStats, error)
 }
 
@@ -25,19 +34,38 @@ type CacheMetadataImagesTask struct {
 	runner MetadataImageCacheRunner
 }
 
+type BackfillMetadataImagesTask struct {
+	runner MetadataImageBackfillRunner
+}
+
 func NewCacheMetadataImagesTask(runner MetadataImageCacheRunner) *CacheMetadataImagesTask {
 	return &CacheMetadataImagesTask{runner: runner}
+}
+
+func NewBackfillMetadataImagesTask(runner MetadataImageBackfillRunner) *BackfillMetadataImagesTask {
+	return &BackfillMetadataImagesTask{runner: runner}
 }
 
 func (t *CacheMetadataImagesTask) Key() string  { return "cache_metadata_images" }
 func (t *CacheMetadataImagesTask) Name() string { return "Cache Metadata Images" }
 func (t *CacheMetadataImagesTask) Description() string {
-	return "Caches provider metadata artwork into object storage"
+	return "Processes only artwork already queued by scans, refreshes, and metadata changes"
 }
 func (t *CacheMetadataImagesTask) Category() taskmanager.TaskCategory {
 	return taskmanager.TaskCategoryMetadata
 }
 func (t *CacheMetadataImagesTask) IsHidden() bool { return false }
+
+func (t *BackfillMetadataImagesTask) Key() string  { return "backfill_metadata_images" }
+func (t *BackfillMetadataImagesTask) Name() string { return "Backfill Metadata Images" }
+func (t *BackfillMetadataImagesTask) Description() string {
+	return "Manually discovers and caches missing provider artwork across the full catalog"
+}
+func (t *BackfillMetadataImagesTask) Category() taskmanager.TaskCategory {
+	return taskmanager.TaskCategoryMetadata
+}
+func (t *BackfillMetadataImagesTask) IsHidden() bool   { return false }
+func (t *BackfillMetadataImagesTask) ManualOnly() bool { return true }
 
 func (t *CacheMetadataImagesTask) DefaultTriggers() []taskmanager.TriggerConfig {
 	return []taskmanager.TriggerConfig{
@@ -46,26 +74,69 @@ func (t *CacheMetadataImagesTask) DefaultTriggers() []taskmanager.TriggerConfig 
 	}
 }
 
+// Backfill is deliberately manual-only. The normal cache task drains durable
+// jobs created by catalog changes; only an administrator choosing this task
+// may initiate a full-catalog discovery sweep.
+func (t *BackfillMetadataImagesTask) DefaultTriggers() []taskmanager.TriggerConfig { return nil }
+
+// ShouldRun fails closed for every scheduler trigger, including one an older
+// installation or administrator may have persisted. TaskManager.RunTask
+// bypasses this gate, preserving the explicit manual action.
+func (t *BackfillMetadataImagesTask) ShouldRun(context.Context) (bool, error) {
+	return false, nil
+}
+
 func (t *CacheMetadataImagesTask) Execute(ctx context.Context, progress taskmanager.ProgressReporter) error {
 	if t.runner == nil {
 		progress.Report(100, "Metadata image cache is not configured")
 		return nil
 	}
+	return executeMetadataImages(ctx, progress, false, t.runner.DrainUntilIdle)
+}
+
+func (t *BackfillMetadataImagesTask) Execute(ctx context.Context, progress taskmanager.ProgressReporter) error {
+	if t.runner == nil {
+		progress.Report(100, "Metadata image backfill is not configured")
+		return nil
+	}
+	return executeMetadataImages(ctx, progress, true, t.runner.RunUntilIdle)
+}
+
+type metadataImageRunFunc func(context.Context, string, int, int, time.Duration, metadata.ImageCacheRunProgressReporter) (metadata.ImageCacheRunStats, error)
+
+func executeMetadataImages(ctx context.Context, progress taskmanager.ProgressReporter, backfill bool, run metadataImageRunFunc) error {
 	hostname, _ := os.Hostname()
 	if hostname == "" {
 		hostname = "silo"
 	}
-	progress.Report(0, "Starting metadata image cache")
+	mode := "drain"
+	maxRuntime := cacheMetadataImagesMaxRuntime
+	startMessage := "Starting queued metadata image cache"
+	if backfill {
+		mode = "backfill"
+		// A manual backfill must either reach the end of discovery or be
+		// explicitly canceled. A scheduled drain is bounded because its next
+		// trigger continues the durable queue; a manual-only task has no such
+		// continuation and must not report a partial sweep as complete.
+		maxRuntime = 0
+		startMessage = "Starting full metadata image backfill"
+	}
+	// TaskManager prevents overlap for one task key, but drain and backfill are
+	// intentionally separate tasks and may run together. Give every execution
+	// a distinct lease owner so a stale worker can never finalize a job reclaimed
+	// by the other task after its lease expires.
+	workerID := fmt.Sprintf("%s:%s:%s", hostname, mode, uuid.NewString())
+	progress.Report(0, startMessage)
 	// Discovery widens the denominator mid-run, so the raw ratio can dip when a
 	// sweep enqueues a fresh page. Reports are sequential, so a high-water mark
 	// is enough to keep what the user sees from walking backwards.
 	reportedPercent := 0.0
-	stats, err := t.runner.RunUntilIdle(
+	stats, err := run(
 		ctx,
-		hostname,
-		cacheMetadataImagesBatchSize,
+		workerID,
+		cacheMetadataImagesClaimLimit,
 		cacheMetadataImagesWorkers,
-		cacheMetadataImagesMaxRuntime,
+		maxRuntime,
 		func(update metadata.ImageCacheRunStats) {
 			percent := cacheMetadataImagesPercent(update)
 			if percent < reportedPercent {
@@ -76,12 +147,15 @@ func (t *CacheMetadataImagesTask) Execute(ctx context.Context, progress taskmana
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("caching metadata images: %w", err)
+		operation := "caching queued metadata images"
+		if backfill {
+			operation = "backfilling metadata images"
+		}
+		return fmt.Errorf("%s: %w", operation, err)
 	}
 	message := fmt.Sprintf(
-		"Batches %d, enqueued %d existing, claimed %d, cached %d, %d %s, skipped %d, uploaded %d variants, found %d existing variants, deleted %d old successes",
+		"Batches %d, claimed %d, cached %d, %d %s, skipped %d, uploaded %d variants, found %d existing variants, deleted %d old successes",
 		stats.Batches,
-		stats.EnqueuedExisting,
 		stats.Claimed,
 		stats.Succeeded,
 		stats.Failed,
@@ -91,6 +165,9 @@ func (t *CacheMetadataImagesTask) Execute(ctx context.Context, progress taskmana
 		stats.ExistingVariants,
 		stats.DeletedSucceeded,
 	)
+	if backfill {
+		message = fmt.Sprintf("Discovered %d existing, %s", stats.EnqueuedExisting, message)
+	}
 	if stats.RuntimeLimited {
 		message += ", runtime budget reached"
 	}
