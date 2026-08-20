@@ -335,6 +335,52 @@ func TestConnectionConfigValidationRedactsNestedSecrets(t *testing.T) {
 	}
 }
 
+func TestPluginProviderRedactsUndeclaredConnectionSecrets(t *testing.T) {
+	const undeclaredSecret = "undeclared-connection-secret"
+	client := &fakeWatchSyncPluginClient{exchangeResponse: &pluginv1.WatchSyncCredentialResponse{
+		Fault: &pluginv1.WatchSyncFault{
+			Code:        pluginv1.WatchSyncFaultCode_WATCH_SYNC_FAULT_CODE_INVALID_CREDENTIAL,
+			SafeMessage: "credentials " + undeclaredSecret + " were rejected",
+		},
+	}}
+	// The schema permits additional properties, so an undeclared field reaches
+	// the plugin classified as a secret and must be redacted like a declared one.
+	schema := &pluginv1.ConfigSchema{
+		Key:        "account",
+		JsonSchema: `{"type":"object","properties":{"base_url":{"type":"string","format":"uri"}},"required":["base_url"]}`,
+		AdminForm: &pluginv1.AdminFormDescriptor{Fields: []*pluginv1.AdminFormField{
+			{Key: "base_url", Control: pluginv1.AdminFormControl_ADMIN_FORM_CONTROL_TEXT},
+		}},
+	}
+	provider, err := NewPluginProvider(PluginProviderOptions{
+		InstallationID: 4, ProviderKey: testPluginProviderKey, CapabilityID: testPluginCapabilityID,
+		Descriptor: &pluginv1.WatchSyncProviderDescriptor{AuthMethods: []pluginv1.WatchSyncAuthMethod{
+			pluginv1.WatchSyncAuthMethod_WATCH_SYNC_AUTH_METHOD_API_KEY,
+		}},
+		ConnectionConfigSchema: []*pluginv1.ConfigSchema{schema},
+		ResolveClient:          func(context.Context, int, string) (WatchSyncPluginClient, error) { return client, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = provider.ConnectWithAPIKeyConfig(context.Background(), "input-token", ConnectionConfigValues{
+		"account": {
+			"base_url":  "https://floppy.example.com",
+			"api_token": undeclaredSecret,
+		},
+	})
+	if !isWatchSyncInvalidCredentialError(err) {
+		t.Fatalf("error = %#v", err)
+	}
+	config := client.exchangeRequest.GetProviderConfig()
+	if config.GetSecretValues()["account.api_token"] != undeclaredSecret {
+		t.Fatalf("undeclared field was not classified as a secret: %#v", config)
+	}
+	if strings.Contains(err.Error(), undeclaredSecret) || !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Fatalf("undeclared connection secret was not redacted: %q", err)
+	}
+}
+
 func TestPluginProviderRejectsUnresolvableDynamicConnectionOptions(t *testing.T) {
 	_, err := NewPluginProvider(PluginProviderOptions{
 		InstallationID: 4, ProviderKey: testPluginProviderKey, CapabilityID: testPluginCapabilityID,

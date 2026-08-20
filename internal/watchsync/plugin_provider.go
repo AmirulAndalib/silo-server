@@ -650,6 +650,13 @@ func (p *PluginProvider) connectionConfig(values ConnectionConfigValues) (*plugi
 			}
 		}
 	}
+	// Fields the schema never declared are classified as secret above, so redact
+	// every flattened secret rather than only the declared ones.
+	for _, encoded := range result.SecretValues {
+		if strings.TrimSpace(encoded) != "" {
+			secrets = append(secrets, encoded)
+		}
+	}
 	return result, secrets, nil
 }
 
