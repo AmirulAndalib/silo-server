@@ -635,7 +635,7 @@ export default function EbookReader() {
               className="hidden gap-1 sm:inline-flex"
               title={`Next: ${nextChapter.label}`}
             >
-              <Link to={nextChapterHref}>
+              <Link to={nextChapterHref} replace>
                 <span className="text-muted-foreground max-w-36 truncate text-xs">
                   {nextChapter.label}
                 </span>
@@ -1303,7 +1303,7 @@ export default function EbookReader() {
             size="lg"
             className="h-11 gap-2 rounded-full px-6 text-[15px] font-bold shadow-lg"
           >
-            <Link to={nextChapterHref}>
+            <Link to={nextChapterHref} replace>
               Next: {nextChapter.label}
               <ChevronRight className="size-[18px]" />
             </Link>
