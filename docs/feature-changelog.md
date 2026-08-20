@@ -1,5 +1,14 @@
 # Feature Changelog
 
+## 2026-08-20
+
+### Give each profile its own watch-provider server
+Plugin watch providers can now ask for connection details per profile instead of forcing every profile on a Silo server to share one installation-wide configuration.
+- Lets a self-hosted provider give each household member their own server URL and credentials.
+- Renders the provider's own setup fields beside the API key on the profile's watch-provider screen, so connecting stays a single step.
+- Encrypts every field the provider declares as a secret and keeps submitted setup data out of admin-facing plugin configuration.
+- Prefers a profile's own values over installation-wide values of the same name, so existing connections keep working until they are reconnected.
+
 ## 2026-08-19
 
 ### Make published server builds easy to compare
