@@ -113,19 +113,20 @@ type audiobookItemRepository interface {
 
 // Enricher drives the audiobook metadata enrichment sweep.
 type Enricher struct {
-	pool           *pgxpool.Pool
-	chainRepo      *metadata.ChainRepository
-	resolver       *metadata.PluginResolverAdapter
-	itemRepo       audiobookItemRepository
-	personRepo     *catalog.PersonRepository
-	providerIDs    audiobookProviderIDRepository
-	state          *enrichmentStateStore
-	imageCacher    audiobookCoverCacher
-	imageCacheJobs metadata.ImageCacheJobEnqueuer
-	workLinker     literaryWorkLinker
-	ffmpegPath     string
-	batchSize      int
-	workers        int
+	pool             *pgxpool.Pool
+	chainRepo        *metadata.ChainRepository
+	resolver         *metadata.PluginResolverAdapter
+	itemRepo         audiobookItemRepository
+	personRepo       *catalog.PersonRepository
+	providerIDs      audiobookProviderIDRepository
+	state            *enrichmentStateStore
+	imageCacher      audiobookCoverCacher
+	imageCacheJobs   metadata.ImageCacheJobEnqueuer
+	workLinker       literaryWorkLinker
+	resolveProviders func(context.Context, int, string) ([]metadata.Provider, error)
+	ffmpegPath       string
+	batchSize        int
+	workers          int
 }
 
 type literaryWorkLinker interface {
@@ -457,7 +458,13 @@ func (e *Enricher) enrichItem(ctx context.Context, item enrichmentItemRow) error
 		return e.completeWithoutMetadata(ctx, item, EnrichmentOutcomeSkipped)
 	}
 
-	providers, err := metadata.ResolveChain(ctx, item.FolderID, "audiobook", e.chainRepo, e.resolver)
+	var providers []metadata.Provider
+	var err error
+	if e.resolveProviders != nil {
+		providers, err = e.resolveProviders(ctx, item.FolderID, "audiobook")
+	} else {
+		providers, err = metadata.ResolveChain(ctx, item.FolderID, "audiobook", e.chainRepo, e.resolver)
+	}
 	if err != nil {
 		resolveErr := fmt.Errorf("resolving audiobook chain for folder %d: %w", item.FolderID, err)
 		e.recordFailure(ctx, item, classifyProviderError(resolveErr), resolveErr.Error())
