@@ -16,6 +16,13 @@ Plugin watch providers can now ask for connection details per profile instead of
 - Encrypts every field the provider declares as a secret and keeps submitted setup data out of admin-facing plugin configuration.
 - Prefers a profile's own values over installation-wide values of the same name, so existing connections keep working until they are reconnected.
 
+### Serve downloads from proxy nodes
+Download delivery can now be spread across proxy and transcode nodes instead of always flowing through the API server.
+- Adds `proxy_delivery` to the download capability response and the opt-in `/downloads/{id}/file-proxy` and `/direct-download-proxy` routes, which redirect to an eligible proxy node per request and serve bytes directly otherwise.
+- Prepared downloads can run on transcode nodes; the result stays on that node and is relayed through the authenticated artifact API, so nodes need no shared mount.
+- Bandwidth-limited downloads stay on the API server so server-wide and per-user limits remain exact.
+- The existing `/file` and `/direct-download` routes are unchanged.
+
 ## 2026-08-19
 
 ### Scope API keys to the admin routes they need
