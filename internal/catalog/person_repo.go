@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -85,9 +86,71 @@ func (r *PersonRepository) FindOrCreate(ctx context.Context, p models.Person) (i
 	return id, nil
 }
 
-// enrichExisting updates empty fields on an existing person with non-empty values from p.
+// personPhotoReplacePredicate builds the SQL condition under which item-credit
+// data may write a person's photo columns.
+//
+// A cached artwork key is immutable and is never replaced from a credit.
+// Credits carry the provider URL, so overwriting the key would both re-arm the
+// download loop (EnqueueExistingProviderArtwork treats a URL in photo_path as
+// "not cached yet") and hand the displaced key to the artwork GC trigger.
+// Anything that is not a cached key is still replaceable by a real image: an
+// empty column, the "-" no-photo sentinel, and a provider URL that never made
+// it through the cache. Keeping URLs replaceable is what stops a person with
+// no external id — FindRefreshCandidates skips them, so no refresh will ever
+// revisit the row — from being stuck with a dead URL forever. The
+// LIKE '%://%' test for "not a cached key" is the same one the artwork GC
+// trigger and the image cache sweep use.
+func personPhotoReplacePredicate(existingPath, incomingPath string) string {
+	return fmt.Sprintf(
+		"((COALESCE(%[1]s, '') = '' AND %[2]s <> '') OR "+
+			"((%[1]s = '-' OR %[1]s LIKE '%%://%%') AND %[2]s NOT IN ('', '-') "+
+			"AND %[2]s IS DISTINCT FROM %[1]s))",
+		existingPath, incomingPath,
+	)
+}
+
+// batchPersonEnrichmentSQL is built once: the text is constant, and the batch
+// enricher runs per scan batch.
+var batchPersonEnrichmentSQL = sync.OnceValue(buildBatchPersonEnrichmentQuery)
+
+func buildBatchPersonEnrichmentQuery() string {
+	photoReplace := personPhotoReplacePredicate("people.photo_path", "t.photo_path")
+	return fmt.Sprintf(`
+		UPDATE people SET
+			tmdb_id = CASE WHEN COALESCE(people.tmdb_id, '') = '' AND t.tmdb_id <> '' THEN t.tmdb_id ELSE people.tmdb_id END,
+			imdb_id = CASE WHEN COALESCE(people.imdb_id, '') = '' AND t.imdb_id <> '' THEN t.imdb_id ELSE people.imdb_id END,
+			tvdb_id = CASE WHEN COALESCE(people.tvdb_id, '') = '' AND t.tvdb_id <> '' THEN t.tvdb_id ELSE people.tvdb_id END,
+			plex_guid = CASE WHEN COALESCE(people.plex_guid, '') = '' AND t.plex_guid <> '' THEN t.plex_guid ELSE people.plex_guid END,
+			photo_path = CASE WHEN %[1]s THEN t.photo_path ELSE people.photo_path END,
+			photo_source_path = CASE WHEN %[1]s THEN t.photo_source_path ELSE people.photo_source_path END,
+			photo_thumbhash = CASE WHEN %[1]s THEN t.photo_thumbhash ELSE people.photo_thumbhash END,
+			bio = CASE WHEN COALESCE(people.bio, '') = '' AND t.bio <> '' THEN t.bio ELSE people.bio END,
+			birthplace = CASE WHEN COALESCE(people.birthplace, '') = '' AND t.birthplace <> '' THEN t.birthplace ELSE people.birthplace END,
+			homepage = CASE WHEN COALESCE(people.homepage, '') = '' AND t.homepage <> '' THEN t.homepage ELSE people.homepage END,
+			updated_at = NOW()
+		FROM UNNEST($1::bigint[], $2::text[], $3::text[], $4::text[], $5::text[],
+		            $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[])
+			AS t(id, tmdb_id, imdb_id, tvdb_id, plex_guid,
+			     photo_path, photo_source_path, photo_thumbhash, bio, birthplace, homepage)
+		WHERE people.id = t.id
+		  AND (
+			(COALESCE(people.tmdb_id, '') = '' AND t.tmdb_id <> '') OR
+			(COALESCE(people.imdb_id, '') = '' AND t.imdb_id <> '') OR
+			(COALESCE(people.tvdb_id, '') = '' AND t.tvdb_id <> '') OR
+			(COALESCE(people.plex_guid, '') = '' AND t.plex_guid <> '') OR
+			%[1]s OR
+			(COALESCE(people.bio, '') = '' AND t.bio <> '') OR
+			(COALESCE(people.birthplace, '') = '' AND t.birthplace <> '') OR
+			(COALESCE(people.homepage, '') = '' AND t.homepage <> '')
+		  )`, photoReplace)
+}
+
+// enrichExisting fills gaps on an existing person from p. It never rewrites a
+// field the catalog already holds, and it leaves the row — including
+// updated_at — untouched when there is nothing to fill.
 func (r *PersonRepository) enrichExisting(ctx context.Context, id int64, p models.Person) (int64, error) {
 	var setClauses []string
+	var changePredicates []string
 	var args []interface{}
 	argIdx := 1
 
@@ -96,33 +159,38 @@ func (r *PersonRepository) enrichExisting(ctx context.Context, id int64, p model
 		if value == "" {
 			return
 		}
-		setClauses = append(setClauses, fmt.Sprintf("%s = CASE WHEN %s = '' THEN $%d ELSE %s END", column, column, argIdx, column))
+		setClauses = append(setClauses, fmt.Sprintf("%s = CASE WHEN COALESCE(%s, '') = '' THEN $%d ELSE %s END", column, column, argIdx, column))
+		changePredicates = append(changePredicates, fmt.Sprintf("COALESCE(%s, '') = ''", column))
 		args = append(args, value)
 		argIdx++
 	}
-	// overwriteIfReal sets the column when the new value is real. The "-"
-	// sentinel ("no photo, but we tried") is only written when the existing
-	// column is empty, so it cannot clobber a real provider path.
-	overwriteIfReal := func(column, value string) {
-		if value == "" {
+	// fillPhoto writes the photo triple as a unit under one decision taken on
+	// photo_path. The path, its source URL, and its thumbhash describe a single
+	// image: moving the path alone binds the new photo to the previous source,
+	// which is what UpdatePhotoIfSourceMatches keys the cache handshake on, so
+	// the finished download would land the *old* image on the row — and leave
+	// the old image's thumbhash behind it.
+	fillPhoto := func(person models.Person) {
+		if person.PhotoPath == "" {
 			return
 		}
-		if value == "-" {
-			setClauses = append(setClauses, fmt.Sprintf("%s = CASE WHEN %s = '' THEN $%d ELSE %s END", column, column, argIdx, column))
-		} else {
-			setClauses = append(setClauses, fmt.Sprintf("%s = $%d", column, argIdx))
-		}
-		args = append(args, value)
-		argIdx++
+		incoming := fmt.Sprintf("$%d", argIdx)
+		predicate := personPhotoReplacePredicate("photo_path", incoming)
+		setClauses = append(setClauses,
+			fmt.Sprintf("photo_path = CASE WHEN %s THEN %s ELSE photo_path END", predicate, incoming),
+			fmt.Sprintf("photo_source_path = CASE WHEN %s THEN $%d ELSE photo_source_path END", predicate, argIdx+1),
+			fmt.Sprintf("photo_thumbhash = CASE WHEN %s THEN $%d ELSE photo_thumbhash END", predicate, argIdx+2),
+		)
+		changePredicates = append(changePredicates, predicate)
+		args = append(args, person.PhotoPath, person.PhotoSourcePath, person.PhotoThumbhash)
+		argIdx += 3
 	}
 
 	fillEmpty("tmdb_id", p.TmdbID)
 	fillEmpty("imdb_id", p.ImdbID)
 	fillEmpty("tvdb_id", p.TvdbID)
 	fillEmpty("plex_guid", p.PlexGUID)
-	overwriteIfReal("photo_path", p.PhotoPath)
-	overwriteIfReal("photo_source_path", p.PhotoSourcePath)
-	overwriteIfReal("photo_thumbhash", p.PhotoThumbhash)
+	fillPhoto(p)
 	fillEmpty("bio", p.Bio)
 	fillEmpty("birthplace", p.Birthplace)
 	fillEmpty("homepage", p.Homepage)
@@ -132,7 +200,10 @@ func (r *PersonRepository) enrichExisting(ctx context.Context, id int64, p model
 	}
 
 	setClauses = append(setClauses, "updated_at = now()")
-	query := fmt.Sprintf("UPDATE people SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
+	query := fmt.Sprintf(
+		"UPDATE people SET %s WHERE id = $%d AND (%s)",
+		strings.Join(setClauses, ", "), argIdx, strings.Join(changePredicates, " OR "),
+	)
 	args = append(args, id)
 
 	if _, err := r.pool.Exec(ctx, query, args...); err != nil {
@@ -283,7 +354,9 @@ func (r *PersonRepository) BatchFindOrCreate(ctx context.Context, people []model
 		rows.Close()
 	}
 
-	// Phase 4: Batch enrich found people (same fillEmpty/overwrite semantics).
+	// Phase 4: Batch enrich found people. Item-credit data fills gaps and may
+	// replace a photo that was never cached; a cached artwork key is immutable
+	// here. See personPhotoReplacePredicate.
 	if len(toEnrich) > 0 {
 		enrichIDs := make([]int64, len(toEnrich))
 		eTmdbIDs := make([]string, len(toEnrich))
@@ -309,36 +382,7 @@ func (r *PersonRepository) BatchFindOrCreate(ctx context.Context, people []model
 			eBirthplaces[i] = e.person.Birthplace
 			eHomepages[i] = e.person.Homepage
 		}
-		_, err := r.pool.Exec(ctx, `
-			UPDATE people SET
-				tmdb_id = CASE WHEN people.tmdb_id = '' AND t.tmdb_id <> '' THEN t.tmdb_id ELSE people.tmdb_id END,
-				imdb_id = CASE WHEN people.imdb_id = '' AND t.imdb_id <> '' THEN t.imdb_id ELSE people.imdb_id END,
-				tvdb_id = CASE WHEN people.tvdb_id = '' AND t.tvdb_id <> '' THEN t.tvdb_id ELSE people.tvdb_id END,
-				plex_guid = CASE WHEN people.plex_guid = '' AND t.plex_guid <> '' THEN t.plex_guid ELSE people.plex_guid END,
-				photo_path = CASE
-					WHEN t.photo_path NOT IN ('', '-') THEN t.photo_path
-					WHEN people.photo_path = ''        THEN t.photo_path
-					ELSE people.photo_path
-				END,
-				photo_source_path = CASE
-					WHEN t.photo_source_path NOT IN ('', '-') THEN t.photo_source_path
-					WHEN people.photo_source_path = ''        THEN t.photo_source_path
-					ELSE people.photo_source_path
-				END,
-				photo_thumbhash = CASE
-					WHEN t.photo_thumbhash NOT IN ('', '-') THEN t.photo_thumbhash
-					WHEN people.photo_thumbhash = ''        THEN t.photo_thumbhash
-					ELSE people.photo_thumbhash
-				END,
-				bio = CASE WHEN people.bio = '' AND t.bio <> '' THEN t.bio ELSE people.bio END,
-				birthplace = CASE WHEN people.birthplace = '' AND t.birthplace <> '' THEN t.birthplace ELSE people.birthplace END,
-				homepage = CASE WHEN people.homepage = '' AND t.homepage <> '' THEN t.homepage ELSE people.homepage END,
-				updated_at = NOW()
-			FROM UNNEST($1::bigint[], $2::text[], $3::text[], $4::text[], $5::text[],
-			            $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[])
-				AS t(id, tmdb_id, imdb_id, tvdb_id, plex_guid,
-				     photo_path, photo_source_path, photo_thumbhash, bio, birthplace, homepage)
-			WHERE people.id = t.id`,
+		_, err := r.pool.Exec(ctx, batchPersonEnrichmentSQL(),
 			enrichIDs, eTmdbIDs, eImdbIDs, eTvdbIDs, ePlexGUIDs,
 			ePhotoPaths, ePhotoSourcePaths, ePhotoThumbs, eBios, eBirthplaces, eHomepages,
 		)
