@@ -2,7 +2,7 @@
 
 import { act, useEffect, useImperativeHandle, forwardRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { FileVersion, ItemDetail } from "@/api/types";
@@ -219,6 +219,15 @@ function setInputValue(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function HistoryBackProbe() {
+  const navigate = useNavigate();
+  return (
+    <button type="button" aria-label="Browser back" onClick={() => navigate(-1)}>
+      Browser back
+    </button>
+  );
+}
+
 describe("EbookReader", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -371,6 +380,47 @@ describe("EbookReader", () => {
 
     expect(container.querySelector('[data-testid="origin-page"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="pushed-series-page"]')).toBeNull();
+  });
+
+  it("replaces a direct reader entry when falling back to the backTo target", async () => {
+    window.history.replaceState({ idx: 0 }, "");
+    const backTo = encodeURIComponent("/item/manga-series-1?libraryId=7");
+    await act(async () => {
+      root.render(
+        <MemoryRouter
+          initialEntries={[`/reader/ebook/ebook-1?libraryId=7&backTo=${backTo}`]}
+        >
+          <Routes>
+            <Route
+              path="/item/:contentId"
+              element={
+                <div data-testid="series-page">
+                  <HistoryBackProbe />
+                </div>
+              }
+            />
+            <Route path="/reader/ebook/:contentId" element={<EbookReader />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    });
+
+    const back = container.querySelector<HTMLAnchorElement>('a[aria-label="Back"]');
+    expect(back).not.toBeNull();
+    await act(async () => {
+      back?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(container.querySelector('[data-testid="series-page"]')).not.toBeNull();
+
+    const browserBack = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Browser back"]',
+    );
+    await act(async () => {
+      browserBack?.click();
+    });
+
+    expect(container.querySelector('[data-testid="series-page"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("reader surface");
   });
 
   it.each([

@@ -603,21 +603,25 @@ export default function EbookReader() {
                 // Exiting the reader must consume the reader's history entry,
                 // not push the target on top of it — otherwise pressing back
                 // on the destination re-opens the reader (issue #189). The
-                // href stays for modified clicks (new tab) and as the
-                // fallback when the reader was opened directly.
+                // href stays for modified clicks (new tab). A directly opened
+                // reader replaces itself with that target so browser Back
+                // cannot reopen the reader.
                 if (
                   event.defaultPrevented ||
                   event.button !== 0 ||
                   event.metaKey ||
                   event.ctrlKey ||
                   event.shiftKey ||
-                  event.altKey ||
-                  !hasRouterHistory()
+                  event.altKey
                 ) {
                   return;
                 }
                 event.preventDefault();
-                navigate(-1);
+                if (hasRouterHistory()) {
+                  navigate(-1);
+                } else {
+                  navigate(backHref, { replace: true });
+                }
               }}
             >
               <ArrowLeft className="size-5" />
