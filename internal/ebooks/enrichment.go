@@ -1464,7 +1464,7 @@ func cleanEbookSearchTitle(title, author string) string {
 	// The marker used to be unwrapped — brackets removed, words kept — so that
 	// distinct volumes searched distinctly rather than collapsing onto one
 	// provider work. That cost far more than it bought: retail furniture like
-	// "Second Skin Book 1" is not in provider catalogues, so it did not
+	// "Second Skin Book 1" is not in provider catalogs, so it did not
 	// disambiguate the search, it broke it. Sampling 40 parked no_match ebooks
 	// against Open Library, the unwrapped form this function used to emit
 	// matched 0 while the bare title matched 24.

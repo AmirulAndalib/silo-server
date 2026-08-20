@@ -1689,7 +1689,7 @@ func (r *ItemRepository) UpdateMetadata(ctx context.Context, contentID string, u
 	if err != nil {
 		return fmt.Errorf("begin metadata update tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(ctx) //nolint:errcheck
 
 	if err := r.UpdateMetadataTx(ctx, tx, contentID, upd); err != nil {
 		return err

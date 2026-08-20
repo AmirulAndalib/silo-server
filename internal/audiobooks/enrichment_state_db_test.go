@@ -244,7 +244,7 @@ func TestRetryBackoffOrdering(t *testing.T) {
 	limited := retryAfterFor(EnrichmentErrorRateLimited, 1)
 	permanent := retryAfterFor(EnrichmentErrorPermanent, 1)
 
-	if !(transient < limited && limited < permanent) {
+	if transient >= limited || limited >= permanent {
 		t.Errorf("backoff not ordered: transient=%v limited=%v permanent=%v", transient, limited, permanent)
 	}
 	if capped := retryAfterFor(EnrichmentErrorRateLimited, 1000); capped > 24*time.Hour {

@@ -42,7 +42,7 @@ const (
 	// Measured in bytes, not runes, and that is deliberate. For ASCII it is the
 	// character count this was calibrated against. For multi-byte scripts it is
 	// more permissive -- a four-character CJK title clears it -- which is the
-	// behaviour we want, because a short CJK title is specific in a way that a
+	// behavior we want, because a short CJK title is specific in a way that a
 	// short English word like "Bitcoin" is not.
 	minContainmentLen = 12
 
@@ -54,6 +54,7 @@ const (
 
 var (
 	// Decorations providers append that say nothing about identity.
+	//nolint:misspell // "dramatised" is a provider decoration we must recognize.
 	editionNoiseRE = regexp.MustCompile(
 		`(?i)\b(unabridged|abridged|audiobook|audio\s*book|dramatised|dramatized|` +
 			`narrated\s+by|complete\s+edition|special\s+edition|anniversary\s+edition|` +
@@ -121,7 +122,7 @@ func foldNumberWords(normalised string) string {
 // Note for scripts that do not space their words (CJK): the whole title
 // normalises to a single token, so Dice gives 1 for an exact match and 0
 // otherwise, and containment carries the near-misses. That is coarse but
-// correct, and strictly better than the ASCII-only behaviour it replaces.
+// correct, and strictly better than the ASCII-only behavior it replaces.
 func normaliseTitle(s string) string {
 	// Compose combining marks first: a decomposed "Café" (e + U+0301) would
 	// otherwise lose its accent to the punctuation strip -- U+0301 is \p{M},
@@ -338,7 +339,7 @@ func selectBestMatchYear(want string, wantYear int, results []SearchResult) (bes
 		matchedTitle := name
 
 		// Aliases are provider-confirmed titles for the same work, so a
-		// translated or regional spelling should not be penalised.
+		// translated or regional spelling should not be penalized.
 		for _, alias := range r.TitleAliases {
 			if s := TitleScore(want, alias.Title); s > score {
 				score = s

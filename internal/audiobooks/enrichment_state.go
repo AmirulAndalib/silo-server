@@ -157,7 +157,7 @@ func (s *enrichmentStateStore) RecordFailure(
 
 	// One statement, deliberately. Recording the failure and parking the retry
 	// used to be two round trips, and anything landing between them -- a
-	// cancelled context, a dropped connection, a concurrent RecordOutcome on
+	// canceled context, a dropped connection, a concurrent RecordOutcome on
 	// the same row -- left the item with an incremented attempts count but no
 	// backoff at all, immediately re-claimable against the very provider that
 	// just failed. The parked interval is min(step * attempts, cap), computed

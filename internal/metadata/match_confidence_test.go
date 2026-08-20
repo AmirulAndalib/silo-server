@@ -6,7 +6,7 @@ import "testing"
 // against the iTunes audiobook search on 2026-07-27, and these are the titles
 // it returned. 19 of 20 came back with something and roughly a quarter of those
 // were wrong, which is what motivated this gate. Keeping the actual pairs means
-// the calibration is anchored to observed provider behaviour rather than to
+// the calibration is anchored to observed provider behavior rather than to
 // invented examples.
 var productionPairs = []struct {
 	name    string

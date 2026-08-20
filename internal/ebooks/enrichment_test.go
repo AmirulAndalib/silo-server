@@ -1608,7 +1608,7 @@ func TestCleanEbookSearchTitle(t *testing.T) {
 		{"Plain Title", "Some Author", "Plain Title"},
 		{"  spaced   out  ", "", "spaced out"},
 		// Series/volume markers are dropped: they are retail furniture that no
-		// provider catalogue indexes, so carrying them into the query matched
+		// provider catalog indexes, so carrying them into the query matched
 		// nothing. Volumes are told apart after the search instead, by
 		// metadata.BestMatch scoring against the raw title.
 		{"Just One Night (The Raven Brothers Book 4)", "", "Just One Night"},
