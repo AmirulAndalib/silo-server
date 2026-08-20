@@ -647,6 +647,7 @@ func TestResolver_MetadataLanguageIgnoresLegacyColumn(t *testing.T) {
 }
 
 func TestResolver_AppliesGroupPolicy(t *testing.T) {
+	groupID := int64(9)
 	group := &GroupPolicy{
 		LibraryIDs:               []int{2, 4},
 		MaxPlaybackQuality:       PlaybackQualityStandard,
@@ -659,7 +660,7 @@ func TestResolver_AppliesGroupPolicy(t *testing.T) {
 
 	t.Run("unset account fields inherit the group", func(t *testing.T) {
 		resolver := NewResolver(
-			stubUserRepo{user: &models.User{ID: 1, AccessPolicyRevision: 5}},
+			stubUserRepo{user: &models.User{ID: 1, AccessGroupID: &groupID, AccessPolicyRevision: 5}},
 			stubStoreProvider{store: stubStore{}},
 			nil,
 			stubGroupProvider{group: group},
@@ -680,6 +681,7 @@ func TestResolver_AppliesGroupPolicy(t *testing.T) {
 		resolver := NewResolver(
 			stubUserRepo{user: &models.User{
 				ID:                   1,
+				AccessGroupID:        &groupID,
 				LibraryIDs:           []int{1, 2, 3},
 				MaxPlaybackQuality:   ptr(PlaybackQuality4K),
 				AccessPolicyRevision: 5,

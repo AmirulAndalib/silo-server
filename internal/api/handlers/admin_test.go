@@ -103,12 +103,12 @@ func TestUpdateRequiresSessionRevocation(t *testing.T) {
 		},
 		{
 			name: "access group set",
-			in:   models.UpdateUserInput{AccessGroupIDSet: true, AccessGroupID: &groupID},
+			in:   models.UpdateUserInput{AccessGroupID: models.SetValue(groupID)},
 			want: true,
 		},
 		{
 			name: "access group unchanged",
-			in:   models.UpdateUserInput{AccessGroupIDSet: true, AccessGroupID: nil},
+			in:   models.UpdateUserInput{AccessGroupID: models.ClearValue[int64]()},
 			want: false,
 		},
 		{

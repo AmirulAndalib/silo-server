@@ -239,117 +239,94 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*models.
 	return scanUser(r.pool.QueryRow(ctx, query, NormalizeEmail(email)))
 }
 
+// userUpdateColumn is one candidate column of a user update: it is written
+// only when set, and bumpsAccessPolicy marks the columns whose change has to
+// invalidate durable session/profile tokens by bumping
+// access_policy_revision. Values are pre-computed, so every entry is safe to
+// build even when set is false.
+type userUpdateColumn struct {
+	column            string
+	set               bool
+	value             any
+	bumpsAccessPolicy bool
+}
+
 // Update modifies a user's fields. Only non-nil fields in the input are updated.
 // If the input contains a Password, it is bcrypt-hashed before storage.
 func (r *UserRepository) Update(ctx context.Context, id int, input models.UpdateUserInput) error {
-	setClauses := []string{}
-	accessPolicyPredicates := []string{}
-	args := []any{}
-	argIndex := 1
-
+	var email *string
 	if input.Email != nil {
-		setClauses = append(setClauses, fmt.Sprintf("email = $%d", argIndex))
-		args = append(args, NormalizeEmail(*input.Email))
-		argIndex++
+		normalized := NormalizeEmail(*input.Email)
+		email = &normalized
 	}
+	var username *string
 	if input.Username != nil {
-		setClauses = append(setClauses, fmt.Sprintf("username = $%d", argIndex))
-		args = append(args, NormalizeUsername(*input.Username))
-		argIndex++
+		normalized := NormalizeUsername(*input.Username)
+		username = &normalized
 	}
+	var passwordHash *string
 	if input.Password != nil {
 		hash, err := bcrypt.GenerateFromPassword([]byte(*input.Password), bcrypt.DefaultCost)
 		if err != nil {
 			return fmt.Errorf("hashing password: %w", err)
 		}
-		setClauses = append(setClauses, fmt.Sprintf("password_hash = $%d", argIndex))
-		args = append(args, string(hash))
-		argIndex++
+		hashed := string(hash)
+		passwordHash = &hashed
 	}
-	if input.LocalPasswordLoginEnabled != nil {
-		setClauses = append(setClauses, fmt.Sprintf("local_password_login_enabled = $%d", argIndex))
-		args = append(args, *input.LocalPasswordLoginEnabled)
-		argIndex++
-	}
-	if input.Role != nil {
-		setClauses = append(setClauses, fmt.Sprintf("role = $%d", argIndex))
-		accessPolicyPredicates = append(accessPolicyPredicates, fmt.Sprintf("role IS DISTINCT FROM $%d", argIndex))
-		args = append(args, *input.Role)
-		argIndex++
-	}
+	var permissions []string
 	if input.Permissions != nil {
-		permissions, err := NormalizePermissions(*input.Permissions)
+		normalized, err := NormalizePermissions(*input.Permissions)
 		if err != nil {
 			return err
 		}
-		setClauses = append(setClauses, fmt.Sprintf("permissions = $%d", argIndex))
-		accessPolicyPredicates = append(accessPolicyPredicates, fmt.Sprintf("permissions IS DISTINCT FROM $%d", argIndex))
-		args = append(args, permissions)
-		argIndex++
+		permissions = normalized
 	}
-	if input.Enabled != nil {
-		setClauses = append(setClauses, fmt.Sprintf("enabled = $%d", argIndex))
-		accessPolicyPredicates = append(accessPolicyPredicates, fmt.Sprintf("enabled IS DISTINCT FROM $%d", argIndex))
-		args = append(args, *input.Enabled)
-		argIndex++
+
+	// Library scope is resolved from users.library_ids on each request, so
+	// changing it must not invalidate durable profile/session tokens — hence
+	// no access-policy bump on that column.
+	columns := []userUpdateColumn{
+		{column: "email", set: email != nil, value: email},
+		{column: "username", set: username != nil, value: username},
+		{column: "password_hash", set: passwordHash != nil, value: passwordHash},
+		{column: "local_password_login_enabled", set: input.LocalPasswordLoginEnabled != nil, value: input.LocalPasswordLoginEnabled},
+		{column: "role", set: input.Role != nil, value: input.Role, bumpsAccessPolicy: true},
+		{column: "permissions", set: input.Permissions != nil, value: permissions, bumpsAccessPolicy: true},
+		{column: "enabled", set: input.Enabled != nil, value: input.Enabled, bumpsAccessPolicy: true},
+		{column: "library_ids", set: input.LibraryIDs.Set, value: derefSlice(input.LibraryIDs.Value)},
+		{
+			column:            "max_playback_quality",
+			set:               input.MaxPlaybackQuality.Set,
+			value:             normalizeQualityOverride(input.MaxPlaybackQuality.Value),
+			bumpsAccessPolicy: true,
+		},
+		{column: "max_streams", set: input.MaxStreams.Set, value: input.MaxStreams.Value},
+		{column: "max_transcodes", set: input.MaxTranscodes.Set, value: input.MaxTranscodes.Value},
+		{column: "transcode_allowed", set: input.TranscodeAllowed.Set, value: input.TranscodeAllowed.Value},
+		{column: "audio_transcode_allowed", set: input.AudioTranscodeAllowed.Set, value: input.AudioTranscodeAllowed.Value},
+		{column: "max_profiles", set: input.MaxProfiles != nil, value: input.MaxProfiles},
+		{column: "download_allowed", set: input.DownloadAllowed.Set, value: input.DownloadAllowed.Value},
+		{column: "download_transcode_allowed", set: input.DownloadTranscodeAllowed.Set, value: input.DownloadTranscodeAllowed.Value},
+		{column: "requests_allowed", set: input.RequestsAllowed.Set, value: input.RequestsAllowed.Value},
+		{column: "access_group_id", set: input.AccessGroupID.Set, value: input.AccessGroupID.Value, bumpsAccessPolicy: true},
 	}
-	if input.LibraryIDs.Set {
-		setClauses = append(setClauses, fmt.Sprintf("library_ids = $%d", argIndex))
-		// Library scope is resolved from users.library_ids on each request, so
-		// changing it must not invalidate durable profile/session tokens.
-		args = append(args, derefSlice(input.LibraryIDs.Value))
-		argIndex++
-	}
-	if input.MaxPlaybackQuality.Set {
-		setClauses = append(setClauses, fmt.Sprintf("max_playback_quality = $%d", argIndex))
-		accessPolicyPredicates = append(accessPolicyPredicates, fmt.Sprintf("max_playback_quality IS DISTINCT FROM $%d", argIndex))
-		args = append(args, normalizeQualityOverride(input.MaxPlaybackQuality.Value))
-		argIndex++
-	}
-	if input.MaxStreams.Set {
-		setClauses = append(setClauses, fmt.Sprintf("max_streams = $%d", argIndex))
-		args = append(args, input.MaxStreams.Value)
-		argIndex++
-	}
-	if input.MaxTranscodes.Set {
-		setClauses = append(setClauses, fmt.Sprintf("max_transcodes = $%d", argIndex))
-		args = append(args, input.MaxTranscodes.Value)
-		argIndex++
-	}
-	if input.TranscodeAllowed.Set {
-		setClauses = append(setClauses, fmt.Sprintf("transcode_allowed = $%d", argIndex))
-		args = append(args, input.TranscodeAllowed.Value)
-		argIndex++
-	}
-	if input.AudioTranscodeAllowed.Set {
-		setClauses = append(setClauses, fmt.Sprintf("audio_transcode_allowed = $%d", argIndex))
-		args = append(args, input.AudioTranscodeAllowed.Value)
-		argIndex++
-	}
-	if input.MaxProfiles != nil {
-		setClauses = append(setClauses, fmt.Sprintf("max_profiles = $%d", argIndex))
-		args = append(args, *input.MaxProfiles)
-		argIndex++
-	}
-	if input.DownloadAllowed.Set {
-		setClauses = append(setClauses, fmt.Sprintf("download_allowed = $%d", argIndex))
-		args = append(args, input.DownloadAllowed.Value)
-		argIndex++
-	}
-	if input.DownloadTranscodeAllowed.Set {
-		setClauses = append(setClauses, fmt.Sprintf("download_transcode_allowed = $%d", argIndex))
-		args = append(args, input.DownloadTranscodeAllowed.Value)
-		argIndex++
-	}
-	if input.RequestsAllowed.Set {
-		setClauses = append(setClauses, fmt.Sprintf("requests_allowed = $%d", argIndex))
-		args = append(args, input.RequestsAllowed.Value)
-		argIndex++
-	}
-	if input.AccessGroupIDSet {
-		setClauses = append(setClauses, fmt.Sprintf("access_group_id = $%d", argIndex))
-		accessPolicyPredicates = append(accessPolicyPredicates, fmt.Sprintf("access_group_id IS DISTINCT FROM $%d", argIndex))
-		args = append(args, input.AccessGroupID)
+
+	setClauses := []string{}
+	accessPolicyPredicates := []string{}
+	args := []any{}
+	argIndex := 1
+	for _, col := range columns {
+		if !col.set {
+			continue
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col.column, argIndex))
+		if col.bumpsAccessPolicy {
+			accessPolicyPredicates = append(
+				accessPolicyPredicates,
+				fmt.Sprintf("%s IS DISTINCT FROM $%d", col.column, argIndex),
+			)
+		}
+		args = append(args, col.value)
 		argIndex++
 	}
 

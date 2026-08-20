@@ -13,15 +13,51 @@ import (
 const (
 	// ScopeAdminUsers covers admin user lifecycle management: list, create,
 	// read, update, and delete users, plus reading a user's profiles.
+	//
+	// A scoped key must never be able to trade its allowlist for an unscoped
+	// admin session, so this scope stops at the admin boundary: it may not
+	// create an account with the admin role, may not grant that role to an
+	// existing account, and may not change the password or role of an account
+	// that is already an admin. Provisioning and managing ordinary accounts,
+	// passwords included, is in scope.
 	ScopeAdminUsers = "admin:users"
 
 	// ScopeAdminAccessGroupsRead covers read-only access-group discovery.
 	ScopeAdminAccessGroupsRead = "admin:access-groups:read"
 )
 
+// APIKeyScope is one scope a key may carry, paired with the description
+// clients show when offering scopes to a user.
+type APIKeyScope struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// APIKeyScopeCatalog returns every scope a key may carry, in a stable order.
+// It is the single source of truth behind both scope validation and the
+// GET /api/v1/api-keys/scopes feature-detection endpoint.
+func APIKeyScopeCatalog() []APIKeyScope {
+	return []APIKeyScope{
+		{
+			Name: ScopeAdminUsers,
+			Description: "Manage user accounts: create, list, read, update, and delete users and " +
+				"read their profiles. Cannot create or modify admin accounts.",
+		},
+		{
+			Name:        ScopeAdminAccessGroupsRead,
+			Description: "Read access groups and their policies.",
+		},
+	}
+}
+
 // ValidAPIKeyScopes returns every scope a key may carry.
 func ValidAPIKeyScopes() []string {
-	return []string{ScopeAdminUsers, ScopeAdminAccessGroupsRead}
+	catalog := APIKeyScopeCatalog()
+	scopes := make([]string, 0, len(catalog))
+	for _, scope := range catalog {
+		scopes = append(scopes, scope.Name)
+	}
+	return scopes
 }
 
 // NormalizeAPIKeyScopes validates and deduplicates a requested scope list.

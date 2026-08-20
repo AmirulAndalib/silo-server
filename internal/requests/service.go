@@ -1070,29 +1070,24 @@ func (s *Service) ensureRequestsEnabled(ctx context.Context) error {
 	return nil
 }
 
+// ensureViewerRequestsAllowed enforces the viewer's resolved requests gate
+// (account override on top of the access group). The account loader is
+// required: without it the gate could only see the group layer, which would
+// silently ignore a per-user deny, so a missing repository is a wiring error
+// rather than a permissive fallback.
 func (s *Service) ensureViewerRequestsAllowed(ctx context.Context, userID int) error {
-	if s.users != nil {
-		user, err := s.users.GetByID(ctx, userID)
-		if err != nil {
-			return ErrForbidden
-		}
-		effective, err := access.EffectivePolicyForUser(ctx, user, s.groupProvider)
-		if err != nil {
-			return ErrForbidden
-		}
-		if !effective.RequestsAllowed {
-			return ErrForbidden
-		}
-		return nil
+	if s.users == nil {
+		return fmt.Errorf("requests: user repository is not configured")
 	}
-	if s.groupProvider == nil {
-		return nil
-	}
-	group, err := s.groupProvider.GetPolicyForUser(ctx, userID)
+	user, err := s.users.GetByID(ctx, userID)
 	if err != nil {
 		return ErrForbidden
 	}
-	if group != nil && !group.RequestsAllowed {
+	effective, err := access.EffectivePolicyForUser(ctx, user, s.groupProvider)
+	if err != nil {
+		return ErrForbidden
+	}
+	if !effective.RequestsAllowed {
 		return ErrForbidden
 	}
 	return nil

@@ -99,6 +99,5 @@ type UpdateUserInput struct {
 	DownloadAllowed           Optional[bool]
 	DownloadTranscodeAllowed  Optional[bool]
 	RequestsAllowed           Optional[bool]
-	AccessGroupIDSet          bool
-	AccessGroupID             *int64
+	AccessGroupID             Optional[int64]
 }

@@ -40,6 +40,7 @@ func TestAPIKeyScopesAllow(t *testing.T) {
 		{"users scope denies admin settings", users, http.MethodGet, "/api/v1/admin/settings", false},
 		{"users scope denies access groups", users, http.MethodGet, "/api/v1/admin/access-groups", false},
 		{"users scope denies non-admin surface", users, http.MethodGet, "/api/v1/watch/home", false},
+		{"users scope denies the scope catalog", users, http.MethodGet, "/api/v1/api-keys/scopes", false},
 		{"users scope denies non-numeric id", users, http.MethodGet, "/api/v1/admin/users/abc", false},
 
 		{"traversal cannot dodge the allowlist", users, http.MethodGet, "/api/v1/admin/settings/../users", true},

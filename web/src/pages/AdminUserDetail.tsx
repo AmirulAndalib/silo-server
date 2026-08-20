@@ -28,6 +28,7 @@ import { Button } from "@/components/ui/button";
 import {
   PolicyAccessFields,
   PolicyLimitFields,
+  policyInheritHints,
   policyStateFromUser,
   policyUpdateFields,
 } from "@/components/UserPolicyFields";
@@ -306,11 +307,13 @@ function OverviewTab({ user }: { user: AdminUser }) {
           />
           <DetailRow
             label="Marker Editing"
-            value={allowed(hasAssignedPermission(user.permissions, PERMISSION_MARKER_EDIT))}
+            value={allowed(hasAssignedPermission(effective.permissions, PERMISSION_MARKER_EDIT))}
           />
           <DetailRow
             label="Metadata Curation"
-            value={allowed(hasAssignedPermission(user.permissions, PERMISSION_METADATA_CURATION))}
+            value={allowed(
+              hasAssignedPermission(effective.permissions, PERMISSION_METADATA_CURATION),
+            )}
           />
           <DetailRow
             label="Max Playback Quality"
@@ -336,15 +339,13 @@ function OverviewTab({ user }: { user: AdminUser }) {
                   : String(effective.max_transcodes)) + overridden(user.max_transcodes !== null)
             }
           />
-          {!effective.transcode_allowed && (
-            <DetailRow
-              label="Audio Transcodes"
-              value={
-                allowed(effective.audio_transcode_allowed) +
-                overridden(user.audio_transcode_allowed !== null)
-              }
-            />
-          )}
+          <DetailRow
+            label="Audio Transcodes"
+            value={
+              allowed(effective.audio_transcode_allowed) +
+              overridden(user.audio_transcode_allowed !== null)
+            }
+          />
           <DetailRow label="Max Profiles" value={String(user.max_profiles)} />
           <DetailRow
             label="Downloads"
@@ -1059,11 +1060,13 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
   const metadataCurationId = useId();
   const updateMutation = useUpdateUser();
   const accessGroupValue = accessGroupID === null ? "none" : String(accessGroupID);
-  // effective_policy was resolved against the user's saved group; once the
-  // admin picks a different group in this dialog, those values are wrong, so
-  // degrade the inherit hints to generic labels rather than show stale ones.
-  const effectiveForHints =
-    accessGroupID === user.access_group_id ? user.effective_policy : undefined;
+  // Hints come from the group selected right now, so they follow the picker
+  // instead of describing the group the account was last saved with. When that
+  // group is not in the loaded list, fall back to the resolved policy the
+  // server sent — but only while the saved group is still the selected one.
+  const inheritHints =
+    policyInheritHints(accessGroupID, accessGroups) ??
+    (accessGroupID === user.access_group_id ? user.effective_policy : undefined);
   const selectedGroupMissing =
     accessGroupID !== null && !accessGroups.some((group) => group.id === accessGroupID);
 
@@ -1211,17 +1214,13 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
             <PolicyAccessFields
               state={policy}
               onChange={setPolicy}
-              effective={effectiveForHints}
+              effective={inheritHints}
               libraries={libraries}
             />
           </TabsContent>
 
           <TabsContent value="limits" className="mt-0 space-y-4">
-            <PolicyLimitFields
-              state={policy}
-              onChange={setPolicy}
-              effective={user.effective_policy}
-            />
+            <PolicyLimitFields state={policy} onChange={setPolicy} effective={inheritHints} />
             <div className="space-y-1">
               <Label>Max Profiles</Label>
               <Input

@@ -46,28 +46,18 @@ type EffectiveUserPolicy struct {
 	RequestsAllowed          bool
 }
 
-// PolicySource reports where each effective field came from.
-type PolicySource struct {
-	LibraryIDs               bool
-	MaxPlaybackQuality       bool
-	DownloadAllowed          bool
-	DownloadTranscodeAllowed bool
-	TranscodeAllowed         bool
-	AudioTranscodeAllowed    bool
-	MaxStreams               bool
-	MaxTranscodes            bool
-	RequestsAllowed          bool
-}
-
 // NoGroupPolicy is the policy applied to an account with no access group
-// (admins are ungrouped). It is fully permissive so that an unset field on
-// such an account keeps today's unrestricted behavior.
+// (admins are ungrouped). It is permissive so that an unset field on such an
+// account keeps today's unrestricted behavior. DownloadTranscodeAllowed is
+// the exception: it defaults to false because that was the old column default
+// on users (and is the seeded Default Group's value), so an account that never
+// had the gate turned on does not silently gain it.
 func NoGroupPolicy() GroupPolicy {
 	return GroupPolicy{
 		LibraryIDs:               nil,
 		MaxPlaybackQuality:       "",
 		DownloadAllowed:          true,
-		DownloadTranscodeAllowed: true,
+		DownloadTranscodeAllowed: false,
 		TranscodeAllowed:         true,
 		AudioTranscodeAllowed:    true,
 		MaxStreams:               0,
@@ -78,9 +68,11 @@ func NoGroupPolicy() GroupPolicy {
 }
 
 // EffectivePolicyForUser loads a user's group policy and returns the resolved
-// policy. Nil providers are treated as "no group".
+// policy. Nil providers are treated as "no group". An account with no group
+// resolves against NoGroupPolicy without querying the provider, which would
+// return nil for it anyway.
 func EffectivePolicyForUser(ctx context.Context, user *models.User, provider GroupPolicyProvider) (EffectiveUserPolicy, error) {
-	if provider == nil || user == nil {
+	if provider == nil || user == nil || user.AccessGroupID == nil {
 		return ApplyGroupPolicy(user, nil), nil
 	}
 	group, err := provider.GetPolicyForUser(ctx, user.ID)
@@ -120,25 +112,6 @@ func ApplyGroupPolicy(user *models.User, group *GroupPolicy) EffectiveUserPolicy
 		effective.Permissions = intersectStrings(user.Permissions, group.AllowedPermissions)
 	}
 	return effective
-}
-
-// OverrideSources reports which effective fields are user overrides (true) as
-// opposed to inherited from the group (false).
-func OverrideSources(user *models.User) PolicySource {
-	if user == nil {
-		return PolicySource{}
-	}
-	return PolicySource{
-		LibraryIDs:               user.LibraryIDs != nil,
-		MaxPlaybackQuality:       user.MaxPlaybackQuality != nil,
-		DownloadAllowed:          user.DownloadAllowed != nil,
-		DownloadTranscodeAllowed: user.DownloadTranscodeAllowed != nil,
-		TranscodeAllowed:         user.TranscodeAllowed != nil,
-		AudioTranscodeAllowed:    user.AudioTranscodeAllowed != nil,
-		MaxStreams:               user.MaxStreams != nil,
-		MaxTranscodes:            user.MaxTranscodes != nil,
-		RequestsAllowed:          user.RequestsAllowed != nil,
-	}
 }
 
 func inheritLibraryIDs(userLibraryIDs, groupLibraryIDs []int) []int {

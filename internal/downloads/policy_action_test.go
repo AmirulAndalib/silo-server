@@ -75,7 +75,9 @@ func TestPolicyActionDeciderMatchesLegacyCreateGate(t *testing.T) {
 
 func TestPolicyActionDeciderUsesGroupDownloadFlags(t *testing.T) {
 	ctx := context.Background()
-	user := &models.User{ID: 9, DownloadTranscodeAllowed: ptrBool(true)}
+	// Grouped account: the group policy layer only applies to a member.
+	groupID := int64(4)
+	user := &models.User{ID: 9, AccessGroupID: &groupID, DownloadTranscodeAllowed: ptrBool(true)}
 	svc := newPolicyActionTestService(
 		user,
 		config.DownloadConfig{Enabled: true, TranscodeEnabled: true},

@@ -450,6 +450,7 @@ func NewRouter(deps Dependencies) chi.Router {
 					userRepo,
 					metadataLibraries,
 					checkPrimaryProfile,
+					accessGroupStore,
 				).RequireMetadataCurationForItem
 			}
 		}
@@ -1970,6 +1971,7 @@ func NewRouter(deps Dependencies) chi.Router {
 				r.Route("/api-keys", func(r chi.Router) {
 					r.Post("/", apiKeyHandler.HandleCreateAPIKey)
 					r.Get("/", apiKeyHandler.HandleListAPIKeys)
+					r.Get("/scopes", apiKeyHandler.HandleListAPIKeyScopes)
 					r.Delete("/{id}", apiKeyHandler.HandleDeleteAPIKey)
 				})
 			})

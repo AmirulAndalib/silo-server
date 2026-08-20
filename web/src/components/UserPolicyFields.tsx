@@ -1,6 +1,6 @@
-import { useId } from "react";
+import { useId, useState } from "react";
 
-import type { AdminUser, AdminUserEffectivePolicy, Library } from "@/api/types";
+import type { AccessGroup, AdminUser, AdminUserEffectivePolicy, Library } from "@/api/types";
 import { LibraryAccessSelector } from "@/components/LibraryAccessSelector";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -34,63 +34,100 @@ export interface UserPolicyState {
   requestsAllowed: boolean | null;
 }
 
-export function policyStateFromUser(user: AdminUser | null): UserPolicyState {
-  return {
-    libraryIDs: user?.library_ids ?? null,
-    maxPlaybackQuality: user?.max_playback_quality ?? null,
-    maxStreams: user?.max_streams ?? null,
-    maxTranscodes: user?.max_transcodes ?? null,
-    transcodeAllowed: user?.transcode_allowed ?? null,
-    audioTranscodeAllowed: user?.audio_transcode_allowed ?? null,
-    downloadAllowed: user?.download_allowed ?? null,
-    downloadTranscodeAllowed: user?.download_transcode_allowed ?? null,
-    requestsAllowed: user?.requests_allowed ?? null,
-  };
-}
+// The one place the state keys and their API field names are paired up; the
+// helpers below are all derived from it so a new policy field is added once.
+const POLICY_FIELDS = {
+  libraryIDs: "library_ids",
+  maxPlaybackQuality: "max_playback_quality",
+  maxStreams: "max_streams",
+  maxTranscodes: "max_transcodes",
+  transcodeAllowed: "transcode_allowed",
+  audioTranscodeAllowed: "audio_transcode_allowed",
+  downloadAllowed: "download_allowed",
+  downloadTranscodeAllowed: "download_transcode_allowed",
+  requestsAllowed: "requests_allowed",
+} as const satisfies Record<keyof UserPolicyState, keyof AdminUser>;
 
 // Update payload: every policy field is sent explicitly — a value stores an
 // override, null clears it back to inherit.
-export function policyUpdateFields(state: UserPolicyState) {
-  return {
-    library_ids: state.libraryIDs,
-    max_playback_quality: state.maxPlaybackQuality,
-    max_streams: state.maxStreams,
-    max_transcodes: state.maxTranscodes,
-    transcode_allowed: state.transcodeAllowed,
-    audio_transcode_allowed: state.audioTranscodeAllowed,
-    download_allowed: state.downloadAllowed,
-    download_transcode_allowed: state.downloadTranscodeAllowed,
-    requests_allowed: state.requestsAllowed,
-  };
-}
+type PolicyUpdatePayload = {
+  [K in keyof UserPolicyState as (typeof POLICY_FIELDS)[K]]: UserPolicyState[K];
+};
 
 // Create payload: only overridden fields are sent; absent fields inherit.
-export function policyCreateFields(state: UserPolicyState) {
+type PolicyCreatePayload = {
+  [K in keyof PolicyUpdatePayload]?: Exclude<PolicyUpdatePayload[K], null>;
+};
+
+export function policyStateFromUser(user: AdminUser | null): UserPolicyState {
+  return Object.fromEntries(
+    Object.entries(POLICY_FIELDS).map(([key, field]) => [key, user?.[field] ?? null]),
+  ) as unknown as UserPolicyState;
+}
+
+export function policyUpdateFields(state: UserPolicyState): PolicyUpdatePayload {
+  return Object.fromEntries(
+    Object.entries(POLICY_FIELDS).map(([key, field]) => [
+      field,
+      state[key as keyof UserPolicyState],
+    ]),
+  ) as PolicyUpdatePayload;
+}
+
+export function policyCreateFields(state: UserPolicyState): PolicyCreatePayload {
+  return Object.fromEntries(
+    Object.entries(policyUpdateFields(state)).filter(([, value]) => value !== null),
+  ) as PolicyCreatePayload;
+}
+
+// What an inheriting field resolves to. Same shape as the server's resolved
+// policy minus permissions, which have no inherit control here.
+export type PolicyInheritHints = Omit<AdminUserEffectivePolicy, "permissions">;
+
+// Mirrors access.NoGroupPolicy(): the layer under an account that belongs to
+// no access group. Keep in sync with internal/access/groups.go.
+const NO_GROUP_POLICY: PolicyInheritHints = {
+  library_ids: null,
+  max_playback_quality: "",
+  max_streams: 0,
+  max_transcodes: 0,
+  transcode_allowed: true,
+  audio_transcode_allowed: true,
+  download_allowed: true,
+  download_transcode_allowed: false,
+  requests_allowed: true,
+};
+
+// Inherit hints for the group currently selected in the form — not the group
+// the account was last saved with, so the hints follow the picker instead of
+// going stale. Returns undefined when the selected group is not in the loaded
+// list (still loading, or since deleted) so callers can fall back.
+export function policyInheritHints(
+  accessGroupID: number | null,
+  accessGroups: AccessGroup[],
+): PolicyInheritHints | undefined {
+  if (accessGroupID === null) return NO_GROUP_POLICY;
+  const group = accessGroups.find((candidate) => candidate.id === accessGroupID);
+  if (group === undefined) return undefined;
   return {
-    ...(state.libraryIDs !== null ? { library_ids: state.libraryIDs } : {}),
-    ...(state.maxPlaybackQuality !== null
-      ? { max_playback_quality: state.maxPlaybackQuality }
-      : {}),
-    ...(state.maxStreams !== null ? { max_streams: state.maxStreams } : {}),
-    ...(state.maxTranscodes !== null ? { max_transcodes: state.maxTranscodes } : {}),
-    ...(state.transcodeAllowed !== null ? { transcode_allowed: state.transcodeAllowed } : {}),
-    ...(state.audioTranscodeAllowed !== null
-      ? { audio_transcode_allowed: state.audioTranscodeAllowed }
-      : {}),
-    ...(state.downloadAllowed !== null ? { download_allowed: state.downloadAllowed } : {}),
-    ...(state.downloadTranscodeAllowed !== null
-      ? { download_transcode_allowed: state.downloadTranscodeAllowed }
-      : {}),
-    ...(state.requestsAllowed !== null ? { requests_allowed: state.requestsAllowed } : {}),
+    library_ids: group.library_ids,
+    max_playback_quality: group.max_playback_quality,
+    max_streams: group.max_streams,
+    max_transcodes: group.max_transcodes,
+    transcode_allowed: group.transcode_allowed,
+    audio_transcode_allowed: group.audio_transcode_allowed,
+    download_allowed: group.download_allowed,
+    download_transcode_allowed: group.download_transcode_allowed,
+    requests_allowed: group.requests_allowed,
   };
 }
 
 interface PolicyContext {
   state: UserPolicyState;
   onChange: (state: UserPolicyState) => void;
-  // The resolved policy from the server, used to show what an inheriting
-  // field currently evaluates to. Absent on the create form.
-  effective?: AdminUserEffectivePolicy;
+  // What the fields inherit when they are not overridden, used to show what an
+  // inheriting field currently evaluates to. Absent when unknown.
+  effective?: PolicyInheritHints;
 }
 
 function inheritHint(effectiveText: string | undefined): string {
@@ -141,6 +178,13 @@ function BooleanPolicyRow({
   );
 }
 
+function limitDraftValue(draft: string): number | null {
+  if (draft.trim() === "") return null;
+  const parsed = Number(draft);
+  if (!Number.isInteger(parsed) || parsed < 0) return null;
+  return parsed;
+}
+
 function LimitPolicyField({
   label,
   value,
@@ -154,7 +198,36 @@ function LimitPolicyField({
 }) {
   const id = useId();
   const overrideId = `${id}-override`;
-  const overridden = value !== null;
+  // Override is tracked locally because "overriding, but nothing typed yet" has
+  // no representation in UserPolicyState: while the box is empty the field
+  // keeps inheriting rather than pinning 0, which would mean unlimited.
+  const [overridden, setOverridden] = useState(value !== null);
+  // The raw string stays local so a cleared or half-typed box is an unsaved
+  // edit instead of collapsing to 0 or NaN.
+  const [draft, setDraft] = useState(() => (value === null ? "" : String(value)));
+  const draftValue = limitDraftValue(draft);
+
+  function handleOverrideChange(checked: boolean) {
+    setOverridden(checked);
+    if (!checked) {
+      setDraft("");
+      onValueChange(null);
+      return;
+    }
+    // Seed the value the field already resolves to. With no hint available the
+    // box starts empty and the field keeps inheriting until the admin types a
+    // value, so an unknown limit is never silently saved as unlimited.
+    setDraft(effectiveValue === undefined ? "" : String(effectiveValue));
+    onValueChange(effectiveValue ?? null);
+  }
+
+  function handleDraftChange(raw: string) {
+    setDraft(raw);
+    const parsed = limitDraftValue(raw);
+    if (parsed === null) return;
+    onValueChange(parsed);
+  }
+
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between">
@@ -163,11 +236,7 @@ function LimitPolicyField({
           <Label htmlFor={overrideId} className="text-muted-foreground text-xs">
             Override
           </Label>
-          <Switch
-            id={overrideId}
-            checked={overridden}
-            onCheckedChange={(checked) => onValueChange(checked ? (effectiveValue ?? 0) : null)}
-          />
+          <Switch id={overrideId} checked={overridden} onCheckedChange={handleOverrideChange} />
         </div>
       </div>
       {overridden ? (
@@ -176,10 +245,16 @@ function LimitPolicyField({
             id={id}
             type="number"
             min={0}
-            value={value}
-            onChange={(event) => onValueChange(Math.max(0, Number(event.target.value)))}
+            step={1}
+            required
+            value={draft}
+            onChange={(event) => handleDraftChange(event.target.value)}
           />
-          <p className="text-muted-foreground text-xs">0 = unlimited</p>
+          <p className="text-muted-foreground text-xs">
+            {draftValue === null
+              ? "Enter a whole number, or turn Override off to inherit."
+              : "0 = unlimited"}
+          </p>
         </>
       ) : (
         <p className="text-muted-foreground border-border rounded-md border border-dashed px-3 py-2 text-sm">

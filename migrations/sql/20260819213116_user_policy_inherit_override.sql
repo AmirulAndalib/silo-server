@@ -34,17 +34,32 @@ ALTER TABLE public.users
 -- positive caps, a named quality, an explicit library list) stay as explicit
 -- overrides. The one deliberate change: a positive cap that exceeds the
 -- group's cap now wins instead of being clamped.
+--
+-- Caps map every value <= 0, not just 0: the admin API used to accept a
+-- negative cap and the old resolver treated anything <= 0 as "defer to the
+-- group". Keeping a negative would turn it into an override that resolves to
+-- 0, i.e. unlimited — the opposite of what the row meant.
+--
 -- Boolean mapping: NOT col (rather than a bare ELSE) keeps a pre-existing
 -- NULL — possible on the download columns, which were always nullable — as
 -- NULL/inherit instead of inventing an explicit deny override.
+--
+-- download_transcode_allowed is the exception and maps the other way round.
+-- It is the one policy column whose old column default was false, so a
+-- never-touched account already stores false. Mapping false to an explicit
+-- deny would freeze every existing account against its group and make the
+-- group's toggle inert; instead false becomes NULL (inherit) and only an
+-- explicit true is kept as an override. The permissive default for an
+-- ungrouped account (access.NoGroupPolicy) is false for this field to match
+-- the old column default, as is the seeded Default Group.
 UPDATE public.users SET
-    max_streams = NULLIF(max_streams, 0),
-    max_transcodes = NULLIF(max_transcodes, 0),
+    max_streams = CASE WHEN max_streams > 0 THEN max_streams END,
+    max_transcodes = CASE WHEN max_transcodes > 0 THEN max_transcodes END,
     max_playback_quality = NULLIF(max_playback_quality, ''),
     transcode_allowed = CASE WHEN NOT transcode_allowed THEN false ELSE NULL END,
     audio_transcode_allowed = CASE WHEN NOT audio_transcode_allowed THEN false ELSE NULL END,
     download_allowed = CASE WHEN NOT download_allowed THEN false ELSE NULL END,
-    download_transcode_allowed = CASE WHEN NOT download_transcode_allowed THEN false ELSE NULL END;
+    download_transcode_allowed = CASE WHEN download_transcode_allowed THEN true ELSE NULL END;
 -- +goose StatementEnd
 
 -- +goose Down
@@ -54,7 +69,8 @@ UPDATE public.users SET
 -- cap (0), an explicit '' quality, and explicit-true booleans collapse into
 -- the old delegate sentinels — under restored strictest-merge semantics such
 -- users fall back to their group's values. requests_allowed overrides are
--- dropped entirely.
+-- dropped entirely. download_transcode_allowed collapses to false, the
+-- restored column default and the value the Up direction treats as inherit.
 UPDATE public.users SET
     max_streams = COALESCE(max_streams, 0),
     max_transcodes = COALESCE(max_transcodes, 0),
@@ -62,7 +78,7 @@ UPDATE public.users SET
     transcode_allowed = COALESCE(transcode_allowed, true),
     audio_transcode_allowed = COALESCE(audio_transcode_allowed, true),
     download_allowed = COALESCE(download_allowed, true),
-    download_transcode_allowed = COALESCE(download_transcode_allowed, true);
+    download_transcode_allowed = COALESCE(download_transcode_allowed, false);
 
 ALTER TABLE public.users
     ALTER COLUMN max_playback_quality SET DEFAULT '',

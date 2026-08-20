@@ -399,8 +399,10 @@ override(_, _) := {"profile_verified": false}
 
 func TestViewerResolverAppliesGroupPolicy(t *testing.T) {
 	ctx := context.Background()
+	groupID := int64(2)
 	user := &models.User{
 		ID:                   1,
+		AccessGroupID:        &groupID,
 		AccessPolicyRevision: 5,
 	}
 	group := &access.GroupPolicy{

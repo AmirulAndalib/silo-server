@@ -6,6 +6,7 @@ import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AdminUser, UpdateUserRequest } from "@/api/types";
+import { PERMISSION_MARKER_EDIT, PERMISSION_METADATA_CURATION } from "@/lib/permissions";
 import { SETTING_KEYS } from "@/lib/settingsContract";
 
 import AdminUserDetail from "./AdminUserDetail";
@@ -22,6 +23,8 @@ const mocks = vi.hoisted(() => ({
   deleteSettingMutate: vi.fn(),
   /** Rows the canonical admin settings list answers with, per test. */
   userSettings: [] as unknown[],
+  /** The account the detail page renders, reset to `adminUser` per test. */
+  user: null as AdminUser | null,
 }));
 
 const adminUser: AdminUser = {
@@ -86,7 +89,7 @@ function installPointerCaptureMocks() {
 }
 
 vi.mock("@/hooks/queries/admin/users", () => ({
-  useAdminUser: () => ({ data: adminUser, isLoading: false, error: null }),
+  useAdminUser: () => ({ data: mocks.user, isLoading: false, error: null }),
   useUpdateUser: () => ({ mutate: mocks.updateUserMutate, isPending: false }),
   useDeleteUser: () => ({ mutate: vi.fn(), isPending: false }),
   useImpersonateUser: () => ({ mutateAsync: vi.fn(), isPending: false }),
@@ -177,6 +180,7 @@ beforeEach(() => {
   mocks.updateSettingMutate.mockReset();
   mocks.deleteSettingMutate.mockReset();
   mocks.userSettings = [];
+  mocks.user = adminUser;
 });
 
 afterEach(() => {
@@ -362,3 +366,121 @@ describe("AdminUserDetail transcode limits", () => {
     expect(call?.body.library_ids).toBeNull();
   });
 });
+
+async function openLimitsTab(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: /edit/i }));
+  await user.click(screen.getByRole("tab", { name: "Limits" }));
+}
+
+/** The Override toggle of the nth limit field on the Limits tab. */
+function overrideSwitch(index: number): HTMLElement {
+  const switches = screen.getAllByRole("switch", { name: "Override" });
+  const target = switches[index];
+  if (target === undefined) throw new Error(`no Override switch at index ${index}`);
+  return target;
+}
+
+async function selectGuestsGroup(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("tab", { name: "Access" }));
+  await user.click(screen.getByRole("combobox", { name: "Group" }));
+  await user.click(await screen.findByRole("option", { name: "Guests" }));
+}
+
+describe("AdminUserDetail inherit hints", () => {
+  it("derives hints from the group selected in the dialog, on both tabs", async () => {
+    const user = userEvent.setup();
+    renderUserDetail();
+
+    await openLimitsTab(user);
+    // Ungrouped: the no-group layer leaves both ceilings uncapped.
+    expect(screen.getAllByText("Inherited: Unlimited")).toHaveLength(2);
+
+    await selectGuestsGroup(user);
+    // The access tab's hints follow the picker straight away.
+    await user.click(screen.getByRole("combobox", { name: "Downloads" }));
+    expect(await screen.findByRole("option", { name: "Inherited: Not allowed" })).toBeVisible();
+    await user.keyboard("{Escape}");
+
+    // ...and so do the limits tab's, which used to keep reading the stale
+    // effective_policy resolved against the account's saved group.
+    await user.click(screen.getByRole("tab", { name: "Limits" }));
+    expect(screen.getByText("Inherited: 1")).toBeInTheDocument();
+    expect(screen.getAllByText("Inherited: Unlimited")).toHaveLength(1);
+  });
+
+  it("seeds a limit override from the inherited value, not from unlimited", async () => {
+    const user = userEvent.setup();
+    renderUserDetail();
+
+    await openLimitsTab(user);
+    await selectGuestsGroup(user);
+    await user.click(screen.getByRole("tab", { name: "Limits" }));
+
+    await user.click(overrideSwitch(0));
+    const maxStreams = screen.getByLabelText("Max Streams");
+    expect(maxStreams).toHaveValue(1);
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mocks.updateUserMutate).toHaveBeenCalled());
+    const call = mocks.updateUserMutate.mock.calls[0]?.[0] as UpdateUserMutationArg | undefined;
+    expect(call?.body.max_streams).toBe(1);
+  });
+
+  it("treats a cleared limit box as unsaved rather than as explicit unlimited", async () => {
+    const user = userEvent.setup();
+    renderUserDetail();
+
+    await openLimitsTab(user);
+    await user.click(overrideSwitch(0));
+    const maxStreams = screen.getByLabelText("Max Streams");
+
+    await user.clear(maxStreams);
+    expect(maxStreams).toHaveValue(null);
+    expect(screen.getByText(/Enter a whole number/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(mocks.updateUserMutate).not.toHaveBeenCalled();
+
+    await user.type(maxStreams, "3");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mocks.updateUserMutate).toHaveBeenCalled());
+    const call = mocks.updateUserMutate.mock.calls[0]?.[0] as UpdateUserMutationArg | undefined;
+    expect(call?.body.max_streams).toBe(3);
+  });
+});
+
+describe("AdminUserDetail effective values", () => {
+  it("shows the group-intersected permission set, not the account's assigned one", () => {
+    mocks.user = {
+      ...adminUser,
+      permissions: [PERMISSION_MARKER_EDIT, PERMISSION_METADATA_CURATION],
+      effective_policy: {
+        ...adminUser.effective_policy,
+        permissions: [PERMISSION_MARKER_EDIT],
+      },
+    };
+    renderUserDetail();
+
+    expect(rowValue("Marker Editing")).toBe("Allowed");
+    expect(rowValue("Metadata Curation")).toBe("Not allowed");
+  });
+
+  it("reports audio transcoding even when video transcoding is allowed", () => {
+    mocks.user = {
+      ...adminUser,
+      effective_policy: {
+        ...adminUser.effective_policy,
+        transcode_allowed: true,
+        audio_transcode_allowed: false,
+      },
+    };
+    renderUserDetail();
+
+    expect(rowValue("Audio Transcodes")).toBe("Not allowed");
+  });
+});
+
+/** Reads the value rendered next to a label in the effective-values panel. */
+function rowValue(label: string): string | undefined {
+  return screen.getByText(label).nextElementSibling?.textContent ?? undefined;
+}

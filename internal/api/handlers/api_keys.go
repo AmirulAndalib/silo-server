@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,20 +15,33 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
+// APIKeyStore is the storage the API key endpoints need. It is an interface
+// so the handlers can be exercised without a database.
+type APIKeyStore interface {
+	Create(ctx context.Context, userID int, label string, scopes []string) (*models.APIKey, error)
+	ListByUser(ctx context.Context, userID int) ([]*models.APIKey, error)
+	ListByUserAdmin(ctx context.Context, userID int) ([]*models.APIKey, error)
+	ListAll(ctx context.Context) ([]*models.APIKeyWithUser, error)
+	Delete(ctx context.Context, id int64, userID int) error
+	DeleteByAdmin(ctx context.Context, id int64) error
+	UpdateTier(ctx context.Context, id int64, tier string) error
+}
+
 // APIKeyHandler handles API key management endpoints.
 type APIKeyHandler struct {
-	repo *auth.APIKeyRepository
+	repo APIKeyStore
 }
 
 // NewAPIKeyHandler creates a new APIKeyHandler.
-func NewAPIKeyHandler(repo *auth.APIKeyRepository) *APIKeyHandler {
+func NewAPIKeyHandler(repo APIKeyStore) *APIKeyHandler {
 	return &APIKeyHandler{repo: repo}
 }
 
 // --- Request/Response types ---
 
 type createAPIKeyRequest struct {
-	Label string `json:"label"`
+	Label  string   `json:"label"`
+	Scopes []string `json:"scopes,omitempty"`
 }
 
 type apiKeyResponse struct {
@@ -41,18 +55,24 @@ type apiKeyResponse struct {
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }
 
-func toAPIKeyResponse(k *models.APIKey) apiKeyResponse {
-	scopes := k.Scopes
+// apiKeyScopesOrEmpty renders a key's scopes for JSON. An unscoped key stores
+// NULL/nil scopes; the API always reports an array so clients never have to
+// distinguish null from empty.
+func apiKeyScopesOrEmpty(scopes []string) []string {
 	if scopes == nil {
-		scopes = []string{}
+		return []string{}
 	}
+	return scopes
+}
+
+func toAPIKeyResponse(k *models.APIKey) apiKeyResponse {
 	return apiKeyResponse{
 		ID:         k.ID,
 		UserID:     k.UserID,
 		Label:      k.Label,
 		Key:        k.Key,
 		RateTier:   k.RateTier,
-		Scopes:     scopes,
+		Scopes:     apiKeyScopesOrEmpty(k.Scopes),
 		CreatedAt:  k.CreatedAt,
 		LastUsedAt: k.LastUsedAt,
 	}
@@ -109,13 +129,35 @@ func (h *APIKeyHandler) HandleCreateAPIKey(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	key, err := h.repo.Create(r.Context(), claims.UserID, req.Label, nil)
+	scopes, err := auth.NormalizeAPIKeyScopes(req.Scopes)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+
+	key, err := h.repo.Create(r.Context(), claims.UserID, req.Label, scopes)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to create API key")
 		return
 	}
 
 	writeJSON(w, http.StatusCreated, toAPIKeyResponse(key))
+}
+
+// apiKeyScopesResponse is the feature-detection payload for API key scopes:
+// clients read the scopes this server understands instead of sniffing the
+// server version before offering them.
+type apiKeyScopesResponse struct {
+	Scopes []auth.APIKeyScope `json:"scopes"`
+}
+
+// HandleListAPIKeyScopes handles GET /api-keys/scopes.
+func (h *APIKeyHandler) HandleListAPIKeyScopes(w http.ResponseWriter, r *http.Request) {
+	if apimw.GetClaims(r.Context()) == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+		return
+	}
+	writeJSON(w, http.StatusOK, apiKeyScopesResponse{Scopes: auth.APIKeyScopeCatalog()})
 }
 
 // HandleListAPIKeys handles GET /api-keys.
@@ -216,10 +258,6 @@ func (h *APIKeyHandler) HandleAdminListAllAPIKeys(w http.ResponseWriter, r *http
 
 	resp := make([]adminApiKeyResponse, 0, len(keys))
 	for _, k := range keys {
-		scopes := k.Scopes
-		if scopes == nil {
-			scopes = []string{}
-		}
 		resp = append(resp, adminApiKeyResponse{
 			ID:         k.ID,
 			UserID:     k.UserID,
@@ -227,7 +265,7 @@ func (h *APIKeyHandler) HandleAdminListAllAPIKeys(w http.ResponseWriter, r *http
 			Label:      k.Label,
 			Key:        k.Key,
 			RateTier:   k.RateTier,
-			Scopes:     scopes,
+			Scopes:     apiKeyScopesOrEmpty(k.Scopes),
 			CreatedAt:  k.CreatedAt,
 			LastUsedAt: k.LastUsedAt,
 		})

@@ -1,6 +1,7 @@
 package access
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -41,10 +42,12 @@ func TestApplyGroupPolicyNoGroupUsesOverridesOverPermissiveDefault(t *testing.T)
 func TestApplyGroupPolicyUnsetUserInheritsNoGroupDefaults(t *testing.T) {
 	got := ApplyGroupPolicy(&models.User{ID: 1}, nil)
 	want := EffectiveUserPolicy{
-		LibraryIDs:               nil,
-		MaxPlaybackQuality:       "",
-		DownloadAllowed:          true,
-		DownloadTranscodeAllowed: true,
+		LibraryIDs:         nil,
+		MaxPlaybackQuality: "",
+		DownloadAllowed:    true,
+		// The no-group default for transcoded downloads is deny: it matches
+		// the pre-inherit column default on users.
+		DownloadTranscodeAllowed: false,
 		TranscodeAllowed:         true,
 		AudioTranscodeAllowed:    true,
 		MaxStreams:               0,
@@ -311,18 +314,35 @@ func TestApplyGroupPolicyRules(t *testing.T) {
 	}
 }
 
-func TestOverrideSources(t *testing.T) {
-	user := &models.User{
-		LibraryIDs:      []int{},
-		MaxStreams:      ptr(0),
-		DownloadAllowed: ptr(false),
+// failingGroupProvider fails the test if the resolver queries it.
+type failingGroupProvider struct{ t *testing.T }
+
+func (p failingGroupProvider) GetPolicyForUser(context.Context, int) (*GroupPolicy, error) {
+	p.t.Helper()
+	p.t.Fatal("GetPolicyForUser should not be called for an account with no access group")
+	return nil, nil
+}
+
+func TestEffectivePolicyForUserSkipsProviderWhenUngrouped(t *testing.T) {
+	user := &models.User{ID: 3, MaxStreams: ptr(2)}
+	got, err := EffectivePolicyForUser(context.Background(), user, failingGroupProvider{t: t})
+	if err != nil {
+		t.Fatalf("EffectivePolicyForUser() error = %v", err)
 	}
-	got := OverrideSources(user)
-	want := PolicySource{LibraryIDs: true, MaxStreams: true, DownloadAllowed: true}
-	if got != want {
-		t.Fatalf("OverrideSources() = %#v, want %#v", got, want)
+	if !reflect.DeepEqual(got, ApplyGroupPolicy(user, nil)) {
+		t.Fatalf("EffectivePolicyForUser(ungrouped) = %#v, want the no-group policy %#v", got, ApplyGroupPolicy(user, nil))
 	}
-	if (OverrideSources(nil) != PolicySource{}) {
-		t.Fatalf("OverrideSources(nil) should report no overrides")
+}
+
+func TestEffectivePolicyForUserQueriesProviderWhenGrouped(t *testing.T) {
+	groupID := int64(11)
+	user := &models.User{ID: 3, AccessGroupID: &groupID}
+	group := &GroupPolicy{ID: groupID, MaxStreams: 2, RequestsAllowed: true}
+	got, err := EffectivePolicyForUser(context.Background(), user, stubGroupProvider{group: group})
+	if err != nil {
+		t.Fatalf("EffectivePolicyForUser() error = %v", err)
+	}
+	if got.MaxStreams != 2 {
+		t.Fatalf("EffectivePolicyForUser(grouped).MaxStreams = %d, want 2", got.MaxStreams)
 	}
 }

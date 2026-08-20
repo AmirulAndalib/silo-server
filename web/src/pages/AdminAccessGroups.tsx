@@ -109,8 +109,9 @@ export default function AdminAccessGroups() {
         <div className="space-y-3">
           <h1 className="page-title text-[clamp(2rem,4vw,3rem)]">Access Groups</h1>
           <p className="page-subtitle text-sm sm:text-base">
-            Shared access defaults for a set of users. A member's own restrictions still apply on
-            top — a group grants the most a member can do, never more.
+            The shared policy layer for a set of users. A group supplies the value for every field
+            its members leave on Inherit; a per-user override replaces the group value in either
+            direction.
           </p>
         </div>
         {!creating && (

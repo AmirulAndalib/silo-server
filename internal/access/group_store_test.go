@@ -249,8 +249,15 @@ func newGroupStoreDBTest(t *testing.T) (context.Context, *pgxpool.Pool, *GroupSt
 	if tableName == nil || *tableName == "" {
 		t.Skip("test database has not applied access groups migration")
 	}
-	if !accessGroupDefaultColumnExists(t, ctx, pool) {
+	if !accessGroupColumnExists(t, ctx, pool, "is_default") {
 		t.Skip("test database has not applied default access group migration")
+	}
+	// The store reads and writes the group transcode gates on every path,
+	// so a database without them cannot run any of these tests.
+	for _, column := range []string{"transcode_allowed", "audio_transcode_allowed"} {
+		if !accessGroupColumnExists(t, ctx, pool, column) {
+			t.Skipf("test database has not applied the user policy inherit/override migration (access_groups.%s missing)", column)
+		}
 	}
 
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
@@ -261,7 +268,7 @@ func newGroupStoreDBTest(t *testing.T) (context.Context, *pgxpool.Pool, *GroupSt
 	return ctx, pool, NewGroupStore(pool), suffix
 }
 
-func accessGroupDefaultColumnExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool) bool {
+func accessGroupColumnExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool, column string) bool {
 	t.Helper()
 	var exists bool
 	if err := pool.QueryRow(ctx, `
@@ -270,9 +277,9 @@ func accessGroupDefaultColumnExists(t *testing.T, ctx context.Context, pool *pgx
 			FROM information_schema.columns
 			WHERE table_schema = 'public'
 			  AND table_name = 'access_groups'
-			  AND column_name = 'is_default'
-		)`).Scan(&exists); err != nil {
-		t.Fatalf("check access_groups.is_default column: %v", err)
+			  AND column_name = $1
+		)`, column).Scan(&exists); err != nil {
+		t.Fatalf("check access_groups.%s column: %v", column, err)
 	}
 	return exists
 }

@@ -9,10 +9,12 @@ import {
   useDeleteUser,
 } from "@/hooks/queries/admin/users";
 import { useAdminLibraries } from "@/hooks/queries/admin/libraries";
+import { useAccessGroups } from "@/hooks/queries/admin/accessGroups";
 import {
   PolicyAccessFields,
   PolicyLimitFields,
   policyCreateFields,
+  policyInheritHints,
   policyStateFromUser,
   policyUpdateFields,
 } from "@/components/UserPolicyFields";
@@ -514,6 +516,7 @@ function formatRelativeTime(value?: string | null, fallback = "-") {
 
 function UserForm({ user, onClose }: { user: AdminUser | null; onClose: () => void }) {
   const { data: libraries = [] } = useAdminLibraries();
+  const { data: accessGroups = [] } = useAccessGroups();
   const [username, setUsername] = useState(user?.username ?? "");
   const [email, setEmail] = useState(user?.email ?? "");
   const [password, setPassword] = useState("");
@@ -536,6 +539,12 @@ function UserForm({ user, onClose }: { user: AdminUser | null; onClose: () => vo
   const createMutation = useCreateUser();
   const updateMutation = useUpdateUser();
   const isPending = createMutation.isPending || updateMutation.isPending;
+  // This form has no group picker: editing keeps the account's group, while a
+  // new account lands on the default group — except an admin, which the server
+  // deliberately leaves ungrouped (auth.Repository.CreateUser).
+  const defaultGroupID = accessGroups.find((group) => group.is_default)?.id ?? null;
+  const inheritGroupID = user ? user.access_group_id : role === "admin" ? null : defaultGroupID;
+  const inheritHints = policyInheritHints(inheritGroupID, accessGroups) ?? user?.effective_policy;
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -684,17 +693,13 @@ function UserForm({ user, onClose }: { user: AdminUser | null; onClose: () => vo
             <PolicyAccessFields
               state={policy}
               onChange={setPolicy}
-              effective={user?.effective_policy}
+              effective={inheritHints}
               libraries={libraries}
             />
           </TabsContent>
 
           <TabsContent value="limits" className="mt-0 space-y-4">
-            <PolicyLimitFields
-              state={policy}
-              onChange={setPolicy}
-              effective={user?.effective_policy}
-            />
+            <PolicyLimitFields state={policy} onChange={setPolicy} effective={inheritHints} />
             <div className="space-y-1">
               <Label htmlFor={maxProfilesId}>Max Profiles</Label>
               <Input
