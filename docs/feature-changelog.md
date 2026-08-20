@@ -2,6 +2,13 @@
 
 ## 2026-08-20
 
+### Make featured heroes read like editorial summaries
+Home and Library Recommended now present concise title metadata without taking technical quality details away from movie and episode pages.
+- Prefers catalog runtime over progress duration and safely omits invalid or unavailable values.
+- Orders movie and series metadata as year, runtime, IMDb rating, up to two normalized genres, and content rating.
+- Gives episode heroes their own season/episode, runtime, and content-rating presentation.
+- Keeps resolution, HDR, and audio-quality badges on movie and episode detail heroes.
+
 ### Give each profile its own watch-provider server
 Plugin watch providers can now ask for connection details per profile instead of forcing every profile on a Silo server to share one installation-wide configuration.
 - Lets a self-hosted provider give each household member their own server URL and credentials.
