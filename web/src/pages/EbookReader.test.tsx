@@ -387,9 +387,7 @@ describe("EbookReader", () => {
     const backTo = encodeURIComponent("/item/manga-series-1?libraryId=7");
     await act(async () => {
       root.render(
-        <MemoryRouter
-          initialEntries={[`/reader/ebook/ebook-1?libraryId=7&backTo=${backTo}`]}
-        >
+        <MemoryRouter initialEntries={[`/reader/ebook/ebook-1?libraryId=7&backTo=${backTo}`]}>
           <Routes>
             <Route
               path="/item/:contentId"
