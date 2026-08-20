@@ -71,6 +71,8 @@ describe("StorageSettings", () => {
     const markup = renderToStaticMarkup(<StorageSettings />);
 
     expect(markup).toContain("Storage location change");
-    expect(markup).toContain("re-caches anything missing");
+    expect(markup).toContain("will not change artwork cache records");
+    expect(markup).toContain("manually run Reconcile Artwork Cache");
+    expect(markup).not.toContain("automatically re-caches anything missing");
   });
 });
