@@ -1079,7 +1079,9 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
       role,
       permissions,
       enabled,
-      access_group_id: accessGroupID,
+      // Admins are never grouped; derive it here so flipping the role back
+      // before saving keeps the picked group.
+      access_group_id: role === "admin" ? null : accessGroupID,
       max_profiles: maxProfiles,
       ...policyUpdateFields(policy),
     };
@@ -1128,15 +1130,7 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
               </div>
               <div className="space-y-2">
                 <Label htmlFor={roleSelectId}>Role</Label>
-                <Select
-                  value={role}
-                  onValueChange={(value) => {
-                    setRole(value);
-                    if (value === "admin") {
-                      setAccessGroupID(null);
-                    }
-                  }}
-                >
+                <Select value={role} onValueChange={setRole}>
                   <SelectTrigger id={roleSelectId}>
                     <SelectValue />
                   </SelectTrigger>

@@ -245,50 +245,59 @@ func TestHandleUpdateUserRejectsScopedAPIKeyEscalation(t *testing.T) {
 	}
 }
 
-func TestHandleUpdateUserUngroupsPromotedAdmin(t *testing.T) {
+// Promoting passes the role through untouched; the repository owns clearing
+// the group so every caller (invitations, provisioning) gets the same rule.
+func TestHandleUpdateUserPromoteLeavesGroupToRepository(t *testing.T) {
+	h, repo := newScopedKeyAdminHandler("user")
+	groupID := int64(5)
+	repo.user.AccessGroupID = &groupID
+
+	rec := updateUserRequestFor(t, h, jwtAdminClaims(), `{"role":"admin"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if repo.updated == nil || repo.updated.Role == nil || *repo.updated.Role != "admin" {
+		t.Fatalf("update = %+v, want role admin", repo.updated)
+	}
+	if repo.updated.AccessGroupID.Set {
+		t.Fatalf("AccessGroupID = %+v, want untouched (repository clears it)", repo.updated.AccessGroupID)
+	}
+}
+
+// A group named alongside the admin role is rejected the same way whether the
+// account is being promoted, is already an admin, or echoes its current role.
+func TestHandleUpdateUserRejectsGroupingAnAdmin(t *testing.T) {
 	tests := []struct {
 		name string
+		role string
 		body string
 	}{
-		{name: "role only", body: `{"role":"admin"}`},
-		{name: "role with leftover group", body: `{"role":"admin","access_group_id":5}`},
+		{name: "existing admin, group only", role: "admin", body: `{"access_group_id":5}`},
+		{name: "existing admin echoing role", role: "admin", body: `{"role":"admin","access_group_id":5}`},
+		{name: "promote with group", role: "user", body: `{"role":"admin","access_group_id":5}`},
+		{name: "promote with unknown group", role: "user", body: `{"role":"admin","access_group_id":99999}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h, repo := newScopedKeyAdminHandler("user")
-			groupID := int64(5)
-			repo.user.AccessGroupID = &groupID
+			h, repo := newScopedKeyAdminHandler(tt.role)
 
 			rec := updateUserRequestFor(t, h, jwtAdminClaims(), tt.body)
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want 422 (body %s)", rec.Code, rec.Body.String())
 			}
-			if repo.updated == nil {
-				t.Fatal("expected update")
+			if code := decodeErrorCode(t, rec); code != "unprocessable_entity" {
+				t.Fatalf("error code = %q, want unprocessable_entity", code)
 			}
-			if !repo.updated.AccessGroupID.Set || repo.updated.AccessGroupID.Value != nil {
-				t.Fatalf("AccessGroupID = %+v, want cleared", repo.updated.AccessGroupID)
+			if repo.updated != nil {
+				t.Fatal("grouped-admin assignment must not be written")
 			}
 		})
 	}
 }
 
-func TestHandleUpdateUserRejectsGroupingAnAdmin(t *testing.T) {
-	h, repo := newScopedKeyAdminHandler("admin")
-
-	rec := updateUserRequestFor(t, h, jwtAdminClaims(), `{"access_group_id":5}`)
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want 422 (body %s)", rec.Code, rec.Body.String())
-	}
-	if code := decodeErrorCode(t, rec); code != "unprocessable_entity" {
-		t.Fatalf("error code = %q, want unprocessable_entity", code)
-	}
-	if repo.updated != nil {
-		t.Fatal("grouped-admin assignment must not be written")
-	}
-}
-
-func TestHandleUpdateUserMayDemoteAdminWithoutGroupingCheck(t *testing.T) {
+// Demoting passes through as well; the repository lands the ex-admin on the
+// default group unless the request names one.
+func TestHandleUpdateUserDemoteLeavesGroupToRepository(t *testing.T) {
 	h, repo := newScopedKeyAdminHandler("admin")
 
 	rec := updateUserRequestFor(t, h, jwtAdminClaims(), `{"role":"user"}`)
@@ -299,7 +308,7 @@ func TestHandleUpdateUserMayDemoteAdminWithoutGroupingCheck(t *testing.T) {
 		t.Fatalf("update = %+v, want role user", repo.updated)
 	}
 	if repo.updated.AccessGroupID.Set {
-		t.Fatalf("AccessGroupID = %+v, want left alone on demote", repo.updated.AccessGroupID)
+		t.Fatalf("AccessGroupID = %+v, want untouched (repository assigns the default group)", repo.updated.AccessGroupID)
 	}
 }
 

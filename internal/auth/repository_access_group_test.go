@@ -99,6 +99,80 @@ func TestUserRepositoryUpdatePromotingToAdminClearsAccessGroupDB(t *testing.T) {
 	}
 }
 
+// Demoting an admin without naming a group lands it on the default group (as
+// create does) so it never becomes an uncapped non-admin; an explicit group in
+// the same write wins, and re-asserting role=user on an ordinary account does
+// not move it.
+func TestUserRepositoryUpdateDemotingAdminAssignsDefaultAccessGroupDB(t *testing.T) {
+	ctx, pool, suffix := newAccessGroupUserRepoDBTest(t)
+	seedID := defaultAuthAccessGroupSeedID(t, ctx, pool)
+	t.Cleanup(func() {
+		restoreAuthDefaultAccessGroup(t, ctx, pool, seedID)
+	})
+	defaultID := insertAuthAccessGroupTestGroupWithLabel(t, ctx, pool, suffix, "default")
+	setAuthDefaultAccessGroup(t, ctx, pool, defaultID)
+	otherID := insertAuthAccessGroupTestGroupWithLabel(t, ctx, pool, suffix, "other")
+	users := NewUserRepository(pool)
+
+	adminInput := createAuthAccessGroupUserInput(suffix, "demote", nil)
+	adminInput.Role = "admin"
+	admin, err := users.Create(ctx, adminInput)
+	if err != nil {
+		t.Fatalf("Create(admin) error: %v", err)
+	}
+
+	roleUser := "user"
+	if err := users.Update(ctx, admin.ID, models.UpdateUserInput{Role: &roleUser}); err != nil {
+		t.Fatalf("Update(role=user) error: %v", err)
+	}
+	user, err := users.GetByID(ctx, admin.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error: %v", err)
+	}
+	if user.AccessGroupID == nil || *user.AccessGroupID != defaultID {
+		t.Fatalf("AccessGroupID = %#v after demote, want default group %d", user.AccessGroupID, defaultID)
+	}
+	if user.AccessPolicyRevision != admin.AccessPolicyRevision+1 {
+		t.Fatalf("AccessPolicyRevision = %d after demote, want %d", user.AccessPolicyRevision, admin.AccessPolicyRevision+1)
+	}
+
+	// Re-asserting role=user on a grouped account is not a demotion and must
+	// not move it off its group.
+	if err := users.Update(ctx, admin.ID, models.UpdateUserInput{
+		Role: &roleUser, AccessGroupID: models.SetValue(otherID),
+	}); err != nil {
+		t.Fatalf("Update(explicit group) error: %v", err)
+	}
+	if err := users.Update(ctx, admin.ID, models.UpdateUserInput{Role: &roleUser}); err != nil {
+		t.Fatalf("Update(role=user again) error: %v", err)
+	}
+	user, err = users.GetByID(ctx, admin.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error: %v", err)
+	}
+	if user.AccessGroupID == nil || *user.AccessGroupID != otherID {
+		t.Fatalf("AccessGroupID = %#v after re-asserting role, want %d", user.AccessGroupID, otherID)
+	}
+
+	// Demoting with an explicit group honours it over the default.
+	roleAdmin := "admin"
+	if err := users.Update(ctx, admin.ID, models.UpdateUserInput{Role: &roleAdmin}); err != nil {
+		t.Fatalf("Update(role=admin) error: %v", err)
+	}
+	if err := users.Update(ctx, admin.ID, models.UpdateUserInput{
+		Role: &roleUser, AccessGroupID: models.SetValue(otherID),
+	}); err != nil {
+		t.Fatalf("Update(demote with group) error: %v", err)
+	}
+	user, err = users.GetByID(ctx, admin.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error: %v", err)
+	}
+	if user.AccessGroupID == nil || *user.AccessGroupID != otherID {
+		t.Fatalf("AccessGroupID = %#v after demote with group, want %d", user.AccessGroupID, otherID)
+	}
+}
+
 func TestUserRepositoryCreateAssignsDefaultAccessGroupDB(t *testing.T) {
 	ctx, pool, suffix := newAccessGroupUserRepoDBTest(t)
 	seedID := defaultAuthAccessGroupSeedID(t, ctx, pool)

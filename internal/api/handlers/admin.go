@@ -424,7 +424,7 @@ func cloneIntSlice(values []int) []int {
 }
 
 // roleAdmin is the server-wide admin account role.
-const roleAdmin = "admin"
+const roleAdmin = models.RoleAdmin
 
 // validateStreamLimits rejects negative concurrency caps. nil means "inherit
 // from the access group" and 0 means an explicit "unlimited" override, so only
@@ -485,13 +485,8 @@ func (h *AdminHandler) rejectScopedAPIKeyUpdate(
 		return nil, false
 	}
 
-	target, err := h.userRepo.GetByID(r.Context(), id)
-	if err != nil {
-		if auth.IsNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", "User not found")
-			return nil, true
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to fetch user")
+	target, blocked := h.loadTargetUser(w, r, id)
+	if blocked {
 		return nil, true
 	}
 	if target.Role == roleAdmin {
@@ -502,56 +497,56 @@ func (h *AdminHandler) rejectScopedAPIKeyUpdate(
 	return target, false
 }
 
-// rejectAdminAccessGroupAssignment stops an already-admin account from being
-// placed in an access group. Scope and action decisions are role-blind, so a
-// grouped admin inherits that group's stream caps and library list. Role
-// changes skip this check: promoting to admin is handled by
-// adminAccessGroupUpdate (which drops the group), and demoting may assign one.
-func (h *AdminHandler) rejectAdminAccessGroupAssignment(
+// loadTargetUser reads the account an admin write targets, writing 404/500 on
+// failure. It reports whether it wrote a response.
+func (h *AdminHandler) loadTargetUser(w http.ResponseWriter, r *http.Request, id int) (*models.User, bool) {
+	target, err := h.userRepo.GetByID(r.Context(), id)
+	if err != nil {
+		if auth.IsNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "User not found")
+			return nil, true
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to fetch user")
+		return nil, true
+	}
+	return target, false
+}
+
+// rejectGroupedAdmin refuses an update that would leave an admin account in
+// an access group: a group named in the request together with the admin role,
+// or for an account that already holds it. Writes that only change the role
+// are not its concern — the repository clears the group on promote and falls
+// back to the default group on demote. It loads the target when the role is
+// not in the request and returns it for reuse as the pre-update snapshot.
+func (h *AdminHandler) rejectGroupedAdmin(
 	w http.ResponseWriter,
 	r *http.Request,
 	id int,
 	req *updateUserRequest,
 	current *models.User,
 ) (*models.User, bool) {
-	if req.Role != nil {
-		return current, false
-	}
 	if !req.AccessGroupID.Set || req.AccessGroupID.Value == nil {
 		return current, false
 	}
-	if current == nil {
-		user, err := h.userRepo.GetByID(r.Context(), id)
-		if err != nil {
-			if auth.IsNotFound(err) {
-				writeError(w, http.StatusNotFound, "not_found", "User not found")
-				return nil, true
-			}
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to fetch user")
+	role := ""
+	switch {
+	case req.Role != nil:
+		role = *req.Role
+	case current != nil:
+		role = current.Role
+	default:
+		var blocked bool
+		if current, blocked = h.loadTargetUser(w, r, id); blocked {
 			return nil, true
 		}
-		current = user
+		role = current.Role
 	}
-	if current.Role == roleAdmin {
+	if role == roleAdmin {
 		writeError(w, http.StatusUnprocessableEntity, "unprocessable_entity",
 			"Admin accounts cannot belong to an access group")
 		return current, true
 	}
 	return current, false
-}
-
-// adminAccessGroupUpdate drops membership when the write is promoting the
-// account to admin. Create already leaves admins ungrouped; update has to
-// match or a grouped user who is later granted the role keeps that group's
-// ceilings.
-func adminAccessGroupUpdate(req *updateUserRequest) models.Optional[int64] {
-	if req != nil && req.Role != nil && *req.Role == roleAdmin {
-		return models.ClearValue[int64]()
-	}
-	if req == nil {
-		return models.Optional[int64]{}
-	}
-	return req.AccessGroupID.Optional()
 }
 
 // clonePtr copies a policy override pointer so a response never aliases the
@@ -596,7 +591,7 @@ func (h *AdminHandler) groupPolicies(ctx context.Context) (map[int64]access.Grou
 // ungrouped (or the group row is gone — the FK clears membership on delete,
 // so a residual not-found is treated as ungrouped, not an error).
 func (h *AdminHandler) groupPolicyFor(ctx context.Context, u *models.User) (*access.GroupPolicy, error) {
-	if u == nil || u.AccessGroupID == nil || h == nil || h.AccessGroups == nil {
+	if !access.GroupApplies(u) || h == nil || h.AccessGroups == nil {
 		return nil, nil
 	}
 	group, err := h.AccessGroups.Get(ctx, *u.AccessGroupID)
@@ -850,10 +845,6 @@ func (h *AdminHandler) HandleUpdateUser(w http.ResponseWriter, r *http.Request) 
 	if blocked {
 		return
 	}
-	currentUser, blocked = h.rejectAdminAccessGroupAssignment(w, r, id, &req, currentUser)
-	if blocked {
-		return
-	}
 
 	maxPlaybackQuality := req.MaxPlaybackQuality.Optional()
 	if maxPlaybackQuality.Value != nil {
@@ -877,7 +868,11 @@ func (h *AdminHandler) HandleUpdateUser(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusUnprocessableEntity, "unprocessable_entity", "Invalid access_group_id")
 			return
 		}
-		if req.AccessGroupID.Value != nil && (req.Role == nil || *req.Role != roleAdmin) {
+		currentUser, blocked = h.rejectGroupedAdmin(w, r, id, &req, currentUser)
+		if blocked {
+			return
+		}
+		if req.AccessGroupID.Value != nil {
 			if h.AccessGroups == nil {
 				writeError(w, http.StatusInternalServerError, "internal_error", "Access groups are not configured")
 				return
@@ -919,17 +914,11 @@ func (h *AdminHandler) HandleUpdateUser(w http.ResponseWriter, r *http.Request) 
 		DownloadAllowed:          req.DownloadAllowed.Optional(),
 		DownloadTranscodeAllowed: req.DownloadTranscodeAllowed.Optional(),
 		RequestsAllowed:          req.RequestsAllowed.Optional(),
-		AccessGroupID:            adminAccessGroupUpdate(&req),
+		AccessGroupID:            req.AccessGroupID.Optional(),
 	}
 
 	if currentUser == nil && updateMayRequireSessionRevocation(updateInput) {
-		currentUser, err = h.userRepo.GetByID(r.Context(), id)
-		if err != nil {
-			if auth.IsNotFound(err) {
-				writeError(w, http.StatusNotFound, "not_found", "User not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to fetch user")
+		if currentUser, blocked = h.loadTargetUser(w, r, id); blocked {
 			return
 		}
 	}
