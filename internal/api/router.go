@@ -1158,6 +1158,11 @@ func NewRouter(deps Dependencies) chi.Router {
 		adminHandler.RestartStatus = restartStatus
 		adminHandler.CatalogSearchStatus = catalogSearchService
 		adminHandler.DiagnosticsStore = diagnosticsStore
+		// Same source branding asset uploads and the metadata image cacher use:
+		// the public S3 client only exists when a public bucket is configured,
+		// and both features are wired off it.
+		publicAssetStore := deps.S3Public
+		adminHandler.PublicStorageConfigured = func() bool { return publicAssetStore != nil }
 		if settingsRepo != nil {
 			adminHandler.SettingsRepo = settingsRepo
 		}

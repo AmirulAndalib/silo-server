@@ -1,10 +1,13 @@
 import { useMemo, useState } from "react";
+import { AlertTriangle } from "lucide-react";
+import { Link } from "react-router";
 
 import type { ConnectionCheckResponse } from "@/api/types";
 import { ConnectionCheckAction } from "@/components/admin/ConnectionCheckAction";
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
 import { SecretField } from "@/components/settings/SecretField";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useBranding } from "@/hooks/useBranding";
 import { useCheckAdminSettingsConnection } from "@/hooks/queries/admin/settings";
 import { useRestartKeys } from "@/hooks/useRestartKeys";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
@@ -14,7 +17,9 @@ import { SaveBar } from "./SaveBar";
 import { SearchStatusPanel } from "./SearchStatusPanel";
 import { SettingField } from "./SettingField";
 
-const METADATA_KEYS = ["metadata.cache_images"];
+const CACHE_IMAGES_KEY = "metadata.cache_images";
+
+const METADATA_KEYS = [CACHE_IMAGES_KEY];
 
 const SCANNER_KEYS = ["scanner.workers", "matcher.workers", "matcher.batch_size"];
 
@@ -44,9 +49,24 @@ const KEYS = [...METADATA_KEYS, ...SCANNER_KEYS, ...MARKER_KEYS, ...SEARCH_KEYS]
 
 export default function LibraryMetadataSettings() {
   const form = useSettingsForm({ keys: useMemo(() => KEYS, []) });
+  const branding = useBranding();
   const restartKeys = useRestartKeys();
   const checkConnection = useCheckAdminSettingsConnection();
   const [connectionResult, setConnectionResult] = useState<ConnectionCheckResponse | null>(null);
+
+  // Image caching writes provider artwork into the public bucket, so the server
+  // rejects enabling it when no bucket is configured at all. `storage_available`
+  // is the process-level truth (branding uses the same flag for asset uploads);
+  // s3.public_bucket only says the setting was saved, which is enough for the
+  // server to accept the save and separates "restart pending" from "never
+  // configured". s3.public_bucket is not staged here, but getValue falls back
+  // to the full settings response.
+  const publicBucketSaved = Boolean(form.getValue("s3.public_bucket"));
+  const imageStorageAvailable = branding.storageAvailable;
+  const cacheImagesOn = form.getValue(CACHE_IMAGES_KEY) === "true";
+  // Never trap an admin with it on: turning it off stays available even when
+  // the bucket went away.
+  const cacheImagesLocked = !imageStorageAvailable && !publicBucketSaved && !cacheImagesOn;
 
   const provider = form.getValue("catalog.search.provider") || "postgres";
   const meiliEnabled = provider === "meilisearch";
@@ -95,13 +115,38 @@ export default function LibraryMetadataSettings() {
 
       <div className="flex-1 space-y-6">
         <FieldGroup label="Metadata">
+          {!imageStorageAvailable && (
+            <div className="mb-3 flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+              <p className="text-muted-foreground text-[13px] leading-relaxed">
+                {publicBucketSaved ? (
+                  <>
+                    The public bucket is saved, but object storage is not active in this process
+                    yet. Restart the server for image caching to start.
+                  </>
+                ) : (
+                  <>
+                    S3 image caching needs S3 object storage. Configure a public bucket in{" "}
+                    <Link
+                      to="/admin/settings?tab=infrastructure"
+                      className="text-foreground font-medium underline-offset-2 hover:underline"
+                    >
+                      Infrastructure
+                    </Link>{" "}
+                    settings, then restart the server.
+                  </>
+                )}
+              </p>
+            </div>
+          )}
           <SettingField
-            label="Store artwork on this server"
+            label="S3 Image Caching"
             type="toggle"
-            hint="Copies posters and backdrops from metadata providers into your own storage, so clients load artwork from Silo instead of a third party."
-            value={form.getValue("metadata.cache_images")}
-            onChange={(value) => form.setValue("metadata.cache_images", value)}
-            restartRequired={restartKeys.has("metadata.cache_images")}
+            hint="Copies posters and backdrops from metadata providers into your public S3 bucket so clients load artwork from Silo instead of a third party."
+            value={form.getValue(CACHE_IMAGES_KEY)}
+            onChange={(value) => form.setValue(CACHE_IMAGES_KEY, value)}
+            disabled={cacheImagesLocked}
+            restartRequired={restartKeys.has(CACHE_IMAGES_KEY)}
           />
         </FieldGroup>
 

@@ -140,6 +140,13 @@ type AdminHandler struct {
 	OnServerSettingUpdated       func(ctx context.Context, key, value string)
 	RestartStatus                *ServerRestartStatusTracker
 	CatalogSearchStatus          catalog.CatalogSearchStatusProvider
+	// PublicStorageConfigured reports whether the public object-storage client
+	// is active in this process — the same condition that gates branding asset
+	// uploads (branding.Service.HasStorage) and the metadata image cacher, both
+	// of which are only wired when the public S3 client exists. A nil func
+	// means "not configured". See publicBucketConfigured for the full rule,
+	// which also accepts a bucket that is saved but not live yet.
+	PublicStorageConfigured func() bool
 }
 
 // NewAdminHandler creates a new AdminHandler backed by the given
@@ -2262,7 +2269,67 @@ type updateSettingsResponse struct {
 	RestartRequiredKeys []string          `json:"restart_required_keys,omitempty"`
 }
 
-func (h *AdminHandler) normalizeBatchSetting(ctx context.Context, key, value string) (string, string, error) {
+// settingMetadataCacheImages copies provider artwork into the public bucket, so
+// it cannot be turned on without one. settingPublicBucketLegacy is the
+// pre-rename alias config.db_loader still falls back to.
+const (
+	settingMetadataCacheImages = "metadata.cache_images"
+	settingPublicBucket        = "s3.public_bucket"
+	settingPublicBucketLegacy  = "s3.operational_bucket"
+)
+
+// errPublicStorageUnavailable is returned when metadata.cache_images is enabled
+// with no public bucket anywhere: the image cacher is wired off the public S3
+// client, so caching could never start.
+var errPublicStorageUnavailable = errors.New(
+	"S3 image caching requires a configured public storage bucket (Infrastructure \u2192 Public storage)")
+
+// publicBucketConfigured reports whether a public object-storage bucket exists
+// from the server's point of view. A bucket that is only saved counts: the
+// setup wizard configures the bucket and enables caching in one batch, and an
+// admin editing an inactive-but-saved deployment is one restart away. Only the
+// live client proves caching starts immediately, so the UI still badges the
+// pending restart — but the API must not block a legitimate save.
+//
+// batchSetsPublicBucket lets the batch endpoint count a bucket being written by
+// the very same request, which has not reached the store yet.
+func (h *AdminHandler) publicBucketConfigured(ctx context.Context, batchSetsPublicBucket bool) bool {
+	if h == nil {
+		return false
+	}
+	if batchSetsPublicBucket {
+		return true
+	}
+	if h.PublicStorageConfigured != nil && h.PublicStorageConfigured() {
+		return true
+	}
+	for _, key := range []string{settingPublicBucket, settingPublicBucketLegacy} {
+		if h.BootstrapSensitiveConfigured[key] &&
+			strings.TrimSpace(h.BootstrapSensitiveValues[key]) != "" {
+			return true
+		}
+		if h.SettingsRepo == nil {
+			continue
+		}
+		if stored, err := h.SettingsRepo.Get(ctx, key); err == nil && strings.TrimSpace(stored) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// batchSetsPublicBucket reports whether a batch write configures a public
+// bucket. An explicitly empty value clears it and must not count.
+func batchSetsPublicBucket(values map[string]string) bool {
+	return strings.TrimSpace(values[settingPublicBucket]) != "" ||
+		strings.TrimSpace(values[settingPublicBucketLegacy]) != ""
+}
+
+func (h *AdminHandler) normalizeBatchSetting(
+	ctx context.Context,
+	key, value string,
+	bucketInBatch bool,
+) (string, string, error) {
 	if strings.HasPrefix(key, "ratelimit.") {
 		return "", "bad_request", fmt.Errorf("%s is managed by /admin/rate-limits/config", key)
 	}
@@ -2282,6 +2349,10 @@ func (h *AdminHandler) normalizeBatchSetting(ctx context.Context, key, value str
 	case "ai.asr_base_url":
 		if llm.IsChatOnlyGateway(normalized) {
 			err = errors.New("this endpoint cannot produce timestamped transcriptions; use a Whisper-compatible transcription endpoint")
+		}
+	case settingMetadataCacheImages:
+		if normalized == "true" && !h.publicBucketConfigured(ctx, bucketInBatch) {
+			return "", "storage_unavailable", errPublicStorageUnavailable
 		}
 	case diagnostics.KeyUploadsEnabled:
 		if normalized == "true" {
@@ -2515,9 +2586,14 @@ func (h *AdminHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.Reque
 	}
 	sort.Strings(keys)
 
+	// Per-key validation that depends on a sibling in the same batch has to see
+	// the whole request: the setup wizard configures the public bucket and turns
+	// image caching on together.
+	bucketInBatch := batchSetsPublicBucket(req.Values)
+
 	normalized := make(map[string]string, len(req.Values))
 	for _, key := range keys {
-		value, code, err := h.normalizeBatchSetting(r.Context(), key, req.Values[key])
+		value, code, err := h.normalizeBatchSetting(r.Context(), key, req.Values[key], bucketInBatch)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, code, err.Error())
 			return
@@ -2683,6 +2759,11 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		req.Value = strconv.FormatBool(enabled)
+	case settingMetadataCacheImages:
+		if req.Value == "true" && !h.publicBucketConfigured(r.Context(), false) {
+			writeError(w, http.StatusBadRequest, "storage_unavailable", errPublicStorageUnavailable.Error())
+			return
+		}
 	case diagnostics.KeyUploadsEnabled:
 		enabled, err := strconv.ParseBool(strings.TrimSpace(req.Value))
 		if err != nil {

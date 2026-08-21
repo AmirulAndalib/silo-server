@@ -6,6 +6,11 @@ import LibraryMetadataSettings from "./LibraryMetadataSettings";
 
 const useSettingsFormMock = vi.fn();
 const useRestartKeysMock = vi.fn(() => new Set<string>());
+const storageAvailableMock = vi.fn(() => true);
+
+vi.mock("@/hooks/useBranding", () => ({
+  useBranding: () => ({ storageAvailable: storageAvailableMock() }),
+}));
 
 vi.mock("@/hooks/useSettingsForm", () => ({
   useSettingsForm: (...args: unknown[]) => useSettingsFormMock(...args),
@@ -68,10 +73,25 @@ function text(markup: string): string {
   return container.textContent ?? "";
 }
 
+// The toggle is a Radix switch, so reach it through the label association
+// SettingField sets up rather than by scanning the markup for "disabled".
+function toggleDisabled(markup: string, label: string): boolean {
+  const container = document.createElement("div");
+  container.innerHTML = markup;
+  const labelEl = Array.from(container.querySelectorAll("label")).find(
+    (el) => el.textContent?.trim() === label,
+  );
+  if (!labelEl?.htmlFor) throw new Error(`no label found for ${label}`);
+  const control = container.querySelector(`[id="${labelEl.htmlFor}"]`);
+  if (!control) throw new Error(`no control found for ${label}`);
+  return control.hasAttribute("disabled");
+}
+
 describe("LibraryMetadataSettings", () => {
   beforeEach(() => {
     localStorage.clear();
     useRestartKeysMock.mockReturnValue(new Set<string>());
+    storageAvailableMock.mockReturnValue(true);
   });
 
   it("renders every field group heading", () => {
@@ -123,6 +143,43 @@ describe("LibraryMetadataSettings", () => {
     );
 
     expect(text(render({ "catalog.search.provider": "meilisearch" }))).toContain("Meilisearch URL");
+  });
+
+  it("leaves S3 image caching editable and unannotated while public storage is active", () => {
+    const rendered = render({ "s3.public_bucket": "silo-public" });
+
+    expect(text(rendered)).toContain("S3 Image Caching");
+    expect(text(rendered)).not.toContain("Restart the server for image caching to start");
+    expect(text(rendered)).not.toContain("S3 image caching needs S3 object storage");
+    expect(toggleDisabled(rendered, "S3 Image Caching")).toBe(false);
+  });
+
+  it("keeps S3 image caching settable when the bucket is saved but not active yet", () => {
+    storageAvailableMock.mockReturnValue(false);
+
+    const rendered = render({ "s3.public_bucket": "silo-public" });
+
+    expect(text(rendered)).toContain("Restart the server for image caching to start");
+    expect(toggleDisabled(rendered, "S3 Image Caching")).toBe(false);
+  });
+
+  it("disables S3 image caching and links to Infrastructure when no bucket is configured", () => {
+    storageAvailableMock.mockReturnValue(false);
+
+    const rendered = render({});
+
+    expect(text(rendered)).toContain("S3 image caching needs S3 object storage");
+    expect(rendered).toContain("/admin/settings?tab=infrastructure");
+    expect(toggleDisabled(rendered, "S3 Image Caching")).toBe(true);
+  });
+
+  it("still allows switching S3 image caching off when the bucket went away", () => {
+    storageAvailableMock.mockReturnValue(false);
+
+    const rendered = render({ "metadata.cache_images": "true" });
+
+    expect(text(rendered)).toContain("S3 image caching needs S3 object storage");
+    expect(toggleDisabled(rendered, "S3 Image Caching")).toBe(false);
   });
 
   it("marks a restart-required field with the restart badge", () => {
