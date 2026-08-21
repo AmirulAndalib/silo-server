@@ -1065,9 +1065,12 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
   // instead of describing the group the account was last saved with. When that
   // group is not in the loaded list, fall back to the resolved policy the
   // server sent — but only while the saved group is still the selected one.
+  // An admin inherits from no group, so preview the no-group policy while the
+  // picked group is kept for toggling the role back.
+  const hintGroupID = role === "admin" ? null : accessGroupID;
   const inheritHints =
-    policyInheritHints(accessGroupID, accessGroups) ??
-    (accessGroupID === user.access_group_id ? user.effective_policy : undefined);
+    policyInheritHints(hintGroupID, accessGroups) ??
+    (hintGroupID === user.access_group_id ? user.effective_policy : undefined);
   const selectedGroupMissing =
     accessGroupID !== null && !accessGroups.some((group) => group.id === accessGroupID);
 

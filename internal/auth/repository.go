@@ -265,8 +265,7 @@ type userUpdateColumn struct {
 // group no matter what the caller passed, and taking the role away without
 // naming a group lands the account on the default group, as create does. A
 // group written on its own is checked against the row's role inside the same
-// statement, so a concurrent promotion cannot leave an admin grouped; the
-// users_admin_ungrouped constraint backs that up.
+// statement, so a concurrent promotion cannot leave an admin grouped.
 func accessGroupUpdateColumn(input models.UpdateUserInput) userUpdateColumn {
 	const isAdmin = "role = '" + models.RoleAdmin + "'"
 	col := userUpdateColumn{column: "access_group_id", bumpsAccessPolicy: true}
