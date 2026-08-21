@@ -49,8 +49,17 @@ describe("GeneralSettings", () => {
     renderPage();
 
     for (const heading of ["Identity", "Access", "Logging"]) {
-      expect(screen.getByText(heading)).toBeInTheDocument();
+      expect(screen.getByRole("group", { name: heading })).toBeInTheDocument();
     }
+  });
+
+  it("summarises the tab in the status strip under the title", () => {
+    renderPage();
+
+    expect(screen.getByRole("heading", { name: "General" })).toBeInTheDocument();
+    expect(screen.getByText("Server name: Silo")).toBeInTheDocument();
+    expect(screen.getByText("Public signups on")).toBeInTheDocument();
+    expect(screen.getByText("Log level: Info")).toBeInTheDocument();
   });
 
   it("manages identity, signup and logging keys on one save bar", () => {
@@ -68,7 +77,7 @@ describe("GeneralSettings", () => {
   it("shows the public signup toggle in its saved state and links to invite codes", () => {
     renderPage();
 
-    expect(screen.getByRole("switch", { name: /Public Signups/i })).toHaveAttribute(
+    expect(screen.getByRole("switch", { name: /Public signups/i })).toHaveAttribute(
       "aria-checked",
       "true",
     );
@@ -81,7 +90,7 @@ describe("GeneralSettings", () => {
   it("keeps quiet log prefixes behind the advanced disclosure", () => {
     renderPage();
 
-    expect(screen.queryByLabelText("Silenced Log Messages")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Quiet log prefixes")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Advanced/i })).toHaveAttribute(
       "aria-expanded",
       "false",
@@ -96,6 +105,6 @@ describe("GeneralSettings", () => {
 
     renderPage();
 
-    expect(screen.getByLabelText("Silenced Log Messages")).toBeInTheDocument();
+    expect(screen.getByLabelText("Quiet log prefixes")).toBeInTheDocument();
   });
 });

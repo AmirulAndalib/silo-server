@@ -5,6 +5,8 @@ import { ArrowRight } from "lucide-react";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
 import { useRestartKeys } from "@/hooks/useRestartKeys";
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
+import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
+import { StatusStrip, type StatusStripItem } from "@/components/settings/StatusStrip";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SettingField } from "./SettingField";
 import { SaveBar } from "./SaveBar";
@@ -21,9 +23,36 @@ const KEYS = [
   "server.log_quiet",
 ];
 
+const LOGGING_ADVANCED_KEYS = ["server.log_quiet"];
+
+const LOG_LEVEL_LABELS: Record<string, string> = {
+  debug: "Debug",
+  info: "Info",
+  warn: "Warn",
+  error: "Error",
+};
+
 export default function GeneralSettings() {
   const form = useSettingsForm({ keys: useMemo(() => KEYS, []) });
   const restartKeys = useRestartKeys();
+
+  const countDirty = (keys: string[]) => keys.filter((key) => form.isDirty(key)).length;
+  const restartCount = KEYS.filter((key) => form.isDirty(key) && restartKeys.has(key)).length;
+
+  const serverName = form.getValue("branding.server_name").trim() || "Silo";
+  const signupsEnabled = form.getValue("signup.enabled") === "true";
+  const logLevel = form.getValue("server.log_level") || "info";
+
+  const stripItems: StatusStripItem[] = [
+    { tone: "info", label: `Server name: ${serverName}` },
+    signupsEnabled
+      ? { tone: "info", label: "Public signups on" }
+      : { tone: "muted", label: "Public signups off" },
+    {
+      tone: logLevel === "debug" ? "warn" : "ok",
+      label: `Log level: ${LOG_LEVEL_LABELS[logLevel] ?? logLevel}`,
+    },
+  ];
 
   if (form.isLoading)
     return (
@@ -43,46 +72,42 @@ export default function GeneralSettings() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="mb-6 space-y-2">
-        <h2 className="text-xl font-semibold tracking-tight">General</h2>
-        <p className="text-muted-foreground text-sm leading-relaxed">
-          What this server calls itself, who is allowed to sign up, and how much it writes to the
-          log.
-        </p>
-      </div>
+      <SettingsPageHeader
+        title="General"
+        description="How the server introduces itself and what it logs."
+        strip={<StatusStrip items={stripItems} />}
+        className="mb-8"
+      />
 
-      <div className="flex-1 space-y-6">
-        <FieldGroup label="Identity">
-          <p className="text-muted-foreground pb-3 text-xs leading-relaxed">
-            Shown in the browser tab, on the login page, in the sidebar, and in the installed app.
-            Leave a field empty to use the Silo default.
-          </p>
+      <div className="flex-1 space-y-9">
+        <FieldGroup
+          label="Identity"
+          clarifier="What people see before they sign in. Leave a field empty for the Silo default."
+        >
           <SettingField
-            label="Server Name"
+            label="Server name"
             hint="Silo"
+            description="Shown in the browser tab, on the login page, in the sidebar, and in the installed app."
             value={form.getValue("branding.server_name")}
             onChange={(v) => form.setValue("branding.server_name", v)}
             restartRequired={restartKeys.has("branding.server_name")}
+            dirty={form.isDirty("branding.server_name")}
           />
           <SettingField
-            label="Login Page Subtitle"
+            label="Login subtitle"
             hint="Sign in with an existing account."
+            description="One line under the server name on the sign-in page."
             value={form.getValue("branding.login_subtitle")}
             onChange={(v) => form.setValue("branding.login_subtitle", v)}
             restartRequired={restartKeys.has("branding.login_subtitle")}
+            dirty={form.isDirty("branding.login_subtitle")}
           />
         </FieldGroup>
 
-        <FieldGroup label="Access">
-          <SettingField
-            label="Public Signups"
-            type="toggle"
-            hint="When on, anyone who has a valid invite code can create their own account."
-            value={form.getValue("signup.enabled")}
-            onChange={(v) => form.setValue("signup.enabled", v)}
-            restartRequired={restartKeys.has("signup.enabled")}
-          />
-          <div className="pt-3">
+        <FieldGroup
+          label="Access"
+          clarifier="Who can create an account on this server"
+          actions={
             <Link
               to="/admin/users"
               className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1.5 text-xs font-medium transition-colors"
@@ -90,17 +115,28 @@ export default function GeneralSettings() {
               Manage invite codes
               <ArrowRight className="h-3 w-3" aria-hidden="true" />
             </Link>
-          </div>
+          }
+        >
+          <SettingField
+            label="Public signups"
+            type="toggle"
+            description="When on, anyone who has a valid invite code can create their own account. Off means an admin creates every account."
+            value={form.getValue("signup.enabled")}
+            onChange={(v) => form.setValue("signup.enabled", v)}
+            restartRequired={restartKeys.has("signup.enabled")}
+            dirty={form.isDirty("signup.enabled")}
+          />
         </FieldGroup>
 
-        <FieldGroup label="Logging">
+        <FieldGroup label="Logging" clarifier="How much detail the server writes">
           <SettingField
-            label="Log Level"
+            label="Log level"
             type="select"
-            hint="How much detail the server writes. Info is right for everyday use; Debug is loud and mainly useful while chasing a problem."
+            description="Info is right for everyday use. Debug is loud and mainly useful while chasing a problem."
             value={form.getValue("server.log_level")}
             onChange={(v) => form.setValue("server.log_level", v)}
             restartRequired={restartKeys.has("server.log_level")}
+            dirty={form.isDirty("server.log_level")}
             options={[
               { value: "debug", label: "Debug" },
               { value: "info", label: "Info" },
@@ -110,22 +146,19 @@ export default function GeneralSettings() {
           />
           <AdvancedSection
             id="general.logging"
-            count={1}
+            count={LOGGING_ADVANCED_KEYS.length}
+            changedCount={countDirty(LOGGING_ADVANCED_KEYS)}
             forceOpen={form.isDirty("server.log_quiet")}
           >
-            <div>
-              <SettingField
-                label="Silenced Log Messages"
-                hint="metadata, scanner"
-                value={form.getValue("server.log_quiet")}
-                onChange={(v) => form.setValue("server.log_quiet", v)}
-                restartRequired={restartKeys.has("server.log_quiet")}
-              />
-              <p className="text-muted-foreground pb-2 text-xs leading-relaxed">
-                Log lines starting with any of these words are dropped, so a noisy subsystem stops
-                filling the log. Separate them with commas.
-              </p>
-            </div>
+            <SettingField
+              label="Quiet log prefixes"
+              hint="metadata, scanner"
+              description="Log lines starting with any of these words are dropped, so a noisy subsystem stops filling the log. Separate them with commas."
+              value={form.getValue("server.log_quiet")}
+              onChange={(v) => form.setValue("server.log_quiet", v)}
+              restartRequired={restartKeys.has("server.log_quiet")}
+              dirty={form.isDirty("server.log_quiet")}
+            />
           </AdvancedSection>
         </FieldGroup>
       </div>
@@ -136,6 +169,7 @@ export default function GeneralSettings() {
         onDiscard={form.discard}
         isSaving={form.isSaving}
         restartRequired={form.restartRequired}
+        restartCount={restartCount}
       />
     </div>
   );

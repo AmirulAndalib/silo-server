@@ -4,6 +4,8 @@ import { AlertTriangle, Check, RotateCcw } from "lucide-react";
 import { BrandingAssetField } from "@/components/admin/BrandingAssetField";
 import { OverlayPreviewCard } from "@/components/overlays/OverlayPreviewCard";
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
+import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
+import { StatusStrip, type StatusStripItem } from "@/components/settings/StatusStrip";
 import { RawCssEditor } from "@/components/theme/RawCssEditor";
 import { ThemePreviewCard } from "@/components/theme/ThemePreviewCard";
 import { TokenEditor } from "@/components/theme/TokenEditor";
@@ -39,11 +41,11 @@ import {
 import { parseVarsJson } from "@/lib/themeExport";
 import type { ThemeVarOverrides } from "@/hooks/useCustomTheme";
 import type { ThemeToken } from "@/lib/themeTokens";
-import { THEME_IDS, THEMES } from "@/lib/themes";
+import { THEME_IDS, THEMES, type ThemeId } from "@/lib/themes";
 import { cn } from "@/lib/utils";
 import { FieldGroup } from "./FieldGroup";
 import { SaveBar } from "./SaveBar";
-import { SettingField } from "./SettingField";
+import { SettingField, SettingFieldRow } from "./SettingField";
 
 const IMAGE_ACCEPT = "image/png,image/jpeg,image/webp";
 const FAVICON_ACCEPT =
@@ -188,90 +190,121 @@ export default function AppearanceSettings() {
 
   const themeAdvancedDirty =
     tokensTouched || form.isDirty(CUSTOM_CSS_KEY) || form.isDirty(CATALOG_URL_KEY);
+  // `THEME_VARS_KEY` is also written by the essential accent picker, so it only
+  // counts once the advanced token editor itself was used — otherwise picking an
+  // accent would report a change inside a section the admin never opened.
+  const themeAdvancedChanged =
+    [CUSTOM_CSS_KEY, CATALOG_URL_KEY].filter((key) => form.isDirty(key)).length +
+    (tokensTouched && form.isDirty(THEME_VARS_KEY) ? 1 : 0);
+  const restartCount = KEYS.filter((key) => form.isDirty(key) && restartKeys.has(key)).length;
+
+  const themeName = (THEME_IDS as readonly string[]).includes(defaultTheme)
+    ? THEMES[defaultTheme as ThemeId].label
+    : null;
+
+  const stripItems: StatusStripItem[] = [
+    themeName
+      ? { tone: "info", label: `Default theme: ${themeName}` }
+      : { tone: "muted", label: "No default theme" },
+    accentColor
+      ? { tone: "info", label: `Accent ${accentColor}` }
+      : { tone: "muted", label: "Default accent" },
+    overlaysEnabled
+      ? { tone: "ok", label: "Poster badges on" }
+      : { tone: "muted", label: "Poster badges off" },
+    assetStorageAvailable
+      ? { tone: "ok", label: "Image uploads ready" }
+      : s3Configured
+        ? { tone: "warn", label: "Image uploads need a restart" }
+        : { tone: "warn", label: "Image uploads need S3" },
+  ];
 
   if (form.isLoading) return <div>Loading...</div>;
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex-1 space-y-6">
-        <FieldGroup label="Logos &amp; Icons">
-          <div className="space-y-3 py-2">
-            <p className="text-muted-foreground text-[13px]">
-              Custom images replace the Silo logo, the browser tab icon, and the login background.
-              Anything you leave empty keeps the Silo default.
-            </p>
+      <SettingsPageHeader
+        title="Appearance"
+        description="Branding and theme defaults for everyone who signs in."
+        strip={<StatusStrip items={stripItems} />}
+        className="mb-8"
+      />
 
-            {!assetStorageAvailable && (
-              <div className="flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
-                <p className="text-muted-foreground text-[13px] leading-relaxed">
-                  {s3Configured ? (
-                    <>
-                      The public bucket is saved, but object storage is not active in this process
-                      yet. Restart the server to enable image uploads.
-                    </>
-                  ) : (
-                    <>
-                      Image uploads need S3 object storage. Configure a public bucket in{" "}
-                      <span className="text-foreground font-medium">Infrastructure</span> settings,
-                      then restart the server.
-                    </>
-                  )}
-                </p>
-              </div>
-            )}
-
-            <div className="space-y-2">
-              <BrandingAssetField
-                label="Logo (wordmark)"
-                description="Wide logo shown in the expanded sidebar."
-                kind="wordmark"
-                currentUrl={branding.wordmarkUrl}
-                accept={IMAGE_ACCEPT}
-                enabled={assetStorageAvailable}
-                preview="wide"
-              />
-              <BrandingAssetField
-                label="Logo (icon)"
-                description="Square mark shown in the collapsed sidebar and the installed app."
-                kind="mark"
-                currentUrl={branding.markUrl}
-                accept={IMAGE_ACCEPT}
-                enabled={assetStorageAvailable}
-                preview="square"
-              />
-              <BrandingAssetField
-                label="Favicon"
-                description="Browser tab icon. PNG, ICO, or SVG."
-                kind="favicon"
-                currentUrl={branding.faviconUrl}
-                accept={FAVICON_ACCEPT}
-                enabled={assetStorageAvailable}
-                preview="square"
-              />
-              <BrandingAssetField
-                label="Login background"
-                description="Full-bleed background image for the login and signup pages."
-                kind="login_bg"
-                currentUrl={branding.loginBgUrl}
-                accept={IMAGE_ACCEPT}
-                enabled={assetStorageAvailable}
-                preview="wide"
-              />
+      <div className="flex-1 space-y-9">
+        <FieldGroup
+          label="Logos and icons"
+          clarifier="Custom images replace the Silo logo, the browser tab icon, and the login background. Anything you leave empty keeps the Silo default."
+        >
+          {!assetStorageAvailable && (
+            <div className="mt-3 flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+              <p className="text-muted-foreground text-[13px] leading-relaxed">
+                {s3Configured ? (
+                  <>
+                    The public bucket is saved, but object storage is not active in this process
+                    yet. Restart the server to enable image uploads.
+                  </>
+                ) : (
+                  <>
+                    Image uploads need S3 object storage. Configure a public bucket in{" "}
+                    <span className="text-foreground font-medium">Infrastructure</span> settings,
+                    then restart the server.
+                  </>
+                )}
+              </p>
             </div>
+          )}
+
+          <div className="space-y-2 py-3.5">
+            <BrandingAssetField
+              label="Logo (wordmark)"
+              description="Wide logo shown in the expanded sidebar."
+              kind="wordmark"
+              currentUrl={branding.wordmarkUrl}
+              accept={IMAGE_ACCEPT}
+              enabled={assetStorageAvailable}
+              preview="wide"
+            />
+            <BrandingAssetField
+              label="Logo (icon)"
+              description="Square mark shown in the collapsed sidebar and the installed app."
+              kind="mark"
+              currentUrl={branding.markUrl}
+              accept={IMAGE_ACCEPT}
+              enabled={assetStorageAvailable}
+              preview="square"
+            />
+            <BrandingAssetField
+              label="Favicon"
+              description="Browser tab icon. PNG, ICO, or SVG."
+              kind="favicon"
+              currentUrl={branding.faviconUrl}
+              accept={FAVICON_ACCEPT}
+              enabled={assetStorageAvailable}
+              preview="square"
+            />
+            <BrandingAssetField
+              label="Login background"
+              description="Full-bleed background image for the login and signup pages."
+              kind="login_bg"
+              currentUrl={branding.loginBgUrl}
+              accept={IMAGE_ACCEPT}
+              enabled={assetStorageAvailable}
+              preview="wide"
+            />
           </div>
         </FieldGroup>
 
-        <FieldGroup label="Colors &amp; Theme">
-          <div className="space-y-2 py-3">
-            <div className="space-y-0.5">
-              <Label className="text-sm font-medium">Accent color</Label>
-              <p className="text-muted-foreground text-xs">
-                Recolors buttons, focus outlines, and the sidebar highlight for everyone. Also used
-                as the installed app&apos;s color.
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
+        <FieldGroup
+          label="Colors and theme"
+          clarifier="What people see until they choose something else for themselves"
+        >
+          <SettingFieldRow
+            label="Accent color"
+            description="Recolors buttons, focus outlines, and the sidebar highlight for everyone. Also used as the installed app's color."
+            dirty={form.isDirty(ACCENT_KEY)}
+          >
+            <div className="flex flex-wrap items-center justify-end gap-2 sm:max-w-[300px]">
               {ACCENT_PRESETS.map((hex) => (
                 <button
                   key={hex}
@@ -291,7 +324,7 @@ export default function AppearanceSettings() {
                   )}
                 </button>
               ))}
-              <label className="border-border ml-1 inline-flex h-8 cursor-pointer items-center gap-2 rounded-lg border px-2.5 text-xs font-medium">
+              <label className="border-border inline-flex h-8 cursor-pointer items-center gap-2 rounded-lg border px-2.5 text-xs font-medium">
                 <input
                   type="color"
                   aria-label="Custom accent color"
@@ -305,29 +338,26 @@ export default function AppearanceSettings() {
                 <button
                   type="button"
                   onClick={clearAccent}
-                  className="text-muted-foreground hover:text-destructive ml-1 inline-flex items-center gap-1.5 text-xs font-medium transition-colors"
+                  className="text-muted-foreground hover:text-destructive inline-flex items-center gap-1.5 text-xs font-medium transition-colors"
                 >
                   <RotateCcw className="h-3 w-3" />
                   Reset
                 </button>
               )}
             </div>
-          </div>
+          </SettingFieldRow>
 
-          <div className="space-y-2 py-3">
-            <div className="space-y-0.5">
-              <Label className="text-sm font-medium">Default theme</Label>
-              <p className="text-muted-foreground text-xs">
-                The theme people see until they choose their own. Everyone can still pick a
-                different one for themselves.
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
+          <SettingFieldRow
+            label="Default theme"
+            description="The theme people see until they choose their own. Everyone can still pick a different one for themselves."
+            dirty={form.isDirty(DEFAULT_THEME_KEY)}
+          >
+            <div className="flex flex-wrap justify-end gap-2 sm:max-w-[320px]">
               <button
                 type="button"
                 onClick={() => form.setValue(DEFAULT_THEME_KEY, "")}
                 className={cn(
-                  "rounded-xl border px-3 py-2 text-xs font-medium transition-colors",
+                  "rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors",
                   defaultTheme === ""
                     ? "border-foreground bg-muted/50"
                     : "border-border hover:bg-muted/30",
@@ -341,7 +371,7 @@ export default function AppearanceSettings() {
                   type="button"
                   onClick={() => form.setValue(DEFAULT_THEME_KEY, id)}
                   className={cn(
-                    "inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-medium transition-colors",
+                    "inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors",
                     defaultTheme === id
                       ? "border-foreground bg-muted/50"
                       : "border-border hover:bg-muted/30",
@@ -360,165 +390,158 @@ export default function AppearanceSettings() {
                 </button>
               ))}
             </div>
-          </div>
+          </SettingFieldRow>
 
-          <div className="py-3">
-            <AdvancedSection id="appearance.theme" count={3} forceOpen={themeAdvancedDirty}>
-              <div className="space-y-3 py-3">
-                <div className="space-y-0.5">
-                  <Label className="text-sm font-medium">Individual colors and fonts</Label>
-                  <p className="text-muted-foreground text-xs">
-                    Change single colors, fonts, and corner rounding on top of the chosen theme.
-                    Everyone sees these changes; each person can still customize further.
-                  </p>
-                </div>
-                <ThemePreviewCard vars={vars} />
-                {hasThemeOverrides && (
-                  <div className="flex justify-end">
-                    <button
-                      type="button"
-                      onClick={resetAllThemeOverrides}
-                      className="text-muted-foreground hover:text-destructive inline-flex items-center gap-1.5 text-xs font-medium transition-colors"
-                    >
-                      <RotateCcw className="h-3 w-3" />
-                      Reset all
-                    </button>
-                  </div>
-                )}
-                <TokenEditor vars={vars} onSetVar={setToken} onResetVar={resetToken} />
+          <AdvancedSection
+            id="appearance.theme"
+            count={3}
+            changedCount={themeAdvancedChanged}
+            forceOpen={themeAdvancedDirty}
+          >
+            <div className="space-y-3 py-3.5">
+              <div className="space-y-1">
+                <Label className="text-sm font-medium">Individual colors and fonts</Label>
+                <p className="text-muted-foreground text-xs leading-relaxed">
+                  Change single colors, fonts, and corner rounding on top of the chosen theme.
+                  Everyone sees these changes; each person can still customize further.
+                </p>
               </div>
-
-              <div className="space-y-2 py-3">
-                <div className="space-y-0.5">
-                  <Label className="text-sm font-medium">Custom CSS</Label>
-                  <p className="text-muted-foreground text-xs">
-                    Extra CSS applied to every page after the theme, for changes the controls above
-                    do not cover. It is saved with the rest of this tab.
-                  </p>
+              <ThemePreviewCard vars={vars} />
+              {hasThemeOverrides && (
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={resetAllThemeOverrides}
+                    className="text-muted-foreground hover:text-destructive inline-flex items-center gap-1.5 text-xs font-medium transition-colors"
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    Reset all
+                  </button>
                 </div>
-                <RawCssEditor value={rawCss} onChange={handleCssChange} />
-              </div>
+              )}
+              <TokenEditor vars={vars} onSetVar={setToken} onResetVar={resetToken} />
+            </div>
 
-              <SettingField
-                label="Community theme list"
-                type="text"
-                hint="Address of the JSON file listing community themes people can browse in their own settings."
-                value={form.getValue(CATALOG_URL_KEY)}
-                onChange={(v) => form.setValue(CATALOG_URL_KEY, v)}
-                restartRequired={restartKeys.has(CATALOG_URL_KEY)}
-              />
-            </AdvancedSection>
-          </div>
+            <div className="space-y-2 py-3.5">
+              <div className="space-y-1">
+                <Label className="text-sm font-medium">Custom CSS</Label>
+                <p className="text-muted-foreground text-xs leading-relaxed">
+                  Extra CSS applied to every page after the theme, for changes the controls above do
+                  not cover. It is saved with the rest of this tab.
+                </p>
+              </div>
+              <RawCssEditor value={rawCss} onChange={handleCssChange} />
+            </div>
+
+            <SettingField
+              label="Community theme list"
+              type="text"
+              hint="https://example.com/themes.json"
+              description="Address of the JSON file listing community themes people can browse in their own settings."
+              value={form.getValue(CATALOG_URL_KEY)}
+              onChange={(v) => form.setValue(CATALOG_URL_KEY, v)}
+              restartRequired={restartKeys.has(CATALOG_URL_KEY)}
+              dirty={form.isDirty(CATALOG_URL_KEY)}
+            />
+          </AdvancedSection>
         </FieldGroup>
 
-        <FieldGroup label="Card Overlays">
+        <FieldGroup label="Card overlays" clarifier="Small badges drawn on poster art">
           <SettingField
             label="Show badges on poster art"
-            hint="Small badges drawn on posters, such as resolution or rating. Turning this off hides them for everyone, whatever each person has chosen."
+            description="Badges such as resolution or rating. Turning this off hides them for everyone, whatever each person has chosen."
             type="toggle"
             value={form.getValue(OVERLAYS_ENABLED_KEY) || "true"}
             onChange={(v) => form.setValue(OVERLAYS_ENABLED_KEY, v)}
             restartRequired={restartKeys.has(OVERLAYS_ENABLED_KEY)}
+            dirty={form.isDirty(OVERLAYS_ENABLED_KEY)}
           />
 
-          <div className={cn("py-3", overlaysEnabled ? "" : "pointer-events-none opacity-50")}>
-            <div className="flex flex-col gap-6 lg:flex-row">
-              <div className="flex-1 space-y-2">
-                <div className="space-y-0.5">
-                  <Label className="text-sm font-medium">Badge style</Label>
-                  <p className="text-muted-foreground text-xs">
-                    How the badges look by default. Applies to anyone who has not changed their own
-                    overlay settings.
-                  </p>
-                </div>
-                <Select
-                  value={overlayPrefs.preset}
-                  onValueChange={(v) => setOverlayPrefs({ ...overlayPrefs, preset: v as PresetId })}
-                >
-                  <SelectTrigger className="w-[200px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {PRESET_IDS.map((id) => (
-                      <SelectItem key={id} value={id}>
-                        {OVERLAY_PRESETS[id].label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex items-start justify-center lg:w-[180px]">
-                <OverlayPreviewCard prefs={overlayPrefs} size="sm" variant="movie" />
-              </div>
+          <SettingFieldRow
+            label="Badge style"
+            description="How the badges look by default. Applies to anyone who has not changed their own overlay settings."
+            dirty={form.isDirty(OVERLAY_DEFAULTS_KEY)}
+            className={overlaysEnabled ? undefined : "pointer-events-none opacity-50"}
+          >
+            <div className="flex flex-col items-end gap-3">
+              <Select
+                value={overlayPrefs.preset}
+                onValueChange={(v) => setOverlayPrefs({ ...overlayPrefs, preset: v as PresetId })}
+              >
+                <SelectTrigger className="w-[200px]" aria-label="Badge style">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {PRESET_IDS.map((id) => (
+                    <SelectItem key={id} value={id}>
+                      {OVERLAY_PRESETS[id].label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <OverlayPreviewCard prefs={overlayPrefs} size="sm" variant="movie" />
             </div>
-          </div>
+          </SettingFieldRow>
 
-          <div className={cn("py-3", overlaysEnabled ? "" : "pointer-events-none opacity-50")}>
+          <div className={cn(overlaysEnabled ? "" : "pointer-events-none opacity-50")}>
             <AdvancedSection
               id="appearance.overlays"
               title="Advanced · which badges and where"
               count={OVERLAY_REGISTRY.length}
               forceOpen={overlayItemsTouched}
             >
-              <div className="space-y-6 py-3">
-                {OVERLAY_CATEGORIES.map((category) => {
-                  const overlays = OVERLAY_REGISTRY.filter((d) => d.category === category);
-                  if (overlays.length === 0) return null;
-                  return (
-                    <div key={category} className="space-y-2">
-                      <div className="text-muted-foreground text-xs font-semibold tracking-wide uppercase">
-                        {CATEGORY_META[category].title}
-                      </div>
-                      <div className="space-y-2">
-                        {overlays.map((def) => {
-                          const config = overlayPrefs.items[def.id];
-                          return (
-                            <div
-                              key={def.id}
-                              className="flex flex-col justify-between gap-3 py-1.5 sm:flex-row sm:items-center"
+              {OVERLAY_CATEGORIES.map((category) => {
+                const overlays = OVERLAY_REGISTRY.filter((d) => d.category === category);
+                if (overlays.length === 0) return null;
+                return (
+                  <div key={category} className="min-w-0">
+                    <p className="text-muted-foreground pt-3.5 pb-1 text-xs font-medium">
+                      {CATEGORY_META[category].title}
+                    </p>
+                    <div className="[&>*]:border-b [&>*]:border-[color-mix(in_srgb,var(--border)_60%,transparent)] [&>*:last-child]:border-b-0">
+                      {overlays.map((def) => {
+                        const config = overlayPrefs.items[def.id];
+                        return (
+                          <SettingFieldRow
+                            key={def.id}
+                            label={def.label}
+                            description={def.description}
+                          >
+                            <Select
+                              value={config.position}
+                              disabled={!config.enabled}
+                              onValueChange={(pos) =>
+                                updateOverlayItem(def.id, { position: pos as OverlayPosition })
+                              }
                             >
-                              <div className="min-w-0 space-y-0.5">
-                                <Label className="text-sm font-medium">{def.label}</Label>
-                                <p className="text-muted-foreground text-xs">{def.description}</p>
-                              </div>
-                              <div className="flex items-center gap-2">
-                                <Select
-                                  value={config.position}
-                                  disabled={!config.enabled}
-                                  onValueChange={(pos) =>
-                                    updateOverlayItem(def.id, { position: pos as OverlayPosition })
-                                  }
-                                >
-                                  <SelectTrigger
-                                    className="w-[130px]"
-                                    aria-label={`${def.label} corner`}
-                                  >
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {POSITION_OPTIONS.map((opt) => (
-                                      <SelectItem key={opt.value} value={opt.value}>
-                                        {opt.label}
-                                      </SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
-                                <Switch
-                                  checked={config.enabled}
-                                  aria-label={`Show ${def.label}`}
-                                  onCheckedChange={(checked) =>
-                                    updateOverlayItem(def.id, { enabled: checked })
-                                  }
-                                />
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
+                              <SelectTrigger
+                                className="w-[130px]"
+                                aria-label={`${def.label} corner`}
+                              >
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {POSITION_OPTIONS.map((opt) => (
+                                  <SelectItem key={opt.value} value={opt.value}>
+                                    {opt.label}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <Switch
+                              checked={config.enabled}
+                              aria-label={`Show ${def.label}`}
+                              onCheckedChange={(checked) =>
+                                updateOverlayItem(def.id, { enabled: checked })
+                              }
+                            />
+                          </SettingFieldRow>
+                        );
+                      })}
                     </div>
-                  );
-                })}
-              </div>
+                  </div>
+                );
+              })}
             </AdvancedSection>
           </div>
         </FieldGroup>
@@ -530,6 +553,7 @@ export default function AppearanceSettings() {
         onDiscard={discard}
         isSaving={form.isSaving}
         restartRequired={form.restartRequired}
+        restartCount={restartCount}
       />
     </div>
   );

@@ -1,8 +1,11 @@
-import { useId } from "react";
+import { useId, type ReactNode } from "react";
+import { Check, TriangleAlert } from "lucide-react";
+
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { RestartBadge } from "@/components/settings/RestartBadge";
+import { cn } from "@/lib/utils";
 import {
   Select,
   SelectContent,
@@ -10,6 +13,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import "@/styles/admin-settings.css";
 
 interface SelectOption {
   value: string;
@@ -17,10 +21,142 @@ interface SelectOption {
   disabled?: boolean;
 }
 
+/** Muted chip marking a setting that still holds its shipped default. */
+export function DefaultChip({ className }: { className?: string }) {
+  return (
+    <span
+      className={cn(
+        "border-border/70 text-muted-foreground bg-foreground/[0.04] inline-flex shrink-0",
+        "items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium tracking-wide",
+        className,
+      )}
+    >
+      Default
+    </span>
+  );
+}
+
+/**
+ * One-line probe result rendered under a field description, e.g.
+ * "Detected VA-API on renderD128". Pass any node to `status` instead when the
+ * copy needs richer markup.
+ */
+export function SettingFieldStatus({
+  tone = "ok",
+  children,
+}: {
+  tone?: "ok" | "warn" | "muted";
+  children: ReactNode;
+}) {
+  const Icon = tone === "warn" ? TriangleAlert : tone === "ok" ? Check : null;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 text-[12.5px] leading-snug",
+        tone === "ok" && "text-green-600 dark:text-green-400",
+        tone === "warn" && "text-amber-600 dark:text-amber-400",
+        tone === "muted" && "text-muted-foreground",
+      )}
+    >
+      {Icon ? <Icon className="size-3.5 shrink-0" aria-hidden="true" /> : null}
+      {children}
+    </span>
+  );
+}
+
+export interface SettingFieldRowProps {
+  label: ReactNode;
+  /** Ties the label to the control; omit for rows whose control has no id. */
+  htmlFor?: string;
+  /** Description under the label. */
+  description?: ReactNode;
+  descriptionId?: string;
+  /** Extra line under the description — probe results, quota notes. */
+  status?: ReactNode;
+  /** Amber "Restart" chip after the label; drive it from `useRestartKeys`. */
+  restartRequired?: boolean;
+  /** Muted "Default" chip after the label. */
+  isDefault?: boolean;
+  /** Accent rail plus a tinted bleed while the value differs from the saved one. */
+  dirty?: boolean;
+  /** Toggles sit flush right; every other control reserves a 200px column. */
+  align?: "control" | "toggle";
+  className?: string;
+  /** The control itself. */
+  children: ReactNode;
+}
+
+/**
+ * The row shell every admin setting sits in: label and description on the
+ * left, control right-aligned, hairline underneath. Exported so the credential
+ * and limit variants line up with plain fields instead of re-deriving spacing.
+ */
+export function SettingFieldRow({
+  label,
+  htmlFor,
+  description,
+  descriptionId,
+  status,
+  restartRequired,
+  isDefault,
+  dirty,
+  align = "control",
+  className,
+  children,
+}: SettingFieldRowProps) {
+  return (
+    <div
+      data-dirty={dirty ? "true" : undefined}
+      className={cn(
+        "border-border/60 relative flex flex-col gap-3 border-b py-3.5 last:border-b-0",
+        "transition-colors sm:flex-row sm:items-start sm:gap-6",
+        dirty && [
+          "bg-[linear-gradient(90deg,var(--settings-accent-soft),transparent_55%)]",
+          "before:absolute before:inset-y-0 before:bg-[var(--settings-accent)]",
+          "before:-left-2.5 before:w-0.5 before:rounded-full before:content-['']",
+        ],
+        className,
+      )}
+    >
+      <div className="min-w-0 flex-1 sm:max-w-[520px]">
+        <div className="flex flex-wrap items-center gap-2">
+          <Label htmlFor={htmlFor} className="text-sm font-medium">
+            {label}
+          </Label>
+          {restartRequired && <RestartBadge />}
+          {isDefault && <DefaultChip />}
+        </div>
+        {description ? (
+          <p id={descriptionId} className="text-muted-foreground mt-1 text-xs leading-relaxed">
+            {description}
+          </p>
+        ) : null}
+        {status ? <div className="mt-1.5">{status}</div> : null}
+      </div>
+      <div
+        className={cn(
+          "flex shrink-0 items-center gap-2 sm:justify-end",
+          align === "control" && "sm:min-w-[200px]",
+        )}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
 interface SettingFieldProps {
   label: string;
   type?: "text" | "number" | "password" | "toggle" | "duration" | "select";
+  /**
+   * Placeholder for `text`, description for every other type. Prefer
+   * `description` for new call sites.
+   */
   hint?: string;
+  /** Always rendered under the label, whatever the type. */
+  description?: ReactNode;
+  /** Extra line under the description, e.g. a detection result. */
+  status?: ReactNode;
   value: string;
   onChange: (value: string) => void;
   options?: SelectOption[];
@@ -28,159 +164,126 @@ interface SettingFieldProps {
   disabled?: boolean;
   /** Marks the field with a restart badge; drive it from `useRestartKeys`. */
   restartRequired?: boolean;
-}
-
-function FieldLabel({
-  htmlFor,
-  label,
-  restartRequired,
-}: {
-  htmlFor: string;
-  label: string;
-  restartRequired?: boolean;
-}) {
-  return (
-    <div className="flex items-center gap-2">
-      <Label htmlFor={htmlFor} className="text-sm font-medium">
-        {label}
-      </Label>
-      {restartRequired && <RestartBadge />}
-    </div>
-  );
+  /** Marks the field as still holding its shipped default. */
+  isDefault?: boolean;
+  /** Marks the field as edited but unsaved. */
+  dirty?: boolean;
+  className?: string;
 }
 
 export function SettingField({
   label,
   type = "text",
   hint,
+  description,
+  status,
   value,
   onChange,
   options,
   sensitiveConfigured,
   disabled,
   restartRequired,
+  isDefault,
+  dirty,
+  className,
 }: SettingFieldProps) {
   const controlId = useId();
   const hintId = useId();
 
+  // `text` keeps treating `hint` as a placeholder (its long-standing
+  // behaviour); every other type shows it under the label.
+  const hintAsDescription = type === "text" ? undefined : hint;
+  const rowDescription = description ?? hintAsDescription;
+  const describedBy = rowDescription ? hintId : undefined;
+
+  const row = (control: ReactNode, align: "control" | "toggle" = "control") => (
+    <SettingFieldRow
+      label={label}
+      htmlFor={controlId}
+      description={rowDescription}
+      descriptionId={hintId}
+      status={status}
+      restartRequired={restartRequired}
+      isDefault={isDefault}
+      dirty={dirty}
+      align={align}
+      className={className}
+    >
+      {control}
+    </SettingFieldRow>
+  );
+
   if (type === "toggle") {
-    const checked = value === "true";
-    return (
-      <div className="flex flex-col justify-between gap-3 py-3 sm:flex-row sm:items-center">
-        <div className="space-y-0.5">
-          <FieldLabel htmlFor={controlId} label={label} restartRequired={restartRequired} />
-          {hint && (
-            <p id={hintId} className="text-muted-foreground text-xs">
-              {hint}
-            </p>
-          )}
-        </div>
-        <Switch
-          id={controlId}
-          checked={checked}
-          onCheckedChange={(val) => onChange(val ? "true" : "false")}
-          disabled={disabled}
-          aria-describedby={hint ? hintId : undefined}
-        />
-      </div>
+    return row(
+      <Switch
+        id={controlId}
+        checked={value === "true"}
+        onCheckedChange={(val) => onChange(val ? "true" : "false")}
+        disabled={disabled}
+        aria-describedby={describedBy}
+      />,
+      "toggle",
     );
   }
 
   if (type === "select" && options) {
     const currentVal = value || options[0]?.value || "";
-    return (
-      <div className="space-y-1 py-2">
-        <FieldLabel htmlFor={controlId} label={label} restartRequired={restartRequired} />
-        <Select value={currentVal} onValueChange={onChange} disabled={disabled}>
-          <SelectTrigger
-            id={controlId}
-            className="w-full sm:w-fit"
-            aria-describedby={hint ? hintId : undefined}
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {options.map((opt) => (
-              <SelectItem key={opt.value} value={opt.value} disabled={opt.disabled}>
-                {opt.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        {hint && (
-          <p id={hintId} className="text-muted-foreground text-xs">
-            {hint}
-          </p>
-        )}
-      </div>
+    return row(
+      <Select value={currentVal} onValueChange={onChange} disabled={disabled}>
+        <SelectTrigger id={controlId} className="w-full sm:w-60" aria-describedby={describedBy}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((opt) => (
+            <SelectItem key={opt.value} value={opt.value} disabled={opt.disabled}>
+              {opt.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>,
     );
   }
 
   if (type === "password") {
-    const placeholder = sensitiveConfigured ? "configured" : (hint ?? "Not configured");
-    return (
-      <div className="space-y-1 py-2">
-        <FieldLabel htmlFor={controlId} label={label} restartRequired={restartRequired} />
-        <Input
-          id={controlId}
-          type="password"
-          placeholder={placeholder}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          disabled={disabled}
-          className="max-w-md"
-          aria-describedby={hint ? hintId : undefined}
-        />
-        {hint && (
-          <p id={hintId} className="text-muted-foreground text-xs">
-            {hint}
-          </p>
-        )}
-      </div>
+    return row(
+      <Input
+        id={controlId}
+        type="password"
+        placeholder={sensitiveConfigured ? "configured" : (hint ?? "Not configured")}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        className="w-full sm:w-60"
+        aria-describedby={describedBy}
+      />,
     );
   }
 
   if (type === "number") {
-    return (
-      <div className="space-y-1 py-2">
-        <FieldLabel htmlFor={controlId} label={label} restartRequired={restartRequired} />
-        <Input
-          id={controlId}
-          type="number"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          disabled={disabled}
-          className="w-full sm:w-40"
-          aria-describedby={hint ? hintId : undefined}
-        />
-        {hint && (
-          <p id={hintId} className="text-muted-foreground text-xs">
-            {hint}
-          </p>
-        )}
-      </div>
+    return row(
+      <Input
+        id={controlId}
+        type="number"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        className="w-full sm:w-40"
+        aria-describedby={describedBy}
+      />,
     );
   }
 
   // text and duration
-  return (
-    <div className="space-y-1 py-2">
-      <FieldLabel htmlFor={controlId} label={label} restartRequired={restartRequired} />
-      <Input
-        id={controlId}
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        className="max-w-md"
-        placeholder={hint}
-        aria-describedby={hint && type === "duration" ? hintId : undefined}
-      />
-      {hint && type === "duration" && (
-        <p id={hintId} className="text-muted-foreground text-xs">
-          {hint}
-        </p>
-      )}
-    </div>
+  return row(
+    <Input
+      id={controlId}
+      type="text"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      disabled={disabled}
+      className="w-full sm:w-60"
+      placeholder={type === "text" ? hint : undefined}
+      aria-describedby={describedBy}
+    />,
   );
 }

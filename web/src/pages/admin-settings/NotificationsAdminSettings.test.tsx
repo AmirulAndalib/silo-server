@@ -9,6 +9,11 @@ import NotificationsAdminSettings from "./NotificationsAdminSettings";
 
 const useSettingsFormMock = vi.fn();
 const restartKeysMock = vi.fn(() => new Set<string>());
+const updateSettingsMock = vi.fn(() => Promise.resolve({ values: {}, restart_required: false }));
+
+vi.mock("@/hooks/queries/admin/settings", () => ({
+  useUpdateServerSettings: () => ({ mutateAsync: updateSettingsMock, isPending: false }),
+}));
 
 vi.mock("@/hooks/useSettingsForm", () => ({
   useSettingsForm: (...args: unknown[]) => useSettingsFormMock(...args),
@@ -94,6 +99,7 @@ describe("NotificationsAdminSettings", () => {
   beforeEach(() => {
     localStorage.clear();
     restartKeysMock.mockReturnValue(new Set<string>());
+    updateSettingsMock.mockClear();
   });
 
   it("registers Silo Push Relay settings with the shared settings form", () => {
@@ -120,7 +126,7 @@ describe("NotificationsAdminSettings", () => {
     expect(options.keys).toContain("notifications.push_relay_url");
   });
 
-  it("owns the merged email keys and leaves the Discord application to Integrations", () => {
+  it("owns the merged email keys and the Discord application", () => {
     useSettingsFormMock.mockReturnValue(makeForm());
 
     renderStaticPage();
@@ -144,7 +150,7 @@ describe("NotificationsAdminSettings", () => {
       expect(options.keys).toContain(key);
     }
     for (const key of ["discord.client_id", "discord.client_secret", "discord.bot_token"]) {
-      expect(options.keys).not.toContain(key);
+      expect(options.keys).toContain(key);
     }
   });
 
@@ -223,24 +229,70 @@ describe("NotificationsAdminSettings", () => {
     expect(screen.getByRole("button", { name: "Keep saved Password" })).toBeInTheDocument();
   });
 
-  it("points Discord application setup at the Integrations tab", async () => {
-    useSettingsFormMock.mockReturnValue(makeForm());
+  it("configures the Discord application inside the Discord channel card", async () => {
+    useSettingsFormMock.mockReturnValue(makeForm({ "discord.client_id": "1234567890" }));
 
     render(renderPage());
     await openChannel(DISCORD_CHANNEL);
 
-    expect(screen.getByRole("link", { name: "Integrations tab" })).toHaveAttribute(
-      "href",
-      "/admin/settings?tab=integrations",
-    );
-    expect(screen.queryByText("Client ID")).not.toBeInTheDocument();
-    expect(screen.queryByText("Client Secret")).not.toBeInTheDocument();
-    expect(screen.queryByText("Bot Token")).not.toBeInTheDocument();
-    expect(screen.queryByText("Test bot token")).not.toBeInTheDocument();
-    expect(screen.queryByText(/Show setup guide/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Integrations tab" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Client ID")).toHaveValue("1234567890");
+    expect(screen.getByText("Client secret")).toBeInTheDocument();
+    expect(screen.getByText("Bot token")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Test bot token" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Show setup guide/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Invite bot to server/ })).toBeInTheDocument();
     // Delivery and appearance stay here.
     expect(screen.getByText("Show artwork in Discord messages")).toBeInTheDocument();
     expect(screen.getByText("Let people pick a DM per episode")).toBeInTheDocument();
+  });
+
+  it("saves the Discord application on its own, not through the page save bar", async () => {
+    const form = makeForm({ "discord.client_id": "1234567890" });
+    useSettingsFormMock.mockReturnValue(form);
+
+    render(renderPage());
+    await openChannel(DISCORD_CHANNEL);
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(updateSettingsMock).toHaveBeenCalledWith({ "discord.client_id": "1234567890" });
+    expect(form.save).not.toHaveBeenCalled();
+  });
+
+  it("clears the Discord application behind a confirmation", async () => {
+    const form = makeForm({ "discord.client_id": "1234567890" });
+    useSettingsFormMock.mockReturnValue(form);
+
+    render(renderPage());
+    await openChannel(DISCORD_CHANNEL);
+    await userEvent.click(screen.getByRole("button", { name: "Clear credentials" }));
+
+    expect(screen.getByText("Clear Discord app credentials?")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /^Clear$/ }));
+
+    expect(updateSettingsMock).toHaveBeenCalledWith({
+      "discord.client_id": "",
+      "discord.client_secret": "",
+      "discord.bot_token": "",
+    });
+  });
+
+  it("summarizes the pipeline and channels in the page status strip", () => {
+    useSettingsFormMock.mockReturnValue(makeForm());
+
+    render(renderPage());
+
+    expect(screen.getByRole("heading", { level: 2, name: "Notifications" })).toBeInTheDocument();
+    expect(screen.getByText("Pipeline on")).toBeInTheDocument();
+    expect(screen.getByText("5 of 7 channels enabled")).toBeInTheDocument();
+  });
+
+  it("warns in the strip when sending is paused", () => {
+    useSettingsFormMock.mockReturnValue(makeForm({ "notifications.fanout_enabled": "false" }));
+
+    render(renderPage());
+
+    expect(screen.getByText("Sending paused")).toBeInTheDocument();
   });
 
   it("hides tuning and webhook limits behind Advanced disclosures", async () => {

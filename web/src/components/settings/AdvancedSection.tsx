@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import "@/styles/admin-settings.css";
 
 const STORAGE_PREFIX = "silo.admin.advanced.";
 
@@ -31,8 +32,10 @@ function writePersisted(id: string, open: boolean): void {
 export interface AdvancedSectionProps {
   /** Stable id for the persisted open state, e.g. `playback.transcoding`. */
   id: string;
-  /** Number of settings inside, rendered as "Advanced · N settings". */
+  /** Number of settings inside, rendered as "N settings" on the right. */
   count?: number;
+  /** Unsaved settings inside, appended as "· M changed". */
+  changedCount?: number;
   title?: string;
   /** Open state used when nothing is persisted yet. */
   defaultOpen?: boolean;
@@ -46,13 +49,15 @@ export interface AdvancedSectionProps {
 }
 
 /**
- * The single disclosure primitive for advanced admin settings. Collapsed by
- * default, remembers the admin's choice per section in localStorage, and
- * auto-expands while `forceOpen` is set.
+ * The single disclosure primitive for advanced admin settings: an inline row at
+ * the end of a group rather than a nested card. Collapsed by default, remembers
+ * the admin's choice per section in localStorage, and auto-expands while
+ * `forceOpen` is set.
  */
 export function AdvancedSection({
   id,
   count,
+  changedCount,
   title = "Advanced",
   defaultOpen = false,
   forceOpen = false,
@@ -85,29 +90,58 @@ export function AdvancedSection({
     writePersisted(id, next);
   }
 
-  const label =
-    typeof count === "number" ? `${title} · ${count} setting${count === 1 ? "" : "s"}` : title;
+  const countLabel =
+    typeof count === "number" ? `${count} setting${count === 1 ? "" : "s"}` : undefined;
+  const changedLabel =
+    typeof changedCount === "number" && changedCount > 0 ? `${changedCount} changed` : undefined;
+  const meta = [countLabel, changedLabel].filter(Boolean).join(" · ");
+  // The accessible name keeps the "Advanced · N settings" reading order even
+  // though the counts are visually pushed to the right of the row.
+  const accessibleLabel = meta ? `${title} · ${meta}` : title;
 
   return (
-    <section className="surface-panel-subtle overflow-hidden rounded-xl">
+    <div className="min-w-0">
       <button
         type="button"
-        className="hover:bg-surface-hover/40 flex w-full items-center gap-2 px-4 py-3 text-left transition-colors"
+        aria-label={accessibleLabel}
         aria-expanded={open}
         onClick={toggle}
+        className={cn(
+          "text-muted-foreground hover:text-foreground flex w-full items-center gap-2.5",
+          "py-3 text-left text-[13px] transition-colors",
+          open && "text-foreground",
+        )}
       >
-        <ChevronDown
+        <ChevronRight
           className={cn(
-            "text-muted-foreground h-4 w-4 shrink-0 transition-transform",
-            !open && "-rotate-90",
+            "size-3.5 shrink-0 transition-transform",
+            open ? "rotate-90 text-[var(--settings-accent)]" : "text-muted-foreground",
           )}
           aria-hidden="true"
         />
-        <span className="text-muted-foreground min-w-0 flex-1 text-xs font-semibold tracking-wide">
-          {label}
-        </span>
+        <span className="min-w-0 font-medium">{title}</span>
+        {meta ? (
+          <span className="text-muted-foreground ml-auto shrink-0 text-[11.5px]">
+            {meta}
+            {changedLabel ? (
+              <span
+                aria-hidden="true"
+                className="ml-2 inline-block size-1.5 rounded-full bg-[var(--settings-accent)] align-middle"
+              />
+            ) : null}
+          </span>
+        ) : null}
       </button>
-      {open ? <div className="divide-border divide-y px-4 pb-3">{children}</div> : null}
-    </section>
+      {open ? (
+        <div
+          className={cn(
+            "ml-[6px] border-l-2 border-[var(--settings-accent-line)] pl-[15px]",
+            "[&>*]:border-b [&>*]:border-[color-mix(in_srgb,var(--border)_60%,transparent)] [&>*:last-child]:border-b-0",
+          )}
+        >
+          {children}
+        </div>
+      ) : null}
+    </div>
   );
 }

@@ -8,6 +8,7 @@ import SecurityAccessSettings from "./SecurityAccessSettings";
 const useSettingsFormMock = vi.fn();
 const rateLimitConfigMock = vi.fn();
 const updateRateLimitMock = vi.fn();
+const serverStatusMock = vi.fn();
 
 vi.mock("@/hooks/useSettingsForm", () => ({
   useSettingsForm: (...args: unknown[]) => useSettingsFormMock(...args),
@@ -20,6 +21,10 @@ vi.mock("@/hooks/useRestartKeys", () => ({
 vi.mock("@/hooks/queries/admin/rateLimits", () => ({
   useRateLimitConfig: () => rateLimitConfigMock(),
   useUpdateRateLimitConfig: () => updateRateLimitMock(),
+}));
+
+vi.mock("@/hooks/queries/admin/settings", () => ({
+  useAdminServerStatus: () => serverStatusMock(),
 }));
 
 const SERVER_CONFIG: RateLimitConfig = {
@@ -70,14 +75,24 @@ describe("SecurityAccessSettings", () => {
     useSettingsFormMock.mockReturnValue(makeForm());
     rateLimitConfigMock.mockReturnValue({ data: SERVER_CONFIG, isLoading: false });
     updateRateLimitMock.mockReturnValue({ mutate: vi.fn(), isPending: false, data: undefined });
+    serverStatusMock.mockReturnValue({ data: undefined });
   });
 
   it("renders every field group", () => {
     render(<SecurityAccessSettings />);
 
-    for (const heading of ["Sign-in Sessions", "Network", "Rate Limiting"]) {
-      expect(screen.getByText(heading)).toBeInTheDocument();
+    for (const heading of ["Sign-in sessions", "Network", "Rate limiting"]) {
+      expect(screen.getByRole("group", { name: heading })).toBeInTheDocument();
     }
+  });
+
+  it("summarises the tab in the status strip under the title", () => {
+    render(<SecurityAccessSettings />);
+
+    expect(screen.getByRole("heading", { name: "Security & Access" })).toBeInTheDocument();
+    expect(screen.getByText("Sign-in lasts the default")).toBeInTheDocument();
+    expect(screen.getByText("Trusted proxies: private ranges only")).toBeInTheDocument();
+    expect(screen.getByText("Rate limiting on · this server only")).toBeInTheDocument();
   });
 
   it("keeps the token and proxy keys on the batched settings form", () => {
@@ -93,14 +108,30 @@ describe("SecurityAccessSettings", () => {
   it("shows only the rate limiting switch until Advanced is opened", async () => {
     render(<SecurityAccessSettings />);
 
-    expect(screen.getByRole("switch", { name: /Enable Rate Limiting/i })).toBeInTheDocument();
-    expect(screen.queryByText("Per Client Address")).not.toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: /Enable rate limiting/i })).toBeInTheDocument();
+    expect(screen.queryByText("Per client address")).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: /Advanced/i }));
 
-    expect(screen.getByText("Per Client Address")).toBeInTheDocument();
+    expect(screen.getByText("Per client address")).toBeInTheDocument();
     expect(screen.getByText("Standard API keys")).toBeInTheDocument();
     expect(screen.getByText("Sign in")).toBeInTheDocument();
+  });
+
+  it("marks an edited rate-limit row dirty and counts it in the Advanced disclosure", async () => {
+    render(<SecurityAccessSettings />);
+
+    await userEvent.click(screen.getByRole("button", { name: /Advanced/i }));
+
+    const rpsInput = screen.getByLabelText("Whole-server requests per second") as HTMLInputElement;
+    await userEvent.clear(rpsInput);
+    await userEvent.type(rpsInput, "500");
+
+    expect(rpsInput.closest('[data-dirty="true"]')).not.toBeNull();
+    expect(screen.getByRole("button", { name: /1 changed/i })).toBeInTheDocument();
+
+    // An untouched row stays clean.
+    expect(screen.getByText("Per client address").closest('[data-dirty="true"]')).toBeNull();
   });
 
   it("counts an edited rate limit toward the shared save bar and saves both writers", async () => {
@@ -111,7 +142,7 @@ describe("SecurityAccessSettings", () => {
 
     render(<SecurityAccessSettings />);
 
-    await userEvent.click(screen.getByRole("switch", { name: /Enable Rate Limiting/i }));
+    await userEvent.click(screen.getByRole("switch", { name: /Enable rate limiting/i }));
     expect(screen.getByText("2 unsaved changes")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: /Save Changes/i }));
@@ -128,6 +159,22 @@ describe("SecurityAccessSettings", () => {
 
     render(<SecurityAccessSettings />);
 
-    expect(screen.getByText(/Server restart required/i)).toBeInTheDocument();
+    expect(screen.getByText("Restart required")).toBeInTheDocument();
+    expect(
+      screen.getByText("The running rate limiter is not using the saved backend."),
+    ).toBeInTheDocument();
+  });
+
+  it("leaves the limiter banner to the shell when a server restart is already owed", () => {
+    rateLimitConfigMock.mockReturnValue({
+      data: { ...SERVER_CONFIG, backend: "redis", active_backend: "memory" },
+      isLoading: false,
+    });
+    serverStatusMock.mockReturnValue({ data: { restart_required: true } });
+
+    render(<SecurityAccessSettings />);
+
+    // Two fixed bottom banners would sit on top of each other.
+    expect(screen.queryByText("Restart required")).not.toBeInTheDocument();
   });
 });

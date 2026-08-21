@@ -102,6 +102,15 @@ describe("LibraryMetadataSettings", () => {
     }
   });
 
+  it("summarises the tab in the status strip under the title", () => {
+    const rendered = text(render({ "catalog.search.provider": "postgres" }));
+
+    expect(rendered).toContain("Library & Metadata");
+    expect(rendered).toContain("Artwork caching off");
+    expect(rendered).toContain("Markers detected here");
+    expect(rendered).toContain("Search: built-in (Postgres)");
+  });
+
   it("manages the merged key set of the three tabs it replaces", () => {
     render({});
 
@@ -148,10 +157,10 @@ describe("LibraryMetadataSettings", () => {
   it("leaves S3 image caching editable and unannotated while public storage is active", () => {
     const rendered = render({ "s3.public_bucket": "silo-public" });
 
-    expect(text(rendered)).toContain("S3 Image Caching");
+    expect(text(rendered)).toContain("S3 image caching");
     expect(text(rendered)).not.toContain("Restart the server for image caching to start");
     expect(text(rendered)).not.toContain("S3 image caching needs S3 object storage");
-    expect(toggleDisabled(rendered, "S3 Image Caching")).toBe(false);
+    expect(toggleDisabled(rendered, "S3 image caching")).toBe(false);
   });
 
   it("keeps S3 image caching settable when the bucket is saved but not active yet", () => {
@@ -160,7 +169,7 @@ describe("LibraryMetadataSettings", () => {
     const rendered = render({ "s3.public_bucket": "silo-public" });
 
     expect(text(rendered)).toContain("Restart the server for image caching to start");
-    expect(toggleDisabled(rendered, "S3 Image Caching")).toBe(false);
+    expect(toggleDisabled(rendered, "S3 image caching")).toBe(false);
   });
 
   it("disables S3 image caching and links to Infrastructure when no bucket is configured", () => {
@@ -170,7 +179,7 @@ describe("LibraryMetadataSettings", () => {
 
     expect(text(rendered)).toContain("S3 image caching needs S3 object storage");
     expect(rendered).toContain("/admin/settings?tab=infrastructure");
-    expect(toggleDisabled(rendered, "S3 Image Caching")).toBe(true);
+    expect(toggleDisabled(rendered, "S3 image caching")).toBe(true);
   });
 
   it("still allows switching S3 image caching off when the bucket went away", () => {
@@ -179,12 +188,12 @@ describe("LibraryMetadataSettings", () => {
     const rendered = render({ "metadata.cache_images": "true" });
 
     expect(text(rendered)).toContain("S3 image caching needs S3 object storage");
-    expect(toggleDisabled(rendered, "S3 Image Caching")).toBe(false);
+    expect(toggleDisabled(rendered, "S3 image caching")).toBe(false);
   });
 
   it("marks a restart-required field with the restart badge", () => {
     useRestartKeysMock.mockReturnValue(new Set(["metadata.cache_images"]));
 
-    expect(text(render({ "catalog.search.provider": "postgres" }))).toContain("restart");
+    expect(text(render({ "catalog.search.provider": "postgres" }))).toContain("Restart");
   });
 });

@@ -85,9 +85,19 @@ describe("AppearanceSettings", () => {
   it("renders every field group heading", () => {
     render(<AppearanceSettings />);
 
-    for (const heading of ["Logos & Icons", "Colors & Theme", "Card Overlays"]) {
+    for (const heading of ["Logos and icons", "Colors and theme", "Card overlays"]) {
       expect(screen.getByRole("group", { name: heading })).toBeInTheDocument();
     }
+  });
+
+  it("summarises the tab in the status strip under the title", () => {
+    render(<AppearanceSettings />);
+
+    expect(screen.getByRole("heading", { name: "Appearance" })).toBeInTheDocument();
+    expect(screen.getByText("No default theme")).toBeInTheDocument();
+    expect(screen.getByText("Default accent")).toBeInTheDocument();
+    expect(screen.getByText("Poster badges on")).toBeInTheDocument();
+    expect(screen.getByText("Image uploads ready")).toBeInTheDocument();
   });
 
   it("stages the union of appearance keys and leaves identity to General", () => {

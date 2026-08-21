@@ -9,11 +9,12 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
+import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
+import { StatusStrip, type StatusStripItem } from "@/components/settings/StatusStrip";
 import {
   useInstallJellyfinCompatWeb,
   useJellyfinCompatStatus,
@@ -26,7 +27,7 @@ import { useSettingsForm } from "@/hooks/useSettingsForm";
 
 import { FieldGroup } from "./FieldGroup";
 import { SaveBar } from "./SaveBar";
-import { SettingField } from "./SettingField";
+import { SettingField, SettingFieldStatus } from "./SettingField";
 import { formatDateTime } from "@/lib/datetime";
 
 const JELLYFIN_ADVANCED_KEYS = [
@@ -71,9 +72,34 @@ const WEB_STATE_LABELS: Record<string, string> = {
   failed: "Install failed",
 };
 
+// The same enum, said as a fact for the status strip at the top of the page.
+const WEB_STATE_STRIP: Record<string, StatusStripItem> = {
+  missing: { tone: "muted", label: "Web UI not installed" },
+  installed: { tone: "ok", label: "Web UI installed" },
+  update_available: { tone: "info", label: "Web UI update available" },
+  installing: { tone: "info", label: "Web UI installing" },
+  removing: { tone: "info", label: "Web UI being removed" },
+  failed: { tone: "warn", label: "Web UI install failed" },
+};
+
 function webStateLabel(value?: string): string {
   if (!value) return "Unknown";
   return WEB_STATE_LABELS[value] ?? statusLabel(value);
+}
+
+function webStateStripItem(value?: string): StatusStripItem {
+  return WEB_STATE_STRIP[value ?? ""] ?? { tone: "muted", label: "Web UI not installed" };
+}
+
+/** Host part of a configured public URL, for the one-line status strip. */
+function hostLabel(value?: string): string {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed) return "";
+  try {
+    return new URL(trimmed).host;
+  } catch {
+    return trimmed.replace(/^[a-z]+:\/\//i, "").replace(/\/.*$/, "");
+  }
 }
 
 function operationTitle(kind?: string): string {
@@ -145,8 +171,10 @@ export default function CompatibilityProxiesSettings() {
     );
 
   const dirtyKeys: string[] = form.dirtyKeys ?? [];
+  const isDirty = (key: string) => dirtyKeys.includes(key);
+  const restartCount = dirtyKeys.filter((key) => restartKeys.has(key)).length;
   const hasDirtyWebConfig = dirtyKeys.some((key) => WEB_INSTALL_KEYS.includes(key));
-  const jellyfinAdvancedDirty = dirtyKeys.some((key) => JELLYFIN_ADVANCED_KEYS.includes(key));
+  const jellyfinAdvancedDirty = JELLYFIN_ADVANCED_KEYS.filter((key) => isDirty(key));
   const operationRunning =
     status?.operation?.state === "running" ||
     status?.web_state === "installing" ||
@@ -155,11 +183,32 @@ export default function CompatibilityProxiesSettings() {
   const jellyfinEnabledValue = form.getValue("jellyfin_compat.enabled");
   const jellyfinEnabledChecked =
     jellyfinEnabledValue === "" ? Boolean(status?.enabled) : jellyfinEnabledValue === "true";
-  const jellyfinEnabledDirty = dirtyKeys.includes("jellyfin_compat.enabled");
   const jellyfinProxyRunning = Boolean(status?.enabled);
   const jellyfinWebServing = jellyfinProxyRunning && status?.web_enabled !== false;
   const installedWebAssetsPresent = Boolean(status?.installed_version);
   const pinnedJellyfinWebInstalled = hasPinnedJellyfinWebInstalled(status);
+  const audiobookshelfEnabled = form.getValue("audiobookshelf_compat.enabled") === "true";
+  const publicHost = hostLabel(status?.public_url || form.getValue("jellyfin_compat.public_url"));
+
+  const stripItems: StatusStripItem[] = [
+    {
+      tone: jellyfinProxyRunning ? "ok" : "muted",
+      label: jellyfinProxyRunning
+        ? publicHost
+          ? `Jellyfin on · ${publicHost}`
+          : "Jellyfin on · no public URL set"
+        : "Jellyfin off",
+    },
+    webStateStripItem(status?.web_state),
+    {
+      tone: audiobookshelfEnabled ? "ok" : "muted",
+      label: audiobookshelfEnabled ? "Audiobookshelf on" : "Audiobookshelf off",
+    },
+  ];
+  if (status?.restart_required) {
+    stripItems.push({ tone: "warn", label: "Restart pending" });
+  }
+
   const setJellyfinAPIEnabled = (value: string) => {
     form.setValue("jellyfin_compat.enabled", value);
     if (value === "false") {
@@ -173,57 +222,37 @@ export default function CompatibilityProxiesSettings() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="mb-6 space-y-2">
-        <h2 className="text-xl font-semibold tracking-tight">Compatibility</h2>
-        <p className="text-muted-foreground text-sm leading-relaxed">
-          Let apps built for other media servers talk to Silo. Silo answers on their protocol while
-          serving your own library.
-        </p>
-      </div>
+      <SettingsPageHeader
+        title="Compatibility"
+        description="Let Jellyfin and Audiobookshelf apps connect to this server."
+        strip={<StatusStrip items={stripItems} />}
+        className="mb-8"
+      />
 
-      <div className="flex-1 space-y-6">
-        <FieldGroup label="Jellyfin">
+      <div className="flex-1 space-y-8">
+        <FieldGroup
+          label="Jellyfin"
+          clarifier="Swiftfin, Findroid, Infuse, and other Jellyfin apps"
+        >
           <SettingField
             label="Allow Jellyfin apps to connect"
             type="toggle"
-            hint="Silo answers Jellyfin requests so apps like Swiftfin, Findroid, and Infuse can sign in and play from your library."
+            description="Silo answers Jellyfin requests so those apps can sign in and play from your library."
             value={jellyfinEnabledChecked ? "true" : "false"}
             onChange={setJellyfinAPIEnabled}
             disabled={form.isSaving}
             restartRequired={restartKeys.has("jellyfin_compat.enabled")}
+            dirty={isDirty("jellyfin_compat.enabled")}
           />
-
-          <div className="flex flex-wrap items-center gap-2 py-3">
-            <Badge variant={status?.enabled ? "default" : "outline"}>
-              {status?.enabled ? "Jellyfin API on" : "Jellyfin API off"}
-            </Badge>
-            <Badge variant={jellyfinWebServing ? "secondary" : "outline"}>
-              {jellyfinWebServing ? "Jellyfin web player on" : "Jellyfin web player off"}
-            </Badge>
-            <Badge
-              variant={
-                status?.web_state === "installed" || status?.web_state === "update_available"
-                  ? "secondary"
-                  : status?.web_state === "failed"
-                    ? "destructive"
-                    : "outline"
-              }
-            >
-              Files: {webStateLabel(status?.web_state)}
-            </Badge>
-            {status?.operation?.state === "running" && (
-              <Badge variant="secondary">{statusLabel(status.operation.kind)} running</Badge>
-            )}
-            {jellyfinEnabledDirty && <Badge variant="outline">Not saved yet</Badge>}
-            {status?.restart_required && <Badge variant="outline">Restart required</Badge>}
-          </div>
 
           <SettingField
             label="Address Jellyfin apps should use"
-            hint="The URL clients connect to, for example https://media.example.com. Silo hands it out when apps discover the server."
+            hint="https://media.example.com"
+            description="The URL clients connect to. Silo hands it out when apps discover the server."
             value={form.getValue("jellyfin_compat.public_url")}
             onChange={(v) => form.setValue("jellyfin_compat.public_url", v)}
             restartRequired={restartKeys.has("jellyfin_compat.public_url")}
+            dirty={isDirty("jellyfin_compat.public_url")}
           />
 
           {status?.last_error && (
@@ -233,22 +262,31 @@ export default function CompatibilityProxiesSettings() {
             </div>
           )}
 
-          <div className="space-y-4 py-3">
+          <div className="space-y-4 py-3.5">
             <div>
-              <h3 className="text-sm font-medium">Jellyfin web player</h3>
-              <p className="text-muted-foreground mt-1 text-sm leading-relaxed">
+              <h4 className="text-sm font-medium">Jellyfin web player</h4>
+              <p className="text-muted-foreground mt-1 max-w-[52ch] text-xs leading-relaxed">
                 A copy of Jellyfin&apos;s own browser interface. Silo does not need it, but Jellyfin
                 mobile and TV apps expect to find it on the server. Turning it off stops Silo
                 serving it and leaves the downloaded files in place.
               </p>
-            </div>
-
-            <div className="grid gap-x-8 md:grid-cols-2">
-              <StatusLine label="Version installed" value={status?.installed_version} />
-              <StatusLine
-                label="Downloader"
-                value={status?.installer_ready ? "Ready" : "Missing required tools"}
-              />
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1">
+                <SettingFieldStatus tone={installedWebAssetsPresent ? "ok" : "muted"}>
+                  {installedWebAssetsPresent
+                    ? `Version ${status?.installed_version} installed`
+                    : webStateLabel(status?.web_state)}
+                </SettingFieldStatus>
+                {jellyfinProxyRunning && installedWebAssetsPresent ? (
+                  <SettingFieldStatus tone={jellyfinWebServing ? "ok" : "muted"}>
+                    {jellyfinWebServing ? "Served to clients" : "Not served to clients"}
+                  </SettingFieldStatus>
+                ) : null}
+                {status?.installer_ready === false ? (
+                  <SettingFieldStatus tone="warn">
+                    Downloader is missing required tools
+                  </SettingFieldStatus>
+                ) : null}
+              </div>
             </div>
 
             {status?.operation?.state === "running" &&
@@ -412,70 +450,79 @@ export default function CompatibilityProxiesSettings() {
           <AdvancedSection
             id="compatibility.jellyfin"
             count={JELLYFIN_ADVANCED_KEYS.length}
-            forceOpen={jellyfinAdvancedDirty}
+            changedCount={jellyfinAdvancedDirty.length}
+            forceOpen={jellyfinAdvancedDirty.length > 0}
           >
             <SettingField
               label="Name shown to Jellyfin apps"
-              hint="Defaults to your Silo server name."
+              description="Defaults to your Silo server name."
               value={form.getValue("jellyfin_compat.server_name")}
               onChange={(v) => form.setValue("jellyfin_compat.server_name", v)}
               restartRequired={restartKeys.has("jellyfin_compat.server_name")}
+              dirty={isDirty("jellyfin_compat.server_name")}
             />
             <SettingField
               label="Server ID"
-              hint="The identifier apps store to recognise this server again. Changing it makes saved clients treat Silo as a new server."
+              description="The identifier apps store to recognise this server again. Changing it makes saved clients treat Silo as a new server."
               value={form.getValue("jellyfin_compat.server_id")}
               onChange={(v) => form.setValue("jellyfin_compat.server_id", v)}
               restartRequired={restartKeys.has("jellyfin_compat.server_id")}
+              dirty={isDirty("jellyfin_compat.server_id")}
             />
             <SettingField
               label="Jellyfin version to report"
-              hint="Some apps refuse to connect to versions they do not know. Leave as is unless an app complains."
+              description="Some apps refuse to connect to versions they do not know. Leave as is unless an app complains."
               value={form.getValue("jellyfin_compat.emulated_server_version")}
               onChange={(v) => form.setValue("jellyfin_compat.emulated_server_version", v)}
               restartRequired={restartKeys.has("jellyfin_compat.emulated_server_version")}
+              dirty={isDirty("jellyfin_compat.emulated_server_version")}
             />
             <SettingField
               label="Stay signed in for"
               type="duration"
-              hint="How long a Jellyfin app stays signed in before it has to log in again, for example 24h."
+              description="How long a Jellyfin app stays signed in before it has to log in again, for example 24h."
               value={form.getValue("jellyfin_compat.session_ttl")}
               onChange={(v) => form.setValue("jellyfin_compat.session_ttl", v)}
               restartRequired={restartKeys.has("jellyfin_compat.session_ttl")}
+              dirty={isDirty("jellyfin_compat.session_ttl")}
             />
             <SettingField
               label="Forget idle playback after"
               type="duration"
-              hint="How long a paused or abandoned playback is remembered before Silo drops it, for example 6h."
+              description="How long a paused or abandoned playback is remembered before Silo drops it, for example 6h."
               value={form.getValue("jellyfin_compat.playback_session_ttl")}
               onChange={(v) => form.setValue("jellyfin_compat.playback_session_ttl", v)}
               restartRequired={restartKeys.has("jellyfin_compat.playback_session_ttl")}
+              dirty={isDirty("jellyfin_compat.playback_session_ttl")}
             />
             <SettingField
               label="Web player version to install"
-              hint="Leave blank to let Silo pick the version that matches the reported Jellyfin version."
+              description="Leave blank to let Silo pick the version that matches the reported Jellyfin version."
               value={form.getValue("jellyfin_compat.web_version")}
               onChange={(v) => form.setValue("jellyfin_compat.web_version", v)}
               restartRequired={restartKeys.has("jellyfin_compat.web_version")}
+              dirty={isDirty("jellyfin_compat.web_version")}
             />
             <SettingField
               label="Web player install folder"
-              hint="Leave blank to use the folder Silo manages itself."
+              description="Leave blank to use the folder Silo manages itself."
               value={form.getValue("jellyfin_compat.web_install_dir")}
               onChange={(v) => form.setValue("jellyfin_compat.web_install_dir", v)}
               restartRequired={restartKeys.has("jellyfin_compat.web_install_dir")}
+              dirty={isDirty("jellyfin_compat.web_install_dir")}
             />
           </AdvancedSection>
         </FieldGroup>
 
-        <FieldGroup label="Audiobookshelf">
+        <FieldGroup label="Audiobookshelf" clarifier="Audiobookshelf mobile and web apps">
           <SettingField
             label="Allow Audiobookshelf apps to connect"
             type="toggle"
-            hint="Silo answers Audiobookshelf requests so its apps can browse and play your audiobooks."
+            description="Silo answers Audiobookshelf requests so its apps can browse and play your audiobooks."
             value={form.getValue("audiobookshelf_compat.enabled")}
             onChange={(v) => form.setValue("audiobookshelf_compat.enabled", v)}
             restartRequired={restartKeys.has("audiobookshelf_compat.enabled")}
+            dirty={isDirty("audiobookshelf_compat.enabled")}
           />
         </FieldGroup>
       </div>
@@ -486,6 +533,7 @@ export default function CompatibilityProxiesSettings() {
         onDiscard={form.discard}
         isSaving={form.isSaving}
         restartRequired={form.restartRequired}
+        restartCount={restartCount}
       />
     </div>
   );

@@ -5,7 +5,8 @@ import type { ConnectionCheckResponse } from "@/api/types";
 import { ConnectionCheckAction } from "@/components/admin/ConnectionCheckAction";
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
 import { SecretField } from "@/components/settings/SecretField";
-import { Badge } from "@/components/ui/badge";
+import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
+import { StatusStrip, type StatusStripItem } from "@/components/settings/StatusStrip";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -22,7 +23,7 @@ import { useSettingsForm } from "@/hooks/useSettingsForm";
 
 import { FieldGroup } from "./FieldGroup";
 import { SaveBar } from "./SaveBar";
-import { SettingField } from "./SettingField";
+import { SettingField, SettingFieldStatus } from "./SettingField";
 import { USER_DATABASE_BACKEND_OPTIONS } from "./databaseSettingOptions";
 import {
   LOG_LEVEL_OPTIONS,
@@ -81,17 +82,24 @@ const PRIVATE_S3_KEYS = [
   "s3.private_secret_key",
 ];
 
-const LOG_KEYS = [
-  OPSLOG_RETENTION_DAYS_KEY,
-  OPSLOG_MAX_ROWS_KEY,
-  OPSLOG_MAX_SIZE_MB_KEY,
-  OPSLOG_BUCKET_POLICIES_KEY,
+// The overall trim limits are what an admin comes here to change; the policy
+// decision log and the per-area rules are debugging tools behind Advanced.
+const LOG_ESSENTIAL_KEYS = [OPSLOG_RETENTION_DAYS_KEY, OPSLOG_MAX_ROWS_KEY, OPSLOG_MAX_SIZE_MB_KEY];
+
+const LOG_ADVANCED_KEYS = [
   "policy.decision_log_retention_days",
   "policy.decision_log_verbosity",
   "policy.decision_log_scope_sample_rate",
+  OPSLOG_BUCKET_POLICIES_KEY,
 ];
 
+const LOG_KEYS = [...LOG_ESSENTIAL_KEYS, ...LOG_ADVANCED_KEYS];
+
 const KEYS = [...REDIS_KEYS, ...DATABASE_KEYS, ...PUBLIC_S3_KEYS, ...PRIVATE_S3_KEYS, ...LOG_KEYS];
+
+function countDirty(form: SettingsForm, keys: string[]): number {
+  return keys.filter((key) => form.isDirty(key)).length;
+}
 
 /**
  * Shared editing state for every credential on the tab. A credential can only
@@ -148,25 +156,18 @@ function RedisGroup({
   }
 
   return (
-    <FieldGroup label="Redis">
-      {managedByEnv && (
-        <div className="border-border/70 flex flex-col gap-2 border-b py-3">
-          <div className="flex items-center gap-2">
-            <Badge variant="outline">Managed by environment</Badge>
-          </div>
-          <p className="text-muted-foreground text-sm">
-            Redis is configured by the <code>REDIS_URL</code> environment variable. Change your
-            deployment configuration and restart the server to update or disable Redis.
-          </p>
-        </div>
-      )}
+    <FieldGroup label="Redis" clarifier="Shares sessions and caches between servers">
       <SettingField
         label="Use Redis"
         type="toggle"
-        hint={
-          managedByEnv
-            ? "This setting is controlled by REDIS_URL"
-            : "Shares sessions and caches between servers. A single-server install works without it."
+        description="A single-server install works without it. A cluster needs it so every node sees the same sessions and caches."
+        status={
+          managedByEnv ? (
+            <SettingFieldStatus tone="muted">
+              Set by the REDIS_URL environment variable. Change your deployment configuration and
+              restart the server to update or disable Redis.
+            </SettingFieldStatus>
+          ) : undefined
         }
         value={enabled ? "true" : "false"}
         onChange={(value) => {
@@ -180,6 +181,7 @@ function RedisGroup({
         }}
         disabled={managedByEnv}
         restartRequired={restartKeys.has("redis.url")}
+        dirty={form.isDirty("redis.url")}
       />
       {enabled && (
         <>
@@ -194,6 +196,7 @@ function RedisGroup({
             hint={managedByEnv ? "Value supplied by REDIS_URL" : "redis://host:6379"}
             disabled={managedByEnv || secrets.disabled}
             restartRequired={restartKeys.has("redis.url")}
+            dirty={form.isDirty("redis.url")}
           />
           <ConnectionCheckAction
             onClick={handleCheckConnection}
@@ -213,7 +216,7 @@ function S3Group({
   secrets,
   scope,
   label,
-  description,
+  clarifier,
   checkKind,
 }: {
   form: SettingsForm;
@@ -221,7 +224,7 @@ function S3Group({
   secrets: SecretEditors;
   scope: "public" | "private";
   label: string;
-  description: string;
+  clarifier: string;
   checkKind: "s3_public" | "s3_private";
 }) {
   const checkConnection = useCheckAdminSettingsConnection();
@@ -247,6 +250,7 @@ function S3Group({
     scope === "public"
       ? 4 + (urlAuth !== "presigned" ? 1 : 0) + (urlAuth === "cloudflare_token" ? 3 : 0)
       : 3;
+  const advancedChanged = countDirty(form, advancedKeys);
 
   async function handleCheckConnection() {
     try {
@@ -265,20 +269,23 @@ function S3Group({
   }
 
   return (
-    <FieldGroup label={label}>
-      <p className="text-muted-foreground py-2 text-sm leading-relaxed">{description}</p>
+    <FieldGroup label={label} clarifier={clarifier}>
       <SettingField
         label="Endpoint"
-        hint="Address of your S3-compatible storage, for example https://s3.us-east-1.amazonaws.com."
+        hint="https://s3.us-east-1.amazonaws.com"
+        description="Address of your S3-compatible storage."
         value={form.getValue(key("endpoint"))}
         onChange={(v) => form.setValue(key("endpoint"), v)}
         restartRequired={restartKeys.has(key("endpoint"))}
+        dirty={form.isDirty(key("endpoint"))}
       />
       <SettingField
         label="Bucket"
+        description="The bucket Silo reads and writes in."
         value={form.getValue(key("bucket"))}
         onChange={(v) => form.setValue(key("bucket"), v)}
         restartRequired={restartKeys.has(key("bucket"))}
+        dirty={form.isDirty(key("bucket"))}
       />
       {scope === "public" && PUBLIC_S3_IDENTITY_KEYS.some((k) => form.isDirty(k)) && (
         <div className="my-3 flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
@@ -307,6 +314,7 @@ function S3Group({
         onChange={(v) => secrets.setSecret(key("access_key"), v)}
         disabled={secrets.disabled}
         restartRequired={restartKeys.has(key("access_key"))}
+        dirty={form.isDirty(key("access_key"))}
       />
       <SecretField
         label="Secret Key"
@@ -318,6 +326,7 @@ function S3Group({
         onChange={(v) => secrets.setSecret(key("secret_key"), v)}
         disabled={secrets.disabled}
         restartRequired={restartKeys.has(key("secret_key"))}
+        dirty={form.isDirty(key("secret_key"))}
       />
       <ConnectionCheckAction
         onClick={handleCheckConnection}
@@ -329,36 +338,40 @@ function S3Group({
       <AdvancedSection
         id={`infrastructure.s3.${scope}`}
         count={advancedCount}
-        forceOpen={advancedKeys.some((k) => form.isDirty(k))}
+        changedCount={advancedChanged}
+        forceOpen={advancedChanged > 0}
       >
         <SettingField
           label="Region"
-          hint="Leave blank unless your provider requires one."
+          description="Leave blank unless your provider requires one."
           value={form.getValue(key("region"))}
           onChange={(v) => form.setValue(key("region"), v)}
           restartRequired={restartKeys.has(key("region"))}
+          dirty={form.isDirty(key("region"))}
         />
         <SettingField
           label="Put the bucket name in the URL path"
           type="toggle"
-          hint="Needed by MinIO and some self-hosted storage. Amazon S3 and most providers do not use it."
+          description="Needed by MinIO and some self-hosted storage. Amazon S3 and most providers do not use it."
           value={form.getValue(key("path_style"))}
           onChange={(v) => form.setValue(key("path_style"), v)}
           restartRequired={restartKeys.has(key("path_style"))}
+          dirty={form.isDirty(key("path_style"))}
         />
         <SettingField
           label="Folder inside the bucket"
-          hint="Optional. Stores all Silo objects under this folder. Leave blank to use the bucket root."
+          description="Optional. Stores all Silo objects under this folder. Leave blank to use the bucket root."
           value={form.getValue(key("key_prefix"))}
           onChange={(v) => form.setValue(key("key_prefix"), v)}
           restartRequired={restartKeys.has(key("key_prefix"))}
+          dirty={form.isDirty(key("key_prefix"))}
         />
         {scope === "public" && (
           <>
             <SettingField
               label="How asset links are authorized"
               type="select"
-              hint="Signed links work with a private bucket and suit almost every install. The other options need the bucket or CDN to serve files itself."
+              description="Signed links work with a private bucket and suit almost every install. The other options need the bucket or CDN to serve files itself."
               value={urlAuth}
               onChange={(v) => form.setValue("s3.public_url_auth", v)}
               options={[
@@ -367,14 +380,17 @@ function S3Group({
                 { value: "cloudflare_token", label: "Cloudflare signed token" },
               ]}
               restartRequired={restartKeys.has("s3.public_url_auth")}
+              dirty={form.isDirty("s3.public_url_auth")}
             />
             {urlAuth !== "presigned" && (
               <SettingField
                 label="Address clients download from"
                 hint="https://cdn.example.com"
+                description="The CDN or bucket address clients fetch artwork and subtitles from."
                 value={form.getValue("s3.public_read_endpoint")}
                 onChange={(v) => form.setValue("s3.public_read_endpoint", v)}
                 restartRequired={restartKeys.has("s3.public_read_endpoint")}
+                dirty={form.isDirty("s3.public_read_endpoint")}
               />
             )}
             {urlAuth === "cloudflare_token" && (
@@ -390,21 +406,24 @@ function S3Group({
                   hint="The signing key configured on the Cloudflare side."
                   disabled={secrets.disabled}
                   restartRequired={restartKeys.has("s3.public_token_secret")}
+                  dirty={form.isDirty("s3.public_token_secret")}
                 />
                 <SettingField
                   label="Token query parameter"
-                  hint="Name of the query parameter Cloudflare expects, usually verify."
+                  description="Name of the query parameter Cloudflare expects, usually verify."
                   value={form.getValue("s3.public_token_param") || "verify"}
                   onChange={(v) => form.setValue("s3.public_token_param", v)}
                   restartRequired={restartKeys.has("s3.public_token_param")}
+                  dirty={form.isDirty("s3.public_token_param")}
                 />
                 <SettingField
                   label="Link lifetime (seconds)"
                   type="number"
-                  hint="How long a generated link keeps working."
+                  description="How long a generated link keeps working."
                   value={form.getValue("s3.public_token_ttl") || "10800"}
                   onChange={(v) => form.setValue("s3.public_token_ttl", v)}
                   restartRequired={restartKeys.has("s3.public_token_ttl")}
+                  dirty={form.isDirty("s3.public_token_ttl")}
                 />
               </>
             )}
@@ -424,52 +443,57 @@ function DatabaseGroup({
 }) {
   const userDBBackend = form.getValue("userdb.backend");
   const sqlite = userDBBackend === "sqlite";
+  const changed = countDirty(form, DATABASE_KEYS);
 
   return (
-    <FieldGroup label="Database">
-      <p className="text-muted-foreground py-2 text-sm leading-relaxed">
-        Silo stores its catalog in Postgres. The defaults suit every install up to a busy multi-node
-        deployment.
-      </p>
+    <FieldGroup
+      label="Database"
+      clarifier="Postgres holds the catalog; the defaults suit every install"
+    >
       <AdvancedSection
         id="infrastructure.database"
         count={sqlite ? 4 : 2}
-        forceOpen={DATABASE_KEYS.some((k) => form.isDirty(k))}
+        changedCount={changed}
+        forceOpen={changed > 0}
       >
         <SettingField
           label="Maximum Postgres connections"
           type="number"
-          hint="Raise this only if the server logs connection-pool waits under load."
+          description="Raise this only if the server logs connection-pool waits under load."
           value={form.getValue("database.max_connections")}
           onChange={(v) => form.setValue("database.max_connections", v)}
           restartRequired={restartKeys.has("database.max_connections")}
+          dirty={form.isDirty("database.max_connections")}
         />
         <SettingField
           label="Where per-user data is stored"
           type="select"
-          hint="Watch progress and personal settings live here. PostgreSQL is the only supported option today."
+          description="Watch progress and personal settings live here. PostgreSQL is the only supported option today."
           options={USER_DATABASE_BACKEND_OPTIONS}
           value={userDBBackend}
           onChange={(v) => form.setValue("userdb.backend", v)}
           restartRequired={restartKeys.has("userdb.backend")}
+          dirty={form.isDirty("userdb.backend")}
         />
         {sqlite && (
           <>
             <SettingField
               label="Open files per user"
               type="number"
-              hint="How many SQLite connections one user's database may hold open at once."
+              description="How many SQLite connections one user's database may hold open at once."
               value={form.getValue("userdb.pool_max_open")}
               onChange={(v) => form.setValue("userdb.pool_max_open", v)}
               restartRequired={restartKeys.has("userdb.pool_max_open")}
+              dirty={form.isDirty("userdb.pool_max_open")}
             />
             <SettingField
               label="Close idle user databases after"
               type="duration"
-              hint="How long an unused per-user SQLite connection stays open, for example 12h."
+              description="How long an unused per-user SQLite connection stays open, for example 12h."
               value={form.getValue("userdb.idle_timeout")}
               onChange={(v) => form.setValue("userdb.idle_timeout", v)}
               restartRequired={restartKeys.has("userdb.idle_timeout")}
+              dirty={form.isDirty("userdb.idle_timeout")}
             />
           </>
         )}
@@ -494,14 +518,17 @@ function BucketOverridesEditor({
   }
 
   return (
-    <div className="space-y-4 py-3">
-      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-        <div className="text-muted-foreground text-sm">
-          Keep noisy areas such as <span className="font-mono">metadata/info</span> for less time
-          than everything else. A limit of <span className="font-mono">0</span> turns that one rule
-          off.
+    <div className="space-y-4 py-3.5">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div className="min-w-0">
+          <h4 className="text-sm font-medium">Per-area limits</h4>
+          <p className="text-muted-foreground mt-1 max-w-[52ch] text-xs leading-relaxed">
+            Keep noisy areas such as <span className="font-mono">metadata/info</span> for less time
+            than everything else. A limit of <span className="font-mono">0</span> turns that one
+            rule off.
+          </p>
         </div>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
           <Button type="button" size="sm" variant="outline" onClick={onRestore}>
             <RotateCcw className="size-4" />
             Restore Recommended Rules
@@ -520,15 +547,15 @@ function BucketOverridesEditor({
         </div>
       ) : null}
 
-      <div className="surface-panel-subtle overflow-x-auto rounded-[1rem]">
+      <div className="border-border/70 overflow-x-auto rounded-[1rem] border">
         <table className="w-full border-collapse text-sm">
           <thead className="bg-muted/40 text-left">
             <tr>
               <th className="px-3 py-2 font-medium">Component</th>
               <th className="px-3 py-2 font-medium">Level</th>
               <th className="px-3 py-2 font-medium">Days</th>
-              <th className="px-3 py-2 font-medium">Max Rows</th>
-              <th className="px-3 py-2 font-medium">Max Size (MB)</th>
+              <th className="px-3 py-2 font-medium">Max rows</th>
+              <th className="px-3 py-2 font-medium">Max size (MB)</th>
               <th className="w-[60px] px-3 py-2 font-medium"> </th>
             </tr>
           </thead>
@@ -634,6 +661,7 @@ function LogsGroup({ form, restartKeys }: { form: SettingsForm; restartKeys: Res
   // dirty, and the only thing that marks it dirty also sets the draft.
   const rows = bucketDirty && draftRows ? draftRows : hydrated.rows;
   const parseError = bucketDirty ? "" : hydrated.error;
+  const advancedChanged = countDirty(form, LOG_ADVANCED_KEYS);
 
   function commitRows(next: LogRetentionBucketRow[]) {
     setDraftRows(next);
@@ -641,45 +669,44 @@ function LogsGroup({ form, restartKeys }: { form: SettingsForm; restartKeys: Res
   }
 
   return (
-    <FieldGroup label="Server logs">
-      <p className="text-muted-foreground py-2 text-sm leading-relaxed">
-        Silo trims its own activity log so it cannot grow without bound. Change these only if the
-        log is using too much space, or if you need to keep it for longer. How often the cleanup
-        runs is set in Scheduled Tasks.
-      </p>
+    <FieldGroup label="Logs" clarifier="How much of Silo's own activity log is kept">
+      <SettingField
+        label="Delete log entries older than (days)"
+        type="number"
+        description="The oldest entries are removed first. How often the cleanup runs is set in Scheduled Tasks."
+        value={form.getValue(OPSLOG_RETENTION_DAYS_KEY)}
+        onChange={(v) => form.setValue(OPSLOG_RETENTION_DAYS_KEY, v)}
+        restartRequired={restartKeys.has(OPSLOG_RETENTION_DAYS_KEY)}
+        dirty={form.isDirty(OPSLOG_RETENTION_DAYS_KEY)}
+      />
+      <SettingField
+        label="Maximum log entries"
+        type="number"
+        description="Once the log passes this many entries, only the newest are kept."
+        value={form.getValue(OPSLOG_MAX_ROWS_KEY)}
+        onChange={(v) => form.setValue(OPSLOG_MAX_ROWS_KEY, v)}
+        restartRequired={restartKeys.has(OPSLOG_MAX_ROWS_KEY)}
+        dirty={form.isDirty(OPSLOG_MAX_ROWS_KEY)}
+      />
+      <SettingField
+        label="Maximum log size (MB)"
+        type="number"
+        description="Estimated from the stored entries. The oldest are removed when the log grows past this."
+        value={form.getValue(OPSLOG_MAX_SIZE_MB_KEY)}
+        onChange={(v) => form.setValue(OPSLOG_MAX_SIZE_MB_KEY, v)}
+        restartRequired={restartKeys.has(OPSLOG_MAX_SIZE_MB_KEY)}
+        dirty={form.isDirty(OPSLOG_MAX_SIZE_MB_KEY)}
+      />
+
       <AdvancedSection
         id="infrastructure.logs"
-        count={7}
-        forceOpen={LOG_KEYS.some((k) => form.isDirty(k))}
+        count={LOG_ADVANCED_KEYS.length}
+        changedCount={advancedChanged}
+        forceOpen={advancedChanged > 0}
       >
-        <SettingField
-          label="Delete log entries older than (days)"
-          type="number"
-          hint="The oldest entries are removed first."
-          value={form.getValue(OPSLOG_RETENTION_DAYS_KEY)}
-          onChange={(v) => form.setValue(OPSLOG_RETENTION_DAYS_KEY, v)}
-          restartRequired={restartKeys.has(OPSLOG_RETENTION_DAYS_KEY)}
-        />
-        <SettingField
-          label="Maximum log entries"
-          type="number"
-          hint="Once the log passes this many entries, only the newest are kept."
-          value={form.getValue(OPSLOG_MAX_ROWS_KEY)}
-          onChange={(v) => form.setValue(OPSLOG_MAX_ROWS_KEY, v)}
-          restartRequired={restartKeys.has(OPSLOG_MAX_ROWS_KEY)}
-        />
-        <SettingField
-          label="Maximum log size (MB)"
-          type="number"
-          hint="Estimated from the stored entries. The oldest are removed when the log grows past this."
-          value={form.getValue(OPSLOG_MAX_SIZE_MB_KEY)}
-          onChange={(v) => form.setValue(OPSLOG_MAX_SIZE_MB_KEY, v)}
-          restartRequired={restartKeys.has(OPSLOG_MAX_SIZE_MB_KEY)}
-        />
-
-        <div className="py-3">
-          <h3 className="text-sm font-medium">Permission checks</h3>
-          <p className="text-muted-foreground mt-1 text-sm leading-relaxed">
+        <div className="py-3.5">
+          <h4 className="text-sm font-medium">Permission checks</h4>
+          <p className="text-muted-foreground mt-1 max-w-[52ch] text-xs leading-relaxed">
             Silo can record why each request was allowed or denied, which is how you find out why a
             user cannot see something.
           </p>
@@ -687,14 +714,16 @@ function LogsGroup({ form, restartKeys }: { form: SettingsForm; restartKeys: Res
         <SettingField
           label="Delete permission records older than (days)"
           type="number"
+          description="The oldest permission records are removed first."
           value={form.getValue("policy.decision_log_retention_days")}
           onChange={(v) => form.setValue("policy.decision_log_retention_days", v)}
           restartRequired={restartKeys.has("policy.decision_log_retention_days")}
+          dirty={form.isDirty("policy.decision_log_retention_days")}
         />
         <SettingField
           label="How much to record"
           type="select"
-          hint="Summary keeps the decision only. Full also keeps a sample of the request and the answer, which is larger but easier to debug."
+          description="Summary keeps the decision only. Full also keeps a sample of the request and the answer, which is larger but easier to debug."
           value={form.getValue("policy.decision_log_verbosity") || "digest"}
           onChange={(v) => form.setValue("policy.decision_log_verbosity", v)}
           options={[
@@ -702,19 +731,18 @@ function LogsGroup({ form, restartKeys }: { form: SettingsForm; restartKeys: Res
             { value: "verbose", label: "Full" },
           ]}
           restartRequired={restartKeys.has("policy.decision_log_verbosity")}
+          dirty={form.isDirty("policy.decision_log_verbosity")}
         />
         <SettingField
           label="Record one allowed check in every"
           type="number"
-          hint="Allowed checks are frequent, so only a sample is stored. Denials and errors are always recorded."
+          description="Allowed checks are frequent, so only a sample is stored. Denials and errors are always recorded."
           value={form.getValue("policy.decision_log_scope_sample_rate")}
           onChange={(v) => form.setValue("policy.decision_log_scope_sample_rate", v)}
           restartRequired={restartKeys.has("policy.decision_log_scope_sample_rate")}
+          dirty={form.isDirty("policy.decision_log_scope_sample_rate")}
         />
 
-        <div className="py-3">
-          <h3 className="text-sm font-medium">Per-area limits</h3>
-        </div>
         <BucketOverridesEditor
           rows={rows}
           parseError={parseError}
@@ -809,20 +837,43 @@ export default function InfrastructureSettings() {
       </div>
     );
 
+  const dirtyKeys: string[] = form.dirtyKeys ?? [];
+  const restartCount = dirtyKeys.filter((key) => restartKeys.has(key)).length;
+
+  const redisManagedByEnv = form.sensitiveManagedByEnv.includes("redis.url");
+  const redisConfigured =
+    form.sensitiveConfigured.includes("redis.url") || form.getValue("redis.url").trim() !== "";
+  const publicBucket = form.getValue("s3.public_bucket").trim();
+  const privateBucket = form.getValue("s3.private_bucket").trim();
+  const retentionDays = form.getValue(OPSLOG_RETENTION_DAYS_KEY).trim();
+
+  const stripItems: StatusStripItem[] = [
+    redisManagedByEnv
+      ? { tone: "info", label: "Redis set by REDIS_URL" }
+      : redisConfigured
+        ? { tone: "ok", label: "Redis configured" }
+        : { tone: "muted", label: "Redis not configured" },
+    publicBucket
+      ? { tone: "ok", label: `Public bucket ${publicBucket}` }
+      : { tone: "warn", label: "No public bucket set" },
+    privateBucket
+      ? { tone: "ok", label: `Private bucket ${privateBucket}` }
+      : { tone: "warn", label: "No private bucket set" },
+    retentionDays
+      ? { tone: "info", label: `Logs kept ${retentionDays} days` }
+      : { tone: "muted", label: "Log retention not set" },
+  ];
+
   return (
     <div className="flex h-full flex-col">
-      <div className="mb-6 space-y-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-xl font-semibold tracking-tight">Infrastructure</h2>
-          <Badge variant="outline">Advanced</Badge>
-        </div>
-        <p className="text-muted-foreground text-sm leading-relaxed">
-          The services Silo runs on: its cache, its object storage, its database, and how long it
-          keeps its own logs.
-        </p>
-      </div>
+      <SettingsPageHeader
+        title="Storage & Database"
+        description="Where Silo keeps its data. Changes here take effect after a restart."
+        strip={<StatusStrip items={stripItems} />}
+        className="mb-8"
+      />
 
-      <div className="flex-1 space-y-6">
+      <div className="flex-1 space-y-8">
         <RedisGroup form={form} restartKeys={restartKeys} secrets={secrets} />
         <S3Group
           form={form}
@@ -830,7 +881,7 @@ export default function InfrastructureSettings() {
           secrets={secrets}
           scope="public"
           label="Public storage"
-          description="Holds what clients download directly: artwork, chapter thumbnails, and subtitle files. The bucket itself can stay private; Silo hands out signed links by default."
+          clarifier="Artwork, chapter thumbnails, and subtitles clients download directly"
           checkKind="s3_public"
         />
         <S3Group
@@ -839,7 +890,7 @@ export default function InfrastructureSettings() {
           secrets={secrets}
           scope="private"
           label="Private storage"
-          description="Holds files only the server reads: imports, exports, and internal artifacts."
+          clarifier="Imports, exports, and files only the server reads"
           checkKind="s3_private"
         />
         <DatabaseGroup form={form} restartKeys={restartKeys} />
@@ -852,6 +903,7 @@ export default function InfrastructureSettings() {
         onDiscard={handleDiscard}
         isSaving={form.isSaving || saveInProgress}
         restartRequired={form.restartRequired}
+        restartCount={restartCount}
       />
     </div>
   );

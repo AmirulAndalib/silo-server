@@ -2,9 +2,13 @@ import { useId, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Bell,
+  BookOpen,
   Bot,
+  Check,
   ChevronDown,
   ChevronRight,
+  Copy,
+  ExternalLink,
   Inbox,
   KeyRound,
   Loader2,
@@ -19,7 +23,6 @@ import {
   Workflow,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Link } from "react-router";
 import { toast } from "sonner";
 import { api } from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -38,8 +41,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
 import { SecretField } from "@/components/settings/SecretField";
+import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
+import { StatusStrip, type StatusStripItem } from "@/components/settings/StatusStrip";
 import { adminKeys } from "@/hooks/queries/keys";
 import { useServerNotificationChannels } from "@/hooks/queries/admin/serverNotificationChannels";
+import { useUpdateServerSettings } from "@/hooks/queries/admin/settings";
 import { useRestartKeys } from "@/hooks/useRestartKeys";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
 import { cn } from "@/lib/utils";
@@ -85,6 +91,13 @@ const EMAIL_KEYS = [
   "email.from_name",
 ];
 
+/**
+ * The Discord application. Saved by its own card inside the Discord channel
+ * (a bot token has to be testable before it is committed), but listed here so
+ * one form owns every value this tab reads.
+ */
+const DISCORD_APP_KEYS = ["discord.client_id", "discord.client_secret", "discord.bot_token"];
+
 const KEYS = [
   "notifications.release_events_enabled",
   "notifications.fanout_enabled",
@@ -115,6 +128,7 @@ const KEYS = [
   "notifications.server_channels.mention_requesters",
   ...RETENTION_KEYS,
   ...EMAIL_KEYS,
+  ...DISCORD_APP_KEYS,
 ];
 
 interface EmailTestResult {
@@ -465,7 +479,7 @@ function RegisterRelayRow({
     <div className="space-y-3 py-3">
       <SettingField
         label="Deployment ID"
-        hint="The name this server is known by on the relay. It is created for you when you register."
+        description="The name this server is known by on the relay. It is created for you when you register."
         type="text"
         value={deploymentID}
         onChange={() => {}}
@@ -538,6 +552,318 @@ function RegisterRelayRow({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Discord application credentials
+// ---------------------------------------------------------------------------
+
+interface DiscordTestResult {
+  ok: boolean;
+  duration_ms: number;
+  message?: string;
+}
+
+/**
+ * Invite link for adding the bot to a Discord server. Membership alone is
+ * enough to DM, so no permissions are requested.
+ */
+function discordInviteUrl(clientId: string): string {
+  return `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(clientId)}&scope=bot&permissions=0`;
+}
+
+function DiscordSetupGuide() {
+  const [open, setOpen] = useState(false);
+  const guideId = useId();
+
+  return (
+    <div className="py-2">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={guideId}
+        onClick={() => setOpen((current) => !current)}
+        className="text-muted-foreground hover:text-foreground inline-flex cursor-pointer items-center gap-1.5 text-xs font-medium transition-colors"
+      >
+        <BookOpen className="h-3.5 w-3.5" />
+        {open ? "Hide setup guide" : "Show setup guide"}
+        <ChevronDown
+          className={cn("h-3.5 w-3.5 transition-transform duration-200", open && "rotate-180")}
+        />
+      </button>
+      {open && (
+        <div
+          id={guideId}
+          className="text-muted-foreground animate-in fade-in-0 mt-3 space-y-1.5 text-xs leading-relaxed duration-200"
+        >
+          <p>Set up at discord.com/developers/applications:</p>
+          <ol className="list-decimal space-y-1.5 pl-4">
+            <li>Create an application (or open an existing one).</li>
+            <li>
+              OAuth2 page: copy the <strong>Client ID</strong>, reset and copy the{" "}
+              <strong>Client Secret</strong>, and under Redirects add
+              <code className="bg-muted mx-1 rounded px-1">
+                {"<public URL>"}/api/v1/notifications/discord/link/callback
+              </code>
+              using this server&apos;s public URL (SILO_PUBLIC_URL) — it must match exactly.
+            </li>
+            <li>
+              Bot page: reset and copy the <strong>Token</strong>. Leave all Privileged Gateway
+              Intents (Presence, Server Members, Message Content) <strong>off</strong> — Silo never
+              connects to the gateway; it only sends DMs.
+            </li>
+            <li>
+              Keep <strong>Requires OAuth2 Code Grant</strong> off, or the invite link below
+              won&apos;t work. Enable <strong>Public Bot</strong> only if someone other than the
+              application owner will be inviting it.
+            </li>
+            <li>
+              Paste the three credentials below, save, then use the invite button to add the bot to
+              your Discord server. It needs <strong>no role permissions</strong> — membership alone
+              lets it DM members, and users must share that server with the bot to receive DMs.
+            </li>
+          </ol>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InviteBotRow({ clientId }: { clientId: string }) {
+  const [copied, setCopied] = useState(false);
+  const trimmed = clientId.trim();
+
+  return (
+    <div className="space-y-2 py-2">
+      <div className="flex flex-wrap gap-1.5">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={!trimmed}
+          onClick={() => window.open(discordInviteUrl(trimmed), "_blank", "noopener,noreferrer")}
+        >
+          <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+          Invite bot to server
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={!trimmed}
+          onClick={() => {
+            void navigator.clipboard.writeText(discordInviteUrl(trimmed));
+            setCopied(true);
+            toast.success("Invite link copied");
+            window.setTimeout(() => setCopied(false), 2000);
+          }}
+        >
+          {copied ? (
+            <Check className="mr-1.5 h-3.5 w-3.5" />
+          ) : (
+            <Copy className="mr-1.5 h-3.5 w-3.5" />
+          )}
+          Copy link
+        </Button>
+      </div>
+      <div className="text-muted-foreground text-xs">
+        {trimmed
+          ? "Anyone with Manage Server permission on your Discord server can open this link to add the bot. Users must be members of that server to receive DMs."
+          : "Enter the Client ID above to generate the invite link."}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The Discord application itself — client id, secret, bot token. It lives in
+ * the Discord channel card because "why didn't my DM arrive" is always a
+ * question about these three values, and it saves on its own so the bot token
+ * can be tested before the page's other edits are committed.
+ */
+function DiscordAppCredentials({
+  savedClientId,
+  sensitiveConfigured,
+  restartKeys,
+}: {
+  savedClientId: string;
+  sensitiveConfigured: string[];
+  restartKeys: ReturnType<typeof useRestartKeys>;
+}) {
+  const updateSettings = useUpdateServerSettings();
+  // `null` follows the saved value; a draft is only pinned while the admin is
+  // editing, so a refetch cannot overwrite typing in progress.
+  const [clientIdDraft, setClientIdDraft] = useState<string | null>(null);
+  const [clientSecret, setClientSecret] = useState("");
+  const [botToken, setBotToken] = useState("");
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  const clientId = clientIdDraft ?? savedClientId;
+  const configuredKeys = new Set(sensitiveConfigured);
+  const secretConfigured = configuredKeys.has("discord.client_secret");
+  const tokenConfigured = configuredKeys.has("discord.bot_token");
+  const ready = savedClientId.trim() !== "" && secretConfigured && tokenConfigured;
+  const unsaved =
+    clientId !== savedClientId || clientSecret.trim() !== "" || botToken.trim() !== "";
+  const anyStored = savedClientId.trim() !== "" || secretConfigured || tokenConfigured;
+
+  async function save() {
+    const updates: Record<string, string> = { "discord.client_id": clientId };
+    if (clientSecret.trim() !== "") updates["discord.client_secret"] = clientSecret;
+    if (botToken.trim() !== "") updates["discord.bot_token"] = botToken;
+    try {
+      await updateSettings.mutateAsync(updates);
+      setClientIdDraft(null);
+      setClientSecret("");
+      setBotToken("");
+      setTestResult(null);
+      toast.success("Discord credentials saved");
+    } catch {
+      // The mutation surfaces the API error.
+    }
+  }
+
+  async function clearAll() {
+    try {
+      await updateSettings.mutateAsync({
+        "discord.client_id": "",
+        "discord.client_secret": "",
+        "discord.bot_token": "",
+      });
+      setClientIdDraft(null);
+      setClientSecret("");
+      setBotToken("");
+      setTestResult(null);
+      toast.success("Discord credentials cleared");
+    } catch {
+      // The mutation surfaces the API error.
+    }
+  }
+
+  async function runTest() {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const response = await api<DiscordTestResult>("/admin/notifications/discord/test", {
+        method: "POST",
+      });
+      setTestResult({
+        success: response.ok,
+        message: `${response.ok ? "Success" : "Failed"} (${response.duration_ms}ms)${
+          response.message ? ` — ${response.message}` : ""
+        }`,
+      });
+    } catch (error) {
+      setTestResult({
+        success: false,
+        message: error instanceof Error ? error.message : "Test request failed.",
+      });
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  return (
+    <>
+      <SubsectionLabel>Application</SubsectionLabel>
+      <DiscordSetupGuide />
+      <div className="divide-border divide-y">
+        <SettingField
+          label="Client ID"
+          value={clientId}
+          onChange={setClientIdDraft}
+          description="From the application's OAuth2 page."
+          restartRequired={restartKeys.has("discord.client_id")}
+        />
+      </div>
+      <InviteBotRow clientId={clientId} />
+      <div className="divide-border divide-y">
+        <SecretField
+          label="Client secret"
+          value={clientSecret}
+          configured={secretConfigured}
+          onChange={setClientSecret}
+          hint="From the application's OAuth2 page. Used to link viewer accounts."
+          restartRequired={restartKeys.has("discord.client_secret")}
+        />
+        <SecretField
+          label="Bot token"
+          value={botToken}
+          configured={tokenConfigured}
+          onChange={setBotToken}
+          hint="From the application's Bot page. Used to send direct messages."
+          restartRequired={restartKeys.has("discord.bot_token")}
+        />
+      </div>
+      <div className="flex flex-wrap items-center gap-2 py-3">
+        <Button
+          type="button"
+          size="sm"
+          onClick={() => void save()}
+          disabled={updateSettings.isPending}
+        >
+          {updateSettings.isPending ? "Saving..." : "Save"}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => void runTest()}
+          disabled={testing || unsaved || !ready}
+        >
+          {testing ? "Testing..." : "Test bot token"}
+        </Button>
+        {anyStored && (
+          <Button type="button" size="sm" variant="ghost" onClick={() => setConfirmClear(true)}>
+            Clear credentials
+          </Button>
+        )}
+      </div>
+      {testResult && (
+        <p
+          role="status"
+          aria-live="polite"
+          className={cn(
+            "pb-2 text-xs",
+            testResult.success
+              ? "text-green-600 dark:text-green-400"
+              : "text-red-600 dark:text-red-400",
+          )}
+        >
+          {testResult.message}
+        </p>
+      )}
+      {unsaved && (
+        <p className="text-muted-foreground pb-2 text-xs">
+          Save first — the test uses the credentials stored on the server.
+        </p>
+      )}
+      <AlertDialog open={confirmClear} onOpenChange={setConfirmClear}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Clear Discord app credentials?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Account linking and Discord direct messages stop working immediately.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                void clearAll();
+                setConfirmClear(false);
+              }}
+            >
+              Clear
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+}
+
 function MobilePushPrivacyDisclosure() {
   return (
     <div className="space-y-2 py-3">
@@ -603,6 +929,7 @@ export default function NotificationsAdminSettings() {
   const numberValue = (key: string, fallback: string) => form.getValue(key) || fallback;
   const needsRestart = (key: string) => restartKeys.has(key);
   const anyDirty = (keys: string[]) => keys.some(form.isDirty);
+  const changedCount = (keys: string[]) => keys.filter(form.isDirty).length;
 
   const releaseEventsOn = isOn("notifications.release_events_enabled");
   const fanoutOn = isOn("notifications.fanout_enabled");
@@ -637,8 +964,8 @@ export default function NotificationsAdminSettings() {
   const mailServerSet = form.getValue("email.smtp_host").trim() !== "";
   const outboundMailOn = form.getValue("email.enabled") === "true";
   const mailReady = mailServerSet && outboundMailOn;
-  // The Discord application (client id, secret, bot token) is configured on
-  // the Integrations tab; only its delivery behaviour lives here.
+  // The Discord application (client id, secret, bot token) is configured in
+  // the Discord channel card below, next to the delivery settings it gates.
   const discordAppConfigured = form.sensitiveConfigured.includes("discord.bot_token");
 
   const channelStates = [
@@ -664,16 +991,37 @@ export default function NotificationsAdminSettings() {
       ? "Sending is paused. New content is still recorded and waits until you turn this back on, or until it is too old to send."
       : null;
 
+  const stripItems: StatusStripItem[] = [
+    releaseEventsOn && fanoutOn
+      ? { tone: "ok", label: "Pipeline on" }
+      : { tone: "warn", label: releaseEventsOn ? "Sending paused" : "New content not recorded" },
+    {
+      tone: enabledChannelCount > 0 ? "info" : "muted",
+      label: `${enabledChannelCount} of ${channelStates.length} channels enabled`,
+    },
+  ];
+  // Only the blocking gaps earn a slot; the channel cards carry the rest.
+  if (emailOn && !mailReady) {
+    stripItems.push({ tone: "warn", label: "SMTP not configured" });
+  }
+  if (discordOn && !discordAppConfigured) {
+    stripItems.push({ tone: "warn", label: "Discord bot has no credentials" });
+  }
+  if (failingServerChannels > 0) {
+    stripItems.push({
+      tone: "warn",
+      label: `${failingServerChannels} server channel${failingServerChannels === 1 ? "" : "s"} failing`,
+    });
+  }
+
   return (
     <div className="flex h-full flex-col">
-      <div className="mb-6 space-y-2">
-        <h2 className="text-xl font-semibold tracking-tight">Notifications</h2>
-        <p className="text-muted-foreground text-sm leading-relaxed">
-          Who gets told about new content, and how it reaches them. Everything here applies
-          immediately — no restart needed. Each person still chooses what they want in their own
-          notification settings.
-        </p>
-      </div>
+      <SettingsPageHeader
+        className="mb-6"
+        title="Notifications"
+        description="Who gets told about new content, and how it reaches them. Everything here applies immediately — no restart needed. Each person still chooses what they want in their own notification settings."
+        strip={<StatusStrip items={stripItems} />}
+      />
 
       <div className="flex-1 space-y-7">
         {/* ── Pipeline: the master switches, framed as the flow they gate ── */}
@@ -775,31 +1123,36 @@ export default function NotificationsAdminSettings() {
               <MobilePushPrivacyDisclosure />
               <SettingField
                 label="Apple Push (APNs)"
-                hint="Deliver generic wakeups to registered iPhone, iPad, Apple TV, and Mac devices."
+                description="Deliver generic wakeups to registered iPhone, iPad, Apple TV, and Mac devices."
                 type="toggle"
                 value={String(applePushOn)}
                 onChange={(value) =>
                   form.setValue("notifications.apple_push_delivery_enabled", value)
                 }
                 restartRequired={needsRestart("notifications.apple_push_delivery_enabled")}
+                dirty={form.isDirty("notifications.apple_push_delivery_enabled")}
               />
               <SettingField
                 label="Android Push (FCM)"
-                hint="Deliver generic wakeups to registered Android phone and TV devices."
+                description="Deliver generic wakeups to registered Android phone and TV devices."
                 type="toggle"
                 value={String(androidPushOn)}
                 onChange={(value) =>
                   form.setValue("notifications.android_push_delivery_enabled", value)
                 }
                 restartRequired={needsRestart("notifications.android_push_delivery_enabled")}
+                dirty={form.isDirty("notifications.android_push_delivery_enabled")}
               />
               <SettingField
                 label="Relay URL"
-                hint="The relay this server talks to. Saved when you register below."
+                description="The relay this server talks to. Saved when you register below."
                 type="text"
                 value={pushRelayURL}
                 onChange={(v) => setPushRelayURLDraft(v)}
                 restartRequired={needsRestart("notifications.push_relay_url")}
+                // The relay URL is a local draft saved by Register, never staged
+                // through the form, so `form.isDirty` would never report it.
+                dirty={pushRelayURLEdited}
               />
               <RegisterRelayRow
                 relayURL={pushRelayURL}
@@ -841,44 +1194,49 @@ export default function NotificationsAdminSettings() {
             <div className="divide-border divide-y">
               <SettingField
                 label="Send email from this server"
-                hint="Covers every email Silo sends, including address verification — not just notifications. Off means no email leaves the server."
+                description="Covers every email Silo sends, including address verification — not just notifications. Off means no email leaves the server."
                 type="toggle"
                 value={form.getValue("email.enabled")}
                 onChange={(v) => form.setValue("email.enabled", v)}
                 restartRequired={needsRestart("email.enabled")}
+                dirty={form.isDirty("email.enabled")}
               />
               <SettingField
                 label="From address"
-                hint="The address recipients see mail coming from, e.g. silo@example.com"
+                description="The address recipients see mail coming from, e.g. silo@example.com"
                 value={form.getValue("email.from_address")}
                 onChange={(v) => form.setValue("email.from_address", v)}
                 restartRequired={needsRestart("email.from_address")}
+                dirty={form.isDirty("email.from_address")}
               />
               <SettingField
                 label="From name"
-                hint='The name shown next to that address (default "Silo")'
+                description='The name shown next to that address (default "Silo")'
                 value={form.getValue("email.from_name")}
                 onChange={(v) => form.setValue("email.from_name", v)}
                 restartRequired={needsRestart("email.from_name")}
+                dirty={form.isDirty("email.from_name")}
               />
               <SettingField
                 label="Mail server address"
-                hint="The SMTP host that accepts your outgoing mail, e.g. smtp.example.com"
+                description="The SMTP host that accepts your outgoing mail, e.g. smtp.example.com"
                 value={form.getValue("email.smtp_host")}
                 onChange={(v) => form.setValue("email.smtp_host", v)}
                 restartRequired={needsRestart("email.smtp_host")}
+                dirty={form.isDirty("email.smtp_host")}
               />
               <SettingField
                 label="Port"
-                hint="587 for STARTTLS (typical), 465 for implicit TLS"
+                description="587 for STARTTLS (typical), 465 for implicit TLS"
                 type="number"
                 value={form.getValue("email.smtp_port")}
                 onChange={(v) => form.setValue("email.smtp_port", v)}
                 restartRequired={needsRestart("email.smtp_port")}
+                dirty={form.isDirty("email.smtp_port")}
               />
               <SettingField
                 label="Encryption"
-                hint="STARTTLS starts unencrypted and upgrades; TLS is encrypted from the first byte. Pick whatever your mail provider documents."
+                description="STARTTLS starts unencrypted and upgrades; TLS is encrypted from the first byte. Pick whatever your mail provider documents."
                 type="select"
                 options={[
                   { value: "starttls", label: "STARTTLS" },
@@ -888,13 +1246,15 @@ export default function NotificationsAdminSettings() {
                 value={form.getValue("email.smtp_security") || "starttls"}
                 onChange={(v) => form.setValue("email.smtp_security", v)}
                 restartRequired={needsRestart("email.smtp_security")}
+                dirty={form.isDirty("email.smtp_security")}
               />
               <SettingField
                 label="Username"
-                hint="Leave empty when the mail server requires no sign-in"
+                description="Leave empty when the mail server requires no sign-in"
                 value={form.getValue("email.smtp_username")}
                 onChange={(v) => form.setValue("email.smtp_username", v)}
                 restartRequired={needsRestart("email.smtp_username")}
+                dirty={form.isDirty("email.smtp_username")}
               />
               <SecretField
                 label="Password"
@@ -908,6 +1268,7 @@ export default function NotificationsAdminSettings() {
                 }}
                 onChange={(v) => form.setValue("email.smtp_password", v)}
                 restartRequired={needsRestart("email.smtp_password")}
+                dirty={form.isDirty("email.smtp_password")}
               />
               <TestEmailRow />
             </div>
@@ -915,27 +1276,30 @@ export default function NotificationsAdminSettings() {
             <div className="divide-border divide-y">
               <SettingField
                 label="Let people pick an email per episode"
-                hint="When off, everyone who chose per-episode email gets the daily summary instead."
+                description="When off, everyone who chose per-episode email gets the daily summary instead."
                 type="toggle"
                 value={toggleValue("notifications.email.allow_per_episode")}
                 onChange={(v) => form.setValue("notifications.email.allow_per_episode", v)}
                 restartRequired={needsRestart("notifications.email.allow_per_episode")}
+                dirty={form.isDirty("notifications.email.allow_per_episode")}
               />
               <SettingField
                 label="Send the daily summary at"
-                hint="One email covering everything added since the last one, sent at this hour in the server's own time zone. Use 0-23; the default is 8 (8am)."
+                description="One email covering everything added since the last one, sent at this hour in the server's own time zone. Use 0-23; the default is 8 (8am)."
                 type="number"
                 value={numberValue("notifications.email.digest_hour", "8")}
                 onChange={(v) => form.setValue("notifications.email.digest_hour", v)}
                 restartRequired={needsRestart("notifications.email.digest_hour")}
+                dirty={form.isDirty("notifications.email.digest_hour")}
               />
               <SettingField
                 label="Link back to this server at"
-                hint="The address people reach this server on, e.g. https://silo.example.com. It is used to build the links inside emails; leave it empty to send emails with no links."
+                description="The address people reach this server on, e.g. https://silo.example.com. It is used to build the links inside emails; leave it empty to send emails with no links."
                 type="text"
                 value={form.getValue("notifications.email.external_url")}
                 onChange={(v) => form.setValue("notifications.email.external_url", v)}
                 restartRequired={needsRestart("notifications.email.external_url")}
+                dirty={form.isDirty("notifications.email.external_url")}
               />
             </div>
           </ChannelCard>
@@ -954,40 +1318,36 @@ export default function NotificationsAdminSettings() {
               )
             }
           >
-            <div className="text-muted-foreground border-border/60 border-b py-3 text-xs leading-relaxed">
-              The Discord application itself — client ID, client secret, bot token, and the invite
-              link — is set up on the{" "}
-              <Link
-                to="/admin/settings?tab=integrations"
-                className="text-foreground font-medium underline-offset-2 hover:underline"
-              >
-                Integrations tab
-              </Link>
-              . The settings here only control what Silo sends and how it looks.
-            </div>
+            <DiscordAppCredentials
+              savedClientId={form.getValue("discord.client_id")}
+              sensitiveConfigured={form.sensitiveConfigured}
+              restartKeys={restartKeys}
+            />
             <SubsectionLabel>Delivery</SubsectionLabel>
             <div className="divide-border divide-y">
               <SettingField
                 label="Let people pick a DM per episode"
-                hint="When off, everyone who chose per-episode DMs gets the daily summary instead."
+                description="When off, everyone who chose per-episode DMs gets the daily summary instead."
                 type="toggle"
                 value={toggleValue("notifications.discord.allow_per_episode")}
                 onChange={(v) => form.setValue("notifications.discord.allow_per_episode", v)}
                 restartRequired={needsRestart("notifications.discord.allow_per_episode")}
+                dirty={form.isDirty("notifications.discord.allow_per_episode")}
               />
               <SettingField
                 label="Send the daily summary at"
-                hint="One DM covering everything added since the last one, sent at this hour in the server's own time zone. Use 0-23; the default is 8 (8am)."
+                description="One DM covering everything added since the last one, sent at this hour in the server's own time zone. Use 0-23; the default is 8 (8am)."
                 type="number"
                 value={numberValue("notifications.discord.digest_hour", "8")}
                 onChange={(v) => form.setValue("notifications.discord.digest_hour", v)}
                 restartRequired={needsRestart("notifications.discord.digest_hour")}
+                dirty={form.isDirty("notifications.discord.digest_hour")}
               />
             </div>
             <SubsectionLabel>Appearance — All Discord Messages</SubsectionLabel>
             <SettingField
               label="Show artwork in Discord messages"
-              hint="Where the artwork comes from. Metadata provider images (TMDB, TVDB) are loaded from the provider and never reveal your server's address. Adding this server's own images also shows posters Silo stored itself, which means your server URL is visible to anyone who can see the message and must be reachable from the internet."
+              description="Where the artwork comes from. Metadata provider images (TMDB, TVDB) are loaded from the provider and never reveal your server's address. Adding this server's own images also shows posters Silo stored itself, which means your server URL is visible to anyone who can see the message and must be reachable from the internet."
               type="select"
               value={form.getValue("notifications.discord.poster_mode") || "provider"}
               options={[
@@ -997,6 +1357,7 @@ export default function NotificationsAdminSettings() {
               ]}
               onChange={(v) => form.setValue("notifications.discord.poster_mode", v)}
               restartRequired={needsRestart("notifications.discord.poster_mode")}
+              dirty={form.isDirty("notifications.discord.poster_mode")}
             />
           </ChannelCard>
 
@@ -1013,19 +1374,21 @@ export default function NotificationsAdminSettings() {
             <AdvancedSection
               id="notifications.webhooks"
               count={WEBHOOK_ADVANCED_KEYS.length}
+              changedCount={changedCount(WEBHOOK_ADVANCED_KEYS)}
               forceOpen={anyDirty(WEBHOOK_ADVANCED_KEYS)}
             >
               <SettingField
                 label="Webhooks each person may create"
-                hint="Default 10."
+                description="Default 10."
                 type="number"
                 value={numberValue("notifications.webhooks.max_per_profile", "10")}
                 onChange={(v) => form.setValue("notifications.webhooks.max_per_profile", v)}
                 restartRequired={needsRestart("notifications.webhooks.max_per_profile")}
+                dirty={form.isDirty("notifications.webhooks.max_per_profile")}
               />
               <SettingField
                 label="Webhook calls per minute, per person"
-                hint="Anything over the limit is dropped from the webhook only; the notification still lands in their inbox. Default 60."
+                description="Anything over the limit is dropped from the webhook only; the notification still lands in their inbox. Default 60."
                 type="number"
                 value={numberValue(
                   "notifications.webhooks.deliveries_per_minute_per_profile",
@@ -1037,16 +1400,18 @@ export default function NotificationsAdminSettings() {
                 restartRequired={needsRestart(
                   "notifications.webhooks.deliveries_per_minute_per_profile",
                 )}
+                dirty={form.isDirty("notifications.webhooks.deliveries_per_minute_per_profile")}
               />
               <SettingField
                 label="Allow webhooks to private addresses"
-                hint="Turns off the guard that blocks LAN and localhost addresses. Development only."
+                description="Turns off the guard that blocks LAN and localhost addresses. Development only."
                 type="toggle"
                 value={form.getValue("notifications.webhooks.allow_private_destinations")}
                 onChange={(v) =>
                   form.setValue("notifications.webhooks.allow_private_destinations", v)
                 }
                 restartRequired={needsRestart("notifications.webhooks.allow_private_destinations")}
+                dirty={form.isDirty("notifications.webhooks.allow_private_destinations")}
               />
               {allowPrivate && (
                 <div className="flex items-start gap-2 py-3 text-xs text-amber-500">
@@ -1083,21 +1448,23 @@ export default function NotificationsAdminSettings() {
             <div className="divide-border divide-y">
               <SettingField
                 label="Collect new items for (seconds)"
-                hint="New content waits this long before posting, so a whole season arrives as one message instead of ten. Default 300, minimum 120."
+                description="New content waits this long before posting, so a whole season arrives as one message instead of ten. Default 300, minimum 120."
                 type="number"
                 value={numberValue("notifications.server_channels.batch_seconds", "300")}
                 onChange={(v) => form.setValue("notifications.server_channels.batch_seconds", v)}
                 restartRequired={needsRestart("notifications.server_channels.batch_seconds")}
+                dirty={form.isDirty("notifications.server_channels.batch_seconds")}
               />
               <SettingField
                 label="Mention the requester on Discord"
-                hint="Posts about requests @mention the person who asked, when their account is linked to Discord. Unlinked accounts show their Silo username instead."
+                description="Posts about requests @mention the person who asked, when their account is linked to Discord. Unlinked accounts show their Silo username instead."
                 type="toggle"
                 value={form.getValue("notifications.server_channels.mention_requesters")}
                 onChange={(v) =>
                   form.setValue("notifications.server_channels.mention_requesters", v)
                 }
                 restartRequired={needsRestart("notifications.server_channels.mention_requesters")}
+                dirty={form.isDirty("notifications.server_channels.mention_requesters")}
               />
               <div className="pt-3">
                 <ServerNotificationChannels />
@@ -1117,31 +1484,35 @@ export default function NotificationsAdminSettings() {
               <AdvancedSection
                 id="notifications.fanout"
                 count={FANOUT_KEYS.length}
+                changedCount={changedCount(FANOUT_KEYS)}
                 forceOpen={anyDirty(FANOUT_KEYS)}
               >
                 <SettingField
                   label="Wait before sending (seconds)"
-                  hint="New content sits this long before Silo sends anything, so episodes that finish scanning together arrive as one notification. Default 30."
+                  description="New content sits this long before Silo sends anything, so episodes that finish scanning together arrive as one notification. Default 30."
                   type="number"
                   value={numberValue("notifications.fanout.settle_seconds", "30")}
                   onChange={(v) => form.setValue("notifications.fanout.settle_seconds", v)}
                   restartRequired={needsRestart("notifications.fanout.settle_seconds")}
+                  dirty={form.isDirty("notifications.fanout.settle_seconds")}
                 />
                 <SettingField
                   label="Most messages per show at once"
-                  hint="Stops a big import from sending one message per episode. Anything past this many for the same show is skipped for that batch. Default 3."
+                  description="Stops a big import from sending one message per episode. Anything past this many for the same show is skipped for that batch. Default 3."
                   type="number"
                   value={numberValue("notifications.fanout.max_series_burst", "3")}
                   onChange={(v) => form.setValue("notifications.fanout.max_series_burst", v)}
                   restartRequired={needsRestart("notifications.fanout.max_series_burst")}
+                  dirty={form.isDirty("notifications.fanout.max_series_burst")}
                 />
                 <SettingField
                   label="Give up on content older than (hours)"
-                  hint="After downtime, anything that has been waiting longer than this is dropped instead of arriving as stale news. Default 72."
+                  description="After downtime, anything that has been waiting longer than this is dropped instead of arriving as stale news. Default 72."
                   type="number"
                   value={numberValue("notifications.fanout.max_event_age_hours", "72")}
                   onChange={(v) => form.setValue("notifications.fanout.max_event_age_hours", v)}
                   restartRequired={needsRestart("notifications.fanout.max_event_age_hours")}
+                  dirty={form.isDirty("notifications.fanout.max_event_age_hours")}
                 />
               </AdvancedSection>
             </FieldGroup>
@@ -1150,31 +1521,35 @@ export default function NotificationsAdminSettings() {
               <AdvancedSection
                 id="notifications.retention"
                 count={RETENTION_KEYS.length}
+                changedCount={changedCount(RETENTION_KEYS)}
                 forceOpen={anyDirty(RETENTION_KEYS)}
               >
                 <SettingField
                   label="Read notifications (days)"
-                  hint="How long a notification someone already read stays in their inbox. Default 90."
+                  description="How long a notification someone already read stays in their inbox. Default 90."
                   type="number"
                   value={numberValue("notifications.retention.read_days", "90")}
                   onChange={(v) => form.setValue("notifications.retention.read_days", v)}
                   restartRequired={needsRestart("notifications.retention.read_days")}
+                  dirty={form.isDirty("notifications.retention.read_days")}
                 />
                 <SettingField
                   label="Unread notifications (days)"
-                  hint="How long an unread notification stays in their inbox. Default 180."
+                  description="How long an unread notification stays in their inbox. Default 180."
                   type="number"
                   value={numberValue("notifications.retention.unread_days", "180")}
                   onChange={(v) => form.setValue("notifications.retention.unread_days", v)}
                   restartRequired={needsRestart("notifications.retention.unread_days")}
+                  dirty={form.isDirty("notifications.retention.unread_days")}
                 />
                 <SettingField
                   label="Sent history (days)"
-                  hint="How long Silo keeps the record of content it already sent notifications for, which is only useful for troubleshooting. Default 30."
+                  description="How long Silo keeps the record of content it already sent notifications for, which is only useful for troubleshooting. Default 30."
                   type="number"
                   value={numberValue("notifications.retention.event_days", "30")}
                   onChange={(v) => form.setValue("notifications.retention.event_days", v)}
                   restartRequired={needsRestart("notifications.retention.event_days")}
+                  dirty={form.isDirty("notifications.retention.event_days")}
                 />
               </AdvancedSection>
             </FieldGroup>

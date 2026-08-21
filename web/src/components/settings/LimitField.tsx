@@ -1,8 +1,7 @@
 import { useId, useState } from "react";
 
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { RestartBadge } from "@/components/settings/RestartBadge";
+import { SettingFieldRow } from "@/pages/admin-settings/SettingField";
 
 export interface LimitFieldProps {
   label: string;
@@ -20,6 +19,8 @@ export interface LimitFieldProps {
   min?: number;
   disabled?: boolean;
   restartRequired?: boolean;
+  /** Marks the field as edited but unsaved. */
+  dirty?: boolean;
 }
 
 /**
@@ -39,6 +40,7 @@ export function LimitField({
   min = 0,
   disabled = false,
   restartRequired = false,
+  dirty = false,
 }: LimitFieldProps) {
   const controlId = useId();
   const checkboxId = useId();
@@ -58,14 +60,15 @@ export function LimitField({
   }
 
   return (
-    <div className="space-y-1 py-2">
-      <div className="flex items-center gap-2">
-        <Label htmlFor={controlId} className="text-sm font-medium">
-          {label}
-        </Label>
-        {restartRequired && <RestartBadge />}
-      </div>
-      <div className="flex flex-wrap items-center gap-3">
+    <SettingFieldRow
+      label={label}
+      htmlFor={controlId}
+      description={hint}
+      descriptionId={hintId}
+      restartRequired={restartRequired}
+      dirty={dirty}
+    >
+      <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2">
         <Input
           id={controlId}
           type="number"
@@ -74,7 +77,7 @@ export function LimitField({
           placeholder={unlimited ? unlimitedLabel : undefined}
           onChange={(e) => onChange(e.target.value)}
           disabled={disabled || unlimited}
-          className="w-full sm:w-40"
+          className="w-28"
           aria-describedby={hint ? hintId : undefined}
         />
         {unit && <span className="text-muted-foreground text-xs">{unit}</span>}
@@ -89,11 +92,6 @@ export function LimitField({
           {unlimitedLabel}
         </label>
       </div>
-      {hint && (
-        <p id={hintId} className="text-muted-foreground text-xs">
-          {hint}
-        </p>
-      )}
-    </div>
+    </SettingFieldRow>
   );
 }

@@ -1,13 +1,31 @@
 # Admin settings UX
 
 Admin settings are organized by admin intent ("I want subtitles to download
-automatically"), not by subsystem, and collapse into 9 tabs: General,
-Appearance, Security & Access, Library & Metadata, Playback, Integrations,
-Notifications, Compatibility, and Infrastructure. Settings promoted to its own
-sidebar group, with the 9 tabs listed inline; old `?tab=` ids from the
-previous 20-tab layout redirect to their new tab rather than 404ing. `⌘K`
-(`AdminSectionCommandDialog`) is mounted in `AdminLayout` so search works from
-every admin page, not just the Dashboard.
+automatically"), not by subsystem. `/admin/settings` with no `?tab=` is the
+**Overview**: server health across the top and one live card per section.
+Eleven sections hang off it, in rail order: General, Appearance, Users &
+Access, Library, Playback, Subtitles & Metadata, Watch sync, AI,
+Notifications, Compatibility, and Storage & Database. Settings is its own
+sidebar group listing Overview plus those eleven; old `?tab=` ids from earlier
+layouts (including `integrations`, now split into Subtitles & Metadata, Watch
+sync, and AI) redirect to the section that absorbed them rather than 404ing.
+`⌘K` (`AdminSectionCommandDialog`) is mounted in `AdminLayout` so search works
+from every admin page, not just the Dashboard.
+
+## Visual system
+
+One section is on screen at a time. The left rail lists the sections with a
+6px health dot each — green, amber, or muted — read from
+`useSettingsOverview().sectionStatus`, and the open one is marked with a 2px
+accent bar and a soft fill rather than a filled pill; the rail collapses on
+mobile, where the Overview is the section list. A section opens with
+`SettingsPageHeader` (breadcrumb, title, lede) and a `StatusStrip` saying what
+that section is doing right now. Below it, settings are rows in hairline-ruled
+`FieldGroup`s, not nested cards, with the Advanced tier inline as one
+disclosure row per group. Provider credentials are `ProviderTile`s that expand
+in place to Test before saving. Staged edits raise one floating save pill
+(`SaveBar`); the restart prompt is a single `RestartBanner` rendered by the
+settings shell, never per tab.
 
 ## Three tiers, and how to pick one for a new setting
 
@@ -42,9 +60,11 @@ Reuse these instead of adding a bespoke variant per tab:
 - `SettingField` / `FieldGroup` / `SaveBar` (`web/src/pages/admin-settings/`)
   and `useSettingsForm` (`web/src/hooks/`) — the one save model. Every tab
   batches edits and commits them through one `SaveBar` with Discard; provider
-  credential cards are the only exception, and only because they need
-  Test-before-commit, which is itself one shared card component rather than a
-  bespoke one per provider.
+  credentials are the only exception, and only because they need
+  Test-before-commit, which is `ProviderTile` rather than a bespoke card per
+  provider.
+- `SettingsPageHeader` and `StatusStrip` (`web/src/components/settings/`) —
+  the one way a section states what it is and what it is currently doing.
 - `AdvancedSection` — the one collapsible-disclosure primitive for the
   Advanced tier. Do not add another `<details>`, another bespoke collapsible
   component, or a per-page expand/collapse toggle.

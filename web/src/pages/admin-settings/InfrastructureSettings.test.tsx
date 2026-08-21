@@ -56,15 +56,26 @@ describe("InfrastructureSettings", () => {
 
     const markup = renderToStaticMarkup(<InfrastructureSettings />);
 
-    for (const heading of [
-      "Redis",
-      "Public storage",
-      "Private storage",
-      "Database",
-      "Server logs",
-    ]) {
+    for (const heading of ["Redis", "Public storage", "Private storage", "Database", "Logs"]) {
       expect(markup).toContain(heading);
     }
+  });
+
+  it("renders the page header and a status strip of the stored-data facts", () => {
+    mockForm();
+
+    render(<InfrastructureSettings />);
+
+    expect(
+      screen.getByRole("heading", { level: 2, name: "Storage & Database" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Where Silo keeps its data. Changes here take effect after a restart."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Redis not configured")).toBeInTheDocument();
+    expect(screen.getByText("No public bucket set")).toBeInTheDocument();
+    expect(screen.getByText("No private bucket set")).toBeInTheDocument();
+    expect(screen.getByText("Log retention not set")).toBeInTheDocument();
   });
 
   it("manages the merged database, storage and log keys in one form", () => {
@@ -91,10 +102,12 @@ describe("InfrastructureSettings", () => {
     expect(markup).toContain("Endpoint");
     expect(markup).toContain("Bucket");
     expect(markup).toContain("Check Connection");
+    expect(markup).toContain("Maximum log entries");
     // Advanced, so not rendered while collapsed.
     expect(markup).not.toContain("Region");
     expect(markup).not.toContain("Maximum Postgres connections");
-    expect(markup).not.toContain("Maximum log entries");
+    expect(markup).not.toContain("Record one allowed check in every");
+    expect(markup).not.toContain("Per-area limits");
     // Removed entirely.
     expect(markup).not.toContain("User DB");
     expect(markup).not.toContain("Not currently in use");
@@ -106,6 +119,7 @@ describe("InfrastructureSettings", () => {
     const markup = renderToStaticMarkup(<InfrastructureSettings />);
 
     expect(markup).toContain("Maximum Postgres connections");
+    expect(markup).toContain("1 changed");
   });
 
   it("warns about the artwork cache when a public storage identity field is edited", () => {

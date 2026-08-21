@@ -1,9 +1,8 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { RestartBadge } from "@/components/settings/RestartBadge";
-import { SettingField } from "@/pages/admin-settings/SettingField";
+import { Input } from "@/components/ui/input";
+import { SettingFieldRow } from "@/pages/admin-settings/SettingField";
 
 export interface SecretFieldProps {
   label: string;
@@ -24,6 +23,8 @@ export interface SecretFieldProps {
   hint?: string;
   disabled?: boolean;
   restartRequired?: boolean;
+  /** Marks the field as edited but unsaved. */
+  dirty?: boolean;
 }
 
 /**
@@ -42,7 +43,10 @@ export function SecretField({
   hint,
   disabled = false,
   restartRequired = false,
+  dirty = false,
 }: SecretFieldProps) {
+  const controlId = useId();
+  const hintId = useId();
   const [internalEditing, setInternalEditing] = useState(false);
   const isEditing = editing ?? internalEditing;
 
@@ -63,12 +67,14 @@ export function SecretField({
 
   if (configured && !isEditing) {
     return (
-      <div className="space-y-1 py-2">
-        <div className="flex items-center gap-2">
-          <Label className="text-sm font-medium">{label}</Label>
-          {restartRequired && <RestartBadge />}
-        </div>
-        <div className="flex max-w-md items-center justify-between gap-3 rounded-md border px-3 py-1.5">
+      <SettingFieldRow
+        label={label}
+        description={hint}
+        descriptionId={hintId}
+        restartRequired={restartRequired}
+        dirty={dirty}
+      >
+        <div className="border-border/70 flex w-full items-center justify-between gap-3 rounded-md border px-3 py-1.5 sm:w-60">
           <span className="text-muted-foreground text-sm">Configured</span>
           <Button
             type="button"
@@ -81,34 +87,45 @@ export function SecretField({
             Replace
           </Button>
         </div>
-        {hint && <p className="text-muted-foreground text-xs">{hint}</p>}
-      </div>
+      </SettingFieldRow>
     );
   }
 
+  const description = configured ? "Enter a replacement value." : hint;
+
   return (
-    <div className="space-y-1">
-      <SettingField
-        label={label}
-        type="password"
-        value={value}
-        onChange={onChange}
-        hint={configured ? "Enter a replacement value." : hint}
-        disabled={disabled}
-        restartRequired={restartRequired}
-      />
-      {configured && (
-        <Button
-          type="button"
-          size="xs"
-          variant="ghost"
-          aria-label={`Keep saved ${label}`}
-          onClick={keepSaved}
+    <SettingFieldRow
+      label={label}
+      htmlFor={controlId}
+      description={description}
+      descriptionId={hintId}
+      restartRequired={restartRequired}
+      dirty={dirty}
+    >
+      <div className="flex w-full flex-col items-end gap-1 sm:w-60">
+        <Input
+          id={controlId}
+          type="password"
+          placeholder={configured ? "configured" : "Not configured"}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
           disabled={disabled}
-        >
-          Keep saved value
-        </Button>
-      )}
-    </div>
+          className="w-full"
+          aria-describedby={description ? hintId : undefined}
+        />
+        {configured && (
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost"
+            aria-label={`Keep saved ${label}`}
+            onClick={keepSaved}
+            disabled={disabled}
+          >
+            Keep saved value
+          </Button>
+        )}
+      </div>
+    </SettingFieldRow>
   );
 }

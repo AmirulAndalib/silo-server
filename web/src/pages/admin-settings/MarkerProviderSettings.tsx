@@ -370,7 +370,7 @@ export function MarkerTasksCard() {
   }
 
   return (
-    <div className="border-border bg-surface max-w-2xl rounded-lg border px-5 py-1">
+    <div className="max-w-2xl">
       <TaskActionRow
         task={detectTask}
         fallbackName="Populate markers"

@@ -36,6 +36,12 @@ export interface AdminNavItem extends SettingsSearchItem {
   href: string;
   exact?: boolean;
   external?: boolean;
+  /**
+   * Query params whose presence in the URL means this item is not the active
+   * one. Settings Overview and the settings tabs share `/admin/settings`, so
+   * Overview only reads as active while no `?tab=` is set.
+   */
+  excludeQueryParams?: readonly string[];
 }
 
 export type AdminNavGroup = SettingsSearchGroup<AdminNavItem>;
@@ -197,14 +203,25 @@ export const ADMIN_NAV_SECTIONS: AdminNavGroup[] = [
   },
   {
     label: "Settings",
-    items: ADMIN_SETTINGS_NAV.map((item) => ({
-      label: item.label,
-      description: item.description,
-      keywords: ["settings", "configuration", ...(item.keywords ?? [])],
-      settings: item.settings,
-      icon: item.icon,
-      href: `/admin/settings?tab=${encodeURIComponent(item.id)}`,
-    })),
+    items: [
+      {
+        label: "Overview",
+        description: "Server health and the current state of every settings section.",
+        keywords: ["settings", "configuration", "overview", "status", "health"],
+        icon: LayoutDashboard,
+        href: "/admin/settings",
+        exact: true,
+        excludeQueryParams: ["tab"],
+      },
+      ...ADMIN_SETTINGS_NAV.map((item) => ({
+        label: item.label,
+        description: item.description,
+        keywords: ["settings", "configuration", ...(item.keywords ?? [])],
+        settings: item.settings,
+        icon: item.icon,
+        href: `/admin/settings?tab=${encodeURIComponent(item.id)}`,
+      })),
+    ],
   },
   {
     label: "System",

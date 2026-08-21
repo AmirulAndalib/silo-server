@@ -31,6 +31,21 @@ describe("AdvancedSection", () => {
     expect(screen.getByRole("button", { name: /Advanced · 1 setting$/ })).toBeInTheDocument();
   });
 
+  it("counts unsaved settings alongside the total", () => {
+    renderSection({ count: 9, changedCount: 2 });
+
+    expect(
+      screen.getByRole("button", { name: "Advanced · 9 settings · 2 changed" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("9 settings · 2 changed")).toBeInTheDocument();
+  });
+
+  it("omits the changed suffix when nothing inside is dirty", () => {
+    renderSection({ count: 9, changedCount: 0 });
+
+    expect(screen.getByRole("button", { name: "Advanced · 9 settings" })).toBeInTheDocument();
+  });
+
   it("persists the open state under the section id", async () => {
     const user = userEvent.setup();
     const { unmount } = renderSection();

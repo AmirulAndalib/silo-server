@@ -2,23 +2,21 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import IntegrationsSettings from "./IntegrationsSettings";
+import AISettings from "./AISettings";
 
 const mocks = vi.hoisted(() => ({
   checkConnection: vi.fn(),
   discard: vi.fn(),
   save: vi.fn(),
   setValue: vi.fn(),
-  toastError: vi.fn(),
-  toastInfo: vi.fn(),
-  toastSuccess: vi.fn(),
-  updateProvider: vi.fn(),
-  testProvider: vi.fn(),
-  updateSettings: vi.fn(),
   resetValue: vi.fn(),
+  toastError: vi.fn(),
+  toastSuccess: vi.fn(),
 }));
 
-const values: Record<string, string> = {
+const values: Record<string, string> = {};
+
+const DEFAULT_VALUES: Record<string, string> = {
   "ai.base_url": "https://text.example.test",
   "ai.chat_model": "chat-model",
   "ai.asr_base_url": "",
@@ -36,10 +34,10 @@ const values: Record<string, string> = {
   "subtitle_ai.transcribe_quota_period": "day",
   "metadata_ai.enabled": "false",
   "metadata_ai.on_view": "button",
-  "discord.client_id": "1234567890",
 };
 
 let dirtyCount = 0;
+let dirtyKeys: string[] = [];
 
 const useSettingsFormMock = vi.fn((_options?: { keys: string[] }) => ({
   isLoading: false,
@@ -47,13 +45,13 @@ const useSettingsFormMock = vi.fn((_options?: { keys: string[] }) => ({
   setValue: mocks.setValue,
   resetValue: mocks.resetValue,
   dirtyCount,
-  dirtyKeys: [],
-  isDirty: vi.fn(() => false),
+  dirtyKeys,
+  isDirty: (key: string) => dirtyKeys.includes(key),
   save: mocks.save,
   discard: mocks.discard,
   isSaving: false,
   restartRequired: false,
-  sensitiveConfigured: ["subtitle_ai.api_key", "discord.client_secret", "discord.bot_token"],
+  sensitiveConfigured: ["subtitle_ai.api_key"],
   sensitiveManagedByEnv: [],
   sensitiveStatusReady: true,
   sensitiveStatusError: false,
@@ -69,117 +67,73 @@ vi.mock("@/hooks/useRestartKeys", () => ({
 }));
 
 vi.mock("@/hooks/queries/admin/settings", () => ({
-  useAdminServerSettings: () => ({ data: values }),
-  useAdminSensitiveStatus: () => ({ data: { configured: [] } }),
-  useUpdateServerSettings: () => ({ mutateAsync: mocks.updateSettings, isPending: false }),
   useCheckAdminSettingsConnection: () => ({
     mutateAsync: mocks.checkConnection,
     isPending: false,
   }),
 }));
 
-vi.mock("@/hooks/queries/admin/subtitles", () => ({
-  useSubtitleProviders: () => ({
-    data: {
-      providers: [
-        {
-          provider_name: "subdl",
-          enabled: false,
-          has_api_key: false,
-          has_credentials: false,
-          updated_at: "",
-        },
-        {
-          provider_name: "opensubtitles",
-          enabled: true,
-          has_api_key: false,
-          has_credentials: true,
-          updated_at: "",
-        },
-        {
-          provider_name: "subsource",
-          enabled: false,
-          has_api_key: true,
-          has_credentials: false,
-          updated_at: "",
-        },
-      ],
-    },
-    isLoading: false,
-  }),
-  useUpdateSubtitleProvider: () => ({ mutate: mocks.updateProvider, isPending: false }),
-  useTestSubtitleProvider: () => ({ mutate: mocks.testProvider, isPending: false }),
-}));
-
 vi.mock("sonner", () => ({
   toast: {
     error: mocks.toastError,
-    info: mocks.toastInfo,
     success: mocks.toastSuccess,
   },
 }));
 
-describe("IntegrationsSettings", () => {
+/** Opens a model tile's connect panel. */
+async function openTile(user: ReturnType<typeof userEvent.setup>, name: string) {
+  const tile = screen.getByRole("group", { name });
+  await user.click(within(tile).getByRole("button", { name: /Connect|Manage/ }));
+  return screen.getByRole("group", { name });
+}
+
+describe("AISettings", () => {
   beforeEach(() => {
     localStorage.clear();
     dirtyCount = 0;
+    dirtyKeys = [];
     for (const mock of Object.values(mocks)) mock.mockReset();
-    values["ai.base_url"] = "https://text.example.test";
-    values["ai.chat_model"] = "chat-model";
-    values["ai.asr_base_url"] = "";
-    values["ai.asr_model"] = "whisper-model";
-    values["ai.max_concurrent_jobs"] = "2";
-    values["subtitle_ai.batch_size"] = "40";
-    values["subtitle_ai.context_neighbors"] = "2";
-    values["subtitle_ai.asr_chunk_seconds"] = "600";
+    for (const key of Object.keys(values)) delete values[key];
+    Object.assign(values, DEFAULT_VALUES);
   });
 
-  it("renders every field group heading", () => {
-    render(<IntegrationsSettings />);
+  it("heads the page and groups models and features", () => {
+    render(<AISettings />);
 
-    for (const heading of [
-      "Subtitle providers",
-      "Watch providers",
-      "Metadata",
-      "Apps",
-      "AI services",
-      "AI features",
-    ]) {
-      expect(screen.getByRole("group", { name: heading })).toBeInTheDocument();
-    }
+    expect(screen.getByRole("heading", { level: 2, name: "AI" })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Optional language models for subtitle translation, transcription, and descriptions.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Models" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Features" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Text model" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Speech-to-text" })).toBeInTheDocument();
   });
 
-  it("renders one card per integration in the merged grid", () => {
-    render(<IntegrationsSettings />);
+  it("keeps model credentials behind the tile until it is expanded", async () => {
+    const user = userEvent.setup();
+    render(<AISettings />);
 
-    for (const title of [
-      "OpenSubtitles",
-      "SubDL",
-      "SubSource",
-      "Trakt",
-      "Simkl",
-      "MDBList",
-      "Discord app",
-      "Text model",
-      "Speech-to-text",
-    ]) {
-      expect(screen.getByRole("group", { name: title })).toBeInTheDocument();
-    }
+    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
+
+    const tile = await openTile(user, "Text model");
+    expect(tile).toHaveAttribute("data-expanded", "true");
+    expect(within(tile).getByLabelText("Base URL")).toBeInTheDocument();
+    expect(within(tile).getByLabelText("Model")).toBeInTheDocument();
+
+    await user.click(within(tile).getByRole("button", { name: "Close" }));
+    expect(screen.queryByLabelText("Base URL")).not.toBeInTheDocument();
   });
 
-  it("shows a status chip per provider card", () => {
-    render(<IntegrationsSettings />);
-
-    // OpenSubtitles has saved credentials, SubDL has none.
-    expect(screen.getAllByText("Connected").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Not set up").length).toBeGreaterThan(0);
-  });
-
-  it("reads legacy subtitle_ai values until the modern ai keys are saved", () => {
+  it("falls back to the legacy subtitle_ai values", async () => {
+    const user = userEvent.setup();
     values["ai.base_url"] = "";
     values["ai.chat_model"] = "";
 
-    render(<IntegrationsSettings />);
+    render(<AISettings />);
+    await openTile(user, "Text model");
 
     expect(screen.getByDisplayValue("https://legacy.example.test")).toBeInTheDocument();
     expect(screen.getByDisplayValue("legacy-chat-model")).toBeInTheDocument();
@@ -188,14 +142,19 @@ describe("IntegrationsSettings", () => {
   it("flags a chat-only endpoint as unable to transcribe", () => {
     values["ai.base_url"] = "https://openrouter.ai/api";
 
-    render(<IntegrationsSettings />);
+    render(<AISettings />);
 
     expect(screen.getByText("Endpoint cannot transcribe")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Speech-to-text" })).toHaveAttribute(
+      "data-state",
+      "error",
+    );
   });
 
   it("applies a speech-to-text preset", async () => {
     const user = userEvent.setup();
-    render(<IntegrationsSettings />);
+    render(<AISettings />);
+    await openTile(user, "Speech-to-text");
 
     await user.click(screen.getByRole("button", { name: "Groq - fast" }));
 
@@ -203,9 +162,61 @@ describe("IntegrationsSettings", () => {
     expect(mocks.setValue).toHaveBeenCalledWith("ai.asr_model", "whisper-large-v3-turbo");
   });
 
+  it("forces a tile open while it holds a staged change", () => {
+    dirtyKeys = ["ai.chat_model"];
+    dirtyCount = 1;
+
+    render(<AISettings />);
+
+    expect(screen.getByRole("group", { name: "Text model" })).toHaveAttribute(
+      "data-expanded",
+      "true",
+    );
+    expect(screen.getByLabelText("Model")).toBeInTheDocument();
+  });
+
+  it("leaves the speech tile closed when only the shared text endpoint is staged", () => {
+    // The transcription check falls back to the text endpoint, so its keys are
+    // part of that request — but they are edited in the text tile, not here.
+    dirtyKeys = ["ai.base_url", "ai.api_key"];
+    dirtyCount = 2;
+
+    render(<AISettings />);
+
+    expect(screen.getByRole("group", { name: "Text model" })).toHaveAttribute(
+      "data-expanded",
+      "true",
+    );
+    expect(screen.getByRole("group", { name: "Speech-to-text" })).not.toHaveAttribute(
+      "data-expanded",
+    );
+  });
+
+  it("states what each feature still needs", () => {
+    render(<AISettings />);
+
+    expect(screen.getByText("Translate subtitles")).toBeInTheDocument();
+    expect(
+      screen.getByText("Needs the text model — uses the text model tile above."),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Needs speech-to-text — also uses the text model/)).toBeInTheDocument();
+    expect(screen.getByText("Text model configured")).toBeInTheDocument();
+    // Empty speech base URL falls back to the text endpoint, which counts as
+    // configured only once the endpoint can actually transcribe.
+    expect(screen.getByText("Speech-to-text configured")).toBeInTheDocument();
+  });
+
+  it("marks a feature requirement unmet when its endpoint cannot transcribe", () => {
+    values["ai.base_url"] = "https://openrouter.ai/api";
+
+    render(<AISettings />);
+
+    expect(screen.getByText("Speech endpoint cannot transcribe")).toBeInTheDocument();
+  });
+
   it("keeps AI tuning behind a collapsed advanced disclosure", async () => {
     const user = userEvent.setup();
-    render(<IntegrationsSettings />);
+    render(<AISettings />);
 
     const toggle = screen.getByRole("button", { name: /Advanced · 6 settings/ });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
@@ -218,9 +229,23 @@ describe("IntegrationsSettings", () => {
     expect(screen.getAllByLabelText("Takes effect after a server restart").length).toBe(1);
   });
 
+  it("counts staged advanced changes on the disclosure", () => {
+    dirtyKeys = ["subtitle_ai.batch_size"];
+    dirtyCount = 1;
+
+    render(<AISettings />);
+
+    expect(
+      screen.getByRole("button", { name: /Advanced · 6 settings · 1 changed/ }),
+    ).toBeInTheDocument();
+    // A staged change auto-expands the section so the save bar cannot block on
+    // a hidden field.
+    expect(screen.getByLabelText("Subtitle lines per request")).toBeInTheDocument();
+  });
+
   it("offers Unlimited instead of a zero sentinel for the transcription allowance", async () => {
     const user = userEvent.setup();
-    render(<IntegrationsSettings />);
+    render(<AISettings />);
 
     await user.click(screen.getByRole("button", { name: /Advanced · 6 settings/ }));
 
@@ -244,7 +269,7 @@ describe("IntegrationsSettings", () => {
     const user = userEvent.setup();
     dirtyCount = 1;
     values[key] = malformedValue;
-    render(<IntegrationsSettings />);
+    render(<AISettings />);
 
     await user.click(screen.getByRole("button", { name: "Save Changes" }));
 
@@ -258,52 +283,27 @@ describe("IntegrationsSettings", () => {
       success: true,
       message: "Text connection verified.",
     });
-    render(<IntegrationsSettings />);
+    render(<AISettings />);
+    await openTile(user, "Text model");
 
     await user.click(screen.getByRole("button", { name: "Test text model" }));
 
-    expect(await screen.findByText("Text connection verified.")).toBeInTheDocument();
+    expect(await screen.findByText(/Text connection verified\./)).toBeInTheDocument();
     expect(mocks.checkConnection).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "ai_chat" }),
     );
   });
 
-  it("saves a subtitle provider through its own card", async () => {
-    const user = userEvent.setup();
-    render(<IntegrationsSettings />);
-
-    const subdl = screen.getByRole("group", { name: "SubDL" });
-    await user.type(within(subdl).getByLabelText("API key"), "key-123");
-    await user.click(within(subdl).getByRole("button", { name: "Save" }));
-
-    expect(mocks.updateProvider).toHaveBeenCalledWith(
-      { provider: "subdl", config: { enabled: false, api_key: "key-123" } },
-      expect.anything(),
-    );
-  });
-
   it("keeping a saved AI key reverts the draft instead of staging an empty value", async () => {
     const user = userEvent.setup();
-    render(<IntegrationsSettings />);
+    render(<AISettings />);
+    const tile = await openTile(user, "Text model");
 
-    const textModel = screen.getByRole("group", { name: "Text model" });
-    await user.click(within(textModel).getByRole("button", { name: "Replace API key" }));
-    await user.click(within(textModel).getByRole("button", { name: "Keep saved API key" }));
+    await user.click(within(tile).getByRole("button", { name: "Replace API key" }));
+    await user.click(within(tile).getByRole("button", { name: "Keep saved API key" }));
 
     // Staging "" would erase the stored key on the next Save Changes.
     expect(mocks.setValue).not.toHaveBeenCalledWith("ai.api_key", "");
     expect(mocks.resetValue).toHaveBeenCalledWith("ai.api_key");
-  });
-
-  it("saves Discord app credentials without touching the page save bar", async () => {
-    const user = userEvent.setup();
-    mocks.updateSettings.mockResolvedValue({ values: {}, restart_required: false });
-    render(<IntegrationsSettings />);
-
-    const discord = screen.getByRole("group", { name: "Discord app" });
-    await user.click(within(discord).getByRole("button", { name: "Save" }));
-
-    expect(mocks.updateSettings).toHaveBeenCalledWith({ "discord.client_id": "1234567890" });
-    expect(mocks.save).not.toHaveBeenCalled();
   });
 });
