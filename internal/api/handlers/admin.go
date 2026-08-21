@@ -502,6 +502,58 @@ func (h *AdminHandler) rejectScopedAPIKeyUpdate(
 	return target, false
 }
 
+// rejectAdminAccessGroupAssignment stops an already-admin account from being
+// placed in an access group. Scope and action decisions are role-blind, so a
+// grouped admin inherits that group's stream caps and library list. Role
+// changes skip this check: promoting to admin is handled by
+// adminAccessGroupUpdate (which drops the group), and demoting may assign one.
+func (h *AdminHandler) rejectAdminAccessGroupAssignment(
+	w http.ResponseWriter,
+	r *http.Request,
+	id int,
+	req *updateUserRequest,
+	current *models.User,
+) (*models.User, bool) {
+	if req.Role != nil {
+		return current, false
+	}
+	if !req.AccessGroupID.Set || req.AccessGroupID.Value == nil {
+		return current, false
+	}
+	if current == nil {
+		user, err := h.userRepo.GetByID(r.Context(), id)
+		if err != nil {
+			if auth.IsNotFound(err) {
+				writeError(w, http.StatusNotFound, "not_found", "User not found")
+				return nil, true
+			}
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to fetch user")
+			return nil, true
+		}
+		current = user
+	}
+	if current.Role == roleAdmin {
+		writeError(w, http.StatusUnprocessableEntity, "unprocessable_entity",
+			"Admin accounts cannot belong to an access group")
+		return current, true
+	}
+	return current, false
+}
+
+// adminAccessGroupUpdate drops membership when the write is promoting the
+// account to admin. Create already leaves admins ungrouped; update has to
+// match or a grouped user who is later granted the role keeps that group's
+// ceilings.
+func adminAccessGroupUpdate(req *updateUserRequest) models.Optional[int64] {
+	if req != nil && req.Role != nil && *req.Role == roleAdmin {
+		return models.ClearValue[int64]()
+	}
+	if req == nil {
+		return models.Optional[int64]{}
+	}
+	return req.AccessGroupID.Optional()
+}
+
 // clonePtr copies a policy override pointer so a response never aliases the
 // stored model. A nil pointer stays nil (JSON null = inherit).
 func clonePtr[T any](value *T) *T {
@@ -690,6 +742,11 @@ func (h *AdminHandler) HandleCreateUser(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "bad_request", "Username, email, password, and role are required")
 		return
 	}
+	if req.Role == roleAdmin && req.AccessGroupID != nil {
+		writeError(w, http.StatusUnprocessableEntity, "unprocessable_entity",
+			"Admin accounts cannot belong to an access group")
+		return
+	}
 
 	var maxPlaybackQuality *string
 	if req.MaxPlaybackQuality != nil {
@@ -793,6 +850,10 @@ func (h *AdminHandler) HandleUpdateUser(w http.ResponseWriter, r *http.Request) 
 	if blocked {
 		return
 	}
+	currentUser, blocked = h.rejectAdminAccessGroupAssignment(w, r, id, &req, currentUser)
+	if blocked {
+		return
+	}
 
 	maxPlaybackQuality := req.MaxPlaybackQuality.Optional()
 	if maxPlaybackQuality.Value != nil {
@@ -816,7 +877,7 @@ func (h *AdminHandler) HandleUpdateUser(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusUnprocessableEntity, "unprocessable_entity", "Invalid access_group_id")
 			return
 		}
-		if req.AccessGroupID.Value != nil {
+		if req.AccessGroupID.Value != nil && (req.Role == nil || *req.Role != roleAdmin) {
 			if h.AccessGroups == nil {
 				writeError(w, http.StatusInternalServerError, "internal_error", "Access groups are not configured")
 				return
@@ -858,7 +919,7 @@ func (h *AdminHandler) HandleUpdateUser(w http.ResponseWriter, r *http.Request) 
 		DownloadAllowed:          req.DownloadAllowed.Optional(),
 		DownloadTranscodeAllowed: req.DownloadTranscodeAllowed.Optional(),
 		RequestsAllowed:          req.RequestsAllowed.Optional(),
-		AccessGroupID:            req.AccessGroupID.Optional(),
+		AccessGroupID:            adminAccessGroupUpdate(&req),
 	}
 
 	if currentUser == nil && updateMayRequireSessionRevocation(updateInput) {

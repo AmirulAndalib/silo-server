@@ -558,6 +558,9 @@ function UserForm({ user, onClose }: { user: AdminUser | null; onClose: () => vo
         max_profiles: maxProfiles,
         ...policyUpdateFields(policy),
       };
+      if (role === "admin") {
+        body.access_group_id = null;
+      }
       if (password) body.password = password;
       updateMutation.mutate({ id: user.id, body }, { onSuccess: onClose });
     } else {

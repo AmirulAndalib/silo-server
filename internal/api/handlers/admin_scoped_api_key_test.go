@@ -245,6 +245,84 @@ func TestHandleUpdateUserRejectsScopedAPIKeyEscalation(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateUserUngroupsPromotedAdmin(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "role only", body: `{"role":"admin"}`},
+		{name: "role with leftover group", body: `{"role":"admin","access_group_id":5}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, repo := newScopedKeyAdminHandler("user")
+			groupID := int64(5)
+			repo.user.AccessGroupID = &groupID
+
+			rec := updateUserRequestFor(t, h, jwtAdminClaims(), tt.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+			}
+			if repo.updated == nil {
+				t.Fatal("expected update")
+			}
+			if !repo.updated.AccessGroupID.Set || repo.updated.AccessGroupID.Value != nil {
+				t.Fatalf("AccessGroupID = %+v, want cleared", repo.updated.AccessGroupID)
+			}
+		})
+	}
+}
+
+func TestHandleUpdateUserRejectsGroupingAnAdmin(t *testing.T) {
+	h, repo := newScopedKeyAdminHandler("admin")
+
+	rec := updateUserRequestFor(t, h, jwtAdminClaims(), `{"access_group_id":5}`)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (body %s)", rec.Code, rec.Body.String())
+	}
+	if code := decodeErrorCode(t, rec); code != "unprocessable_entity" {
+		t.Fatalf("error code = %q, want unprocessable_entity", code)
+	}
+	if repo.updated != nil {
+		t.Fatal("grouped-admin assignment must not be written")
+	}
+}
+
+func TestHandleUpdateUserMayDemoteAdminWithoutGroupingCheck(t *testing.T) {
+	h, repo := newScopedKeyAdminHandler("admin")
+
+	rec := updateUserRequestFor(t, h, jwtAdminClaims(), `{"role":"user"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if repo.updated == nil || repo.updated.Role == nil || *repo.updated.Role != "user" {
+		t.Fatalf("update = %+v, want role user", repo.updated)
+	}
+	if repo.updated.AccessGroupID.Set {
+		t.Fatalf("AccessGroupID = %+v, want left alone on demote", repo.updated.AccessGroupID)
+	}
+}
+
+func TestHandleCreateUserRejectsGroupedAdmin(t *testing.T) {
+	h, repo := newScopedKeyAdminHandler("user")
+	body := `{"username":"mallory","email":"m@example.com","password":"hunter2","role":"admin","access_group_id":5}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", strings.NewReader(body))
+	req = req.WithContext(apimw.SetClaims(req.Context(), jwtAdminClaims()))
+	rec := httptest.NewRecorder()
+
+	h.HandleCreateUser(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (body %s)", rec.Code, rec.Body.String())
+	}
+	if code := decodeErrorCode(t, rec); code != "unprocessable_entity" {
+		t.Fatalf("error code = %q, want unprocessable_entity", code)
+	}
+	if repo.created != nil {
+		t.Fatal("grouped admin must not be created")
+	}
+}
+
 // The scoped-key guard loads the target account before validating, so a
 // missing account has to surface as 404 rather than an escalation decision.
 func TestHandleUpdateUserScopedAPIKeyMissingTarget(t *testing.T) {

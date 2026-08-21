@@ -1056,6 +1056,7 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
   const [policy, setPolicy] = useState(() => policyStateFromUser(user));
   const [maxProfiles, setMaxProfiles] = useState(user.max_profiles);
   const accessGroupSelectId = useId();
+  const roleSelectId = useId();
   const markerEditId = useId();
   const metadataCurationId = useId();
   const updateMutation = useUpdateUser();
@@ -1126,9 +1127,17 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
                 />
               </div>
               <div className="space-y-2">
-                <Label>Role</Label>
-                <Select value={role} onValueChange={setRole}>
-                  <SelectTrigger>
+                <Label htmlFor={roleSelectId}>Role</Label>
+                <Select
+                  value={role}
+                  onValueChange={(value) => {
+                    setRole(value);
+                    if (value === "admin") {
+                      setAccessGroupID(null);
+                    }
+                  }}
+                >
+                  <SelectTrigger id={roleSelectId}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1160,6 +1169,7 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
                 onValueChange={(value) => {
                   setAccessGroupID(value === "none" ? null : Number(value));
                 }}
+                disabled={role === "admin"}
               >
                 <SelectTrigger id={accessGroupSelectId} className="w-full">
                   <SelectValue />

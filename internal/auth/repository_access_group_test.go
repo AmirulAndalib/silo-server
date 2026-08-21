@@ -71,6 +71,34 @@ func TestUserRepositoryUpdateAccessGroupIDDB(t *testing.T) {
 	}
 }
 
+func TestUserRepositoryUpdatePromotingToAdminClearsAccessGroupDB(t *testing.T) {
+	ctx, pool, suffix := newAccessGroupUserRepoDBTest(t)
+	groupID := insertAuthAccessGroupTestGroup(t, ctx, pool, suffix)
+	users := NewUserRepository(pool)
+	created, err := users.Create(ctx, createAuthAccessGroupUserInput(suffix, "promote", &groupID))
+	if err != nil {
+		t.Fatalf("Create() error: %v", err)
+	}
+	if created.AccessGroupID == nil || *created.AccessGroupID != groupID {
+		t.Fatalf("AccessGroupID = %#v, want %d", created.AccessGroupID, groupID)
+	}
+
+	role := "admin"
+	if err := users.Update(ctx, created.ID, models.UpdateUserInput{Role: &role}); err != nil {
+		t.Fatalf("Update(role=admin) error: %v", err)
+	}
+	user, err := users.GetByID(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error: %v", err)
+	}
+	if user.Role != "admin" {
+		t.Fatalf("Role = %q, want admin", user.Role)
+	}
+	if user.AccessGroupID != nil {
+		t.Fatalf("AccessGroupID = %#v after promote, want nil", user.AccessGroupID)
+	}
+}
+
 func TestUserRepositoryCreateAssignsDefaultAccessGroupDB(t *testing.T) {
 	ctx, pool, suffix := newAccessGroupUserRepoDBTest(t)
 	seedID := defaultAuthAccessGroupSeedID(t, ctx, pool)
@@ -98,6 +126,16 @@ func TestUserRepositoryCreateAssignsDefaultAccessGroupDB(t *testing.T) {
 	}
 	if created.AccessGroupID != nil {
 		t.Fatalf("AccessGroupID = %#v for admin, want nil (admins stay ungrouped)", created.AccessGroupID)
+	}
+
+	groupedAdminInput := createAuthAccessGroupUserInput(suffix, "grouped-admin", &defaultID)
+	groupedAdminInput.Role = "admin"
+	created, err = users.Create(ctx, groupedAdminInput)
+	if err != nil {
+		t.Fatalf("Create(admin with explicit group) error: %v", err)
+	}
+	if created.AccessGroupID != nil {
+		t.Fatalf("AccessGroupID = %#v for admin with explicit group, want nil", created.AccessGroupID)
 	}
 
 	explicitID := insertAuthAccessGroupTestGroupWithLabel(t, ctx, pool, suffix, "explicit")

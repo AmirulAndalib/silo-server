@@ -210,6 +210,22 @@ describe("AdminUserDetail access group picker", () => {
     expect(call?.id).toBe(7);
     expect(call?.body.access_group_id).toBe(5);
   });
+
+  it("clears the group when the account is promoted to admin", async () => {
+    const user = userEvent.setup();
+    mocks.user = { ...adminUser, access_group_id: 5 };
+    renderUserDetail();
+
+    await user.click(screen.getByRole("button", { name: /edit/i }));
+    await user.click(screen.getByRole("combobox", { name: "Role" }));
+    await user.click(await screen.findByRole("option", { name: "Admin" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mocks.updateUserMutate).toHaveBeenCalled());
+    const call = mocks.updateUserMutate.mock.calls[0]?.[0] as UpdateUserMutationArg | undefined;
+    expect(call?.body.role).toBe("admin");
+    expect(call?.body.access_group_id).toBeNull();
+  });
 });
 
 describe("AdminUserDetail user settings tab", () => {

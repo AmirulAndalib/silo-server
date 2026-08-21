@@ -1,5 +1,10 @@
 # Feature Changelog
 
+## 2026-08-21
+
+### Keep promoted admins ungrouped
+Promoting a grouped account to admin now drops its access group, matching create. Catalog and playback policy is role-blind, so leaving the group in place kept the Default Group's stream cap (and any library list) on the new admin. Assigning a group to an existing admin is rejected.
+
 ## 2026-08-20
 
 ### Make featured heroes read like editorial summaries

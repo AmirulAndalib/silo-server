@@ -184,9 +184,13 @@ func (r *UserRepository) Create(ctx context.Context, input models.CreateUserInpu
 		cols = append(cols, "max_profiles")
 		args = append(args, *input.MaxProfiles)
 	}
-	if input.AccessGroupID != nil {
+	accessGroupID := input.AccessGroupID
+	if input.Role == "admin" {
+		accessGroupID = nil
+	}
+	if accessGroupID != nil {
 		cols = append(cols, "access_group_id")
-		args = append(args, *input.AccessGroupID)
+		args = append(args, *accessGroupID)
 	}
 
 	// Build placeholders: $1, $2, ..., $N
@@ -197,7 +201,7 @@ func (r *UserRepository) Create(ctx context.Context, input models.CreateUserInpu
 	// Admins stay ungrouped: scope/action decisions are role-blind, so the
 	// default group's ceilings would cap the server owner (mirrors the
 	// exclusion in the assign_default_group_to_existing_users migration).
-	if input.AccessGroupID == nil && input.Role != "admin" {
+	if accessGroupID == nil && input.Role != "admin" {
 		cols = append(cols, "access_group_id")
 		placeholders = append(placeholders, "(SELECT id FROM access_groups WHERE is_default)")
 	}
@@ -280,6 +284,10 @@ func (r *UserRepository) Update(ctx context.Context, id int, input models.Update
 			return err
 		}
 		permissions = normalized
+	}
+
+	if input.Role != nil && *input.Role == "admin" {
+		input.AccessGroupID = models.ClearValue[int64]()
 	}
 
 	// Library scope is resolved from users.library_ids on each request, so
