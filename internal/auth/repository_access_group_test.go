@@ -97,6 +97,24 @@ func TestUserRepositoryUpdatePromotingToAdminClearsAccessGroupDB(t *testing.T) {
 	if user.AccessGroupID != nil {
 		t.Fatalf("AccessGroupID = %#v after promote, want nil", user.AccessGroupID)
 	}
+
+	// A group written on its own is resolved against the row's role in the
+	// same statement, so a write that raced a promotion cannot group the
+	// admin; the handler's 422 is a preflight, not the invariant.
+	if err := users.Update(ctx, created.ID, models.UpdateUserInput{AccessGroupID: models.SetValue(groupID)}); err != nil {
+		t.Fatalf("Update(group on admin) error: %v", err)
+	}
+	user, err = users.GetByID(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error: %v", err)
+	}
+	if user.AccessGroupID != nil {
+		t.Fatalf("AccessGroupID = %#v after grouping an admin, want nil", user.AccessGroupID)
+	}
+	if user.AccessPolicyRevision != created.AccessPolicyRevision+1 {
+		t.Fatalf("AccessPolicyRevision = %d, want %d (promote bumped once, no-op group write must not)",
+			user.AccessPolicyRevision, created.AccessPolicyRevision+1)
+	}
 }
 
 // Demoting an admin without naming a group lands it on the default group (as
@@ -154,7 +172,7 @@ func TestUserRepositoryUpdateDemotingAdminAssignsDefaultAccessGroupDB(t *testing
 		t.Fatalf("AccessGroupID = %#v after re-asserting role, want %d", user.AccessGroupID, otherID)
 	}
 
-	// Demoting with an explicit group honours it over the default.
+	// Demoting with an explicit group honors it over the default.
 	roleAdmin := "admin"
 	if err := users.Update(ctx, admin.ID, models.UpdateUserInput{Role: &roleAdmin}); err != nil {
 		t.Fatalf("Update(role=admin) error: %v", err)

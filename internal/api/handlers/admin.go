@@ -528,7 +528,7 @@ func (h *AdminHandler) rejectGroupedAdmin(
 	if !req.AccessGroupID.Set || req.AccessGroupID.Value == nil {
 		return current, false
 	}
-	role := ""
+	var role string
 	switch {
 	case req.Role != nil:
 		role = *req.Role
@@ -606,7 +606,7 @@ func (h *AdminHandler) groupPolicyFor(ctx context.Context, u *models.User) (*acc
 }
 
 func lookupGroupPolicy(policies map[int64]access.GroupPolicy, u *models.User) *access.GroupPolicy {
-	if u == nil || u.AccessGroupID == nil {
+	if !access.GroupApplies(u) {
 		return nil
 	}
 	policy, ok := policies[*u.AccessGroupID]

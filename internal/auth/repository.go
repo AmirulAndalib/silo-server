@@ -252,8 +252,10 @@ type userUpdateColumn struct {
 	column string
 	set    bool
 	value  any
-	// expr, when non-empty, is a SQL expression written in place of a bound
-	// value; it may reference the row's current columns.
+	// expr, when non-empty, is a SQL expression written in place of a bare
+	// bound value; it may reference the row's current columns. A "$?" inside
+	// it is replaced with the placeholder for value; without one, value is
+	// not bound.
 	expr              string
 	bumpsAccessPolicy bool
 }
@@ -261,10 +263,12 @@ type userUpdateColumn struct {
 // accessGroupUpdateColumn decides what the write does to access_group_id.
 // Admin accounts are never grouped (see Create): granting the role clears the
 // group no matter what the caller passed, and taking the role away without
-// naming a group lands the account on the default group, as create does.
-// Any other write honours the caller's explicit value or leaves the column
-// alone.
+// naming a group lands the account on the default group, as create does. A
+// group written on its own is checked against the row's role inside the same
+// statement, so a concurrent promotion cannot leave an admin grouped; the
+// users_admin_ungrouped constraint backs that up.
 func accessGroupUpdateColumn(input models.UpdateUserInput) userUpdateColumn {
+	const isAdmin = "role = '" + models.RoleAdmin + "'"
 	col := userUpdateColumn{column: "access_group_id", bumpsAccessPolicy: true}
 	switch {
 	case input.Role != nil && *input.Role == models.RoleAdmin:
@@ -272,8 +276,14 @@ func accessGroupUpdateColumn(input models.UpdateUserInput) userUpdateColumn {
 		col.value = (*int64)(nil)
 	case input.Role != nil && !input.AccessGroupID.Set:
 		col.set = true
-		col.expr = "CASE WHEN role = '" + models.RoleAdmin + "' " +
-			"THEN (SELECT id FROM access_groups WHERE is_default) ELSE access_group_id END"
+		col.expr = "CASE WHEN " + isAdmin +
+			" THEN (SELECT id FROM access_groups WHERE is_default) ELSE access_group_id END"
+	case input.Role == nil && input.AccessGroupID.Set && input.AccessGroupID.Value != nil:
+		col.set = true
+		col.value = input.AccessGroupID.Value
+		// The cast pins the parameter type; inside a CASE the driver would
+		// otherwise send it as text.
+		col.expr = "CASE WHEN " + isAdmin + " THEN NULL ELSE $?::bigint END"
 	default:
 		col.set = input.AccessGroupID.Set
 		col.value = input.AccessGroupID.Value
@@ -349,9 +359,12 @@ func (r *UserRepository) Update(ctx context.Context, id int, input models.Update
 		if !col.set {
 			continue
 		}
-		rhs := fmt.Sprintf("$%d", argIndex)
+		placeholder := fmt.Sprintf("$%d", argIndex)
+		rhs := placeholder
+		binds := true
 		if col.expr != "" {
-			rhs = "(" + col.expr + ")"
+			binds = strings.Contains(col.expr, "$?")
+			rhs = "(" + strings.ReplaceAll(col.expr, "$?", placeholder) + ")"
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = %s", col.column, rhs))
 		if col.bumpsAccessPolicy {
@@ -360,7 +373,7 @@ func (r *UserRepository) Update(ctx context.Context, id int, input models.Update
 				fmt.Sprintf("%s IS DISTINCT FROM %s", col.column, rhs),
 			)
 		}
-		if col.expr != "" {
+		if !binds {
 			continue
 		}
 		args = append(args, col.value)
