@@ -106,11 +106,11 @@ describe("ProvidersSettings", () => {
       screen.getByRole("heading", { level: 2, name: "Subtitles & Metadata" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("Where Silo fetches subtitles, artwork, and descriptions."),
-    ).toBeInTheDocument();
+      screen.queryByText("Where Silo fetches subtitles, artwork, and descriptions."),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Subtitle providers" })).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Metadata providers" })).toBeInTheDocument();
-    expect(screen.getByText("Searched in order, top to bottom")).toBeInTheDocument();
+    expect(screen.queryByText("Searched in order, top to bottom")).not.toBeInTheDocument();
   });
 
   it("shows one tile per provider, in search order", () => {
@@ -130,11 +130,13 @@ describe("ProvidersSettings", () => {
 
     const openSubtitles = screen.getByRole("group", { name: "OpenSubtitles" });
     expect(openSubtitles).toHaveAttribute("data-state", "connected");
-    expect(within(openSubtitles).getByText("Account credentials stored")).toBeInTheDocument();
+    expect(within(openSubtitles).getByText("Connected")).toBeInTheDocument();
+    // The state word is the only signal: no "credentials stored" line repeating it.
+    expect(within(openSubtitles).queryByText(/credentials stored/)).not.toBeInTheDocument();
 
     const subdl = screen.getByRole("group", { name: "SubDL" });
     expect(subdl).toHaveAttribute("data-state", "not_connected");
-    expect(within(subdl).getByText("No credentials stored")).toBeInTheDocument();
+    expect(within(subdl).getByText("Not connected")).toBeInTheDocument();
     expect(within(subdl).getByRole("button", { name: "Connect" })).toBeInTheDocument();
 
     // Configured but switched off: not searched, so not "connected".
@@ -148,18 +150,11 @@ describe("ProvidersSettings", () => {
     expect(within(mdblist).getByRole("button", { name: "Manage" })).toBeInTheDocument();
   });
 
-  it("counts connected providers in the status strip", () => {
-    render(<ProvidersSettings />);
-
-    expect(screen.getByText("2 of 4 connected")).toBeInTheDocument();
-  });
-
   it("counts a missing MDBList key as not connected", () => {
     sensitiveConfigured = [];
 
     render(<ProvidersSettings />);
 
-    expect(screen.getByText("1 of 4 connected")).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "MDBList" })).toHaveAttribute(
       "data-state",
       "not_connected",
@@ -224,7 +219,7 @@ describe("ProvidersSettings", () => {
     );
   });
 
-  it("surfaces a failed provider test on the tile and in the strip", async () => {
+  it("surfaces a failed provider test on the tile itself", async () => {
     const user = userEvent.setup();
     mocks.testProvider.mockImplementation((_vars, options) => {
       options.onSuccess({ success: false, error: "401 — key rejected" });
@@ -250,7 +245,7 @@ describe("ProvidersSettings", () => {
     const subsource = screen.getByRole("group", { name: "SubSource" });
     expect(subsource).toHaveAttribute("data-state", "error");
     expect(within(subsource).getByRole("button", { name: "Fix" })).toBeInTheDocument();
-    expect(screen.getByText("SubSource: 401 — key rejected")).toBeInTheDocument();
+    expect(within(subsource).getByText("401 — key rejected")).toBeInTheDocument();
   });
 
   it("points metadata plugins at the plugins page instead of faking tiles", () => {

@@ -102,13 +102,13 @@ describe("LibraryMetadataSettings", () => {
     }
   });
 
-  it("summarises the tab in the status strip under the title", () => {
+  it("renders the tab title and the essential controls", () => {
     const rendered = text(render({ "catalog.search.provider": "postgres" }));
 
     expect(rendered).toContain("Library & Metadata");
-    expect(rendered).toContain("Artwork caching off");
-    expect(rendered).toContain("Markers detected here");
-    expect(rendered).toContain("Search: built-in (Postgres)");
+    expect(rendered).toContain("S3 image caching");
+    expect(rendered).toContain("Find intros and credits");
+    expect(rendered).toContain("Search engine");
   });
 
   it("manages the merged key set of the three tabs it replaces", () => {
@@ -159,7 +159,7 @@ describe("LibraryMetadataSettings", () => {
 
     expect(text(rendered)).toContain("S3 image caching");
     expect(text(rendered)).not.toContain("Restart the server for image caching to start");
-    expect(text(rendered)).not.toContain("S3 image caching needs S3 object storage");
+    expect(text(rendered)).not.toContain("Image caching needs a public S3 bucket");
     expect(toggleDisabled(rendered, "S3 image caching")).toBe(false);
   });
 
@@ -177,7 +177,7 @@ describe("LibraryMetadataSettings", () => {
 
     const rendered = render({});
 
-    expect(text(rendered)).toContain("S3 image caching needs S3 object storage");
+    expect(text(rendered)).toContain("Image caching needs a public S3 bucket");
     expect(rendered).toContain("/admin/settings?tab=infrastructure");
     expect(toggleDisabled(rendered, "S3 image caching")).toBe(true);
   });
@@ -187,13 +187,26 @@ describe("LibraryMetadataSettings", () => {
 
     const rendered = render({ "metadata.cache_images": "true" });
 
-    expect(text(rendered)).toContain("S3 image caching needs S3 object storage");
+    expect(text(rendered)).toContain("Image caching needs a public S3 bucket");
     expect(toggleDisabled(rendered, "S3 image caching")).toBe(false);
   });
 
-  it("marks a restart-required field with the restart badge", () => {
+  it("says it once for a group where every field needs a restart", () => {
     useRestartKeysMock.mockReturnValue(new Set(["metadata.cache_images"]));
 
-    expect(text(render({ "catalog.search.provider": "postgres" }))).toContain("Restart");
+    const rendered = render({ "catalog.search.provider": "postgres" });
+
+    expect(text(rendered)).toContain("Changes apply after a restart");
+    // The group says it, so the field inside drops its own badge.
+    expect(rendered).not.toContain("Takes effect after a server restart");
+  });
+
+  it("marks a restart-required field with the restart badge inside a mixed group", () => {
+    useRestartKeysMock.mockReturnValue(new Set(["scanner.workers"]));
+
+    const rendered = render({ "catalog.search.provider": "postgres" }, ["scanner.workers"]);
+
+    expect(rendered).toContain("Takes effect after a server restart");
+    expect(text(rendered)).not.toContain("Changes apply after a restart");
   });
 });

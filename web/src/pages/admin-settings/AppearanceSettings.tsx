@@ -5,7 +5,6 @@ import { BrandingAssetField } from "@/components/admin/BrandingAssetField";
 import { OverlayPreviewCard } from "@/components/overlays/OverlayPreviewCard";
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
-import { StatusStrip, type StatusStripItem } from "@/components/settings/StatusStrip";
 import { RawCssEditor } from "@/components/theme/RawCssEditor";
 import { ThemePreviewCard } from "@/components/theme/ThemePreviewCard";
 import { TokenEditor } from "@/components/theme/TokenEditor";
@@ -41,7 +40,7 @@ import {
 import { parseVarsJson } from "@/lib/themeExport";
 import type { ThemeVarOverrides } from "@/hooks/useCustomTheme";
 import type { ThemeToken } from "@/lib/themeTokens";
-import { THEME_IDS, THEMES, type ThemeId } from "@/lib/themes";
+import { THEME_IDS, THEMES } from "@/lib/themes";
 import { cn } from "@/lib/utils";
 import { FieldGroup } from "./FieldGroup";
 import { SaveBar } from "./SaveBar";
@@ -70,6 +69,10 @@ const CATALOG_URL_KEY = "theme.catalog_url";
 const OVERLAYS_ENABLED_KEY = "overlays.enabled";
 const OVERLAY_DEFAULTS_KEY = "defaults.card_overlays";
 
+const THEME_KEYS = [ACCENT_KEY, DEFAULT_THEME_KEY, THEME_VARS_KEY, CUSTOM_CSS_KEY, CATALOG_URL_KEY];
+
+const OVERLAY_KEYS = [OVERLAYS_ENABLED_KEY, OVERLAY_DEFAULTS_KEY];
+
 /**
  * Every appearance key the tab stages, saved as one batch by the shared
  * SaveBar. Theming used to autosave each keystroke through
@@ -80,15 +83,7 @@ const OVERLAY_DEFAULTS_KEY = "defaults.card_overlays";
  * Server name and login subtitle deliberately live on the General tab: they are
  * server identity, not look and feel.
  */
-const KEYS = [
-  ACCENT_KEY,
-  DEFAULT_THEME_KEY,
-  THEME_VARS_KEY,
-  CUSTOM_CSS_KEY,
-  CATALOG_URL_KEY,
-  OVERLAYS_ENABLED_KEY,
-  OVERLAY_DEFAULTS_KEY,
-];
+const KEYS = [...THEME_KEYS, ...OVERLAY_KEYS];
 
 export default function AppearanceSettings() {
   const form = useSettingsForm({ keys: useMemo(() => KEYS, []) });
@@ -190,65 +185,27 @@ export default function AppearanceSettings() {
 
   const themeAdvancedDirty =
     tokensTouched || form.isDirty(CUSTOM_CSS_KEY) || form.isDirty(CATALOG_URL_KEY);
-  // `THEME_VARS_KEY` is also written by the essential accent picker, so it only
-  // counts once the advanced token editor itself was used — otherwise picking an
-  // accent would report a change inside a section the admin never opened.
-  const themeAdvancedChanged =
-    [CUSTOM_CSS_KEY, CATALOG_URL_KEY].filter((key) => form.isDirty(key)).length +
-    (tokensTouched && form.isDirty(THEME_VARS_KEY) ? 1 : 0);
-  const restartCount = KEYS.filter((key) => form.isDirty(key) && restartKeys.has(key)).length;
 
-  const themeName = (THEME_IDS as readonly string[]).includes(defaultTheme)
-    ? THEMES[defaultTheme as ThemeId].label
-    : null;
-
-  const stripItems: StatusStripItem[] = [
-    themeName
-      ? { tone: "info", label: `Default theme: ${themeName}` }
-      : { tone: "muted", label: "No default theme" },
-    accentColor
-      ? { tone: "info", label: `Accent ${accentColor}` }
-      : { tone: "muted", label: "Default accent" },
-    overlaysEnabled
-      ? { tone: "ok", label: "Poster badges on" }
-      : { tone: "muted", label: "Poster badges off" },
-    assetStorageAvailable
-      ? { tone: "ok", label: "Image uploads ready" }
-      : s3Configured
-        ? { tone: "warn", label: "Image uploads need a restart" }
-        : { tone: "warn", label: "Image uploads need S3" },
-  ];
+  const allRestart = (keys: string[]) => keys.every((key) => restartKeys.has(key));
 
   if (form.isLoading) return <div>Loading...</div>;
 
   return (
     <div className="flex h-full flex-col">
-      <SettingsPageHeader
-        title="Appearance"
-        description="Branding and theme defaults for everyone who signs in."
-        strip={<StatusStrip items={stripItems} />}
-        className="mb-8"
-      />
+      <SettingsPageHeader title="Appearance" className="mb-8" />
 
       <div className="flex-1 space-y-9">
-        <FieldGroup
-          label="Logos and icons"
-          clarifier="Custom images replace the Silo logo, the browser tab icon, and the login background. Anything you leave empty keeps the Silo default."
-        >
+        <FieldGroup label="Logos and icons">
           {!assetStorageAvailable && (
             <div className="mt-3 flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
               <p className="text-muted-foreground text-[13px] leading-relaxed">
                 {s3Configured ? (
-                  <>
-                    The public bucket is saved, but object storage is not active in this process
-                    yet. Restart the server to enable image uploads.
-                  </>
+                  <>Restart the server to finish enabling image uploads.</>
                 ) : (
                   <>
-                    Image uploads need S3 object storage. Configure a public bucket in{" "}
-                    <span className="text-foreground font-medium">Infrastructure</span> settings,
-                    then restart the server.
+                    Image uploads need a public S3 bucket, set in{" "}
+                    <span className="text-foreground font-medium">Infrastructure</span> settings.
                   </>
                 )}
               </p>
@@ -258,7 +215,7 @@ export default function AppearanceSettings() {
           <div className="space-y-2 py-3.5">
             <BrandingAssetField
               label="Logo (wordmark)"
-              description="Wide logo shown in the expanded sidebar."
+              description="Shown in the expanded sidebar."
               kind="wordmark"
               currentUrl={branding.wordmarkUrl}
               accept={IMAGE_ACCEPT}
@@ -267,7 +224,7 @@ export default function AppearanceSettings() {
             />
             <BrandingAssetField
               label="Logo (icon)"
-              description="Square mark shown in the collapsed sidebar and the installed app."
+              description="Shown in the collapsed sidebar and the installed app."
               kind="mark"
               currentUrl={branding.markUrl}
               accept={IMAGE_ACCEPT}
@@ -276,7 +233,7 @@ export default function AppearanceSettings() {
             />
             <BrandingAssetField
               label="Favicon"
-              description="Browser tab icon. PNG, ICO, or SVG."
+              description="PNG, ICO, or SVG."
               kind="favicon"
               currentUrl={branding.faviconUrl}
               accept={FAVICON_ACCEPT}
@@ -285,7 +242,7 @@ export default function AppearanceSettings() {
             />
             <BrandingAssetField
               label="Login background"
-              description="Full-bleed background image for the login and signup pages."
+              description="Shown on the login and signup pages."
               kind="login_bg"
               currentUrl={branding.loginBgUrl}
               accept={IMAGE_ACCEPT}
@@ -295,14 +252,10 @@ export default function AppearanceSettings() {
           </div>
         </FieldGroup>
 
-        <FieldGroup
-          label="Colors and theme"
-          clarifier="What people see until they choose something else for themselves"
-        >
+        <FieldGroup label="Colors and theme" restartAll={allRestart(THEME_KEYS)}>
           <SettingFieldRow
             label="Accent color"
-            description="Recolors buttons, focus outlines, and the sidebar highlight for everyone. Also used as the installed app's color."
-            dirty={form.isDirty(ACCENT_KEY)}
+            description="Recolors buttons, focus outlines, and the sidebar."
           >
             <div className="flex flex-wrap items-center justify-end gap-2 sm:max-w-[300px]">
               {ACCENT_PRESETS.map((hex) => (
@@ -349,8 +302,7 @@ export default function AppearanceSettings() {
 
           <SettingFieldRow
             label="Default theme"
-            description="The theme people see until they choose their own. Everyone can still pick a different one for themselves."
-            dirty={form.isDirty(DEFAULT_THEME_KEY)}
+            description="Used until someone picks their own theme."
           >
             <div className="flex flex-wrap justify-end gap-2 sm:max-w-[320px]">
               <button
@@ -392,18 +344,12 @@ export default function AppearanceSettings() {
             </div>
           </SettingFieldRow>
 
-          <AdvancedSection
-            id="appearance.theme"
-            count={3}
-            changedCount={themeAdvancedChanged}
-            forceOpen={themeAdvancedDirty}
-          >
+          <AdvancedSection id="appearance.theme" count={3} forceOpen={themeAdvancedDirty}>
             <div className="space-y-3 py-3.5">
               <div className="space-y-1">
                 <Label className="text-sm font-medium">Individual colors and fonts</Label>
                 <p className="text-muted-foreground text-xs leading-relaxed">
-                  Change single colors, fonts, and corner rounding on top of the chosen theme.
-                  Everyone sees these changes; each person can still customize further.
+                  Applied on top of the chosen theme.
                 </p>
               </div>
               <ThemePreviewCard vars={vars} />
@@ -426,8 +372,7 @@ export default function AppearanceSettings() {
               <div className="space-y-1">
                 <Label className="text-sm font-medium">Custom CSS</Label>
                 <p className="text-muted-foreground text-xs leading-relaxed">
-                  Extra CSS applied to every page after the theme, for changes the controls above do
-                  not cover. It is saved with the rest of this tab.
+                  Applied to every page after the theme.
                 </p>
               </div>
               <RawCssEditor value={rawCss} onChange={handleCssChange} />
@@ -437,30 +382,27 @@ export default function AppearanceSettings() {
               label="Community theme list"
               type="text"
               hint="https://example.com/themes.json"
-              description="Address of the JSON file listing community themes people can browse in their own settings."
+              description="Address of a JSON list of community themes."
               value={form.getValue(CATALOG_URL_KEY)}
               onChange={(v) => form.setValue(CATALOG_URL_KEY, v)}
               restartRequired={restartKeys.has(CATALOG_URL_KEY)}
-              dirty={form.isDirty(CATALOG_URL_KEY)}
             />
           </AdvancedSection>
         </FieldGroup>
 
-        <FieldGroup label="Card overlays" clarifier="Small badges drawn on poster art">
+        <FieldGroup label="Card overlays" restartAll={allRestart(OVERLAY_KEYS)}>
           <SettingField
             label="Show badges on poster art"
-            description="Badges such as resolution or rating. Turning this off hides them for everyone, whatever each person has chosen."
+            description="Off hides badges for everyone."
             type="toggle"
             value={form.getValue(OVERLAYS_ENABLED_KEY) || "true"}
             onChange={(v) => form.setValue(OVERLAYS_ENABLED_KEY, v)}
             restartRequired={restartKeys.has(OVERLAYS_ENABLED_KEY)}
-            dirty={form.isDirty(OVERLAYS_ENABLED_KEY)}
           />
 
           <SettingFieldRow
             label="Badge style"
-            description="How the badges look by default. Applies to anyone who has not changed their own overlay settings."
-            dirty={form.isDirty(OVERLAY_DEFAULTS_KEY)}
+            description="Default for people who have not chosen their own."
             className={overlaysEnabled ? undefined : "pointer-events-none opacity-50"}
           >
             <div className="flex flex-col items-end gap-3">
@@ -486,7 +428,6 @@ export default function AppearanceSettings() {
           <div className={cn(overlaysEnabled ? "" : "pointer-events-none opacity-50")}>
             <AdvancedSection
               id="appearance.overlays"
-              title="Advanced · which badges and where"
               count={OVERLAY_REGISTRY.length}
               forceOpen={overlayItemsTouched}
             >
@@ -552,8 +493,6 @@ export default function AppearanceSettings() {
         onSave={form.save}
         onDiscard={discard}
         isSaving={form.isSaving}
-        restartRequired={form.restartRequired}
-        restartCount={restartCount}
       />
     </div>
   );

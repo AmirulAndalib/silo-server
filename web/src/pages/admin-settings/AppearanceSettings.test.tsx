@@ -90,14 +90,12 @@ describe("AppearanceSettings", () => {
     }
   });
 
-  it("summarises the tab in the status strip under the title", () => {
+  it("renders the tab title and nothing else in the header", () => {
     render(<AppearanceSettings />);
 
     expect(screen.getByRole("heading", { name: "Appearance" })).toBeInTheDocument();
-    expect(screen.getByText("No default theme")).toBeInTheDocument();
-    expect(screen.getByText("Default accent")).toBeInTheDocument();
-    expect(screen.getByText("Poster badges on")).toBeInTheDocument();
-    expect(screen.getByText("Image uploads ready")).toBeInTheDocument();
+    expect(screen.getByText("Default theme")).toBeInTheDocument();
+    expect(screen.getByText("Accent color")).toBeInTheDocument();
   });
 
   it("stages the union of appearance keys and leaves identity to General", () => {

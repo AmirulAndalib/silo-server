@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
@@ -56,7 +56,6 @@ function overviewModel(
     tiles: [],
     cards: [],
     sectionStatus: sectionStatus as SettingsOverviewModel["sectionStatus"],
-    attentionCount: 0,
   };
 }
 
@@ -111,7 +110,7 @@ describe("AdminSettingsLayout", () => {
 
     const rail = screen.getByRole("navigation", { name: "Admin settings sections" });
     const labels = [...rail.querySelectorAll("a")].map((link) =>
-      link.textContent?.replace(/Needs attention|Not set up/, "").trim(),
+      link.textContent?.replace("Needs attention", "").trim(),
     );
 
     expect(labels).toEqual(["Overview", ...ADMIN_SETTINGS_NAV.map((item) => item.label)]);
@@ -129,7 +128,7 @@ describe("AdminSettingsLayout", () => {
     expect(current[0]).toHaveAttribute("href", "/admin/settings?tab=playback");
   });
 
-  it("colours a rail dot per section health", () => {
+  it("dots only the sections that need attention", () => {
     vi.stubGlobal("scrollTo", vi.fn());
     mocks.useSettingsOverview.mockReturnValue(
       overviewModel({ playback: "warn", "watch-sync": "off", general: "ok" }),
@@ -138,9 +137,10 @@ describe("AdminSettingsLayout", () => {
     const markup = renderLayout("?tab=general");
 
     expect(markup).toContain("bg-amber-500");
-    expect(markup).toContain("bg-emerald-500");
     expect(markup).toContain("Needs attention");
-    expect(markup).toContain("Not set up");
+    // A section that is merely off, or healthy, gets no dot at all.
+    expect(markup).not.toContain("bg-emerald-500");
+    expect(markup).not.toContain("Not set up");
   });
 
   it("mounts every settings tab", () => {
@@ -217,69 +217,17 @@ describe("AdminSettingsLayout", () => {
     }
   });
 
+  it("carries no search box of its own; the admin header owns search", () => {
+    vi.stubGlobal("scrollTo", vi.fn());
+    renderInteractiveLayout("?tab=general");
+
+    expect(screen.queryByRole("searchbox", { name: "Search settings" })).not.toBeInTheDocument();
+  });
+
   it("keeps `ai` pointing at the AI tab rather than an alias", () => {
     vi.stubGlobal("scrollTo", vi.fn());
     renderInteractiveLayout("?tab=ai");
 
     expect(screen.getByRole("region", { name: "AI settings" })).toBeInTheDocument();
-  });
-
-  it("filters the rail from its search box", async () => {
-    vi.stubGlobal("scrollTo", vi.fn());
-    renderInteractiveLayout("?tab=general");
-
-    await userEvent.type(screen.getByRole("searchbox", { name: "Search settings" }), "redis");
-
-    const rail = screen.getByRole("navigation", { name: "Admin settings sections" });
-    expect(rail).toHaveTextContent("Storage & Database");
-    expect(rail).not.toHaveTextContent("Playback");
-    expect(screen.getByText("1 match")).toBeInTheDocument();
-  });
-
-  it("matches individual admin setting labels", async () => {
-    vi.stubGlobal("scrollTo", vi.fn());
-    renderInteractiveLayout("?tab=general");
-
-    await userEvent.type(
-      screen.getByRole("searchbox", { name: "Search settings" }),
-      "quiet log prefixes",
-    );
-
-    const rail = screen.getByRole("navigation", { name: "Admin settings sections" });
-    expect(rail).toHaveTextContent("General");
-    expect(rail).not.toHaveTextContent("Playback");
-  });
-
-  it("focuses the rail search with Cmd+K", () => {
-    vi.stubGlobal("scrollTo", vi.fn());
-    // The rail's shortcut is scoped to the width the rail is visible at.
-    vi.stubGlobal(
-      "matchMedia",
-      vi.fn(() => ({ matches: true })),
-    );
-    renderInteractiveLayout("?tab=general");
-
-    const searchBox = screen.getByRole("searchbox", { name: "Search settings" });
-    fireEvent.keyDown(document, { key: "k", metaKey: true });
-
-    expect(searchBox).toHaveFocus();
-  });
-
-  it("does not consume Cmd+K when the rail is hidden", () => {
-    vi.stubGlobal(
-      "matchMedia",
-      vi.fn(() => ({ matches: false })),
-    );
-    vi.stubGlobal("scrollTo", vi.fn());
-    renderInteractiveLayout("?tab=general");
-
-    const event = new KeyboardEvent("keydown", {
-      key: "k",
-      metaKey: true,
-      cancelable: true,
-    });
-
-    expect(document.dispatchEvent(event)).toBe(true);
-    expect(event.defaultPrevented).toBe(false);
   });
 });

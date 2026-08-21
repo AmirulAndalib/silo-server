@@ -61,19 +61,15 @@ describe("CompatibilityProxiesSettings", () => {
       expect(markup).toContain(heading);
     }
     expect(markup).toContain("Compatibility");
-    expect(markup).toContain("Let Jellyfin and Audiobookshelf apps connect to this server.");
   });
 
-  it("summarises the compatibility surfaces in the status strip", () => {
+  it("states the Jellyfin web player install state in plain wording", () => {
     mockForm();
 
     const markup = renderToStaticMarkup(<CompatibilityProxiesSettings />);
 
-    // The strip is the only thing that renders toned dots.
-    expect(markup).toContain('data-tone="ok"');
-    expect(markup).toContain("Jellyfin off");
-    expect(markup).toContain("Web UI not installed");
-    expect(markup).toContain("Audiobookshelf on");
+    expect(markup).toContain("Jellyfin web player");
+    expect(markup).toContain("Not installed");
   });
 
   it("shows the essential proxy controls and keeps identity settings behind Advanced", () => {

@@ -14,18 +14,28 @@ from every admin page, not just the Dashboard.
 
 ## Visual system
 
-One section is on screen at a time. The left rail lists the sections with a
-6px health dot each — green, amber, or muted — read from
-`useSettingsOverview().sectionStatus`, and the open one is marked with a 2px
-accent bar and a soft fill rather than a filled pill; the rail collapses on
-mobile, where the Overview is the section list. A section opens with
-`SettingsPageHeader` (breadcrumb, title, lede) and a `StatusStrip` saying what
-that section is doing right now. Below it, settings are rows in hairline-ruled
-`FieldGroup`s, not nested cards, with the Advanced tier inline as one
-disclosure row per group. Provider credentials are `ProviderTile`s that expand
-in place to Test before saving. Staged edits raise one floating save pill
-(`SaveBar`); the restart prompt is a single `RestartBanner` rendered by the
-settings shell, never per tab.
+One section is on screen at a time, and each thing on screen carries one
+signal. The left rail lists the sections; a section only gets a dot when
+`useSettingsOverview().sectionStatus` says `warn`, and it is amber. Healthy and
+not-set-up sections get nothing. The open item is marked with a 2px accent bar
+and no fill; the rail collapses on mobile, where the Overview is the section
+list. The Overview itself shows a health tile only for a tile in `warn` or
+`off` — a server with nothing to fix reads "Everything is configured." — and
+one card per section carrying a single summary phrase.
+
+A section opens with `SettingsPageHeader`: the title, and page actions if it
+has any. No breadcrumb, no lede, no status strip. Below it, settings are rows
+in hairline-ruled `FieldGroup`s, not nested cards, with the Advanced tier
+inline as one disclosure row per group. A description under a field label is
+the exception, not the rule: one short sentence, and only when the label alone
+is ambiguous. Units live beside the control (`SettingField`'s `unit`), not in
+the label. When every field in a group needs a restart, the group says so once
+(`FieldGroup restartAll`) and the fields inside drop their chips. Provider
+credentials are `ProviderTile`s that expand in place to Test before saving;
+their border is neutral in every state and the state is a dot plus a word in
+the header. Staged edits raise one floating save pill (`SaveBar`); the restart
+prompt is a single `RestartBanner` rendered by the settings shell, never per
+tab.
 
 ## Three tiers, and how to pick one for a new setting
 
@@ -38,8 +48,8 @@ Every admin setting is one of:
   of values that make the feature usable at all).
 - **Advanced** — correct but not essential; collapsed by default behind one
   `AdvancedSection` disclosure per tab (or per `FieldGroup` on a dense tab).
-  Open state persists in `localStorage` and auto-expands when a search match
-  or a dirty/invalid field lives inside it. Tuning knobs, alternate backends,
+  Open state persists in `localStorage` and auto-expands when a dirty or
+  invalid field lives inside it. Tuning knobs, alternate backends,
   and anything whose default is good enough that most admins never touch it
   belong here.
 - **Hidden** — no UI at all, on any tab. The setting is still a normal
@@ -63,8 +73,9 @@ Reuse these instead of adding a bespoke variant per tab:
   credentials are the only exception, and only because they need
   Test-before-commit, which is `ProviderTile` rather than a bespoke card per
   provider.
-- `SettingsPageHeader` and `StatusStrip` (`web/src/components/settings/`) —
-  the one way a section states what it is and what it is currently doing.
+- `SettingsPageHeader` (`web/src/components/settings/`) — the one way a
+  section names itself. Live state belongs on the Overview, not repeated as a
+  strip on every tab.
 - `AdvancedSection` — the one collapsible-disclosure primitive for the
   Advanced tier. Do not add another `<details>`, another bespoke collapsible
   component, or a per-page expand/collapse toggle.

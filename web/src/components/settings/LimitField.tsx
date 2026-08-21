@@ -19,8 +19,6 @@ export interface LimitFieldProps {
   min?: number;
   disabled?: boolean;
   restartRequired?: boolean;
-  /** Marks the field as edited but unsaved. */
-  dirty?: boolean;
 }
 
 /**
@@ -40,7 +38,6 @@ export function LimitField({
   min = 0,
   disabled = false,
   restartRequired = false,
-  dirty = false,
 }: LimitFieldProps) {
   const controlId = useId();
   const checkboxId = useId();
@@ -66,7 +63,6 @@ export function LimitField({
       description={hint}
       descriptionId={hintId}
       restartRequired={restartRequired}
-      dirty={dirty}
     >
       <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2">
         <Input

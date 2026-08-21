@@ -53,13 +53,12 @@ describe("GeneralSettings", () => {
     }
   });
 
-  it("summarises the tab in the status strip under the title", () => {
+  it("opens with the title alone: no breadcrumb, lede, or status strip", () => {
     renderPage();
 
     expect(screen.getByRole("heading", { name: "General" })).toBeInTheDocument();
-    expect(screen.getByText("Server name: Silo")).toBeInTheDocument();
-    expect(screen.getByText("Public signups on")).toBeInTheDocument();
-    expect(screen.getByText("Log level: Info")).toBeInTheDocument();
+    expect(screen.queryByText("Server name: Silo")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Settings ›/)).not.toBeInTheDocument();
   });
 
   it("manages identity, signup and logging keys on one save bar", () => {

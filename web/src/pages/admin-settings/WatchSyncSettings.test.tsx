@@ -64,8 +64,8 @@ describe("WatchSyncSettings", () => {
 
     expect(screen.getByRole("heading", { level: 2, name: "Watch sync" })).toBeInTheDocument();
     expect(
-      screen.getByText("Keep watch history in sync with Trakt and Simkl."),
-    ).toBeInTheDocument();
+      screen.queryByText("Keep watch history in sync with Trakt and Simkl."),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Trakt" })).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Simkl" })).toBeInTheDocument();
   });
@@ -91,7 +91,11 @@ describe("WatchSyncSettings", () => {
       "data-state",
       "not_connected",
     );
-    expect(screen.getByText("1 of 2 connected")).toBeInTheDocument();
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+    expect(screen.getByText("Not connected")).toBeInTheDocument();
+    // The state word is the only signal; the tile no longer repeats it as a
+    // "credentials stored" line underneath.
+    expect(screen.queryByText("App credentials stored")).not.toBeInTheDocument();
   });
 
   it("marks a half-configured provider as partly set up", () => {
@@ -100,7 +104,6 @@ describe("WatchSyncSettings", () => {
     render(<WatchSyncSettings />);
 
     expect(screen.getByText("Partly set up")).toBeInTheDocument();
-    expect(screen.getByText("0 of 2 connected")).toBeInTheDocument();
   });
 
   it("expands one tile in place and collapses it again", async () => {

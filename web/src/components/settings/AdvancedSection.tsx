@@ -32,10 +32,8 @@ function writePersisted(id: string, open: boolean): void {
 export interface AdvancedSectionProps {
   /** Stable id for the persisted open state, e.g. `playback.transcoding`. */
   id: string;
-  /** Number of settings inside, rendered as "N settings" on the right. */
+  /** Number of settings inside, rendered as a muted count on the right. */
   count?: number;
-  /** Unsaved settings inside, appended as "· M changed". */
-  changedCount?: number;
   title?: string;
   /** Open state used when nothing is persisted yet. */
   defaultOpen?: boolean;
@@ -57,7 +55,6 @@ export interface AdvancedSectionProps {
 export function AdvancedSection({
   id,
   count,
-  changedCount,
   title = "Advanced",
   defaultOpen = false,
   forceOpen = false,
@@ -90,14 +87,10 @@ export function AdvancedSection({
     writePersisted(id, next);
   }
 
-  const countLabel =
-    typeof count === "number" ? `${count} setting${count === 1 ? "" : "s"}` : undefined;
-  const changedLabel =
-    typeof changedCount === "number" && changedCount > 0 ? `${changedCount} changed` : undefined;
-  const meta = [countLabel, changedLabel].filter(Boolean).join(" · ");
-  // The accessible name keeps the "Advanced · N settings" reading order even
-  // though the counts are visually pushed to the right of the row.
-  const accessibleLabel = meta ? `${title} · ${meta}` : title;
+  // The number reads as a bare count on screen; the accessible name spells out
+  // what it counts, since it is visually pushed to the right of the row.
+  const accessibleLabel =
+    typeof count === "number" ? `${title} · ${count} setting${count === 1 ? "" : "s"}` : title;
 
   return (
     <div className="min-w-0">
@@ -120,15 +113,9 @@ export function AdvancedSection({
           aria-hidden="true"
         />
         <span className="min-w-0 font-medium">{title}</span>
-        {meta ? (
-          <span className="text-muted-foreground ml-auto shrink-0 text-[11.5px]">
-            {meta}
-            {changedLabel ? (
-              <span
-                aria-hidden="true"
-                className="ml-2 inline-block size-1.5 rounded-full bg-[var(--settings-accent)] align-middle"
-              />
-            ) : null}
+        {typeof count === "number" ? (
+          <span aria-hidden="true" className="text-muted-foreground ml-auto shrink-0 text-[11.5px]">
+            {count}
           </span>
         ) : null}
       </button>

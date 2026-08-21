@@ -102,10 +102,10 @@ describe("AISettings", () => {
 
     expect(screen.getByRole("heading", { level: 2, name: "AI" })).toBeInTheDocument();
     expect(
-      screen.getByText(
+      screen.queryByText(
         "Optional language models for subtitle translation, transcription, and descriptions.",
       ),
-    ).toBeInTheDocument();
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Models" })).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Features" })).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Text model" })).toBeInTheDocument();
@@ -144,7 +144,7 @@ describe("AISettings", () => {
 
     render(<AISettings />);
 
-    expect(screen.getByText("Endpoint cannot transcribe")).toBeInTheDocument();
+    expect(screen.getByText("Cannot transcribe")).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Speech-to-text" })).toHaveAttribute(
       "data-state",
       "error",
@@ -192,26 +192,21 @@ describe("AISettings", () => {
     );
   });
 
-  it("states what each feature still needs", () => {
+  it("says nothing under a feature whose model is ready", () => {
     render(<AISettings />);
 
     expect(screen.getByText("Translate subtitles")).toBeInTheDocument();
-    expect(
-      screen.getByText("Needs the text model — uses the text model tile above."),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/Needs speech-to-text — also uses the text model/)).toBeInTheDocument();
-    expect(screen.getByText("Text model configured")).toBeInTheDocument();
-    // Empty speech base URL falls back to the text endpoint, which counts as
-    // configured only once the endpoint can actually transcribe.
-    expect(screen.getByText("Speech-to-text configured")).toBeInTheDocument();
+    expect(screen.queryByText("Needs the text model")).not.toBeInTheDocument();
+    expect(screen.queryByText("Needs speech-to-text")).not.toBeInTheDocument();
   });
 
-  it("marks a feature requirement unmet when its endpoint cannot transcribe", () => {
+  it("names the missing model when a feature cannot run", () => {
     values["ai.base_url"] = "https://openrouter.ai/api";
 
     render(<AISettings />);
 
-    expect(screen.getByText("Speech endpoint cannot transcribe")).toBeInTheDocument();
+    // A chat-only endpoint cannot transcribe, so the speech feature is unmet.
+    expect(screen.getByText("Needs speech-to-text")).toBeInTheDocument();
   });
 
   it("keeps AI tuning behind a collapsed advanced disclosure", async () => {
@@ -229,17 +224,15 @@ describe("AISettings", () => {
     expect(screen.getAllByLabelText("Takes effect after a server restart").length).toBe(1);
   });
 
-  it("counts staged advanced changes on the disclosure", () => {
+  it("auto-expands the advanced section around a staged change", () => {
     dirtyKeys = ["subtitle_ai.batch_size"];
     dirtyCount = 1;
 
     render(<AISettings />);
 
-    expect(
-      screen.getByRole("button", { name: /Advanced · 6 settings · 1 changed/ }),
-    ).toBeInTheDocument();
     // A staged change auto-expands the section so the save bar cannot block on
     // a hidden field.
+    expect(screen.getByRole("button", { name: /Advanced · 6 settings/ })).toBeInTheDocument();
     expect(screen.getByLabelText("Subtitle lines per request")).toBeInTheDocument();
   });
 
@@ -271,7 +264,7 @@ describe("AISettings", () => {
     values[key] = malformedValue;
     render(<AISettings />);
 
-    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(mocks.toastError).toHaveBeenCalledWith(message);
     expect(mocks.save).not.toHaveBeenCalled();
@@ -302,7 +295,7 @@ describe("AISettings", () => {
     await user.click(within(tile).getByRole("button", { name: "Replace API key" }));
     await user.click(within(tile).getByRole("button", { name: "Keep saved API key" }));
 
-    // Staging "" would erase the stored key on the next Save Changes.
+    // Staging "" would erase the stored key on the next save.
     expect(mocks.setValue).not.toHaveBeenCalledWith("ai.api_key", "");
     expect(mocks.resetValue).toHaveBeenCalledWith("ai.api_key");
   });

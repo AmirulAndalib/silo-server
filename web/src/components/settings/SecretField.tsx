@@ -23,8 +23,6 @@ export interface SecretFieldProps {
   hint?: string;
   disabled?: boolean;
   restartRequired?: boolean;
-  /** Marks the field as edited but unsaved. */
-  dirty?: boolean;
 }
 
 /**
@@ -43,7 +41,6 @@ export function SecretField({
   hint,
   disabled = false,
   restartRequired = false,
-  dirty = false,
 }: SecretFieldProps) {
   const controlId = useId();
   const hintId = useId();
@@ -72,7 +69,6 @@ export function SecretField({
         description={hint}
         descriptionId={hintId}
         restartRequired={restartRequired}
-        dirty={dirty}
       >
         <div className="border-border/70 flex w-full items-center justify-between gap-3 rounded-md border px-3 py-1.5 sm:w-60">
           <span className="text-muted-foreground text-sm">Configured</span>
@@ -100,7 +96,6 @@ export function SecretField({
       description={description}
       descriptionId={hintId}
       restartRequired={restartRequired}
-      dirty={dirty}
     >
       <div className="flex w-full flex-col items-end gap-1 sm:w-60">
         <Input

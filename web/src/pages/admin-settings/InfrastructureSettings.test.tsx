@@ -61,7 +61,7 @@ describe("InfrastructureSettings", () => {
     }
   });
 
-  it("renders the page header and a status strip of the stored-data facts", () => {
+  it("renders the page header on its own, with no description or status strip", () => {
     mockForm();
 
     render(<InfrastructureSettings />);
@@ -70,12 +70,30 @@ describe("InfrastructureSettings", () => {
       screen.getByRole("heading", { level: 2, name: "Storage & Database" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("Where Silo keeps its data. Changes here take effect after a restart."),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Redis not configured")).toBeInTheDocument();
-    expect(screen.getByText("No public bucket set")).toBeInTheDocument();
-    expect(screen.getByText("No private bucket set")).toBeInTheDocument();
-    expect(screen.getByText("Log retention not set")).toBeInTheDocument();
+      screen.queryByText("Where Silo keeps its data. Changes here take effect after a restart."),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Redis not configured")).not.toBeInTheDocument();
+    expect(screen.queryByText("No public bucket set")).not.toBeInTheDocument();
+  });
+
+  it("states the restart requirement once per group instead of chipping every field", () => {
+    mockForm();
+
+    render(<InfrastructureSettings />);
+
+    const redis = within(screen.getByRole("group", { name: "Redis" }));
+    expect(redis.getByText("Changes apply after a restart")).toBeInTheDocument();
+    expect(screen.queryAllByLabelText("Takes effect after a server restart")).toHaveLength(0);
+  });
+
+  it("puts units beside the control rather than in the label", () => {
+    mockForm();
+
+    const markup = renderToStaticMarkup(<InfrastructureSettings />);
+
+    expect(markup).toContain("Delete log entries older than");
+    expect(markup).not.toContain("Delete log entries older than (days)");
+    expect(markup).not.toContain("Maximum log size (MB)");
   });
 
   it("manages the merged database, storage and log keys in one form", () => {
@@ -119,7 +137,7 @@ describe("InfrastructureSettings", () => {
     const markup = renderToStaticMarkup(<InfrastructureSettings />);
 
     expect(markup).toContain("Maximum Postgres connections");
-    expect(markup).toContain("1 changed");
+    expect(markup).toContain("Advanced · 2 settings");
   });
 
   it("warns about the artwork cache when a public storage identity field is edited", () => {
@@ -160,7 +178,7 @@ describe("InfrastructureSettings", () => {
 
     const privateGroup = within(screen.getByRole("group", { name: "Private storage" }));
     await userEvent.click(privateGroup.getByRole("button", { name: "Replace Access Key" }));
-    await userEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() =>
       expect(privateGroup.getByLabelText("Access Key")).toHaveAttribute("type", "password"),

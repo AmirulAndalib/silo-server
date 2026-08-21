@@ -1,15 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import { useEffect, useRef, type ComponentType } from "react";
 import { ChevronLeft, LayoutDashboard } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Link, useSearchParams } from "react-router";
 
-import { SettingsSearchInput } from "@/components/settings/SettingsSearchInput";
 import {
-  countSettingsSearchItems,
-  filterSettingsSearchGroups,
-} from "@/components/settings/settingsSearch";
-import {
-  ADMIN_SETTINGS_GROUPS,
   ADMIN_SETTINGS_NAV,
   resolveAdminSettingsTabID,
   type AdminSettingsSearchItem,
@@ -64,27 +58,10 @@ function settingsComponent(id: string) {
   return component;
 }
 
-const SETTINGS_GROUPS = ADMIN_SETTINGS_GROUPS.map((group) => ({
-  ...group,
-  items: group.items.map((item) => ({ ...item, component: settingsComponent(item.id) })),
-}));
-
 const SETTINGS_NAV: SettingsNav[] = ADMIN_SETTINGS_NAV.map((item) => ({
   ...item,
   component: settingsComponent(item.id),
 }));
-
-const STATUS_DOT_CLASS: Record<SectionStatus, string> = {
-  ok: "bg-emerald-500",
-  warn: "bg-amber-500",
-  off: "bg-muted-foreground/35",
-};
-
-const STATUS_DOT_LABEL: Record<SectionStatus, string> = {
-  ok: "",
-  warn: "Needs attention",
-  off: "Not set up",
-};
 
 interface RailItemProps {
   label: string;
@@ -95,12 +72,12 @@ interface RailItemProps {
 }
 
 /**
- * One row of the settings rail: icon, label, and — for a section — a health
- * dot on the right. The active row reads as an accent bar plus a wash rather
- * than a filled pill, so the rail stays quiet next to the page it frames.
+ * One row of the settings rail: icon, label, and — only when a section needs
+ * the admin — an amber dot on the right. The active row is an accent bar and
+ * nothing else, so the rail stays quiet next to the page it frames.
  */
 function SettingsRailItem({ label, icon: Icon, href, active, status }: RailItemProps) {
-  const statusLabel = status ? STATUS_DOT_LABEL[status] : "";
+  const needsAttention = status === "warn";
 
   return (
     <li>
@@ -110,7 +87,7 @@ function SettingsRailItem({ label, icon: Icon, href, active, status }: RailItemP
         className={cn(
           "relative flex w-full items-center gap-2.5 rounded-lg py-[7px] pr-2.5 pl-3 text-[13.5px] transition-colors duration-150",
           active
-            ? "text-foreground bg-[var(--settings-accent-soft)] font-medium"
+            ? "text-foreground font-medium"
             : "text-muted-foreground hover:text-foreground hover:bg-foreground/[0.035]",
         )}
       >
@@ -126,13 +103,10 @@ function SettingsRailItem({ label, icon: Icon, href, active, status }: RailItemP
           className={cn("h-4 w-4 flex-none", active && "text-[var(--settings-accent)]")}
         />
         <span className="min-w-0 flex-1 truncate">{label}</span>
-        {status ? (
+        {needsAttention ? (
           <>
-            <span
-              aria-hidden="true"
-              className={cn("h-1.5 w-1.5 flex-none rounded-full", STATUS_DOT_CLASS[status])}
-            />
-            {statusLabel ? <span className="sr-only">{statusLabel}</span> : null}
+            <span aria-hidden="true" className="h-1.5 w-1.5 flex-none rounded-full bg-amber-500" />
+            <span className="sr-only">Needs attention</span>
           </>
         ) : null}
       </Link>
@@ -142,21 +116,11 @@ function SettingsRailItem({ label, icon: Icon, href, active, status }: RailItemP
 
 export default function AdminSettingsLayout() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [settingsSearch, setSettingsSearch] = useState("");
   const activeContentRef = useRef<HTMLDivElement>(null);
   const { data: serverStatus } = useAdminServerStatus();
   const { sectionStatus } = useSettingsOverview();
   const rawActiveId = searchParams.get("tab");
   const activeId = resolveAdminSettingsTabID(rawActiveId);
-  const filteredSettingsGroups = useMemo(
-    () => filterSettingsSearchGroups(SETTINGS_GROUPS, settingsSearch),
-    [settingsSearch],
-  );
-  const filteredItems = useMemo(
-    () => filteredSettingsGroups.flatMap((group) => group.items),
-    [filteredSettingsGroups],
-  );
-  const filteredSettingsCount = countSettingsSearchItems(filteredSettingsGroups);
 
   const active = activeId ? SETTINGS_NAV.find((item) => item.id === activeId) : undefined;
   const ActiveComponent = active?.component;
@@ -199,24 +163,7 @@ export default function AdminSettingsLayout() {
               aria-label="Admin settings sections"
               className="border-border hidden border-r lg:block lg:w-[15.5rem] lg:flex-shrink-0"
             >
-              <div className="px-4 pt-4 pb-3">
-                <SettingsSearchInput
-                  value={settingsSearch}
-                  onChange={setSettingsSearch}
-                  resultCount={filteredSettingsCount}
-                  totalCount={SETTINGS_NAV.length}
-                  shortcutMediaQuery="(min-width: 64rem)"
-                  showShortcutHint
-                />
-              </div>
-              <div className="px-4 pb-5">
-                {/* Eyebrow only: the nav landmark already names this list. */}
-                <p
-                  aria-hidden="true"
-                  className="text-muted-foreground px-1 pt-1 pb-1.5 text-[11px] font-medium"
-                >
-                  Settings
-                </p>
+              <div className="px-4 py-5">
                 <ul className="list-none space-y-0.5">
                   <SettingsRailItem
                     label="Overview"
@@ -224,7 +171,7 @@ export default function AdminSettingsLayout() {
                     href="/admin/settings"
                     active={!activeId}
                   />
-                  {filteredItems.map((item) => (
+                  {SETTINGS_NAV.map((item) => (
                     <SettingsRailItem
                       key={item.id}
                       label={item.label}
@@ -235,9 +182,6 @@ export default function AdminSettingsLayout() {
                     />
                   ))}
                 </ul>
-                {filteredItems.length === 0 ? (
-                  <p className="text-muted-foreground px-1 pt-2 text-sm">No matching settings</p>
-                ) : null}
               </div>
             </nav>
 

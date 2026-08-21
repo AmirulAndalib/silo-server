@@ -91,7 +91,7 @@ async function openChannel(pattern: RegExp) {
   await userEvent.click(screen.getByRole("button", { name: pattern }));
 }
 
-const EMAIL_CHANNEL = /Email for accounts that opt in/;
+const EMAIL_CHANNEL = /Daily summary or a message per episode/;
 const DISCORD_CHANNEL = /Direct messages from your Discord bot/;
 const WEBHOOK_CHANNEL = /Webhooks people create for themselves/;
 
@@ -160,7 +160,7 @@ describe("NotificationsAdminSettings", () => {
     render(renderPage());
 
     expect(screen.getByText("Grouping and flood control")).toBeInTheDocument();
-    expect(screen.getByText("How long notifications are kept")).toBeInTheDocument();
+    expect(screen.getByText("Retention")).toBeInTheDocument();
     expect(screen.getByText("Pipeline")).toBeInTheDocument();
     expect(screen.getByText("Delivery Channels")).toBeInTheDocument();
     expect(screen.getByText("Tuning")).toBeInTheDocument();
@@ -243,7 +243,7 @@ describe("NotificationsAdminSettings", () => {
     expect(screen.getByRole("button", { name: /Show setup guide/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Invite bot to server/ })).toBeInTheDocument();
     // Delivery and appearance stay here.
-    expect(screen.getByText("Show artwork in Discord messages")).toBeInTheDocument();
+    expect(screen.getByText("Artwork")).toBeInTheDocument();
     expect(screen.getByText("Let people pick a DM per episode")).toBeInTheDocument();
   });
 
@@ -277,22 +277,23 @@ describe("NotificationsAdminSettings", () => {
     });
   });
 
-  it("summarizes the pipeline and channels in the page status strip", () => {
+  it("counts the enabled channels on the pipeline card", () => {
     useSettingsFormMock.mockReturnValue(makeForm());
 
     render(renderPage());
 
     expect(screen.getByRole("heading", { level: 2, name: "Notifications" })).toBeInTheDocument();
-    expect(screen.getByText("Pipeline on")).toBeInTheDocument();
-    expect(screen.getByText("5 of 7 channels enabled")).toBeInTheDocument();
+    expect(screen.getByText("5/7 channels on")).toBeInTheDocument();
   });
 
-  it("warns in the strip when sending is paused", () => {
+  it("warns on the pipeline card when sending is paused", () => {
     useSettingsFormMock.mockReturnValue(makeForm({ "notifications.fanout_enabled": "false" }));
 
     render(renderPage());
 
-    expect(screen.getByText("Sending paused")).toBeInTheDocument();
+    expect(
+      screen.getByText("Sending is paused; new content waits in the queue."),
+    ).toBeInTheDocument();
   });
 
   it("hides tuning and webhook limits behind Advanced disclosures", async () => {
@@ -301,17 +302,17 @@ describe("NotificationsAdminSettings", () => {
     render(renderPage());
     await openChannel(WEBHOOK_CHANNEL);
 
-    expect(screen.queryByText("Wait before sending (seconds)")).not.toBeInTheDocument();
-    expect(screen.queryByText("Read notifications (days)")).not.toBeInTheDocument();
-    expect(screen.queryByText("Webhooks each person may create")).not.toBeInTheDocument();
+    expect(screen.queryByText("Settle window")).not.toBeInTheDocument();
+    expect(screen.queryByText("Read notifications")).not.toBeInTheDocument();
+    expect(screen.queryByText("Webhooks per person")).not.toBeInTheDocument();
 
     for (const toggle of screen.getAllByRole("button", { name: /Advanced · 3 settings/ })) {
       await userEvent.click(toggle);
     }
 
-    expect(screen.getByText("Wait before sending (seconds)")).toBeInTheDocument();
-    expect(screen.getByText("Read notifications (days)")).toBeInTheDocument();
-    expect(screen.getByText("Webhooks each person may create")).toBeInTheDocument();
+    expect(screen.getByText("Settle window")).toBeInTheDocument();
+    expect(screen.getByText("Read notifications")).toBeInTheDocument();
+    expect(screen.getByText("Webhooks per person")).toBeInTheDocument();
   });
 
   it("auto-expands an advanced disclosure that holds a staged change", async () => {
@@ -321,7 +322,7 @@ describe("NotificationsAdminSettings", () => {
 
     render(renderPage());
 
-    expect(screen.getByText("Read notifications (days)")).toBeInTheDocument();
-    expect(screen.queryByText("Wait before sending (seconds)")).not.toBeInTheDocument();
+    expect(screen.getByText("Read notifications")).toBeInTheDocument();
+    expect(screen.queryByText("Settle window")).not.toBeInTheDocument();
   });
 });

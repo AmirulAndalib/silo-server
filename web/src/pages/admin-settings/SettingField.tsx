@@ -13,27 +13,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useGroupRestartAll } from "./FieldGroup";
 import "@/styles/admin-settings.css";
 
 interface SelectOption {
   value: string;
   label: string;
   disabled?: boolean;
-}
-
-/** Muted chip marking a setting that still holds its shipped default. */
-export function DefaultChip({ className }: { className?: string }) {
-  return (
-    <span
-      className={cn(
-        "border-border/70 text-muted-foreground bg-foreground/[0.04] inline-flex shrink-0",
-        "items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium tracking-wide",
-        className,
-      )}
-    >
-      Default
-    </span>
-  );
 }
 
 /**
@@ -68,17 +54,13 @@ export interface SettingFieldRowProps {
   label: ReactNode;
   /** Ties the label to the control; omit for rows whose control has no id. */
   htmlFor?: string;
-  /** Description under the label. */
+  /** Description under the label. One short sentence, or nothing at all. */
   description?: ReactNode;
   descriptionId?: string;
   /** Extra line under the description — probe results, quota notes. */
   status?: ReactNode;
   /** Amber "Restart" chip after the label; drive it from `useRestartKeys`. */
   restartRequired?: boolean;
-  /** Muted "Default" chip after the label. */
-  isDefault?: boolean;
-  /** Accent rail plus a tinted bleed while the value differs from the saved one. */
-  dirty?: boolean;
   /** Toggles sit flush right; every other control reserves a 200px column. */
   align?: "control" | "toggle";
   className?: string;
@@ -98,23 +80,19 @@ export function SettingFieldRow({
   descriptionId,
   status,
   restartRequired,
-  isDefault,
-  dirty,
   align = "control",
   className,
   children,
 }: SettingFieldRowProps) {
+  // A group that already says "Changes apply after a restart" does not need the
+  // same fact repeated on every row inside it.
+  const groupSaysRestart = useGroupRestartAll();
+
   return (
     <div
-      data-dirty={dirty ? "true" : undefined}
       className={cn(
         "border-border/60 relative flex flex-col gap-3 border-b py-3.5 last:border-b-0",
-        "transition-colors sm:flex-row sm:items-start sm:gap-6",
-        dirty && [
-          "bg-[linear-gradient(90deg,var(--settings-accent-soft),transparent_55%)]",
-          "before:absolute before:inset-y-0 before:bg-[var(--settings-accent)]",
-          "before:-left-2.5 before:w-0.5 before:rounded-full before:content-['']",
-        ],
+        "sm:flex-row sm:items-start sm:gap-6",
         className,
       )}
     >
@@ -123,8 +101,7 @@ export function SettingFieldRow({
           <Label htmlFor={htmlFor} className="text-sm font-medium">
             {label}
           </Label>
-          {restartRequired && <RestartBadge />}
-          {isDefault && <DefaultChip />}
+          {restartRequired && !groupSaysRestart && <RestartBadge />}
         </div>
         {description ? (
           <p id={descriptionId} className="text-muted-foreground mt-1 text-xs leading-relaxed">
@@ -157,6 +134,8 @@ interface SettingFieldProps {
   description?: ReactNode;
   /** Extra line under the description, e.g. a detection result. */
   status?: ReactNode;
+  /** Rendered after the control, e.g. "%" or "Mbps". */
+  unit?: string;
   value: string;
   onChange: (value: string) => void;
   options?: SelectOption[];
@@ -164,10 +143,6 @@ interface SettingFieldProps {
   disabled?: boolean;
   /** Marks the field with a restart badge; drive it from `useRestartKeys`. */
   restartRequired?: boolean;
-  /** Marks the field as still holding its shipped default. */
-  isDefault?: boolean;
-  /** Marks the field as edited but unsaved. */
-  dirty?: boolean;
   className?: string;
 }
 
@@ -177,14 +152,13 @@ export function SettingField({
   hint,
   description,
   status,
+  unit,
   value,
   onChange,
   options,
   sensitiveConfigured,
   disabled,
   restartRequired,
-  isDefault,
-  dirty,
   className,
 }: SettingFieldProps) {
   const controlId = useId();
@@ -204,12 +178,11 @@ export function SettingField({
       descriptionId={hintId}
       status={status}
       restartRequired={restartRequired}
-      isDefault={isDefault}
-      dirty={dirty}
       align={align}
       className={className}
     >
       {control}
+      {unit ? <span className="text-muted-foreground text-xs">{unit}</span> : null}
     </SettingFieldRow>
   );
 

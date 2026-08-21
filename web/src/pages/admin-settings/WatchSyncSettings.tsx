@@ -5,7 +5,6 @@ import { ProviderTile, ProviderTileGrid } from "@/components/settings/ProviderTi
 import { RestartBadge } from "@/components/settings/RestartBadge";
 import { SecretField } from "@/components/settings/SecretField";
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
-import { StatusStrip } from "@/components/settings/StatusStrip";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -63,10 +62,6 @@ function credentialKeys(providerKey: string) {
     { key: `watchsync.${providerKey}.client_id`, label: "Client ID" },
     { key: `watchsync.${providerKey}.client_secret`, label: "Client secret" },
   ];
-}
-
-function isConnected(providerKey: string, sensitiveConfigured: string[]): boolean {
-  return credentialKeys(providerKey).every((field) => sensitiveConfigured.includes(field.key));
 }
 
 function WatchProviderTile({
@@ -138,9 +133,6 @@ function WatchProviderTile({
       state={expanded ? "editing" : allConfigured ? "connected" : "not_connected"}
       statePill={!expanded && !allConfigured && anyConfigured ? "Partly set up" : undefined}
       badge={restartRequired ? <RestartBadge /> : undefined}
-      meta={
-        expanded ? undefined : allConfigured ? "App credentials stored" : "No credentials stored"
-      }
       busy={updateSettings.isPending}
       expanded={expanded}
       primaryAction={{
@@ -148,9 +140,8 @@ function WatchProviderTile({
         onClick: onExpand,
       }}
     >
-      <p className="text-muted-foreground mb-1 text-xs leading-relaxed">
-        App credentials from {title}. Once they are saved, each viewer connects their own {title}{" "}
-        account from their profile settings.
+      <p className="text-muted-foreground mb-1 text-xs">
+        Viewers link their own {title} account from profile settings.
       </p>
       {fields.map((field) => (
         <SecretField
@@ -182,7 +173,7 @@ function WatchProviderTile({
       </div>
       {needsRestart && (
         <div className="border-warning/30 bg-warning/10 text-warning mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border px-3 py-2 text-xs">
-          <span>Restart the server so {title} collection browsing picks up this change.</span>
+          <span>Restart the server to pick up the new {title} credentials.</span>
           <RestartServerButton />
         </div>
       )}
@@ -229,31 +220,11 @@ export default function WatchSyncSettings() {
     );
   }
 
-  const connectedCount = PROVIDERS.filter((provider) =>
-    isConnected(provider.key, form.sensitiveConfigured),
-  ).length;
-
   return (
     <div className="flex h-full max-w-5xl flex-col gap-7">
-      <SettingsPageHeader
-        title="Watch sync"
-        description="Keep watch history in sync with Trakt and Simkl."
-        strip={
-          <StatusStrip
-            items={[
-              {
-                tone: connectedCount > 0 ? "ok" : "muted",
-                label: `${connectedCount} of ${PROVIDERS.length} connected`,
-              },
-            ]}
-          />
-        }
-      />
+      <SettingsPageHeader title="Watch sync" />
 
-      <FieldGroup
-        label="Watch providers"
-        clarifier="Viewers link their own accounts from profile settings"
-      >
+      <FieldGroup label="Watch providers">
         <div className="py-3.5">
           <ProviderTileGrid>
             {PROVIDERS.map((provider) => (

@@ -6,14 +6,7 @@ import { RestartBanner, SaveBar } from "./SaveBar";
 
 function renderBar(props: Partial<Parameters<typeof SaveBar>[0]> = {}) {
   return render(
-    <SaveBar
-      dirtyCount={2}
-      onSave={vi.fn()}
-      onDiscard={vi.fn()}
-      isSaving={false}
-      restartRequired={false}
-      {...props}
-    />,
+    <SaveBar dirtyCount={2} onSave={vi.fn()} onDiscard={vi.fn()} isSaving={false} {...props} />,
   );
 }
 
@@ -32,7 +25,7 @@ describe("SaveBar", () => {
     expect(screen.getByText("3 unsaved changes")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Discard" }));
-    await userEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(onDiscard).toHaveBeenCalledTimes(1);
     expect(onSave).toHaveBeenCalledTimes(1);
   });
@@ -43,22 +36,10 @@ describe("SaveBar", () => {
     expect(screen.getByText("1 unsaved change")).toBeInTheDocument();
   });
 
-  it("says how many staged changes need a restart", () => {
-    renderBar({ dirtyCount: 4, restartRequired: true, restartCount: 2 });
+  it("says nothing about restarts", () => {
+    renderBar({ dirtyCount: 4 });
 
-    expect(screen.getByText("2 changes need a restart")).toBeInTheDocument();
-  });
-
-  it("drops the restart line when none of the staged changes need one", () => {
-    renderBar({ dirtyCount: 4, restartRequired: true, restartCount: 0 });
-
-    expect(screen.queryByText(/need a restart/)).not.toBeInTheDocument();
-  });
-
-  it("falls back to the tab's restart flag when no count is known", () => {
-    renderBar({ dirtyCount: 1, restartRequired: true });
-
-    expect(screen.getByText("Some changes need a restart")).toBeInTheDocument();
+    expect(screen.queryByText(/restart/i)).not.toBeInTheDocument();
   });
 
   it("disables saving while a save is in flight", () => {
@@ -68,7 +49,7 @@ describe("SaveBar", () => {
   });
 
   it("renders no restart prompt of its own", () => {
-    renderBar({ dirtyCount: 2, restartRequired: true });
+    renderBar({ dirtyCount: 2 });
 
     expect(screen.queryByText("Restart required")).not.toBeInTheDocument();
   });

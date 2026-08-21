@@ -2,13 +2,13 @@
    Admin settings — accent tokens
    ================================================================
    The app themes carry no hue accent: `--accent` is a raised surface
-   colour, not a brand hue. Design direction A leans on one violet for
-   the dirty-row rail, the advanced-disclosure rail, and the save pill,
-   so it is defined once here instead of being hardcoded per component.
+   colour, not a brand hue. One violet carries the active rail item, the
+   advanced-disclosure rail, and the save pill, so it is defined once
+   here instead of being hardcoded per component.
 
    Imported by the admin settings primitives that reference it
-   (SettingsPageHeader, SettingField, AdvancedSection, SaveBar,
-   StatusStrip, ProviderTile); Vite dedupes the repeated import.
+   (SettingField, AdvancedSection, SaveBar, ProviderTile); Vite dedupes
+   the repeated import.
    ================================================================ */
 
 :root {

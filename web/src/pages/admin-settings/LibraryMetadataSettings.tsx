@@ -7,13 +7,9 @@ import { ConnectionCheckAction } from "@/components/admin/ConnectionCheckAction"
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
 import { SecretField } from "@/components/settings/SecretField";
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
-import { StatusStrip, type StatusStripItem } from "@/components/settings/StatusStrip";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useBranding } from "@/hooks/useBranding";
-import {
-  useCatalogSearchStatus,
-  useCheckAdminSettingsConnection,
-} from "@/hooks/queries/admin/settings";
+import { useCheckAdminSettingsConnection } from "@/hooks/queries/admin/settings";
 import { useRestartKeys } from "@/hooks/useRestartKeys";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
 import { FieldGroup } from "./FieldGroup";
@@ -29,13 +25,6 @@ const METADATA_KEYS = [CACHE_IMAGES_KEY];
 const SCANNER_KEYS = ["scanner.workers", "matcher.workers", "matcher.batch_size"];
 
 const MARKER_KEYS = ["markers.mode", "markers.lazy_playback"];
-
-const MARKER_MODE_LABELS: Record<string, string> = {
-  off: "Markers off",
-  local: "Markers detected here",
-  both: "Markers detected here, then online",
-  online: "Markers looked up online",
-};
 
 const MEILI_URL_KEY = "catalog.search.meilisearch.url";
 const MEILI_API_KEY = "catalog.search.meilisearch.api_key";
@@ -64,7 +53,6 @@ export default function LibraryMetadataSettings() {
   const branding = useBranding();
   const restartKeys = useRestartKeys();
   const checkConnection = useCheckAdminSettingsConnection();
-  const searchStatus = useCatalogSearchStatus();
   const [connectionResult, setConnectionResult] = useState<ConnectionCheckResponse | null>(null);
 
   // Image caching writes provider artwork into the public bucket, so the server
@@ -84,8 +72,7 @@ export default function LibraryMetadataSettings() {
   const provider = form.getValue("catalog.search.provider") || "postgres";
   const meiliEnabled = provider === "meilisearch";
   const anyDirty = (keys: string[]) => keys.some((key) => form.isDirty(key));
-  const countDirty = (keys: string[]) => keys.filter((key) => form.isDirty(key)).length;
-  const restartCount = KEYS.filter((key) => form.isDirty(key) && restartKeys.has(key)).length;
+  const allRestart = (keys: string[]) => keys.every((key) => restartKeys.has(key));
   // Staged Meilisearch edits stay reachable after switching the provider back,
   // so the save bar can never count a change the admin cannot see.
   const showMeili = meiliEnabled || anyDirty(MEILI_KEYS);
@@ -107,31 +94,6 @@ export default function LibraryMetadataSettings() {
   }
 
   const markerMode = form.getValue("markers.mode") || "local";
-  const stripItems: StatusStripItem[] = [
-    cacheImagesOn
-      ? imageStorageAvailable
-        ? { tone: "ok", label: "Artwork cached in S3" }
-        : { tone: "warn", label: "Artwork caching waiting on storage" }
-      : imageStorageAvailable || publicBucketSaved
-        ? { tone: "muted", label: "Artwork caching off" }
-        : { tone: "warn", label: "Artwork caching off — no public bucket" },
-    {
-      tone: markerMode === "off" ? "muted" : "ok",
-      label: MARKER_MODE_LABELS[markerMode] ?? markerMode,
-    },
-    {
-      tone: meiliEnabled && searchStatus.data?.meilisearch.healthy === false ? "warn" : "info",
-      label: meiliEnabled
-        ? `Search: Meilisearch${
-            searchStatus.data
-              ? searchStatus.data.meilisearch.healthy
-                ? " · connected"
-                : " · unreachable"
-              : ""
-          }`
-        : "Search: built-in (Postgres)",
-    },
-  ];
 
   if (form.isLoading) {
     return (
@@ -147,37 +109,26 @@ export default function LibraryMetadataSettings() {
 
   return (
     <div className="flex h-full flex-col">
-      <SettingsPageHeader
-        title="Library & Metadata"
-        description="Scanning, artwork caching, markers, and search."
-        strip={<StatusStrip items={stripItems} />}
-        className="mb-8"
-      />
+      <SettingsPageHeader title="Library & Metadata" className="mb-8" />
 
       <div className="flex-1 space-y-9">
-        <FieldGroup
-          label="Metadata"
-          clarifier="Artwork and details fetched from providers. Scan schedules live in Scheduled Tasks."
-        >
+        <FieldGroup label="Metadata" restartAll={allRestart(METADATA_KEYS)}>
           {!imageStorageAvailable && (
             <div className="mt-3 flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
               <p className="text-muted-foreground text-[13px] leading-relaxed">
                 {publicBucketSaved ? (
-                  <>
-                    The public bucket is saved, but object storage is not active in this process
-                    yet. Restart the server for image caching to start.
-                  </>
+                  <>Restart the server for image caching to start.</>
                 ) : (
                   <>
-                    S3 image caching needs S3 object storage. Configure a public bucket in{" "}
+                    Image caching needs a public S3 bucket, set in{" "}
                     <Link
                       to="/admin/settings?tab=infrastructure"
                       className="text-foreground font-medium underline-offset-2 hover:underline"
                     >
                       Infrastructure
                     </Link>{" "}
-                    settings, then restart the server.
+                    settings.
                   </>
                 )}
               </p>
@@ -186,39 +137,35 @@ export default function LibraryMetadataSettings() {
           <SettingField
             label="S3 image caching"
             type="toggle"
-            description="Copies posters and backdrops from metadata providers into your public S3 bucket, so clients load artwork from Silo instead of a third party."
+            description="Serves provider artwork from your S3 bucket."
             value={form.getValue(CACHE_IMAGES_KEY)}
             onChange={(value) => form.setValue(CACHE_IMAGES_KEY, value)}
             disabled={cacheImagesLocked}
             restartRequired={restartKeys.has(CACHE_IMAGES_KEY)}
-            dirty={form.isDirty(CACHE_IMAGES_KEY)}
           />
         </FieldGroup>
 
-        <FieldGroup label="Scanning" clarifier="How quickly Silo reads new files and looks them up">
+        <FieldGroup label="Scanning" restartAll={allRestart(SCANNER_KEYS)}>
           <AdvancedSection
             id="library.scanning"
             count={SCANNER_KEYS.length}
-            changedCount={countDirty(SCANNER_KEYS)}
             forceOpen={anyDirty(SCANNER_KEYS)}
           >
             <SettingField
               label="Scanner workers"
               type="number"
-              description="How many files Silo reads at once. Raise it on fast storage, lower it if scans slow the server down."
+              description="How many files Silo reads at once."
               value={form.getValue("scanner.workers")}
               onChange={(value) => form.setValue("scanner.workers", value)}
               restartRequired={restartKeys.has("scanner.workers")}
-              dirty={form.isDirty("scanner.workers")}
             />
             <SettingField
               label="Matcher workers"
               type="number"
-              description="How many items Silo looks up with metadata providers at once."
+              description="How many items Silo looks up at once."
               value={form.getValue("matcher.workers")}
               onChange={(value) => form.setValue("matcher.workers", value)}
               restartRequired={restartKeys.has("matcher.workers")}
-              dirty={form.isDirty("matcher.workers")}
             />
             <SettingField
               label="Matcher batch size"
@@ -227,19 +174,15 @@ export default function LibraryMetadataSettings() {
               value={form.getValue("matcher.batch_size")}
               onChange={(value) => form.setValue("matcher.batch_size", value)}
               restartRequired={restartKeys.has("matcher.batch_size")}
-              dirty={form.isDirty("matcher.batch_size")}
             />
           </AdvancedSection>
         </FieldGroup>
 
-        <FieldGroup
-          label="Intro and credits markers"
-          clarifier="Where the Skip button in the player gets its timings"
-        >
+        <FieldGroup label="Intro and credits markers" restartAll={allRestart(MARKER_KEYS)}>
           <SettingField
             label="Find intros and credits"
             type="select"
-            description="Markers let clients offer a Skip button. Detecting on this server costs CPU; looking online shares nothing about your library beyond the episode being matched."
+            description="Detecting on this server costs CPU."
             options={[
               { value: "off", label: "Off" },
               { value: "local", label: "Detect on this server" },
@@ -249,23 +192,20 @@ export default function LibraryMetadataSettings() {
             value={markerMode}
             onChange={(value) => form.setValue("markers.mode", value)}
             restartRequired={restartKeys.has("markers.mode")}
-            dirty={form.isDirty("markers.mode")}
           />
 
           <AdvancedSection
             id="library.markers"
             count={2}
-            changedCount={countDirty(["markers.lazy_playback"])}
             forceOpen={form.isDirty("markers.lazy_playback")}
           >
             <SettingField
               label="Look up missing markers when playback starts"
               type="toggle"
-              description="Fetches markers for an episode that has none yet, which can delay the first few seconds of playback."
+              description="Can delay the first few seconds of playback."
               value={form.getValue("markers.lazy_playback") || "false"}
               onChange={(value) => form.setValue("markers.lazy_playback", value)}
               restartRequired={restartKeys.has("markers.lazy_playback")}
-              dirty={form.isDirty("markers.lazy_playback")}
             />
             <MarkerProviderCards />
           </AdvancedSection>
@@ -275,11 +215,11 @@ export default function LibraryMetadataSettings() {
           </div>
         </FieldGroup>
 
-        <FieldGroup label="Search" clarifier="Which engine answers searches from clients">
+        <FieldGroup label="Search" restartAll={allRestart(SEARCH_KEYS)}>
           <SettingField
             label="Search engine"
             type="select"
-            description="The built-in engine needs no extra service. Meilisearch tolerates typos and stays fast on large libraries, but runs as its own server."
+            description="Meilisearch tolerates typos but runs as its own service."
             value={provider}
             onChange={(value) => form.setValue("catalog.search.provider", value)}
             options={[
@@ -287,7 +227,6 @@ export default function LibraryMetadataSettings() {
               { value: "meilisearch", label: "Meilisearch" },
             ]}
             restartRequired={restartKeys.has("catalog.search.provider")}
-            dirty={form.isDirty("catalog.search.provider")}
           />
 
           {showMeili && (
@@ -297,10 +236,8 @@ export default function LibraryMetadataSettings() {
                 value={form.getValue(MEILI_URL_KEY)}
                 onChange={(value) => form.setValue(MEILI_URL_KEY, value)}
                 hint="http://localhost:7700"
-                description="Address of the Meilisearch server Silo indexes into."
                 disabled={!meiliEnabled}
                 restartRequired={restartKeys.has(MEILI_URL_KEY)}
-                dirty={form.isDirty(MEILI_URL_KEY)}
               />
               <SecretField
                 label="Meilisearch API key"
@@ -308,10 +245,9 @@ export default function LibraryMetadataSettings() {
                 configured={form.sensitiveConfigured.includes(MEILI_API_KEY)}
                 onChange={(value) => form.setValue(MEILI_API_KEY, value)}
                 onKeep={() => form.resetValue(MEILI_API_KEY)}
-                hint="The master key, or a key allowed to read and write Silo's index."
+                hint="Master key, or one that can read and write the index."
                 disabled={!meiliEnabled}
                 restartRequired={restartKeys.has(MEILI_API_KEY)}
-                dirty={form.isDirty(MEILI_API_KEY)}
               />
               <div className="py-3">
                 <ConnectionCheckAction
@@ -325,21 +261,20 @@ export default function LibraryMetadataSettings() {
               <AdvancedSection
                 id="library.search.meilisearch"
                 count={MEILI_ADVANCED_KEYS.length}
-                changedCount={countDirty(MEILI_ADVANCED_KEYS)}
                 forceOpen={anyDirty(MEILI_ADVANCED_KEYS)}
               >
                 <SettingField
                   label="Index name prefix"
                   value={form.getValue("catalog.search.meilisearch.index") || "silo_media_items"}
                   onChange={(value) => form.setValue("catalog.search.meilisearch.index", value)}
-                  description="Change it only when several Silo servers share one Meilisearch instance."
+                  description="Only needed when Silo servers share one Meilisearch."
                   disabled={!meiliEnabled}
                   restartRequired={restartKeys.has("catalog.search.meilisearch.index")}
-                  dirty={form.isDirty("catalog.search.meilisearch.index")}
                 />
                 <SettingField
-                  label="Query timeout (ms)"
+                  label="Query timeout"
                   type="number"
+                  unit="ms"
                   value={form.getValue("catalog.search.meilisearch.timeout_ms") || "800"}
                   onChange={(value) =>
                     form.setValue("catalog.search.meilisearch.timeout_ms", value)
@@ -347,7 +282,6 @@ export default function LibraryMetadataSettings() {
                   description="Searches that take longer fall back to the built-in engine."
                   disabled={!meiliEnabled}
                   restartRequired={restartKeys.has("catalog.search.meilisearch.timeout_ms")}
-                  dirty={form.isDirty("catalog.search.meilisearch.timeout_ms")}
                 />
                 <SettingField
                   label="When a search has several words"
@@ -360,10 +294,8 @@ export default function LibraryMetadataSettings() {
                     { value: "last", label: "Drop trailing words until something matches" },
                     { value: "all", label: "Require every word" },
                   ]}
-                  description="How Silo handles a search that has several words."
                   disabled={!meiliEnabled}
                   restartRequired={restartKeys.has("catalog.search.meilisearch.matching_strategy")}
-                  dirty={form.isDirty("catalog.search.meilisearch.matching_strategy")}
                 />
                 <SettingField
                   label="Items sent to the index per batch"
@@ -372,10 +304,9 @@ export default function LibraryMetadataSettings() {
                   onChange={(value) =>
                     form.setValue("catalog.search.meilisearch.sync_batch_size", value)
                   }
-                  description="Larger batches index faster and use more memory on the Meilisearch host."
+                  description="Larger batches index faster and use more memory."
                   disabled={!meiliEnabled}
                   restartRequired={restartKeys.has("catalog.search.meilisearch.sync_batch_size")}
-                  dirty={form.isDirty("catalog.search.meilisearch.sync_batch_size")}
                 />
                 <SettingField
                   label="Match by meaning as well as words"
@@ -384,10 +315,9 @@ export default function LibraryMetadataSettings() {
                   onChange={(value) =>
                     form.setValue("catalog.search.meilisearch.semantic_enabled", value)
                   }
-                  description="Also returns items whose description means something close to the search, reusing the embeddings the recommendations feature already builds."
+                  description="Also matches items whose description means something similar."
                   disabled={!meiliEnabled}
                   restartRequired={restartKeys.has("catalog.search.meilisearch.semantic_enabled")}
-                  dirty={form.isDirty("catalog.search.meilisearch.semantic_enabled")}
                 />
                 <SettingField
                   label="Meaning-based share of results"
@@ -396,10 +326,9 @@ export default function LibraryMetadataSettings() {
                   onChange={(value) =>
                     form.setValue("catalog.search.meilisearch.semantic_ratio", value)
                   }
-                  description="0 ranks purely by matching words, 1 purely by meaning, 0.5 blends the two."
+                  description="0 ranks by words, 1 by meaning."
                   disabled={!meiliEnabled}
                   restartRequired={restartKeys.has("catalog.search.meilisearch.semantic_ratio")}
-                  dirty={form.isDirty("catalog.search.meilisearch.semantic_ratio")}
                 />
               </AdvancedSection>
             </>
@@ -416,8 +345,6 @@ export default function LibraryMetadataSettings() {
         onSave={form.save}
         onDiscard={form.discard}
         isSaving={form.isSaving}
-        restartRequired={form.restartRequired}
-        restartCount={restartCount}
       />
     </div>
   );

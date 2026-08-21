@@ -11,10 +11,6 @@ interface SaveBarProps {
   onSave: () => void;
   onDiscard: () => void;
   isSaving: boolean;
-  /** True when any staged change only takes effect after a restart. */
-  restartRequired: boolean;
-  /** How many of the staged changes need a restart, when the tab knows. */
-  restartCount?: number;
 }
 
 function plural(count: number, word: string) {
@@ -22,30 +18,13 @@ function plural(count: number, word: string) {
 }
 
 /**
- * The floating save pill. Hidden while the tab is clean, so a page with nothing
- * staged has no permanent furniture at the bottom of the viewport.
- *
- * It deliberately says nothing about restarts beyond the count: the one restart
+ * The floating save pill: the staged count and the two actions. Hidden while
+ * the tab is clean, so a page with nothing staged has no permanent furniture at
+ * the bottom of the viewport. It says nothing about restarts — the one restart
  * prompt is `RestartBanner`, rendered once by the settings shell.
  */
-export function SaveBar({
-  dirtyCount,
-  onSave,
-  onDiscard,
-  isSaving,
-  restartRequired,
-  restartCount,
-}: SaveBarProps) {
+export function SaveBar({ dirtyCount, onSave, onDiscard, isSaving }: SaveBarProps) {
   if (dirtyCount <= 0) return null;
-
-  const restartNote =
-    typeof restartCount === "number"
-      ? restartCount > 0
-        ? `${plural(restartCount, "change")} need${restartCount === 1 ? "s" : ""} a restart`
-        : undefined
-      : restartRequired
-        ? "Some changes need a restart"
-        : undefined;
 
   return (
     <>
@@ -59,21 +38,8 @@ export function SaveBar({
         className="pointer-events-none fixed inset-x-0 bottom-[var(--settings-dock-offset,1.5rem)] z-40 flex justify-center px-4"
       >
         <div className="glass pointer-events-auto flex max-w-full items-center gap-3 rounded-full py-2 pr-2 pl-4 shadow-2xl backdrop-blur-xl sm:gap-4 sm:pl-5">
-          <span className="flex min-w-0 items-center gap-2.5">
-            <span
-              aria-hidden="true"
-              className="size-[7px] shrink-0 animate-pulse rounded-full bg-[var(--settings-accent)]"
-            />
-            <span className="min-w-0">
-              <span className="block truncate text-[13px] font-medium">
-                {plural(dirtyCount, "unsaved change")}
-              </span>
-              {restartNote ? (
-                <span className="text-muted-foreground block truncate text-[11px]">
-                  {restartNote}
-                </span>
-              ) : null}
-            </span>
+          <span className="min-w-0 truncate text-[13px] font-medium">
+            {plural(dirtyCount, "unsaved change")}
           </span>
           <span className="flex shrink-0 items-center gap-1.5">
             <Button variant="ghost" size="sm" className="rounded-full" onClick={onDiscard}>
@@ -85,7 +51,7 @@ export function SaveBar({
               disabled={isSaving}
               className="rounded-full bg-[var(--settings-accent)] text-[#15151a] hover:bg-[var(--settings-accent)] hover:brightness-110"
             >
-              {isSaving ? "Saving..." : "Save Changes"}
+              {isSaving ? "Saving..." : "Save"}
             </Button>
           </span>
         </div>

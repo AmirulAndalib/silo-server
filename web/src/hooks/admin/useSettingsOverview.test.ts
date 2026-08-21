@@ -20,8 +20,8 @@ function card(input: SettingsOverviewInput, id: string): OverviewCard {
   return found;
 }
 
-function rowValue(entry: OverviewCard, label: string) {
-  return entry.rows.find((row) => row.label === label);
+function summary(input: SettingsOverviewInput, id: string): string {
+  return card(input, id).summary;
 }
 
 describe("formatDurationSetting", () => {
@@ -45,7 +45,7 @@ describe("buildSettingsOverview health tiles", () => {
     expect(model.tiles).toHaveLength(5);
     expect(model.cards).toHaveLength(11);
     expect(tile({}, "storage").stateText).toBe("Not set up");
-    expect(rowValue(card({}, "general"), "Log level")?.value).toBe("—");
+    expect(summary({}, "general")).toBe("Silo");
   });
 
   it("names the bucket when only public storage is configured", () => {
@@ -56,7 +56,8 @@ describe("buildSettingsOverview health tiles", () => {
 
     expect(storage.state).toBe("ok");
     expect(storage.detail).toBe("S3 · silo-art");
-    expect(storage.action).toEqual({ label: "Review", tab: "infrastructure" });
+    // A healthy tile is a fact, not a task: it carries no link.
+    expect(storage.action).toBeUndefined();
   });
 
   it("summarises both buckets when private storage is configured too", () => {
@@ -173,28 +174,20 @@ describe("buildSettingsOverview section cards", () => {
     ]);
   });
 
-  it("summarises playback from the saved keys", () => {
+  it("summarises playback in one phrase", () => {
     const playback = card(
       {
         settings: {
           "playback.transcode_enabled": "true",
           "playback.hw_accel": "qsv",
-          allow_4k_transcode: "false",
-          "download.enabled": "true",
-          "download.user_bandwidth_mbps": "50",
         },
       },
       "playback",
     );
 
-    expect(rowValue(playback, "Transcoding")?.value).toBe("On · Quick Sync");
-    expect(rowValue(playback, "4K transcode")).toEqual({
-      label: "4K transcode",
-      value: "Off",
-      tone: "muted",
-    });
-    expect(rowValue(playback, "Downloads")?.value).toBe("On · 50 Mbps");
+    expect(playback.summary).toBe("Transcoding on · Quick Sync");
     expect(playback.attention).toBe(false);
+    expect(summary({}, "playback")).toBe("Transcoding off");
   });
 
   it("flags a notifications email channel with no SMTP host", () => {
@@ -203,11 +196,7 @@ describe("buildSettingsOverview section cards", () => {
       "notifications",
     );
 
-    expect(rowValue(notifications, "Email")).toEqual({
-      label: "Email",
-      value: "No SMTP",
-      tone: "warn",
-    });
+    expect(notifications.summary).toBe("Email channel has no SMTP");
     expect(notifications.attention).toBe(true);
     // With nothing configured at all the section is merely dormant, not broken.
     expect(buildSettingsOverview({}).sectionStatus.notifications).toBe("off");
@@ -244,9 +233,7 @@ describe("buildSettingsOverview section cards", () => {
       "providers",
     );
 
-    expect(rowValue(providers, "Subtitle providers")?.value).toBe("1 of 3 connected");
-    expect(rowValue(providers, "MDBList")?.value).toBe("Connected");
-    expect(rowValue(providers, "Needs a key")?.value).toBe("SubDL");
+    expect(providers.summary).toBe("SubDL needs a key");
     expect(providers.attention).toBe(true);
   });
 
@@ -260,18 +247,18 @@ describe("buildSettingsOverview section cards", () => {
       },
     };
 
-    const watchSync = card(input, "watch-sync");
-    expect(rowValue(watchSync, "Trakt")?.value).toBe("Connected");
-    expect(rowValue(watchSync, "Simkl")?.value).toBe("Not set up");
+    expect(card(input, "watch-sync").summary).toBe("Trakt connected");
 
     const ai = card(input, "ai");
-    expect(rowValue(ai, "Text model")).toEqual({
-      label: "Text model",
-      value: "gpt-4o-mini",
-      tone: "ok",
-    });
-    expect(rowValue(ai, "Speech-to-text")?.value).toBe("Not set up");
-    expect(rowValue(ai, "Features live")?.value).toBe("2 of 4");
+    expect(ai.summary).toBe("gpt-4o-mini · 2 of 4 features on");
+    expect(ai.attention).toBe(false);
+  });
+
+  it("flags a text model saved without an API key", () => {
+    const ai = card({ settings: { "ai.chat_model": "gpt-4o-mini" } }, "ai");
+
+    expect(ai.summary).toBe("Model set, no API key");
+    expect(ai.attention).toBe(true);
   });
 
   it("describes the Jellyfin surface from the compat status", () => {
@@ -288,20 +275,14 @@ describe("buildSettingsOverview section cards", () => {
       "compatibility",
     );
 
-    expect(rowValue(compatibility, "Jellyfin API")?.value).toBe("On · media.example.tv");
-    expect(rowValue(compatibility, "Jellyfin web UI")?.value).toBe("Installed");
-    expect(rowValue(compatibility, "Audiobookshelf")?.value).toBe("Off");
+    expect(compatibility.summary).toBe("Jellyfin on · media.example.tv");
+    expect(compatibility.attention).toBe(false);
   });
 
   it("warns when there is no public bucket at all", () => {
     const infrastructure = card({ settings: { "opslog.retention_days": "30" } }, "infrastructure");
 
-    expect(rowValue(infrastructure, "Buckets")).toEqual({
-      label: "Buckets",
-      value: "None",
-      tone: "warn",
-    });
-    expect(rowValue(infrastructure, "Ops log")?.value).toBe("30 days");
+    expect(infrastructure.summary).toBe("No bucket configured");
     expect(infrastructure.attention).toBe(true);
   });
 
@@ -317,20 +298,14 @@ describe("buildSettingsOverview section cards", () => {
       "security",
     );
 
-    expect(rowValue(security, "Sign-in lifetime")?.value).toBe("30 days");
-    expect(rowValue(security, "Rate limiting")?.value).toBe("On · Redis");
-    expect(rowValue(security, "Trusted proxies")?.value).toBe("2 ranges");
+    expect(security.summary).toBe("Sign-in 30 days · Rate limiting on");
     expect(security.attention).toBe(false);
   });
 
   it("does not read a missing rate-limit config as rate limiting being off", () => {
-    const security = card({}, "security");
+    const security = card({ settings: { "auth.access_token_expiry": "720h" } }, "security");
 
-    expect(rowValue(security, "Rate limiting")).toEqual({
-      label: "Rate limiting",
-      value: "—",
-      tone: "muted",
-    });
+    expect(security.summary).toBe("Sign-in 30 days");
     expect(security.attention).toBe(false);
   });
 
@@ -342,6 +317,5 @@ describe("buildSettingsOverview section cards", () => {
     expect(model.sectionStatus.notifications).toBe("warn");
     expect(model.sectionStatus.infrastructure).toBe("ok");
     expect(model.sectionStatus["watch-sync"]).toBe("off");
-    expect(model.attentionCount).toBeGreaterThan(0);
   });
 });

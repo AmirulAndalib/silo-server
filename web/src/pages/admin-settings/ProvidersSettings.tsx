@@ -7,7 +7,6 @@ import type { ProviderTileState } from "@/components/settings/ProviderTile";
 import { RestartBadge } from "@/components/settings/RestartBadge";
 import { SecretField } from "@/components/settings/SecretField";
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
-import { StatusStrip, type StatusStripItem } from "@/components/settings/StatusStrip";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -47,7 +46,7 @@ const KEYS = ["mdblist.api_key"];
 // Shared tile plumbing
 // ---------------------------------------------------------------------------
 
-/** Result of the last Test on a tile, kept in memory for the status strip. */
+/** Result of the last Test on a tile, kept in memory for the tile itself. */
 export interface ProviderTestState {
   ok: boolean;
   message: string;
@@ -94,7 +93,7 @@ function PanelActions({ test, children }: { test?: ProviderTestState; children: 
           className={
             test.ok
               ? "text-muted-foreground ml-auto text-[11.5px]"
-              : "ml-auto text-[11.5px] text-red-600 dark:text-red-400"
+              : "ml-auto text-[11.5px] text-amber-600 dark:text-amber-400"
           }
         >
           {test.ok ? testedLabel(test) : test.message}
@@ -234,8 +233,8 @@ function SubtitleProviderTile({
   }
 
   // A failure describes the values that were tested, so it stops being true the
-  // moment they are edited; leaving it up would keep the tile red (and the page
-  // strip complaining) while the admin retypes.
+  // moment they are edited; leaving it up would keep the tile in error while
+  // the admin retypes.
   function clearStaleTest() {
     if (test) onTested(undefined);
   }
@@ -303,15 +302,8 @@ function SubtitleProviderTile({
   const connected = configured && enabled;
   const state = resolveState({ expanded, test, connected });
   const statePill = !expanded && configured && !enabled ? "Connected · off" : undefined;
-  const meta = expanded
-    ? undefined
-    : test && !test.ok
-      ? test.message
-      : configured
-        ? usesAccount
-          ? "Account credentials stored"
-          : "API key stored"
-        : "No credentials stored";
+  // Only a failure earns the extra line: "connected" is already in the header.
+  const meta = !expanded && test && !test.ok ? test.message : undefined;
 
   return (
     <ProviderTile
@@ -388,9 +380,7 @@ function SubtitleProviderTile({
           Close
         </Button>
       </PanelActions>
-      <p className="text-muted-foreground mt-2 text-xs">
-        Test uses the values typed here. Saving applies to new searches right away.
-      </p>
+      <p className="text-muted-foreground mt-2 text-xs">Test uses the values typed here.</p>
     </ProviderTile>
   );
 }
@@ -476,13 +466,7 @@ function MDBListTile({
   }
 
   const state = resolveState({ expanded, test, connected: configured });
-  const meta = expanded
-    ? undefined
-    : test && !test.ok
-      ? test.message
-      : configured
-        ? "API key stored"
-        : "No credentials stored — list URLs still import";
+  const meta = !expanded && test && !test.ok ? test.message : undefined;
 
   return (
     <ProviderTile
@@ -501,9 +485,8 @@ function MDBListTile({
         onClick: onExpand,
       }}
     >
-      <p className="text-muted-foreground mb-1 text-xs leading-relaxed">
-        Lets viewers search and browse MDBList collections. Importing a list by its URL works
-        without a key. Get a free key at{" "}
+      <p className="text-muted-foreground mb-1 text-xs">
+        A key adds search and browse; list URLs import without one. Get a key at{" "}
         <a
           href="https://mdblist.com/preferences/#api"
           target="_blank"
@@ -555,7 +538,7 @@ function MDBListTile({
         </Button>
       </PanelActions>
       <p className="text-muted-foreground mt-2 text-xs">
-        Test uses the key typed here, or the saved key when the field is empty.
+        Test uses the key typed here, or the saved one.
       </p>
     </ProviderTile>
   );
@@ -587,29 +570,6 @@ export default function ProvidersSettings() {
     return ai - bi;
   });
 
-  const mdblistConfigured = form.sensitiveConfigured.includes("mdblist.api_key");
-  const connectedCount =
-    providers.filter((provider) =>
-      provider.provider_name === "opensubtitles"
-        ? provider.has_credentials && provider.enabled
-        : provider.has_api_key && provider.enabled,
-    ).length + (mdblistConfigured ? 1 : 0);
-  const totalCount = providers.length + 1;
-
-  const failures = Object.entries(tests).filter(
-    (entry): entry is [string, ProviderTestState] => entry[1] != null && !entry[1].ok,
-  );
-  const stripItems: StatusStripItem[] = [
-    {
-      tone: connectedCount > 0 ? "ok" : "muted",
-      label: `${connectedCount} of ${totalCount} connected`,
-    },
-    ...failures.map(([id, test]) => ({
-      tone: "warn" as const,
-      label: `${id === "mdblist" ? "MDBList" : presentationFor(id).name}: ${test.message}`,
-    })),
-  ];
-
   if (form.isLoading || isLoading) {
     return (
       <div className="max-w-5xl space-y-6" role="status" aria-label="Loading providers">
@@ -624,13 +584,9 @@ export default function ProvidersSettings() {
 
   return (
     <div className="flex h-full max-w-5xl flex-col gap-7">
-      <SettingsPageHeader
-        title="Subtitles & Metadata"
-        description="Where Silo fetches subtitles, artwork, and descriptions."
-        strip={<StatusStrip items={stripItems} />}
-      />
+      <SettingsPageHeader title="Subtitles & Metadata" />
 
-      <FieldGroup label="Subtitle providers" clarifier="Searched in order, top to bottom">
+      <FieldGroup label="Subtitle providers">
         <div className="py-3.5">
           {providers.length === 0 ? (
             <p className="text-muted-foreground text-sm">No subtitle providers are available.</p>
@@ -652,7 +608,7 @@ export default function ProvidersSettings() {
         </div>
       </FieldGroup>
 
-      <FieldGroup label="Metadata providers" clarifier="Artwork, cast, and descriptions">
+      <FieldGroup label="Metadata providers">
         <div className="space-y-3 py-3.5">
           <ProviderTileGrid>
             <MDBListTile
@@ -666,7 +622,7 @@ export default function ProvidersSettings() {
             />
           </ProviderTileGrid>
           <p className="text-muted-foreground text-xs">
-            TMDB and TheTVDB are metadata plugins — connect them from{" "}
+            TMDB and TheTVDB connect from{" "}
             <a href="/admin/plugins" className="underline underline-offset-2">
               Plugins
             </a>

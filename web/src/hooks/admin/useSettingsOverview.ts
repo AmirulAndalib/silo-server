@@ -45,9 +45,6 @@ export type SettingsOverviewTabID = (typeof SETTINGS_OVERVIEW_TAB_IDS)[number];
 /** Colour band a health tile reads in: green, amber, dimmed, or neutral blue. */
 export type OverviewState = "ok" | "warn" | "off" | "info";
 
-/** Colour band a single card row's value reads in. */
-export type OverviewTone = "default" | "muted" | "ok" | "warn";
-
 export interface OverviewTileAction {
   label: string;
   tab: SettingsOverviewTabID;
@@ -64,18 +61,15 @@ export interface OverviewTile {
   action?: OverviewTileAction;
 }
 
-export interface OverviewRow {
-  label: string;
-  value: string;
-  tone?: OverviewTone;
-}
-
 export interface OverviewCard {
   id: SettingsOverviewTabID;
   title: string;
-  rows: OverviewRow[];
-  /** True when any row is in a warn state; drives the amber card treatment. */
+  /** One phrase saying what the section is doing right now. */
+  summary: string;
+  /** True when something in the section needs the admin; reads amber. */
   attention: boolean;
+  /** True when nothing in the section is set up yet. */
+  inactive: boolean;
 }
 
 export type SectionStatus = "ok" | "warn" | "off";
@@ -86,8 +80,6 @@ export interface SettingsOverviewModel {
   tiles: OverviewTile[];
   cards: OverviewCard[];
   sectionStatus: Record<SettingsOverviewTabID, SectionStatus>;
-  /** Number of tiles plus cards asking for attention, for the strip caption. */
-  attentionCount: number;
 }
 
 /**
@@ -129,14 +121,6 @@ function readBool(settings: Record<string, string> | undefined, key: string): bo
 function readInt(settings: Record<string, string> | undefined, key: string): number | null {
   const parsed = Number.parseInt(readText(settings, key), 10);
   return Number.isFinite(parsed) ? parsed : null;
-}
-
-function onOff(value: boolean): OverviewRow["value"] {
-  return value ? "On" : "Off";
-}
-
-function toneFor(value: boolean): OverviewTone {
-  return value ? "ok" : "muted";
 }
 
 function join(parts: Array<string | null | undefined>): string {
@@ -207,13 +191,6 @@ function searchProviderLabel(value: string): string {
   return SEARCH_PROVIDER_LABELS[value] ?? sentenceCase(value);
 }
 
-const MARKER_MODE_LABELS: Record<string, string> = {
-  off: "Off",
-  local: "On this server",
-  both: "Server, then online",
-  online: "Online only",
-};
-
 const SUBTITLE_PROVIDER_LABELS: Record<string, string> = {
   opensubtitles: "OpenSubtitles",
   subdl: "SubDL",
@@ -257,16 +234,22 @@ function urlHost(value: string): string {
   }
 }
 
-function countList(value: string): number {
-  return value
-    .split(/[\s,]+/)
-    .map((entry) => entry.trim())
-    .filter(Boolean).length;
-}
-
 // ---------------------------------------------------------------------------
 // Health tiles
 // ---------------------------------------------------------------------------
+
+/**
+ * The link a tile carries. Only a tile the admin has to do something about
+ * gets one — a healthy tile is a fact, not a task.
+ */
+function tileAction(
+  state: OverviewState,
+  tab: SettingsOverviewTabID,
+): OverviewTileAction | undefined {
+  if (state === "warn") return { label: "Fix", tab };
+  if (state === "off") return { label: "Set up", tab };
+  return undefined;
+}
 
 function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
   const { settings } = input;
@@ -280,6 +263,7 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
     : publicBucket
       ? `S3 · ${publicBucket}`
       : "No bucket configured";
+  const storageState: OverviewState = storageReady ? "ok" : "off";
 
   const maxConnections = readInt(settings, "database.max_connections");
   const redisConfigured = configured.has("redis.url") || readText(settings, "redis.url") !== "";
@@ -288,23 +272,33 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
   const restartPending = settingsRestartPending(input.serverStatus);
   const transcodeMode = transcodeModeLabel(readText(settings, "playback.hw_accel"), input.hwAccel);
   const renderDevice = input.hwAccel?.render_devices?.[0] ?? "";
+  const transcodeState: OverviewState = restartPending ? "warn" : transcodeEnabled ? "ok" : "off";
 
   const activeSearch =
     input.search?.active_provider || readText(settings, "catalog.search.provider") || "postgres";
   const meiliConfigured = input.search?.meilisearch.configured ?? false;
   const meiliHealthy = input.search?.meilisearch.healthy ?? false;
+  const searchState: OverviewState =
+    activeSearch === "meilisearch"
+      ? meiliHealthy
+        ? "ok"
+        : "warn"
+      : meiliConfigured
+        ? "warn"
+        : "info";
 
   const emailHost = readText(settings, "email.smtp_host");
   const emailReady = readBool(settings, "email.enabled") && emailHost !== "";
+  const emailState: OverviewState = emailReady ? "ok" : "off";
 
   return [
     {
       id: "storage",
       label: "Storage",
-      state: storageReady ? "ok" : "off",
+      state: storageState,
       stateText: storageReady ? "Healthy" : "Not set up",
       detail: storageReady ? bucketDetail : "Artwork and uploads have nowhere to go",
-      action: { label: storageReady ? "Review" : "Set up", tab: "infrastructure" },
+      action: tileAction(storageState, "infrastructure"),
     },
     {
       id: "database",
@@ -316,31 +310,23 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
         maxConnections ? `max ${maxConnections} connections` : null,
         redisConfigured ? "Redis" : null,
       ]),
-      action: { label: "Review", tab: "infrastructure" },
     },
     {
       id: "transcoding",
       label: "Transcoding",
-      state: restartPending ? "warn" : transcodeEnabled ? "ok" : "off",
+      state: transcodeState,
       stateText: restartPending ? "Restart pending" : transcodeEnabled ? "Ready" : "Off",
       detail: restartPending
         ? "Saved changes apply after a restart"
         : transcodeEnabled
           ? join([transcodeMode, renderDevice])
           : "Clients only get what they can already play",
-      action: { label: restartPending ? "Fix" : "Review", tab: "playback" },
+      action: tileAction(transcodeState, "playback"),
     },
     {
       id: "search",
       label: "Search",
-      state:
-        activeSearch === "meilisearch"
-          ? meiliHealthy
-            ? "ok"
-            : "warn"
-          : meiliConfigured
-            ? "warn"
-            : "info",
+      state: searchState,
       stateText: searchProviderLabel(activeSearch),
       detail:
         activeSearch === "meilisearch"
@@ -350,15 +336,15 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
           : meiliConfigured
             ? "Meilisearch configured but not active"
             : "Meilisearch not connected",
-      action: { label: "Switch engine", tab: "library" },
+      action: tileAction(searchState, "library"),
     },
     {
       id: "email",
       label: "Email",
-      state: emailReady ? "ok" : "off",
+      state: emailState,
       stateText: emailReady ? "Ready" : "Not set up",
       detail: emailReady ? `SMTP · ${emailHost}` : "Invites and resets can't send",
-      action: { label: emailReady ? "Review" : "Set up", tab: "notifications" },
+      action: tileAction(emailState, "notifications"),
     },
   ];
 }
@@ -376,130 +362,80 @@ function buildCards(input: SettingsOverviewInput): OverviewCard[] {
   const { settings } = input;
   const configured = new Set(input.sensitiveConfigured ?? []);
 
-  const cards: Array<Omit<OverviewCard, "attention">> = [];
+  const cards: OverviewCard[] = [];
+  const push = (
+    id: SettingsOverviewTabID,
+    title: string,
+    summary: string,
+    flags: { attention?: boolean; inactive?: boolean } = {},
+  ) => {
+    cards.push({
+      id,
+      title,
+      summary: summary || UNKNOWN_VALUE,
+      attention: flags.attention ?? false,
+      inactive: flags.inactive ?? false,
+    });
+  };
 
   // General ---------------------------------------------------------------
   const serverName = readText(settings, "branding.server_name");
-  cards.push({
-    id: "general",
-    title: "General",
-    rows: [
-      { label: "Server name", value: serverName || "Silo", tone: serverName ? "default" : "muted" },
-      {
-        label: "Public signups",
-        value: onOff(readBool(settings, "signup.enabled")),
-        tone: readBool(settings, "signup.enabled") ? "default" : "muted",
-      },
-      {
-        label: "Log level",
-        value: sentenceCase(readText(settings, "server.log_level")) || UNKNOWN_VALUE,
-      },
-    ],
-  });
+  push(
+    "general",
+    "General",
+    join([serverName || "Silo", readBool(settings, "signup.enabled") ? "Signups on" : null]),
+  );
 
   // Appearance ------------------------------------------------------------
   const theme = themeLabel(readText(settings, "branding.default_theme"));
-  const accent = readText(settings, "branding.accent_color");
-  const overlaysOn = readBool(settings, "overlays.enabled");
-  cards.push({
-    id: "appearance",
-    title: "Appearance",
-    rows: [
-      {
-        label: "Default theme",
-        value: theme ?? "Viewer's choice",
-        tone: theme ? "default" : "muted",
-      },
-      {
-        label: "Accent",
-        value: accent ? accent.toUpperCase() : "Theme default",
-        tone: accent ? "default" : "muted",
-      },
-      { label: "Card overlays", value: onOff(overlaysOn), tone: toneFor(overlaysOn) },
-    ],
-  });
+  push(
+    "appearance",
+    "Appearance",
+    join([theme ?? "Viewer's choice", readBool(settings, "overlays.enabled") ? "Overlays" : null]),
+  );
 
   // Security & access -----------------------------------------------------
   const accessExpiry = readText(settings, "auth.access_token_expiry");
-  const proxyCount = countList(readText(settings, "clientip.trusted_proxies"));
   // A missing config is "not loaded", not "disabled": defaulting it to off used
   // to paint an amber dot on the rail for every section while the page booted.
   const rateLimits = input.rateLimits;
-  const rateLimitBackend = rateLimits?.backend === "redis" ? "Redis" : "In memory";
-  cards.push({
-    id: "security",
-    title: "Security & Access",
-    rows: [
-      {
-        label: "Sign-in lifetime",
-        value: accessExpiry ? formatDurationSetting(accessExpiry) : UNKNOWN_VALUE,
-      },
-      {
-        label: "Rate limiting",
-        value: rateLimits
-          ? rateLimits.enabled
-            ? `On · ${rateLimitBackend}`
-            : "Off"
-          : UNKNOWN_VALUE,
-        tone: rateLimits ? (rateLimits.enabled ? "ok" : "warn") : "muted",
-      },
-      {
-        label: "Trusted proxies",
-        value: proxyCount ? `${proxyCount} range${proxyCount === 1 ? "" : "s"}` : "None",
-        tone: proxyCount ? "default" : "muted",
-      },
-    ],
-  });
+  push(
+    "security",
+    "Security & Access",
+    join([
+      accessExpiry ? `Sign-in ${formatDurationSetting(accessExpiry)}` : null,
+      rateLimits ? (rateLimits.enabled ? "Rate limiting on" : "Rate limiting off") : null,
+    ]),
+  );
 
   // Library & metadata ----------------------------------------------------
   const cacheImages = readBool(settings, "metadata.cache_images");
-  const markerMode = readText(settings, "markers.mode") || "local";
+  // Caching to a bucket that is not there is the one library setting that
+  // fails silently, so it is called out rather than left as a fact.
+  const cacheBroken = cacheImages && input.storageAvailable === false;
   const searchProvider =
     input.search?.active_provider || readText(settings, "catalog.search.provider") || "postgres";
-  cards.push({
-    id: "library",
-    title: "Library & Metadata",
-    rows: [
-      {
-        label: "Image cache",
-        value: cacheImages ? "S3" : "Off",
-        // Caching to a bucket that is not there is the one library setting
-        // that silently fails, so it is called out rather than shown green.
-        tone: cacheImages ? (input.storageAvailable === false ? "warn" : "ok") : "muted",
-      },
-      {
-        label: "Intro markers",
-        value: MARKER_MODE_LABELS[markerMode] ?? sentenceCase(markerMode),
-        tone: markerMode === "off" ? "muted" : "default",
-      },
-      { label: "Search engine", value: searchProviderLabel(searchProvider) },
-    ],
-  });
+  push(
+    "library",
+    "Library & Metadata",
+    cacheBroken
+      ? "Image cache has no bucket"
+      : join([
+          `${searchProviderLabel(searchProvider)} search`,
+          cacheImages ? "Images cached" : null,
+        ]),
+    { attention: cacheBroken },
+  );
 
   // Playback --------------------------------------------------------------
   const transcodeEnabled = readBool(settings, "playback.transcode_enabled");
-  const allow4k = readBool(settings, "allow_4k_transcode");
-  const downloadsOn = readBool(settings, "download.enabled");
-  const downloadMbps = readInt(settings, "download.user_bandwidth_mbps");
-  cards.push({
-    id: "playback",
-    title: "Playback",
-    rows: [
-      {
-        label: "Transcoding",
-        value: transcodeEnabled
-          ? `On · ${transcodeModeLabel(readText(settings, "playback.hw_accel"), input.hwAccel)}`
-          : "Off",
-        tone: toneFor(transcodeEnabled),
-      },
-      { label: "4K transcode", value: onOff(allow4k), tone: allow4k ? "default" : "muted" },
-      {
-        label: "Downloads",
-        value: downloadsOn ? join(["On", downloadMbps ? `${downloadMbps} Mbps` : null]) : "Off",
-        tone: toneFor(downloadsOn),
-      },
-    ],
-  });
+  push(
+    "playback",
+    "Playback",
+    transcodeEnabled
+      ? `Transcoding on · ${transcodeModeLabel(readText(settings, "playback.hw_accel"), input.hwAccel)}`
+      : "Transcoding off",
+  );
 
   // Metadata & subtitle providers -----------------------------------------
   const providers = input.subtitleProviders ?? [];
@@ -511,32 +447,29 @@ function buildCards(input: SettingsOverviewInput): OverviewCard[] {
   );
   const mdblistConfigured =
     configured.has("mdblist.api_key") || readText(settings, "mdblist.api_key") !== "";
-  const providerRows: OverviewRow[] = [
+  push(
+    "providers",
+    "Metadata & subtitle providers",
+    needsKey.length
+      ? `${needsKey
+          .map(
+            (provider) =>
+              SUBTITLE_PROVIDER_LABELS[provider.provider_name] ?? provider.provider_name,
+          )
+          .join(", ")} needs a key`
+      : providers.length
+        ? join([
+            `${connectedProviders.length} of ${providers.length} connected`,
+            mdblistConfigured ? "MDBList" : null,
+          ])
+        : mdblistConfigured
+          ? "MDBList connected"
+          : "Not set up",
     {
-      label: "Subtitle providers",
-      value: providers.length
-        ? `${connectedProviders.length} of ${providers.length} connected`
-        : UNKNOWN_VALUE,
-      tone: connectedProviders.length ? "ok" : "muted",
+      attention: needsKey.length > 0,
+      inactive: connectedProviders.length === 0 && !mdblistConfigured,
     },
-    {
-      label: "MDBList",
-      value: mdblistConfigured ? "Connected" : "Not set up",
-      tone: mdblistConfigured ? "ok" : "muted",
-    },
-  ];
-  if (needsKey.length) {
-    providerRows.push({
-      label: "Needs a key",
-      value: needsKey
-        .map(
-          (provider) => SUBTITLE_PROVIDER_LABELS[provider.provider_name] ?? provider.provider_name,
-        )
-        .join(", "),
-      tone: "warn",
-    });
-  }
-  cards.push({ id: "providers", title: "Metadata & subtitle providers", rows: providerRows });
+  );
 
   // Watch sync ------------------------------------------------------------
   const traktConfigured =
@@ -545,22 +478,16 @@ function buildCards(input: SettingsOverviewInput): OverviewCard[] {
   const simklConfigured =
     configured.has("watchsync.simkl.client_secret") ||
     readText(settings, "watchsync.simkl.client_id") !== "";
-  cards.push({
-    id: "watch-sync",
-    title: "Watch sync",
-    rows: [
-      {
-        label: "Trakt",
-        value: traktConfigured ? "Connected" : "Not set up",
-        tone: traktConfigured ? "ok" : "muted",
-      },
-      {
-        label: "Simkl",
-        value: simklConfigured ? "Connected" : "Not set up",
-        tone: simklConfigured ? "ok" : "muted",
-      },
-    ],
-  });
+  const watchSyncNames = [
+    traktConfigured ? "Trakt" : null,
+    simklConfigured ? "Simkl" : null,
+  ].filter((name): name is string => name !== null);
+  push(
+    "watch-sync",
+    "Watch sync",
+    watchSyncNames.length ? `${watchSyncNames.join(" and ")} connected` : "Not set up",
+    { inactive: watchSyncNames.length === 0 },
+  );
 
   // AI services -----------------------------------------------------------
   const textModel = readText(settings, "ai.chat_model");
@@ -568,27 +495,20 @@ function buildCards(input: SettingsOverviewInput): OverviewCard[] {
   const speechConfigured =
     configured.has("ai.asr_api_key") || readText(settings, "ai.asr_base_url") !== "";
   const featuresLive = AI_FEATURE_KEYS.filter((key) => readBool(settings, key)).length;
-  cards.push({
-    id: "ai",
-    title: "AI services",
-    rows: [
-      {
-        label: "Text model",
-        value: textModel || "Not set up",
-        tone: textModel ? (textKeyConfigured ? "ok" : "warn") : "muted",
-      },
-      {
-        label: "Speech-to-text",
-        value: speechConfigured ? "Ready" : "Not set up",
-        tone: speechConfigured ? "ok" : "muted",
-      },
-      {
-        label: "Features live",
-        value: `${featuresLive} of ${AI_FEATURE_KEYS.length}`,
-        tone: featuresLive ? "default" : "muted",
-      },
-    ],
-  });
+  const aiKeyMissing = textModel !== "" && !textKeyConfigured;
+  push(
+    "ai",
+    "AI services",
+    aiKeyMissing
+      ? "Model set, no API key"
+      : textModel
+        ? join([textModel, `${featuresLive} of ${AI_FEATURE_KEYS.length} features on`])
+        : "Not set up",
+    {
+      attention: aiKeyMissing,
+      inactive: textModel === "" && !speechConfigured && featuresLive === 0,
+    },
+  );
 
   // Notifications ---------------------------------------------------------
   const inApp = readBool(settings, "notifications.ui_enabled");
@@ -597,34 +517,19 @@ function buildCards(input: SettingsOverviewInput): OverviewCard[] {
   const smtpReady =
     readBool(settings, "email.enabled") && readText(settings, "email.smtp_host") !== "";
   const discordChannel = readBool(settings, "notifications.discord_enabled");
-  const discordWebhooks = (input.serverChannels ?? []).filter(
-    (channel) => channel.type === "discord" && channel.enabled,
-  ).length;
-  cards.push({
-    id: "notifications",
-    title: "Notifications",
-    rows: [
-      {
-        label: "In-app · Web push",
-        value: inApp && webPush ? "On" : inApp ? "In-app only" : webPush ? "Web push only" : "Off",
-        tone: inApp || webPush ? "ok" : "muted",
-      },
-      {
-        label: "Email",
-        value: emailChannel ? (smtpReady ? "On" : "No SMTP") : "Off",
-        tone: emailChannel ? (smtpReady ? "ok" : "warn") : "muted",
-      },
-      {
-        label: "Discord",
-        value: discordChannel
-          ? discordWebhooks
-            ? `${discordWebhooks} webhook${discordWebhooks === 1 ? "" : "s"}`
-            : "On"
-          : "Off",
-        tone: toneFor(discordChannel),
-      },
-    ],
-  });
+  const emailBroken = emailChannel && !smtpReady;
+  const channels = [
+    inApp ? "In-app" : null,
+    webPush ? "Web push" : null,
+    emailChannel ? "Email" : null,
+    discordChannel ? "Discord" : null,
+  ].filter((name): name is string => name !== null);
+  push(
+    "notifications",
+    "Notifications",
+    emailBroken ? "Email channel has no SMTP" : channels.length ? join(channels) : "All off",
+    { attention: emailBroken, inactive: channels.length === 0 },
+  );
 
   // Compatibility ---------------------------------------------------------
   const jellyfinEnabled = input.jellyfin?.enabled ?? readBool(settings, "jellyfin_compat.enabled");
@@ -632,77 +537,41 @@ function buildCards(input: SettingsOverviewInput): OverviewCard[] {
     input.jellyfin?.public_url ?? readText(settings, "jellyfin_compat.public_url"),
   );
   const jellyfinBroken = jellyfinEnabled && input.jellyfin?.api_state === "error";
-  const webState = input.jellyfin?.web_state;
   const absEnabled = readBool(settings, "audiobookshelf_compat.enabled");
-  cards.push({
-    id: "compatibility",
-    title: "Compatibility",
-    rows: [
-      {
-        label: "Jellyfin API",
-        value: jellyfinEnabled ? join(["On", jellyfinHost || null]) : "Off",
-        tone: jellyfinBroken ? "warn" : toneFor(jellyfinEnabled),
-      },
-      {
-        label: "Jellyfin web UI",
-        value:
-          webState === "installed"
-            ? "Installed"
-            : webState === "update_available"
-              ? "Update available"
-              : webState === "installing"
-                ? "Installing"
-                : webState === "failed"
-                  ? "Install failed"
-                  : "Not installed",
-        tone:
-          webState === "installed"
-            ? "ok"
-            : webState === "failed"
-              ? "warn"
-              : webState === "update_available"
-                ? "default"
-                : "muted",
-      },
-      { label: "Audiobookshelf", value: onOff(absEnabled), tone: toneFor(absEnabled) },
-    ],
-  });
+  push(
+    "compatibility",
+    "Compatibility",
+    jellyfinBroken
+      ? "Jellyfin API not responding"
+      : join([
+          jellyfinEnabled ? join(["Jellyfin on", jellyfinHost || null]) : null,
+          absEnabled ? "Audiobookshelf on" : null,
+        ]) || "Off",
+    { attention: jellyfinBroken, inactive: !jellyfinEnabled && !absEnabled },
+  );
 
   // Infrastructure --------------------------------------------------------
   const redisConfigured = configured.has("redis.url") || readText(settings, "redis.url") !== "";
   const publicBucket = readText(settings, "s3.public_bucket");
   const privateBucket = readText(settings, "s3.private_bucket");
-  const opsLogDays = readInt(settings, "opslog.retention_days");
-  cards.push({
-    id: "infrastructure",
-    title: "Infrastructure",
-    rows: [
-      {
-        label: "Redis",
-        value: redisConfigured ? "Configured" : "Not configured",
-        tone: redisConfigured ? "ok" : "muted",
-      },
-      {
-        label: "Buckets",
-        value: privateBucket ? "Public + private" : publicBucket ? "Public only" : "None",
-        tone: publicBucket ? "default" : "warn",
-      },
-      {
-        label: "Ops log",
-        value: opsLogDays ? `${opsLogDays} day${opsLogDays === 1 ? "" : "s"}` : UNKNOWN_VALUE,
-      },
-    ],
-  });
+  push(
+    "infrastructure",
+    "Infrastructure",
+    publicBucket
+      ? join([
+          privateBucket ? "Public and private buckets" : "Public bucket",
+          redisConfigured ? "Redis" : null,
+        ])
+      : "No bucket configured",
+    { attention: publicBucket === "" },
+  );
 
-  return cards.map((card) => ({
-    ...card,
-    attention: card.rows.some((row) => row.tone === "warn"),
-  }));
+  return cards;
 }
 
 function sectionStatusFor(card: OverviewCard): SectionStatus {
   if (card.attention) return "warn";
-  return card.rows.every((row) => row.tone === "muted") ? "off" : "ok";
+  return card.inactive ? "off" : "ok";
 }
 
 /** Derives the whole overview model from already-fetched data. */
@@ -714,11 +583,7 @@ export function buildSettingsOverview(input: SettingsOverviewInput): SettingsOve
     cards.map((card) => [card.id, sectionStatusFor(card)]),
   ) as Record<SettingsOverviewTabID, SectionStatus>;
 
-  const attentionCount =
-    tiles.filter((tile) => tile.state === "warn" || tile.state === "off").length +
-    cards.filter((card) => card.attention).length;
-
-  return { isLoading: false, tiles, cards, sectionStatus, attentionCount };
+  return { isLoading: false, tiles, cards, sectionStatus };
 }
 
 /**

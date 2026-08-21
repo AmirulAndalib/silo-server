@@ -7,7 +7,6 @@ import type {
 } from "@/api/types";
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
-import { StatusStrip, type StatusStripItem } from "@/components/settings/StatusStrip";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -30,7 +29,9 @@ import { SettingField, SettingFieldRow } from "./SettingField";
 // Rate limits do not: they live behind /admin/rate-limits/config and the batch
 // endpoint rejects those keys, so this tab drives two writers behind one save
 // bar rather than showing the admin two different Save buttons.
-const KEYS = ["auth.access_token_expiry", "auth.refresh_token_expiry", "clientip.trusted_proxies"];
+const SESSION_KEYS = ["auth.access_token_expiry", "auth.refresh_token_expiry"];
+const NETWORK_KEYS = ["clientip.trusted_proxies"];
+const KEYS = [...SESSION_KEYS, ...NETWORK_KEYS];
 
 const DEFAULT_TIER: RateLimitTierConfig = {
   requests_per_second: 10,
@@ -69,43 +70,6 @@ const TIER_LABELS: Record<string, string> = {
   standard: "Standard API keys",
   elevated: "Elevated API keys",
 };
-
-/** Whether a tier's draft values differ from its saved values. */
-function tierIsDirty(current: RateLimitTierConfig, saved: RateLimitTierConfig): boolean {
-  return (
-    current.requests_per_second !== saved.requests_per_second ||
-    current.requests_per_minute !== saved.requests_per_minute ||
-    current.burst !== saved.burst
-  );
-}
-
-/** Count of individual fields (of three) a tier's draft changed. */
-function tierChangedCount(current: RateLimitTierConfig, saved: RateLimitTierConfig): number {
-  return (
-    (current.requests_per_second !== saved.requests_per_second ? 1 : 0) +
-    (current.requests_per_minute !== saved.requests_per_minute ? 1 : 0) +
-    (current.burst !== saved.burst ? 1 : 0)
-  );
-}
-
-/** Whether an auth endpoint's draft values differ from its saved values. */
-function authEndpointIsDirty(
-  current: RateLimitAuthEndpointConfig,
-  saved: RateLimitAuthEndpointConfig,
-): boolean {
-  return current.requests_per_minute !== saved.requests_per_minute || current.burst !== saved.burst;
-}
-
-/** Count of individual fields (of two) an auth endpoint's draft changed. */
-function authEndpointChangedCount(
-  current: RateLimitAuthEndpointConfig,
-  saved: RateLimitAuthEndpointConfig,
-): number {
-  return (
-    (current.requests_per_minute !== saved.requests_per_minute ? 1 : 0) +
-    (current.burst !== saved.burst ? 1 : 0)
-  );
-}
 
 const AUTH_ENDPOINT_LABELS: Record<string, string> = {
   login: "Sign in",
@@ -164,7 +128,6 @@ function RateTriadRow({
   perMinute,
   burst,
   disabled = false,
-  dirty = false,
 }: {
   label: string;
   description?: string;
@@ -172,17 +135,11 @@ function RateTriadRow({
   perMinute: RateLimitField;
   burst: RateLimitField;
   disabled?: boolean;
-  dirty?: boolean;
 }) {
   const baseId = useId();
 
   return (
-    <SettingFieldRow
-      label={label}
-      htmlFor={`${baseId}-rpm`}
-      description={description}
-      dirty={dirty}
-    >
+    <SettingFieldRow label={label} htmlFor={`${baseId}-rpm`} description={description}>
       <div className="flex flex-wrap items-end justify-end gap-2.5">
         {perSecond && (
           <RateBox
@@ -202,6 +159,7 @@ function RateTriadRow({
 export default function SecurityAccessSettings() {
   const form = useSettingsForm({ keys: useMemo(() => KEYS, []) });
   const restartKeys = useRestartKeys();
+  const allRestart = (keys: string[]) => keys.every((key) => restartKeys.has(key));
   const { data: serverConfig, isLoading: rateLimitsLoading } = useRateLimitConfig();
   // Already fetched (and cached) by the settings shell for its own banner.
   const { data: serverStatus } = useAdminServerStatus();
@@ -290,33 +248,6 @@ export default function SecurityAccessSettings() {
   const advancedCount =
     2 + 3 + Object.keys(TIER_LABELS).length * 3 + Object.keys(AUTH_ENDPOINT_LABELS).length * 2;
 
-  // Per-row dirty flags for the fields inside the disclosure, each compared
-  // against the loaded config rather than the whole-object `advancedDirty`
-  // above — used both to accent the changed rows and to total up the
-  // disclosure's "N changed" count for its SaveBar-style header.
-  const globalRpsDirty =
-    config.global_requests_per_second !== hydratedConfig.global_requests_per_second;
-  const ipDirty =
-    config.ip_requests_per_second !== hydratedConfig.ip_requests_per_second ||
-    config.ip_requests_per_minute !== hydratedConfig.ip_requests_per_minute ||
-    config.ip_burst !== hydratedConfig.ip_burst;
-  const ipChangedCount =
-    (config.ip_requests_per_second !== hydratedConfig.ip_requests_per_second ? 1 : 0) +
-    (config.ip_requests_per_minute !== hydratedConfig.ip_requests_per_minute ? 1 : 0) +
-    (config.ip_burst !== hydratedConfig.ip_burst ? 1 : 0);
-  const tiersChangedCount = Object.keys(TIER_LABELS).reduce((sum, tier) => {
-    const current = config.tiers[tier] ?? DEFAULT_TIER;
-    const saved = hydratedConfig.tiers[tier] ?? DEFAULT_TIER;
-    return sum + tierChangedCount(current, saved);
-  }, 0);
-  const authEndpointsChangedCount = Object.keys(AUTH_ENDPOINT_LABELS).reduce((sum, endpoint) => {
-    const current = config.auth_endpoints[endpoint] ?? DEFAULT_AUTH_ENDPOINT;
-    const saved = hydratedConfig.auth_endpoints[endpoint] ?? DEFAULT_AUTH_ENDPOINT;
-    return sum + authEndpointChangedCount(current, saved);
-  }, 0);
-  const advancedChangedCount =
-    (globalRpsDirty ? 1 : 0) + ipChangedCount + tiersChangedCount + authEndpointsChangedCount;
-
   // The limiter only starts (and only switches backend) at boot, so the saved
   // config can disagree with what this process is actually enforcing.
   const limiterNeedsRestart =
@@ -326,33 +257,6 @@ export default function SecurityAccessSettings() {
           !!serverConfig.active_backend &&
           serverConfig.backend !== serverConfig.active_backend))) ||
     updateConfig.data?.restart_required === true;
-
-  const restartCount = KEYS.filter((key) => form.isDirty(key) && restartKeys.has(key)).length;
-
-  const trustedProxyCount = form
-    .getValue("clientip.trusted_proxies")
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0).length;
-
-  const stripItems: StatusStripItem[] = [
-    {
-      tone: "info",
-      label: `Sign-in lasts ${form.getValue("auth.refresh_token_expiry") || "the default"}`,
-    },
-    trustedProxyCount > 0
-      ? {
-          tone: "info",
-          label: `${trustedProxyCount} trusted prox${trustedProxyCount === 1 ? "y" : "ies"}`,
-        }
-      : { tone: "muted", label: "Trusted proxies: private ranges only" },
-    config.enabled
-      ? {
-          tone: "ok",
-          label: `Rate limiting on · ${config.backend === "redis" ? "shared via Redis" : "this server only"}`,
-        }
-      : { tone: "warn", label: "Rate limiting off" },
-  ];
 
   async function handleSave() {
     if (rateLimitsDirty) updateConfig.mutate(config);
@@ -384,111 +288,62 @@ export default function SecurityAccessSettings() {
 
   return (
     <div className="flex h-full flex-col">
-      <SettingsPageHeader
-        title="Security & Access"
-        description="Sessions, network trust, and rate limits."
-        strip={<StatusStrip items={stripItems} />}
-        className="mb-8"
-      />
+      <SettingsPageHeader title="Security & Access" className="mb-8" />
 
       <div className="flex-1 space-y-9">
-        <FieldGroup
-          label="Sign-in sessions"
-          clarifier="How long a signed-in client stays valid before it has to sign in again"
-        >
+        <FieldGroup label="Sign-in sessions" restartAll={allRestart(SESSION_KEYS)}>
           <SettingField
             label="Access token expiry"
             type="duration"
-            description="How long a signed-in app can call the API before it silently renews, for example 1h or 30m."
+            description="How long before an app silently renews, e.g. 30m."
             value={form.getValue("auth.access_token_expiry")}
             onChange={(v) => form.setValue("auth.access_token_expiry", v)}
             restartRequired={restartKeys.has("auth.access_token_expiry")}
-            dirty={form.isDirty("auth.access_token_expiry")}
           />
           <SettingField
             label="Refresh token expiry"
             type="duration"
-            description="How long someone stays signed in without typing their password again, for example 30d or 720h."
+            description="How long someone stays signed in, e.g. 30d."
             value={form.getValue("auth.refresh_token_expiry")}
             onChange={(v) => form.setValue("auth.refresh_token_expiry", v)}
             restartRequired={restartKeys.has("auth.refresh_token_expiry")}
-            dirty={form.isDirty("auth.refresh_token_expiry")}
           />
         </FieldGroup>
 
-        <FieldGroup
-          label="Network"
-          clarifier="Which proxies Silo believes about a request's real client address"
-        >
+        <FieldGroup label="Network" restartAll={allRestart(NETWORK_KEYS)}>
           <SettingField
             label="Trusted proxies"
             description={
-              (trustedProxiesManaged
-                ? "Managed by SILO_TRUSTED_PROXIES. Remove that environment variable to edit here. "
-                : "") +
-              "Comma-separated address ranges of reverse proxies allowed to report a request's real " +
-              "client address, e.g. 172.16.0.0/12, 203.0.113.7/32. Applies without a restart."
+              trustedProxiesManaged
+                ? "Managed by SILO_TRUSTED_PROXIES."
+                : "Comma-separated proxy ranges; empty keeps the private defaults."
             }
             hint="172.16.0.0/12, 203.0.113.7/32"
             value={form.getValue("clientip.trusted_proxies")}
             onChange={(v) => form.setValue("clientip.trusted_proxies", v)}
             disabled={trustedProxiesManaged}
             restartRequired={restartKeys.has("clientip.trusted_proxies")}
-            dirty={form.isDirty("clientip.trusted_proxies")}
           />
-          <div className="py-3.5">
-            <p className="text-sm font-medium">Choosing trusted proxy ranges</p>
-            <ul className="text-muted-foreground mt-1 list-disc space-y-1 pl-4 text-xs leading-relaxed">
-              <li>
-                Setting this replaces the defaults (private ranges 10.0.0.0/8, 172.16.0.0/12,
-                192.168.0.0/16 and loopback). Leave it empty to keep them.
-              </li>
-              <li>
-                Recommended: keep the defaults, and only add your proxy&apos;s public address as a
-                /32 (e.g. 203.0.113.7/32) if it reaches Silo from outside those ranges.
-              </li>
-              <li>
-                CDNs such as Cloudflare connect from many published IP ranges — you must list all of
-                their CIDRs and keep the list up to date as they change.
-              </li>
-              <li>
-                Avoid 0.0.0.0/0 (trust everything): any client could then claim to be at any
-                address, which throws off rate limits and audit logs.
-              </li>
-            </ul>
-          </div>
         </FieldGroup>
 
-        <FieldGroup
-          label="Rate limiting"
-          clarifier="How many requests Silo accepts before it turns clients away"
-        >
+        <FieldGroup label="Rate limiting">
           <SettingField
             label="Enable rate limiting"
             type="toggle"
-            description="Caps how many requests one client can make in a short window, so a runaway app or a brute-force attempt cannot flood the server. When off, nothing is capped."
             value={config.enabled ? "true" : "false"}
             onChange={(v) => updateConfigState((prev) => ({ ...prev, enabled: v === "true" }))}
             disabled={savingRateLimits}
-            dirty={config.enabled !== hydratedConfig.enabled}
           />
 
           <AdvancedSection
             id="security.rate-limits"
             count={advancedCount}
-            changedCount={advancedChangedCount}
             forceOpen={advancedDirty}
           >
-            <p className="text-muted-foreground py-3 text-xs leading-relaxed">
-              A burst allowance is how many requests may arrive back to back before the per-second
-              or per-minute budget starts turning requests away. The defaults suit a household
-              server; raise them only if legitimate clients are being blocked.
-            </p>
-
             <SettingFieldRow
               label="Where counters are kept"
               htmlFor="rate-limit-backend"
-              description="Keeping counters in memory is fine for a single server. Choose Redis when several Silo servers share the same traffic, so one client cannot spend the budget once per server. Changing this takes effect after a restart, and Redis must be configured under Storage & Database first."
+              description="Redis shares counters across servers, after a restart."
             >
               <Select
                 value={config.backend}
@@ -508,10 +363,9 @@ export default function SecurityAccessSettings() {
             </SettingFieldRow>
 
             <SettingFieldRow
-              label="Whole-server requests per second"
+              label="Whole-server limit"
               htmlFor="global-rps"
-              description="Ceiling across every rate-limited route, counting all clients together."
-              dirty={globalRpsDirty}
+              description="Ceiling across every rate-limited route."
             >
               <Input
                 id="global-rps"
@@ -526,13 +380,13 @@ export default function SecurityAccessSettings() {
                 disabled={savingRateLimits}
                 className="w-full text-right tabular-nums sm:w-40"
               />
+              <span className="text-muted-foreground text-xs">requests/second</span>
             </SettingFieldRow>
 
             <RateTriadRow
               label="Per client address"
-              description="Budget one IP address gets, shared across signed-in routes and the public sign-in and Autoscan endpoints."
+              description="Budget one IP address gets."
               disabled={savingRateLimits}
-              dirty={ipDirty}
               perSecond={{
                 value: config.ip_requests_per_second,
                 onChange: setNumber((num) =>
@@ -555,14 +409,11 @@ export default function SecurityAccessSettings() {
 
             {Object.keys(TIER_LABELS).map((tier) => {
               const tierConfig = config.tiers[tier] ?? DEFAULT_TIER;
-              const savedTierConfig = hydratedConfig.tiers[tier] ?? DEFAULT_TIER;
               return (
                 <RateTriadRow
                   key={tier}
                   label={TIER_LABELS[tier]!}
-                  description="Budget each API key in this group gets."
                   disabled={savingRateLimits}
-                  dirty={tierIsDirty(tierConfig, savedTierConfig)}
                   perSecond={{
                     value: tierConfig.requests_per_second,
                     onChange: setNumber((num) =>
@@ -585,21 +436,14 @@ export default function SecurityAccessSettings() {
 
             <div className="py-3.5">
               <p className="text-sm font-medium">Sign-in and webhook endpoints</p>
-              <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
-                Extra per-address budgets for the endpoints anyone can reach without signing in.
-                They apply on top of the limits above.
-              </p>
             </div>
             {Object.keys(AUTH_ENDPOINT_LABELS).map((endpoint) => {
               const epConfig = config.auth_endpoints[endpoint] ?? DEFAULT_AUTH_ENDPOINT;
-              const savedEpConfig =
-                hydratedConfig.auth_endpoints[endpoint] ?? DEFAULT_AUTH_ENDPOINT;
               return (
                 <RateTriadRow
                   key={endpoint}
                   label={AUTH_ENDPOINT_LABELS[endpoint]!}
                   disabled={savingRateLimits}
-                  dirty={authEndpointIsDirty(epConfig, savedEpConfig)}
                   perMinute={{
                     value: epConfig.requests_per_minute,
                     onChange: setNumber((num) =>
@@ -622,8 +466,6 @@ export default function SecurityAccessSettings() {
         onSave={handleSave}
         onDiscard={handleDiscard}
         isSaving={form.isSaving || savingRateLimits}
-        restartRequired={form.restartRequired || limiterNeedsRestart}
-        restartCount={restartCount + (config.backend !== hydratedConfig.backend ? 1 : 0)}
       />
 
       {/* The limiter has its own reason to restart (it only reads its backend at

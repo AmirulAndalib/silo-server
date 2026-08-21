@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import { FieldGroup } from "./FieldGroup";
 import { SettingField } from "./SettingField";
 
 vi.mock("@/components/ui/select", () => ({
@@ -33,36 +34,43 @@ describe("SettingField", () => {
     expect(screen.getByRole("button", { name: "SQLite (TBD)" })).toBeDisabled();
   });
 
-  it("shows the restart and default chips after the label", () => {
+  it("shows the restart chip after the label", () => {
     render(
       <SettingField
         label="FFmpeg path"
         value="/usr/bin/ffmpeg"
         onChange={vi.fn()}
         restartRequired
-        isDefault
       />,
     );
 
     expect(screen.getByLabelText("Takes effect after a server restart")).toBeInTheDocument();
-    expect(screen.getByText("Default")).toBeInTheDocument();
   });
 
-  it("omits both chips by default", () => {
+  it("omits the chip by default", () => {
     render(<SettingField label="FFmpeg path" value="" onChange={vi.fn()} />);
 
     expect(screen.queryByLabelText("Takes effect after a server restart")).not.toBeInTheDocument();
-    expect(screen.queryByText("Default")).not.toBeInTheDocument();
   });
 
-  it("marks an edited row as dirty for the accent rail", () => {
-    const { container, rerender } = render(
-      <SettingField label="Server name" value="Silo" onChange={vi.fn()} />,
+  it("drops its chip inside a group that already says every field restarts", () => {
+    render(
+      <FieldGroup label="Redis" restartAll>
+        <SettingField label="Connection URL" value="" onChange={vi.fn()} restartRequired />
+      </FieldGroup>,
     );
-    expect(container.querySelector('[data-dirty="true"]')).toBeNull();
 
-    rerender(<SettingField label="Server name" value="Silo 2" onChange={vi.fn()} dirty />);
-    expect(container.querySelector('[data-dirty="true"]')).not.toBeNull();
+    expect(screen.getByText("Changes apply after a restart")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Takes effect after a server restart")).not.toBeInTheDocument();
+  });
+
+  it("puts the unit beside the control instead of in the label", () => {
+    render(
+      <SettingField label="Mark watched at" type="number" unit="%" value="90" onChange={vi.fn()} />,
+    );
+
+    expect(screen.getByLabelText("Mark watched at")).toHaveValue(90);
+    expect(screen.getByText("%")).toBeInTheDocument();
   });
 
   it("renders a status line under the description", () => {

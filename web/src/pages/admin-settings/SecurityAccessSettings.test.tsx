@@ -86,13 +86,10 @@ describe("SecurityAccessSettings", () => {
     }
   });
 
-  it("summarises the tab in the status strip under the title", () => {
+  it("renders the tab title", () => {
     render(<SecurityAccessSettings />);
 
     expect(screen.getByRole("heading", { name: "Security & Access" })).toBeInTheDocument();
-    expect(screen.getByText("Sign-in lasts the default")).toBeInTheDocument();
-    expect(screen.getByText("Trusted proxies: private ranges only")).toBeInTheDocument();
-    expect(screen.getByText("Rate limiting on · this server only")).toBeInTheDocument();
   });
 
   it("keeps the token and proxy keys on the batched settings form", () => {
@@ -118,20 +115,17 @@ describe("SecurityAccessSettings", () => {
     expect(screen.getByText("Sign in")).toBeInTheDocument();
   });
 
-  it("marks an edited rate-limit row dirty and counts it in the Advanced disclosure", async () => {
+  it("stages an edited rate-limit row on the shared save bar", async () => {
     render(<SecurityAccessSettings />);
 
     await userEvent.click(screen.getByRole("button", { name: /Advanced/i }));
 
-    const rpsInput = screen.getByLabelText("Whole-server requests per second") as HTMLInputElement;
-    await userEvent.clear(rpsInput);
-    await userEvent.type(rpsInput, "500");
+    // The control rejects empty/zero input, so append rather than clear first.
+    const rpsInput = screen.getByLabelText("Whole-server limit") as HTMLInputElement;
+    await userEvent.type(rpsInput, "5");
 
-    expect(rpsInput.closest('[data-dirty="true"]')).not.toBeNull();
-    expect(screen.getByRole("button", { name: /1 changed/i })).toBeInTheDocument();
-
-    // An untouched row stays clean.
-    expect(screen.getByText("Per client address").closest('[data-dirty="true"]')).toBeNull();
+    expect(rpsInput.value).toBe("10005");
+    expect(screen.getByText("1 unsaved change")).toBeInTheDocument();
   });
 
   it("counts an edited rate limit toward the shared save bar and saves both writers", async () => {
@@ -145,7 +139,7 @@ describe("SecurityAccessSettings", () => {
     await userEvent.click(screen.getByRole("switch", { name: /Enable rate limiting/i }));
     expect(screen.getByText("2 unsaved changes")).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: /Save Changes/i }));
+    await userEvent.click(screen.getByRole("button", { name: /^Save$/i }));
 
     expect(mutate).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }));
     expect(save).toHaveBeenCalled();

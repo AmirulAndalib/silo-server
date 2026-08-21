@@ -23,15 +23,15 @@ export interface ProviderTileProps {
   /** Replaces the monogram, e.g. with an icon. */
   logo?: ReactNode;
   state: ProviderTileState;
-  /** Overrides the default pill text for the state. */
+  /** Overrides the default word for the state. */
   statePill?: string;
-  /** Small line at the foot: quota, key expiry, or the error text. */
+  /** Small line at the foot. Only for what the state does not already say. */
   meta?: ReactNode;
   /** The tile's own button — Connect, Manage, Fix. */
   primaryAction?: ProviderTileAction;
   /** Chips beside the name, e.g. a `RestartBadge`. */
   badge?: ReactNode;
-  /** Controls level with the state pill, e.g. an enable switch. */
+  /** Controls level with the state, e.g. an enable switch. */
   headerActions?: ReactNode;
   /** Spans the tile across the grid and reveals `children` as an inline panel. */
   expanded?: boolean;
@@ -42,38 +42,22 @@ export interface ProviderTileProps {
   children?: ReactNode;
 }
 
-const PILL_LABELS: Record<ProviderTileState, string> = {
+const STATE_LABELS: Record<ProviderTileState, string> = {
   connected: "Connected",
   not_connected: "Not connected",
   error: "Error",
   editing: "Editing",
 };
 
-const PILL_CLASSES: Record<ProviderTileState, string> = {
-  connected: "border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-300",
-  not_connected: "border-border text-muted-foreground bg-foreground/[0.04]",
-  error: "border-red-500/35 bg-red-500/10 text-red-600 dark:text-red-300",
-  editing:
-    "border-[var(--settings-accent-line)] bg-[var(--settings-accent-soft)] text-[var(--settings-accent)]",
-};
-
-const PILL_DOT_CLASSES: Record<ProviderTileState, string> = {
-  connected: "bg-green-500 shadow-[0_0_6px_rgba(129,201,149,.8)]",
-  not_connected: "bg-muted-foreground/50",
-  error: "bg-red-500 shadow-[0_0_6px_rgba(239,68,68,.8)]",
+const STATE_DOT_CLASSES: Record<ProviderTileState, string> = {
+  connected: "bg-emerald-500",
+  not_connected: "bg-muted-foreground/40",
+  error: "bg-amber-500",
   editing: "bg-[var(--settings-accent)]",
 };
 
-const TILE_CLASSES: Record<ProviderTileState, string> = {
-  connected: "border-green-500/25 bg-[linear-gradient(165deg,rgba(129,201,149,.075),transparent)]",
-  not_connected: "border-border/70 bg-foreground/[0.025]",
-  error: "border-red-500/30 bg-[linear-gradient(165deg,rgba(239,68,68,.07),transparent)]",
-  editing:
-    "border-[var(--settings-accent-line)] bg-[linear-gradient(165deg,var(--settings-accent-soft),transparent)]",
-};
-
-/** Status pill used on a tile and, standalone, anywhere a provider is listed. */
-export function ProviderStatePill({
+/** Dot plus word: the tile's one status signal, reused wherever it is listed. */
+export function ProviderState({
   state,
   label,
   className,
@@ -86,14 +70,13 @@ export function ProviderStatePill({
     <span
       data-state={state}
       className={cn(
-        "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5",
-        "text-[11px] leading-5 font-medium whitespace-nowrap",
-        PILL_CLASSES[state],
+        "inline-flex shrink-0 items-center gap-1.5 text-[11.5px] whitespace-nowrap",
+        state === "error" ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground",
         className,
       )}
     >
-      <span aria-hidden="true" className={cn("size-1.5 rounded-full", PILL_DOT_CLASSES[state])} />
-      {label ?? PILL_LABELS[state]}
+      <span aria-hidden="true" className={cn("size-1.5 rounded-full", STATE_DOT_CLASSES[state])} />
+      {label ?? STATE_LABELS[state]}
     </span>
   );
 }
@@ -143,8 +126,7 @@ export function ProviderTile({
       data-state={state}
       data-expanded={expanded ? "true" : undefined}
       className={cn(
-        "flex min-w-0 flex-col rounded-2xl border p-4 transition-colors",
-        TILE_CLASSES[state],
+        "border-border/70 bg-foreground/[0.02] flex min-w-0 flex-col rounded-2xl border p-4",
         expanded && "col-span-full shadow-lg",
         className,
       )}
@@ -170,38 +152,31 @@ export function ProviderTile({
             <p className="text-muted-foreground mt-0.5 truncate text-xs">{tagline}</p>
           ) : null}
         </div>
-        {expanded ? (
-          <div className="flex shrink-0 items-center gap-2">
-            <ProviderStatePill state={state} label={statePill} />
-            {headerActions}
-          </div>
-        ) : (
-          headerActions
-        )}
+        <div className="flex shrink-0 items-center gap-2.5">
+          <ProviderState state={state} label={statePill} />
+          {headerActions}
+        </div>
       </div>
 
-      {!expanded && (
-        <div className="mt-3.5 flex items-center justify-between gap-2">
-          <ProviderStatePill state={state} label={statePill} />
-          {primaryAction ? (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={primaryAction.onClick}
-              disabled={primaryAction.disabled}
-            >
-              {primaryAction.label}
-            </Button>
-          ) : null}
+      {!expanded && primaryAction ? (
+        <div className="mt-3.5 flex justify-end">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={primaryAction.onClick}
+            disabled={primaryAction.disabled}
+          >
+            {primaryAction.label}
+          </Button>
         </div>
-      )}
+      ) : null}
 
       {meta ? (
         <p
           className={cn(
             "mt-2.5 text-[11.5px]",
-            state === "error" ? "text-red-600 dark:text-red-300" : "text-muted-foreground",
+            state === "error" ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground",
           )}
         >
           {meta}
