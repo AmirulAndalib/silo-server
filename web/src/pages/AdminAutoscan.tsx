@@ -126,9 +126,19 @@ function SettingsTab() {
 // Page
 // ---------------------------------------------------------------------------
 
-export default function AdminAutoscan() {
+interface AdminAutoscanProps {
+  /**
+   * Rendered inside the Libraries page rather than as its own route. The
+   * heading drops to an h2 and the Sources/Activity selection moves to `view`,
+   * because `tab` already names the Libraries tab that hosts this panel.
+   */
+  embedded?: boolean;
+}
+
+export default function AdminAutoscan({ embedded = false }: AdminAutoscanProps = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const requestedTab = searchParams.get("tab");
+  const tabParam = embedded ? "view" : "tab";
+  const requestedTab = searchParams.get(tabParam);
   const activeTab = normalizeTab(requestedTab);
   const trigger = useTriggerAutoscan();
   const settings = useAutoscanSettings();
@@ -148,9 +158,9 @@ export default function AdminAutoscan() {
   function setActiveTab(value: string) {
     const next = new URLSearchParams(searchParams);
     if (value === "sources") {
-      next.delete("tab");
+      next.delete(tabParam);
     } else {
-      next.set("tab", value);
+      next.set(tabParam, value);
     }
     setSearchParams(next, { replace: true });
   }
@@ -160,9 +170,13 @@ export default function AdminAutoscan() {
       <div className="page-header">
         <div className="space-y-2">
           <div className="flex items-center gap-2.5">
-            <h1 className="text-3xl font-semibold tracking-normal text-balance sm:text-4xl">
-              Autoscan
-            </h1>
+            {embedded ? (
+              <h2 className="text-xl font-semibold tracking-tight">Autoscan</h2>
+            ) : (
+              <h1 className="text-3xl font-semibold tracking-normal text-balance sm:text-4xl">
+                Autoscan
+              </h1>
+            )}
             {settings.data &&
               (enabled ? (
                 <Badge variant="secondary">Enabled</Badge>

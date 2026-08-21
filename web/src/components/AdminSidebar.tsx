@@ -77,8 +77,17 @@ export default function AdminSidebar({ onNavigate, embedded = false }: AdminSide
   }
 
   function isActive(item: SidebarItem) {
-    if (item.exact) return location.pathname === item.href;
-    return location.pathname === item.href || location.pathname.startsWith(`${item.href}/`);
+    // Settings tabs are one path with a `?tab=` discriminator, so a plain
+    // pathname compare would light up all nine (or none) at once.
+    const [itemPath, itemQuery] = item.href.split("?");
+    if (itemQuery) {
+      if (location.pathname !== itemPath) return false;
+      const wanted = new URLSearchParams(itemQuery);
+      const current = new URLSearchParams(location.search);
+      return [...wanted.entries()].every(([key, value]) => current.get(key) === value);
+    }
+    if (item.exact) return location.pathname === itemPath;
+    return location.pathname === itemPath || location.pathname.startsWith(`${itemPath}/`);
   }
 
   return (

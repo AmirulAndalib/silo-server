@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { Link } from "react-router";
 import { Loader2, Play, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
+
 import type { MarkerProviderConfig, TaskInfo } from "@/api/types";
 import { TaskStatusBadge } from "@/components/admin/TaskStatusBadge";
 import { useEventChannel } from "@/components/realtimeEventsContext";
@@ -15,20 +16,21 @@ import {
   useUpdateMarkerProvider,
   useValidateMarkerProvider,
 } from "@/hooks/queries/admin/markers";
-import { useSettingsForm } from "@/hooks/useSettingsForm";
-import { FieldGroup } from "./FieldGroup";
-import { SaveBar } from "./SaveBar";
-import { SettingField } from "./SettingField";
 import { formatDateTime } from "@/lib/datetime";
+import { SettingField } from "./SettingField";
 
-const INTRO_SETTING_KEYS = ["markers.mode", "markers.lazy_playback"];
 const INTEGER_INPUT_PATTERN = /^[+-]?\d+$/;
 
 function formatRate(value: number) {
   return `${Math.round(value * 100)}%`;
 }
 
-function ProviderSettingsCard() {
+/**
+ * Per-provider marker settings. These save through the markers API rather than
+ * the tab's SaveBar because each card writes one provider row, so it keeps its
+ * own Save/Validate buttons.
+ */
+export function MarkerProviderCards() {
   const providers = useMarkerProviders();
 
   if (providers.isLoading) {
@@ -48,7 +50,7 @@ function ProviderSettingsCard() {
   if (providerList.length === 0) {
     return (
       <div className="border-border bg-surface max-w-2xl rounded-lg border px-5 py-4">
-        <h3 className="text-sm font-semibold">Marker Providers</h3>
+        <h3 className="text-sm font-semibold">Marker providers</h3>
         <p className="text-muted-foreground mt-2 text-sm">
           No marker provider plugins are installed or enabled.
         </p>
@@ -57,9 +59,9 @@ function ProviderSettingsCard() {
   }
 
   return (
-    <div className="max-w-2xl space-y-4">
+    <div className="max-w-2xl space-y-4 py-3">
       {providerList.map((provider) => (
-        <ProviderSettingsForm
+        <MarkerProviderForm
           key={[
             provider.provider,
             provider.fetch_enabled,
@@ -76,7 +78,7 @@ function ProviderSettingsCard() {
   );
 }
 
-function ProviderSettingsForm({ provider }: { provider: MarkerProviderConfig }) {
+function MarkerProviderForm({ provider }: { provider: MarkerProviderConfig }) {
   const updateProvider = useUpdateMarkerProvider();
   const validateProvider = useValidateMarkerProvider();
   const displayName = provider.display_name || provider.provider;
@@ -151,13 +153,13 @@ function ProviderSettingsForm({ provider }: { provider: MarkerProviderConfig }) 
 
       <div className="divide-border divide-y">
         <SettingField
-          label="Use for Online Marker Lookup"
+          label="Use for online marker lookup"
           type="toggle"
           value={fetchEnabled ? "true" : "false"}
           onChange={(value) => setFetchEnabled(value === "true")}
         />
         <div className="space-y-1 py-2">
-          <Label htmlFor={priorityID}>Fetch Priority</Label>
+          <Label htmlFor={priorityID}>Lookup order</Label>
           <Input
             id={priorityID}
             type="number"
@@ -170,7 +172,7 @@ function ProviderSettingsForm({ provider }: { provider: MarkerProviderConfig }) 
           <p className="text-muted-foreground text-xs">Lower numbers win when providers overlap.</p>
         </div>
         <SettingField
-          label="Allow Contributions"
+          label="Allow contributions"
           type="toggle"
           value={contributeEnabled ? "true" : "false"}
           onChange={(value) => {
@@ -181,15 +183,15 @@ function ProviderSettingsForm({ provider }: { provider: MarkerProviderConfig }) 
           disabled={!provider.is_submitter}
         />
         <SettingField
-          label="Auto-submit Local Markers"
+          label="Send this server's markers automatically"
           type="toggle"
           value={autoLocal ? "true" : "false"}
           onChange={(value) => setAutoLocal(value === "true")}
           disabled={!provider.is_submitter || !contributeEnabled}
-          hint="Scheduled contribution only sends scanner markers that meet the confidence floor."
+          hint="Only markers this server detected, and only those above the confidence floor below, are sent."
         />
         <div className="space-y-1 py-2">
-          <Label htmlFor={minConfidenceID}>Minimum Confidence</Label>
+          <Label htmlFor={minConfidenceID}>Minimum confidence</Label>
           <Input
             id={minConfidenceID}
             type="number"
@@ -266,7 +268,7 @@ function ProviderSettingsForm({ provider }: { provider: MarkerProviderConfig }) 
           onClick={save}
           disabled={!dirty || !priorityValid || !confidenceValid || updateProvider.isPending}
         >
-          {updateProvider.isPending ? "Saving..." : "Save Provider Settings"}
+          {updateProvider.isPending ? "Saving..." : "Save provider settings"}
         </Button>
       </div>
     </fieldset>
@@ -341,14 +343,15 @@ function TaskActionRow({
           ) : (
             <Play className="h-3.5 w-3.5" />
           )}
-          {running ? "Running" : "Run Now"}
+          {running ? "Running" : "Run now"}
         </Button>
       </div>
     </div>
   );
 }
 
-function IntroTasksCard() {
+/** Run-now shortcuts for the two marker tasks, with their last result. */
+export function MarkerTasksCard() {
   useEventChannel("tasks");
   const { data: tasks } = useTasks();
   const runTask = useRunTask();
@@ -370,77 +373,17 @@ function IntroTasksCard() {
     <div className="border-border bg-surface max-w-2xl rounded-lg border px-5 py-1">
       <TaskActionRow
         task={detectTask}
-        fallbackName="Populate Markers"
+        fallbackName="Populate markers"
         fallbackDescription="Populates intro and credits markers for opted-in libraries."
         onRun={() => void run("detect_intro_markers")}
         pending={pendingTask === "detect_intro_markers"}
       />
       <TaskActionRow
         task={contributeTask}
-        fallbackName="Contribute Markers"
+        fallbackName="Contribute markers"
         fallbackDescription="Submits high-confidence local intro markers to enabled providers."
         onRun={() => void run("contribute_markers")}
         pending={pendingTask === "contribute_markers"}
-      />
-    </div>
-  );
-}
-
-export default function IntroSettings() {
-  const form = useSettingsForm({ keys: useMemo(() => INTRO_SETTING_KEYS, []) });
-
-  if (form.isLoading) {
-    return (
-      <div className="space-y-6" role="status" aria-label="Loading intro settings">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-24 w-full max-w-2xl" />
-        <Skeleton className="h-40 w-full max-w-2xl" />
-        <span className="sr-only">Loading intro settings</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex h-full flex-col">
-      <div className="mb-6 space-y-2">
-        <h2 className="text-xl font-semibold tracking-tight">Intro Markers</h2>
-        <p className="text-muted-foreground text-sm leading-relaxed">
-          Configure marker lookup, local marker generation, and provider contribution.
-        </p>
-      </div>
-
-      <div className="flex-1 space-y-6">
-        <FieldGroup label="Marker Lookup">
-          <SettingField
-            label="Mode"
-            type="select"
-            options={[
-              { value: "off", label: "Off" },
-              { value: "local", label: "Local" },
-              { value: "both", label: "Local + Online" },
-              { value: "online", label: "Online Only" },
-            ]}
-            value={form.getValue("markers.mode") || "local"}
-            onChange={(value) => form.setValue("markers.mode", value)}
-          />
-          <SettingField
-            label="Fetch Markers at Playback if Missing"
-            type="toggle"
-            value={form.getValue("markers.lazy_playback") || "false"}
-            onChange={(value) => form.setValue("markers.lazy_playback", value)}
-          />
-        </FieldGroup>
-
-        <ProviderSettingsCard />
-        <IntroTasksCard />
-      </div>
-
-      <SaveBar
-        dirtyCount={form.dirtyCount}
-        onSave={form.save}
-        onDiscard={form.discard}
-        isSaving={form.isSaving}
-        restartRequired={form.restartRequired}
       />
     </div>
   );

@@ -1,6 +1,9 @@
 package config
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // restartRequiredKeys lists server_settings keys whose values are captured at
 // process startup (listeners, connection pools, HTTP clients, worker pools)
@@ -117,4 +120,29 @@ func RestartRequired(key string) bool {
 		}
 	}
 	return false
+}
+
+// RestartRequiredKeys returns the sorted list of exact server_settings keys
+// that require a restart. The admin UI reads this over
+// GET /admin/settings/restart-keys to render its restart badges, so it must
+// stay a copy: callers must not be able to mutate the registry.
+func RestartRequiredKeys() []string {
+	keys := make([]string, 0, len(restartRequiredKeys))
+	for key, required := range restartRequiredKeys {
+		if required {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// RestartRequiredPrefixes returns the sorted list of key prefixes whose whole
+// namespace requires a restart. Pair it with RestartRequiredKeys: a key needs a
+// restart when it is listed exactly or carries one of these prefixes.
+func RestartRequiredPrefixes() []string {
+	prefixes := make([]string, len(restartRequiredPrefixes))
+	copy(prefixes, restartRequiredPrefixes)
+	sort.Strings(prefixes)
+	return prefixes
 }

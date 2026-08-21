@@ -77,7 +77,6 @@ const AdminDiagnostics = lazy(() => import("@/pages/AdminDiagnostics"));
 const AdminAccessGroups = lazy(() => import("@/pages/AdminAccessGroups"));
 const AdminUsers = lazy(() => import("@/pages/AdminUsers"));
 const AdminRequests = lazy(() => import("@/pages/AdminRequests"));
-const AdminAutoscan = lazy(() => import("@/pages/AdminAutoscan"));
 const AdminDevices = lazy(() => import("@/pages/AdminDevices"));
 const AdminLibraries = lazy(() => import("@/pages/AdminLibraries"));
 const AdminSettingsLayout = lazy(() => import("@/pages/admin-settings/AdminSettingsLayout"));
@@ -457,7 +456,11 @@ function AppRoutes() {
                   <Route path="collections/new" element={<AdminCollectionEditor />} />
                   <Route path="collections/:id/edit" element={<AdminCollectionEditor />} />
                   <Route path="requests" element={<AdminRequests />} />
-                  <Route path="autoscan" element={<AdminAutoscan />} />
+                  {/* Autoscan is a tab on Libraries now; keep old links working. */}
+                  <Route
+                    path="autoscan"
+                    element={<Navigate to="/admin/libraries?tab=autoscan" replace />}
+                  />
                   <Route path="history" element={<AdminPlaybackHistory />} />
                   <Route path="marker-history" element={<AdminMarkerHistory />} />
                   <Route path="history-import" element={<AdminHistoryImport />} />

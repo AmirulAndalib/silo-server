@@ -66,18 +66,20 @@ describe("AdminSectionCommandDialog", () => {
     expect(screen.queryByRole("option", { name: /Settings/ })).not.toBeInTheDocument();
   });
 
-  it("searches individual admin setting labels from the dashboard dialog", async () => {
+  it("searches individual admin setting labels from the admin dialog", async () => {
     renderDialog();
 
     const searchBox = await openDialog();
-    await userEvent.type(searchBox, "pool max open");
+    await userEvent.type(searchBox, "maximum postgres connections");
 
-    expect(screen.getByRole("option", { name: /Database/ })).toBeInTheDocument();
-    expect(screen.getByText("Pool Max Open")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Infrastructure/ })).toBeInTheDocument();
+    expect(screen.getByText("Maximum Postgres connections")).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("option", { name: /Database/ }));
+    await userEvent.click(screen.getByRole("option", { name: /Infrastructure/ }));
 
-    expect(screen.getByLabelText("Current path")).toHaveTextContent("/admin/settings?tab=database");
+    expect(screen.getByLabelText("Current path")).toHaveTextContent(
+      "/admin/settings?tab=infrastructure",
+    );
   });
 
   it("includes admin plugin app destinations", async () => {

@@ -16,10 +16,21 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/hooks/useSettingsForm", () => ({
   useSettingsForm: () => ({
     isLoading: true,
-    dirtyCount: 0,
     getValue: () => "",
+    setValue: () => {},
+    resetValue: () => {},
+    dirtyCount: 0,
+    dirtyKeys: [],
+    isDirty: () => false,
+    save: () => {},
+    discard: () => {},
+    isSaving: false,
+    restartRequired: false,
     sensitiveConfigured: [],
     sensitiveManagedByEnv: [],
+    sensitiveStatusReady: false,
+    sensitiveStatusError: null,
+    buildConnectionCheckRequest: () => ({}),
   }),
 }));
 
@@ -64,7 +75,7 @@ describe("AdminSettingsLayout", () => {
   it("renders the grouped navigation sections", () => {
     const markup = renderLayout();
 
-    for (const group of ["Server", "Media", "Connections", "Data"]) {
+    for (const group of ["Server", "Connections &amp; Data"]) {
       expect(markup).toContain(`>${group}<`);
     }
   });
@@ -77,7 +88,7 @@ describe("AdminSettingsLayout", () => {
     expect(
       screen.queryByRole("navigation", { name: "Admin settings sections categories" }),
     ).not.toBeInTheDocument();
-    for (const group of ["Server", "Media", "Connections", "Data"]) {
+    for (const group of ["Server", "Connections & Data"]) {
       expect(screen.getAllByRole("heading", { name: group })).toHaveLength(1);
       expect(
         screen.queryByRole("link", { name: new RegExp(`^${group}, \\d+ settings`) }),
@@ -88,10 +99,10 @@ describe("AdminSettingsLayout", () => {
   it("uses one desktop grid and card geometry for every settings group", () => {
     const markup = renderLayout();
 
-    expect(markup.match(/2xl:grid-cols-4/g)).toHaveLength(4);
+    expect(markup.match(/2xl:grid-cols-4/g)).toHaveLength(2);
     expect(markup).not.toContain("2xl:grid-cols-3");
-    expect(markup.match(/lg:h-28/g)).toHaveLength(20);
-    expect(markup.match(/lg:line-clamp-3/g)).toHaveLength(20);
+    expect(markup.match(/lg:h-28/g)).toHaveLength(9);
+    expect(markup.match(/lg:line-clamp-3/g)).toHaveLength(9);
   });
 
   it("renders every settings tab", () => {
@@ -99,25 +110,14 @@ describe("AdminSettingsLayout", () => {
 
     for (const label of [
       "General",
-      "Branding",
-      "Theming",
-      "Card Overlays",
-      "Scanner &amp; Matcher",
-      "Search",
-      "Intro Markers",
-      "Subtitles",
-      "AI Services",
+      "Appearance",
+      "Security &amp; Access",
+      "Library &amp; Metadata",
       "Playback",
-      "Downloads",
-      "Watch Providers",
       "Integrations",
-      "Email",
       "Notifications",
-      "Compatibility Proxies",
-      "Rate Limiting",
-      "Database",
-      "Storage",
-      "Log Retention",
+      "Compatibility",
+      "Infrastructure",
     ]) {
       expect(markup).toContain(label);
     }
@@ -126,7 +126,7 @@ describe("AdminSettingsLayout", () => {
   it("renders the settings index at the root and preserves tab deep links", () => {
     renderInteractiveLayout();
 
-    expect(screen.getByRole("link", { name: /General.*Authentication/ })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /General.*Server identity/ })).toHaveAttribute(
       "href",
       "/admin/settings?tab=general",
     );
@@ -142,9 +142,11 @@ describe("AdminSettingsLayout", () => {
     vi.stubGlobal("scrollTo", scrollTo);
     renderInteractiveLayout();
 
-    await userEvent.click(screen.getByRole("link", { name: /Database.*Postgres/ }));
+    await userEvent.click(screen.getByRole("link", { name: /Infrastructure.*Redis/ }));
 
-    const detailRegion = await screen.findByRole("region", { name: "Database settings" });
+    const detailRegion = await screen.findByRole("region", {
+      name: "Infrastructure settings",
+    });
     expect(scrollTo).toHaveBeenCalledWith(0, 0);
     expect(detailRegion).toHaveFocus();
   });
@@ -152,9 +154,9 @@ describe("AdminSettingsLayout", () => {
   it("adds a mobile detail heading when the settings component has none", () => {
     vi.stubGlobal("scrollTo", vi.fn());
 
-    renderInteractiveLayout("?tab=branding");
+    renderInteractiveLayout("?tab=appearance");
 
-    expect(screen.getByRole("heading", { name: "Branding", level: 2 })).toHaveFocus();
+    expect(screen.getByRole("heading", { name: "Appearance", level: 2 })).toHaveFocus();
   });
 
   it("resets the scrolling detail pane when switching admin tabs", async () => {
@@ -164,11 +166,13 @@ describe("AdminSettingsLayout", () => {
     const generalRegion = screen.getByRole("region", { name: "General settings" });
     generalRegion.scrollTop = 400;
 
-    await userEvent.click(screen.getByRole("button", { name: "Database" }));
+    await userEvent.click(screen.getByRole("button", { name: /Infrastructure/ }));
 
-    const databaseRegion = await screen.findByRole("region", { name: "Database settings" });
-    expect(databaseRegion.scrollTop).toBe(0);
-    expect(databaseRegion).toHaveFocus();
+    const infrastructureRegion = await screen.findByRole("region", {
+      name: "Infrastructure settings",
+    });
+    expect(infrastructureRegion.scrollTop).toBe(0);
+    expect(infrastructureRegion).toHaveFocus();
   });
 
   it("surfaces durable restart-required state above the active tab", () => {
@@ -179,11 +183,38 @@ describe("AdminSettingsLayout", () => {
     expect(markup).toContain("Server restart required for saved settings to take effect.");
   });
 
-  it("resolves the legacy jellyfin tab alias to Compatibility Proxies", () => {
-    const withAlias = renderLayout("?tab=jellyfin");
-    const direct = renderLayout("?tab=compatibility-proxies");
+  it("resolves every legacy tab id to the tab that absorbed it", () => {
+    const aliases: Record<string, string> = {
+      jellyfin: "compatibility",
+      "compatibility-proxies": "compatibility",
+      branding: "appearance",
+      theming: "appearance",
+      overlays: "appearance",
+      "rate-limiting": "security",
+      scanner: "library",
+      search: "library",
+      intro: "library",
+      subtitles: "integrations",
+      ai: "integrations",
+      "watch-providers": "integrations",
+      downloads: "playback",
+      email: "notifications",
+      database: "infrastructure",
+      storage: "infrastructure",
+      "log-retention": "infrastructure",
+    };
 
-    expect(withAlias).toBe(direct);
+    for (const [legacy, current] of Object.entries(aliases)) {
+      expect(renderLayout(`?tab=${legacy}`)).toBe(renderLayout(`?tab=${current}`));
+    }
+  });
+
+  it("badges Infrastructure as advanced in the settings nav", () => {
+    vi.stubGlobal("scrollTo", vi.fn());
+
+    const markup = renderLayout("?tab=general");
+
+    expect(markup).toContain(">Advanced<");
   });
 
   it("filters admin settings sections from the search box", async () => {
@@ -191,7 +222,7 @@ describe("AdminSettingsLayout", () => {
 
     await userEvent.type(screen.getByRole("searchbox", { name: "Search settings" }), "redis");
 
-    expect(screen.getAllByRole("link", { name: /Database/ })).toHaveLength(1);
+    expect(screen.getAllByRole("link", { name: /Infrastructure/ })).toHaveLength(1);
     expect(screen.queryByRole("link", { name: /Playback/ })).not.toBeInTheDocument();
     expect(screen.getByText("1 match")).toBeInTheDocument();
   });
@@ -201,11 +232,11 @@ describe("AdminSettingsLayout", () => {
 
     await userEvent.type(
       screen.getByRole("searchbox", { name: "Search settings" }),
-      "pool max open",
+      "silenced log messages",
     );
 
-    expect(screen.getAllByRole("link", { name: /Database/ })).toHaveLength(1);
-    expect(screen.queryByRole("link", { name: /General/ })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: /General/ })).toHaveLength(1);
+    expect(screen.queryByRole("link", { name: /Playback/ })).not.toBeInTheDocument();
   });
 
   it("focuses admin settings search with Cmd+K", () => {

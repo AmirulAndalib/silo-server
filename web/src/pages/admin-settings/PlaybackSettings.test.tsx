@@ -21,25 +21,27 @@ if (!window.HTMLElement.prototype.scrollIntoView) {
 const useSettingsFormMock = vi.fn();
 const useHWAccelDetectionMock = vi.fn();
 
-beforeEach(() => {
-  useSettingsFormMock.mockClear();
-  useHWAccelDetectionMock.mockReturnValue({ data: undefined, isLoading: false });
-});
-
 vi.mock("@/hooks/useSettingsForm", () => ({
   useSettingsForm: (...args: unknown[]) => useSettingsFormMock(...args),
+}));
+
+vi.mock("@/hooks/useRestartKeys", () => ({
+  useRestartKeys: () => new Set<string>(["playback.ffmpeg_path"]),
 }));
 
 vi.mock("@/hooks/queries/admin/system", () => ({
   useHWAccelDetection: (...args: unknown[]) => useHWAccelDetectionMock(...args),
 }));
 
-function makeForm(values: Record<string, string>) {
+function makeForm(values: Record<string, string>, dirty: string[] = []) {
+  const dirtyKeys = new Set(dirty);
   return {
     isLoading: false,
     getValue: (key: string) => values[key] ?? "",
     setValue: vi.fn(),
-    dirtyCount: 0,
+    isDirty: (key: string) => dirtyKeys.has(key),
+    dirtyCount: dirtyKeys.size,
+    dirtyKeys: [...dirtyKeys],
     save: vi.fn(),
     discard: vi.fn(),
     isSaving: false,
@@ -47,19 +49,97 @@ function makeForm(values: Record<string, string>) {
   };
 }
 
-function settingSwitch(markup: string, labelText: string): Element {
+function parse(markup: string): HTMLElement {
   const container = document.createElement("div");
   container.innerHTML = markup;
-  const label = Array.from(container.querySelectorAll("label")).find(
-    (candidate) => candidate.textContent === labelText,
-  );
-  const toggle = label?.htmlFor ? container.querySelector(`[id="${label.htmlFor}"]`) : null;
-  if (!toggle) throw new Error(`${labelText} toggle was not rendered`);
-  return toggle;
+  return container;
 }
+
+function labelled(container: HTMLElement, text: string): Element {
+  const label = Array.from(container.querySelectorAll("label")).find(
+    (candidate) => candidate.textContent === text,
+  );
+  const control = label?.htmlFor ? container.querySelector(`[id="${label.htmlFor}"]`) : null;
+  if (!control) throw new Error(`no control rendered for label: ${text}`);
+  return control;
+}
+
+/** Opens both advanced disclosures via their persisted state. */
+function expandAdvanced() {
+  localStorage.setItem("silo.admin.advanced.playback.transcoding", "true");
+  localStorage.setItem("silo.admin.advanced.playback.downloads", "true");
+}
+
+const TONE_MAP_LABEL = "Convert HDR colors on the CPU when the GPU cannot";
+
+beforeEach(() => {
+  localStorage.clear();
+  useSettingsFormMock.mockReset();
+  useHWAccelDetectionMock.mockReset();
+  useHWAccelDetectionMock.mockReturnValue({ data: undefined, isLoading: false });
+});
+
+describe("PlaybackSettings layout", () => {
+  it("renders every field group heading", () => {
+    useSettingsFormMock.mockReturnValue(makeForm({ "playback.hw_accel": "none" }));
+
+    const container = parse(renderToStaticMarkup(<PlaybackSettings />));
+    const headings = Array.from(container.querySelectorAll("[role=group]")).map((group) => {
+      const labelId = group.getAttribute("aria-labelledby");
+      return labelId ? (container.querySelector(`[id="${labelId}"]`)?.textContent ?? "") : "";
+    });
+
+    expect(headings).toEqual(["Transcoding", "Watch behavior", "Downloads"]);
+  });
+
+  it("manages both the playback and download key families in one form", () => {
+    useSettingsFormMock.mockReturnValue(makeForm({ "playback.hw_accel": "none" }));
+
+    renderToStaticMarkup(<PlaybackSettings />);
+    const keys: string[] = useSettingsFormMock.mock.calls[0]?.[0]?.keys ?? [];
+
+    expect(keys).toContain("playback.transcode_enabled");
+    expect(keys).toContain("download.enabled");
+    expect(keys).toContain("download.artifact_max_bytes");
+    // Hidden tier: still saved and readable through the API, no UI.
+    expect(keys).not.toContain("playback.chapter_thumbnail_node_capacity");
+  });
+
+  it("keeps advanced settings collapsed until they are opened", () => {
+    useSettingsFormMock.mockReturnValue(makeForm({ "playback.hw_accel": "none" }));
+
+    const container = parse(renderToStaticMarkup(<PlaybackSettings />));
+
+    expect(container.textContent).toContain("Transcoding");
+    expect(container.textContent).not.toContain("FFmpeg path");
+    expect(container.textContent).not.toContain("Server bandwidth");
+  });
+
+  it("force-opens an advanced section holding a dirty field", () => {
+    useSettingsFormMock.mockReturnValue(
+      makeForm({ "playback.hw_accel": "none" }, ["download.artifact_dir"]),
+    );
+
+    const container = parse(renderToStaticMarkup(<PlaybackSettings />));
+
+    expect(container.textContent).toContain("Prepared file directory");
+    expect(container.textContent).not.toContain("FFmpeg path");
+  });
+
+  it("marks restart-required fields from the restart key list", () => {
+    expandAdvanced();
+    useSettingsFormMock.mockReturnValue(makeForm({ "playback.hw_accel": "none" }));
+
+    const container = parse(renderToStaticMarkup(<PlaybackSettings />));
+    const badges = container.querySelectorAll("[aria-label='Takes effect after a server restart']");
+
+    expect(badges).toHaveLength(1);
+  });
+});
 
 describe("PlaybackSettings CPU tone mapping", () => {
   it("includes the setting and renders it off by default", () => {
+    expandAdvanced();
     useSettingsFormMock.mockReturnValue(
       makeForm({
         "playback.hw_accel": "none",
@@ -67,14 +147,12 @@ describe("PlaybackSettings CPU tone mapping", () => {
       }),
     );
 
-    const toggle = settingSwitch(
-      renderToStaticMarkup(<PlaybackSettings />),
-      "Enable CPU Tone Mapping",
-    );
+    const container = parse(renderToStaticMarkup(<PlaybackSettings />));
 
     expect(useSettingsFormMock.mock.calls[0]?.[0]?.keys).toContain(
       "playback.chapter_thumbnail_software_tone_map_enabled",
     );
+    const toggle = labelled(container, TONE_MAP_LABEL);
     expect(toggle).toHaveAttribute("aria-checked", "false");
     expect(toggle).not.toHaveAttribute("disabled");
   });
@@ -89,6 +167,7 @@ describe("PlaybackSettings CPU tone mapping", () => {
   });
 
   it("disables the toggle while HDR chapter thumbnails are disabled", () => {
+    expandAdvanced();
     useSettingsFormMock.mockReturnValue(
       makeForm({
         "playback.hw_accel": "none",
@@ -97,10 +176,8 @@ describe("PlaybackSettings CPU tone mapping", () => {
       }),
     );
 
-    const toggle = settingSwitch(
-      renderToStaticMarkup(<PlaybackSettings />),
-      "Enable CPU Tone Mapping",
-    );
+    const container = parse(renderToStaticMarkup(<PlaybackSettings />));
+    const toggle = labelled(container, TONE_MAP_LABEL);
 
     expect(toggle).toHaveAttribute("aria-checked", "true");
     expect(toggle).toHaveAttribute("disabled");
@@ -108,19 +185,21 @@ describe("PlaybackSettings CPU tone mapping", () => {
 });
 
 describe("PlaybackSettings transcode tone mapping", () => {
+  beforeEach(expandAdvanced);
+
   it("registers independent hardware and software settings disabled by default", () => {
     useSettingsFormMock.mockReturnValue(makeForm({ "playback.hw_accel": "auto" }));
 
-    const markup = renderToStaticMarkup(<PlaybackSettings />);
+    const container = parse(renderToStaticMarkup(<PlaybackSettings />));
     const keys = useSettingsFormMock.mock.calls[0]?.[0]?.keys as string[];
 
     expect(keys).toContain("playback.transcode_hardware_tone_map_enabled");
     expect(keys).toContain("playback.transcode_software_tone_map_enabled");
-    expect(settingSwitch(markup, "Enable Hardware HDR Tone Mapping")).toHaveAttribute(
+    expect(labelled(container, "Enable Hardware HDR Tone Mapping")).toHaveAttribute(
       "aria-checked",
       "false",
     );
-    expect(settingSwitch(markup, "Enable Software HDR Tone Mapping")).toHaveAttribute(
+    expect(labelled(container, "Enable Software HDR Tone Mapping")).toHaveAttribute(
       "aria-checked",
       "false",
     );
@@ -135,13 +214,13 @@ describe("PlaybackSettings transcode tone mapping", () => {
       }),
     );
 
-    const markup = renderToStaticMarkup(<PlaybackSettings />);
+    const container = parse(renderToStaticMarkup(<PlaybackSettings />));
 
-    expect(settingSwitch(markup, "Enable Hardware HDR Tone Mapping")).toHaveAttribute(
+    expect(labelled(container, "Enable Hardware HDR Tone Mapping")).toHaveAttribute(
       "aria-checked",
       "true",
     );
-    expect(settingSwitch(markup, "Enable Software HDR Tone Mapping")).toHaveAttribute(
+    expect(labelled(container, "Enable Software HDR Tone Mapping")).toHaveAttribute(
       "aria-checked",
       "false",
     );
@@ -155,8 +234,8 @@ describe("PlaybackSettings transcode tone mapping", () => {
       }),
     );
 
-    const toggle = settingSwitch(
-      renderToStaticMarkup(<PlaybackSettings />),
+    const toggle = labelled(
+      parse(renderToStaticMarkup(<PlaybackSettings />)),
       "Enable Hardware HDR Tone Mapping",
     );
 
@@ -182,8 +261,8 @@ describe("PlaybackSettings transcode tone mapping", () => {
       }),
     );
 
-    const toggle = settingSwitch(
-      renderToStaticMarkup(<PlaybackSettings />),
+    const toggle = labelled(
+      parse(renderToStaticMarkup(<PlaybackSettings />)),
       "Enable Hardware HDR Tone Mapping",
     );
 

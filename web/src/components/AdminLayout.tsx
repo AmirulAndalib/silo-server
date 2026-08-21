@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation } from "react-router";
 import AdminSidebar from "@/components/AdminSidebar";
+import { AdminSectionCommandDialog } from "@/components/AdminSectionCommandDialog";
 import ServerActivity from "@/components/ServerActivity";
 import {
   Sheet,
@@ -11,8 +12,12 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet";
 import { useDocumentTitle } from "@/hooks/useDocumentTitle";
+import { useAdminPluginInstallations } from "@/hooks/queries/admin/plugins";
+import { usePolicyCapability } from "@/hooks/queries/admin/policy";
+import { buildAdminCommandNavSections } from "@/lib/adminNavigation";
 import { resolveAdminDocumentTitle } from "@/lib/documentTitle";
-import { Menu, X } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { Menu, Search, X } from "lucide-react";
 import { useWatchPlaybackController } from "@/playback/watchPlaybackContext";
 import { useAudiobookPlaybackController } from "@/pages/audiobooks/player/audiobookPlaybackContext";
 
@@ -20,7 +25,19 @@ const ADMIN_DESKTOP_MEDIA_QUERY = "(min-width: 64rem)";
 
 export default function AdminLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
   const location = useLocation();
+  const { data: adminInstallations } = useAdminPluginInstallations();
+  const policyCapability = usePolicyCapability();
+  // Mounted here rather than on the dashboard so Cmd+K reaches every admin
+  // page, which is what the pages that advertise the shortcut assume.
+  const adminSearchSections = useMemo(
+    () =>
+      buildAdminCommandNavSections(adminInstallations, {
+        policyEditorAvailable: policyCapability.data?.editor_available === true,
+      }),
+    [adminInstallations, policyCapability.data?.editor_available],
+  );
   const { isBackgroundBarVisible } = useWatchPlaybackController();
   const audiobookPlayback = useAudiobookPlaybackController();
   const hasBackgroundBar = isBackgroundBarVisible || audiobookPlayback?.isBackgroundBarVisible;
@@ -44,6 +61,11 @@ export default function AdminLayout() {
 
   return (
     <div className="bg-background relative min-h-[100dvh] overflow-x-hidden">
+      <AdminSectionCommandDialog
+        sections={adminSearchSections}
+        open={commandOpen}
+        onOpenChange={setCommandOpen}
+      />
       <a
         href="#main-content"
         className="focus:bg-background focus:text-foreground focus:ring-ring sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:rounded-lg focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:ring-2 focus:outline-none"
@@ -82,7 +104,10 @@ export default function AdminLayout() {
               </div>
             </div>
           </div>
-          <ServerActivity className="h-11 w-11" />
+          <div className="flex items-center gap-1">
+            <AdminSearchButton onClick={() => setCommandOpen(true)} className="h-11 w-11" />
+            <ServerActivity className="h-11 w-11" />
+          </div>
         </div>
 
         {/* Mobile sidebar drawer */}
@@ -113,8 +138,9 @@ export default function AdminLayout() {
         </SheetContent>
       </Sheet>
 
-      {/* Desktop activity indicator */}
-      <div className="fixed top-5 right-5 z-40 hidden lg:block">
+      {/* Desktop header controls */}
+      <div className="fixed top-5 right-5 z-40 hidden items-center gap-2 lg:flex">
+        <AdminSearchButton onClick={() => setCommandOpen(true)} showShortcut />
         <ServerActivity />
       </div>
 
@@ -130,5 +156,38 @@ export default function AdminLayout() {
         </div>
       </main>
     </div>
+  );
+}
+
+function AdminSearchButton({
+  onClick,
+  className,
+  showShortcut = false,
+}: {
+  onClick: () => void;
+  className?: string;
+  showShortcut?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label="Search admin sections"
+      title="Search admin sections (⌘K)"
+      className={cn(
+        "text-muted-foreground hover:text-foreground hover:bg-accent/60 focus-visible:ring-ring/60 border-border/70 bg-surface/70 flex h-9 items-center justify-center gap-2 rounded-xl border px-2.5 transition-colors focus-visible:ring-[3px] focus-visible:outline-none",
+        className,
+      )}
+    >
+      <Search className="h-4 w-4" aria-hidden="true" />
+      {showShortcut ? (
+        <>
+          <span className="hidden text-[13px] font-medium xl:inline">Search</span>
+          <kbd className="border-border/70 pointer-events-none rounded border px-1.5 py-0.5 font-mono text-[10px] select-none">
+            ⌘K
+          </kbd>
+        </>
+      ) : null}
+    </button>
   );
 }

@@ -12,31 +12,21 @@ import {
 import {
   ADMIN_SETTINGS_GROUPS,
   ADMIN_SETTINGS_NAV,
+  resolveAdminSettingsTabID,
   type AdminSettingsSearchItem,
 } from "@/lib/adminSettingsSearch";
 import { cn } from "@/lib/utils";
 import { useAdminServerStatus } from "@/hooks/queries/admin/settings";
 
-import EmailSettings from "./EmailSettings";
-import NotificationsAdminSettings from "./NotificationsAdminSettings";
 import GeneralSettings from "./GeneralSettings";
+import AppearanceSettings from "./AppearanceSettings";
+import SecurityAccessSettings from "./SecurityAccessSettings";
+import LibraryMetadataSettings from "./LibraryMetadataSettings";
 import PlaybackSettings from "./PlaybackSettings";
-import ScannerSettings from "./ScannerSettings";
-import SearchSettings from "./SearchSettings";
-import IntroSettings from "./IntroSettings";
-import SubtitlesSettings from "./SubtitlesSettings";
-import AIServicesSettings from "./AIServicesSettings";
-import RateLimitSettings from "./RateLimitSettings";
-import WatchProvidersSettings from "./WatchProvidersSettings";
 import IntegrationsSettings from "./IntegrationsSettings";
+import NotificationsAdminSettings from "./NotificationsAdminSettings";
 import CompatibilityProxiesSettings from "./CompatibilityProxiesSettings";
-import DatabaseSettings from "./DatabaseSettings";
-import StorageSettings from "./StorageSettings";
-import DownloadSettings from "./DownloadSettings";
-import LogRetentionSettings from "./LogRetentionSettings";
-import ThemeSettings from "./ThemeSettings";
-import BrandingSettings from "./BrandingSettings";
-import OverlaySettings from "./OverlaySettings";
+import InfrastructureSettings from "./InfrastructureSettings";
 import { RestartServerButton } from "./RestartServerButton";
 
 interface SettingsNav extends AdminSettingsSearchItem {
@@ -50,25 +40,14 @@ interface SettingsNavGroup {
 
 const SETTINGS_COMPONENTS: Record<string, ComponentType> = {
   general: GeneralSettings,
-  branding: BrandingSettings,
-  theming: ThemeSettings,
-  overlays: OverlaySettings,
-  scanner: ScannerSettings,
-  search: SearchSettings,
-  intro: IntroSettings,
-  subtitles: SubtitlesSettings,
-  ai: AIServicesSettings,
+  appearance: AppearanceSettings,
+  security: SecurityAccessSettings,
+  library: LibraryMetadataSettings,
   playback: PlaybackSettings,
-  downloads: DownloadSettings,
-  "watch-providers": WatchProvidersSettings,
   integrations: IntegrationsSettings,
-  email: EmailSettings,
   notifications: NotificationsAdminSettings,
-  "compatibility-proxies": CompatibilityProxiesSettings,
-  "rate-limiting": RateLimitSettings,
-  database: DatabaseSettings,
-  storage: StorageSettings,
-  "log-retention": LogRetentionSettings,
+  compatibility: CompatibilityProxiesSettings,
+  infrastructure: InfrastructureSettings,
 };
 
 function settingsComponent(id: string) {
@@ -89,7 +68,9 @@ const SETTINGS_NAV: SettingsNav[] = ADMIN_SETTINGS_NAV.map((item) => ({
   component: settingsComponent(item.id),
 }));
 
-const SHELL_HEADING_SETTINGS = new Set(["branding", "theming"]);
+// Tabs whose component renders no heading of its own, so the shell supplies
+// the mobile-visible one.
+const SHELL_HEADING_SETTINGS = new Set(["appearance"]);
 
 export default function AdminSettingsLayout() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -98,7 +79,7 @@ export default function AdminSettingsLayout() {
   const activeHeadingRef = useRef<HTMLHeadingElement>(null);
   const { data: serverStatus } = useAdminServerStatus();
   const rawActiveId = searchParams.get("tab");
-  const activeId = rawActiveId === "jellyfin" ? "compatibility-proxies" : rawActiveId;
+  const activeId = resolveAdminSettingsTabID(rawActiveId);
   const filteredSettingsGroups = useMemo(
     () => filterSettingsSearchGroups(SETTINGS_GROUPS, settingsSearch),
     [settingsSearch],
@@ -124,6 +105,13 @@ export default function AdminSettingsLayout() {
   }
   const active = activeId ? SETTINGS_NAV.find((item) => item.id === activeId) : undefined;
   const ActiveComponent = active?.component;
+
+  // Rewrite a legacy `?tab=` id to the tab that absorbed it so the address bar,
+  // and anything the admin copies out of it, names a tab that still exists.
+  useEffect(() => {
+    if (!activeId || activeId === rawActiveId) return;
+    setSearchParams({ tab: activeId }, { replace: true });
+  }, [activeId, rawActiveId, setSearchParams]);
 
   useEffect(() => {
     if (!active) return;
@@ -193,6 +181,13 @@ export default function AdminSettingsLayout() {
                     label={item.label}
                     icon={item.icon}
                     active={item.id === active.id}
+                    badge={
+                      item.badge ? (
+                        <span className="border-border/70 text-muted-foreground rounded border px-1.5 py-0.5 text-[10px] font-medium">
+                          {item.badge}
+                        </span>
+                      ) : undefined
+                    }
                     onClick={() => setActiveId(item.id)}
                   />
                 ))}

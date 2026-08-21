@@ -84,6 +84,26 @@ export function useSettingsForm({ keys }: UseSettingsFormOptions) {
   const dirtyCount = dirty.size;
   const dirtyKeys = useMemo(() => Array.from(dirty), [dirty]);
 
+  // Every admin settings tab stages edits and only writes them through the
+  // SaveBar, so closing or reloading the tab would silently drop them. One
+  // guard here covers all tabs.
+  //
+  // Only the browser-level teardown is guarded: react-router's `useBlocker`
+  // needs a data router, and the app mounts the declarative `<BrowserRouter>`
+  // (web/src/App.tsx), where calling it throws. Wire it up here if the app
+  // ever moves to `createBrowserRouter`.
+  useEffect(() => {
+    if (dirtyCount === 0) return;
+    function warnOnUnload(event: BeforeUnloadEvent) {
+      event.preventDefault();
+      // Older browsers only show the prompt for a truthy returnValue; the text
+      // itself is ignored everywhere.
+      event.returnValue = "";
+    }
+    window.addEventListener("beforeunload", warnOnUnload);
+    return () => window.removeEventListener("beforeunload", warnOnUnload);
+  }, [dirtyCount]);
+
   const isDirty = useCallback((key: string) => dirty.has(key), [dirty]);
 
   const buildConnectionCheckRequest = useCallback(

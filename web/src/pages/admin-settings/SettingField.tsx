@@ -2,6 +2,7 @@ import { useId } from "react";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
+import { RestartBadge } from "@/components/settings/RestartBadge";
 import {
   Select,
   SelectContent,
@@ -25,6 +26,27 @@ interface SettingFieldProps {
   options?: SelectOption[];
   sensitiveConfigured?: boolean;
   disabled?: boolean;
+  /** Marks the field with a restart badge; drive it from `useRestartKeys`. */
+  restartRequired?: boolean;
+}
+
+function FieldLabel({
+  htmlFor,
+  label,
+  restartRequired,
+}: {
+  htmlFor: string;
+  label: string;
+  restartRequired?: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <Label htmlFor={htmlFor} className="text-sm font-medium">
+        {label}
+      </Label>
+      {restartRequired && <RestartBadge />}
+    </div>
+  );
 }
 
 export function SettingField({
@@ -36,6 +58,7 @@ export function SettingField({
   options,
   sensitiveConfigured,
   disabled,
+  restartRequired,
 }: SettingFieldProps) {
   const controlId = useId();
   const hintId = useId();
@@ -45,9 +68,7 @@ export function SettingField({
     return (
       <div className="flex flex-col justify-between gap-3 py-3 sm:flex-row sm:items-center">
         <div className="space-y-0.5">
-          <Label htmlFor={controlId} className="text-sm font-medium">
-            {label}
-          </Label>
+          <FieldLabel htmlFor={controlId} label={label} restartRequired={restartRequired} />
           {hint && (
             <p id={hintId} className="text-muted-foreground text-xs">
               {hint}
@@ -69,9 +90,7 @@ export function SettingField({
     const currentVal = value || options[0]?.value || "";
     return (
       <div className="space-y-1 py-2">
-        <Label htmlFor={controlId} className="text-sm font-medium">
-          {label}
-        </Label>
+        <FieldLabel htmlFor={controlId} label={label} restartRequired={restartRequired} />
         <Select value={currentVal} onValueChange={onChange} disabled={disabled}>
           <SelectTrigger
             id={controlId}
@@ -101,9 +120,7 @@ export function SettingField({
     const placeholder = sensitiveConfigured ? "configured" : (hint ?? "Not configured");
     return (
       <div className="space-y-1 py-2">
-        <Label htmlFor={controlId} className="text-sm font-medium">
-          {label}
-        </Label>
+        <FieldLabel htmlFor={controlId} label={label} restartRequired={restartRequired} />
         <Input
           id={controlId}
           type="password"
@@ -126,9 +143,7 @@ export function SettingField({
   if (type === "number") {
     return (
       <div className="space-y-1 py-2">
-        <Label htmlFor={controlId} className="text-sm font-medium">
-          {label}
-        </Label>
+        <FieldLabel htmlFor={controlId} label={label} restartRequired={restartRequired} />
         <Input
           id={controlId}
           type="number"
@@ -150,9 +165,7 @@ export function SettingField({
   // text and duration
   return (
     <div className="space-y-1 py-2">
-      <Label htmlFor={controlId} className="text-sm font-medium">
-        {label}
-      </Label>
+      <FieldLabel htmlFor={controlId} label={label} restartRequired={restartRequired} />
       <Input
         id={controlId}
         type="text"

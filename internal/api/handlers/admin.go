@@ -1628,6 +1628,22 @@ func (h *AdminHandler) HandleGetEffectiveSettings(w http.ResponseWriter, r *http
 	writeJSON(w, http.StatusOK, effective)
 }
 
+type restartKeysResponse struct {
+	Keys     []string `json:"keys"`
+	Prefixes []string `json:"prefixes"`
+}
+
+// HandleGetRestartKeys handles GET /admin/settings/restart-keys. The registry
+// is compiled into the binary (internal/config), so the response only changes
+// across deploys; the admin UI caches it and uses it to badge the fields whose
+// saved value waits on a restart.
+func (h *AdminHandler) HandleGetRestartKeys(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, restartKeysResponse{
+		Keys:     config.RestartRequiredKeys(),
+		Prefixes: config.RestartRequiredPrefixes(),
+	})
+}
+
 type sensitiveStatusResponse struct {
 	Configured   []string `json:"configured"`
 	ManagedByEnv []string `json:"managed_by_env,omitempty"`
@@ -1684,8 +1700,10 @@ func (h *AdminHandler) HandleGetSensitiveStatus(w http.ResponseWriter, r *http.R
 type adminSettingResponse struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
-	// RestartRequired reports whether the saved value only takes effect
-	// after a server restart (set on update responses only).
+	// RestartRequired reports whether the value only takes effect after a
+	// server restart. It is populated from the compiled restart-key registry
+	// on read responses as well as on updates, so the admin UI never has to
+	// hand-copy the list into hint text.
 	RestartRequired bool `json:"restart_required,omitempty"`
 }
 
@@ -2205,7 +2223,11 @@ func (h *AdminHandler) HandleGetSetting(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if value, ok := h.BootstrapSensitiveValues[key]; ok && value != "" {
-		writeJSON(w, http.StatusOK, adminSettingResponse{Key: key, Value: value})
+		writeJSON(w, http.StatusOK, adminSettingResponse{
+			Key:             key,
+			Value:           value,
+			RestartRequired: config.RestartRequired(key),
+		})
 		return
 	}
 
@@ -2219,7 +2241,11 @@ func (h *AdminHandler) HandleGetSetting(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, adminSettingResponse{Key: key, Value: value})
+	writeJSON(w, http.StatusOK, adminSettingResponse{
+		Key:             key,
+		Value:           value,
+		RestartRequired: config.RestartRequired(key),
+	})
 }
 
 type updateSettingRequest struct {

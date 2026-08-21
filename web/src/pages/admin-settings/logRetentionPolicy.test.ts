@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  appendBucketRow,
+  bucketRowsFromRaw,
   parseBucketPolicies,
+  recommendedBucketRows,
+  removeBucketRow,
   serializeBucketPolicies,
+  serializeBucketRows,
+  updateBucketRow,
   type LogRetentionBucketPolicy,
 } from "./logRetentionPolicy";
 
@@ -113,6 +119,58 @@ describe("logRetentionPolicy", () => {
     ]);
 
     expect(JSON.parse(raw)).toEqual([
+      {
+        component: "metadata",
+        level: "info",
+        retention_days: 1,
+        max_rows: 100000,
+        max_size_mb: 128,
+      },
+    ]);
+  });
+});
+
+describe("logRetentionPolicy bucket rows", () => {
+  it("gives every parsed row a stable id", () => {
+    const { rows, error } = bucketRowsFromRaw(
+      JSON.stringify([
+        { component: "metadata", level: "info", retention_days: 1, max_rows: 10, max_size_mb: 8 },
+        { component: "scanner", level: "warn", retention_days: 7, max_rows: 20, max_size_mb: 16 },
+      ]),
+    );
+
+    expect(error).toBe("");
+    expect(rows.map((row) => row.id)).toEqual(["1", "2"]);
+    expect(rows[1]?.component).toBe("scanner");
+  });
+
+  it("falls back to the recommended rows when the stored JSON is unreadable", () => {
+    const { rows, error } = bucketRowsFromRaw("{not json");
+
+    expect(error).not.toBe("");
+    expect(rows).toEqual(recommendedBucketRows());
+  });
+
+  it("adds, edits and removes rows without reusing an id", () => {
+    let rows = bucketRowsFromRaw("").rows;
+    rows = appendBucketRow(rows);
+    rows = appendBucketRow(rows);
+    expect(rows.map((row) => row.id)).toEqual(["1", "2"]);
+
+    rows = updateBucketRow(rows, "1", "component", "scanner");
+    rows = updateBucketRow(rows, "1", "max_rows", "-4");
+    expect(rows[0]?.component).toBe("scanner");
+    expect(rows[0]?.max_rows).toBe(0);
+
+    rows = removeBucketRow(rows, "2");
+    rows = appendBucketRow(rows);
+    expect(rows.map((row) => row.id)).toEqual(["1", "2"]);
+  });
+
+  it("serializes rows without their editor ids", () => {
+    const rows = updateBucketRow(appendBucketRow([]), "1", "component", "metadata");
+
+    expect(JSON.parse(serializeBucketRows(rows))).toEqual([
       {
         component: "metadata",
         level: "info",
