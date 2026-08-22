@@ -51,8 +51,10 @@ describe("ActionBar", () => {
         "cursor-pointer",
         "transform-gpu",
         "transition-transform",
+        "duration-150",
         "hover:bg-primary",
         "motion-safe:hover:scale-[1.02]",
+        "motion-safe:active:scale-[0.98]",
         "motion-reduce:transition-none",
       );
     },
@@ -66,14 +68,29 @@ describe("ActionBar", () => {
     });
 
     expect(screen.getByRole("button", { name: "Mark Watched" })).toHaveClass(
-      "cursor-pointer",
+      "enabled:cursor-pointer",
       "transform-gpu",
       "transition-transform",
+      "duration-150",
       "hover:bg-[color-mix(in_srgb,var(--surface)_40%,transparent)]",
       "motion-safe:hover:scale-[1.02]",
+      "motion-safe:active:scale-[0.98]",
       "motion-reduce:transition-none",
     );
     expect(screen.getByTitle("Favorite")).toHaveClass("cursor-pointer");
     expect(screen.getByTitle("More")).toHaveClass("cursor-pointer");
+  });
+
+  it("does not expose an enabled pointer affordance while the watched action is pending", () => {
+    renderActionBar({
+      watchedLabel: "Mark Watched",
+      onToggleWatched: () => {},
+      isUpdatingWatched: true,
+    });
+
+    const watchedAction = screen.getByRole("button", { name: "Mark Watched" });
+    expect(watchedAction).toBeDisabled();
+    expect(watchedAction).toHaveClass("enabled:cursor-pointer");
+    expect(watchedAction).not.toHaveClass("cursor-pointer");
   });
 });
