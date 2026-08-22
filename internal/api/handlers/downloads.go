@@ -540,7 +540,11 @@ func (h *DownloadHandler) handleDirectDownload(w http.ResponseWriter, r *http.Re
 	serveCtx := downloads.WithServeAuthorized(r.Context(), func(target downloads.FileTarget) {
 		attachTransfer(r.Context(), userID, apimw.GetProfileID(r.Context()), target.MediaFileID)
 	})
-	if err := h.svc.ServeDirect(serveCtx, w, r, userID, fileID, r.URL.Query().Get("format"), filter); err != nil {
+	// A multi-gigabyte original outlives the API server's absolute WriteTimeout,
+	// exactly as on /downloads/{id}/file above; roll the deadline with progress
+	// instead of truncating the body at 120 s.
+	sw := httpstream.NewRollingDeadlineWriter(w)
+	if err := h.svc.ServeDirect(serveCtx, sw, r, userID, fileID, r.URL.Query().Get("format"), filter); err != nil {
 		h.writeDownloadError(w, err)
 		return
 	}
@@ -555,9 +559,15 @@ func (h *DownloadHandler) redirectDirectDownload(ctx context.Context, w http.Res
 	if err != nil {
 		return false, err
 	}
-	handled, err := h.redirectToProxy(w, r, secret, target, userID, "")
+	// The profile has to travel with the redirect. Hardcoding "" here recorded
+	// the telemetry transfer, the proxy's own attach (from the token claim) and
+	// the node session against no profile at all, so proxy-served traffic went
+	// missing from per-profile attribution while the same file served locally
+	// was attributed correctly.
+	profileID := apimw.GetProfileID(ctx)
+	handled, err := h.redirectToProxy(w, r, secret, target, userID, profileID)
 	if handled {
-		attachTransfer(ctx, userID, "", target.MediaFileID)
+		attachTransfer(ctx, userID, profileID, target.MediaFileID)
 	}
 	return handled, err
 }
