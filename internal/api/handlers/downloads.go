@@ -110,12 +110,15 @@ type downloadRequest struct {
 
 // downloadCaps mirrors playback.ClientCapabilities for the request body.
 type downloadCaps struct {
-	CodecsVideo            []string `json:"codecs_video,omitempty"`
-	CodecsAudio            []string `json:"codecs_audio,omitempty"`
-	AudioPassthroughCodecs []string `json:"audio_passthrough_codecs,omitempty"`
-	Containers             []string `json:"containers,omitempty"`
-	MaxResolution          string   `json:"max_resolution,omitempty"`
-	HDR                    bool     `json:"hdr,omitempty"`
+	ClientFeatures         []string                           `json:"client_features,omitempty"`
+	VideoEvidence          playback.CapabilityEvidenceV3      `json:"video_evidence,omitempty"`
+	CodecsVideo            []string                           `json:"codecs_video,omitempty"`
+	CodecsAudio            []string                           `json:"codecs_audio,omitempty"`
+	AudioPassthroughCodecs []string                           `json:"audio_passthrough_codecs,omitempty"`
+	Containers             []string                           `json:"containers,omitempty"`
+	MaxResolution          string                             `json:"max_resolution,omitempty"`
+	HDR                    bool                               `json:"hdr,omitempty"`
+	VideoDecode            []playback.VideoDecodeCapabilityV3 `json:"video_decode,omitempty"`
 }
 
 // patchDownloadRequest is the JSON body for PATCH /downloads/{id}.
@@ -276,12 +279,19 @@ func (h *DownloadHandler) HandleCreateDownload(w http.ResponseWriter, r *http.Re
 	}
 	if req.Caps != nil {
 		createReq.Caps = playback.ClientCapabilities{
+			ClientFeatures:         req.Caps.ClientFeatures,
+			VideoEvidence:          req.Caps.VideoEvidence,
 			CodecsVideo:            req.Caps.CodecsVideo,
 			CodecsAudio:            req.Caps.CodecsAudio,
 			AudioPassthroughCodecs: req.Caps.AudioPassthroughCodecs,
 			Containers:             req.Caps.Containers,
 			MaxResolution:          req.Caps.MaxResolution,
 			HDR:                    req.Caps.HDR,
+			VideoDecode:            req.Caps.VideoDecode,
+		}
+		if err := createReq.Caps.NormalizeAndValidateVideoDecode(); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
 		}
 	}
 

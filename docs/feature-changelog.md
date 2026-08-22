@@ -1,5 +1,10 @@
 # Feature Changelog
 
+## 2026-08-22
+
+### Qualify bounded software video decoders without weakening evidence tiers
+Playback protocol v3 now advertises the engine-neutral `software_video_decode_v1` opt-in. Exact and platform-attested clients may use bounded `hardware: false` entries from `video_decode[]` for original/direct eligibility only when they send the feature. Download creation accepts the same additive feature, evidence tier, and detailed decoder entries so persistent originals do not flatten a 1080p software claim into a device-wide 4K claim. Existing clients remain hardware-only at strict playback tiers and existing flat download payloads remain unchanged.
+
 ## 2026-08-21
 
 ### Keep signed playback credentials out of client-visible media URLs

@@ -98,13 +98,13 @@ the document is always the full one:
   "protocol_versions": [3],
   "features": ["playback_plan_v3", "neutral_playback_v3_contract_v1", "layout_aware_passthrough", "playback_route_diagnostics",
                "device_quirks_v1", "seek_reanchor_v1", "output_change_v1", "direct_stream_resume_v1",
-               "header_authenticated_media_v1", "plan_source_duration_v1"],
+               "header_authenticated_media_v1", "software_video_decode_v1", "plan_source_duration_v1"],
   "deliveries": ["original_http", "server_remux_progressive", "server_remux_hls", "server_transcode_hls"],
   "transformations": [{"name": "audio_to_aac", "executor": "server", "recipe_version": "1", "validated_claims": ["audio_decode"]}]
 }
 ```
 
-The ten feature strings above are the full set this server version advertises:
+The eleven feature strings above are the full set this server version advertises:
 
 | Feature | What it promises |
 | --- | --- |
@@ -117,6 +117,7 @@ The ten feature strings above are the full set this server version advertises:
 | `output_change_v1` | The `output_change` intent replan is available; clients must keep the active route when this feature is absent |
 | `direct_stream_resume_v1` | A direct route may resume mid-file rather than restarting |
 | `header_authenticated_media_v1` | An opted-in client receives only API-local media URLs without signed credentials in their query or path, and authenticates every media request with its normal Authorization header (§4.1) |
+| `software_video_decode_v1` | Exact/platform-attested clients may qualify bounded `video_decode[]` entries with `hardware: false` for direct/original delivery; without the opt-in those evidence tiers remain hardware-only (§3) |
 | `plan_source_duration_v1` | `source.duration_seconds` is populated when known, so its absence means *unknown* rather than *unsupported* (§5) |
 
 That last one is the reason feature detection is a list and not a version
@@ -308,14 +309,15 @@ required and are one of:
 | Tier | Who reports it | What the server does with it |
 | --- | --- | --- |
 | `exact` | Android (`MediaCodecList`) | Full strict validation. The server walks `video_decode[]` and requires a hardware entry matching codec, profile, level, bit depth, and every `max_*` bound. Only this tier can earn a validated audio **passthrough** claim. |
-| `platform_attested` | Apple (VideoToolbox) | Same walk, but profile and level are **skipped** — the platform attests the codec family rather than enumerating modes. All other bounds still apply. |
+| `platform_attested` | Apple (platform-backed Aether decoder stack) | Same walk. Profile and level are **skipped for hardware entries** because the platform cannot enumerate them; explicitly opted-in software entries enforce any profiles/levels the pinned stack supplies. All other bounds still apply. |
 | `declared` | Web (`isTypeSupported`) | Flat list match only: `codecs_video` / `codecs_video_hardware` membership. No `video_decode[]` walk. |
 
 Four rules follow from the table and are easy to get wrong:
 
 **A flat claim without backing detail is a refusal, not a pass.** On `exact` and
 `platform_attested`, if a codec appears in `codecs_video` but no `video_decode[]`
-entry names that codec with `hardware: true`, the source is *not* eligible for a
+entry names that codec with `hardware: true` (or an explicitly opted-in bounded
+software entry), the source is *not* eligible for a
 direct route. The plan is downgraded and carries the decision reason
 `evidence_insufficient_for_direct` plus the matching degradation warning, which
 distinguishes "your evidence didn't support this" from "your device said no." A
@@ -328,6 +330,23 @@ If an entry matched the codec but the source exceeded one of its bounds — a
 4K file against a `max_height: 1080` decoder — that is a real device limit, and
 the plan is downgraded with no evidence warning. The two cases mean different
 things and a client should not conflate them in its telemetry.
+
+Software decode remains explicit. At `exact` and `platform_attested`, a
+`hardware: false` entry participates only when the request advertises
+`software_video_decode_v1`; the same codec, bit-depth, dimension, frame-rate,
+bitrate, and supplied profile/level bounds are then enforced. Existing clients therefore retain the
+historical hardware-only behavior at these tiers.
+
+Download creation reuses this bounded vocabulary additively inside `caps`:
+`client_features`, `video_evidence`, and `video_decode` have the same meanings
+and limits. Opting in requires a non-empty exact/platform-attested detailed
+list; malformed partial opt-ins are rejected rather than falling back to flat
+claims. This matters when hardware and software decoders have different
+ceilings: the flat `max_resolution` remains a coarse device ceiling, while the
+detailed entry decides whether a particular original file is safe. Apple keeps
+the legacy coarse ceiling at 1080p so older servers fail safely; a detailed
+hardware entry may independently preserve a 4K original on a new server.
+Legacy flat-only download clients keep the previous resolver behavior.
 
 **An omitted bound means "unconstrained", not "unknown".** Within a
 `video_decode[]` entry, an empty `profiles`, `levels`, or `bit_depths` list and a

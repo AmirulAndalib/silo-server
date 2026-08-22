@@ -168,6 +168,99 @@ func TestResolver_Transcode_UnsupportedVideoCodec(t *testing.T) {
 	}
 }
 
+func TestResolver_DownloadSoftwareDecodeIsFeatureGatedAndBounded(t *testing.T) {
+	file := &models.MediaFile{
+		CodecVideo: "av1", CodecAudio: "aac", Container: "mp4",
+		Resolution: "1080p", Bitrate: 9_000,
+		VideoTracks: []models.VideoTrack{{
+			Codec: "av1", Profile: "Main", Width: 1920, Height: 1080, FrameRate: "24/1",
+			Bitrate: 9_000, BitDepth: 10,
+		}},
+	}
+	caps := playback.ClientCapabilities{
+		ClientFeatures: []string{playback.FeatureSoftwareVideoDecodeV3},
+		VideoEvidence:  playback.EvidencePlatformAttestedV3,
+		CodecsVideo:    []string{"av1"},
+		CodecsAudio:    []string{"aac"},
+		Containers:     []string{"mp4"},
+		MaxResolution:  "2160p",
+		VideoDecode: []playback.VideoDecodeCapabilityV3{{
+			Codec: "av1", Profiles: []string{"main"}, BitDepths: []int{10}, MaxWidth: 1920,
+			MaxHeight: 1080, MaxFrameRate: 60, MaxBitrateKbps: 40_000,
+			Hardware: false,
+		}},
+	}
+
+	if decision := playback.Resolve(file, caps, defaultSettings()); decision.Method != playback.PlayDirect {
+		t.Fatalf("opted-in bounded software source = %q, want direct", decision.Method)
+	}
+
+	withoutFeature := caps
+	withoutFeature.ClientFeatures = nil
+	if decision := playback.Resolve(file, withoutFeature, defaultSettings()); decision.Method != playback.PlayTranscode {
+		t.Fatalf("software source without opt-in = %q, want transcode", decision.Method)
+	}
+
+	file.Resolution = "2160p"
+	file.VideoTracks[0].Width = 3840
+	file.VideoTracks[0].Height = 2160
+	if decision := playback.Resolve(file, caps, defaultSettings()); decision.Method != playback.PlayTranscode {
+		t.Fatalf("software source beyond decoder bounds = %q, want transcode", decision.Method)
+	}
+}
+
+func TestResolver_DetailedHardwareEvidenceOverridesLegacyDownloadCeiling(t *testing.T) {
+	file := &models.MediaFile{
+		CodecVideo: "hevc", CodecAudio: "aac", Container: "mp4",
+		Resolution: "2160p", Bitrate: 60_000,
+		VideoTracks: []models.VideoTrack{{
+			Codec: "hevc", Profile: "Main 10", Width: 3840, Height: 2160,
+			FrameRate: "60/1", Bitrate: 60_000, BitDepth: 10,
+		}},
+	}
+	caps := playback.ClientCapabilities{
+		VideoEvidence: playback.EvidencePlatformAttestedV3,
+		CodecsVideo:   []string{"hevc"},
+		CodecsAudio:   []string{"aac"},
+		Containers:    []string{"mp4"},
+		// Older servers conservatively stop here. The detailed-aware server
+		// validates the per-decoder 4K hardware bound instead.
+		MaxResolution: "1080p",
+		VideoDecode: []playback.VideoDecodeCapabilityV3{{
+			Codec: "hevc", BitDepths: []int{8, 10}, MaxWidth: 3840,
+			MaxHeight: 2160, MaxFrameRate: 60, MaxBitrateKbps: 120_000,
+			Hardware: true,
+		}},
+	}
+
+	if decision := playback.Resolve(file, caps, defaultSettings()); decision.Method != playback.PlayDirect {
+		t.Fatalf("detailed 4K hardware source = %q, want direct", decision.Method)
+	}
+}
+
+func TestResolver_DetailedDownloadEvidenceFailsClosedWhenProbeFactsAreIncomplete(t *testing.T) {
+	file := &models.MediaFile{
+		CodecVideo: "av1", CodecAudio: "aac", Container: "mp4",
+		Resolution: "1080p",
+	}
+	caps := playback.ClientCapabilities{
+		ClientFeatures: []string{playback.FeatureSoftwareVideoDecodeV3},
+		VideoEvidence:  playback.EvidencePlatformAttestedV3,
+		CodecsVideo:    []string{"av1"},
+		CodecsAudio:    []string{"aac"},
+		Containers:     []string{"mp4"},
+		MaxResolution:  "2160p",
+		VideoDecode: []playback.VideoDecodeCapabilityV3{{
+			Codec: "av1", BitDepths: []int{8, 10}, MaxWidth: 1920,
+			MaxHeight: 1080, MaxFrameRate: 60, MaxBitrateKbps: 40_000,
+		}},
+	}
+
+	if decision := playback.Resolve(file, caps, defaultSettings()); decision.Method != playback.PlayTranscode {
+		t.Fatalf("incomplete strict evidence = %q, want transcode", decision.Method)
+	}
+}
+
 func TestResolver_Transcode_ResolutionExceeds(t *testing.T) {
 	file := &models.MediaFile{
 		CodecVideo: "h264", CodecAudio: "aac", Container: "mp4",

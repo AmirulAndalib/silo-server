@@ -22,6 +22,12 @@ const (
 	FeatureOutputChangeV3        = "output_change_v1"
 	FeatureDirectStreamResumeV3  = "direct_stream_resume_v1"
 	FeaturePlanSourceDurationV3  = "plan_source_duration_v1"
+	// FeatureSoftwareVideoDecodeV3 lets a strict evidence-tier client opt into
+	// bounded hardware:false video_decode entries. Without the feature, exact
+	// and platform_attested retain their historical hardware-only direct-play
+	// policy, so older clients cannot become software-decoding candidates by
+	// accident.
+	FeatureSoftwareVideoDecodeV3 = "software_video_decode_v1"
 	// FeatureHeaderAuthenticatedMediaV3 advertises an opt-in transport mode
 	// whose client-visible stream and subtitle URLs carry no signed playback
 	// credential. A client that sends this token promises to attach its normal
@@ -52,6 +58,7 @@ func ServerFeaturesV3() []string {
 		FeatureOutputChangeV3,
 		FeatureDirectStreamResumeV3,
 		FeatureHeaderAuthenticatedMediaV3,
+		FeatureSoftwareVideoDecodeV3,
 		// Advertised so a client can tell "this server does not populate
 		// source.duration_seconds" apart from "this server knows the runtime
 		// is genuinely unknown". Without the distinction both look like an
@@ -248,10 +255,11 @@ type VideoDecodeCapabilityV3 struct {
 //
 //   - exact: per-codec profiles/levels/bit-depths/bounds from a real platform
 //     probe (Android MediaCodecList). Full strict validation.
-//   - platform_attested: platform-level decoder attestation without
-//     profile/level enumeration (Apple VideoToolbox). Codec, resolution, bit
-//     depth, frame rate, and dynamic range are validated; profile/level
-//     matching is skipped instead of failing conservative.
+//   - platform_attested: platform-level decoder-stack attestation without
+//     profile/level enumeration (for example Apple's VideoToolbox plus a
+//     pinned software stack). Codec, resolution, bit depth, frame rate, and
+//     dynamic range are validated; profile/level matching is skipped instead
+//     of failing conservative. Software entries require an explicit feature.
 //   - declared: boolean support statements (web MediaSource.isTypeSupported).
 //     Copy routes are granted on codec+container+range match from the flat
 //     codec lists; no strict direct claims are made.
@@ -265,6 +273,44 @@ const (
 
 func validCapabilityEvidenceV3(v CapabilityEvidenceV3) bool {
 	return v == EvidenceExactV3 || v == EvidencePlatformAttestedV3 || v == EvidenceDeclaredV3
+}
+
+func normalizeAndValidateVideoCapabilitiesV3(c *ClientCodecCapabilitiesV3, features []string) error {
+	if !validCapabilityEvidenceV3(c.VideoEvidence) {
+		return errors.New("video_evidence is required and must be exact, platform_attested, or declared")
+	}
+	if len(features) > 64 || len(c.CodecsVideo) > 64 || len(c.CodecsVideoHardware) > 64 || len(c.VideoDecode) > 64 {
+		return errors.New("video capability list exceeds supported size")
+	}
+	for _, feature := range features {
+		if len(feature) > 128 {
+			return errors.New("client feature exceeds supported size")
+		}
+	}
+	for _, values := range [][]string{c.CodecsVideo, c.CodecsVideoHardware} {
+		for i := range values {
+			values[i] = strings.ToLower(strings.TrimSpace(values[i]))
+			if len(values[i]) > 128 {
+				return errors.New("capability value exceeds supported size")
+			}
+		}
+	}
+	for i := range c.VideoDecode {
+		entry := &c.VideoDecode[i]
+		entry.Codec = strings.ToLower(strings.TrimSpace(entry.Codec))
+		if entry.Codec == "" || len(entry.DecoderName) > 128 || entry.MaxWidth < 0 || entry.MaxHeight < 0 || entry.MaxFrameRate < 0 || entry.MaxBitrateKbps < 0 {
+			return errors.New("invalid detailed video capability")
+		}
+		if len(entry.Profiles) > 64 || len(entry.Levels) > 64 || len(entry.BitDepths) > 64 {
+			return errors.New("detailed video capability exceeds supported size")
+		}
+		for _, profile := range entry.Profiles {
+			if len(profile) > 64 {
+				return errors.New("detailed video capability value exceeds supported size")
+			}
+		}
+	}
+	return nil
 }
 
 type ClientCodecCapabilitiesV3 struct {
@@ -893,8 +939,8 @@ func validateSelectedTrackIdentityV3(kind string, track *TrackIdentityV3) error 
 // payload. features carries the request's top-level client_features — the
 // only feature-advertisement location in the contract.
 func validateCapabilitiesV3(c *ClientCodecCapabilitiesV3, ctx *ClientPlaybackContextV3, features []string) error {
-	if !validCapabilityEvidenceV3(c.VideoEvidence) {
-		return errors.New("video_evidence is required and must be exact, platform_attested, or declared")
+	if err := normalizeAndValidateVideoCapabilitiesV3(c, features); err != nil {
+		return err
 	}
 	if !validCapabilityEvidenceV3(c.AudioEvidence) {
 		return errors.New("audio_evidence is required and must be exact, platform_attested, or declared")
@@ -926,25 +972,11 @@ func validateCapabilitiesV3(c *ClientCodecCapabilitiesV3, ctx *ClientPlaybackCon
 			return errors.New("platform_details entry exceeds supported size")
 		}
 	}
-	for _, values := range [][]string{c.CodecsVideo, c.CodecsVideoHardware, c.CodecsAudio, c.Containers} {
+	for _, values := range [][]string{c.CodecsAudio, c.Containers} {
 		for i := range values {
 			values[i] = strings.ToLower(strings.TrimSpace(values[i]))
 			if len(values[i]) > 128 {
 				return errors.New("capability value exceeds supported size")
-			}
-		}
-	}
-	for i := range c.VideoDecode {
-		c.VideoDecode[i].Codec = strings.ToLower(strings.TrimSpace(c.VideoDecode[i].Codec))
-		if c.VideoDecode[i].Codec == "" || len(c.VideoDecode[i].DecoderName) > 128 || c.VideoDecode[i].MaxWidth < 0 || c.VideoDecode[i].MaxHeight < 0 || c.VideoDecode[i].MaxFrameRate < 0 || c.VideoDecode[i].MaxBitrateKbps < 0 {
-			return errors.New("invalid detailed video capability")
-		}
-		if len(c.VideoDecode[i].Profiles) > 64 || len(c.VideoDecode[i].Levels) > 64 || len(c.VideoDecode[i].BitDepths) > 64 {
-			return errors.New("detailed video capability exceeds supported size")
-		}
-		for _, profile := range c.VideoDecode[i].Profiles {
-			if len(profile) > 64 {
-				return errors.New("detailed video capability value exceeds supported size")
 			}
 		}
 	}

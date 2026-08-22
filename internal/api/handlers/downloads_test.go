@@ -17,6 +17,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
+	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 )
 
@@ -369,6 +370,87 @@ func TestHandleCreateDownloadThreadsQuality(t *testing.T) {
 	if resp.Quality != downloads.Quality5Mbps || resp.DeliveryFormat != downloads.FormatTranscode ||
 		resp.TargetBitrateKbps != 5000 || resp.Revision != 2 {
 		t.Fatalf("response = %+v, want quality/delivery/bitrate/revision", resp)
+	}
+}
+
+func TestHandleCreateDownloadPreservesBoundedSoftwareDecodeEvidence(t *testing.T) {
+	svc := &fakeDownloadService{created: &downloads.Download{
+		ID: "dl1", ContentID: "c1", Status: downloads.StatusQueued,
+		Format: downloads.FormatOriginal, Quality: downloads.QualityOriginal,
+		EffectiveQuality: downloads.QualityOriginal,
+	}}
+	h := NewDownloadHandler(svc)
+	body := []byte(`{
+		"content_id":"c1",
+		"quality":"original",
+		"caps":{
+			"client_features":["software_video_decode_v1"],
+			"video_evidence":"platform_attested",
+			"codecs_video":["av1"],
+			"codecs_audio":["aac"],
+			"containers":["mp4"],
+			"max_resolution":"2160p",
+			"video_decode":[{
+				"codec":"av1","bit_depths":[8,10],"max_width":1920,
+				"max_height":1080,"max_frame_rate":60,
+				"max_bitrate_kbps":40000,"hardware":false
+			}]
+		}
+	}`)
+	rec := httptest.NewRecorder()
+	h.HandleCreateDownload(rec, downloadTestRequest(http.MethodPost, "/downloads", body, 7, "", ""))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body: %s)", rec.Code, rec.Body.String())
+	}
+	caps := svc.gotCreateReq.Caps
+	if caps.VideoEvidence != playback.EvidencePlatformAttestedV3 ||
+		len(caps.ClientFeatures) != 1 || caps.ClientFeatures[0] != playback.FeatureSoftwareVideoDecodeV3 ||
+		len(caps.VideoDecode) != 1 || caps.VideoDecode[0].MaxWidth != 1920 ||
+		caps.VideoDecode[0].Hardware {
+		t.Fatalf("service received altered software evidence: %+v", caps)
+	}
+}
+
+func TestHandleCreateDownloadRejectsUnboundedDetailedDecoderInput(t *testing.T) {
+	svc := &fakeDownloadService{}
+	h := NewDownloadHandler(svc)
+	body := []byte(`{
+		"content_id":"c1",
+		"caps":{
+			"client_features":["software_video_decode_v1"],
+			"video_evidence":"platform_attested",
+			"codecs_video":["av1"],
+			"video_decode":[{"codec":"av1","max_width":-1,"hardware":false}]
+		}
+	}`)
+	rec := httptest.NewRecorder()
+	h.HandleCreateDownload(rec, downloadTestRequest(http.MethodPost, "/downloads", body, 7, "", ""))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if svc.gotCreateReq.ContentID != "" {
+		t.Fatal("invalid detailed decoder evidence reached the download service")
+	}
+}
+
+func TestHandleCreateDownloadRejectsSoftwareOptInWithoutDetailedEvidence(t *testing.T) {
+	svc := &fakeDownloadService{}
+	h := NewDownloadHandler(svc)
+	body := []byte(`{
+		"content_id":"c1",
+		"caps":{
+			"client_features":["software_video_decode_v1"],
+			"video_evidence":"platform_attested",
+			"codecs_video":["av1"]
+		}
+	}`)
+	rec := httptest.NewRecorder()
+	h.HandleCreateDownload(rec, downloadTestRequest(http.MethodPost, "/downloads", body, 7, "", ""))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
 	}
 }
 

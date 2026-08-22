@@ -3,6 +3,7 @@
 package playback
 
 import (
+	"errors"
 	"slices"
 
 	"github.com/Silo-Server/silo-server/internal/access"
@@ -26,12 +27,39 @@ const (
 // instead of downmixing+re-encoding to AAC. Distinct from CodecsAudio, which
 // describes what the client itself can decode.
 type ClientCapabilities struct {
-	CodecsVideo            []string `json:"codecs_video"` // e.g., h264, hevc, av1
-	CodecsAudio            []string `json:"codecs_audio"` // e.g., aac, opus, flac
-	AudioPassthroughCodecs []string `json:"audio_passthrough_codecs,omitempty"`
-	Containers             []string `json:"containers"`     // e.g., mp4, webm, mkv
-	MaxResolution          string   `json:"max_resolution"` // e.g., 1080p, 2160p
-	HDR                    bool     `json:"hdr"`
+	ClientFeatures         []string                  `json:"client_features,omitempty"`
+	VideoEvidence          CapabilityEvidenceV3      `json:"video_evidence,omitempty"`
+	CodecsVideo            []string                  `json:"codecs_video"` // e.g., h264, hevc, av1
+	CodecsAudio            []string                  `json:"codecs_audio"` // e.g., aac, opus, flac
+	AudioPassthroughCodecs []string                  `json:"audio_passthrough_codecs,omitempty"`
+	Containers             []string                  `json:"containers"`     // e.g., mp4, webm, mkv
+	MaxResolution          string                    `json:"max_resolution"` // e.g., 1080p, 2160p
+	HDR                    bool                      `json:"hdr"`
+	VideoDecode            []VideoDecodeCapabilityV3 `json:"video_decode,omitempty"`
+}
+
+// NormalizeAndValidateVideoDecode applies the protocol-v3 detailed decoder
+// limits to additive capability payloads such as download creation. Legacy
+// flat-only payloads remain valid and unchanged.
+func (c *ClientCapabilities) NormalizeAndValidateVideoDecode() error {
+	softwareOptIn := HasFeatureV3(c.ClientFeatures, FeatureSoftwareVideoDecodeV3)
+	if c.VideoEvidence == "" && len(c.VideoDecode) == 0 && !softwareOptIn {
+		return nil
+	}
+	if (c.VideoEvidence != EvidenceExactV3 && c.VideoEvidence != EvidencePlatformAttestedV3) || len(c.VideoDecode) == 0 {
+		return errors.New("detailed download video evidence requires exact or platform_attested entries")
+	}
+	detailed := ClientCodecCapabilitiesV3{
+		VideoEvidence: c.VideoEvidence,
+		CodecsVideo:   c.CodecsVideo,
+		VideoDecode:   c.VideoDecode,
+	}
+	if err := normalizeAndValidateVideoCapabilitiesV3(&detailed, c.ClientFeatures); err != nil {
+		return err
+	}
+	c.CodecsVideo = detailed.CodecsVideo
+	c.VideoDecode = detailed.VideoDecode
+	return nil
 }
 
 // AdminSettings controls server-side playback constraints.
@@ -54,6 +82,17 @@ type PlayDecision struct {
 func Resolve(file *models.MediaFile, caps ClientCapabilities, settings AdminSettings) *PlayDecision {
 	// Check if client supports the video codec.
 	videoOK := containsStr(caps.CodecsVideo, file.CodecVideo)
+	detailedVideoEvidence := (caps.VideoEvidence == EvidenceExactV3 || caps.VideoEvidence == EvidencePlatformAttestedV3) && len(caps.VideoDecode) > 0
+	if detailedVideoEvidence {
+		videoOK, _ = videoEligibleV3(SourceDescriptorFromFileV3(file, 0), StartRequestV3{
+			ClientFeatures: caps.ClientFeatures,
+			Capabilities: ClientCodecCapabilitiesV3{
+				VideoEvidence: caps.VideoEvidence,
+				CodecsVideo:   caps.CodecsVideo,
+				VideoDecode:   caps.VideoDecode,
+			},
+		})
+	}
 	// Audio is considered OK if the client can decode the codec itself OR its
 	// sink can passthrough it. Passthrough lets us stream-copy surround audio
 	// (EAC3/AC3/DTS/TrueHD) to HDMI AVRs instead of re-encoding to stereo AAC.
@@ -63,7 +102,7 @@ func Resolve(file *models.MediaFile, caps ClientCapabilities, settings AdminSett
 	containerOK := containsStr(caps.Containers, file.Container)
 
 	// Check resolution constraint.
-	if !resolutionFits(file.Resolution, caps.MaxResolution) {
+	if !detailedVideoEvidence && !resolutionFits(file.Resolution, caps.MaxResolution) {
 		if !settings.TranscodeEnabled {
 			return &PlayDecision{
 				Method: PlayDirect,
