@@ -96,14 +96,10 @@ func (w *observedWriter) ReadFrom(reader io.Reader) (int64, error) {
 	if w.observation.cut.Load() {
 		return 0, context.Canceled
 	}
-	readerFrom, ok := httpstream.ReaderFromOf(w.w)
-	if !ok {
-		return io.Copy(httpstream.WriterOnly(w), reader)
-	}
 	if w.statusCode == 0 {
 		w.statusCode = http.StatusOK
 	}
-	return httpstream.CopyChunked(readerFrom, reader, httpstream.ReadFromChunkDefault, func(n int64, err error) {
+	return httpstream.ForwardReadFrom(w.w, w, reader, httpstream.ReadFromChunkDefault, func(n int64, err error) {
 		if w.bodyEligible {
 			w.observation.AddBytes(n)
 		}

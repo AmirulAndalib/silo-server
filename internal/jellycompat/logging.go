@@ -41,11 +41,7 @@ func (w *loggingResponseWriter) ReadFrom(src io.Reader) (int64, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
-	rf, ok := httpstream.ReaderFromOf(w.ResponseWriter)
-	if !ok {
-		return io.Copy(httpstream.WriterOnly(w), src)
-	}
-	return httpstream.CopyChunked(rf, src, 0, nil)
+	return httpstream.ForwardReadFrom(w.ResponseWriter, w, src, 0, nil)
 }
 
 func (w *loggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
@@ -170,11 +166,7 @@ func (w *debugResponseWriter) ReadFrom(src io.Reader) (int64, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
-	rf, ok := httpstream.ReaderFromOf(w.ResponseWriter)
-	if !ok {
-		return io.Copy(httpstream.WriterOnly(w), src)
-	}
-	return httpstream.CopyChunked(rf, src, httpstream.ReadFromChunkDefault, func(n int64, _ error) {
+	return httpstream.ForwardReadFrom(w.ResponseWriter, w, src, httpstream.ReadFromChunkDefault, func(n int64, _ error) {
 		w.totalBytes += int(n)
 	})
 }

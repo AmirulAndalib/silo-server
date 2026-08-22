@@ -17,6 +17,28 @@ func ReaderFromOf(w http.ResponseWriter) (io.ReaderFrom, bool) {
 	return rf, ok
 }
 
+// ForwardReadFrom forwards a ResponseWriter wrapper's ReadFrom to the writer it
+// wraps, preserving both the kernel sendfile path and the wrapper's accounting.
+//
+// Every wrapper on a media route has to implement this: io.Copy discovers
+// io.ReaderFrom by direct type assertion and never through Unwrap, so a single
+// wrapper that omits ReadFrom kills zero-copy for the entire chain below it.
+// Nine wrappers across five packages hand-rolled the identical tail, which meant
+// any fix to the forwarding logic had to be re-applied nine times and a missed
+// site silently degraded to the io.Copy fallback.
+//
+// inner is the wrapped writer; self is the wrapper, used only for the fallback
+// so that a writer without a ReaderFrom still routes bytes through the wrapper's
+// own Write rather than around it. chunk and record are passed to CopyChunked.
+func ForwardReadFrom(inner http.ResponseWriter, self io.Writer, src io.Reader, chunk int64, record func(n int64, err error)) (int64, error) {
+	rf, ok := ReaderFromOf(inner)
+	if !ok {
+		// WriterOnly hides ReadFrom so io.Copy cannot recurse into the caller.
+		return io.Copy(WriterOnly(self), src)
+	}
+	return CopyChunked(rf, src, chunk, record)
+}
+
 // CopyChunked drives rf.ReadFrom in slices of chunk bytes, calling record after
 // each slice. A non-positive chunk performs a single unbounded transfer.
 func CopyChunked(rf io.ReaderFrom, src io.Reader, chunk int64, record func(n int64, err error)) (int64, error) {

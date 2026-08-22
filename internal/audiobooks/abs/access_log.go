@@ -108,11 +108,7 @@ func (s *statusRecorder) ReadFrom(src io.Reader) (int64, error) {
 	if s.status == 0 {
 		s.status = http.StatusOK
 	}
-	rf, ok := httpstream.ReaderFromOf(s.ResponseWriter)
-	if !ok {
-		return io.Copy(httpstream.WriterOnly(s), src)
-	}
-	return httpstream.CopyChunked(rf, src, httpstream.ReadFromChunkDefault, func(n int64, _ error) {
+	return httpstream.ForwardReadFrom(s.ResponseWriter, s, src, httpstream.ReadFromChunkDefault, func(n int64, _ error) {
 		s.bytes += int(n)
 	})
 }

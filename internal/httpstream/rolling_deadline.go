@@ -152,12 +152,6 @@ func (s *RollingDeadlineWriter) Write(p []byte) (int, error) {
 // (sendfile for *os.File bodies, as used by http.ServeContent) while still
 // rolling the deadline between bounded slices.
 func (s *RollingDeadlineWriter) ReadFrom(r io.Reader) (int64, error) {
-	rf, ok := ReaderFromOf(s.w)
-	if !ok {
-		// WriterOnly hides this method so io.Copy doesn't recurse into it.
-		s.bump()
-		return io.Copy(WriterOnly(s), r)
-	}
 	if s.statusCode == 0 {
 		s.statusCode = http.StatusOK
 	}
@@ -165,7 +159,7 @@ func (s *RollingDeadlineWriter) ReadFrom(r io.Reader) (int64, error) {
 	// headers and then waits on readiness before its first write would otherwise
 	// run that slice against the window set at construction.
 	s.forceBump()
-	return CopyChunked(rf, r, readFromChunk, func(n int64, err error) {
+	return ForwardReadFrom(s.w, s, r, readFromChunk, func(n int64, err error) {
 		s.forceBump()
 		s.recordWrite(n, err)
 	})

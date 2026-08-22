@@ -75,11 +75,7 @@ func (w *compatImageProxyTagResponseWriter) ReadFrom(src io.Reader) (int64, erro
 }
 
 func (w *compatImageProxyTagResponseWriter) readFromPassthrough(src io.Reader) (int64, error) {
-	rf, ok := httpstream.ReaderFromOf(w.ResponseWriter)
-	if !ok {
-		return io.Copy(httpstream.WriterOnly(w), src)
-	}
-	return httpstream.CopyChunked(rf, src, 0, nil)
+	return httpstream.ForwardReadFrom(w.ResponseWriter, w, src, 0, nil)
 }
 
 func (w *compatImageProxyTagResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

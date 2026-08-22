@@ -88,11 +88,7 @@ func (w *meteredResponseWriter) Write(b []byte) (int, error) {
 }
 
 func (w *meteredResponseWriter) ReadFrom(src io.Reader) (int64, error) {
-	rf, ok := httpstream.ReaderFromOf(w.ResponseWriter)
-	if !ok {
-		return io.Copy(httpstream.WriterOnly(w), src)
-	}
-	return httpstream.CopyChunked(rf, src, meterChunk, func(n int64, _ error) {
+	return httpstream.ForwardReadFrom(w.ResponseWriter, w, src, meterChunk, func(n int64, _ error) {
 		w.meter.Add(n)
 	})
 }

@@ -78,11 +78,7 @@ func (w *statusWriter) ReadFrom(src io.Reader) (int64, error) {
 	if !w.written {
 		w.status, w.written = http.StatusOK, true
 	}
-	rf, ok := httpstream.ReaderFromOf(w.ResponseWriter)
-	if !ok {
-		return io.Copy(httpstream.WriterOnly(w), src)
-	}
-	return httpstream.CopyChunked(rf, src, 0, nil)
+	return httpstream.ForwardReadFrom(w.ResponseWriter, w, src, 0, nil)
 }
 
 // Hijack implements http.Hijacker, required for WebSocket upgrades.
