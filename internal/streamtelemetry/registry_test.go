@@ -517,3 +517,98 @@ func TestPendingRealtimeStateIsPrunedBySweep(t *testing.T) {
 		t.Fatalf("pending realtime entries after sweep = %d, want 0", held)
 	}
 }
+
+// Ranged byte routes issue many small GETs for one file. A record per request
+// would exhaust MaxTransfers inside a retention window and leave RequestCount —
+// which exists to count exactly this — pinned at 1.
+func TestRangedTransferRequestsFoldIntoOneRecord(t *testing.T) {
+	cfg := testConfig()
+	cfg.Retention = time.Hour // keep the record alive across the sweep below
+	registry := NewRegistry(cfg, NewLocalStore(), slog.New(slog.DiscardHandler))
+	handler := registry.Observe(testRoute(ClassTransfer))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		Attach(r.Context(), testAttachment(""))
+		_, _ = w.Write([]byte("chunk"))
+	}))
+	const requests = 25
+	for range requests {
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/media/x", nil))
+	}
+
+	snapshot := registry.Sweep()
+	if len(snapshot.Transfers) != 1 {
+		t.Fatalf("transfers = %d, want 1 folded record", len(snapshot.Transfers))
+	}
+	transfer := snapshot.Transfers[0]
+	if transfer.RequestCount != requests {
+		t.Fatalf("request count = %d, want %d", transfer.RequestCount, requests)
+	}
+	if transfer.BytesAccepted != requests*int64(len("chunk")) {
+		t.Fatalf("bytes = %d, want %d", transfer.BytesAccepted, requests*int64(len("chunk")))
+	}
+	if registry.transferReservations.Load() != 1 {
+		t.Fatalf("reservations = %d, want 1", registry.transferReservations.Load())
+	}
+}
+
+// A different file, subject or route is a different pour.
+func TestTransfersSeparateByFileAndSubject(t *testing.T) {
+	cfg := testConfig()
+	cfg.Retention = time.Hour
+	registry := NewRegistry(cfg, NewLocalStore(), slog.New(slog.DiscardHandler))
+	serve := func(attachment Attachment) {
+		handler := registry.Observe(testRoute(ClassTransfer))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			Attach(r.Context(), attachment)
+			_, _ = w.Write([]byte("chunk"))
+		}))
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/media/x", nil))
+	}
+	base := testAttachment("")
+	serve(base)
+	otherFile := base
+	otherFile.MediaFileID = 43
+	serve(otherFile)
+	otherUser := base
+	otherUser.Subject = UserSubject(8)
+	serve(otherUser)
+
+	if snapshot := registry.Sweep(); len(snapshot.Transfers) != 3 {
+		t.Fatalf("transfers = %d, want 3 distinct pours", len(snapshot.Transfers))
+	}
+}
+
+// HasIdentityConflict and IdentityConflicts must agree. A started-at authority
+// upgrade that confirms the recorded instant is not a conflict at all and must
+// not consume the per-session budget; one that moves it is, and sets the flag.
+func TestStartedAtAuthorityUpgradeAndConflictAgree(t *testing.T) {
+	at := time.Unix(100, 0)
+
+	t.Run("pure upgrade records nothing", func(t *testing.T) {
+		session := newLogicalSession(Attachment{Subject: UserSubject(7), SessionID: "s",
+			StartedAt: at, StartedAtSource: StartedAtSourceFirstSeen}, testConfig(), at)
+		session.recordConflicts(Attachment{Subject: UserSubject(7), SessionID: "s",
+			StartedAt: at, StartedAtSource: StartedAtSourceClaim}, at, 16)
+		if session.hasIdentityConflict || len(session.identityConflicts) != 0 {
+			t.Fatalf("benign upgrade recorded a conflict: %+v", session.identityConflicts)
+		}
+		if session.startedAtSource != StartedAtSourceClaim {
+			t.Fatalf("authority did not upgrade: %v", session.startedAtSource)
+		}
+	})
+
+	t.Run("moved value sets the flag and the list", func(t *testing.T) {
+		session := newLogicalSession(Attachment{Subject: UserSubject(7), SessionID: "s",
+			StartedAt: at, StartedAtSource: StartedAtSourceFirstSeen}, testConfig(), at)
+		moved := at.Add(-90 * time.Second)
+		session.recordConflicts(Attachment{Subject: UserSubject(7), SessionID: "s",
+			StartedAt: moved, StartedAtSource: StartedAtSourceClaim}, at, 16)
+		if !session.hasIdentityConflict {
+			t.Fatal("started_at was replaced but HasIdentityConflict is false")
+		}
+		if len(session.identityConflicts) != 1 || session.identityConflicts[0].Field != "started_at_replaced" {
+			t.Fatalf("conflicts = %+v", session.identityConflicts)
+		}
+		if !session.startedAt.Equal(moved) {
+			t.Fatalf("started at = %v, want %v", session.startedAt, moved)
+		}
+	})
+}

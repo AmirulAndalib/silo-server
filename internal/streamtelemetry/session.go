@@ -93,8 +93,13 @@ type transfer struct {
 	requestCount       int64
 	route              MediaRoute
 	capture            CaptureSet
-	observation        *Observation
-	outcomes           map[httpstream.StreamOutcome]int64
+	// observations holds every in-flight request folded into this transfer.
+	// Ranged byte routes (audiobook file reads, download resumes, ebook page
+	// fetches) issue many overlapping small GETs for the same file, so a
+	// transfer is a subject pouring one file over one route, not one request —
+	// which is what requestCount has always claimed to count.
+	observations map[string]*Observation
+	outcomes     map[httpstream.StreamOutcome]int64
 }
 
 func newLogicalSession(a Attachment, cfg Config, observedAt time.Time) *logicalSession {
@@ -175,16 +180,29 @@ func (s *logicalSession) recordConflicts(a Attachment, observedAt time.Time, max
 		s.playMethods.add(a.PlayMethod)
 	}
 	if rank := startedAtRank(a.StartedAtSource); !a.StartedAt.IsZero() && rank > startedAtRank(s.startedAtSource) {
-		old := s.startedAt.Format(time.RFC3339Nano)
+		previous := s.startedAt
 		s.startedAt = a.StartedAt
 		s.startedAtSource = a.StartedAtSource
 		s.startedDegraded = a.StartedAtSource == StartedAtSourceIssuedAt || a.StartedAtSource == StartedAtSourceFirstSeen
-		if len(s.identityConflicts) < max {
-			s.identityConflicts = append(s.identityConflicts, IdentityConflict{
-				Field: "started_at_replaced", Existing: old, Offered: a.StartedAt.Format(time.RFC3339Nano), ObservedAt: observedAt,
-			})
-		} else {
-			s.identityOverflowed = true
+		// Only a change of VALUE is a conflict. A pure authority upgrade that
+		// confirms the instant already recorded — the common proxy-then-claim
+		// case — is not one, and recording it consumed the per-session conflict
+		// budget and could set IdentityConflictsOverflowed for nothing. When the
+		// value does move, two sources genuinely disagree about when playback
+		// began, so hasIdentityConflict is set alongside the entry: consumers
+		// filtering on the flag and consumers reading the list must not
+		// disagree about whether a session is conflicted.
+		if !previous.Equal(a.StartedAt) {
+			s.hasIdentityConflict = true
+			if len(s.identityConflicts) < max {
+				s.identityConflicts = append(s.identityConflicts, IdentityConflict{
+					Field:    "started_at_replaced",
+					Existing: previous.Format(time.RFC3339Nano),
+					Offered:  a.StartedAt.Format(time.RFC3339Nano), ObservedAt: observedAt,
+				})
+			} else {
+				s.identityOverflowed = true
+			}
 		}
 	}
 }

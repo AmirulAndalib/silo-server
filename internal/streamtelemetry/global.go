@@ -213,6 +213,17 @@ func BuildGlobalView(set PublisherSet, at time.Time, params ViewParams) GlobalMo
 		ref := PublisherRef{PublisherID: member.PublisherID, NodeID: snapshot.NodeID}
 		status := PublisherStatus{PublisherRef: ref, LastHeartbeat: member.LastHeartbeat, CapturedAt: snapshot.CapturedAt,
 			Epoch: snapshot.PublisherEpoch, Sequence: snapshot.Sequence, Truncated: snapshot.Truncated}
+		// Skew is only detectable in one direction from a single sample. A
+		// publisher whose clock runs AHEAD stamps a future time and is caught
+		// here. One running BEHIND is indistinguishable from one that stopped
+		// publishing: the roster score is the publisher's own CapturedAt, so
+		// heartbeat and snapshot drift together and there is no independent
+		// clock to compare against. Such a publisher is classified stale and its
+		// sessions leave the merged view — the safe direction, since the
+		// alternative is serving data that may be minutes old as current.
+		// PublisherStatus carries Epoch and Sequence precisely so two successive
+		// reads of the parity endpoint distinguish "behind but advancing" from
+		// "stalled"; BuildGlobalView is a pure function of one sample and cannot.
 		heartbeatAge := at.Sub(member.LastHeartbeat)
 		if heartbeatAge < -params.Freshness {
 			view.ClockSkewSuspected = true

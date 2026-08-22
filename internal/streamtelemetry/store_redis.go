@@ -123,6 +123,15 @@ func (s *RedisStore) Publish(ctx context.Context, snapshot Snapshot) error {
 		return err
 	}
 	key := s.snapshotKey(snapshot.PublisherID)
+	// A delta publish rewrites only the fields whose local digest changed, so it
+	// silently assumes the hash still holds everything else. It may not: a
+	// maxmemory eviction, an out-of-band DEL, a failover to a replica missing
+	// the key, or a publish gap long enough for PExpire to lapse all drop it
+	// without an error. HLEN runs inside the same transaction, so it reports the
+	// post-write field count; a mismatch means the key was reconstructed from
+	// the delta alone and the next publish must be full. Costs one pipelined
+	// command and self-heals in one sweep instead of up to FullResyncEvery.
+	var fieldCount *redis.IntCmd
 	_, err = s.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		if full {
 			pipe.Del(ctx, key)
@@ -152,6 +161,9 @@ func (s *RedisStore) Publish(ctx context.Context, snapshot Snapshot) error {
 		cutoff := snapshot.CapturedAt.Add(-2 * s.cfg.MembershipTTL).UnixNano()
 		pipe.ZRemRangeByScore(ctx, s.rosterKey(), "-inf", "("+strconv.FormatInt(cutoff, 10))
 		pipe.PExpire(ctx, s.rosterKey(), 10*s.cfg.MembershipTTL)
+		if !full {
+			fieldCount = pipe.HLen(ctx, key)
+		}
 		return nil
 	})
 	if err != nil {
@@ -164,6 +176,11 @@ func (s *RedisStore) Publish(ctx context.Context, snapshot Snapshot) error {
 		s.published[field] = digest128(value)
 	}
 	s.needFullResync = false
+	if fieldCount != nil {
+		if held, hlenErr := fieldCount.Result(); hlenErr != nil || held != int64(len(fields)) {
+			s.needFullResync = true
+		}
+	}
 	s.publishCount++
 	return nil
 }

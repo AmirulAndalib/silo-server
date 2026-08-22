@@ -5,6 +5,7 @@ import (
 	"hash/maphash"
 	"log/slog"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -151,17 +152,42 @@ func (r *Registry) attach(obs *Observation, attachment Attachment) {
 		attachment.TokenIssuedAtSource = TokenIssuedAtSourceNone
 	}
 	if obs.route.Class == ClassTransfer {
-		if !reserve(&r.transferReservations, r.cfg.MaxTransfers) {
+		// One record per subject/file/route, not one per HTTP request. Ranged
+		// byte routes issue many small overlapping GETs — an audiobook client
+		// alone can sustain tens per second — and a record per request would
+		// exhaust MaxTransfers within one retention window while requestCount,
+		// which exists to count exactly this, stayed pinned at 1.
+		key := transferKey(attachment, obs.route)
+		r.transfersMu.Lock()
+		t := r.transfers[key]
+		if t == nil {
+			if !reserve(&r.transferReservations, r.cfg.MaxTransfers) {
+				r.transfersMu.Unlock()
+				obs.countingOnly = true
+				r.drop("transfer capacity exhausted")
+				return
+			}
+			t = &transfer{id: key, subject: attachment.Subject, profileID: attachment.ProfileID,
+				mediaFileID: attachment.MediaFileID, route: obs.route, capture: obs.Capture,
+				observations: make(map[string]*Observation),
+				outcomes:     make(map[httpstream.StreamOutcome]int64)}
+			r.transfers[key] = t
+		}
+		t.mu.Lock()
+		if len(t.observations) >= r.cfg.MaxObservationsPerSession {
+			t.mu.Unlock()
+			r.transfersMu.Unlock()
 			obs.countingOnly = true
-			r.drop("transfer capacity exhausted")
+			r.drop("per-transfer observation capacity exhausted")
 			return
 		}
-		t := &transfer{id: obs.id, subject: attachment.Subject, profileID: attachment.ProfileID,
-			mediaFileID: attachment.MediaFileID, openObservations: 1, requestCount: 1,
-			route: obs.route, capture: obs.Capture, observation: obs,
-			outcomes: make(map[httpstream.StreamOutcome]int64)}
-		r.transfersMu.Lock()
-		r.transfers[t.id] = t
+		t.observations[obs.id] = obs
+		t.openObservations++
+		t.requestCount++
+		// The newest request's capture wins: viewer IP, device and client can
+		// legitimately change across a resumed download.
+		t.capture = obs.Capture
+		t.mu.Unlock()
 		r.transfersMu.Unlock()
 		obs.attachment = &attachment
 		obs.target.transfer = t
@@ -262,7 +288,7 @@ func (r *Registry) release(obs *Observation, outcome httpstream.StreamOutcome) {
 		t.openObservations--
 		t.lastObservationEnd = now()
 		t.outcomes[outcome]++
-		t.observation = nil
+		delete(t.observations, obs.id)
 		t.mu.Unlock()
 	} else if target.session != nil {
 		s := target.session
@@ -331,6 +357,14 @@ func maxPendingRealtimePerShard(maxSessions int64) int64 {
 		return 0
 	}
 	return maxSessions/shardCount + 1
+}
+
+// transferKey identifies one pour: a subject moving one media file over one
+// route. Deliberately excludes anything per-request so overlapping Range GETs
+// for the same file fold into a single record.
+func transferKey(a Attachment, route MediaRoute) string {
+	return string(a.Subject.Kind) + "\x00" + a.Subject.ID + "\x00" + a.ProfileID + "\x00" +
+		strconv.Itoa(a.MediaFileID) + "\x00" + routeID(route.Method, route.Pattern)
 }
 
 func (r *Registry) shard(id string) *sessionShard {
@@ -474,8 +508,8 @@ func (r *Registry) sweep(sweepStart time.Time) Snapshot {
 	for id, t := range r.transfers {
 		t.mu.Lock()
 		total := t.bytesFolded
-		if t.observation != nil {
-			total += t.observation.BytesAccepted()
+		for _, obs := range t.observations {
+			total += obs.BytesAccepted()
 		}
 		if total > t.lastSweptBytes {
 			t.lastByteAccepted = sweepStart

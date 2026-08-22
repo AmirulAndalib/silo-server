@@ -80,6 +80,18 @@ func (w *observedWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// ReadFrom samples the cut flag once, at entry, whereas Write samples it every
+// ~32 KB. That difference is protocol-visible: on HTTP/1.1 the h1 writer is an
+// io.ReaderFrom, so a cut cannot interrupt an in-flight transfer and a 20 GB
+// direct play drains to the end; on HTTP/2 there is no ReaderFrom, the fallback
+// io.Copy goes through Write, and the same cut lands within 32 KB.
+//
+// Latent today — nothing calls cut.Store and this package is observational
+// (doc.go) — and deliberately left that way rather than half-fixed: a per-slice
+// cut check here would still only act at readFromChunk granularity, so the two
+// protocols would still disagree, just less visibly. The enforcement change that
+// introduces a caller for cut.Store owns making the granularity uniform, and
+// must land with a test that a cut behaves identically over h1 and h2.
 func (w *observedWriter) ReadFrom(reader io.Reader) (int64, error) {
 	if w.observation.cut.Load() {
 		return 0, context.Canceled
