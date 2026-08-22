@@ -511,6 +511,119 @@ func TestHandleStartPlaybackV3ReturnsExecutableDirectPlan(t *testing.T) {
 	}
 }
 
+func TestHandleStartPlaybackV3NegotiatesHeaderAuthenticatedDirectAndSubtitleURLs(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		optIn      bool
+		wantStream bool
+	}{
+		{name: "opted-in URLs carry no playback credential", optIn: true},
+		{name: "legacy URL keeps restart token", wantStream: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			file := v3HandlerFixtureFile(t)
+			file.ExternalSubtitles = []models.ExternalSubtitle{{Path: writePlaybackTestMediaFile(t, "movie.eng.srt"), Language: "eng", Format: "srt"}}
+			manager := playback.NewSessionManager(0, 0)
+			handler := NewPlaybackHandler(manager, testPlaybackFileResolver{file: file})
+			handler.JWTSecret = "test-stream-signing-secret"
+			handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"allow_4k_transcode": "true"}}
+			handler.ItemAccess = allowAllPlaybackItemAccess{}
+
+			start := v3HandlerStartRequest()
+			if test.optIn {
+				start.ClientFeatures = append(start.ClientFeatures, playback.FeatureHeaderAuthenticatedMediaV3)
+			}
+			subtitleIndex := 0
+			start.SubtitleTrackID = playback.TrackIDV3(file.ID, "subtitle", subtitleIndex)
+			start.SubtitleTrackIndex = &subtitleIndex
+			rr := httptest.NewRecorder()
+			handler.HandleStartPlayback(rr, httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, start))).WithContext(newAuthorizedPlaybackContext()))
+
+			var response playback.DecisionResponseV3
+			if rr.Code != http.StatusCreated || json.Unmarshal(rr.Body.Bytes(), &response) != nil || response.PlaybackPlan == nil {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			streamURL, err := url.Parse(response.PlaybackPlan.Stream.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if streamURL.IsAbs() || streamURL.Path != "/stream/"+response.SessionID {
+				t.Fatalf("stream URL = %q, want API-local session route", response.PlaybackPlan.Stream.URL)
+			}
+			if got := streamURL.Query().Get(streamTokenParam); (got != "") != test.wantStream {
+				t.Fatalf("stream token present = %v for URL %q, want %v", got != "", response.PlaybackPlan.Stream.URL, test.wantStream)
+			}
+			if len(response.PlaybackPlan.Stream.Headers) != 0 {
+				t.Fatalf("plan persisted bearer material in headers: %#v", response.PlaybackPlan.Stream.Headers)
+			}
+
+			artifact := response.PlaybackPlan.Subtitle.Artifact
+			if artifact == nil || len(response.PlaybackPlan.Subtitle.Inventory) != 1 {
+				t.Fatalf("subtitle contract = %#v", response.PlaybackPlan.Subtitle)
+			}
+			for _, raw := range []string{artifact.URL, response.PlaybackPlan.Subtitle.Inventory[0].URL} {
+				parsed, parseErr := url.Parse(raw)
+				if parseErr != nil || parsed.IsAbs() || parsed.Query().Get(streamTokenParam) != "" || !strings.HasPrefix(parsed.Path, "/stream/"+response.SessionID+"/subtitles/") {
+					t.Fatalf("subtitle URL = %q, want tokenless API-local route (parse error %v)", raw, parseErr)
+				}
+			}
+			if test.optIn && !playback.HasFeatureV3(response.ServerFeatures, playback.FeatureHeaderAuthenticatedMediaV3) {
+				t.Fatalf("server features = %v, want %q", response.ServerFeatures, playback.FeatureHeaderAuthenticatedMediaV3)
+			}
+		})
+	}
+}
+
+func TestHandleReplanPlaybackV3CannotDowngradeHeaderAuthenticatedAttempt(t *testing.T) {
+	file := v3HandlerFixtureFile(t)
+	manager := playback.NewSessionManager(0, 0)
+	handler := NewPlaybackHandler(manager, testPlaybackFileResolver{file: file})
+	handler.JWTSecret = "test-stream-signing-secret"
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"allow_4k_transcode": "true"}}
+	handler.ItemAccess = allowAllPlaybackItemAccess{}
+
+	start := v3HandlerStartRequest()
+	start.ClientFeatures = append(start.ClientFeatures, playback.FeatureHeaderAuthenticatedMediaV3)
+	startRR := httptest.NewRecorder()
+	handler.HandleStartPlayback(startRR, httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, start))).WithContext(newAuthorizedPlaybackContext()))
+	var started playback.DecisionResponseV3
+	if startRR.Code != http.StatusCreated || json.Unmarshal(startRR.Body.Bytes(), &started) != nil || started.PlaybackPlan == nil {
+		t.Fatalf("start status=%d body=%s", startRR.Code, startRR.Body.String())
+	}
+
+	nextContext := start.ClientPlaybackContext
+	nextContext.Output.OutputContextID = "route-2"
+	replanned := postPlaybackReplanV3(t, handler, started.SessionID, playback.ReplanRequestV3{
+		ProtocolVersion:       playback.ProtocolV3,
+		ClientFeatures:        []string{}, // explicit attempted downgrade
+		Operation:             playback.ReplanOperationOutputChangeV3,
+		PlaybackAttemptID:     start.PlaybackAttemptID,
+		ReplanRequestID:       "header-auth-replan-0001",
+		FailedPlanID:          started.PlaybackPlan.PlanID,
+		PlanAttemptID:         "header-auth-attempt-0001",
+		PlanAttemptKey:        started.PlaybackPlan.PlanAttemptKey,
+		AttemptCount:          1,
+		PositionSeconds:       12,
+		SelectedTracks:        started.PlaybackPlan.SelectedTracks,
+		Capabilities:          start.Capabilities,
+		ClientPlaybackContext: nextContext,
+	})
+	if replanned.PlaybackPlan == nil {
+		t.Fatalf("replan = %#v", replanned)
+	}
+	parsed, err := url.Parse(replanned.PlaybackPlan.Stream.URL)
+	if err != nil || parsed.IsAbs() || parsed.Query().Get(streamTokenParam) != "" {
+		t.Fatalf("replan URL = %q, want tokenless API-local route (parse error %v)", replanned.PlaybackPlan.Stream.URL, err)
+	}
+	record, err := handler.PlanStoreV3.GetAttempt(context.Background(), started.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !playback.HasFeatureV3(record.NormalizedRequest.ClientFeatures, playback.FeatureHeaderAuthenticatedMediaV3) {
+		t.Fatalf("durable client features = %v, secure transport mode was downgraded", record.NormalizedRequest.ClientFeatures)
+	}
+}
+
 // The inventory is the authoritative subtitle menu, so it has to be fetchable
 // before the user has picked anything. A start that resolves to `off` still
 // publishes session-scoped URLs on every sidecar entry; gating them on the
@@ -2395,6 +2508,72 @@ func TestPrepareTransportV3RequiresRemoteManifestReadiness(t *testing.T) {
 	}
 }
 
+func TestPrepareTransportV3KeepsHeaderAuthenticatedRemoteHLSBehindAPI(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		features  []string
+		wantProxy bool
+	}{
+		{name: "header authenticated", features: []string{playback.FeatureHeaderAuthenticatedMediaV3}},
+		{name: "legacy proxy URL", wantProxy: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
+					writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{
+						{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
+						{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+					}})
+				case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
+					writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{Status: "started"})
+				case r.Method == http.MethodDelete:
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer remote.Close()
+
+			handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+			handler.JWTSecret = "test-stream-signing-secret"
+			handler.NodePlanner = staticNodePlannerV3{plan: nodepool.Plan{
+				TranscodeNode: &nodepool.Node{URL: remote.URL},
+				ProxyNode:     &nodepool.Node{URL: "http://proxy.example"},
+			}}
+			plan := &playback.PlanV3{
+				PlanID:   "plan:remote-header-auth",
+				Delivery: playback.DeliveryTranscodeHLSV3,
+				Transformations: []playback.TransformationV3{
+					{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
+					{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+				},
+			}
+			request := withHeaderAuthenticatedMediaV3(httptest.NewRequest(http.MethodPost, "/", nil), test.features)
+			transport, transportErr := handler.prepareTransportV3(request, &playback.Session{ID: "session-remote-auth", UserID: 7, ProfileID: "profile-1"}, v3HandlerFixtureFile(t), playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac"})
+			if transportErr != nil {
+				t.Fatalf("prepare remote HLS: %v", transportErr)
+			}
+			defer transport.rollback()
+
+			parsed, err := url.Parse(transport.url)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.wantProxy {
+				if !parsed.IsAbs() || parsed.Host != "proxy.example" || !strings.HasPrefix(parsed.Path, "/stream/transcode/") {
+					t.Fatalf("legacy HLS URL = %q, want signed proxy route", transport.url)
+				}
+			} else if parsed.IsAbs() || parsed.Path != "/playback/transcode/session-remote-auth/master.m3u8" || parsed.RawQuery != "" || strings.Contains(transport.url, "proxy.example") {
+				t.Fatalf("header-authenticated HLS URL = %q, want tokenless API-local manifest", transport.url)
+			}
+			if transport.nodeURL != remote.URL {
+				t.Fatalf("remote executor = %q, want %q behind API facade", transport.nodeURL, remote.URL)
+			}
+		})
+	}
+}
+
 func TestPrepareTransportV3SendsResolvedCopyAnchorToRemoteExecutor(t *testing.T) {
 	var startRequest transcodenode.TranscodeStartRequest
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3781,6 +3960,49 @@ func TestPrepareTransportV3RoutesProgressiveRemuxThroughProxyNodeWithSeekAndDV(t
 	}
 	if !claims.TranscodeAudio {
 		t.Fatal("token must tell the proxy to convert audio")
+	}
+}
+
+func TestPrepareTransportV3NegotiatesHeaderAuthenticatedProgressiveRemuxURL(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		features  []string
+		wantToken bool
+	}{
+		{name: "header authenticated", features: []string{playback.FeatureHeaderAuthenticatedMediaV3}},
+		{name: "legacy", wantToken: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+			handler.JWTSecret = "test-stream-signing-secret"
+			stubCopySeekAnchorV3(handler)
+			plan := identityProxyPlanV3(playback.DeliveryRemuxProgressiveV3)
+			plan.EffectiveMediaFileID = 42
+			plan.Timeline = playback.TimelineV3{SourceStartSeconds: 39.5}
+			request := withHeaderAuthenticatedMediaV3(httptest.NewRequest(http.MethodPost, "/", nil), test.features)
+
+			transport, transportErr := handler.prepareTransportV3(
+				request,
+				&playback.Session{ID: "session-remux-auth", UserID: 7, ProfileID: "profile-1", MediaFileID: 42},
+				v3HandlerFixtureFile(t),
+				playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayRemux, TargetAudioCodec: "aac"},
+			)
+			if transportErr != nil {
+				t.Fatalf("prepare remux: %v", transportErr)
+			}
+			defer transport.rollback()
+
+			parsed, err := url.Parse(transport.url)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parsed.IsAbs() || parsed.Path != "/stream/session-remux-auth" || parsed.Query().Get("seek") != "39.5" {
+				t.Fatalf("remux URL = %q, want API-local seek route", transport.url)
+			}
+			if got := parsed.Query().Get(streamTokenParam); (got != "") != test.wantToken {
+				t.Fatalf("remux stream token present = %v for URL %q, want %v", got != "", transport.url, test.wantToken)
+			}
+		})
 	}
 }
 

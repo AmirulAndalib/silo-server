@@ -2,6 +2,9 @@
 
 ## 2026-08-21
 
+### Keep signed playback credentials out of client-visible media URLs
+Playback protocol v3 now advertises the engine-neutral `header_authenticated_media_v1` opt-in. Capable clients receive API-local direct, remux, HLS, subtitle, and font URLs without a signed stream token in the query or path, and attach their current API Authorization header to every media request instead. Existing clients keep the restart-resilient token URLs unchanged. Remote HLS executors can still run behind the API route, while direct/progressive proxy delivery is bypassed in this mode; transparent reconstruction after an API restart is intentionally replaced by a fresh client playback attempt.
+
 ### Admin accounts are never capped by an access group
 An account promoted to admin kept its access group, so the Default Group's stream cap and library list still applied to it. Admins are now ungrouped everywhere: promoting clears the group, demoting lands the account on the default group unless the request names one, and `POST /admin/users`, `PUT /admin/users/{id}`, and `POST /admin/invitations` reject `role: "admin"` together with an `access_group_id` with `422`. Policy resolution ignores any group an admin row still carries, and a migration clears the admins that were grouped before this change.
 

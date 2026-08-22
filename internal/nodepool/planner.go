@@ -231,6 +231,36 @@ func (p *Planner) PlanSessionWith(sessionID, currentTranscodeURL string, needsTr
 	return plan
 }
 
+// PlanTranscodeSessionWithLocalEgress selects and reserves only a transcode
+// node. The API server remains the client-facing media endpoint and relays the
+// selected node's manifest and segments, so no proxy node is needed or charged
+// against its job/bandwidth budget. This is intentionally separate from
+// PlanSessionWith: its normal grouped-node policy assumes the client talks to a
+// selected proxy directly.
+func (p *Planner) PlanTranscodeSessionWithLocalEgress(sessionID, currentTranscodeURL string, eligible func(*Node) bool) Plan {
+	if p == nil || p.transcodes == nil || sessionID == "" {
+		return Plan{}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := p.now()
+	p.pruneReservations(now)
+	delete(p.reserved, sessionID)
+
+	transcodes := p.transcodes.Nodes()
+	groupHealthy := groupHealth(nil, transcodes)
+	if eligible != nil {
+		transcodes = filterNodes(transcodes, eligible)
+	}
+	node := p.pickLocalEgressTranscode(transcodes, groupHealthy, currentTranscodeURL, now)
+	if node == nil {
+		return Plan{}
+	}
+	p.reserved[sessionID] = &reservation{transcodeURL: node.URL, createdAt: now}
+	return Plan{TranscodeNode: node}
+}
+
 // filterNodes returns the nodes accepted by keep, preserving pool order so
 // round-robin cursors stay meaningful across selections.
 func filterNodes(nodes []*Node, keep func(*Node) bool) []*Node {
@@ -360,6 +390,33 @@ func (p *Planner) pickTranscode(transcodes, proxies []*Node, groupHealthy map[st
 		}
 		if best == nil || p.effectiveJobs(n, now) < p.effectiveJobs(best, now) {
 			best = n
+		}
+	}
+	if current == nil || best == nil || current == best {
+		return best
+	}
+	if p.effectiveJobs(best, now)+2 <= p.effectiveJobs(current, now) {
+		return best
+	}
+	return current
+}
+
+// pickLocalEgressTranscode applies the transcode half of normal session
+// admission without requiring a healthy proxy partner. The API server is the
+// egress hop for this route, so unrelated proxy health and capacity must not
+// suppress an otherwise healthy transcode executor.
+func (p *Planner) pickLocalEgressTranscode(transcodes []*Node, groupHealthy map[string]bool, currentURL string, now time.Time) *Node {
+	var best, current *Node
+	for _, node := range transcodes {
+		if node == nil || !node.Healthy || !node.Enabled || !p.underCap(node, now) ||
+			node.Group != nil && !groupHealthy[*node.Group] {
+			continue
+		}
+		if node.URL == currentURL {
+			current = node
+		}
+		if best == nil || p.effectiveJobs(node, now) < p.effectiveJobs(best, now) {
+			best = node
 		}
 	}
 	if current == nil || best == nil || current == best {

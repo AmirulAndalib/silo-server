@@ -77,6 +77,50 @@ type preparedTimelineV3 struct {
 	copySeekAnchorResolved bool
 }
 
+type headerAuthenticatedMediaContextKeyV3 struct{}
+
+// withHeaderAuthenticatedMediaV3 records the request's negotiated media-auth
+// mode without carrying a credential. Transport preparation happens several
+// layers below the v3 request decoder; keeping the bounded boolean on the
+// request preserves that negotiation across direct, remux, HLS and replan
+// paths while leaving the durable request body as the source of truth.
+func withHeaderAuthenticatedMediaV3(r *http.Request, clientFeatures []string) *http.Request {
+	if r == nil {
+		return nil
+	}
+	enabled := playback.HasFeatureV3(clientFeatures, playback.FeatureHeaderAuthenticatedMediaV3)
+	return r.WithContext(context.WithValue(r.Context(), headerAuthenticatedMediaContextKeyV3{}, enabled))
+}
+
+func headerAuthenticatedMediaV3(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	return headerAuthenticatedMediaContextV3(r.Context())
+}
+
+func headerAuthenticatedMediaContextV3(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	enabled, _ := ctx.Value(headerAuthenticatedMediaContextKeyV3{}).(bool)
+	return enabled
+}
+
+func pinHeaderAuthenticatedMediaFeatureV3(clientFeatures []string, enabled bool) []string {
+	pinned := make([]string, 0, len(clientFeatures)+1)
+	for _, feature := range clientFeatures {
+		if strings.EqualFold(strings.TrimSpace(feature), playback.FeatureHeaderAuthenticatedMediaV3) {
+			continue
+		}
+		pinned = append(pinned, feature)
+	}
+	if enabled {
+		pinned = append(pinned, playback.FeatureHeaderAuthenticatedMediaV3)
+	}
+	return pinned
+}
+
 type transportErrorV3 struct {
 	reason    string
 	message   string
@@ -280,32 +324,59 @@ type capabilitySessionPlannerV3 interface {
 	PlanSessionWith(sessionID, currentTranscodeURL string, needsTranscode bool, estBitrateKbps int, eligible func(*nodepool.Node) bool) nodepool.Plan
 }
 
-// planNodeSessionV3 selects transcode/proxy nodes for the session. Plans that
-// carry server transformations restrict selection to nodes whose advertised
+// localEgressSessionPlannerV3 lets a pooled transcode executor feed the API
+// server while the API remains the only client-facing media origin. A planner
+// that lacks this optional method still works; its proxy selection is discarded
+// before a URL is returned, though the concrete nodepool planner implements the
+// method so production reservation accounting stays exact.
+type localEgressSessionPlannerV3 interface {
+	PlanTranscodeSessionWithLocalEgress(sessionID, currentTranscodeURL string, eligible func(*nodepool.Node) bool) nodepool.Plan
+}
+
+// planNodeSessionV3 selects execution nodes for the session. Plans that carry
+// server transformations restrict selection to nodes whose advertised
 // capabilities validate against the plan, so load balancing in a
 // heterogeneous pool cannot land a recipe on a node that would reject it when
-// a capable sibling exists. Capability-blind selection remains for
-// transformation-free plans and non-enumerating planners.
-func (h *PlaybackHandler) planNodeSessionV3(ctx context.Context, session *playback.Session, result playback.PlannerResultV3) nodepool.Plan {
-	selector, selectable := h.NodePlanner.(capabilitySessionPlannerV3)
-	enumerator, enumerable := h.NodePlanner.(transcodeNodeEnumeratorV3)
-	if !selectable || !enumerable || !planRequiresServerTransformationsV3(result.Plan) {
-		return h.NodePlanner.PlanSession(session.ID, session.TranscodeNodeURL, true, result.TargetBitrateKbps)
-	}
-	capable := make(map[string]struct{})
-	for nodeURL, advertised := range h.pooledNodeTransformationsV3(ctx, enumerator.TranscodeNodeURLs()) {
-		if validateAdvertisedTransformationsV3(result.Plan, advertised) == nil {
-			capable[nodeURL] = struct{}{}
+// a capable sibling exists. In local-egress mode the API relays the selected
+// transcode node and no client-facing proxy is selected or returned.
+func (h *PlaybackHandler) planNodeSessionV3(ctx context.Context, session *playback.Session, result playback.PlannerResultV3, localEgress bool) nodepool.Plan {
+	var eligible func(*nodepool.Node) bool
+	if enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3); ok && planRequiresServerTransformationsV3(result.Plan) {
+		capable := make(map[string]struct{})
+		for nodeURL, advertised := range h.pooledNodeTransformationsV3(ctx, enumerator.TranscodeNodeURLs()) {
+			if validateAdvertisedTransformationsV3(result.Plan, advertised) == nil {
+				capable[nodeURL] = struct{}{}
+			}
+		}
+		// The predicate runs under the planner lock: a set lookup only.
+		eligible = func(node *nodepool.Node) bool {
+			if node == nil {
+				return false
+			}
+			_, found := capable[node.URL]
+			return found
 		}
 	}
-	// The predicate runs under the planner lock: a set lookup only.
-	return selector.PlanSessionWith(session.ID, session.TranscodeNodeURL, true, result.TargetBitrateKbps, func(node *nodepool.Node) bool {
-		if node == nil {
-			return false
+
+	if localEgress {
+		if selector, ok := h.NodePlanner.(localEgressSessionPlannerV3); ok {
+			return selector.PlanTranscodeSessionWithLocalEgress(session.ID, session.TranscodeNodeURL, eligible)
 		}
-		_, ok := capable[node.URL]
-		return ok
-	})
+	}
+
+	var plan nodepool.Plan
+	if selector, ok := h.NodePlanner.(capabilitySessionPlannerV3); ok && eligible != nil {
+		plan = selector.PlanSessionWith(session.ID, session.TranscodeNodeURL, true, result.TargetBitrateKbps, eligible)
+	} else {
+		plan = h.NodePlanner.PlanSession(session.ID, session.TranscodeNodeURL, true, result.TargetBitrateKbps)
+	}
+	if localEgress {
+		// Compatibility fallback for a custom planner that has not learned the
+		// exact local-egress reservation method. The proxy may have been selected
+		// internally, but it is never exposed as client media authority.
+		plan.ProxyNode = nil
+	}
+	return plan
 }
 
 // validateAdvertisedTransformationsV3 verifies that every server-executed
@@ -612,6 +683,7 @@ func (h *PlaybackHandler) startPlannedPlaybackV3(r *http.Request, userID int, pr
 	if result.Plan == nil {
 		return playback.DecisionResponseV3{}, &transportErrorV3{reason: "internal_error", message: "The server produced no playback plan."}
 	}
+	r = withHeaderAuthenticatedMediaV3(r, req.ClientFeatures)
 	if checker, ok := h.sessionMgr.(transcodePermissionChecker); ok && (result.PlayMethod == playback.PlayTranscode || result.TranscodeAudio) {
 		if err := checker.CheckTranscodingAllowed(r.Context(), userID, result.PlayMethod == playback.PlayTranscode); err != nil {
 			reason := "transcoding_disabled"
@@ -744,7 +816,7 @@ func (h *PlaybackHandler) prepareTransportV3(r *http.Request, session *playback.
 		return h.prepareIdentityTransportV3(r, session, file, result, timeline)
 	}
 	if h.NodePlanner != nil {
-		plan := h.planNodeSessionV3(r.Context(), session, result)
+		plan := h.planNodeSessionV3(r.Context(), session, result, headerAuthenticatedMediaV3(r))
 		if plan.TranscodeNode != nil {
 			transformations, err := h.remoteTransformationsV3(r.Context(), plan.TranscodeNode.URL)
 			if err == nil {
@@ -858,11 +930,26 @@ func (h *PlaybackHandler) prepareIdentityTransportV3(r *http.Request, session *p
 	routeSession.TargetAudioBitrateKbps = result.TargetAudioBitrateKbps
 	routeSession.RemuxDVMode = remuxDVModeForPlanV3(result.Plan)
 
-	proxyNode, proxyErr := h.planIdentityProxyV3(r, session.ID, result)
-	if proxyErr != nil {
-		return preparedTransportV3{}, proxyErr
+	var proxyNode *nodepool.Node
+	if headerAuthenticatedMediaV3(r) {
+		// Proxy identity routes authenticate with a signed token in the URL path.
+		// Keep this negotiated mode on the authenticated API origin instead, so
+		// no client-visible URL can carry or disclose that credential.
+		if localErr := h.refuseLocalIdentityWorkV3(r, result); localErr != nil {
+			return preparedTransportV3{}, localErr
+		}
+	} else {
+		var proxyErr *transportErrorV3
+		proxyNode, proxyErr = h.planIdentityProxyV3(r, session.ID, result)
+		if proxyErr != nil {
+			return preparedTransportV3{}, proxyErr
+		}
 	}
-	streamURL, servedByProxy := h.identityStreamURLV3(&routeSession, file, proxyNode)
+	streamURL := fmt.Sprintf("/stream/%s", routeSession.ID)
+	servedByProxy := false
+	if !headerAuthenticatedMediaV3(r) {
+		streamURL, servedByProxy = h.identityStreamURLV3(&routeSession, file, proxyNode)
+	}
 	releaseProxyReservation := func() {
 		if releaser, ok := h.NodePlanner.(sessionReservationReleaserV3); ok {
 			releaser.ReleaseSession(session.ID)
@@ -1255,8 +1342,11 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 			return preparedTransportV3{}, transportErr
 		}
 	}
-	card := playback.NewRecipeCard(session.UserID, session.ProfileID, file.ID, "", ts.Opts())
-	url := appendStreamToken(fmt.Sprintf("/playback/transcode/%s/master.m3u8", session.ID), h.signSessionToken(card))
+	url := fmt.Sprintf("/playback/transcode/%s/master.m3u8", session.ID)
+	if !headerAuthenticatedMediaV3(r) {
+		card := playback.NewRecipeCard(session.UserID, session.ProfileID, file.ID, "", ts.Opts())
+		url = appendStreamToken(url, h.signSessionToken(card))
+	}
 	committed := false
 	previousNodeURL := session.TranscodeNodeURL
 	previousTransportID := remoteTransportID(session)
@@ -1324,13 +1414,16 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 		h.tm.StopRemoteTranscode(transportID, node.URL)
 		return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "The selected transcode node rejected the playback transport.", retryable: true}
 	}
-	hw := firstNonEmptyHandlerV3(strings.TrimSpace(nodeResp.HWAccel), strings.TrimSpace(req.HWAccel))
-	card := playback.NewRecipeCard(session.UserID, session.ProfileID, file.ID, node.URL, playback.TranscodeOpts{InputPath: req.InputPath, SessionID: session.ID, TranscodeTransportID: transportID, SourceVideoCodec: req.SourceVideoCodec, SourceVideoProfile: req.SourceVideoProfile, SourceVideoBitDepth: req.SourceVideoBitDepth, SoftwareVideoDecode: req.SoftwareVideoDecode, VideoBitstreamFilter: req.VideoBitstreamFilter, SeekSeconds: req.SeekSeconds, StreamOriginSeconds: req.StreamOriginSeconds, CopySeekAnchorResolved: req.CopySeekAnchorResolved, StartSegmentNumber: req.StartSegmentNumber, TargetResolution: req.TargetResolution, TargetCodecVideo: req.TargetCodecVideo, TargetCodecAudio: req.TargetCodecAudio, TargetAudioChannels: req.TargetAudioChannels, TargetAudioBitrateKbps: req.TargetAudioBitrateKbps, TargetBitrateKbps: req.TargetBitrateKbps, SegmentDuration: req.SegmentDuration, HWAccel: hw, AudioTrackIndex: req.AudioTrackIndex, SubtitleTrackIndex: req.SubtitleTrackIndex, SubtitleBurnIn: req.SubtitleBurnIn, SubtitleCodec: req.SubtitleCodec, TotalDuration: req.TotalDuration})
-	url := h.buildProxyManifestURL(card, nodePlan.ProxyNode)
+	url := fmt.Sprintf("/playback/transcode/%s/master.m3u8", session.ID)
+	if !headerAuthenticatedMediaV3(r) {
+		hw := firstNonEmptyHandlerV3(strings.TrimSpace(nodeResp.HWAccel), strings.TrimSpace(req.HWAccel))
+		card := playback.NewRecipeCard(session.UserID, session.ProfileID, file.ID, node.URL, playback.TranscodeOpts{InputPath: req.InputPath, SessionID: session.ID, TranscodeTransportID: transportID, SourceVideoCodec: req.SourceVideoCodec, SourceVideoProfile: req.SourceVideoProfile, SourceVideoBitDepth: req.SourceVideoBitDepth, SoftwareVideoDecode: req.SoftwareVideoDecode, VideoBitstreamFilter: req.VideoBitstreamFilter, SeekSeconds: req.SeekSeconds, StreamOriginSeconds: req.StreamOriginSeconds, CopySeekAnchorResolved: req.CopySeekAnchorResolved, StartSegmentNumber: req.StartSegmentNumber, TargetResolution: req.TargetResolution, TargetCodecVideo: req.TargetCodecVideo, TargetCodecAudio: req.TargetCodecAudio, TargetAudioChannels: req.TargetAudioChannels, TargetAudioBitrateKbps: req.TargetAudioBitrateKbps, TargetBitrateKbps: req.TargetBitrateKbps, SegmentDuration: req.SegmentDuration, HWAccel: hw, AudioTrackIndex: req.AudioTrackIndex, SubtitleTrackIndex: req.SubtitleTrackIndex, SubtitleBurnIn: req.SubtitleBurnIn, SubtitleCodec: req.SubtitleCodec, TotalDuration: req.TotalDuration})
+		url = h.buildProxyManifestURL(card, nodePlan.ProxyNode)
+	}
 	// buildProxyManifestURL only returns an absolute proxy URL when a proxy was
 	// planned and the token could be signed; otherwise the client fetches the
 	// manifest from this server and the local liveness path applies.
-	servedByProxy := nodePlan.ProxyNode != nil && strings.HasPrefix(url, "http")
+	servedByProxy := !headerAuthenticatedMediaV3(r) && nodePlan.ProxyNode != nil && strings.HasPrefix(url, "http")
 	committed := false
 	previousNodeURL := session.TranscodeNodeURL
 	previousTransportID := remoteTransportID(session)
@@ -1386,7 +1479,30 @@ func sourceVideoTranscodeFactsV3(file *models.MediaFile, result playback.Planner
 }
 
 func (h *PlaybackHandler) v3SessionStreamState(ctx context.Context, session *playback.Session, file *models.MediaFile, result playback.PlannerResultV3, transport preparedTransportV3) playback.SessionStreamState {
-	state := playback.SessionStreamState{PlayMethod: result.PlayMethod, BasePlayMethod: result.PlayMethod, AudioTrackIndex: plannedAudioTrackIndexV3(result, session.AudioTrackIndex), TranscodeAudio: result.TranscodeAudio, RemuxDVMode: remuxDVModeForPlanV3(result.Plan), TranscodeNodeURL: transport.nodeURL, TranscodeTransportID: transport.transportID, TranscodeRouteSet: true, ClientIP: clientip.FromContext(ctx), ClientName: session.ClientName, ClientVersion: session.ClientVersion, ClientUserAgent: session.ClientUserAgent, StreamBitrateKbps: result.TargetBitrateKbps, TargetVideoCodec: result.TargetVideoCodec, TargetAudioCodec: result.TargetAudioCodec, TargetAudioChannels: result.TargetAudioChannels, TargetAudioBitrateKbps: result.TargetAudioBitrateKbps, TargetResolution: result.TargetResolution, SubtitleTrackIndex: result.SubtitleTransportTrackIndex, SubtitleBurnIn: result.SubtitleBurnIn}
+	state := playback.SessionStreamState{
+		PlayMethod:                result.PlayMethod,
+		BasePlayMethod:            result.PlayMethod,
+		AudioTrackIndex:           plannedAudioTrackIndexV3(result, session.AudioTrackIndex),
+		TranscodeAudio:            result.TranscodeAudio,
+		RemuxDVMode:               remuxDVModeForPlanV3(result.Plan),
+		TranscodeNodeURL:          transport.nodeURL,
+		TranscodeTransportID:      transport.transportID,
+		TranscodeRouteSet:         true,
+		RequireMediaAuthorization: headerAuthenticatedMediaContextV3(ctx),
+		MediaAuthorizationSet:     true,
+		ClientIP:                  clientip.FromContext(ctx),
+		ClientName:                session.ClientName,
+		ClientVersion:             session.ClientVersion,
+		ClientUserAgent:           session.ClientUserAgent,
+		StreamBitrateKbps:         result.TargetBitrateKbps,
+		TargetVideoCodec:          result.TargetVideoCodec,
+		TargetAudioCodec:          result.TargetAudioCodec,
+		TargetAudioChannels:       result.TargetAudioChannels,
+		TargetAudioBitrateKbps:    result.TargetAudioBitrateKbps,
+		TargetResolution:          result.TargetResolution,
+		SubtitleTrackIndex:        result.SubtitleTransportTrackIndex,
+		SubtitleBurnIn:            result.SubtitleBurnIn,
+	}
 	if result.Plan != nil && (result.Plan.Delivery == playback.DeliveryTranscodeHLSV3 || result.Plan.Delivery == playback.DeliveryRemuxHLSV3) {
 		state.SegmentDuration = 2
 	}
@@ -1616,6 +1732,13 @@ func (h *PlaybackHandler) HandleReplanPlaybackV3(w http.ResponseWriter, r *http.
 	if req.ClientFeatures == nil {
 		req.ClientFeatures = append([]string(nil), record.NormalizedRequest.ClientFeatures...)
 	}
+	// Media authentication is fixed at start. Neither an omitted/empty feature
+	// list nor a later opt-in can switch modes mid-attempt: a legacy URL from an
+	// earlier plan may remain usable until its signed recipe expires, so allowing
+	// legacy-to-header-auth upgrades would leave two different security contracts
+	// alive for the same session. Stop/start is the explicit mode boundary.
+	headerAuthenticatedAttempt := playback.HasFeatureV3(record.NormalizedRequest.ClientFeatures, playback.FeatureHeaderAuthenticatedMediaV3)
+	req.ClientFeatures = pinHeaderAuthenticatedMediaFeatureV3(req.ClientFeatures, headerAuthenticatedAttempt)
 	if err := req.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid replan request")
 		return
@@ -2056,7 +2179,10 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 		}
 		artifactRecipe = frozenRecipe
 	}
-	transportReused := trackChange && h.hasActiveHLSTransportV3(session) && sidecarOnlyHLSReplanV3(record, result.Plan, artifactRecipe, req.ClientPlaybackContext.Output.OutputContextID)
+	currentHeaderAuthenticatedMedia := playback.HasFeatureV3(record.NormalizedRequest.ClientFeatures, playback.FeatureHeaderAuthenticatedMediaV3)
+	nextHeaderAuthenticatedMedia := playback.HasFeatureV3(start.ClientFeatures, playback.FeatureHeaderAuthenticatedMediaV3)
+	transportReused := currentHeaderAuthenticatedMedia == nextHeaderAuthenticatedMedia && trackChange && h.hasActiveHLSTransportV3(session) && sidecarOnlyHLSReplanV3(record, result.Plan, artifactRecipe, req.ClientPlaybackContext.Output.OutputContextID)
+	r = withHeaderAuthenticatedMediaV3(r, start.ClientFeatures)
 	var transport preparedTransportV3
 	if transportReused {
 		// A sidecar selection changes the plan and subtitle artifact, but it does

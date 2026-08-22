@@ -428,8 +428,10 @@ func (h *PlaybackHandler) streamCardFromQuery(r *http.Request, sessionID string)
 
 // loadTranscodeServeSession resolves the playback Session for the transcode
 // manifest/segment serve routes while keeping stream-token verification off the
-// hot path. The overwhelmingly common case is a live in-memory session, which
-// needs no token at all, so the cheap GetSession lookup runs first and the
+// hot path. A V3 session that negotiated header-authenticated media requires a
+// live authenticated owner on every request; a legacy session retains its UUID
+// bearer behavior. The overwhelmingly common case is a live in-memory session,
+// so the cheap GetSession lookup runs first and the
 // (HMAC + JSON) token decode is performed only on a not-found miss where a
 // reconstruct is actually required. On that miss it delegates to the shared
 // LoadOrReconstructSession front door so reconstruct/ownership semantics stay
@@ -439,9 +441,12 @@ func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID s
 	requestUserID := apimw.GetUserID(r.Context())
 	session, err := h.sessionMgr.GetSession(sessionID)
 	if err == nil {
-		// Live session: enforce the same ownership rule as LoadOrReconstructSession
-		// (a zero caller is allowed; a non-zero mismatch is refused). No token
-		// verification on this hot path.
+		if session.RequireMediaAuthorization && requestUserID == 0 {
+			return nil, playback.SessionUnauthorized, nil
+		}
+		// Live session: secure transports require a user above; legacy bearer
+		// routes allow zero. Either way, a present but mismatched identity is
+		// forbidden. No token verification on this hot path.
 		if requestUserID != 0 && session.UserID != requestUserID {
 			return nil, playback.SessionForbidden, nil
 		}
@@ -1297,8 +1302,9 @@ func alignedSeekSeconds(seekSeconds float64, segmentDuration int, targetVideoCod
 }
 
 // HandleGetTranscodeManifest handles GET /playback/transcode/{session_id}/master.m3u8.
-// Auth is optional — the session UUID serves as an access token (same pattern
-// as /stream/{session_id}). When auth context is present, ownership is verified.
+// Legacy transports allow the session UUID to act as the access capability.
+// Header-authenticated V3 transports require the live session owner on every
+// request; their UUID is only a route identifier.
 //
 // Known-duration encoded sessions expose a synthetic full VOD manifest so the
 // player can seek immediately. Copy-video sessions expose FFmpeg's real
@@ -1316,6 +1322,9 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 		return
 	case playback.SessionForbidden:
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
+		return
+	case playback.SessionUnauthorized:
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
 		return
 	}
 
@@ -1358,7 +1367,8 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 }
 
 // HandleGetTranscodeSegment handles GET /playback/transcode/{session_id}/segment/{name}.
-// Auth is optional — the session UUID serves as an access token.
+// Authorization follows the same negotiated legacy-versus-header-authenticated
+// rule as the manifest endpoint above.
 func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
 	session, status, card := h.loadTranscodeServeSession(r, sessionID)
@@ -1371,6 +1381,9 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 		return
 	case playback.SessionForbidden:
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
+		return
+	case playback.SessionUnauthorized:
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
 		return
 	}
 

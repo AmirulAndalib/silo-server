@@ -98,13 +98,13 @@ the document is always the full one:
   "protocol_versions": [3],
   "features": ["playback_plan_v3", "neutral_playback_v3_contract_v1", "layout_aware_passthrough", "playback_route_diagnostics",
                "device_quirks_v1", "seek_reanchor_v1", "output_change_v1", "direct_stream_resume_v1",
-               "plan_source_duration_v1"],
+               "header_authenticated_media_v1", "plan_source_duration_v1"],
   "deliveries": ["original_http", "server_remux_progressive", "server_remux_hls", "server_transcode_hls"],
   "transformations": [{"name": "audio_to_aac", "executor": "server", "recipe_version": "1", "validated_claims": ["audio_decode"]}]
 }
 ```
 
-The nine feature strings above are the full set this server version advertises:
+The ten feature strings above are the full set this server version advertises:
 
 | Feature | What it promises |
 | --- | --- |
@@ -116,6 +116,7 @@ The nine feature strings above are the full set this server version advertises:
 | `seek_reanchor_v1` | The `seek_reanchor` replan operation is available (§6) |
 | `output_change_v1` | The `output_change` intent replan is available; clients must keep the active route when this feature is absent |
 | `direct_stream_resume_v1` | A direct route may resume mid-file rather than restarting |
+| `header_authenticated_media_v1` | An opted-in client receives only API-local media URLs without signed credentials in their query or path, and authenticates every media request with its normal Authorization header (§4.1) |
 | `plan_source_duration_v1` | `source.duration_seconds` is populated when known, so its absence means *unknown* rather than *unsupported* (§5) |
 
 That last one is the reason feature detection is a list and not a version
@@ -445,6 +446,45 @@ omits entirely is unavailable — the server will not guess.
 `stream.header_refresh` tells the client what to do when the stream URL's auth
 expires: `none` means the URL is stable for the session, `session` means
 re-request headers from `header_refresh_url` rather than restarting playback.
+
+### 4.1 Header-authenticated media URLs
+
+`header_authenticated_media_v1` is an engine-neutral client opt-in. A client
+uses it only after the server advertises the same token, then includes it in the
+top-level `client_features` on start and replan requests. For that attempt the
+server returns only relative URLs on the authenticated API origin:
+
+- direct and progressive remux: `/stream/{session_id}` (an ordinary `seek`
+  parameter may still be present);
+- remux/transcode HLS: `/playback/transcode/{session_id}/master.m3u8`, with
+  relative, credential-free segment URLs in the manifest;
+- subtitle artifacts, inventory sidecars and font bundles:
+  `/stream/{session_id}/subtitles/...`.
+
+None of those client-visible URLs contains the signed playback token (`st`) or
+a token-bearing proxy path, and no proxy or transcode-node origin is returned.
+A pooled transcode node may still execute HLS behind the API server; the API
+relays its manifest and segments over the same authenticated client route.
+Direct-play and progressive-remux proxy routes are bypassed because those
+nodes accept a signed URL token rather than the user's API credential, so the
+normal local-remux fallback policy still applies.
+
+The client must attach its current `Authorization: Bearer ...` header to the
+manifest/file request and every derived request, including HLS segments,
+subtitle artifacts and font bundles. `stream.headers` deliberately does not
+echo the bearer token: plans are persisted for idempotent replay, while the
+client already owns the current access credential. `header_refresh: none`
+means the relative media URL itself is stable; normal API-token refresh remains
+out of band, after which a client can retry or reload that URL with the new
+header.
+
+The signed playback token is what carries a reconstruction recipe across an
+API restart. Opting it out therefore also opts out of transparent session
+reconstruction: a missing in-memory session returns the normal expired/missing
+response and the client starts a fresh attempt. Once selected, this mode is
+sticky for the lifetime of the attempt; a client that can no longer honor it
+must stop and start a new attempt rather than downgrade a replan to a
+credential-bearing URL.
 
 ---
 

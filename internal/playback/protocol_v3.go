@@ -11,25 +11,31 @@ import (
 )
 
 const (
-	ProtocolV3                    = 3
-	FeaturePlaybackPlanV3         = "playback_plan_v3"
-	FeatureNeutralContractV3      = "neutral_playback_v3_contract_v1"
-	FeatureLayoutPassthrough      = "layout_aware_passthrough"
-	FeatureClientVideoTransforms  = "client_video_transformations_v1"
-	FeatureRouteDiagnostics       = "playback_route_diagnostics"
-	FeatureDeviceQuirksV3         = "device_quirks_v1"
-	FeatureSeekReanchorV3         = "seek_reanchor_v1"
-	FeatureOutputChangeV3         = "output_change_v1"
-	FeatureDirectStreamResumeV3   = "direct_stream_resume_v1"
-	FeaturePlanSourceDurationV3   = "plan_source_duration_v1"
-	PlanRecipeVersionV3           = "v3.4"
-	ClientDV7ToDV81V3             = "client_dv7_to_dv81"
-	ClientDV7ToHDR10V3            = "client_dv7_to_hdr10"
-	ClientDVTransformVersionV3    = "1"
-	ClientDV8HDR10PlusSanitizerV3 = "client_dv8_hdr10plus_sanitizer_v1"
-	ClientPostResumeRecoveryV3    = "client_post_resume_video_recovery_v1"
-	ClientSurfaceRecoveryV3       = "client_surface_recovery_v1"
-	DeviceQuirkRegistryRevisionV3 = "2026-07-13.1"
+	ProtocolV3                   = 3
+	FeaturePlaybackPlanV3        = "playback_plan_v3"
+	FeatureNeutralContractV3     = "neutral_playback_v3_contract_v1"
+	FeatureLayoutPassthrough     = "layout_aware_passthrough"
+	FeatureClientVideoTransforms = "client_video_transformations_v1"
+	FeatureRouteDiagnostics      = "playback_route_diagnostics"
+	FeatureDeviceQuirksV3        = "device_quirks_v1"
+	FeatureSeekReanchorV3        = "seek_reanchor_v1"
+	FeatureOutputChangeV3        = "output_change_v1"
+	FeatureDirectStreamResumeV3  = "direct_stream_resume_v1"
+	FeaturePlanSourceDurationV3  = "plan_source_duration_v1"
+	// FeatureHeaderAuthenticatedMediaV3 advertises an opt-in transport mode
+	// whose client-visible stream and subtitle URLs carry no signed playback
+	// credential. A client that sends this token promises to attach its normal
+	// access-token Authorization header to every media request, including HLS
+	// manifests/segments and sidecar subtitle/font requests.
+	FeatureHeaderAuthenticatedMediaV3 = "header_authenticated_media_v1"
+	PlanRecipeVersionV3               = "v3.4"
+	ClientDV7ToDV81V3                 = "client_dv7_to_dv81"
+	ClientDV7ToHDR10V3                = "client_dv7_to_hdr10"
+	ClientDVTransformVersionV3        = "1"
+	ClientDV8HDR10PlusSanitizerV3     = "client_dv8_hdr10plus_sanitizer_v1"
+	ClientPostResumeRecoveryV3        = "client_post_resume_video_recovery_v1"
+	ClientSurfaceRecoveryV3           = "client_surface_recovery_v1"
+	DeviceQuirkRegistryRevisionV3     = "2026-07-13.1"
 )
 
 // ServerFeaturesV3 returns the complete feature set advertised by protocol-v3
@@ -45,6 +51,7 @@ func ServerFeaturesV3() []string {
 		FeatureSeekReanchorV3,
 		FeatureOutputChangeV3,
 		FeatureDirectStreamResumeV3,
+		FeatureHeaderAuthenticatedMediaV3,
 		// Advertised so a client can tell "this server does not populate
 		// source.duration_seconds" apart from "this server knows the runtime
 		// is genuinely unknown". Without the distinction both look like an

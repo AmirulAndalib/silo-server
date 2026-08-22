@@ -84,6 +84,35 @@ func TestPlanSessionWithRestrictsEligibleTranscodeNodes(t *testing.T) {
 	}
 }
 
+func TestPlanTranscodeSessionWithLocalEgressDoesNotUseProxyCapacity(t *testing.T) {
+	group := strPtr("rack-a")
+	proxy := proxyNode(1, "http://proxy-a", group)
+	proxy.Healthy = false
+	transcode := transcodeNode(2, "http://tc-a", group, 0)
+	f := newFixture([]*Node{proxy}, []*Node{transcode})
+
+	plan := f.planner.PlanTranscodeSessionWithLocalEgress("s-local-egress", "", func(node *Node) bool {
+		return node != nil && node.URL == transcode.URL
+	})
+	if plan.TranscodeNode == nil || plan.TranscodeNode.URL != transcode.URL {
+		t.Fatalf("local-egress plan = %#v, want healthy transcode despite unrelated proxy health", plan)
+	}
+	if plan.ProxyNode != nil {
+		t.Fatalf("local-egress plan exposed proxy %#v", plan.ProxyNode)
+	}
+	reservation := f.planner.reserved["s-local-egress"]
+	if reservation == nil || reservation.transcodeURL != transcode.URL || reservation.proxyURL != "" || reservation.kbps != 0 {
+		t.Fatalf("local-egress reservation = %#v, want transcode-only accounting", reservation)
+	}
+
+	if none := f.planner.PlanTranscodeSessionWithLocalEgress("s-ineligible", "", func(*Node) bool { return false }); none.TranscodeNode != nil {
+		t.Fatalf("ineligible local-egress plan selected %#v", none.TranscodeNode)
+	}
+	if _, reserved := f.planner.reserved["s-ineligible"]; reserved {
+		t.Fatal("ineligible local-egress plan left a reservation")
+	}
+}
+
 func TestReleaseSessionDropsProvisionalReservation(t *testing.T) {
 	node := transcodeNode(1, "http://tc-1", nil, 0)
 	node.MaxJobs = intPtr(1)

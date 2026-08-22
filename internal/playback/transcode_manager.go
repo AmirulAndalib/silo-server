@@ -326,6 +326,9 @@ const (
 	SessionLoadFailed
 	// SessionForbidden: a live session exists but belongs to another user.
 	SessionForbidden
+	// SessionUnauthorized: the live session negotiated authenticated media
+	// requests, but this request has no authenticated user identity.
+	SessionUnauthorized
 )
 
 // LoadOrReconstructSession is the single front door every serve handler uses to
