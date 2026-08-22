@@ -83,10 +83,15 @@ type Config struct {
 	MaxRoutesPerSession            int
 }
 
+// defaultFreshness is how long a published snapshot stays current. It doubles as
+// the decay window for a publisher's Truncated flag, since both answer the same
+// question: is this publisher's picture of the world usable right now?
+const defaultFreshness = 5 * time.Second
+
 func DefaultConfig(nodeID string) Config {
 	return Config{
 		NodeID: nodeID, SweepInterval: time.Second, Retention: 5 * time.Minute,
-		Freshness: 5 * time.Second, MembershipTTL: time.Minute, KeyPrefix: "silo:stelem",
+		Freshness: defaultFreshness, MembershipTTL: time.Minute, KeyPrefix: "silo:stelem",
 		ViewTTL:         DefaultViewTTL,
 		FullResyncEvery: 60, MaxPublishers: 256, MaxMergedSessions: 50_000, MaxMergedTransfers: 50_000,
 		MaxSessions: 10_000, MaxTransfers: 10_000, MaxObservations: 50_000,
@@ -105,12 +110,17 @@ func ConfigFromEnv(nodeID string) Config {
 	cfg.Enabled = envEnabled(os.Getenv(enabledEnv))
 	coreInvalid := make([]string, 0)
 	distributedInvalid := make([]string, 0)
+	// The operator only owns the variables they actually set. The cross-checks
+	// below relate two knobs, and a violation involving an unset knob is not the
+	// operator's mistake — it is a default that has to move.
+	explicit := make(map[string]bool)
 	cfg.Distributed = envEnabled(os.Getenv(distributedEnv))
 	parseDuration := func(name string, dst *time.Duration) {
 		value := strings.TrimSpace(os.Getenv(name))
 		if value == "" {
 			return
 		}
+		explicit[name] = true
 		parsed, err := time.ParseDuration(value)
 		if err != nil || parsed <= 0 {
 			coreInvalid = append(coreInvalid, name)
@@ -123,6 +133,7 @@ func ConfigFromEnv(nodeID string) Config {
 		if value == "" {
 			return
 		}
+		explicit[name] = true
 		parsed, err := time.ParseDuration(value)
 		if err != nil || parsed <= 0 {
 			distributedInvalid = append(distributedInvalid, name)
@@ -180,14 +191,57 @@ func ConfigFromEnv(nodeID string) Config {
 			cfg.KeyPrefix = value
 		}
 	}
-	if cfg.SweepInterval > time.Duration(1<<63-1)/3 || cfg.Freshness < 3*cfg.SweepInterval {
-		distributedInvalid = append(distributedInvalid, freshnessEnv)
+	// Cross-checks. Each relates a knob to another knob, so comparing an
+	// env-supplied value against the other's DEFAULT and then rejecting the
+	// config is wrong twice over: it disables distributed mode for a single
+	// variable, and it blames a variable the operator never touched. When only
+	// one side was set, the unset side moves to satisfy the invariant; only a
+	// pair the operator pinned to genuinely inconsistent values is an error, and
+	// then only the variables they set are named.
+	crossCheckFailed := func(involved ...string) {
+		named := make([]string, 0, len(involved))
+		for _, name := range involved {
+			if explicit[name] {
+				named = append(named, name)
+			}
+		}
+		if len(named) == 0 {
+			// Defaults that violate their own invariant: a code bug, not an
+			// operator one. Name both so it is findable.
+			named = involved
+		}
+		distributedInvalid = append(distributedInvalid, named...)
 	}
+	// Repair first, then validate the RESOLVED values. Repairs only ever move a
+	// knob the operator left at its default, and are ordered so a later one
+	// cannot undo an earlier one.
+	if !explicit[freshnessEnv] && cfg.SweepInterval <= time.Duration(1<<63-1)/3 && cfg.Freshness < 3*cfg.SweepInterval {
+		cfg.Freshness = 3 * cfg.SweepInterval
+	}
+	if !explicit[sweepIntervalEnv] && cfg.Freshness < 3*cfg.SweepInterval {
+		cfg.SweepInterval = cfg.Freshness / 3
+	}
+	if !explicit[membershipTTLEnv] && cfg.MembershipTTL <= cfg.Freshness {
+		cfg.MembershipTTL = 2 * cfg.Freshness
+	}
+	if !explicit[freshnessEnv] && cfg.MembershipTTL <= cfg.Freshness {
+		cfg.Freshness = cfg.MembershipTTL / 2
+		if !explicit[sweepIntervalEnv] && cfg.Freshness < 3*cfg.SweepInterval {
+			cfg.SweepInterval = cfg.Freshness / 3
+		}
+	}
+	// A snapshot older than three sweeps is stale; overflow-guard the
+	// multiplication the comparison depends on.
+	if cfg.SweepInterval <= 0 || cfg.SweepInterval > time.Duration(1<<63-1)/3 || cfg.Freshness < 3*cfg.SweepInterval {
+		crossCheckFailed(sweepIntervalEnv, freshnessEnv)
+	}
+	// Membership has to outlive freshness, or a publisher leaves the roster
+	// before it is even considered stale.
 	if cfg.MembershipTTL <= cfg.Freshness {
-		distributedInvalid = append(distributedInvalid, membershipTTLEnv)
+		crossCheckFailed(freshnessEnv, membershipTTLEnv)
 	}
 	if cfg.MembershipTTL > time.Duration(1<<63-1)/10 {
-		distributedInvalid = append(distributedInvalid, membershipTTLEnv)
+		crossCheckFailed(membershipTTLEnv)
 	}
 	if len(coreInvalid) > 0 {
 		if cfg.Enabled {

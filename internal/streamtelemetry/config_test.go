@@ -92,6 +92,60 @@ func TestConfigFromEnvValidation(t *testing.T) {
 			t.Fatalf("config = %+v", cfg)
 		}
 	})
+	// Setting ONE variable must not disable distributed mode by colliding with
+	// the other knob's default: the unset knob moves instead.
+	t.Run("sweep interval alone raises the unset freshness", func(t *testing.T) {
+		clearConfigEnv(t)
+		t.Setenv(enabledEnv, "true")
+		t.Setenv(distributedEnv, "true")
+		t.Setenv(sweepIntervalEnv, "2s") // default freshness 5s < 3*2s
+		cfg := ConfigFromEnv("node")
+		if !cfg.Enabled || !cfg.Distributed {
+			t.Fatalf("one variable disabled distributed mode: %+v", cfg)
+		}
+		if cfg.SweepInterval != 2*time.Second || cfg.Freshness != 6*time.Second {
+			t.Fatalf("sweep/freshness = %v/%v, want 2s/6s", cfg.SweepInterval, cfg.Freshness)
+		}
+	})
+	t.Run("freshness alone lowers the unset sweep interval", func(t *testing.T) {
+		clearConfigEnv(t)
+		t.Setenv(enabledEnv, "true")
+		t.Setenv(distributedEnv, "true")
+		t.Setenv(freshnessEnv, "2s") // default sweep 1s is fine; 2s < 3s is not
+		cfg := ConfigFromEnv("node")
+		if !cfg.Enabled || !cfg.Distributed {
+			t.Fatalf("one variable disabled distributed mode: %+v", cfg)
+		}
+		if cfg.Freshness != 2*time.Second || cfg.SweepInterval > cfg.Freshness/3 {
+			t.Fatalf("sweep/freshness = %v/%v", cfg.SweepInterval, cfg.Freshness)
+		}
+	})
+	t.Run("freshness alone raises the unset membership ttl", func(t *testing.T) {
+		clearConfigEnv(t)
+		t.Setenv(enabledEnv, "true")
+		t.Setenv(distributedEnv, "true")
+		t.Setenv(freshnessEnv, "60s") // default membership TTL is also 60s
+		cfg := ConfigFromEnv("node")
+		if !cfg.Enabled || !cfg.Distributed {
+			t.Fatalf("one variable disabled distributed mode: %+v", cfg)
+		}
+		if cfg.Freshness != 60*time.Second || cfg.MembershipTTL <= cfg.Freshness {
+			t.Fatalf("freshness/membership = %v/%v", cfg.Freshness, cfg.MembershipTTL)
+		}
+	})
+	t.Run("membership ttl alone lowers the unset freshness", func(t *testing.T) {
+		clearConfigEnv(t)
+		t.Setenv(enabledEnv, "true")
+		t.Setenv(distributedEnv, "true")
+		t.Setenv(membershipTTLEnv, "4s") // default freshness 5s outlives it
+		cfg := ConfigFromEnv("node")
+		if !cfg.Enabled || !cfg.Distributed {
+			t.Fatalf("one variable disabled distributed mode: %+v", cfg)
+		}
+		if cfg.MembershipTTL != 4*time.Second || cfg.MembershipTTL <= cfg.Freshness {
+			t.Fatalf("freshness/membership = %v/%v", cfg.Freshness, cfg.MembershipTTL)
+		}
+	})
 	t.Run("membership not above freshness", func(t *testing.T) {
 		clearConfigEnv(t)
 		t.Setenv(enabledEnv, "true")

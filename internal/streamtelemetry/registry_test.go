@@ -425,3 +425,95 @@ func TestLocalStoreDeepCopies(t *testing.T) {
 		t.Fatalf("store returned aliased snapshot: %+v", loadedAgain)
 	}
 }
+
+// Truncated states current blindness — BuildGlobalView pins Complete=false while
+// a publisher reports it — so one transient drop must not mark a process
+// degraded for the rest of its life.
+func TestTruncatedDecaysAfterFreshness(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxObservations = 0 // force the very first observation to be dropped
+	registry := NewRegistry(cfg, NewLocalStore(), slog.New(slog.DiscardHandler))
+	handler := registry.Observe(testRoute(ClassPlayback))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		Attach(r.Context(), testAttachment("session-1"))
+		_, _ = w.Write([]byte("payload"))
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/media/x", nil))
+
+	dropAt := time.Now()
+	if !registry.SnapshotAt(dropAt).Truncated {
+		t.Fatal("snapshot taken at the drop is not truncated")
+	}
+	if snapshot := registry.SnapshotAt(dropAt.Add(cfg.Freshness / 2)); !snapshot.Truncated {
+		t.Fatal("snapshot inside the freshness window is not truncated")
+	}
+	later := registry.SnapshotAt(dropAt.Add(cfg.Freshness + time.Second))
+	if later.Truncated {
+		t.Fatal("Truncated is still set an entire freshness window after the drop")
+	}
+	// The permanent record stays monotonic.
+	if later.DroppedObservations == 0 {
+		t.Fatalf("dropped observations = %d, want the drop to still be counted", later.DroppedObservations)
+	}
+}
+
+// Clients open the realtime control socket as soon as they have a sessionId,
+// which is before they request any media route. State that arrives then has to
+// survive until the session exists, or every live session reports a dead socket.
+func TestRealtimeConnectionSetBeforeAttachIsApplied(t *testing.T) {
+	registry := NewRegistry(testConfig(), NewLocalStore(), slog.New(slog.DiscardHandler))
+	registry.SetRealtimeConnection("session-1", true)
+
+	handler := registry.Observe(testRoute(ClassPlayback))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		Attach(r.Context(), testAttachment("session-1"))
+		_, _ = w.Write([]byte("payload"))
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/media/x", nil))
+
+	snapshot := registry.SnapshotAt(time.Now())
+	if len(snapshot.Sessions) != 1 {
+		t.Fatalf("sessions = %+v", snapshot.Sessions)
+	}
+	if !snapshot.Sessions[0].RealtimeConnectionAlive {
+		t.Fatal("realtime state set before the first media route was dropped")
+	}
+}
+
+// Held state must not outlive the sessions it waits for.
+func TestPendingRealtimeStateIsBounded(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxSessions = 0
+	registry := NewRegistry(cfg, NewLocalStore(), slog.New(slog.DiscardHandler))
+	registry.SetRealtimeConnection("session-1", true)
+
+	shard := registry.shard("session-1")
+	shard.RLock()
+	held := len(shard.pendingRealtime)
+	shard.RUnlock()
+	if held != 0 {
+		t.Fatalf("pending realtime entries = %d, want the capacity bound to refuse it", held)
+	}
+}
+
+// A socket that opens and closes without the client ever requesting media leaves
+// state behind; the sweep has to reclaim it.
+func TestPendingRealtimeStateIsPrunedBySweep(t *testing.T) {
+	registry := NewRegistry(testConfig(), NewLocalStore(), slog.New(slog.DiscardHandler))
+	registry.SetRealtimeConnection("orphan-session", true)
+
+	shard := registry.shard("orphan-session")
+	shard.RLock()
+	held := len(shard.pendingRealtime)
+	shard.RUnlock()
+	if held != 1 {
+		t.Fatalf("pending realtime entries = %d, want 1", held)
+	}
+
+	// testConfig sets Retention to 1ms, so one sweep past it collects the entry.
+	registry.sweep(time.Now().Add(time.Second))
+	shard.RLock()
+	held = len(shard.pendingRealtime)
+	shard.RUnlock()
+	if held != 0 {
+		t.Fatalf("pending realtime entries after sweep = %d, want 0", held)
+	}
+}

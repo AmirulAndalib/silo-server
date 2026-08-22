@@ -21,6 +21,18 @@ var now = time.Now
 type sessionShard struct {
 	sync.RWMutex
 	sessions map[string]*logicalSession
+	// pendingRealtime holds realtime-connection state that arrived before the
+	// session existed. Clients open the control socket as soon as they have a
+	// sessionId — before the first byte route is hit — so in the normal
+	// ordering the state would otherwise be dropped and every live session
+	// would report RealtimeConnectionAlive=false. Applied on session creation
+	// and pruned by the sweep, so it cannot grow without bound.
+	pendingRealtime map[string]pendingRealtime
+}
+
+type pendingRealtime struct {
+	connected bool
+	at        time.Time
 }
 
 type Registry struct {
@@ -40,17 +52,23 @@ type Registry struct {
 	droppedBytes             atomic.Int64
 	unattributedObservations atomic.Int64
 	unattributedBytes        atomic.Int64
-	truncated                atomic.Bool
-	lastWarnUnixNano         atomic.Int64
-	lastPublishWarnUnixNano  atomic.Int64
-	sequence                 atomic.Uint64
-	startOnce                sync.Once
-	stopOnce                 sync.Once
-	stop                     chan struct{}
-	done                     chan struct{}
-	started                  atomic.Bool
-	leaveMu                  sync.Mutex
-	left                     bool
+	// lastDropUnixNano records when an observation was last dropped. Truncated
+	// is a statement about CURRENT blindness — BuildGlobalView pins
+	// Complete=false for as long as a publisher reports it — so it has to
+	// decay, otherwise one transient burst marks a process degraded until it
+	// restarts and a later real truncation is indistinguishable. The monotonic
+	// Dropped* counters remain the permanent record.
+	lastDropUnixNano        atomic.Int64
+	lastWarnUnixNano        atomic.Int64
+	lastPublishWarnUnixNano atomic.Int64
+	sequence                atomic.Uint64
+	startOnce               sync.Once
+	stopOnce                sync.Once
+	stop                    chan struct{}
+	done                    chan struct{}
+	started                 atomic.Bool
+	leaveMu                 sync.Mutex
+	left                    bool
 }
 
 func NewRegistry(cfg Config, store SnapshotStore, logger *slog.Logger) *Registry {
@@ -69,6 +87,7 @@ func NewRegistry(cfg Config, store SnapshotStore, logger *slog.Logger) *Registry
 	r := &Registry{cfg: cfg, store: store, logger: logger, seed: maphash.MakeSeed(), transfers: make(map[string]*transfer), stop: make(chan struct{}), done: make(chan struct{})}
 	for i := range r.shards {
 		r.shards[i].sessions = make(map[string]*logicalSession)
+		r.shards[i].pendingRealtime = make(map[string]pendingRealtime)
 	}
 	return r
 }
@@ -164,6 +183,10 @@ func (r *Registry) attach(obs *Observation, attachment Attachment) {
 			return
 		}
 		s = newLogicalSession(attachment, r.cfg, observedAt)
+		if pending, ok := shard.pendingRealtime[attachment.SessionID]; ok {
+			s.realtimeAlive = pending.connected
+			delete(shard.pendingRealtime, attachment.SessionID)
+		}
 		shard.sessions[attachment.SessionID] = s
 	}
 	s.mu.Lock()
@@ -262,7 +285,7 @@ func (r *Registry) release(obs *Observation, outcome httpstream.StreamOutcome) {
 }
 
 func (r *Registry) drop(reason string) {
-	r.truncated.Store(true)
+	r.lastDropUnixNano.Store(now().UnixNano())
 	r.droppedObservations.Add(1)
 	r.warnRateLimited(reason, &r.lastWarnUnixNano)
 }
@@ -283,6 +306,33 @@ func (r *Registry) warnRateLimited(message string, stamp *atomic.Int64, attrs ..
 	}
 }
 
+// truncatedAt reports whether the registry was blind recently enough for the
+// snapshot at `at` to be incomplete. The window matches Freshness, which is the
+// same horizon BuildGlobalView uses to decide a publisher is still current.
+func (r *Registry) truncatedAt(at time.Time) bool {
+	last := r.lastDropUnixNano.Load()
+	if last == 0 {
+		return false
+	}
+	window := r.cfg.Freshness
+	if window <= 0 {
+		window = defaultFreshness
+	}
+	if at.IsZero() {
+		at = now()
+	}
+	return at.Sub(time.Unix(0, last)) < window
+}
+
+// maxPendingRealtimePerShard spreads the session budget over the shards so held
+// realtime state can never outgrow the sessions it is waiting for.
+func maxPendingRealtimePerShard(maxSessions int64) int64 {
+	if maxSessions <= 0 {
+		return 0
+	}
+	return maxSessions/shardCount + 1
+}
+
 func (r *Registry) shard(id string) *sessionShard {
 	var h maphash.Hash
 	h.SetSeed(r.seed)
@@ -290,19 +340,31 @@ func (r *Registry) shard(id string) *sessionShard {
 	return &r.shards[h.Sum64()%shardCount]
 }
 
+// SetRealtimeConnection records whether a realtime control socket is alive for
+// a session. It is routinely called BEFORE the session exists — a client opens
+// the socket as soon as it has a sessionId, which is before it requests the
+// first media route — so state for an unknown session is held until an attach
+// creates it rather than discarded.
 func (r *Registry) SetRealtimeConnection(sessionID string, connected bool) {
 	if r == nil || !r.cfg.Enabled || sessionID == "" {
 		return
 	}
 	shard := r.shard(sessionID)
-	shard.RLock()
-	s := shard.sessions[sessionID]
-	if s != nil {
+	shard.Lock()
+	if s := shard.sessions[sessionID]; s != nil {
 		s.mu.Lock()
 		s.realtimeAlive = connected
 		s.mu.Unlock()
+		delete(shard.pendingRealtime, sessionID)
+		shard.Unlock()
+		return
 	}
-	shard.RUnlock()
+	if _, held := shard.pendingRealtime[sessionID]; held || int64(len(shard.pendingRealtime)) < maxPendingRealtimePerShard(r.cfg.MaxSessions) {
+		shard.pendingRealtime[sessionID] = pendingRealtime{connected: connected, at: now()}
+	} else {
+		r.drop("pending realtime capacity exhausted")
+	}
+	shard.Unlock()
 }
 
 func (r *Registry) Start(ctx context.Context) {
@@ -398,6 +460,14 @@ func (r *Registry) sweep(sweepStart time.Time) Snapshot {
 				r.sessionReservations.Add(-1)
 			}
 		}
+		// Realtime state whose session never arrived — a socket that opened and
+		// closed without the client ever requesting media — expires on the same
+		// horizon as an idle session.
+		for id, pending := range shard.pendingRealtime {
+			if sweepStart.Sub(pending.at) >= r.cfg.Retention {
+				delete(shard.pendingRealtime, id)
+			}
+		}
 		shard.Unlock()
 	}
 	r.transfersMu.Lock()
@@ -432,7 +502,7 @@ func (r *Registry) Snapshot() Snapshot { return r.SnapshotAt(now()) }
 // most recent sweep; callers that need current totals must call Sweep.
 func (r *Registry) SnapshotAt(capturedAt time.Time) Snapshot {
 	view := Snapshot{PublisherID: r.cfg.PublisherID, NodeID: r.cfg.NodeID, PublisherEpoch: r.cfg.PublisherEpoch, Sequence: r.sequence.Load(), CapturedAt: capturedAt,
-		Truncated: r.truncated.Load(), DroppedObservations: r.droppedObservations.Load(),
+		Truncated: r.truncatedAt(capturedAt), DroppedObservations: r.droppedObservations.Load(),
 		DroppedBytes: r.droppedBytes.Load(), UnattributedObservations: r.unattributedObservations.Load(),
 		UnattributedBytes: r.unattributedBytes.Load()}
 	for i := range r.shards {
