@@ -149,7 +149,7 @@ export function ProviderTile({
             {badge}
           </div>
           {tagline ? (
-            <p className="text-muted-foreground mt-0.5 truncate text-xs">{tagline}</p>
+            <p className="text-muted-foreground mt-0.5 text-xs leading-snug">{tagline}</p>
           ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-2.5">

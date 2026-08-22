@@ -437,7 +437,7 @@ function buildCards(input: SettingsOverviewInput): OverviewCard[] {
       : "Transcoding off",
   );
 
-  // Metadata & subtitle providers -----------------------------------------
+  // Subtitles & Metadata ---------------------------------------------------
   const providers = input.subtitleProviders ?? [];
   const connectedProviders = providers.filter(
     (provider) => provider.has_api_key || provider.has_credentials,
@@ -449,7 +449,7 @@ function buildCards(input: SettingsOverviewInput): OverviewCard[] {
     configured.has("mdblist.api_key") || readText(settings, "mdblist.api_key") !== "";
   push(
     "providers",
-    "Metadata & subtitle providers",
+    "Subtitles & Metadata",
     needsKey.length
       ? `${needsKey
           .map(
@@ -489,7 +489,7 @@ function buildCards(input: SettingsOverviewInput): OverviewCard[] {
     { inactive: watchSyncNames.length === 0 },
   );
 
-  // AI services -----------------------------------------------------------
+  // AI ------------------------------------------------------------------
   const textModel = readText(settings, "ai.chat_model");
   const textKeyConfigured = configured.has("ai.api_key") || configured.has("subtitle_ai.api_key");
   const speechConfigured =
@@ -498,7 +498,7 @@ function buildCards(input: SettingsOverviewInput): OverviewCard[] {
   const aiKeyMissing = textModel !== "" && !textKeyConfigured;
   push(
     "ai",
-    "AI services",
+    "AI",
     aiKeyMissing
       ? "Model set, no API key"
       : textModel
@@ -550,13 +550,13 @@ function buildCards(input: SettingsOverviewInput): OverviewCard[] {
     { attention: jellyfinBroken, inactive: !jellyfinEnabled && !absEnabled },
   );
 
-  // Infrastructure --------------------------------------------------------
+  // Storage & Database ---------------------------------------------------
   const redisConfigured = configured.has("redis.url") || readText(settings, "redis.url") !== "";
   const publicBucket = readText(settings, "s3.public_bucket");
   const privateBucket = readText(settings, "s3.private_bucket");
   push(
     "infrastructure",
-    "Infrastructure",
+    "Storage & Database",
     publicBucket
       ? join([
           privateBucket ? "Public and private buckets" : "Public bucket",

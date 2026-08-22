@@ -20,7 +20,7 @@ import { useCheckAdminSettingsConnection } from "@/hooks/queries/admin/settings"
 import { useRestartKeys, type RestartKeyMatcher } from "@/hooks/useRestartKeys";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
 
-import { FieldGroup } from "./FieldGroup";
+import { FieldGroup, RestartAllProvider } from "./FieldGroup";
 import { SaveBar } from "./SaveBar";
 import { SettingField } from "./SettingField";
 import { USER_DATABASE_BACKEND_OPTIONS } from "./databaseSettingOptions";
@@ -137,7 +137,6 @@ function RedisGroup({
     if (form.dirtyCount === 0) setEnabledOverride(null);
   }
   const enabled = enabledOverride ?? (redisUrl.trim() !== "" || configured);
-  const allRestart = (keys: string[]) => keys.every((key) => restartKeys.has(key));
 
   async function handleCheckConnection() {
     try {
@@ -156,7 +155,7 @@ function RedisGroup({
   }
 
   return (
-    <FieldGroup label="Redis" restartAll={allRestart(REDIS_KEYS)}>
+    <FieldGroup label="Redis">
       <SettingField
         label="Use Redis"
         type="toggle"
@@ -241,7 +240,6 @@ function S3Group({
       ? 4 + (urlAuth !== "presigned" ? 1 : 0) + (urlAuth === "cloudflare_token" ? 3 : 0)
       : 3;
   const advancedChanged = countDirty(form, advancedKeys);
-  const allRestart = (candidates: string[]) => candidates.every((key) => restartKeys.has(key));
 
   async function handleCheckConnection() {
     try {
@@ -260,7 +258,7 @@ function S3Group({
   }
 
   return (
-    <FieldGroup label={label} restartAll={allRestart(keys)}>
+    <FieldGroup label={label}>
       <SettingField
         label="Endpoint"
         hint="https://s3.us-east-1.amazonaws.com"
@@ -419,10 +417,9 @@ function DatabaseGroup({
   const userDBBackend = form.getValue("userdb.backend");
   const sqlite = userDBBackend === "sqlite";
   const changed = countDirty(form, DATABASE_KEYS);
-  const allRestart = (keys: string[]) => keys.every((key) => restartKeys.has(key));
 
   return (
-    <FieldGroup label="Database" restartAll={allRestart(DATABASE_KEYS)}>
+    <FieldGroup label="Database">
       <AdvancedSection id="infrastructure.database" count={sqlite ? 4 : 2} forceOpen={changed > 0}>
         <SettingField
           label="Maximum Postgres connections"
@@ -617,7 +614,6 @@ function LogsGroup({ form, restartKeys }: { form: SettingsForm; restartKeys: Res
   const rows = bucketDirty && draftRows ? draftRows : hydrated.rows;
   const parseError = bucketDirty ? "" : hydrated.error;
   const advancedChanged = countDirty(form, LOG_ADVANCED_KEYS);
-  const allRestart = (keys: string[]) => keys.every((key) => restartKeys.has(key));
 
   function commitRows(next: LogRetentionBucketRow[]) {
     setDraftRows(next);
@@ -625,7 +621,7 @@ function LogsGroup({ form, restartKeys }: { form: SettingsForm; restartKeys: Res
   }
 
   return (
-    <FieldGroup label="Logs" restartAll={allRestart(LOG_KEYS)}>
+    <FieldGroup label="Logs">
       <SettingField
         label="Delete log entries older than"
         type="number"
@@ -783,29 +779,34 @@ export default function InfrastructureSettings() {
 
   return (
     <div className="flex h-full flex-col">
-      <SettingsPageHeader title="Storage & Database" className="mb-8" />
+      <SettingsPageHeader title="Storage & Database" className="mb-2" />
+      <p className="text-muted-foreground mb-6 text-sm">
+        Changes on this page apply after a restart.
+      </p>
 
-      <div className="flex-1 space-y-8">
-        <RedisGroup form={form} restartKeys={restartKeys} secrets={secrets} />
-        <S3Group
-          form={form}
-          restartKeys={restartKeys}
-          secrets={secrets}
-          scope="public"
-          label="Public storage"
-          checkKind="s3_public"
-        />
-        <S3Group
-          form={form}
-          restartKeys={restartKeys}
-          secrets={secrets}
-          scope="private"
-          label="Private storage"
-          checkKind="s3_private"
-        />
-        <DatabaseGroup form={form} restartKeys={restartKeys} />
-        <LogsGroup form={form} restartKeys={restartKeys} />
-      </div>
+      <RestartAllProvider>
+        <div className="flex-1 space-y-8">
+          <RedisGroup form={form} restartKeys={restartKeys} secrets={secrets} />
+          <S3Group
+            form={form}
+            restartKeys={restartKeys}
+            secrets={secrets}
+            scope="public"
+            label="Public storage"
+            checkKind="s3_public"
+          />
+          <S3Group
+            form={form}
+            restartKeys={restartKeys}
+            secrets={secrets}
+            scope="private"
+            label="Private storage"
+            checkKind="s3_private"
+          />
+          <DatabaseGroup form={form} restartKeys={restartKeys} />
+          <LogsGroup form={form} restartKeys={restartKeys} />
+        </div>
+      </RestartAllProvider>
 
       <SaveBar
         dirtyCount={form.dirtyCount}

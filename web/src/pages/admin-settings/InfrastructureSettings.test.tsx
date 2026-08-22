@@ -76,13 +76,15 @@ describe("InfrastructureSettings", () => {
     expect(screen.queryByText("No public bucket set")).not.toBeInTheDocument();
   });
 
-  it("states the restart requirement once per group instead of chipping every field", () => {
+  it("states the restart requirement once for the whole page instead of repeating it per group", () => {
     mockForm();
 
     render(<InfrastructureSettings />);
 
-    const redis = within(screen.getByRole("group", { name: "Redis" }));
-    expect(redis.getByText("Changes apply after a restart")).toBeInTheDocument();
+    expect(screen.getAllByText("Changes on this page apply after a restart.")).toHaveLength(1);
+    // No group repeats its own "Changes apply after a restart" line, and no
+    // individual field shows a restart chip either.
+    expect(screen.queryByText("Changes apply after a restart")).not.toBeInTheDocument();
     expect(screen.queryAllByLabelText("Takes effect after a server restart")).toHaveLength(0);
   });
 

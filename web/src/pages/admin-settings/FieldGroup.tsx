@@ -9,6 +9,19 @@ export function useGroupRestartAll(): boolean {
   return useContext(GroupRestartContext);
 }
 
+/**
+ * Marks everything nested under it as restart-all without rendering any
+ * group's own "Changes apply after a restart" line. Use it on a whole page
+ * where every group is restart-all: say the sentence once near the page
+ * title, wrap the page's groups in this provider, and pass `restartAll={false}`
+ * (or omit it) on each `FieldGroup` so the per-group line does not repeat —
+ * per-field restart chips stay suppressed because the groups still inherit
+ * this context.
+ */
+export function RestartAllProvider({ children }: { children: ReactNode }) {
+  return <GroupRestartContext.Provider value={true}>{children}</GroupRestartContext.Provider>;
+}
+
 export interface FieldGroupProps {
   /** Sentence-case heading, e.g. "Transcoding". */
   label: string;
@@ -36,6 +49,11 @@ export function FieldGroup({
   children,
 }: FieldGroupProps) {
   const labelId = useId();
+  // A page-level `RestartAllProvider` can already say every field in the page
+  // restarts; a group nested under it inherits that without repeating its own
+  // "Changes apply after a restart" line (see `restartAll` above).
+  const inheritedRestartAll = useContext(GroupRestartContext);
+  const effectiveRestartAll = restartAll || inheritedRestartAll;
   return (
     <section role="group" aria-labelledby={labelId} className={cn("min-w-0", className)}>
       <div className="border-border/80 flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b pb-2.5">
@@ -47,7 +65,7 @@ export function FieldGroup({
       {restartAll ? (
         <p className="text-muted-foreground pt-2.5 text-xs">Changes apply after a restart</p>
       ) : null}
-      <GroupRestartContext.Provider value={restartAll}>
+      <GroupRestartContext.Provider value={effectiveRestartAll}>
         <div className="[&>*]:border-b [&>*]:border-[color-mix(in_srgb,var(--border)_60%,transparent)] [&>*:last-child]:border-b-0">
           {children}
         </div>

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { ADMIN_SETTINGS_NAV } from "@/lib/adminSettingsSearch";
 import {
   buildSettingsOverview,
   formatDurationSetting,
@@ -172,6 +173,14 @@ describe("buildSettingsOverview section cards", () => {
       "compatibility",
       "infrastructure",
     ]);
+  });
+
+  it("titles every card exactly like its settings rail label", () => {
+    const railLabels = Object.fromEntries(ADMIN_SETTINGS_NAV.map((item) => [item.id, item.label]));
+
+    for (const card of buildSettingsOverview({}).cards) {
+      expect(card.title).toBe(railLabels[card.id]);
+    }
   });
 
   it("summarises playback in one phrase", () => {
