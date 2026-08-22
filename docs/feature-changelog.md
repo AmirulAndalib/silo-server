@@ -1,5 +1,14 @@
 # Feature Changelog
 
+## 2026-08-22
+
+### Measure delivered bytes on every serving path
+Silo now measures what it actually sends, rather than trusting what a client reports it is watching.
+- Every byte-serving route across the API server, Jellyfin-compatibility layer, standalone proxy, audiobook listener and transcode nodes reports what it served, to whom and how fast, off the hot path.
+- Adds `GET /api/v1/admin/stream-telemetry/parity`, which puts the merged measurement beside the two live-session views admins read today and diffs them. See [docs/admin-api.md](admin-api.md).
+- Makes no decisions: nothing is blocked, throttled or ended, and no existing admin view was repointed onto it.
+- Fixes four defects on the byte paths themselves — proxied streams recorded against no owner, the proxy's own address recorded as the viewer's, the kernel sendfile fast path dead through the proxy chain, and stream tokens with no reliable creation time.
+
 ## 2026-04-09
 
 Covers commits from 2026-04-08 22:32 EDT through 2026-04-09 20:02 EDT.
