@@ -50,6 +50,9 @@ import VersionDropdown from "./VersionDropdown";
 import AudioTracksPopover from "./AudioTracksPopover";
 import SubtitlesPopover from "./SubtitlesPopover";
 
+// Avoid repainting the animated detail backdrop while these larger controls change hover state.
+const responsivePrimaryActionClass = "transform-gpu transition-none";
+
 interface ActionBarProps {
   contentId?: string;
   playHref?: string;
@@ -287,7 +290,7 @@ export default function ActionBar({
           showPlayChoiceDialog ? (
             <Button
               onClick={openPlayChoiceDialog}
-              className="relative h-11 cursor-pointer gap-2.5 overflow-hidden rounded-full px-8 text-[15px] font-bold tracking-wide shadow-md"
+              className={`${responsivePrimaryActionClass} relative h-11 cursor-pointer gap-2.5 overflow-hidden rounded-full px-8 text-[15px] font-bold tracking-wide shadow-md`}
             >
               <Play className="size-[18px] fill-current" />
               {displayedPlayLabel}
@@ -296,7 +299,7 @@ export default function ActionBar({
           ) : selectedVersion ? (
             <Button
               onClick={() => handleSelectedVersionPlay(false)}
-              className="relative h-11 cursor-pointer gap-2.5 overflow-hidden rounded-full px-8 text-[15px] font-bold tracking-wide shadow-md"
+              className={`${responsivePrimaryActionClass} relative h-11 cursor-pointer gap-2.5 overflow-hidden rounded-full px-8 text-[15px] font-bold tracking-wide shadow-md`}
             >
               <Play className="size-[18px] fill-current" />
               {displayedPlayLabel}
@@ -305,7 +308,7 @@ export default function ActionBar({
           ) : (
             <Button
               onClick={() => startPlaybackFromHref(playHref)}
-              className="relative h-11 cursor-pointer gap-2.5 overflow-hidden rounded-full px-8 text-[15px] font-bold tracking-wide shadow-md"
+              className={`${responsivePrimaryActionClass} relative h-11 cursor-pointer gap-2.5 overflow-hidden rounded-full px-8 text-[15px] font-bold tracking-wide shadow-md`}
             >
               <Play className="size-[18px] fill-current" />
               {displayedPlayLabel}
@@ -332,7 +335,7 @@ export default function ActionBar({
             variant="glass"
             onClick={onToggleWatched}
             disabled={isUpdatingWatched}
-            className="h-11 cursor-pointer rounded-full px-5 text-[14px] font-semibold"
+            className={`${responsivePrimaryActionClass} h-11 cursor-pointer rounded-full px-5 text-[14px] font-semibold`}
           >
             <Check className="size-[18px]" />
             {watchedLabel}
