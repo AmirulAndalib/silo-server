@@ -150,3 +150,81 @@ func TestReadFromChunkAllowsSlowClients(t *testing.T) {
 			readFromChunk, DefaultStallWindow, floor, maxAcceptableFloorBitsPerSec)
 	}
 }
+
+// TestReadFromRollsDeadlineUnderProductionStep is the same guarantee with the
+// real bumpStep in play. The other deadline tests construct the writer with
+// step=0, so they never exercise the throttle — and the throttle was the bug:
+// a slice completing less than a step after the last bump got no refresh, so the
+// next slice started with as little as window-step remaining and a client
+// sustaining the documented floor rate was reaped despite never stalling.
+func TestReadFromRollsDeadlineUnderProductionStep(t *testing.T) {
+	slice := sliceDuration()
+	window := slice * 3
+	total := readFromChunk * 3
+
+	done := make(chan error, 1)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// A step far longer than the whole transfer: with the throttle applied to
+		// slices, every bump after the first would be suppressed.
+		sw := newRollingDeadlineWriter(w, window, time.Hour)
+		sw.WriteHeader(http.StatusOK)
+		_, err := sw.ReadFrom(&pacedReader{remaining: total, piece: testPiece, pause: testPiecePause})
+		done <- err
+	}))
+	srv.Config.WriteTimeout = 0
+	srv.Start()
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	n, err := io.Copy(io.Discard, resp.Body)
+	if err != nil {
+		t.Fatalf("stream died after %d/%d bytes under the production bump step: %v", n, total, err)
+	}
+	if n != total {
+		t.Fatalf("short body: got %d bytes, want %d", n, total)
+	}
+	if handlerErr := <-done; handlerErr != nil {
+		t.Fatalf("handler ReadFrom returned %v; the step throttle must not shorten a slice's window", handlerErr)
+	}
+}
+
+// A handler that commits headers and then waits before its first write must not
+// spend that wait against the window set at construction.
+func TestReadFromBumpsBeforeTheFirstSlice(t *testing.T) {
+	slice := sliceDuration()
+	window := slice * 3
+	total := readFromChunk
+
+	done := make(chan error, 1)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		sw := newRollingDeadlineWriter(w, window, time.Hour)
+		sw.WriteHeader(http.StatusOK)
+		// Stand in for waiting on artifact readiness: longer than the window, so
+		// only a bump before the first slice can save the transfer.
+		time.Sleep(window + 50*time.Millisecond)
+		_, err := sw.ReadFrom(&pacedReader{remaining: total, piece: testPiece, pause: testPiecePause})
+		done <- err
+	}))
+	srv.Config.WriteTimeout = 0
+	srv.Start()
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	n, err := io.Copy(io.Discard, resp.Body)
+	if err != nil || n != total {
+		t.Fatalf("first slice ran against a stale deadline: %d/%d bytes, err %v", n, total, err)
+	}
+	if handlerErr := <-done; handlerErr != nil {
+		t.Fatalf("handler ReadFrom returned %v after a long pre-write wait", handlerErr)
+	}
+}

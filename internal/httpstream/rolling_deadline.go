@@ -29,12 +29,16 @@ const (
 	stallWindowEnv = "SILO_STREAM_WRITE_STALL_TIMEOUT"
 
 	// bumpStep rate-limits deadline updates so a busy stream issues one
-	// SetWriteDeadline per step rather than one per 32 KB chunk.
+	// SetWriteDeadline per step rather than one per 32 KB chunk. It applies to
+	// Write only: a ReadFrom slice is already bounded at readFromChunk, so
+	// bumping around one costs at most a syscall per 4 MiB and the throttle
+	// would only shorten the window a slice runs against.
 	bumpStep = 15 * time.Second
 
 	// readFromChunk bounds each ReadFrom slice so the deadline keeps rolling.
 	// At the default 180s window, 4 MiB permits steady clients down to roughly
-	// 186 kbit/s without expiring mid-slice.
+	// 186 kbit/s without expiring mid-slice. That figure is only true because
+	// every slice starts against a freshly set deadline — see forceBump.
 	readFromChunk int64 = ReadFromChunkDefault
 )
 
@@ -97,10 +101,26 @@ func (s *RollingDeadlineWriter) bump() {
 	if s.disabled {
 		return
 	}
-	now := time.Now()
-	if !s.lastBump.IsZero() && now.Sub(s.lastBump) < s.step {
+	if !s.lastBump.IsZero() && time.Since(s.lastBump) < s.step {
 		return
 	}
+	s.forceBump()
+}
+
+// forceBump sets the deadline unconditionally, ignoring the step throttle.
+//
+// The throttle exists so a fast stream does not issue one SetWriteDeadline per
+// 32 KB Write. A ReadFrom slice is already bounded at readFromChunk, so the
+// throttle buys nothing there and costs correctness: a throttled slice starts
+// with as little as window-step remaining, which raises the sustained rate a
+// client must hold to survive from the documented 186 kbit/s to ~203 kbit/s and
+// reaps healthy slow clients. Every slice therefore gets a full window, which is
+// what the pre-CopyChunked loop did.
+func (s *RollingDeadlineWriter) forceBump() {
+	if s.disabled {
+		return
+	}
+	now := time.Now()
 	if err := s.rc.SetWriteDeadline(now.Add(s.window)); err != nil {
 		s.disabled = true
 		return
@@ -141,8 +161,12 @@ func (s *RollingDeadlineWriter) ReadFrom(r io.Reader) (int64, error) {
 	if s.statusCode == 0 {
 		s.statusCode = http.StatusOK
 	}
+	// Before the FIRST slice as well as between slices: a handler that sets
+	// headers and then waits on readiness before its first write would otherwise
+	// run that slice against the window set at construction.
+	s.forceBump()
 	return CopyChunked(rf, r, readFromChunk, func(n int64, err error) {
-		s.bump()
+		s.forceBump()
 		s.recordWrite(n, err)
 	})
 }
