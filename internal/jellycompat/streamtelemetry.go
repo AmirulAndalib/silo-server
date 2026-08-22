@@ -28,8 +28,26 @@ import (
 // request: Session.StreamAppUserID is the numeric silo account id, so compat
 // sessions land in the same subject space as native and proxy and a per-user
 // total sums across families.
+//
+// The canonical key is the UPSTREAM playback session id, never the compat
+// PlaybackSession.ID. Every other publisher — the proxy (from the stream token's
+// SessionID claim), nodesessions, and playback_sessions_sync — keys on
+// playback.Session.ID, and BuildGlobalView merges by exact SessionID string.
+// Keying compat on its own play-session id would split one viewing into two
+// merged sessions: a byte-less compat twin and the proxy record carrying all the
+// traffic, and would make every compat session look telemetry_only in parity.
+//
+// A compat play session does not learn its upstream id until
+// ensureUpstreamPlayback (or ensureTranscodeManifest) has run, so on the very
+// first request of a session this is a no-op and the caller attaches again once
+// the id exists. Skipping is deliberate: a provisional key would produce exactly
+// the ghost session described above, and a brand-new session cannot have a
+// pending cut against it because its id did not exist a moment ago. The
+// consequence is that a request failing before the upstream session is minted
+// lands in the unattributed counters rather than on a session — which is
+// correct, since nothing else in the fleet knows that id either.
 func attachCompatStream(ctx context.Context, session *Session, play *PlaybackSession, mediaFileID int) {
-	if session == nil {
+	if session == nil || play == nil || play.UpstreamSessionID == "" {
 		return
 	}
 	attachment := streamtelemetry.Attachment{
@@ -41,15 +59,13 @@ func attachCompatStream(ctx context.Context, session *Session, play *PlaybackSes
 		TokenIssuedAtSource: streamtelemetry.TokenIssuedAtSourceNone,
 		StartedAtSource:     streamtelemetry.StartedAtSourceFirstSeen,
 	}
-	if play != nil {
-		attachment.SessionID = play.ID
-		attachment.PlayMethod = play.UpstreamPlayMethod
-		if !play.CreatedAt.IsZero() {
-			// P0a established the top-level compat CreatedAt as the source of
-			// truth for a compat session's start time.
-			attachment.StartedAt = play.CreatedAt
-			attachment.StartedAtSource = streamtelemetry.StartedAtSourceSession
-		}
+	attachment.SessionID = play.UpstreamSessionID
+	attachment.PlayMethod = play.UpstreamPlayMethod
+	if !play.CreatedAt.IsZero() {
+		// P0a established the top-level compat CreatedAt as the source of
+		// truth for a compat session's start time.
+		attachment.StartedAt = play.CreatedAt
+		attachment.StartedAtSource = streamtelemetry.StartedAtSourceSession
 	}
 	streamtelemetry.Attach(ctx, attachment)
 }

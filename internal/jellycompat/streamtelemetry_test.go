@@ -127,6 +127,22 @@ func (f compatTelemetryFixture) get(t *testing.T, method, url string, headers ma
 	return compatResponse{status: resp.StatusCode, body: string(buf)}
 }
 
+// playSessions exposes the fixture's compat play sessions so a test can assert
+// telemetry is NOT keyed on their ids.
+func (f compatTelemetryFixture) playSessions() []PlaybackSession {
+	store, ok := f.store.(*PlaybackSessionStore)
+	if !ok {
+		return nil
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	out := make([]PlaybackSession, 0, len(store.sessions))
+	for _, play := range store.sessions {
+		out = append(out, play)
+	}
+	return out
+}
+
 func TestMountedCompatRouterAttributesDirectStream(t *testing.T) {
 	registry := compatTelemetryRegistry(t)
 	fixture := newCompatTelemetryServer(t, registry)
@@ -150,8 +166,20 @@ func TestMountedCompatRouterAttributesDirectStream(t *testing.T) {
 	if session.Subject != streamtelemetry.UserSubject(91) || session.ProfileID != "profile-7" {
 		t.Fatalf("identity = %+v", session)
 	}
-	if session.SessionID == "" {
-		t.Fatal("compat session has no canonical play-session id")
+	// The canonical key is the UPSTREAM playback session id (what the proxy,
+	// nodesessions and playback_sessions_sync all publish), not the compat
+	// PlaybackSession.ID. Keying on the latter splits one viewing into two
+	// merged sessions and makes every compat session look telemetry_only.
+	if session.SessionID != "upstream-started" {
+		t.Fatalf("session id = %q, want the upstream playback session id", session.SessionID)
+	}
+	for _, play := range fixture.playSessions() {
+		if session.SessionID == play.ID {
+			t.Fatalf("telemetry keyed on the compat play session id %q", play.ID)
+		}
+		if play.UpstreamSessionID != session.SessionID {
+			t.Fatalf("play session upstream id = %q, telemetry session id = %q", play.UpstreamSessionID, session.SessionID)
+		}
 	}
 	if session.MediaFileID != 42 {
 		t.Fatalf("media file id = %d", session.MediaFileID)

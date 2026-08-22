@@ -26,7 +26,7 @@ var jellycompatMediaRoutes = []streamtelemetry.MediaRoute{
 
 func compatRoute(method, pattern string, class streamtelemetry.Class, capRelevant bool) streamtelemetry.MediaRoute {
 	return streamtelemetry.MediaRoute{Family: streamtelemetry.FamilyJellycompat, Method: method, Pattern: pattern,
-		Class: class, Role: streamtelemetry.RoleViewerEgress, CanonicalSessionKey: "compat_play_session",
+		Class: class, Role: streamtelemetry.RoleViewerEgress, CanonicalSessionKey: "upstream_playback_session",
 		CapRelevant: capRelevant, Enrolled: true, Capture: compatCapture(pattern)}
 }
 

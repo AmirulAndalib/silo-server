@@ -93,6 +93,9 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 		writeCompatUpstreamError(w, err)
 		return
 	}
+	// The attach above is a no-op on the first request of a session, which has
+	// no upstream id yet. Now it does, and no byte has been written.
+	attachCompatStream(r.Context(), session, playSession, source.FileID)
 
 	if h.fileResolver == nil {
 		writeError(w, http.StatusInternalServerError, "ServerError", "File resolver not available")
@@ -235,6 +238,9 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 			writeCompatUpstreamError(w, err)
 			return
 		}
+		// See HandleVideoStream: the pre-side-effect attach cannot know the
+		// upstream id on a session's first request, and this is where it exists.
+		attachCompatStream(r.Context(), session, playSession, source.FileID)
 		failRemoteStart := func() {
 			h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
 		}
@@ -293,6 +299,13 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 
 	// Ensure the transcode process is running.
 	manifest, err := h.ensureTranscodeManifest(r.Context(), session, playSession.ID, *source)
+	if err == nil {
+		// Local-fallback path: the upstream session was minted in here, so this
+		// is the first point at which the observation can carry the merged view's
+		// canonical key. No-op when the earlier attach already succeeded.
+		playSession = h.refreshPlaySession(playSession)
+		attachCompatStream(r.Context(), session, playSession, source.FileID)
+	}
 	if err != nil {
 		if errors.Is(err, errTranscode4KDisallowed) {
 			writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
@@ -347,6 +360,13 @@ func (h *PlaybackHandler) HandleHLSManifest(w http.ResponseWriter, r *http.Reque
 
 	// Ensure the transcode process is running.
 	manifest, err := h.ensureTranscodeManifest(r.Context(), session, playSession.ID, *source)
+	if err == nil {
+		// Local-fallback path: the upstream session was minted in here, so this
+		// is the first point at which the observation can carry the merged view's
+		// canonical key. No-op when the earlier attach already succeeded.
+		playSession = h.refreshPlaySession(playSession)
+		attachCompatStream(r.Context(), session, playSession, source.FileID)
+	}
 	if err != nil {
 		if errors.Is(err, errTranscode4KDisallowed) {
 			writeError(w, http.StatusForbidden, "Forbidden", "4K video transcoding is disabled on this server")
@@ -1425,6 +1445,19 @@ func (h *PlaybackHandler) reviveUpstreamForReport(ctx context.Context, session *
 		return nil
 	}
 	return revived
+}
+
+// refreshPlaySession re-reads a play session from the store so a caller that
+// just triggered upstream-session creation sees the minted UpstreamSessionID.
+// Returns the original on a miss so callers never have to nil-check.
+func (h *PlaybackHandler) refreshPlaySession(current *PlaybackSession) *PlaybackSession {
+	if current == nil {
+		return nil
+	}
+	if refreshed, ok := h.playbackStore.Get(current.ID); ok && refreshed != nil {
+		return refreshed
+	}
+	return current
 }
 
 func (h *PlaybackHandler) ensureUpstreamPlayback(ctx context.Context, compatSession *Session, playSessionID string, source PlaybackMediaSource, method string) (*PlaybackSession, error) {
