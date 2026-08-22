@@ -538,7 +538,7 @@ type playbackStartRequestDigestsV3 struct {
 // unconditionally would write "web" into the one field that is contractually
 // semver, on every browser session.
 func playbackClientInfoForStartV3(r *http.Request, clientContext playback.ClientPlaybackContextV3) playback.ClientInfo {
-	info := playbackClientInfoFromRequest(r)
+	info := playback.ClientInfoFromRequest(r)
 	if info.Name == "" {
 		return info
 	}
@@ -2772,7 +2772,7 @@ func (h *PlaybackHandler) HandlePlaybackRouteEventV3(w http.ResponseWriter, r *h
 		return
 	}
 	event.Diagnostics = sanitizeDiagnosticsV3(event.Diagnostics)
-	client := h.playbackClientInfoWithSessionFallbackV3(firstNonEmptyValue(event.SessionID, identity.SessionID), playbackClientInfoFromRequest(r))
+	client := h.playbackClientInfoWithSessionFallbackV3(firstNonEmptyValue(event.SessionID, identity.SessionID), playback.ClientInfoFromRequest(r))
 	h.enqueueRouteEventV3(playback.RouteEventRecordV3{RouteEventV3: event, UserID: userID, ProfileID: profileID, ClientName: client.Name, ClientVersion: client.Version, ClientBuild: client.Build, ClientChannel: client.Channel, ClientModel: event.Diagnostics["device_model"]})
 	w.WriteHeader(http.StatusAccepted)
 }

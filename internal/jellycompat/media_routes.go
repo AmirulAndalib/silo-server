@@ -1,11 +1,9 @@
 package jellycompat
 
 import (
-	"net"
 	"net/http"
 	"time"
 
-	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 )
 
@@ -47,13 +45,7 @@ func compatRoute(method, pattern string, class streamtelemetry.Class, capRelevan
 // deliberate; do not "fix" it by moving the wrapper.
 func compatCapture(pattern string) func(*http.Request) streamtelemetry.CaptureSet {
 	return func(r *http.Request) streamtelemetry.CaptureSet {
-		viewerIP := clientip.FromContext(r.Context())
-		if viewerIP == "" {
-			viewerIP, _, _ = net.SplitHostPort(r.RemoteAddr)
-			if viewerIP == "" {
-				viewerIP = r.RemoteAddr
-			}
-		}
+		viewerIP := streamtelemetry.ViewerIP(r)
 		return streamtelemetry.CaptureSet{
 			Method: r.Method, Pattern: pattern, ViewerIP: viewerIP,
 			DeviceID: stripCompatNUL(firstMediaBrowserAuthorizationValue(r, "DeviceId")),

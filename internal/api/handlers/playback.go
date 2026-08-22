@@ -1108,16 +1108,6 @@ func (h *PlaybackHandler) HandleStartPlayback(w http.ResponseWriter, r *http.Req
 	h.handleStartPlaybackV3(w, r, body)
 }
 
-// PlaybackClientInfoFromRequest captures and normalizes playback client headers
-// at the HTTP request boundary.
-func PlaybackClientInfoFromRequest(r *http.Request) playback.ClientInfo {
-	return playback.ClientInfoFromRequest(r)
-}
-
-func playbackClientInfoFromRequest(r *http.Request) playback.ClientInfo {
-	return PlaybackClientInfoFromRequest(r)
-}
-
 // HandleUpdateProgress handles POST /playback/{session_id}/progress.
 func (h *PlaybackHandler) HandleUpdateProgress(w http.ResponseWriter, r *http.Request) {
 	userID := apimw.GetUserID(r.Context())

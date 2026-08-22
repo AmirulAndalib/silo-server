@@ -117,6 +117,13 @@ func genericCapture(r *http.Request) CaptureSet {
 	}
 }
 
+// ViewerIP resolves the address to record for the person on the other end of a
+// media route: the resolved client IP when clientip.Middleware has run, and the
+// transport peer otherwise. Exported because every family's Capture builds the
+// same fallback chain, and four copies of it would diverge the moment one is
+// fixed (IPv6 bracket handling, say) and the others are not.
+func ViewerIP(r *http.Request) string { return viewerIP(r) }
+
 func viewerIP(r *http.Request) string {
 	if r == nil {
 		return ""

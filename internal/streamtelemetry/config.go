@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/Silo-Server/silo-server/internal/envutil"
 )
 
 const (
@@ -107,14 +109,14 @@ func DefaultConfig(nodeID string) Config {
 // telemetry; invalid distributed-only settings retain local telemetry.
 func ConfigFromEnv(nodeID string) Config {
 	cfg := DefaultConfig(nodeID)
-	cfg.Enabled = envEnabled(os.Getenv(enabledEnv))
+	cfg.Enabled = envutil.Bool(enabledEnv)
 	coreInvalid := make([]string, 0)
 	distributedInvalid := make([]string, 0)
 	// The operator only owns the variables they actually set. The cross-checks
 	// below relate two knobs, and a violation involving an unset knob is not the
 	// operator's mistake — it is a default that has to move.
 	explicit := make(map[string]bool)
-	cfg.Distributed = envEnabled(os.Getenv(distributedEnv))
+	cfg.Distributed = envutil.Bool(distributedEnv)
 	parseDuration := func(name string, dst *time.Duration) {
 		value := strings.TrimSpace(os.Getenv(name))
 		if value == "" {
@@ -307,9 +309,4 @@ func parseFamilies(value string) (map[Family]bool, bool) {
 		}
 	}
 	return families, true
-}
-
-func envEnabled(value string) bool {
-	value = strings.TrimSpace(strings.ToLower(value))
-	return value == "1" || value == "true" || value == "yes" || value == "on"
 }

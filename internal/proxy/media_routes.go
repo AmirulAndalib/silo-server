@@ -1,11 +1,9 @@
 package proxy
 
 import (
-	"net"
 	"net/http"
 	"time"
 
-	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 )
@@ -35,13 +33,7 @@ func declareProxyMediaRoutes() { streamtelemetry.DeclareRoutes(proxyMediaRoutes.
 func proxyCapture(pattern string) func(*http.Request) streamtelemetry.CaptureSet {
 	return func(r *http.Request) streamtelemetry.CaptureSet {
 		client := playback.ClientInfoFromRequest(r)
-		viewerIP := clientip.FromContext(r.Context())
-		if viewerIP == "" {
-			viewerIP, _, _ = net.SplitHostPort(r.RemoteAddr)
-			if viewerIP == "" {
-				viewerIP = r.RemoteAddr
-			}
-		}
+		viewerIP := streamtelemetry.ViewerIP(r)
 		return streamtelemetry.CaptureSet{
 			Method: r.Method, Pattern: pattern, ViewerIP: viewerIP,
 			DeviceID:  r.Header.Get("X-Silo-Device-ID"),

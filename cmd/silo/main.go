@@ -200,11 +200,14 @@ func newStreamTelemetryRegistry(ctx context.Context, nodeID string, redisClient 
 // newStreamTelemetryViewCache builds the bounded-staleness cache the admin
 // parity endpoint reads. It shares one cached view across every reader so the
 // merged rebuild is paid at most once per TTL, not once per request.
-func newStreamTelemetryViewCache(registry *streamtelemetry.Registry, nodeID string) *streamtelemetry.ViewCache {
+func newStreamTelemetryViewCache(registry *streamtelemetry.Registry) *streamtelemetry.ViewCache {
 	if registry == nil {
 		return nil
 	}
-	return streamtelemetry.NewViewCache(registry, streamtelemetry.ConfigFromEnv(nodeID).ViewTTL, slog.Default())
+	// Reads the TTL off the registry rather than calling ConfigFromEnv again:
+	// a second parse logs every invalid variable twice and the two calls could
+	// disagree if the environment changed between them.
+	return streamtelemetry.NewViewCache(registry, registry.ViewTTL(), slog.Default())
 }
 
 func resolvePluginCacheDir() string {
@@ -898,7 +901,7 @@ func main() {
 	if mode == "" || mode == "integrated" || mode == "api" {
 		streamTelemetryRegistry = newStreamTelemetryRegistry(appCtx, nodeID, apiRedisClient)
 		streamTelemetryRegistry.Start(appCtx)
-		streamTelemetryViewCache = newStreamTelemetryViewCache(streamTelemetryRegistry, nodeID)
+		streamTelemetryViewCache = newStreamTelemetryViewCache(streamTelemetryRegistry)
 	}
 
 	// Assigned below once the trusted-proxy config is seeded; captured by the

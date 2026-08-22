@@ -95,6 +95,16 @@ func NewRegistry(cfg Config, store SnapshotStore, logger *slog.Logger) *Registry
 
 func (r *Registry) Enabled() bool { return r != nil && r.cfg.Enabled }
 
+// ViewTTL exposes the resolved bounded-staleness window so the view cache can be
+// built from the config this registry already parsed, rather than reading and
+// re-validating every SILO_STREAM_TELEMETRY_* variable a second time.
+func (r *Registry) ViewTTL() time.Duration {
+	if r == nil {
+		return 0
+	}
+	return r.cfg.ViewTTL
+}
+
 func (r *Registry) Store() SnapshotStore {
 	if r == nil {
 		return nil
