@@ -187,8 +187,19 @@ describe("CardOverlays", () => {
     expect(badge?.style.borderWidth).toBe(
       preset.borderWidth === undefined ? "" : posterLength(preset.borderWidth),
     );
+    // CSSStyleDeclaration exposes an all-sides borderWidth through its side longhands.
     expect(badge?.style.borderLeftWidth).toBe(
       preset.borderWidth === undefined ? "" : posterLength(preset.borderWidth),
+    );
+    expect(badge?.style.textShadow).toBe(
+      preset.textShadow === undefined
+        ? ""
+        : `${posterLength(preset.textShadow.x)} ${posterLength(preset.textShadow.y)} ${posterLength(preset.textShadow.blur)} ${preset.textShadow.color}`,
+    );
+    expect(badge?.style.boxShadow).toBe(
+      preset.boxShadow === undefined
+        ? ""
+        : `${posterLength(preset.boxShadow.x)} ${posterLength(preset.boxShadow.y)} ${posterLength(preset.boxShadow.blur)} ${posterLength(preset.boxShadow.spread ?? 0)} ${preset.boxShadow.color}`,
     );
   });
 
@@ -272,6 +283,56 @@ describe("CardOverlays", () => {
 
     unmount();
     expect(disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("scales preset shadows from the measured poster width in legacy browsers", () => {
+    const disconnect = vi.fn();
+    vi.stubGlobal("CSS", { supports: () => false });
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(private callback: ResizeObserverCallback) {}
+        observe(target: Element) {
+          this.callback(
+            [{ target, contentRect: { width: 92.5 } } as unknown as ResizeObserverEntry],
+            this as unknown as ResizeObserver,
+          );
+        }
+        disconnect = disconnect;
+      },
+    );
+
+    const { container, unmount } = render(
+      <CardOverlays data={SAMPLE_MOVIE_DATA} prefs={prefsWithOnly("resolution", "minimal")} />,
+    );
+    const layer = container.querySelector<HTMLElement>('[data-card-overlays="poster"]');
+
+    expect(layer?.style.getPropertyValue("--card-overlay-text-shadow-x")).toBe("0px");
+    expect(layer?.style.getPropertyValue("--card-overlay-text-shadow-y")).toBe("0.5px");
+    expect(layer?.style.getPropertyValue("--card-overlay-text-shadow-blur")).toBe("1px");
+
+    unmount();
+    expect(disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("keeps preset shadows at baseline size on wide cards", () => {
+    const minimal = render(
+      <CardOverlays
+        data={SAMPLE_MOVIE_DATA}
+        prefs={prefsWithOnly("resolution", "minimal")}
+        variant="wide"
+      />,
+    ).container.querySelector<HTMLElement>("span.inline-flex");
+    expect(minimal?.style.textShadow).toBe("0px 1px 2px rgba(0,0,0,0.85)");
+
+    const vibrant = render(
+      <CardOverlays
+        data={SAMPLE_MOVIE_DATA}
+        prefs={prefsWithOnly("resolution", "vibrant")}
+        variant="wide"
+      />,
+    ).container.querySelector<HTMLElement>("span.inline-flex");
+    expect(vibrant?.style.boxShadow).toBe("0px 1px 2px 0px rgb(0 0 0 / 0.25)");
   });
 
   it("lifts bottom-right badges above the card menu button", () => {
