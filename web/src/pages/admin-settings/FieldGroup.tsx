@@ -37,9 +37,10 @@ export interface FieldGroupProps {
 }
 
 /**
- * A settings group: a heading with a hairline rule under it and the rows
- * directly below. Deliberately not a card — nesting a box per group made the
- * page read as a stack of panels rather than one document.
+ * A settings group in the grouped-inset style: a plain heading above one quiet
+ * panel that holds the rows. One container per group (never per field) keeps
+ * groups visibly separate, especially on narrow screens, without reading as a
+ * stack of cards.
  */
 export function FieldGroup({
   label,
@@ -56,17 +57,17 @@ export function FieldGroup({
   const effectiveRestartAll = restartAll || inheritedRestartAll;
   return (
     <section role="group" aria-labelledby={labelId} className={cn("min-w-0", className)}>
-      <div className="border-border/80 flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b pb-2.5">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-1 pb-2">
         <h3 id={labelId} className="flex-1 text-[15px] leading-6 font-semibold tracking-tight">
           {label}
         </h3>
         {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
       </div>
       {restartAll ? (
-        <p className="text-muted-foreground pt-2.5 text-xs">Changes apply after a restart</p>
+        <p className="text-muted-foreground px-1 pb-2 text-xs">Changes apply after a restart</p>
       ) : null}
       <GroupRestartContext.Provider value={effectiveRestartAll}>
-        <div className="[&>*]:border-b [&>*]:border-[color-mix(in_srgb,var(--border)_60%,transparent)] [&>*:last-child]:border-b-0">
+        <div className="border-border/60 bg-card/40 rounded-xl border px-4 [&>*]:border-b [&>*]:border-[color-mix(in_srgb,var(--border)_60%,transparent)] [&>*:last-child]:border-b-0">
           {children}
         </div>
       </GroupRestartContext.Provider>

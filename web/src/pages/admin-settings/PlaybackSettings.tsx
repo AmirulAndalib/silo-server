@@ -239,7 +239,6 @@ export default function PlaybackSettings() {
               value={form.getValue("playback.transcode_hardware_tone_map_enabled") || "false"}
               onChange={(v) => form.setValue("playback.transcode_hardware_tone_map_enabled", v)}
               restartRequired={restartKeys.has("playback.transcode_hardware_tone_map_enabled")}
-              dirty={isDirty("playback.transcode_hardware_tone_map_enabled")}
             />
             <SettingField
               label="Enable Software HDR Tone Mapping"
@@ -248,7 +247,6 @@ export default function PlaybackSettings() {
               value={form.getValue("playback.transcode_software_tone_map_enabled") || "false"}
               onChange={(v) => form.setValue("playback.transcode_software_tone_map_enabled", v)}
               restartRequired={restartKeys.has("playback.transcode_software_tone_map_enabled")}
-              dirty={isDirty("playback.transcode_software_tone_map_enabled")}
             />
             <SettingField
               label="Throttle transcoding"
