@@ -448,6 +448,9 @@ func (h *DownloadHandler) handleDownloadFile(w http.ResponseWriter, r *http.Requ
 
 	profileID, deviceID, _, _ := managedIdentity(r)
 	filter := requestAccessFilter(r)
+	serveCtx := downloads.WithServeAuthorized(r.Context(), func(target downloads.FileTarget) {
+		attachTransfer(r.Context(), userID, profileID, target.MediaFileID)
+	})
 	if delegate && deviceID != "" {
 		handled, err := h.redirectManagedDownload(r.Context(), w, r, userID, profileID, deviceID, id, filter)
 		if err != nil {
@@ -461,7 +464,7 @@ func (h *DownloadHandler) handleDownloadFile(w http.ResponseWriter, r *http.Requ
 	// Full media downloads outlive the server's absolute WriteTimeout; roll
 	// the write deadline with progress instead.
 	sw := httpstream.NewRollingDeadlineWriter(w)
-	if err := h.svc.ServeFile(r.Context(), sw, r, userID, profileID, deviceID, id, filter); err != nil {
+	if err := h.svc.ServeFile(serveCtx, sw, r, userID, profileID, deviceID, id, filter); err != nil {
 		if errors.Is(err, downloads.ErrResponseCommitted) {
 			return
 		}
@@ -524,7 +527,14 @@ func (h *DownloadHandler) handleDirectDownload(w http.ResponseWriter, r *http.Re
 			return
 		}
 	}
-	if err := h.svc.ServeDirect(r.Context(), w, r, userID, fileID, r.URL.Query().Get("format"), filter); err != nil {
+	serveCtx := downloads.WithServeAuthorized(r.Context(), func(target downloads.FileTarget) {
+		attachTransfer(r.Context(), userID, apimw.GetProfileID(r.Context()), target.MediaFileID)
+	})
+	// A multi-gigabyte original outlives the API server's absolute WriteTimeout,
+	// exactly as on /downloads/{id}/file above; roll the deadline with progress
+	// instead of truncating the body at 120 s.
+	sw := httpstream.NewRollingDeadlineWriter(w)
+	if err := h.svc.ServeDirect(serveCtx, sw, r, userID, fileID, r.URL.Query().Get("format"), filter); err != nil {
 		h.writeDownloadError(w, err)
 		return
 	}
@@ -539,7 +549,17 @@ func (h *DownloadHandler) redirectDirectDownload(ctx context.Context, w http.Res
 	if err != nil {
 		return false, err
 	}
-	return h.redirectToProxy(w, r, secret, target, userID, "")
+	// The profile has to travel with the redirect. Hardcoding "" here recorded
+	// the telemetry transfer, the proxy's own attach (from the token claim) and
+	// the node session against no profile at all, so proxy-served traffic went
+	// missing from per-profile attribution while the same file served locally
+	// was attributed correctly.
+	profileID := apimw.GetProfileID(ctx)
+	handled, err := h.redirectToProxy(w, r, secret, target, userID, profileID)
+	if handled {
+		attachTransfer(ctx, userID, profileID, target.MediaFileID)
+	}
+	return handled, err
 }
 
 func (h *DownloadHandler) redirectManagedDownload(ctx context.Context, w http.ResponseWriter, r *http.Request, userID int, profileID, deviceID, downloadID string, filter catalog.AccessFilter) (bool, error) {
@@ -551,7 +571,11 @@ func (h *DownloadHandler) redirectManagedDownload(ctx context.Context, w http.Re
 	if err != nil {
 		return false, err
 	}
-	return h.redirectToProxy(w, r, secret, target, userID, profileID)
+	handled, err := h.redirectToProxy(w, r, secret, target, userID, profileID)
+	if handled {
+		attachTransfer(ctx, userID, profileID, target.MediaFileID)
+	}
+	return handled, err
 }
 
 func (h *DownloadHandler) proxyTarget() (downloadFileResolver, string, bool) {
@@ -769,7 +793,10 @@ func (h *DownloadHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	ref := chi.URLParam(r, "ref")
-	if err := h.svc.ServeSubtitle(r.Context(), w, r, userID, profileID, deviceID, id, ref, requestAccessFilter(r)); err != nil {
+	serveCtx := downloads.WithServeAuthorized(r.Context(), func(target downloads.FileTarget) {
+		attachTransfer(r.Context(), userID, profileID, target.MediaFileID)
+	})
+	if err := h.svc.ServeSubtitle(serveCtx, w, r, userID, profileID, deviceID, id, ref, requestAccessFilter(r)); err != nil {
 		h.writeAssetError(w, "subtitle", id, err)
 		return
 	}

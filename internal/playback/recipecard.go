@@ -16,12 +16,13 @@ import (
 // context, channels, log sink). Those are re-wired on reconstruct from the
 // live config and request.
 type RecipeCard struct {
-	SessionID            string `json:"session_id"`
-	UserID               int    `json:"user_id"`
-	ProfileID            string `json:"profile_id"`
-	MediaFileID          int    `json:"media_file_id"`
-	TranscodeNodeURL     string `json:"transcode_node_url,omitempty"`
-	TranscodeTransportID string `json:"transcode_transport_id,omitempty"`
+	SessionID            string    `json:"session_id"`
+	UserID               int       `json:"user_id"`
+	ProfileID            string    `json:"profile_id"`
+	MediaFileID          int       `json:"media_file_id"`
+	TranscodeNodeURL     string    `json:"transcode_node_url,omitempty"`
+	TranscodeTransportID string    `json:"transcode_transport_id,omitempty"`
+	OriginalStartedAt    time.Time `json:"original_started_at,omitempty"`
 
 	// PlayMethod discriminates which serve path reconstructs this session
 	// (direct / remux / transcode). Empty decodes as PlayTranscode for
@@ -216,22 +217,28 @@ const MaxTokenTTL = 24 * time.Hour
 // change applies to reconstructed sessions too.
 func (c RecipeCard) ToClaims() streamtoken.Claims {
 	return streamtoken.Claims{
-		SessionID:              c.SessionID,
-		MediaPath:              c.InputPath,
-		OutputSubdir:           c.OutputSubdir,
-		DVProfile:              c.DVProfile,
-		AudioOnly:              c.AudioOnly,
-		PlayMethod:             string(c.PlayMethod),
-		TranscodeAudio:         c.TranscodeAudio,
-		RemuxDVMode:            string(c.RemuxDVMode),
-		TranscodeNode:          c.TranscodeNodeURL,
-		TranscodeTransportID:   c.TranscodeTransportID,
-		TargetCodec:            c.TargetCodecVideo,
-		TargetRes:              c.TargetResolution,
-		AudioTrackIndex:        c.AudioTrackIndex,
-		UserID:                 c.UserID,
-		ProfileID:              c.ProfileID,
-		MediaFileID:            c.MediaFileID,
+		SessionID:            c.SessionID,
+		MediaPath:            c.InputPath,
+		OutputSubdir:         c.OutputSubdir,
+		DVProfile:            c.DVProfile,
+		AudioOnly:            c.AudioOnly,
+		PlayMethod:           string(c.PlayMethod),
+		TranscodeAudio:       c.TranscodeAudio,
+		RemuxDVMode:          string(c.RemuxDVMode),
+		TranscodeNode:        c.TranscodeNodeURL,
+		TranscodeTransportID: c.TranscodeTransportID,
+		TargetCodec:          c.TargetCodecVideo,
+		TargetRes:            c.TargetResolution,
+		AudioTrackIndex:      c.AudioTrackIndex,
+		UserID:               c.UserID,
+		ProfileID:            c.ProfileID,
+		MediaFileID:          c.MediaFileID,
+		OriginalStartedAtUnixNano: func() int64 {
+			if c.OriginalStartedAt.IsZero() {
+				return 0
+			}
+			return c.OriginalStartedAt.UnixNano()
+		}(),
 		SourceVideoCodec:       c.SourceVideoCodec,
 		SourceVideoProfile:     c.SourceVideoProfile,
 		SourceVideoBitDepth:    c.SourceVideoBitDepth,
@@ -266,7 +273,7 @@ func RecipeCardFromClaims(c *streamtoken.Claims) RecipeCard {
 	if method == "" {
 		method = PlayTranscode
 	}
-	return RecipeCard{
+	card := RecipeCard{
 		SessionID:              c.SessionID,
 		UserID:                 c.UserID,
 		ProfileID:              c.ProfileID,
@@ -303,4 +310,8 @@ func RecipeCardFromClaims(c *streamtoken.Claims) RecipeCard {
 		TotalDuration:          c.TotalDuration,
 		FastStart:              c.FastStart,
 	}
+	if c.OriginalStartedAtUnixNano != 0 {
+		card.OriginalStartedAt = time.Unix(0, c.OriginalStartedAtUnixNano).UTC()
+	}
+	return card
 }

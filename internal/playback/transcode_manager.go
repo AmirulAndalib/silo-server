@@ -425,6 +425,7 @@ func (m *TranscodeManager) ReconstructSession(ctx context.Context, sessionID str
 		UserID:                 card.UserID,
 		ProfileID:              card.ProfileID,
 		MediaFileID:            card.MediaFileID,
+		StartedAt:              card.OriginalStartedAt,
 		PlayMethod:             method,
 		BasePlayMethod:         method,
 		TranscodeNodeURL:       card.TranscodeNodeURL,

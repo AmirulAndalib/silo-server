@@ -174,6 +174,10 @@ func (s *Server) handleGrantTranscodeSegment(w http.ResponseWriter, r *http.Requ
 // after its own restart), so the credential the client was promised it would
 // never see stays strictly on the proxy→node hop.
 func (s *Server) relayGrantToTranscodeNode(w http.ResponseWriter, r *http.Request, claims *streamtoken.Claims, path string) {
+	// The token transcode routes attach in their handlers; this is the only path
+	// the two grant transcode handlers take, so attaching once here is the
+	// equivalent hook. The proxy→node hop itself stays internal_relay.
+	attachStream(r.Context(), claims)
 	cfg := s.watcher.Config()
 	forwardToken := ""
 	if cfg != nil && cfg.Auth.JWTSecret != "" {

@@ -7,6 +7,14 @@ Playback protocol v3 now advertises the engine-neutral `authorized_media_origins
 
 ## 2026-08-22
 
+### Measure delivered bytes on every serving path
+Silo now measures what it actually sends, rather than trusting what a client reports it is watching.
+- Every byte-serving route across the API server, Jellyfin-compatibility layer, standalone proxy, audiobook listener and transcode nodes reports what it served, to whom and how fast, off the hot path.
+- Measurement is on by default and needs no configuration: every media route family — native, jellycompat, proxy, audiobooks and transcode nodes — is observed out of the box. `SILO_STREAM_TELEMETRY_ENABLED=false` is the per-process kill switch, `SILO_STREAM_TELEMETRY_FAMILIES` narrows observation or kills one misbehaving family without losing the rest, and the distributed merge turns itself on wherever Redis is configured, so a single-node install measures locally and a cluster merges without either setting a variable.
+- Adds `GET /api/v1/admin/stream-telemetry/parity`, which puts the merged measurement beside the two live-session views admins read today and diffs them. See [docs/admin-api.md](admin-api.md).
+- Makes no decisions: nothing is blocked, throttled or ended, and no existing admin view was repointed onto it.
+- Fixes four defects on the byte paths themselves — proxied streams recorded against no owner, the proxy's own address recorded as the viewer's, the kernel sendfile fast path dead through the proxy chain, and stream tokens with no reliable creation time.
+
 ### Qualify bounded software video decoders without weakening evidence tiers
 Playback protocol v3 now advertises the engine-neutral `software_video_decode_v1` opt-in. Exact and platform-attested clients may use bounded `hardware: false` entries from `video_decode[]` for original/direct eligibility only when they send the feature. Download creation accepts the same additive feature, evidence tier, and detailed decoder entries so persistent originals do not flatten a 1080p software claim into a device-wide 4K claim. Existing clients remain hardware-only at strict playback tiers and existing flat download payloads remain unchanged.
 

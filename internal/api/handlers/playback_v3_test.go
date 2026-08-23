@@ -821,6 +821,7 @@ func TestHandleReplanPlaybackV3UpdatesSelectedAudioAndReplaysIdempotently(t *tes
 	file.AudioTracks = append(file.AudioTracks, models.AudioTrack{Codec: "aac", Channels: 2, Layout: "stereo", Language: "spa"})
 	manager := playback.NewSessionManager(0, 0)
 	handler := NewPlaybackHandler(manager, testPlaybackFileResolver{file: file})
+	handler.JWTSecret = "test-secret"
 	stubCopySeekAnchorV3(handler)
 	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"allow_4k_transcode": "true"}}
 	handler.ItemAccess = allowAllPlaybackItemAccess{}
@@ -844,6 +845,17 @@ func TestHandleReplanPlaybackV3UpdatesSelectedAudioAndReplaysIdempotently(t *tes
 	if started.PlaybackPlan == nil {
 		t.Fatal("start returned no plan")
 	}
+	originalSession, err := manager.GetSession(started.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalClaims := streamClaimsFromPlanURL(t, started.PlaybackPlan.Stream.URL, handler.JWTSecret)
+	if originalClaims.OriginalStartedAtUnixNano != originalSession.StartedAt.UnixNano() {
+		t.Fatalf("start ostn = %d, want %d", originalClaims.OriginalStartedAtUnixNano, originalSession.StartedAt.UnixNano())
+	}
+	// Cross the JWT NumericDate second boundary so the replan proves ostn stays
+	// immutable even though Sign rewrites iat on the replacement token.
+	time.Sleep(time.Until(time.Unix(time.Now().Unix()+1, 0)) + 10*time.Millisecond)
 	audioIndex := 1
 	bandwidthEstimate := 3_500
 	bandwidthCap := 4_000
@@ -872,6 +884,13 @@ func TestHandleReplanPlaybackV3UpdatesSelectedAudioAndReplaysIdempotently(t *tes
 	second := call()
 	if first.PlaybackPlan == nil || second.PlaybackPlan == nil || first.PlaybackPlan.PlanID != second.PlaybackPlan.PlanID {
 		t.Fatalf("first=%#v second=%#v", first, second)
+	}
+	replanClaims := streamClaimsFromPlanURL(t, first.PlaybackPlan.Stream.URL, handler.JWTSecret)
+	if replanClaims.OriginalStartedAtUnixNano != originalSession.StartedAt.UnixNano() {
+		t.Fatalf("replan ostn = %d, want original %d", replanClaims.OriginalStartedAtUnixNano, originalSession.StartedAt.UnixNano())
+	}
+	if originalClaims.IssuedAt == nil || replanClaims.IssuedAt == nil || originalClaims.IssuedAt.Equal(replanClaims.IssuedAt.Time) {
+		t.Fatalf("iat did not move across replan: original=%v replan=%v", originalClaims.IssuedAt, replanClaims.IssuedAt)
 	}
 	session, err := manager.GetSession(started.SessionID)
 	if err != nil {
@@ -913,6 +932,32 @@ func TestHandleReplanPlaybackV3UpdatesSelectedAudioAndReplaysIdempotently(t *tes
 	if conflictRR.Code != http.StatusConflict || !strings.Contains(conflictRR.Body.String(), "idempotency_key_reused") {
 		t.Fatalf("conflict status = %d, body = %s", conflictRR.Code, conflictRR.Body.String())
 	}
+}
+
+func streamClaimsFromPlanURL(t *testing.T, rawURL, secret string) *streamtoken.Claims {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := u.Query().Get(streamTokenParam)
+	if token == "" {
+		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+		for i, part := range parts {
+			if part == "transcode" && i+1 < len(parts) {
+				token = parts[i+1]
+				break
+			}
+		}
+	}
+	if token == "" {
+		t.Fatalf("plan URL has no stream token: %q", rawURL)
+	}
+	claims, err := streamtoken.Verify(token, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return claims
 }
 
 func TestHandleReplanPlaybackV3FailureDoesNotReplaceDurableStartDecision(t *testing.T) {

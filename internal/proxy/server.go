@@ -18,11 +18,13 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 
+	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/downloadprepare"
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 )
 
@@ -39,6 +41,8 @@ type Server struct {
 	grants        proxyGrantLookup
 	loginSessions loginSessionValidator
 	egress        *egressMeter
+	clientIP      *clientip.Resolver
+	telemetry     *streamtelemetry.Registry
 	// subCache stores full-track PGS (.sup) extracts under the transcode dir
 	// so repeat selections skip the whole-file ffmpeg demux.
 	subCache *playback.SubtitleCache
@@ -94,6 +98,18 @@ func (s *Server) SetRemoteArtifactMissReporter(reporter remoteArtifactMissReport
 	s.artifactMissReporter = reporter
 }
 
+// SetClientIPResolver wires trusted-proxy client IP resolution. It must be
+// called during construction, before the server begins handling requests.
+func (s *Server) SetClientIPResolver(resolver *clientip.Resolver) {
+	s.clientIP = resolver
+}
+
+// SetStreamTelemetry wires local stream observation. A nil registry is a
+// complete no-op.
+func (s *Server) SetStreamTelemetry(registry *streamtelemetry.Registry) {
+	s.telemetry = registry
+}
+
 // newStreamTransport tunes the proxy→transcode-node connection pool. Many
 // concurrent viewers fan their segment fetches through one proxy→node pair,
 // and Go's default of 2 idle connections per host causes constant connection
@@ -110,7 +126,11 @@ func newStreamTransport() *http.Transport {
 
 // Handler returns the chi.Router with all proxy routes mounted.
 func (s *Server) Handler() http.Handler {
+	declareProxyMediaRoutes()
 	r := chi.NewRouter()
+	if s.clientIP != nil {
+		r.Use(clientip.Middleware(s.clientIP))
+	}
 	// hls.js uses XHR for manifest/segment fetches which are subject to
 	// CORS when the proxy runs on a different origin than the web app.
 	r.Use(cors.Handler(cors.Options{
@@ -137,25 +157,25 @@ func (s *Server) Handler() http.Handler {
 	r.Group(func(r chi.Router) {
 		// Streaming and download bytes count toward the node's measured egress.
 		r.Use(s.meterEgress)
-		r.Head("/stream/direct/{token}", s.handleDirectPlay)
-		r.Get("/stream/direct/{token}", s.handleDirectPlay)
-		r.Head("/stream/remux/{token}", s.handleRemux)
-		r.Get("/stream/remux/{token}", s.handleRemux)
-		r.Head("/stream/transcode/{token}/master.m3u8", s.handleTranscodeManifest)
-		r.Get("/stream/transcode/{token}/master.m3u8", s.handleTranscodeManifest)
-		r.Get("/stream/transcode/{token}/segment/{name}", s.handleTranscodeSegment)
+		r.Head("/stream/direct/{token}", observeProxy(s.telemetry, http.MethodHead, "/stream/direct/{token}", s.handleDirectPlay))
+		r.Get("/stream/direct/{token}", observeProxy(s.telemetry, http.MethodGet, "/stream/direct/{token}", s.handleDirectPlay))
+		r.Head("/stream/remux/{token}", observeProxy(s.telemetry, http.MethodHead, "/stream/remux/{token}", s.handleRemux))
+		r.Get("/stream/remux/{token}", observeProxy(s.telemetry, http.MethodGet, "/stream/remux/{token}", s.handleRemux))
+		r.Head("/stream/transcode/{token}/master.m3u8", observeProxy(s.telemetry, http.MethodHead, "/stream/transcode/{token}/master.m3u8", s.handleTranscodeManifest))
+		r.Get("/stream/transcode/{token}/master.m3u8", observeProxy(s.telemetry, http.MethodGet, "/stream/transcode/{token}/master.m3u8", s.handleTranscodeManifest))
+		r.Get("/stream/transcode/{token}/segment/{name}", observeProxy(s.telemetry, http.MethodGet, "/stream/transcode/{token}/segment/{name}", s.handleTranscodeSegment))
 		// Credential-free grant routes (authorized_media_origins_v1). Same media
 		// bytes as the token routes above, addressed by session id and
 		// authorized by the caller's own Authorization header.
-		r.Head("/stream/v3/{session_id}", s.handleGrantIdentity)
-		r.Get("/stream/v3/{session_id}", s.handleGrantIdentity)
-		r.Head("/stream/v3/{session_id}/master.m3u8", s.handleGrantTranscodeManifest)
-		r.Get("/stream/v3/{session_id}/master.m3u8", s.handleGrantTranscodeManifest)
-		r.Get("/stream/v3/{session_id}/segment/{name}", s.handleGrantTranscodeSegment)
-		r.Get("/stream/subtitles/{token}/{track}/fonts", s.handleSubtitleFonts)
-		r.Get("/stream/subtitles/{token}/{track}", s.handleSubtitle)
-		r.Head("/downloads/file/{token}", s.handleDownloadFile)
-		r.Get("/downloads/file/{token}", s.handleDownloadFile)
+		r.Head("/stream/v3/{session_id}", observeProxy(s.telemetry, http.MethodHead, "/stream/v3/{session_id}", s.handleGrantIdentity))
+		r.Get("/stream/v3/{session_id}", observeProxy(s.telemetry, http.MethodGet, "/stream/v3/{session_id}", s.handleGrantIdentity))
+		r.Head("/stream/v3/{session_id}/master.m3u8", observeProxy(s.telemetry, http.MethodHead, "/stream/v3/{session_id}/master.m3u8", s.handleGrantTranscodeManifest))
+		r.Get("/stream/v3/{session_id}/master.m3u8", observeProxy(s.telemetry, http.MethodGet, "/stream/v3/{session_id}/master.m3u8", s.handleGrantTranscodeManifest))
+		r.Get("/stream/v3/{session_id}/segment/{name}", observeProxy(s.telemetry, http.MethodGet, "/stream/v3/{session_id}/segment/{name}", s.handleGrantTranscodeSegment))
+		r.Get("/stream/subtitles/{token}/{track}/fonts", observeProxy(s.telemetry, http.MethodGet, "/stream/subtitles/{token}/{track}/fonts", s.handleSubtitleFonts))
+		r.Get("/stream/subtitles/{token}/{track}", observeProxy(s.telemetry, http.MethodGet, "/stream/subtitles/{token}/{track}", s.handleSubtitle))
+		r.Head("/downloads/file/{token}", observeProxy(s.telemetry, http.MethodHead, "/downloads/file/{token}", s.handleDownloadFile))
+		r.Get("/downloads/file/{token}", observeProxy(s.telemetry, http.MethodGet, "/downloads/file/{token}", s.handleDownloadFile))
 	})
 
 	// Admin routes — bearer-auth protected.
@@ -246,6 +266,9 @@ func (s *Server) handleDirectPlay(w http.ResponseWriter, r *http.Request) {
 // reach it with the same claims projected from a grant they authorized against
 // the caller's login session — the serving behavior must not differ.
 func (s *Server) serveDirectPlayClaims(w http.ResponseWriter, r *http.Request, claims *streamtoken.Claims) {
+	// Attach here rather than at the call sites so both the token routes and the
+	// grant routes attribute their bytes to the viewer.
+	attachStream(r.Context(), claims)
 	info := sessionInfo(s.tracker, claims, "direct_play")
 	s.tracker.Track(r.Context(), info)
 	defer s.tracker.Remove(r.Context(), claims.SessionID)
@@ -267,6 +290,9 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	if claims.PlayMethod != streamtoken.PlayMethodDownload || (strings.TrimSpace(claims.MediaPath) == "" && !remoteArtifact) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
+	}
+	if !remoteArtifact {
+		attachTransfer(r.Context(), claims)
 	}
 
 	// HEAD is a capability/path preflight, not an active transfer. Counting it
@@ -311,6 +337,7 @@ func (s *Server) relayDownloadArtifact(w http.ResponseWriter, r *http.Request, c
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	attachTransfer(r.Context(), claims)
 	cfg := s.watcher.Config()
 	if cfg == nil || strings.TrimSpace(cfg.Auth.JWTSecret) == "" {
 		http.Error(w, "download unavailable", http.StatusServiceUnavailable)
@@ -390,6 +417,8 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 // recipe, shared by the token routes and the grant routes for the same reason
 // serveDirectPlayClaims is.
 func (s *Server) serveRemuxClaims(w http.ResponseWriter, r *http.Request, claims *streamtoken.Claims) {
+	// See serveDirectPlayClaims: shared by the token and grant routes.
+	attachStream(r.Context(), claims)
 	info := sessionInfo(s.tracker, claims, "remux")
 	s.tracker.Track(r.Context(), info)
 	defer s.tracker.Remove(r.Context(), claims.SessionID)
@@ -418,6 +447,7 @@ func (s *Server) handleTranscodeManifest(w http.ResponseWriter, r *http.Request)
 	if claims == nil {
 		return
 	}
+	attachStream(r.Context(), claims)
 	s.touchTranscodeSession(r, claims)
 	s.proxyToTranscodeNode(w, r, claims, "/transcode/"+transcodeTransportIDFromClaims(claims)+"/master.m3u8", chi.URLParam(r, "token"))
 }
@@ -427,6 +457,7 @@ func (s *Server) handleTranscodeSegment(w http.ResponseWriter, r *http.Request) 
 	if claims == nil {
 		return
 	}
+	attachStream(r.Context(), claims)
 	s.touchTranscodeSession(r, claims)
 	name := chi.URLParam(r, "name")
 	s.proxyToTranscodeNode(w, r, claims, "/transcode/"+transcodeTransportIDFromClaims(claims)+"/segment/"+name, chi.URLParam(r, "token"))
@@ -453,15 +484,21 @@ func (s *Server) touchTranscodeSession(r *http.Request, claims *streamtoken.Clai
 // sessionInfo builds the node-session tracker record for a verified token,
 // copying the numeric ownership keys the node-session tracker needs.
 func sessionInfo(tr *nodesessions.Tracker, claims *streamtoken.Claims, kind string) nodesessions.SessionInfo {
+	startedAt, source := claims.StartedAt()
+	if source == streamtoken.StartedAtSourceNone {
+		startedAt = time.Now().UTC()
+	}
 	return nodesessions.SessionInfo{
-		SessionID:   claims.SessionID,
-		NodeURL:     tr.NodeURL(),
-		NodeName:    tr.NodeName(),
-		Type:        kind,
-		StartedAt:   time.Now().UTC().Format(time.RFC3339),
-		AuthUserID:  claims.UserID,
-		ProfileID:   claims.ProfileID,
-		MediaFileID: claims.MediaFileID,
+		SessionID:         claims.SessionID,
+		NodeURL:           tr.NodeURL(),
+		NodeName:          tr.NodeName(),
+		Type:              kind,
+		StartedAt:         startedAt.Format(time.RFC3339),
+		StartedAtUnixNano: startedAt.UnixNano(),
+		StartedAtSource:   string(source),
+		AuthUserID:        claims.UserID,
+		ProfileID:         claims.ProfileID,
+		MediaFileID:       claims.MediaFileID,
 	}
 }
 
@@ -470,6 +507,7 @@ func (s *Server) handleSubtitle(w http.ResponseWriter, r *http.Request) {
 	if claims == nil {
 		return
 	}
+	attachStream(r.Context(), claims)
 	cfg := s.watcher.Config()
 	trackParam := chi.URLParam(r, "track")
 	trackIndex, requestedFormat, err := playback.ParseSubtitleTrackParam(trackParam)
@@ -543,6 +581,7 @@ func (s *Server) handleSubtitleFonts(w http.ResponseWriter, r *http.Request) {
 	if claims == nil {
 		return
 	}
+	attachStream(r.Context(), claims)
 	cfg := s.watcher.Config()
 	trackParam := chi.URLParam(r, "track")
 	trackIndex, _, err := playback.ParseSubtitleTrackParam(trackParam)
