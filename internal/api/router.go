@@ -1070,6 +1070,14 @@ func NewRouter(deps Dependencies) chi.Router {
 				if detailSvc != nil {
 					detailSvc.SetCopySafetyRacer(copySafetyRace)
 				}
+				if streamHandler != nil {
+					// The progressive remux serve path revives stream-copy
+					// transports of its own, and its single long response is
+					// the one thing no later request can gate. It needs the
+					// same racer to refuse a condemned revival and to cover an
+					// undecided one.
+					streamHandler.CopySafetyRacer = copySafetyRace
+				}
 			}
 		}
 		// A resolver lets subtitle realtime events carry the combined ordinal

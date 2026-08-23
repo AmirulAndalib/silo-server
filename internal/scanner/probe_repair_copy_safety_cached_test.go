@@ -138,9 +138,12 @@ func TestScanCopySafetyPersistsAndMemoizes(t *testing.T) {
 	mtime := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
 	file := copySafetyTestFile(mtime)
 
-	multi, err := ensurer.ScanCopySafety(context.Background(), file)
+	multi, stale, err := ensurer.ScanCopySafety(context.Background(), file)
 	if err != nil {
 		t.Fatalf("ScanCopySafety() error = %v", err)
+	}
+	if stale {
+		t.Fatal("ScanCopySafety() stale = true, want false for a write the row accepted")
 	}
 	if !multi {
 		t.Fatal("ScanCopySafety() = false, want true for the conflicting-PPS stream")
@@ -181,12 +184,12 @@ func TestScanCopySafetyErrorRecordsNothing(t *testing.T) {
 
 	file := copySafetyTestFile(time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC))
 
-	multi, err := ensurer.ScanCopySafety(context.Background(), file)
+	multi, stale, err := ensurer.ScanCopySafety(context.Background(), file)
 	if err == nil {
 		t.Fatal("ScanCopySafety() error = nil, want the scan failure surfaced to the caller")
 	}
-	if multi {
-		t.Fatal("ScanCopySafety() = true on error, want false")
+	if multi || stale {
+		t.Fatalf("ScanCopySafety() = (%t, %t) on error, want (false, false)", multi, stale)
 	}
 	if writes := writer.recorded(); len(writes) != 0 {
 		t.Fatalf("failed scan recorded %d verdicts, want 0", len(writes))

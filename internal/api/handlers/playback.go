@@ -148,6 +148,15 @@ type PlaybackProbeEnsurer interface {
 // *playback.CopySafetyRace implements it.
 type PlaybackCopySafetyRacer interface {
 	RaceScanForPlan(fileID int, plan *playback.PlanV3)
+	// RaceScan re-engages the race for a file whose verdict is still open. The
+	// serve paths use it when they revive a stream-copy transport: the replica
+	// that planned it may be gone, and only a race running *here* can withdraw
+	// the route from the session this replica just rebuilt.
+	RaceScan(fileID int)
+	// VideoCopyUnsafeKnown answers, without ffmpeg and without waiting, whether
+	// this replica can already condemn a video stream-copy of the file —
+	// including from a verdict whose write to the row failed.
+	VideoCopyUnsafeKnown(ctx context.Context, file *models.MediaFile) bool
 }
 
 type PlaybackChapterThumbnailQueuer interface {
@@ -513,8 +522,10 @@ func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID s
 	// holding an admission slot the client's fresh attempt needs — and a
 	// remote-node recipe never reaches the local transport reconstruct at all
 	// (the serve handlers proxy to the node instead), so a gate down there would
-	// miss it entirely. See playback_copy_safety.go.
-	if videoCopyReconstructRefused(r.Context(), h.fileResolver, card) {
+	// miss it entirely. A revival the verdict does not condemn re-engages the
+	// race here, so the session about to be rebuilt is covered by a race this
+	// replica owns. See playback_copy_safety.go.
+	if videoCopyReconstructRefused(r.Context(), h.fileResolver, h.CopySafetyRacer, card) {
 		return nil, playback.SessionMissing, nil, nil
 	}
 	session, status := h.tm.LoadOrReconstructSession(r.Context(), h.sessionMgr.GetSession, sessionID, requestUserID, card)

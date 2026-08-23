@@ -34,17 +34,60 @@ import (
 // because that is the failure a client's recovery already knows how to handle
 // — it mints a fresh attempt, which plans against the persisted verdict and
 // lands on a transcode.
+//
+// The gate is only half the answer, because the row is only half the state. A
+// verdict is reached on one replica and may not be on the row at all: the write
+// can fail, or the scan may still be running elsewhere. A revival whose verdict
+// is *unknown* is therefore allowed — the whole point of optimistic remuxing —
+// but this replica puts itself back on the race for the file before serving it,
+// so the session it just built is owned by a live race here rather than by a
+// verdict on a replica that may already be gone. That race costs no ffmpeg when
+// the answer is already known locally or on the row; it simply re-runs the
+// notification for the sessions this replica now holds.
+
+// videoCopyRevivalRefused decides one revived video stream-copy: refuse it when
+// this replica can already call the source copy-unsafe, and otherwise re-engage
+// the race so a verdict reached later still reaches the session being revived.
+//
+// The persisted row is consulted first because it is the state every replica
+// shares. When it says nothing, the racer is asked, because a verdict this
+// process reached but failed to write lives only in its memo — and the row
+// cannot tell that apart from "never scanned". Without that second question a
+// failed write would leave the condemned recipe rebuildable forever.
+//
+// A missing racer (tests, minimal setups) collapses this to the row check plus
+// no race, which is the pre-optimistic behavior.
+func videoCopyRevivalRefused(ctx context.Context, racer PlaybackCopySafetyRacer, file *models.MediaFile, sessionID string) bool {
+	if file == nil {
+		return false
+	}
+	if multi, known := file.PersistedVideoCopyVerdict(); known {
+		if multi {
+			logVideoCopyRevivalRefusal(ctx, file, sessionID)
+		}
+		return multi
+	}
+	if racer == nil {
+		return false
+	}
+	if racer.VideoCopyUnsafeKnown(ctx, file) {
+		logVideoCopyRevivalRefusal(ctx, file, sessionID)
+		return true
+	}
+	racer.RaceScan(file.ID)
+	return false
+}
 
 // videoCopyReconstructRefused reports whether rebuilding a lost transport from
-// card must be refused because the persisted verdict now says its source cannot
-// be video stream-copied. Only copy deliveries are gated; a transcode
-// reconstruct is never touched.
+// card must be refused because the verdict now says its source cannot be video
+// stream-copied, and re-engages the race when it does not. Only copy deliveries
+// are gated; a transcode reconstruct is never touched.
 //
 // An unreadable row is not evidence of anything and does not refuse: the
 // verdict is re-checked on every request, so a database blip costs a later
 // refusal rather than a spurious one. The same applies to a handler with no
 // file resolver wired (optional on PlaybackHandler).
-func videoCopyReconstructRefused(ctx context.Context, files FilePathResolver, card *playback.RecipeCard) bool {
+func videoCopyReconstructRefused(ctx context.Context, files FilePathResolver, racer PlaybackCopySafetyRacer, card *playback.RecipeCard) bool {
 	if card == nil || files == nil || card.MediaFileID <= 0 || !card.VideoStreamCopy() {
 		return false
 	}
@@ -52,7 +95,7 @@ func videoCopyReconstructRefused(ctx context.Context, files FilePathResolver, ca
 	if err != nil || file == nil {
 		return false
 	}
-	return videoCopyUnsafeByVerdict(ctx, file, card.SessionID)
+	return videoCopyRevivalRefused(ctx, racer, file, card.SessionID)
 }
 
 // reconstructTransportForServe rebuilds a lost local transport from the token
@@ -71,20 +114,12 @@ func (h *PlaybackHandler) reconstructTransportForServe(ctx context.Context, sess
 	return h.tm.ReconstructTranscode(ctx, sessionID, requestedSegment, *card)
 }
 
-// videoCopyUnsafeByVerdict reports whether the media_files row carries a valid
-// verdict condemning a video stream-copy of this file, logging the refusal it
-// is about to cause.
-func videoCopyUnsafeByVerdict(ctx context.Context, file *models.MediaFile, sessionID string) bool {
-	multi, known := file.PersistedVideoCopyVerdict()
-	if !known || !multi {
-		return false
-	}
-	slog.InfoContext(ctx, "refusing to reconstruct a copy-unsafe video stream-copy",
+func logVideoCopyRevivalRefusal(ctx context.Context, file *models.MediaFile, sessionID string) {
+	slog.InfoContext(ctx, "refusing to revive a copy-unsafe video stream-copy",
 		"component", "api",
 		"session", sessionID,
 		"playback_session_id", sessionID,
 		"file_id", file.ID,
 		"reason", playback.PlanInvalidatedVideoCopyUnsafe,
 	)
-	return true
 }

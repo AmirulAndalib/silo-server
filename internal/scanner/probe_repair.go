@@ -219,14 +219,41 @@ func (e *PlaybackProbeEnsurer) NeedsCopySafetyScan(file *models.MediaFile) bool 
 // unknown, persisting and memoizing the result. Concurrent callers for one file
 // share a single scan, so a start, a replan and a watch-page load racing on the
 // same file spawn one ffmpeg between them.
-func (e *PlaybackProbeEnsurer) ScanCopySafety(ctx context.Context, file *models.MediaFile) (bool, error) {
+//
+// The second return reports that the verdict is stale: the row moved to another
+// generation of the file while the scan ran, so the answer is correct for bytes
+// the server is no longer serving. It is not an error — nothing failed — but a
+// caller must neither trust it nor act on it.
+func (e *PlaybackProbeEnsurer) ScanCopySafety(ctx context.Context, file *models.MediaFile) (multi bool, stale bool, err error) {
 	if e == nil || file == nil {
-		return false, nil
+		return false, false, nil
 	}
 	if strings.TrimSpace(e.ffmpegPath) == "" {
-		return false, errCopySafetyScanUnavailable
+		return false, false, errCopySafetyScanUnavailable
 	}
 	return e.scanAndPersistCopySafety(ctx, file)
+}
+
+// KnownCopySafetyVerdict answers the copy-safety question for a file without
+// ever running ffmpeg, from the process memo or from the persisted row, and
+// re-attempts a write this process reached but never managed to store.
+//
+// It exists because "unknown" and "known but unpersisted" are different states
+// that the media_files row cannot tell apart. A verdict whose write failed is
+// authoritative on this replica and invisible everywhere else, so the paths
+// that gate a revived stream-copy — and the race that withdraws one — have to
+// be able to ask this process what it already knows rather than only asking the
+// row.
+func (e *PlaybackProbeEnsurer) KnownCopySafetyVerdict(ctx context.Context, file *models.MediaFile) (bool, bool) {
+	if e == nil || file == nil {
+		return false, false
+	}
+	multi, known := e.knownCopySafetyVerdict(file)
+	if !known {
+		return false, false
+	}
+	e.retryUnpersistedCopySafety(ctx, file)
+	return multi, true
 }
 
 var errCopySafetyScanUnavailable = errors.New("ffmpeg path not configured")
@@ -298,7 +325,7 @@ func (e *PlaybackProbeEnsurer) ensureCopySafety(ctx context.Context, file *model
 		return fileWithMultiplePPS(file, multi), nil
 	}
 
-	multi, err := e.scanAndPersistCopySafety(ctx, file)
+	multi, stale, err := e.scanAndPersistCopySafety(ctx, file)
 	if err != nil {
 		// Unknown safety must not fail open to the video-copy path this probe is
 		// intended to guard. Leave MultiplePPS unset and do not cache or persist
@@ -308,6 +335,16 @@ func (e *PlaybackProbeEnsurer) ensureCopySafety(ctx context.Context, file *model
 			"component", "scanner",
 			"file_id", file.ID,
 			"error", err,
+		)
+		return fileWithCopySafety(file, nil, true), nil
+	}
+	if stale {
+		// The caller is holding a snapshot of a generation the row has moved
+		// past. Its verdict describes bytes this file no longer contains, so it
+		// is treated exactly like an unresolved scan rather than stamped on.
+		slog.InfoContext(ctx, "video copy-safety verdict superseded before it could be recorded",
+			"component", "scanner",
+			"file_id", file.ID,
 		)
 		return fileWithCopySafety(file, nil, true), nil
 	}
@@ -349,13 +386,17 @@ func copySafetyFlightKey(file *models.MediaFile) string {
 // — is bound to the leader's own snapshot of the file, so a joiner never writes
 // another generation's facts. The key is what keeps a joiner from *reading*
 // them.
-func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, file *models.MediaFile) (bool, error) {
+//
+// A write refused as stale is neither memoized nor reported as a verdict: the
+// row has moved to a generation this scan never read, and both the memo and any
+// downstream notification would be facts about bytes nobody is serving.
+func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, file *models.MediaFile) (bool, bool, error) {
 	fileID := file.ID
 	filePath := file.FilePath
 	fileSize := file.FileSize
 	fileModifiedAt := file.FileModifiedAt
 
-	multi, err, _ := e.copySafetyFlight.Do(copySafetyFlightKey(file), func() (any, error) {
+	outcome, err, _ := e.copySafetyFlight.Do(copySafetyFlightKey(file), func() (any, error) {
 		timeout := e.timeout
 		if timeout < 30*time.Second {
 			timeout = 30 * time.Second
@@ -364,7 +405,7 @@ func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, fil
 		multi, err := DetectMultiplePPSH264(scanCtx, e.ffmpegPath, filePath)
 		cancel()
 		if err != nil {
-			return false, err
+			return copySafetyOutcome{}, err
 		}
 
 		// With no writer there is nowhere for the verdict to land, so it is not
@@ -372,6 +413,13 @@ func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, fil
 		persisted := true
 		if e.copySafetyRepo != nil {
 			if writeErr := e.copySafetyRepo.UpdateMultiplePPS(ctx, fileID, multi, fileSize, fileModifiedAt); writeErr != nil {
+				if errors.Is(writeErr, ErrStaleCopySafetyScan) {
+					slog.InfoContext(ctx, "discarding a video copy-safety verdict for a superseded generation of the file",
+						"component", "scanner",
+						"file_id", fileID,
+					)
+					return copySafetyOutcome{stale: true}, nil
+				}
 				persisted = false
 				slog.WarnContext(ctx, "persisting video copy-safety verdict failed",
 					"component", "scanner",
@@ -381,13 +429,20 @@ func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, fil
 			}
 		}
 		e.storeCopySafety(file, multi, persisted)
-		return multi, nil
+		return copySafetyOutcome{multi: multi}, nil
 	})
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	result, _ := multi.(bool)
-	return result, nil
+	result, _ := outcome.(copySafetyOutcome)
+	return result.multi, result.stale, nil
+}
+
+// copySafetyOutcome is what one shared scan produced, carried through the
+// singleflight so joiners learn about a superseded write as well as the verdict.
+type copySafetyOutcome struct {
+	multi bool
+	stale bool
 }
 
 // retryUnpersistedCopySafety re-attempts the media_files write for a verdict
@@ -416,19 +471,30 @@ func (e *PlaybackProbeEnsurer) retryUnpersistedCopySafety(ctx context.Context, f
 		// the write while this caller queued behind it.
 		entry, ok := e.memoizedCopySafety(file)
 		if !ok || entry.persisted {
-			return entry.multi, nil
+			return copySafetyOutcome{multi: entry.multi}, nil
 		}
 		if err := e.copySafetyRepo.UpdateMultiplePPS(ctx, fileID, entry.multi, entry.size, entry.mtime); err != nil {
+			if errors.Is(err, ErrStaleCopySafetyScan) {
+				// The row has moved on. The memo stays — it is still the right
+				// answer for the snapshot that produced it, and it can no longer
+				// match a caller holding the current generation — but there is
+				// nothing left to write, so this stops being a failure.
+				slog.InfoContext(ctx, "video copy-safety verdict is no longer writable; the row holds another generation",
+					"component", "scanner",
+					"file_id", fileID,
+				)
+				return copySafetyOutcome{multi: entry.multi, stale: true}, nil
+			}
 			slog.WarnContext(ctx, "retrying the video copy-safety verdict write failed",
 				"component", "scanner",
 				"file_id", fileID,
 				"error", err,
 			)
-			return entry.multi, nil
+			return copySafetyOutcome{multi: entry.multi}, nil
 		}
 		entry.persisted = true
 		e.copySafety.Store(fileID, entry)
-		return entry.multi, nil
+		return copySafetyOutcome{multi: entry.multi}, nil
 	})
 }
 

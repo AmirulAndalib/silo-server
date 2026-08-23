@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -147,6 +148,102 @@ func TestHandleStream_ReconstructsARemuxThatIsStillCopySafe(t *testing.T) {
 	}
 }
 
+// Refusing a revival is only possible where a verdict exists. The dangerous
+// case is the one where it does not yet: replica A is still scanning (or has
+// scanned and failed to write the row) when replica B revives the transport
+// from the card. B's response is a single progressive remux that runs for the
+// length of the title, and the gate it just passed never runs again — so unless
+// B puts itself on the race for the file, no withdrawal can ever reach it, and
+// A's notifier cannot: it only reaches A's own sessions.
+func TestHandleStream_RevivedRemuxWithNoVerdictReEngagesTheRace(t *testing.T) {
+	const (
+		secret    = "test-stream-signing-secret"
+		sessionID = "lost-remux-unverdicted"
+	)
+	file := copySafetyStreamFile(t, nil)
+
+	sessionMgr := playback.NewSessionManager(0, 0)
+	tm := playback.NewTranscodeManager()
+	tm.Sessions = sessionMgr
+
+	ffmpeg := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(ffmpeg, []byte("#!/bin/sh\nprintf muxed\n"), 0o755); err != nil {
+		t.Fatalf("write fake ffmpeg: %v", err)
+	}
+	racer := &recordingCopySafetyRacer{}
+	handler := NewStreamHandler(sessionMgr, testPlaybackFileResolver{file: file})
+	handler.TM = tm
+	handler.JWTSecret = secret
+	handler.CopySafetyRacer = racer
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{FFmpegPath: ffmpeg}
+	}
+
+	card := playback.NewRemuxRecipeCard(sessionID, 1, "profile-1", file.ID, false, 0)
+	card.InputPath = file.FilePath
+	token, err := streamtoken.Sign(card.ToClaims(), secret, playback.MaxTokenTTL)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/"+sessionID+"?st="+token, nil)
+	req = req.WithContext(newAuthorizedPlaybackContext())
+	req = withPlaybackRouteParam(req, "session_id", sessionID)
+
+	rr := httptest.NewRecorder()
+	handler.HandleStream(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s; want an undecided remux served optimistically", rr.Code, rr.Body.String())
+	}
+	if got := racer.bareRaces(); len(got) != 1 || got[0] != file.ID {
+		t.Fatalf("raced files = %v, want the revived file %d raced on this replica", got, file.ID)
+	}
+}
+
+// A verdict whose write to media_files failed lives only in the memo of the
+// process that reached it. The row cannot tell that apart from "never scanned",
+// so a revival gated on the row alone would rebuild the condemned remux for as
+// long as the client keeps retrying its stream URL — and nothing would
+// re-invoke the ensurer that holds the answer. Asking the racer closes it.
+func TestHandleStream_RefusesARevivalTheRowDoesNotKnowIsUnsafe(t *testing.T) {
+	const (
+		secret    = "test-stream-signing-secret"
+		sessionID = "lost-remux-unpersisted"
+	)
+	file := copySafetyStreamFile(t, nil)
+
+	sessionMgr := playback.NewSessionManager(0, 0)
+	tm := playback.NewTranscodeManager()
+	tm.Sessions = sessionMgr
+
+	handler := NewStreamHandler(sessionMgr, testPlaybackFileResolver{file: file})
+	handler.TM = tm
+	handler.JWTSecret = secret
+	handler.CopySafetyRacer = &recordingCopySafetyRacer{knownUnsafe: true}
+
+	card := playback.NewRemuxRecipeCard(sessionID, 1, "profile-1", file.ID, false, 0)
+	card.InputPath = file.FilePath
+	token, err := streamtoken.Sign(card.ToClaims(), secret, playback.MaxTokenTTL)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/"+sessionID+"?st="+token, nil)
+	req = req.WithContext(newAuthorizedPlaybackContext())
+	req = withPlaybackRouteParam(req, "session_id", sessionID)
+
+	rr := httptest.NewRecorder()
+	handler.HandleStream(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %s; want the revival refused on the unpersisted verdict", rr.Code, rr.Body.String())
+	}
+	if _, err := sessionMgr.GetSession(sessionID); !errors.Is(err, playback.ErrSessionNotFound) {
+		t.Fatalf("GetSession error = %v, want the refused revival torn down", err)
+	}
+}
+
 // copySafetyHLSCard is a lost HLS transport whose video target was pinned to a
 // stream copy — the remux_hls recipe. nodeURL pins it to a transcode node,
 // which is what makes the serve handlers proxy rather than rebuild locally.
@@ -196,9 +293,11 @@ func copySafetyHLSRequest(t *testing.T, secret, segmentName string, card playbac
 func TestHandleTranscodeServe_RefusesRevivingACopyUnsafeHLSRecipe(t *testing.T) {
 	const secret = "test-stream-signing-secret"
 
-	nodeHits := 0
+	// The httptest handler runs on its own goroutine; the assertions read this
+	// from the test's.
+	var nodeHits atomic.Int64
 	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		nodeHits++
+		nodeHits.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer node.Close()
@@ -247,8 +346,8 @@ func TestHandleTranscodeServe_RefusesRevivingACopyUnsafeHLSRecipe(t *testing.T) 
 				if _, err := sessionMgr.GetSession(sessionID); !errors.Is(err, playback.ErrSessionNotFound) {
 					t.Fatalf("GetSession error = %v, want no session registered by a refused revival", err)
 				}
-				if nodeHits != 0 {
-					t.Fatalf("transcode node received %d proxied requests, want the condemned stream never proxied", nodeHits)
+				if got := nodeHits.Load(); got != 0 {
+					t.Fatalf("transcode node received %d proxied requests, want the condemned stream never proxied", got)
 				}
 			})
 		}
@@ -318,6 +417,58 @@ func TestHandleTranscodeServe_RevivesARealTranscodeForACopyUnsafeSource(t *testi
 	}
 }
 
+// The HLS revival path needs the same two halves as the progressive one: an
+// undecided recipe is revived and raced here, and one this replica already
+// knows is unsafe — from a verdict whose write never landed — is refused even
+// though the row says nothing.
+func TestHandleTranscodeServe_UndecidedRevivalIsRacedAndKnownUnsafeIsRefused(t *testing.T) {
+	const secret = "test-stream-signing-secret"
+
+	t.Run("undecided revival re-engages the race", func(t *testing.T) {
+		const sessionID = "lost-hls-unverdicted"
+		file := copySafetyStreamFile(t, nil)
+
+		sessionMgr := playback.NewSessionManager(0, 0)
+		racer := &recordingCopySafetyRacer{}
+		handler := NewPlaybackHandler(sessionMgr, testPlaybackFileResolver{file: file})
+		handler.JWTSecret = secret
+		handler.CopySafetyRacer = racer
+
+		rr := httptest.NewRecorder()
+		handler.HandleGetTranscodeManifest(rr, copySafetyHLSRequest(t, secret, "", copySafetyHLSCard(sessionID, file.ID, "")))
+
+		// The ffmpeg behind the transport is absent in this fixture, so the
+		// response is a not-found either way; the registered session is what
+		// proves the gate let the undecided recipe through.
+		if _, err := sessionMgr.GetSession(sessionID); err != nil {
+			t.Fatalf("GetSession error = %v, want an undecided recipe revived optimistically", err)
+		}
+		if got := racer.bareRaces(); len(got) != 1 || got[0] != file.ID {
+			t.Fatalf("raced files = %v, want the revived file %d raced on this replica", got, file.ID)
+		}
+	})
+
+	t.Run("verdict known only in memory still refuses", func(t *testing.T) {
+		const sessionID = "lost-hls-unpersisted"
+		file := copySafetyStreamFile(t, nil)
+
+		sessionMgr := playback.NewSessionManager(0, 0)
+		handler := NewPlaybackHandler(sessionMgr, testPlaybackFileResolver{file: file})
+		handler.JWTSecret = secret
+		handler.CopySafetyRacer = &recordingCopySafetyRacer{knownUnsafe: true}
+
+		rr := httptest.NewRecorder()
+		handler.HandleGetTranscodeManifest(rr, copySafetyHLSRequest(t, secret, "", copySafetyHLSCard(sessionID, file.ID, "")))
+
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, body = %s; want the revival refused", rr.Code, rr.Body.String())
+		}
+		if _, err := sessionMgr.GetSession(sessionID); !errors.Is(err, playback.ErrSessionNotFound) {
+			t.Fatalf("GetSession error = %v, want no session registered by a refused revival", err)
+		}
+	})
+}
+
 // Only video stream-copy deliveries are gated. A transcode re-encodes the
 // bitstream, so conflicting parameter sets cannot reach the client's decoder
 // and the recipe stays serveable whatever the verdict says.
@@ -343,7 +494,7 @@ func TestVideoCopyReconstructRefusedOnlyGatesCopyDeliveries(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			card := tc.card
-			if got := videoCopyReconstructRefused(t.Context(), files, &card); got != tc.want {
+			if got := videoCopyReconstructRefused(t.Context(), files, nil, &card); got != tc.want {
 				t.Fatalf("videoCopyReconstructRefused() = %v, want %v", got, tc.want)
 			}
 		})

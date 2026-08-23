@@ -1757,3 +1757,160 @@ describe("usePlaybackSession server-invalidated plans", () => {
     unmount();
   });
 });
+
+describe("usePlaybackSession server-invalidated plans", () => {
+  // An invalidation waits out whatever is still being adopted, so it decides
+  // against the plan that actually won rather than the one on screen. The wait
+  // has to be scoped to the request that can still own the session: a start
+  // abandoned by a version switch cannot install anything any more, and a hung
+  // one would otherwise hold the invalidation past the server's 8s deadline —
+  // which stops the very session that is playing fine.
+  it("does not wait on a superseded start that never settles", async () => {
+    let startCount = 0;
+    const replanBodies: Array<{ operation: string }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/playback/start")) {
+        startCount += 1;
+        if (startCount === 1) {
+          // The abandoned request: it never settles, and nothing will ever
+          // count it out.
+          return new Promise<Response>(() => {});
+        }
+        return jsonResponse(
+          {
+            protocol_version: 3,
+            server_features: ["playback_plan_v3"],
+            outcome: "playable",
+            session_id: "session-2",
+            playback_plan: fixturePlanV3({ session_id: "session-2" }),
+          },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/playback/session-2/replan")) {
+        replanBodies.push(JSON.parse(String(init?.body)) as { operation: string });
+        return jsonResponse({
+          protocol_version: 3,
+          server_features: ["playback_plan_v3"],
+          outcome: "playable",
+          session_id: "session-2",
+          playback_plan: fixturePlanV3({
+            session_id: "session-2",
+            plan_id: "plan:2222222222222222",
+            plan_attempt_key: "v3:2222222222222222",
+          }),
+        });
+      }
+      if (url.endsWith("/playback/route-events")) return new Response(null, { status: 202 });
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, rerender, unmount } = renderHook(
+      ({ requestKey, fileId }: { requestKey: string; fileId: number }) =>
+        usePlaybackSession(requestKey, [], [], fileId, 0, false, "auto"),
+      { wrapper, initialProps: { requestKey: "episode-1", fileId: 7 } },
+    );
+    await waitFor(() => expect(startCount).toBe(1));
+
+    rerender({ requestKey: "episode-2", fileId: 8 });
+    await waitFor(() => expect(result.current.plan).not.toBeNull());
+
+    const planId = result.current.plan?.plan_id;
+    if (!planId) throw new Error("expected an adopted plan");
+
+    const outcome = await act(async () =>
+      Promise.race([
+        result.current.invalidatePlan(planId, "video_copy_unsafe", 120),
+        new Promise<"blocked">((resolve) => {
+          setTimeout(() => resolve("blocked"), 500);
+        }),
+      ]),
+    );
+
+    expect(outcome).toBe(true);
+    expect(replanBodies.map(({ operation }) => operation)).toEqual(["failure_recovery"]);
+    await waitFor(() => expect(result.current.plan?.plan_id).toBe("plan:2222222222222222"));
+
+    unmount();
+  });
+
+  // The scoping must not weaken the guarantee it was built for: an invalidation
+  // that arrives while the *current* start is still in flight still waits, so
+  // it decides against the plan that response installs rather than no-opping
+  // against the one already on screen.
+  it("still waits for the start that currently owns the session", async () => {
+    let releaseStart: ((response: Response) => void) | undefined;
+    const pendingStart = new Promise<Response>((resolve) => {
+      releaseStart = resolve;
+    });
+    let startCount = 0;
+    const replanBodies: Array<{ operation: string }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/playback/start")) {
+        startCount += 1;
+        return pendingStart;
+      }
+      if (url.endsWith("/playback/session-1/replan")) {
+        replanBodies.push(JSON.parse(String(init?.body)) as { operation: string });
+        return jsonResponse({
+          protocol_version: 3,
+          server_features: ["playback_plan_v3"],
+          outcome: "playable",
+          session_id: "session-1",
+          playback_plan: fixturePlanV3({
+            session_id: "session-1",
+            plan_id: "plan:3333333333333333",
+            plan_attempt_key: "v3:3333333333333333",
+          }),
+        });
+      }
+      if (url.endsWith("/playback/route-events")) return new Response(null, { status: 202 });
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, unmount } = renderHook(
+      () => usePlaybackSession("request-1", [], [], 7, 0, false, "auto"),
+      { wrapper },
+    );
+    await waitFor(() => expect(startCount).toBe(1));
+
+    // The verdict names a plan this client has not read the response for yet.
+    let settled = false;
+    const invalidation = result.current
+      .invalidatePlan("plan:0123456789abcdef", "video_copy_unsafe", 120)
+      .then((adopted) => {
+        settled = true;
+        return adopted;
+      });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(settled).toBe(false);
+    expect(replanBodies).toHaveLength(0);
+
+    await act(async () => {
+      releaseStart?.(
+        jsonResponse(
+          {
+            protocol_version: 3,
+            server_features: ["playback_plan_v3"],
+            outcome: "playable",
+            session_id: "session-1",
+            playback_plan: fixturePlanV3({ session_id: "session-1" }),
+          },
+          { status: 201 },
+        ),
+      );
+      await expect(invalidation).resolves.toBe(true);
+    });
+    expect(replanBodies.map(({ operation }) => operation)).toEqual(["failure_recovery"]);
+
+    unmount();
+  });
+});

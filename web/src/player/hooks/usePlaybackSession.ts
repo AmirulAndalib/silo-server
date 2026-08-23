@@ -316,14 +316,23 @@ export function usePlaybackSession(
   const attemptedPlanKeysRef = useRef<string[]>([]);
   const attemptCountRef = useRef(1);
   const replanInFlightRef = useRef(false);
-  // Adoptions in flight: a start or a replan whose decision has not been
-  // applied yet. The server commits a replacement plan — and starts the
-  // copy-safety scan behind it — before the client can read the response, so a
-  // `plan_invalidated` command can name a plan this client is still adopting.
-  // Waiters registered here are woken once nothing is in flight, which lets an
-  // invalidation decide against the plan that actually won.
-  const adoptionsInFlightRef = useRef(0);
-  const adoptionWaitersRef = useRef<Array<() => void>>([]);
+  // Adoptions in flight, counted per load sequence: a start or a replan whose
+  // decision has not been applied yet. The server commits a replacement plan —
+  // and starts the copy-safety scan behind it — before the client can read the
+  // response, so a `plan_invalidated` command can name a plan this client is
+  // still adopting. Waiters registered here are woken once their own sequence
+  // has nothing in flight, which lets an invalidation decide against the plan
+  // that actually won.
+  //
+  // The key is what makes the wait bounded. A superseded request — a version
+  // switch abandoned mid-flight, a start whose `fetch` never settles — is not a
+  // candidate to own the session any more, so waiting for it decides nothing
+  // and is worse than not waiting: the server's invalidation deadline is 8s,
+  // and a session that misses it is stopped outright. Only the sequence that
+  // currently owns the session can still change what the invalidation should
+  // decide against, so only it is waited on.
+  const adoptionsInFlightRef = useRef(new Map<number, number>());
+  const adoptionWaitersRef = useRef<Array<{ loadSequence: number; resolve: () => void }>>([]);
   const pendingReplanRef = useRef<{
     options: ReplanOptions;
     loadSequence: number;
@@ -340,34 +349,51 @@ export function usePlaybackSession(
     stateRef.current = state;
   }, [state]);
 
-  const beginAdoption = useCallback(() => {
-    adoptionsInFlightRef.current += 1;
+  const beginAdoption = useCallback((loadSequence: number) => {
+    const inFlight = adoptionsInFlightRef.current;
+    inFlight.set(loadSequence, (inFlight.get(loadSequence) ?? 0) + 1);
   }, []);
 
   /**
-   * Counts one in-flight adoption out.
+   * Counts one in-flight adoption out of its load sequence.
    *
-   * Waiters are woken only when nothing is left in flight: a queued replan is
-   * dispatched from its predecessor's `finally` before the predecessor is
-   * counted out, so the count tracks the whole chain rather than one request.
+   * A sequence's waiters are woken only when nothing is left in flight for it:
+   * a queued replan is dispatched from its predecessor's `finally` before the
+   * predecessor is counted out, so the count tracks the whole chain rather than
+   * one request.
    */
-  const endAdoption = useCallback(() => {
-    adoptionsInFlightRef.current = Math.max(0, adoptionsInFlightRef.current - 1);
-    if (adoptionsInFlightRef.current > 0) return;
+  const endAdoption = useCallback((loadSequence: number) => {
+    const inFlight = adoptionsInFlightRef.current;
+    const remaining = (inFlight.get(loadSequence) ?? 0) - 1;
+    if (remaining > 0) {
+      inFlight.set(loadSequence, remaining);
+      return;
+    }
+    inFlight.delete(loadSequence);
     const waiters = adoptionWaitersRef.current;
     if (waiters.length === 0) return;
-    adoptionWaitersRef.current = [];
-    for (const wake of waiters) wake();
+    const settled = waiters.filter((waiter) => !inFlight.has(waiter.loadSequence));
+    if (settled.length === 0) return;
+    adoptionWaitersRef.current = waiters.filter((waiter) => inFlight.has(waiter.loadSequence));
+    for (const waiter of settled) waiter.resolve();
   }, []);
 
   /**
-   * Resolves once no start or replan is in flight, or null when none is —
-   * callers act synchronously in the common case rather than deferring a turn.
+   * Resolves once the sequence that currently owns the session has no start or
+   * replan in flight, or null when it has none — callers act synchronously in
+   * the common case rather than deferring a turn.
+   *
+   * A request from a superseded sequence is deliberately not waited for. It can
+   * no longer install a plan (every path re-checks the sequence before adopting
+   * one), so it has nothing left to say about what an invalidation should
+   * decide against, and a hung one would otherwise hold the wait open past the
+   * server's deadline and cost the live session its stream.
    */
   const awaitAdoptionSettled = useCallback((): Promise<void> | null => {
-    if (adoptionsInFlightRef.current === 0) return null;
+    const loadSequence = loadSequenceRef.current;
+    if (!adoptionsInFlightRef.current.has(loadSequence)) return null;
     return new Promise<void>((resolve) => {
-      adoptionWaitersRef.current.push(resolve);
+      adoptionWaitersRef.current.push({ loadSequence, resolve });
     });
   }, []);
 
@@ -619,7 +645,7 @@ export function usePlaybackSession(
         }));
       };
 
-      beginAdoption();
+      beginAdoption(loadSequence);
       try {
         const selectedFileId = selectFileId(preferredFileId);
         if (!selectedFileId) {
@@ -683,7 +709,7 @@ export function usePlaybackSession(
         const nextError = describePlaybackSessionError(err, initialErrorMessage);
         retirePreviousSession(nextError);
       } finally {
-        endAdoption();
+        endAdoption(loadSequence);
       }
     },
     [adoptDecision, beginAdoption, endAdoption, requestStart, selectFileId, stopSession],
@@ -860,7 +886,7 @@ export function usePlaybackSession(
 
       const loadSequence = loadSequenceRef.current;
       replanInFlightRef.current = true;
-      beginAdoption();
+      beginAdoption(loadSequence);
       setState((current) => ({
         ...current,
         replanning: true,
@@ -950,7 +976,7 @@ export function usePlaybackSession(
         }
         // Last: a queued replan dispatched just above has already counted
         // itself in, so waiters are not woken between the two links of a chain.
-        endAdoption();
+        endAdoption(loadSequence);
       }
     },
     [

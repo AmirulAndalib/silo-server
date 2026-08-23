@@ -844,6 +844,33 @@ rebuild at all. The progressive route decides after the load, because the same
 file lookup serves its other preflight checks, and tears the reconstructed
 session back down when it refuses.
 
+The row alone is not the whole answer, in two directions.
+
+A verdict can be **known but unwritten**: the scan reached it and the
+`media_files` write failed, so it lives only in the memo of the process that
+reached it, and the row cannot tell that apart from "never scanned". The revival
+gate therefore asks the row first and the local scanner second, and the scanner
+retries the failed write — without ffmpeg — while it answers.
+
+A verdict can be **not yet reached at all**, which is the ordinary optimistic
+case and is allowed. But the gate runs once, at the revival request, while a
+progressive remux is a single response that runs for the length of the title:
+nothing later re-examines it, and the replica that is racing for the verdict can
+only reach its own sessions. So a revival the verdict does not condemn
+*re-engages the race on the reviving replica*, which makes the session it just
+built the property of a race running here. That pass costs no ffmpeg when the
+answer is already known locally or on the row; it re-runs the notification for
+the sessions this replica now holds.
+
+Two smaller rules keep that machinery honest. A race request that arrives while
+a scan for the same file is running is folded into one follow-up pass rather
+than dropped, because the sessions a pass acts on are the ones that exist when
+it runs and a replan can commit a replacement stream-copy mid-scan. And the
+verdict write is conditional on the row still holding the size and mtime that
+were scanned: a file rewritten in place while the scan read it produces a
+verdict about bytes nobody is serving, which is neither persisted nor pushed at
+any session.
+
 ---
 
 ## 7. Registries

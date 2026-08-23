@@ -44,6 +44,12 @@ type recordingCopySafetyRacer struct {
 	mu    sync.Mutex
 	plans []playback.DeliveryV3
 	files []int
+	// bare records the files handed to RaceScan — the revival path, which has
+	// no plan to hand over.
+	bare []int
+	// knownUnsafe stands in for a verdict this replica holds without the row
+	// carrying it: an unsafe scan whose write to media_files failed.
+	knownUnsafe bool
 }
 
 func (r *recordingCopySafetyRacer) RaceScanForPlan(fileID int, plan *playback.PlanV3) {
@@ -55,10 +61,28 @@ func (r *recordingCopySafetyRacer) RaceScanForPlan(fileID int, plan *playback.Pl
 	}
 }
 
+func (r *recordingCopySafetyRacer) RaceScan(fileID int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.bare = append(r.bare, fileID)
+}
+
+func (r *recordingCopySafetyRacer) VideoCopyUnsafeKnown(context.Context, *models.MediaFile) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.knownUnsafe
+}
+
 func (r *recordingCopySafetyRacer) raced() ([]int, []playback.DeliveryV3) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]int(nil), r.files...), append([]playback.DeliveryV3(nil), r.plans...)
+}
+
+func (r *recordingCopySafetyRacer) bareRaces() []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int(nil), r.bare...)
 }
 
 // Starting playback must never wait on the H.264 copy-safety scan: it takes the

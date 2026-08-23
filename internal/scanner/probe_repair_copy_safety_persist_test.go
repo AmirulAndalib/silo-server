@@ -308,6 +308,79 @@ func TestEnsureCopySafetyRetriesAFailedPersistWithoutRescanning(t *testing.T) {
 	}
 }
 
+// A scan reads the opening seconds over storage that can be slow, so the file
+// can be rewritten in place while it runs. The row then refuses the write, and
+// the verdict is about bytes nobody is serving: it must not be memoized as
+// though it described the file, and the caller has to be told, because a
+// verdict that never reached the row must not be pushed at live sessions either.
+func TestScanCopySafetyReportsASupersededWriteAsStale(t *testing.T) {
+	ffmpegPath, runs := fakeFFmpeg(t, conflictingPPSAnnexB, 0)
+	writer := &fakeCopySafetyWriter{err: ErrStaleCopySafetyScan}
+	ensurer := &PlaybackProbeEnsurer{ffmpegPath: ffmpegPath, copySafetyRepo: writer}
+
+	mtime := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
+	file := copySafetyTestFile(mtime)
+
+	multi, stale, err := ensurer.ScanCopySafety(context.Background(), file)
+	if err != nil {
+		t.Fatalf("ScanCopySafety() error = %v, want a superseded write reported as stale, not failed", err)
+	}
+	if !stale {
+		t.Fatal("ScanCopySafety() stale = false, want true for a write the row refused")
+	}
+	if multi {
+		t.Fatal("ScanCopySafety() = true alongside stale, want no verdict claimed for a superseded generation")
+	}
+	if runs() != 1 {
+		t.Fatalf("ffmpeg ran %d times, want 1", runs())
+	}
+	// Nothing was memoized, so the file is still unresolved: the next request
+	// for whatever generation the row now holds scans it properly.
+	if !ensurer.NeedsCopySafetyScan(file) {
+		t.Fatal("NeedsCopySafetyScan() = false after a superseded write, want the file still unresolved")
+	}
+	if _, known := ensurer.KnownCopySafetyVerdict(context.Background(), file); known {
+		t.Fatal("KnownCopySafetyVerdict() reported a verdict for a superseded generation")
+	}
+}
+
+// KnownCopySafetyVerdict is the question the serve gate and the race both ask.
+// It has to see the memo — a verdict whose write failed is authoritative here
+// and invisible on the row — and it must retry that write, without ffmpeg.
+func TestKnownCopySafetyVerdictSeesTheMemoAndRetriesTheWrite(t *testing.T) {
+	ffmpegPath, runs := fakeFFmpeg(t, conflictingPPSAnnexB, 0)
+	writer := &fakeCopySafetyWriter{err: fmt.Errorf("database unavailable")}
+	ensurer := &PlaybackProbeEnsurer{ffmpegPath: ffmpegPath, copySafetyRepo: writer}
+
+	mtime := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
+	file := copySafetyTestFile(mtime)
+
+	if _, _, err := ensurer.ScanCopySafety(context.Background(), file); err != nil {
+		t.Fatalf("ScanCopySafety() error = %v", err)
+	}
+	if writes := writer.recorded(); len(writes) != 1 {
+		t.Fatalf("UpdateMultiplePPS called %d times for the first scan, want 1", len(writes))
+	}
+
+	multi, known := ensurer.KnownCopySafetyVerdict(context.Background(), file)
+	if !known || !multi {
+		t.Fatalf("KnownCopySafetyVerdict() = (%t, %t), want the unpersisted unsafe verdict", multi, known)
+	}
+	if runs() != 1 {
+		t.Fatalf("ffmpeg ran %d times, want the known-verdict lookup to never scan", runs())
+	}
+	if writes := writer.recorded(); len(writes) != 2 {
+		t.Fatalf("UpdateMultiplePPS called %d times, want the unpersisted write retried", len(writes))
+	}
+
+	// An untouched file is simply unknown; the lookup never invents a verdict.
+	other := copySafetyTestFile(mtime)
+	other.ID = 43
+	if _, known := ensurer.KnownCopySafetyVerdict(context.Background(), other); known {
+		t.Fatal("KnownCopySafetyVerdict() reported a verdict for a file nothing has scanned")
+	}
+}
+
 // Rows predating the file_modified_at column carry no mtime. Their verdict is
 // still persisted and still honored on read — refusing to write it would leave
 // them permanently unverdicted, so every replica would rescan the same file and
