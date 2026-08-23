@@ -769,7 +769,7 @@ func TestReconstructFromToken_TokenlessRebuildsFromTheStoredTransportRecipe(t *t
 	if session == nil {
 		t.Fatal("tokenless request did not reconstruct; a node restart would 404 this session until the client replans")
 	}
-	defer session.CloseProcess()
+	defer func() { _ = session.CloseProcess() }()
 	if store.hits != 1 {
 		t.Fatalf("recipe store consulted %d times, want 1", store.hits)
 	}
