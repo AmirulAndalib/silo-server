@@ -494,6 +494,130 @@ func TestEnsureCopySafetyConcurrentCallsScanOnce(t *testing.T) {
 	}
 }
 
+// A file rewritten in place keeps its row ID and changes its bytes. Two callers
+// that disagree about the size and mtime are therefore looking at two different
+// bitstreams, and must not share a scan: the joiner would take the leader's
+// verdict for its own file — clearing the condemnation of a copy-unsafe
+// replacement, or condemning a copy-safe one.
+func TestCopySafetyScanDoesNotShareAFlightAcrossFileGenerations(t *testing.T) {
+	mtime := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*models.MediaFile)
+	}{
+		{
+			name:   "size changed",
+			mutate: func(f *models.MediaFile) { f.FileSize = 9999 },
+		},
+		{
+			name: "mtime changed",
+			mutate: func(f *models.MediaFile) {
+				later := mtime.Add(time.Hour)
+				f.FileModifiedAt = &later
+			},
+		},
+		{
+			name:   "mtime dropped",
+			mutate: func(f *models.MediaFile) { f.FileModifiedAt = nil },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ffmpegPath, runs, release := fakeFFmpegGated(t, conflictingPPSAnnexB)
+			writer := &fakeCopySafetyWriter{}
+			ensurer := &PlaybackProbeEnsurer{ffmpegPath: ffmpegPath, copySafetyRepo: writer}
+
+			replaced := copySafetyTestFile(mtime)
+			tc.mutate(replaced)
+
+			var wg sync.WaitGroup
+			errs := make([]error, 2)
+			for i, file := range []*models.MediaFile{copySafetyTestFile(mtime), replaced} {
+				wg.Add(1)
+				go func(i int, file *models.MediaFile) {
+					defer wg.Done()
+					_, errs[i] = ensurer.ensureCopySafety(context.Background(), file)
+				}(i, file)
+			}
+
+			// Both scans are held inside the stub, so "two ffmpeg processes have
+			// started" is only reachable if the two generations were given
+			// separate flights. A shared flight leaves the second caller parked
+			// on the first and the count stuck at one.
+			timeout := ""
+			deadline := time.Now().Add(5 * time.Second)
+			for runs() != 2 {
+				if time.Now().After(deadline) {
+					timeout = fmt.Sprintf("timed out with %d ffmpeg runs, want one scan per file generation", runs())
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			release()
+			wg.Wait()
+			if timeout != "" {
+				t.Fatal(timeout)
+			}
+			for i, err := range errs {
+				if err != nil {
+					t.Fatalf("ensureCopySafety() caller %d error = %v", i, err)
+				}
+			}
+			if writes := writer.recorded(); len(writes) != 2 {
+				t.Fatalf("UpdateMultiplePPS called %d times, want one verdict per generation: %+v", len(writes), writes)
+			}
+		})
+	}
+}
+
+// The same generation read twice — with the mtime differing only below the
+// precision the row can store — is one bitstream and must still share one scan.
+func TestCopySafetyScanSharesAFlightAcrossSubMicrosecondMtimeDrift(t *testing.T) {
+	ffmpegPath, runs, release := fakeFFmpegGated(t, conflictingPPSAnnexB)
+	writer := &fakeCopySafetyWriter{}
+	ensurer := &PlaybackProbeEnsurer{ffmpegPath: ffmpegPath, copySafetyRepo: writer}
+
+	mtime := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
+	jittered := copySafetyTestFile(mtime)
+	drifted := mtime.Add(17 * time.Nanosecond).Local()
+	jittered.FileModifiedAt = &drifted
+
+	var wg sync.WaitGroup
+	var entered atomic.Int64
+	errs := make([]error, 2)
+	for i, file := range []*models.MediaFile{copySafetyTestFile(mtime), jittered} {
+		wg.Add(1)
+		go func(i int, file *models.MediaFile) {
+			defer wg.Done()
+			entered.Add(1)
+			_, errs[i] = ensurer.ensureCopySafety(context.Background(), file)
+		}(i, file)
+	}
+
+	timeout := ""
+	deadline := time.Now().Add(5 * time.Second)
+	for entered.Load() != 2 || runs() != 1 {
+		if time.Now().After(deadline) {
+			timeout = fmt.Sprintf("timed out: %d callers entered, %d ffmpeg runs", entered.Load(), runs())
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	release()
+	wg.Wait()
+	if timeout != "" {
+		t.Fatal(timeout)
+	}
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("ensureCopySafety() caller %d error = %v", i, err)
+		}
+	}
+	if got := runs(); got != 1 {
+		t.Fatalf("ffmpeg ran %d times, want sub-microsecond mtime drift to share one scan", got)
+	}
+}
+
 func TestPersistedCopySafetyVerdict(t *testing.T) {
 	mtime := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
 	base := func() *models.MediaFile {

@@ -507,6 +507,16 @@ func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID s
 	// Genuine miss (e.g. after a restart): now — and only now — pay for the token
 	// decode so the recipe is available for reconstruction.
 	card, claims := verifiedStreamCardFromToken(r.URL.Query().Get(streamTokenParam), sessionID, h.JWTSecret)
+	// The copy-safety verdict gates the revival before it happens, not after.
+	// Reconstruction registers the playback session against the user's stream
+	// caps, so a refusal that ran later would leave a session nobody serves
+	// holding an admission slot the client's fresh attempt needs — and a
+	// remote-node recipe never reaches the local transport reconstruct at all
+	// (the serve handlers proxy to the node instead), so a gate down there would
+	// miss it entirely. See playback_copy_safety.go.
+	if videoCopyReconstructRefused(r.Context(), h.fileResolver, card) {
+		return nil, playback.SessionMissing, nil, nil
+	}
 	session, status := h.tm.LoadOrReconstructSession(r.Context(), h.sessionMgr.GetSession, sessionID, requestUserID, card)
 	return session, status, card, claims
 }

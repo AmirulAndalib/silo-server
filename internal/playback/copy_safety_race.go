@@ -26,6 +26,12 @@ const copySafetyScanTimeout = time.Minute
 // defer and must still happen, goroutines are cheap, ffmpeg is not.
 const copySafetyScanConcurrency = 4
 
+// copySafetyRecheckTimeout bounds the verdict re-read that follows a failed
+// scan. It cannot inherit the scan's context: a scan that failed because its
+// deadline expired leaves that context already dead, which is exactly the case
+// the re-read exists for.
+const copySafetyRecheckTimeout = 15 * time.Second
+
 // CopySafetyScanner is the scanner-side half of the race: it decides whether a
 // file still needs the H.264 multi-PPS scan and runs it. *scanner.PlaybackProbeEnsurer
 // implements it.
@@ -147,11 +153,7 @@ func (r *CopySafetyRace) scan(fileID int) {
 		// replica that reached it. Pushing invalidations across replicas —
 		// Redis-backed, like the other cross-replica playback signals — is
 		// follow-up work.
-		if multi, known := file.PersistedVideoCopyVerdict(); known && multi {
-			slog.InfoContext(ctx, "applying a persisted copy-unsafe verdict reached elsewhere",
-				"component", "playback", "file_id", fileID)
-			r.notifier.VideoCopyUnsafe(ctx, fileID)
-		}
+		r.notifyPersistedUnsafe(ctx, file)
 		return
 	}
 
@@ -164,6 +166,13 @@ func (r *CopySafetyRace) scan(fileID int) {
 		// world where the scan ran before playback started.
 		slog.WarnContext(ctx, "video copy-safety scan failed",
 			"component", "playback", "file_id", fileID, "error", err)
+		// Inconclusive here does not mean inconclusive everywhere. Another
+		// replica may have persisted an unsafe verdict while this scan was
+		// failing, and that verdict now suppresses every later local scan of the
+		// file (NeedsCopySafetyScan reads the row) — so the sessions this replica
+		// owns would wait for an unrelated future race to withdraw their route.
+		// Re-reading the row is the one thing that can still resolve them.
+		r.recheckPersistedVerdict(ctx, fileID)
 		return
 	}
 	if !multi {
@@ -173,6 +182,40 @@ func (r *CopySafetyRace) scan(fileID int) {
 	slog.InfoContext(ctx, "video copy-safety scan disqualified the stream-copy route",
 		"component", "playback", "file_id", fileID)
 	r.notifier.VideoCopyUnsafe(ctx, fileID)
+}
+
+// recheckPersistedVerdict re-reads the row after a local scan failed and applies
+// an unsafe verdict another replica reached in the meantime. A read that fails,
+// or a row with no valid verdict on it, changes nothing: inconclusive stays
+// inconclusive.
+func (r *CopySafetyRace) recheckPersistedVerdict(ctx context.Context, fileID int) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), copySafetyRecheckTimeout)
+	defer cancel()
+
+	file, err := r.files.GetByID(ctx, fileID)
+	if err != nil || file == nil {
+		if err != nil {
+			slog.WarnContext(ctx, "video copy-safety verdict re-read after a failed scan could not load the file",
+				"component", "playback", "file_id", fileID, "error", err)
+		}
+		return
+	}
+	r.notifyPersistedUnsafe(ctx, file)
+}
+
+// notifyPersistedUnsafe pushes the withdrawal for a row that already carries a
+// valid copy-unsafe verdict. A known-safe or unverdicted row is silent, as
+// always.
+func (r *CopySafetyRace) notifyPersistedUnsafe(ctx context.Context, file *models.MediaFile) {
+	if file == nil {
+		return
+	}
+	if multi, known := file.PersistedVideoCopyVerdict(); !known || !multi {
+		return
+	}
+	slog.InfoContext(ctx, "applying a persisted copy-unsafe verdict reached elsewhere",
+		"component", "playback", "file_id", file.ID)
+	r.notifier.VideoCopyUnsafe(ctx, file.ID)
 }
 
 // RaceScanForPlan starts a race only when the plan actually stream-copies video

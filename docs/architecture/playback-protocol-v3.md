@@ -827,13 +827,22 @@ capability the client replays on whichever replica answers next, and a replica
 that dies between persisting a verdict and pushing the invalidation takes the
 only notifier that knew about it with it. The replacement replica has no live
 session, so it rebuilds one from the recipe card — which would replay the exact
-remux the verdict condemned. Reconstruction therefore re-reads the persisted
-verdict before it rebuilds a video stream-copy transport (a progressive remux,
-or an HLS transport whose video target is `copy`) and refuses with the ordinary
-playback-session not-found when the verdict says the source is unsafe. The
-client's existing recovery mints a fresh attempt, which plans against the same
-row and lands on a transcode. Transcode reconstruction is untouched: re-encoding
-the bitstream is unaffected by conflicting parameter sets.
+remux the verdict condemned. The serve routes therefore re-read the persisted
+verdict for a video stream-copy recipe (a progressive remux, or an HLS transport
+whose video target is `copy`) and refuse with the ordinary playback-session
+not-found when the row says the source is unsafe. The client's existing recovery
+mints a fresh attempt, which plans against the same row and lands on a
+transcode. Transcode reconstruction is untouched: re-encoding the bitstream is
+unaffected by conflicting parameter sets.
+
+On the HLS routes the check runs *before* the session is rebuilt, not before the
+transport is. Rebuilding registers the playback session against the user's
+stream caps, so a later refusal would leave a session nobody serves holding a
+slot the replacement attempt needs; and an HLS recipe pinned to a transcode node
+is revived by proxying to that node, a path that never reaches a local transport
+rebuild at all. The progressive route decides after the load, because the same
+file lookup serves its other preflight checks, and tears the reconstructed
+session back down when it refuses.
 
 ---
 

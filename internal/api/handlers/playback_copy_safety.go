@@ -22,6 +22,14 @@ import (
 // the moment of reconstruction closes that hole: the row is the one piece of
 // state every replica shares.
 //
+// The check belongs BEFORE the session is rebuilt, for two reasons. Rebuilding
+// registers the session against the user's stream caps, so a later refusal
+// leaves a session nobody serves holding a slot the client's replacement
+// attempt has to admit through. And the transport is not the only thing a card
+// can revive: an HLS recipe pinned to a transcode node is served by proxying to
+// that node, a path that never reaches a local transport rebuild — gating there
+// would let exactly the remote remux keep streaming.
+//
 // The refusal is a plain not-found, matching an expired or missing recipe,
 // because that is the failure a client's recovery already knows how to handle
 // — it mints a fresh attempt, which plans against the persisted verdict and
@@ -48,15 +56,16 @@ func videoCopyReconstructRefused(ctx context.Context, files FilePathResolver, ca
 }
 
 // reconstructTransportForServe rebuilds a lost local transport from the token
-// recipe for the manifest and segment serve routes, refusing a video
-// stream-copy the persisted copy-safety verdict has since condemned. A nil
-// result is the caller's not-found, which is also what a missing card yields —
-// the two are the same thing to a client: this recipe is no longer serveable.
+// recipe for the manifest and segment serve routes. A nil card yields a nil
+// result, which is the caller's not-found: to a client, a recipe it cannot
+// present and a recipe that no longer rebuilds are the same thing.
+//
+// The copy-safety verdict is not consulted here. It is consulted in
+// loadTranscodeServeSession, which is the only producer of the cards that reach
+// this function and runs before the session is registered — see the file
+// comment for why the earlier point is the correct one.
 func (h *PlaybackHandler) reconstructTransportForServe(ctx context.Context, sessionID string, requestedSegment int, card *playback.RecipeCard) *playback.TranscodeSession {
 	if card == nil {
-		return nil
-	}
-	if videoCopyReconstructRefused(ctx, h.fileResolver, card) {
 		return nil
 	}
 	return h.tm.ReconstructTranscode(ctx, sessionID, requestedSegment, *card)

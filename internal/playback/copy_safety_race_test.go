@@ -65,8 +65,11 @@ func (s *fakeCopySafetyScanner) peakConcurrency() int {
 }
 
 type fakeFileLoader struct {
-	mu    sync.Mutex
-	file  *models.MediaFile
+	mu   sync.Mutex
+	file *models.MediaFile
+	// later, when set, is what every read after the first returns — the row as
+	// another replica has since rewritten it.
+	later *models.MediaFile
 	err   error
 	loads int
 }
@@ -75,6 +78,9 @@ func (l *fakeFileLoader) GetByID(context.Context, int) (*models.MediaFile, error
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.loads++
+	if l.loads > 1 && l.later != nil {
+		return l.later, l.err
+	}
 	return l.file, l.err
 }
 
@@ -93,6 +99,13 @@ func raceFixture(t *testing.T, scanner *fakeCopySafetyScanner) (*CopySafetyRace,
 // that care about what the row carries — a persisted verdict, above all.
 func raceFixtureForFile(t *testing.T, scanner *fakeCopySafetyScanner, file *models.MediaFile) (*CopySafetyRace, *SessionManager, *fakeCopySafetyControl) {
 	t.Helper()
+	return raceFixtureWithLoader(t, scanner, &fakeFileLoader{file: file})
+}
+
+// raceFixtureWithLoader is raceFixtureForFile over a loader the caller controls,
+// for the cases that care about the row changing between two reads.
+func raceFixtureWithLoader(t *testing.T, scanner *fakeCopySafetyScanner, loader *fakeFileLoader) (*CopySafetyRace, *SessionManager, *fakeCopySafetyControl) {
+	t.Helper()
 	sessions := NewSessionManager(0, 0)
 	hub := NewRealtimeHub()
 	tracker := NewCommandTracker()
@@ -102,7 +115,6 @@ func raceFixtureForFile(t *testing.T, scanner *fakeCopySafetyScanner, file *mode
 	// These tests are about the race, not about waiting out the window a
 	// just-started session gets before it can be stopped.
 	notifier.settle = 0
-	loader := &fakeFileLoader{file: file}
 	return NewCopySafetyRace(scanner, loader, notifier), sessions, control
 }
 
@@ -167,6 +179,59 @@ func TestCopySafetyRaceLeavesSessionsAloneOnScanError(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	if stopped := control.stoppedSessions(); len(stopped) != 0 {
 		t.Fatalf("stopped = %v, want live sessions untouched after an inconclusive scan", stopped)
+	}
+}
+
+// A failed local scan and a verdict reached elsewhere can happen at once, and
+// the combination is the worst of both: the persisted verdict suppresses every
+// later local scan of the file, so the failure that just returned empty-handed
+// is this replica's last chance to notice it. Without the re-read, the sessions
+// this replica owns keep the condemned route until some unrelated future race
+// happens to load the row.
+func TestCopySafetyRaceAppliesAVerdictPersistedWhileTheScanFailed(t *testing.T) {
+	scanner := &fakeCopySafetyScanner{needs: true, err: errors.New("ffmpeg exploded")}
+	loader := &fakeFileLoader{
+		file: &models.MediaFile{
+			ID:          100,
+			CodecVideo:  "h264",
+			VideoTracks: []models.VideoTrack{{Codec: "h264"}},
+		},
+		later: fileWithPersistedVerdict(true),
+	}
+	race, sessions, control := raceFixtureWithLoader(t, scanner, loader)
+	session, err := sessions.StartSession(1, "profile-1", 100, PlayRemux, false)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	race.RaceScan(100)
+
+	waitForStop(t, control, session.ID)
+}
+
+// The mirror image: a scan that fails over a row that still carries no verdict
+// anywhere proves nothing, and the re-read must not invent one.
+func TestCopySafetyRaceScanFailureWithNoVerdictAnywhereStaysSilent(t *testing.T) {
+	scanner := &fakeCopySafetyScanner{needs: true, err: errors.New("ffmpeg exploded")}
+	loader := &fakeFileLoader{
+		file: &models.MediaFile{
+			ID:          100,
+			CodecVideo:  "h264",
+			VideoTracks: []models.VideoTrack{{Codec: "h264"}},
+		},
+		later: fileWithPersistedVerdict(false),
+	}
+	race, sessions, control := raceFixtureWithLoader(t, scanner, loader)
+	if _, err := sessions.StartSession(1, "profile-1", 100, PlayRemux, false); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	race.RaceScan(100)
+
+	waitForScans(t, scanner, 1)
+	time.Sleep(20 * time.Millisecond)
+	if stopped := control.stoppedSessions(); len(stopped) != 0 {
+		t.Fatalf("stopped = %v, want live sessions untouched when no verdict exists anywhere", stopped)
 	}
 }
 

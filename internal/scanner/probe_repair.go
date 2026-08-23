@@ -315,19 +315,47 @@ func (e *PlaybackProbeEnsurer) ensureCopySafety(ctx context.Context, file *model
 	return fileWithMultiplePPS(file, multi), nil
 }
 
+// copySafetyFlightKey identifies one generation of one file. The file ID alone
+// is not enough: a rewrite in place keeps the row ID and changes the bytes, so a
+// caller holding the replacement would otherwise join the flight scanning the
+// old file and consume its verdict — condemning a copy-safe replacement, or
+// worse, clearing the condemnation of a copy-unsafe one. Only callers that agree
+// on the size and mtime are looking at the same bitstream, and therefore only
+// they may share a scan.
+//
+// The mtime is normalized exactly as sameFileModifiedAt normalizes it, so two
+// reads of the same generation that differ only in stored precision still share
+// a flight. A row with no mtime gets a marker no timestamp can produce: it is a
+// generation of its own, not a match for every other.
+func copySafetyFlightKey(file *models.MediaFile) string {
+	if file == nil {
+		return ""
+	}
+	mtime := "none"
+	if file.FileModifiedAt != nil {
+		mtime = strconv.FormatInt(normalizeFileModifiedAt(*file.FileModifiedAt).UnixMicro(), 10)
+	}
+	return strconv.Itoa(file.ID) + ":" + strconv.FormatInt(file.FileSize, 10) + ":" + mtime
+}
+
 // scanAndPersistCopySafety runs the multi-PPS bitstream scan, persists the
-// verdict, and memoizes it. Concurrent callers for the same file share one
-// scan; a failed database write is logged and the scan result is still used,
-// since it is correct for this request. The memo remembers that the write did
-// not land, so the next lookup for the file retries it — see
+// verdict, and memoizes it. Concurrent callers for the same file *generation*
+// share one scan; a failed database write is logged and the scan result is still
+// used, since it is correct for this request. The memo remembers that the write
+// did not land, so the next lookup for the file retries it — see
 // retryUnpersistedCopySafety.
+//
+// Everything the flight closure records — the persisted row and the process memo
+// — is bound to the leader's own snapshot of the file, so a joiner never writes
+// another generation's facts. The key is what keeps a joiner from *reading*
+// them.
 func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, file *models.MediaFile) (bool, error) {
 	fileID := file.ID
 	filePath := file.FilePath
 	fileSize := file.FileSize
 	fileModifiedAt := file.FileModifiedAt
 
-	multi, err, _ := e.copySafetyFlight.Do(strconv.Itoa(fileID), func() (any, error) {
+	multi, err, _ := e.copySafetyFlight.Do(copySafetyFlightKey(file), func() (any, error) {
 		timeout := e.timeout
 		if timeout < 30*time.Second {
 			timeout = 30 * time.Second
@@ -369,9 +397,11 @@ func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, fil
 // Without the retry a single failed write is lost until the process restarts.
 // The verdict stays correct here, but every other replica keeps rescanning the
 // same file and keeps planning fresh sessions onto the copy route it condemns.
-// The write shares scanAndPersistCopySafety's singleflight key, so a burst of
-// playback requests for one file cannot stampede the row, and a retry racing a
-// scan simply joins it.
+// The write shares scanAndPersistCopySafety's singleflight key — the same
+// generation-scoped key, so a retry never joins a flight scanning a different
+// generation of the row — and so a burst of playback requests for one file
+// cannot stampede the row, while a retry racing a scan of its own generation
+// simply joins it.
 func (e *PlaybackProbeEnsurer) retryUnpersistedCopySafety(ctx context.Context, file *models.MediaFile) {
 	if e == nil || file == nil || e.copySafetyRepo == nil {
 		return
@@ -381,7 +411,7 @@ func (e *PlaybackProbeEnsurer) retryUnpersistedCopySafety(ctx context.Context, f
 	}
 
 	fileID := file.ID
-	_, _, _ = e.copySafetyFlight.Do(strconv.Itoa(fileID), func() (any, error) {
+	_, _, _ = e.copySafetyFlight.Do(copySafetyFlightKey(file), func() (any, error) {
 		// Re-read inside the flight: a concurrent scan or retry may have landed
 		// the write while this caller queued behind it.
 		entry, ok := e.memoizedCopySafety(file)
