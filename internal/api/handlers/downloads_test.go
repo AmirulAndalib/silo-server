@@ -502,6 +502,33 @@ func TestHandleCreateDownloadAcceptsFlatCapabilityPayloads(t *testing.T) {
 	}
 }
 
+// A misspelled evidence tier on an otherwise flat payload must 400 exactly as
+// it does on the v3 playback start path. Accepting it would degrade the client
+// to flat resolution with no signal that its tier was never read.
+func TestHandleCreateDownloadRejectsUnknownVideoEvidenceOnFlatPayloads(t *testing.T) {
+	svc := &fakeDownloadService{}
+	h := NewDownloadHandler(svc)
+	body := []byte(`{
+		"content_id":"c1",
+		"caps":{
+			"video_evidence":"exat",
+			"codecs_video":["h264"],
+			"codecs_audio":["aac"],
+			"containers":["mp4"],
+			"max_resolution":"1080p"
+		}
+	}`)
+	rec := httptest.NewRecorder()
+	h.HandleCreateDownload(rec, downloadTestRequest(http.MethodPost, "/downloads", body, 7, "", ""))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if svc.gotCreateReq.ContentID != "" {
+		t.Fatal("an unrecognized video_evidence tier reached the download service")
+	}
+}
+
 func TestHandleCreateDownloadRejectsDetailedEntriesWithoutStrictEvidence(t *testing.T) {
 	svc := &fakeDownloadService{}
 	h := NewDownloadHandler(svc)

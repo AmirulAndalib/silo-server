@@ -116,7 +116,7 @@ func TestPlaybackURLBuildersRefuseTokensForMediaAuthorizedSessions(t *testing.T)
 	// must never fall back to minting the credential the mode removed.
 	grants := &recordingProxyGrantStoreV3{}
 	handler.ProxyGrantStore = grants
-	got, servedByProxy := handler.identityGrantStreamURLV3(context.Background(), secure, file, proxy)
+	got, servedByProxy, _ := handler.identityGrantStreamURLV3(context.Background(), secure, file, proxy)
 	if !servedByProxy || got != proxy.URL+"/stream/v3/session-secure" {
 		t.Fatalf("origins identity URL = %q (proxy %v), want the credential-free proxy route", got, servedByProxy)
 	}
@@ -125,7 +125,7 @@ func TestPlaybackURLBuildersRefuseTokensForMediaAuthorizedSessions(t *testing.T)
 		t.Fatal("origins identity URL was published without a grant behind it")
 	}
 
-	got, servedByProxy = handler.grantManifestURLV3(context.Background(), card, proxy)
+	got, servedByProxy, _ = handler.grantManifestURLV3(context.Background(), card, proxy)
 	if !servedByProxy || got != proxy.URL+"/stream/v3/session-secure/master.m3u8" {
 		t.Fatalf("origins manifest URL = %q (proxy %v), want the credential-free proxy manifest", got, servedByProxy)
 	}

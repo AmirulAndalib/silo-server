@@ -22,11 +22,24 @@ type recordingProxyGrantStoreV3 struct {
 	putErr   error
 	cards    map[string]playback.RecipeCard
 	deleted  []string
+	// ops is the ordered call log ("get", "put", "delete"), so a test can
+	// assert that a replan read the grant it displaced before overwriting it.
+	ops []string
 }
 
 func (s *recordingProxyGrantStoreV3) Enabled() bool { return !s.disabled }
 
+func (s *recordingProxyGrantStoreV3) Get(_ context.Context, sessionID string) (*playback.RecipeCard, bool) {
+	s.ops = append(s.ops, "get")
+	card, ok := s.cards[sessionID]
+	if !ok {
+		return nil, false
+	}
+	return &card, true
+}
+
 func (s *recordingProxyGrantStoreV3) Put(_ context.Context, sessionID string, card playback.RecipeCard) error {
+	s.ops = append(s.ops, "put")
 	if s.putErr != nil {
 		return s.putErr
 	}
@@ -38,7 +51,9 @@ func (s *recordingProxyGrantStoreV3) Put(_ context.Context, sessionID string, ca
 }
 
 func (s *recordingProxyGrantStoreV3) Delete(_ context.Context, sessionID string) error {
+	s.ops = append(s.ops, "delete")
 	s.deleted = append(s.deleted, sessionID)
+	delete(s.cards, sessionID)
 	return nil
 }
 
@@ -92,6 +107,87 @@ func TestPrepareTransportV3AuthorizedOriginsRestoreDirectPlayProxyEgress(t *test
 	}
 	if len(planner.released) != 1 {
 		t.Fatalf("planner releases = %v, want the proxy reservation released", planner.released)
+	}
+}
+
+// A replan overwrites the grant of a session that is already proxy-served. If
+// the replacement never commits, the client is left on the OLD plan's proxy
+// URL — which only resolves while the OLD grant exists. Rolling back therefore
+// has to put the displaced grant back, not revoke it.
+func TestPrepareTransportV3AuthorizedOriginsRollbackRestoresTheDisplacedGrant(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: "http://proxy-1"}}}
+	priorCard := playback.RecipeCard{SessionID: "session-origin-replan", UserID: 7, InputPath: "/media/previous-plan.mkv"}
+	grants := &recordingProxyGrantStoreV3{cards: map[string]playback.RecipeCard{"session-origin-replan": priorCard}}
+	handler.ProxyGrantStore = grants
+	file := v3HandlerFixtureFile(t)
+
+	transport, transportErr := handler.prepareTransportV3(
+		httptest.NewRequest(http.MethodPost, "/", nil),
+		&playback.Session{ID: "session-origin-replan", UserID: 7, ProfileID: "profile-1"},
+		file,
+		playback.PlannerResultV3{Plan: identityProxyPlanV3(playback.DeliveryOriginalHTTPV3), PlayMethod: playback.PlayDirect},
+		authorizedOriginsModeV3())
+	if transportErr != nil {
+		t.Fatalf("prepare identity transport: %v", transportErr)
+	}
+	if got := grants.cards["session-origin-replan"].InputPath; got != file.FilePath {
+		t.Fatalf("grant media path after prepare = %q, want the replacement plan's %q", got, file.FilePath)
+	}
+
+	transport.rollback()
+
+	restored, ok := grants.cards["session-origin-replan"]
+	if !ok {
+		t.Fatal("rollback revoked the grant; the restored plan's published proxy URL now 404s")
+	}
+	if restored.InputPath != priorCard.InputPath {
+		t.Fatalf("restored grant media path = %q, want the previous plan's %q", restored.InputPath, priorCard.InputPath)
+	}
+	if len(grants.deleted) != 0 {
+		t.Fatalf("grants deleted = %v, want none: the session is still proxy-served", grants.deleted)
+	}
+	if grants.ops[0] != "get" {
+		t.Fatalf("store ops = %v, want the displaced grant read before it was overwritten", grants.ops)
+	}
+}
+
+// The mirror defect: a replan that lands on a transport this server serves
+// itself publishes a URL the proxy has no part in. Leaving the grant alive
+// would keep the proxy authorized to serve the previous recipe for the rest of
+// its TTL, so committing off the proxy revokes it.
+func TestPrepareTransportV3AuthorizedOriginsCommitOffTheProxyRevokesTheGrant(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	// No proxy in the plan: direct play needs no server work, so this attempt
+	// legitimately commits onto the API-local identity route.
+	handler.NodePlanner = &recordingNodePlannerV3{}
+	grants := &recordingProxyGrantStoreV3{cards: map[string]playback.RecipeCard{
+		"session-origin-offproxy": {SessionID: "session-origin-offproxy", UserID: 7, InputPath: "/media/previous-plan.mkv"},
+	}}
+	handler.ProxyGrantStore = grants
+
+	transport, transportErr := handler.prepareTransportV3(
+		httptest.NewRequest(http.MethodPost, "/", nil),
+		&playback.Session{ID: "session-origin-offproxy", UserID: 7, ProfileID: "profile-1"},
+		v3HandlerFixtureFile(t),
+		playback.PlannerResultV3{Plan: identityProxyPlanV3(playback.DeliveryOriginalHTTPV3), PlayMethod: playback.PlayDirect},
+		authorizedOriginsModeV3())
+	if transportErr != nil {
+		t.Fatalf("prepare identity transport: %v", transportErr)
+	}
+	if transport.url != "/stream/session-origin-offproxy" {
+		t.Fatalf("stream url = %q, want the API-local route", transport.url)
+	}
+
+	transport.commit()
+
+	if len(grants.deleted) != 1 || grants.deleted[0] != "session-origin-offproxy" {
+		t.Fatalf("grants deleted on commit = %v, want the stale proxy authority revoked", grants.deleted)
+	}
+	if _, ok := grants.cards["session-origin-offproxy"]; ok {
+		t.Fatal("a grant survived a commit onto a transport the proxy does not serve")
 	}
 }
 
@@ -303,6 +399,7 @@ func TestPrepareTransportV3AuthorizedOriginsPublishGrantBackedHLSManifest(t *tes
 func TestEscalateRefusedProgressiveRemuxV3SkipsEscalationWhenOriginsHaveAProxy(t *testing.T) {
 	handler, input, result := escalationFixtureV3(t, true)
 	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: "http://proxy-1"}}}
+	handler.ProxyGrantStore = &recordingProxyGrantStoreV3{}
 
 	escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), authorizedOriginsModeV3(), func() playback.PlannerInputV3 { return input }, result)
 	if transportErr != nil {
@@ -318,6 +415,7 @@ func TestEscalateRefusedProgressiveRemuxV3SkipsEscalationWhenOriginsHaveAProxy(t
 func TestEscalateRefusedProgressiveRemuxV3StillEscalatesWithoutAnyProxyOrigin(t *testing.T) {
 	handler, input, result := escalationFixtureV3(t, true)
 	handler.NodePlanner = &recordingNodePlannerV3{}
+	handler.ProxyGrantStore = &recordingProxyGrantStoreV3{}
 
 	escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), authorizedOriginsModeV3(), func() playback.PlannerInputV3 { return input }, result)
 	if transportErr != nil {
@@ -325,6 +423,35 @@ func TestEscalateRefusedProgressiveRemuxV3StillEscalatesWithoutAnyProxyOrigin(t 
 	}
 	if escalated.Plan == nil || escalated.Plan.Delivery != playback.DeliveryRemuxHLSV3 {
 		t.Fatalf("escalated delivery = %#v, want %q", escalated.Plan, playback.DeliveryRemuxHLSV3)
+	}
+}
+
+// A proxy the server can name but cannot authorize is no executor at all: the
+// origin URL is only serviceable while a grant backs it. Without a usable grant
+// store this process can never publish one, so the refusal is permanent and the
+// escalation has to run — otherwise the remux sits on a retryable
+// capacity_unavailable that nothing in this deployment will ever satisfy.
+func TestEscalateRefusedProgressiveRemuxV3StillEscalatesWithoutAUsableGrantStore(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		store proxyGrantStoreV3
+	}{
+		{name: "no grant store", store: nil},
+		{name: "grant store disabled", store: &recordingProxyGrantStoreV3{disabled: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler, input, result := escalationFixtureV3(t, true)
+			handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: "http://proxy-1"}}}
+			handler.ProxyGrantStore = test.store
+
+			escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), authorizedOriginsModeV3(), func() playback.PlannerInputV3 { return input }, result)
+			if transportErr != nil {
+				t.Fatalf("escalation error = %#v", transportErr)
+			}
+			if escalated.Plan == nil || escalated.Plan.Delivery != playback.DeliveryRemuxHLSV3 {
+				t.Fatalf("escalated delivery = %#v, want %q", escalated.Plan, playback.DeliveryRemuxHLSV3)
+			}
+		})
 	}
 }
 

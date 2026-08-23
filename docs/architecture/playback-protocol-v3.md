@@ -546,6 +546,18 @@ sticky for the lifetime of the attempt; a client that can no longer honor it
 must stop and start a new attempt rather than downgrade a replan to a
 credential-bearing URL.
 
+**Replica affinity.** Because there is no reconstruction recipe, a
+header-authenticated attempt's session exists only in the memory of the API
+process that started it. A media request routed to any other replica finds no
+session and returns the expired/missing response, so a deployment serving
+tokenless attempts currently needs either a single API replica or session
+affinity on the media routes; legacy token-bearing attempts are unaffected,
+since they reconstruct anywhere. Proxy-origin URLs
+(`authorized_media_origins_v1`) are also unaffected: the proxy serves from the
+shared grant store rather than from an API process's memory. Moving session
+state into shared storage is the fix, and until it lands this constraint is
+part of the deployment contract.
+
 ### 4.2 Media and subtitle URL query parameters
 
 Every URL a plan publishes belongs to one of the route families below, and the

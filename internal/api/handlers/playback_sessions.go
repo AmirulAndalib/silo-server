@@ -88,8 +88,9 @@ type playbackSessionRow struct {
 
 // playbackSessionsCapabilitiesResponse advertises the additive fields of the
 // live admin session payload so independently deployed clients (Android,
-// Apple) can feature-detect them. Both fields are omitempty on the wire, so
-// absence on a row is otherwise indistinguishable from an older server.
+// Apple) can feature-detect them. The advertised fields are omitempty on the
+// wire, so absence on a row is otherwise indistinguishable from an older
+// server.
 type playbackSessionsCapabilitiesResponse struct {
 	// EffectivePlayMethod reports that rows carry effective_play_method.
 	EffectivePlayMethod bool `json:"effective_play_method"`
@@ -103,6 +104,10 @@ type playbackSessionsCapabilitiesResponse struct {
 	ClientBuild bool `json:"client_build"`
 	// ClientChannel reports that rows carry client_channel.
 	ClientChannel bool `json:"client_channel"`
+	// TargetAudioChannels reports that rows carry target_audio_channels;
+	// absent on a row then means the reporting node did not know the encoded
+	// layout.
+	TargetAudioChannels bool `json:"target_audio_channels"`
 }
 
 // HandleGetSessionsCapabilities exposes additive feature support for the live
@@ -114,6 +119,7 @@ func (h *AdminHandler) HandleGetSessionsCapabilities(w http.ResponseWriter, _ *h
 		IsJellyfinClient:          true,
 		ClientBuild:               true,
 		ClientChannel:             true,
+		TargetAudioChannels:       true,
 	})
 }
 

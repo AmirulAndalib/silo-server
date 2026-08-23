@@ -369,6 +369,30 @@ func TestNormalizeAndValidateVideoDecode(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			// A typo'd tier on a flat payload is a client bug the v3 playback
+			// path rejects outright. Silently resolving it from the flat lists
+			// here would hide the bug behind a working-looking answer.
+			name: "unknown evidence tier without entries",
+			caps: playback.ClientCapabilities{
+				VideoEvidence: playback.CapabilityEvidenceV3("exat"),
+				CodecsVideo:   []string{"h264"},
+				CodecsAudio:   []string{"aac"},
+				Containers:    []string{"mp4"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "unknown evidence tier with entries",
+			caps: playback.ClientCapabilities{
+				VideoEvidence: playback.CapabilityEvidenceV3("platform-attested"),
+				CodecsVideo:   []string{"av1"},
+				VideoDecode: []playback.VideoDecodeCapabilityV3{{
+					Codec: "av1", MaxWidth: 1920, MaxHeight: 1080, Hardware: true,
+				}},
+			},
+			wantErr: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -117,6 +117,10 @@ type proxyGrantStoreV3 interface {
 	// store accepts Put silently, so a URL that only a stored grant can serve
 	// must not be published without checking it.
 	Enabled() bool
+	// Get reads the grant a session currently egresses from. A replan uses it
+	// to remember the recipe it is about to overwrite, so a failed replacement
+	// can hand the restored plan its authority back.
+	Get(ctx context.Context, sessionID string) (*playback.RecipeCard, bool)
 	Put(ctx context.Context, sessionID string, card playback.RecipeCard) error
 	Delete(ctx context.Context, sessionID string) error
 }
@@ -248,13 +252,27 @@ type proxyNodeEnumeratorV3 interface {
 	ProxyNodeURLs() []string
 }
 
-// proxyEgressOriginsAvailableV3 reports whether this deployment has any proxy
-// origin an authorized-origins attempt could be sent to. A planner that cannot
+// proxyEgressOriginsAvailableV3 reports whether this deployment can actually
+// send an authorized-origins attempt to a proxy. A planner that cannot
 // enumerate proxies counts as none: the escalation this gates exists precisely
 // for the case where identity work has no executor, and assuming an origin the
-// server cannot name would leave the attempt with nowhere to run.
+// server cannot name would leave the attempt with nowhere to run. An unusable
+// grant store counts as none for the same reason — a proxy origin serves only
+// from a stored grant, so without one no proxy URL is publishable by this
+// process, ever.
+//
+// The distinction this preserves is between "not right now" and "not ever". A
+// configured-but-currently-ineligible proxy (saturated, unhealthy, cannot run
+// the recipe) deliberately still suppresses escalation: that attempt gets the
+// same retryable capacity_unavailable a legacy attempt gets, and retrying is
+// the correct response. Only a deployment that cannot do proxy egress at all —
+// no proxies in the pool, or no grant store to authorize one with — escalates
+// to HLS.
 func (h *PlaybackHandler) proxyEgressOriginsAvailableV3() bool {
 	if h == nil || h.NodePlanner == nil {
+		return false
+	}
+	if h.ProxyGrantStore == nil || !h.ProxyGrantStore.Enabled() {
 		return false
 	}
 	enumerator, ok := h.NodePlanner.(proxyNodeEnumeratorV3)
@@ -1002,11 +1020,16 @@ func (h *PlaybackHandler) prepareIdentityTransportV3(r *http.Request, session *p
 	}
 	streamURL := fmt.Sprintf("/stream/%s", routeSession.ID)
 	servedByProxy := false
+	// priorGrant is the egress authority this attempt overwrote, if any. A
+	// replan of a session that was already proxy-served must be able to put it
+	// back: rolling back to the restored old plan leaves that plan's published
+	// proxy URL live, and a deleted grant would 404 it.
+	var priorGrant *playback.RecipeCard
 	switch {
 	case !mode.headerAuth:
 		streamURL, servedByProxy = h.identityStreamURLV3(&routeSession, file, proxyNode)
 	case mode.proxyEgress:
-		streamURL, servedByProxy = h.identityGrantStreamURLV3(r.Context(), &routeSession, file, proxyNode)
+		streamURL, servedByProxy, priorGrant = h.identityGrantStreamURLV3(r.Context(), &routeSession, file, proxyNode)
 	}
 	releaseProxyReservation := func() {
 		if releaser, ok := h.NodePlanner.(sessionReservationReleaserV3); ok {
@@ -1050,6 +1073,7 @@ func (h *PlaybackHandler) prepareIdentityTransportV3(r *http.Request, session *p
 			if previousNodeURL != "" {
 				h.tm.StopRemoteTranscode(previousTransportID, previousNodeURL)
 			}
+			h.revokeStaleProxyGrantOnCommitV3(r.Context(), session.ID, mode, servedByProxy)
 			h.applyRemoteTransportMarkV3(r.Context(), session.ID, servedByProxy)
 			unlock()
 		},
@@ -1064,11 +1088,24 @@ func (h *PlaybackHandler) prepareIdentityTransportV3(r *http.Request, session *p
 			// that was never committed.
 			if servedByProxy {
 				releaseProxyReservation()
-				h.deleteProxyGrantV3(r.Context(), session.ID)
+				h.restoreProxyGrantV3(r.Context(), session.ID, priorGrant)
 			}
 			unlock()
 		},
 	}, nil
+}
+
+// revokeStaleProxyGrantOnCommitV3 drops the egress grant when an
+// authorized-origins attempt commits onto a transport this server serves
+// itself. A replan that moves a proxy-served session onto the API origin (or
+// onto a local transcode) publishes a URL the proxy has no part in, and the
+// surviving grant would keep the proxy authorized to serve the previous recipe
+// for the rest of its TTL.
+func (h *PlaybackHandler) revokeStaleProxyGrantOnCommitV3(ctx context.Context, sessionID string, mode mediaAuthModeV3, servedByProxy bool) {
+	if !mode.proxyEgress || servedByProxy {
+		return
+	}
+	h.deleteProxyGrantV3(ctx, sessionID)
 }
 
 // identityGrantStreamURLV3 builds the stream URL for a direct-play or
@@ -1086,38 +1123,71 @@ func (h *PlaybackHandler) prepareIdentityTransportV3(r *http.Request, session *p
 // caller can release the planner reservation when it is not. A grant that
 // cannot be written is not fatal: this attempt simply stays on the API origin,
 // which is exactly the behavior of a header-authenticated attempt that
-// negotiated no origins at all.
-func (h *PlaybackHandler) identityGrantStreamURLV3(ctx context.Context, s *playback.Session, file *models.MediaFile, proxyNode *nodepool.Node) (string, bool) {
+// negotiated no origins at all. The third value is the grant this write
+// displaced, for the caller's rollback.
+func (h *PlaybackHandler) identityGrantStreamURLV3(ctx context.Context, s *playback.Session, file *models.MediaFile, proxyNode *nodepool.Node) (string, bool, *playback.RecipeCard) {
 	if proxyNode == nil || file == nil || s == nil {
-		return h.playbackStreamURL(s), false
+		return h.playbackStreamURL(s), false, nil
 	}
 	card := identityRecipeCard(s)
 	card.InputPath = file.FilePath
 	card.DVProfile = file.PrimaryDVProfile()
 	card.AudioOnly = file.IsAudioOnly()
-	if !h.putProxyGrantV3(ctx, s.ID, card) {
-		return h.playbackStreamURL(s), false
+	prior, stored := h.putProxyGrantV3(ctx, s.ID, card)
+	if !stored {
+		return h.playbackStreamURL(s), false, nil
 	}
-	return strings.TrimRight(proxyNode.URL, "/") + "/stream/v3/" + s.ID, true
+	return strings.TrimRight(proxyNode.URL, "/") + "/stream/v3/" + s.ID, true, prior
 }
 
 // putProxyGrantV3 stores the recipe a designated proxy origin serves this
 // session from, reporting whether the grant is actually retrievable. A replan
-// overwrites the previous grant under the same session id.
+// overwrites the previous grant under the same session id, so the grant it
+// displaces is returned for the caller to thread into its rollback: a
+// replacement that fails to commit restores the old plan, and that plan's
+// already-published proxy URL is only serviceable while its grant exists.
+//
+// The overwrite is deliberately not staged behind the commit. Between this Put
+// and the transport commit the previously published client URL resolves the new
+// recipe — same session, same user, same media authority, bounded by the replan
+// window — which is the accepted cost of keeping one grant per session.
 //
 // A disabled store is a negative answer rather than a silent success: it
 // accepts writes it cannot retrieve (the Redis-less integrated box), and
 // publishing a proxy URL against one would hand the client a route that 404s.
-func (h *PlaybackHandler) putProxyGrantV3(ctx context.Context, sessionID string, card playback.RecipeCard) bool {
+func (h *PlaybackHandler) putProxyGrantV3(ctx context.Context, sessionID string, card playback.RecipeCard) (*playback.RecipeCard, bool) {
 	if h.ProxyGrantStore == nil || !h.ProxyGrantStore.Enabled() || sessionID == "" {
-		return false
+		return nil, false
+	}
+	prior, hadPrior := h.ProxyGrantStore.Get(ctx, sessionID)
+	if !hadPrior {
+		prior = nil
 	}
 	if err := h.ProxyGrantStore.Put(ctx, sessionID, card); err != nil {
 		slog.WarnContext(ctx, "protocol v3 proxy egress grant write failed; serving from the API origin",
 			"component", "api", "playback_session_id", sessionID, "error", err)
-		return false
+		return nil, false
 	}
-	return true
+	return prior, true
+}
+
+// restoreProxyGrantV3 undoes a replan's grant overwrite. A session that was
+// already egressing from a proxy keeps serving its restored plan, so its grant
+// has to come back rather than be revoked; a session that had none is revoked
+// as before, because a grant for a transport that never committed would point a
+// proxy at work that no longer exists.
+func (h *PlaybackHandler) restoreProxyGrantV3(ctx context.Context, sessionID string, prior *playback.RecipeCard) {
+	if h == nil || h.ProxyGrantStore == nil || sessionID == "" {
+		return
+	}
+	if prior == nil {
+		h.deleteProxyGrantV3(ctx, sessionID)
+		return
+	}
+	if err := h.ProxyGrantStore.Put(context.WithoutCancel(ctx), sessionID, *prior); err != nil {
+		slog.WarnContext(ctx, "failed to restore the previous proxy egress grant",
+			"component", "api", "playback_session_id", sessionID, "error", err)
+	}
 }
 
 // deleteProxyGrantV3 revokes a session's proxy egress authority. It runs
@@ -1579,6 +1649,9 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 			}
 			committed = true
 			previous := h.tm.SwapTranscodeSession(session.ID, ts)
+			// A local transcode is never proxy-served, so an authorized-origins
+			// replan landing here has to revoke the grant it is replacing.
+			h.revokeStaleProxyGrantOnCommitV3(r.Context(), session.ID, mode, false)
 			h.applyRemoteTransportMarkV3(r.Context(), session.ID, false)
 			unlock()
 			if previous != nil && previous != ts {
@@ -1641,6 +1714,9 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 	// actually be established; otherwise the client fetches the manifest from
 	// this server and the local liveness path applies.
 	servedByProxy := false
+	// See prepareIdentityTransportV3: the displaced grant is what a failed
+	// replan of an already-proxy-served session has to put back.
+	var priorGrant *playback.RecipeCard
 	switch {
 	case !mode.headerAuth:
 		card := remoteTranscodeRecipeCardV3(session, file, node.URL, transportID, req, nodeResp)
@@ -1648,7 +1724,7 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 		servedByProxy = nodePlan.ProxyNode != nil && strings.HasPrefix(url, "http")
 	case mode.proxyEgress:
 		card := remoteTranscodeRecipeCardV3(session, file, node.URL, transportID, req, nodeResp)
-		url, servedByProxy = h.grantManifestURLV3(r.Context(), card, nodePlan.ProxyNode)
+		url, servedByProxy, priorGrant = h.grantManifestURLV3(r.Context(), card, nodePlan.ProxyNode)
 	}
 	committed := false
 	previousNodeURL := session.TranscodeNodeURL
@@ -1663,6 +1739,7 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 		if previousNodeURL != "" {
 			h.tm.StopRemoteTranscode(previousTransportID, previousNodeURL)
 		}
+		h.revokeStaleProxyGrantOnCommitV3(r.Context(), session.ID, mode, servedByProxy)
 		h.applyRemoteTransportMarkV3(r.Context(), session.ID, servedByProxy)
 		unlock()
 	}, rollback: func() {
@@ -1680,7 +1757,7 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 		// An egress grant written for a transport that never committed would
 		// point a proxy at a transcode that no longer exists.
 		if servedByProxy {
-			h.deleteProxyGrantV3(r.Context(), session.ID)
+			h.restoreProxyGrantV3(r.Context(), session.ID, priorGrant)
 		}
 		unlock()
 	}}, nil
@@ -1702,13 +1779,18 @@ func remoteTranscodeRecipeCardV3(session *playback.Session, file *models.MediaFi
 // the manifest, so the same /stream/v3/{session_id}/... family serves both.
 //
 // Without a planned proxy — or when the grant cannot be stored — the client
-// fetches the manifest from this server, which relays the same node.
-func (h *PlaybackHandler) grantManifestURLV3(ctx context.Context, card playback.RecipeCard, proxyNode *nodepool.Node) (string, bool) {
+// fetches the manifest from this server, which relays the same node. The third
+// value is the grant this write displaced, for the caller's rollback.
+func (h *PlaybackHandler) grantManifestURLV3(ctx context.Context, card playback.RecipeCard, proxyNode *nodepool.Node) (string, bool, *playback.RecipeCard) {
 	localURL := fmt.Sprintf("/playback/transcode/%s/master.m3u8", card.SessionID)
-	if proxyNode == nil || !h.putProxyGrantV3(ctx, card.SessionID, card) {
-		return localURL, false
+	if proxyNode == nil {
+		return localURL, false, nil
 	}
-	return strings.TrimRight(proxyNode.URL, "/") + "/stream/v3/" + card.SessionID + "/master.m3u8", true
+	prior, stored := h.putProxyGrantV3(ctx, card.SessionID, card)
+	if !stored {
+		return localURL, false, nil
+	}
+	return strings.TrimRight(proxyNode.URL, "/") + "/stream/v3/" + card.SessionID + "/master.m3u8", true, prior
 }
 
 func sourceExecutionMetadataV3(file *models.MediaFile, result playback.PlannerResultV3) playback.SourceExecutionMetadataV3 {

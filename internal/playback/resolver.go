@@ -55,6 +55,14 @@ func (c *ClientCapabilities) hasDetailedVideoEvidence() bool {
 // opt-in is refused: video_decode entries whose evidence tier cannot validate
 // them would otherwise be silently ignored.
 func (c *ClientCapabilities) NormalizeAndValidateVideoDecode() error {
+	// A present-but-unrecognized tier is a client bug, not a legacy payload:
+	// silently resolving it from the flat lists would hide a typo behind a
+	// working-looking answer, where the v3 playback path rejects it outright.
+	// Omitting the field entirely stays valid — that is what a legacy flat
+	// payload looks like.
+	if c.VideoEvidence != "" && !validCapabilityEvidenceV3(c.VideoEvidence) {
+		return errors.New("video_evidence must be exact, platform_attested, or declared")
+	}
 	if len(c.VideoDecode) == 0 {
 		return nil
 	}
