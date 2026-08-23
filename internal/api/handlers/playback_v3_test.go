@@ -2220,6 +2220,95 @@ func TestAttachSubtitleArtifactV3UsesFrozenDownloadedIdentityWithoutOrdinalLooku
 	}
 }
 
+// A plan struct can arrive at artifact attachment already carrying the previous
+// plan's subtitle artifact — a seek reanchor replays record.CurrentPlan
+// verbatim. Every mode without a client-fetchable artifact must therefore clear
+// it rather than let the stale URL ride along, and an `off` decision must shed
+// its track_id with it. The inventory URLs are selection-independent and stay.
+func TestAttachSubtitleArtifactV3ClearsStaleArtifactWhenNoArtifactMode(t *testing.T) {
+	stale := func() *playback.SubtitleArtifactV3 {
+		return &playback.SubtitleArtifactV3{URL: "/stream/old-session/subtitles/1.vtt?file_id=42", MIMEType: "text/vtt", Format: "vtt", TimingOriginSeconds: 12}
+	}
+	tests := []struct {
+		name          string
+		mode          playback.SubtitleModeV3
+		selectedIndex int
+		wantTrackID   string
+	}{
+		{name: "off", mode: playback.SubtitleOffV3, selectedIndex: -1},
+		{name: "off with a carried-over ordinal", mode: playback.SubtitleOffV3, selectedIndex: 1},
+		{name: "burn in keeps its track", mode: playback.SubtitleBurnInV3, selectedIndex: 1, wantTrackID: "file:42:subtitle:1"},
+		{name: "render without a resolvable selection", mode: playback.SubtitleRenderV3, selectedIndex: -1, wantTrackID: "file:42:subtitle:1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			file := v3HandlerFixtureFile(t)
+			file.ExternalSubtitles = []models.ExternalSubtitle{{Path: "/subs/a.srt", Language: "eng", Format: "srt"}}
+			file.SubtitleTracks = []models.SubtitleTrack{{Index: 0, Codec: "subrip", Language: "fra"}}
+			handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+			plan := &playback.PlanV3{
+				Subtitle: playback.SubtitleDecisionV3{
+					Mode:      test.mode,
+					TrackID:   playback.TrackIDV3(file.ID, "subtitle", 1),
+					Artifact:  stale(),
+					Inventory: playback.BuildSubtitleInventoryV3(file, nil),
+				},
+			}
+			if err := handler.attachSubtitleArtifactV3(context.Background(), "session-current", file, plan, test.selectedIndex, nil); err != nil {
+				t.Fatalf("attach: %v", err)
+			}
+			if plan.Subtitle.Artifact != nil {
+				t.Fatalf("artifact = %#v, want nil for mode %q with selected index %d", plan.Subtitle.Artifact, test.mode, test.selectedIndex)
+			}
+			if plan.Subtitle.TrackID != test.wantTrackID {
+				t.Fatalf("track_id = %q, want %q", plan.Subtitle.TrackID, test.wantTrackID)
+			}
+			if len(plan.Subtitle.Inventory) != 2 {
+				t.Fatalf("inventory = %#v, want both tracks published", plan.Subtitle.Inventory)
+			}
+			for _, item := range plan.Subtitle.Inventory {
+				if !strings.HasPrefix(item.URL, "/stream/session-current/subtitles/") {
+					t.Fatalf("inventory entry %d url = %q, want a current-session sidecar url", item.CombinedIndex, item.URL)
+				}
+			}
+		})
+	}
+}
+
+// The regression this guards: a session that rendered a sidecar, then replanned
+// with subtitles off, kept republishing the old artifact.
+func TestAttachSubtitleArtifactV3DropsArtifactAcrossRenderToOffReplan(t *testing.T) {
+	file := v3HandlerFixtureFile(t)
+	file.ExternalSubtitles = []models.ExternalSubtitle{{Path: "/subs/a.srt", Language: "eng", Format: "srt"}}
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	rendered := &playback.PlanV3{
+		Subtitle: playback.SubtitleDecisionV3{
+			Mode:      playback.SubtitleRenderV3,
+			TrackID:   playback.TrackIDV3(file.ID, "subtitle", 0),
+			Inventory: playback.BuildSubtitleInventoryV3(file, nil),
+		},
+	}
+	if err := handler.attachSubtitleArtifactV3(context.Background(), "session-1", file, rendered, 0, nil); err != nil {
+		t.Fatalf("attach render: %v", err)
+	}
+	if rendered.Subtitle.Artifact == nil {
+		t.Fatal("render mode published no artifact")
+	}
+	// Replan reuses the accepted plan (the seek-reanchor shape) and turns
+	// subtitles off; the durable artifact must not survive the transition.
+	replanned := *rendered
+	replanned.Subtitle.Mode = playback.SubtitleOffV3
+	if err := handler.attachSubtitleArtifactV3(context.Background(), "session-1", file, &replanned, -1, nil); err != nil {
+		t.Fatalf("attach off: %v", err)
+	}
+	if replanned.Subtitle.Artifact != nil || replanned.Subtitle.TrackID != "" {
+		t.Fatalf("off plan = %#v, want no artifact and no track_id", replanned.Subtitle)
+	}
+	if rendered.Subtitle.Artifact == nil {
+		t.Fatal("clearing the successor mutated the accepted plan's artifact")
+	}
+}
+
 func TestSubtitleArtifactStoreFailuresAreRetryable(t *testing.T) {
 	storeErr := errors.New("database unavailable")
 	wantRetryable := subtitleArtifactErrorV3("subtitle lookup failed", wrapSubtitleStoreErrorV3(storeErr))
@@ -2331,7 +2420,7 @@ func TestPrepareTransportV3ProgressiveRemuxUsesResolvedCopyAnchor(t *testing.T) 
 			EffectiveMediaFileID: 42,
 			Timeline:             playback.TimelineV3{SourceStartSeconds: requested, PlayerStartSeconds: requested, CanSeekAnywhere: true, SeekRestoration: "player_position"},
 		}
-		transport, transportErr := handler.prepareTransportV3(httptest.NewRequest(http.MethodPost, "/", nil), session, file, playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayRemux})
+		transport, transportErr := handler.prepareTransportV3(httptest.NewRequest(http.MethodPost, "/", nil), session, file, playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayRemux}, false)
 		if transportErr != nil {
 			t.Fatalf("prepare progressive transport: %v", transportErr)
 		}
@@ -2388,6 +2477,7 @@ func TestPrepareTransportV3AudioOnlyRemuxSkipsVideoCopyAnchor(t *testing.T) {
 		&playback.Session{ID: "session-audio-only", MediaFileID: 42},
 		file,
 		playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayRemux, TargetAudioCodec: "aac"},
+		false,
 	)
 	if transportErr != nil {
 		t.Fatalf("prepare audio-only transport: %v", transportErr)
@@ -2422,6 +2512,7 @@ func TestPrepareTransportV3CopyAnchorFailureIsRetryable(t *testing.T) {
 		&playback.Session{ID: "session-copy-failure"},
 		&models.MediaFile{ID: 42, FilePath: "/media/movie.mkv"},
 		playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayRemux},
+		false,
 	)
 	if transportErr == nil || transportErr.reason != "transcode_start_failed" || !transportErr.retryable || transportErr.cause == nil || transportErr.cause.Error() != "probe failed" {
 		t.Fatalf("transport error = %#v, want retryable copy anchor failure", transportErr)
@@ -2455,7 +2546,7 @@ func TestPrepareTransportV3RejectsNodeMissingRequiredTransformation(t *testing.T
 		},
 	}
 	request := httptest.NewRequest(http.MethodPost, "/", nil)
-	_, transportErr := handler.prepareTransportV3(request, &playback.Session{ID: "session-capability"}, v3HandlerFixtureFile(t), playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac"})
+	_, transportErr := handler.prepareTransportV3(request, &playback.Session{ID: "session-capability"}, v3HandlerFixtureFile(t), playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac"}, false)
 	if transportErr == nil || transportErr.reason != "transcode_node_capability_unavailable" {
 		t.Fatalf("transport error = %#v", transportErr)
 	}
@@ -2498,7 +2589,7 @@ func TestPrepareTransportV3RequiresRemoteManifestReadiness(t *testing.T) {
 		},
 	}
 	request := httptest.NewRequest(http.MethodPost, "/", nil)
-	transport, transportErr := handler.prepareTransportV3(request, &playback.Session{ID: "session-ready", UserID: 7, ProfileID: "profile-1"}, v3HandlerFixtureFile(t), playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac"})
+	transport, transportErr := handler.prepareTransportV3(request, &playback.Session{ID: "session-ready", UserID: 7, ProfileID: "profile-1"}, v3HandlerFixtureFile(t), playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac"}, false)
 	if transportErr != nil {
 		t.Fatalf("prepare remote transport: %v", transportErr)
 	}
@@ -2549,8 +2640,8 @@ func TestPrepareTransportV3KeepsHeaderAuthenticatedRemoteHLSBehindAPI(t *testing
 					{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
 				},
 			}
-			request := withHeaderAuthenticatedMediaV3(httptest.NewRequest(http.MethodPost, "/", nil), test.features)
-			transport, transportErr := handler.prepareTransportV3(request, &playback.Session{ID: "session-remote-auth", UserID: 7, ProfileID: "profile-1"}, v3HandlerFixtureFile(t), playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac"})
+			request := httptest.NewRequest(http.MethodPost, "/", nil)
+			transport, transportErr := handler.prepareTransportV3(request, &playback.Session{ID: "session-remote-auth", UserID: 7, ProfileID: "profile-1"}, v3HandlerFixtureFile(t), playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac"}, headerAuthenticatedMediaV3(test.features))
 			if transportErr != nil {
 				t.Fatalf("prepare remote HLS: %v", transportErr)
 			}
@@ -2605,6 +2696,7 @@ func TestPrepareTransportV3SendsResolvedCopyAnchorToRemoteExecutor(t *testing.T)
 		&playback.Session{ID: "session-remote-copy-anchor", UserID: 7, ProfileID: "profile-1"},
 		&models.MediaFile{ID: 42, FilePath: "/media/movie.mkv", CodecVideo: "h264"},
 		playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayRemux, TargetAudioCodec: "aac"},
+		false,
 	)
 	if transportErr != nil {
 		t.Fatalf("prepare remote copy transport: %v", transportErr)
@@ -2662,7 +2754,7 @@ func TestPrepareTransportV3UsesFrozenSourceMetadataAfterProbeDrift(t *testing.T)
 	file.Duration = 99
 	result := recipe.PlannerResult(plan)
 	request := httptest.NewRequest(http.MethodPost, "/", nil)
-	transport, transportErr := handler.prepareTransportV3(request, &playback.Session{ID: "session-frozen-source", UserID: 7, ProfileID: "profile-1"}, file, result)
+	transport, transportErr := handler.prepareTransportV3(request, &playback.Session{ID: "session-frozen-source", UserID: 7, ProfileID: "profile-1"}, file, result, false)
 	if transportErr != nil {
 		t.Fatalf("prepare remote transport: %v", transportErr)
 	}
@@ -2718,7 +2810,7 @@ func TestPrepareLocalTransportV3ReturnsStableTerminalWhenFFmpegExitsBeforeReady(
 	if timelineErr != nil {
 		t.Fatalf("prepare timeline: %v", timelineErr)
 	}
-	transport, transportErr := handler.prepareLocalTransportV3(request, &playback.Session{ID: "session-startup-failure", UserID: 7, ProfileID: "profile-1"}, file, result, timeline)
+	transport, transportErr := handler.prepareLocalTransportV3(request, &playback.Session{ID: "session-startup-failure", UserID: 7, ProfileID: "profile-1"}, file, result, timeline, false)
 	if transportErr == nil {
 		transport.rollback()
 		t.Fatal("failed ffmpeg startup returned a playable transport")
@@ -3887,6 +3979,7 @@ func TestPrepareTransportV3RoutesDirectPlayThroughProxyNode(t *testing.T) {
 		&playback.Session{ID: "session-direct-proxy", UserID: 7, ProfileID: "profile-1"},
 		v3HandlerFixtureFile(t),
 		playback.PlannerResultV3{Plan: identityProxyPlanV3(playback.DeliveryOriginalHTTPV3), PlayMethod: playback.PlayDirect},
+		false,
 	)
 	if transportErr != nil {
 		t.Fatalf("prepare identity transport: %v", transportErr)
@@ -3937,6 +4030,7 @@ func TestPrepareTransportV3RoutesProgressiveRemuxThroughProxyNodeWithSeekAndDV(t
 		&playback.Session{ID: "session-remux-proxy", UserID: 7, ProfileID: "profile-1"},
 		file,
 		playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayRemux, TranscodeAudio: true, TargetAudioCodec: "aac"},
+		false,
 	)
 	if transportErr != nil {
 		t.Fatalf("prepare identity transport: %v", transportErr)
@@ -3979,13 +4073,14 @@ func TestPrepareTransportV3NegotiatesHeaderAuthenticatedProgressiveRemuxURL(t *t
 			plan := identityProxyPlanV3(playback.DeliveryRemuxProgressiveV3)
 			plan.EffectiveMediaFileID = 42
 			plan.Timeline = playback.TimelineV3{SourceStartSeconds: 39.5}
-			request := withHeaderAuthenticatedMediaV3(httptest.NewRequest(http.MethodPost, "/", nil), test.features)
+			request := httptest.NewRequest(http.MethodPost, "/", nil)
 
 			transport, transportErr := handler.prepareTransportV3(
 				request,
 				&playback.Session{ID: "session-remux-auth", UserID: 7, ProfileID: "profile-1", MediaFileID: 42},
 				v3HandlerFixtureFile(t),
 				playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayRemux, TargetAudioCodec: "aac"},
+				headerAuthenticatedMediaV3(test.features),
 			)
 			if transportErr != nil {
 				t.Fatalf("prepare remux: %v", transportErr)
@@ -4016,6 +4111,7 @@ func TestPrepareTransportV3FallsBackLocallyWithoutEligibleProxy(t *testing.T) {
 		&playback.Session{ID: "session-direct-local", UserID: 7, ProfileID: "profile-1"},
 		v3HandlerFixtureFile(t),
 		playback.PlannerResultV3{Plan: identityProxyPlanV3(playback.DeliveryOriginalHTTPV3), PlayMethod: playback.PlayDirect},
+		false,
 	)
 	if transportErr != nil {
 		t.Fatalf("prepare identity transport: %v", transportErr)
@@ -4043,6 +4139,7 @@ func TestPrepareTransportV3RefusesLocalRemuxWhenFallbackDisabled(t *testing.T) {
 			PlayMethod:     playback.PlayRemux,
 			TranscodeAudio: true,
 		},
+		false,
 	)
 	if transportErr == nil || transportErr.reason != "capacity_unavailable" {
 		t.Fatalf("transport error = %#v, want capacity_unavailable when local remux work is disabled", transportErr)
@@ -4062,6 +4159,7 @@ func TestPrepareTransportV3AllowsLocalDirectPlayWhenFallbackDisabled(t *testing.
 		&playback.Session{ID: "session-direct-allowed", UserID: 7, ProfileID: "profile-1"},
 		v3HandlerFixtureFile(t),
 		playback.PlannerResultV3{Plan: identityProxyPlanV3(playback.DeliveryOriginalHTTPV3), PlayMethod: playback.PlayDirect},
+		false,
 	)
 	if transportErr != nil {
 		t.Fatalf("direct play refused with local fallback disabled: %#v", transportErr)
@@ -4080,6 +4178,7 @@ func TestPrepareTransportV3ReleasesProxyReservationOnRollback(t *testing.T) {
 		&playback.Session{ID: "session-rollback", UserID: 7, ProfileID: "profile-1"},
 		v3HandlerFixtureFile(t),
 		playback.PlannerResultV3{Plan: identityProxyPlanV3(playback.DeliveryOriginalHTTPV3), PlayMethod: playback.PlayDirect},
+		false,
 	)
 	if transportErr != nil {
 		t.Fatalf("prepare identity transport: %v", transportErr)
@@ -4134,6 +4233,7 @@ func TestPrepareTransportV3KeepsRemuxLocalWhenProxyLacksTheRecipe(t *testing.T) 
 			PlayMethod:     playback.PlayRemux,
 			TranscodeAudio: true,
 		},
+		false,
 	)
 	if transportErr != nil {
 		t.Fatalf("prepare identity transport: %v", transportErr)
@@ -4169,6 +4269,7 @@ func TestPrepareTransportV3DirectPlaySkipsProxyCapabilityProbe(t *testing.T) {
 		&playback.Session{ID: "session-direct-noprobe", UserID: 7, ProfileID: "profile-1"},
 		v3HandlerFixtureFile(t),
 		playback.PlannerResultV3{Plan: identityProxyPlanV3(playback.DeliveryOriginalHTTPV3), PlayMethod: playback.PlayDirect},
+		false,
 	)
 	if transportErr != nil {
 		t.Fatalf("prepare identity transport: %v", transportErr)
@@ -4216,6 +4317,7 @@ func TestPrepareTransportV3MarksProxySessionsAsRemotelyTransported(t *testing.T)
 		session,
 		v3HandlerFixtureFile(t),
 		playback.PlannerResultV3{Plan: identityProxyPlanV3(playback.DeliveryOriginalHTTPV3), PlayMethod: playback.PlayDirect},
+		false,
 	)
 	if transportErr != nil {
 		t.Fatalf("prepare identity transport: %v", transportErr)
@@ -4300,6 +4402,7 @@ func TestPrepareTransportV3PrefersACapableSiblingProxy(t *testing.T) {
 			PlayMethod:     playback.PlayRemux,
 			TranscodeAudio: true,
 		},
+		false,
 	)
 	if transportErr != nil {
 		t.Fatalf("prepare identity transport: %#v", transportErr)
@@ -4329,6 +4432,7 @@ func TestPrepareTransportV3ClearsRemoteTransportMarkWhenServingLocally(t *testin
 	proxied, transportErr := handler.prepareTransportV3(
 		httptest.NewRequest(http.MethodPost, "/", nil), session, file,
 		playback.PlannerResultV3{Plan: identityProxyPlanV3(playback.DeliveryOriginalHTTPV3), PlayMethod: playback.PlayDirect},
+		false,
 	)
 	if transportErr != nil {
 		t.Fatalf("prepare proxy transport: %v", transportErr)
@@ -4340,6 +4444,7 @@ func TestPrepareTransportV3ClearsRemoteTransportMarkWhenServingLocally(t *testin
 	local, transportErr := handler.prepareTransportV3(
 		httptest.NewRequest(http.MethodPost, "/", nil), session, file,
 		playback.PlannerResultV3{Plan: identityProxyPlanV3(playback.DeliveryOriginalHTTPV3), PlayMethod: playback.PlayDirect},
+		false,
 	)
 	if transportErr != nil {
 		t.Fatalf("prepare local transport: %v", transportErr)

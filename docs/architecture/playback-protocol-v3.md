@@ -486,7 +486,13 @@ A pooled transcode node may still execute HLS behind the API server; the API
 relays its manifest and segments over the same authenticated client route.
 Direct-play and progressive-remux proxy routes are bypassed because those
 nodes accept a signed URL token rather than the user's API credential, so the
-normal local-remux fallback policy still applies.
+normal local-remux fallback policy still applies. On a server that disables
+`playback.local_transcode_fallback`, a progressive remux needing a server
+transformation therefore has no executor at all: the server plans the same
+recipe as `server_remux_hls` instead, which a pooled transcode node can run
+behind the API. A client that advertises no HLS delivery gets the non-retryable
+terminal `local_transcode_disabled` rather than a retryable capacity error it
+could only retry forever.
 
 The client must attach its current `Authorization: Bearer ...` header to the
 manifest/file request and every derived request, including HLS segments,
@@ -504,6 +510,34 @@ response and the client starts a fresh attempt. Once selected, this mode is
 sticky for the lifetime of the attempt; a client that can no longer honor it
 must stop and start a new attempt rather than downgrade a replan to a
 credential-bearing URL.
+
+### 4.2 Media and subtitle URL query parameters
+
+Every URL a plan publishes belongs to one of two route families, and the query
+parameters each family accepts are part of the contract. A client replays the
+URL it was handed byte-for-byte; it never composes one, never drops a
+parameter, and never carries a parameter across families.
+
+| Route family | Routes | Query parameters |
+| --- | --- | --- |
+| Media | `/stream/{session_id}`, `/playback/transcode/{session_id}/master.m3u8` and its segments | `seek` only — the progressive-remux start offset in seconds, present only when it is non-zero |
+| Subtitle artifact | `/stream/{session_id}/subtitles/{combined_index}{.ext}`, `/stream/{session_id}/subtitles/{combined_index}/fonts` | `file_id`, always; plus `downloaded_subtitle_id` when the track is a downloaded or AI-generated one (§8) |
+
+A media route never carries `file_id` or `downloaded_subtitle_id` — the session
+already names the file it plays, and the media timeline is anchored by `seek`
+plus the fields in §5. A subtitle route never carries `seek`: a sidecar is
+fetched whole and timed against `subtitle.artifact.timing_origin_seconds`.
+
+`file_id` is required on a subtitle route because a plan can fall back to an
+alternate edition, so the session id alone does not fix which file's ordinal
+space `{combined_index}` addresses. `downloaded_subtitle_id` pins the exact
+downloaded row behind that ordinal, which is what keeps the URL stable when the
+downloaded segment of the inventory is reordered or grows mid-session (§8).
+
+An attempt that did not opt into `header_authenticated_media_v1` additionally
+carries the signed stream token `st` on its media URLs — never on subtitle or
+font-bundle routes. It is an opaque transport credential rather than a playback
+parameter, and it is outside the table above.
 
 ---
 
@@ -635,6 +669,20 @@ A seek-scoped recovery refuses to accept new capability or device evidence: a
 seek is not an authority boundary for replacing the client's declared abilities
 mid-session.
 
+**Attempt-sticky features.** `client_features` is otherwise refreshed by any
+replan that sends it, but two entries are fixed by the start negotiation and a
+replan can neither add nor drop them:
+
+| Feature | Why it is fixed |
+| --- | --- |
+| `header_authenticated_media_v1` | It selects the media security contract. A signed URL from an earlier plan stays usable until its recipe expires, so a mid-attempt switch would leave two contracts alive for one session (§4.1) |
+| `software_video_decode_v1` | It widens the direct-play evidence tiers. Dropping it converts a direct route into a transcode and persists that downgrade into the durable request |
+
+The server silently restores the negotiated state of both, whatever the replan
+sends — including an explicit list that omits one, which is otherwise a valid
+way to drop a feature. Seek replans never replace the feature list at all.
+Changing either mode means stopping and starting a new attempt.
+
 ---
 
 ## 7. Registries
@@ -690,6 +738,7 @@ HDR, 4K, or transcode-policy reason — deselecting the subtitle restores playba
 
 *Transport and session:* `internal_error`, `session_expired`,
 `subtitle_artifact_unavailable`, `capacity_unavailable`,
+`local_transcode_disabled`,
 `audio_transcoding_disabled`,
 `transcode_start_failed`, `transcode_node_unavailable`,
 `transcode_node_capability_unavailable`, `track_unavailable`,
@@ -763,6 +812,18 @@ without first asking for a plan it does not want.
 transcodes it to a client-renderable format first — always to WebVTT, served as
 `text/vtt` at a `.vtt` URL), or `burn_in` (rendered into the video, which forces
 a transcode).
+
+`subtitle.artifact` is the one track the plan tells the client to draw, and it
+is present **only** under `render` and `convert`. Under `off` and `burn_in` it
+is absent, and every plan states this afresh: an artifact is never carried over
+from an earlier plan of the same session, so a client must take the current
+plan's `subtitle` block literally rather than remembering the previous one.
+`off` also carries no `subtitle.track_id`. The inventory `url`s are unaffected
+— they describe what is fetchable, not what is selected, and stay published in
+every mode.
+
+Subtitle artifact, inventory and font-bundle URLs are session-scoped and carry
+their own query parameters; see §4.2 for the per-route-family contract.
 
 The sidecar URL suffix is part of the representation contract, not decoration.
 An embedded `hdmv_pgs_subtitle`/PGS sidecar is lossless binary PGS at a `.sup`

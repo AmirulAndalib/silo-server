@@ -435,15 +435,82 @@ func TestHandleCreateDownloadRejectsUnboundedDetailedDecoderInput(t *testing.T) 
 	}
 }
 
-func TestHandleCreateDownloadRejectsSoftwareOptInWithoutDetailedEvidence(t *testing.T) {
+// Flat-list payloads are legal at every evidence tier on the v3 playback start
+// path, so download creation must accept the same shapes rather than 400 on
+// them. Only video_decode entries the tier cannot validate are refused.
+func TestHandleCreateDownloadAcceptsFlatCapabilityPayloads(t *testing.T) {
+	tests := []struct {
+		name string
+		caps string
+	}{
+		{
+			name: "declared evidence with flat lists",
+			caps: `{
+				"video_evidence":"declared",
+				"codecs_video":["h264","hevc"],
+				"codecs_audio":["aac"],
+				"containers":["mp4"],
+				"max_resolution":"1080p"
+			}`,
+		},
+		{
+			name: "feature token only",
+			caps: `{
+				"client_features":["software_video_decode_v1"],
+				"codecs_video":["av1"],
+				"codecs_audio":["aac"],
+				"containers":["mp4"]
+			}`,
+		},
+		{
+			name: "platform attested without entries",
+			caps: `{
+				"client_features":["software_video_decode_v1"],
+				"video_evidence":"platform_attested",
+				"codecs_video":["av1"]
+			}`,
+		},
+		{
+			name: "legacy flat payload",
+			caps: `{
+				"codecs_video":["h264"],
+				"codecs_audio":["aac"],
+				"containers":["mp4"],
+				"max_resolution":"1080p"
+			}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &fakeDownloadService{created: &downloads.Download{
+				ID: "dl1", ContentID: "c1", Status: downloads.StatusQueued,
+				Format: downloads.FormatOriginal, Quality: downloads.QualityOriginal,
+				EffectiveQuality: downloads.QualityOriginal,
+			}}
+			h := NewDownloadHandler(svc)
+			body := []byte(`{"content_id":"c1","quality":"original","caps":` + tc.caps + `}`)
+			rec := httptest.NewRecorder()
+			h.HandleCreateDownload(rec, downloadTestRequest(http.MethodPost, "/downloads", body, 7, "", ""))
+
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want 202 (body: %s)", rec.Code, rec.Body.String())
+			}
+			if len(svc.gotCreateReq.Caps.CodecsVideo) == 0 {
+				t.Fatalf("service received no flat codec list: %+v", svc.gotCreateReq.Caps)
+			}
+		})
+	}
+}
+
+func TestHandleCreateDownloadRejectsDetailedEntriesWithoutStrictEvidence(t *testing.T) {
 	svc := &fakeDownloadService{}
 	h := NewDownloadHandler(svc)
 	body := []byte(`{
 		"content_id":"c1",
 		"caps":{
-			"client_features":["software_video_decode_v1"],
-			"video_evidence":"platform_attested",
-			"codecs_video":["av1"]
+			"video_evidence":"declared",
+			"codecs_video":["av1"],
+			"video_decode":[{"codec":"av1","max_width":1920,"hardware":true}]
 		}
 	}`)
 	rec := httptest.NewRecorder()
@@ -451,6 +518,9 @@ func TestHandleCreateDownloadRejectsSoftwareOptInWithoutDetailedEvidence(t *test
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if svc.gotCreateReq.ContentID != "" {
+		t.Fatal("unvalidatable video_decode entries reached the download service")
 	}
 }
 

@@ -38,16 +38,28 @@ type ClientCapabilities struct {
 	VideoDecode            []VideoDecodeCapabilityV3 `json:"video_decode,omitempty"`
 }
 
+// hasDetailedVideoEvidence reports whether the payload carries a strict-tier
+// detailed decoder description: per-decoder video_decode entries backed by an
+// evidence tier that can validate them. It is the single predicate shared by
+// the additive validator and Resolve so the two cannot drift.
+func (c *ClientCapabilities) hasDetailedVideoEvidence() bool {
+	return (c.VideoEvidence == EvidenceExactV3 || c.VideoEvidence == EvidencePlatformAttestedV3) &&
+		len(c.VideoDecode) > 0
+}
+
 // NormalizeAndValidateVideoDecode applies the protocol-v3 detailed decoder
-// limits to additive capability payloads such as download creation. Legacy
-// flat-only payloads remain valid and unchanged.
+// limits to additive capability payloads such as download creation. It mirrors
+// the v3 playback start path: flat-list payloads at any evidence tier — and
+// feature-token-only payloads — stay valid and unchanged, because those resolve
+// from the flat codec lists exactly as playback does. Only a partial detailed
+// opt-in is refused: video_decode entries whose evidence tier cannot validate
+// them would otherwise be silently ignored.
 func (c *ClientCapabilities) NormalizeAndValidateVideoDecode() error {
-	softwareOptIn := HasFeatureV3(c.ClientFeatures, FeatureSoftwareVideoDecodeV3)
-	if c.VideoEvidence == "" && len(c.VideoDecode) == 0 && !softwareOptIn {
+	if len(c.VideoDecode) == 0 {
 		return nil
 	}
-	if (c.VideoEvidence != EvidenceExactV3 && c.VideoEvidence != EvidencePlatformAttestedV3) || len(c.VideoDecode) == 0 {
-		return errors.New("detailed download video evidence requires exact or platform_attested entries")
+	if !c.hasDetailedVideoEvidence() {
+		return errors.New("video_decode requires exact or platform_attested video_evidence")
 	}
 	detailed := ClientCodecCapabilitiesV3{
 		VideoEvidence: c.VideoEvidence,
@@ -82,16 +94,26 @@ type PlayDecision struct {
 func Resolve(file *models.MediaFile, caps ClientCapabilities, settings AdminSettings) *PlayDecision {
 	// Check if client supports the video codec.
 	videoOK := containsStr(caps.CodecsVideo, file.CodecVideo)
-	detailedVideoEvidence := (caps.VideoEvidence == EvidenceExactV3 || caps.VideoEvidence == EvidencePlatformAttestedV3) && len(caps.VideoDecode) > 0
+	detailedVideoEvidence := caps.hasDetailedVideoEvidence()
 	if detailedVideoEvidence {
-		videoOK, _ = videoEligibleV3(SourceDescriptorFromFileV3(file, 0), StartRequestV3{
-			ClientFeatures: caps.ClientFeatures,
-			Capabilities: ClientCodecCapabilitiesV3{
-				VideoEvidence: caps.VideoEvidence,
-				CodecsVideo:   caps.CodecsVideo,
-				VideoDecode:   caps.VideoDecode,
-			},
-		})
+		source := SourceDescriptorFromFileV3(file, 0)
+		// Detailed validation needs complete probe facts (codec, bit depth,
+		// dimensions, frame rate, bitrate). A file whose probe metadata is
+		// sparse cannot be checked against the decoder bounds at all — that is
+		// "can't tell", not "incompatible", and forcing a transcode of an
+		// original-quality download over it would be a silent quality loss. Keep
+		// the flat-list answer in that case; a real mismatch (complete metadata
+		// whose entries do not cover the source) still fails closed below.
+		if routeVideoMetadataCompleteV3(source) {
+			videoOK, _ = videoEligibleV3(source, StartRequestV3{
+				ClientFeatures: caps.ClientFeatures,
+				Capabilities: ClientCodecCapabilitiesV3{
+					VideoEvidence: caps.VideoEvidence,
+					CodecsVideo:   caps.CodecsVideo,
+					VideoDecode:   caps.VideoDecode,
+				},
+			})
+		}
 	}
 	// Audio is considered OK if the client can decode the codec itself OR its
 	// sink can passthrough it. Passthrough lets us stream-copy surround audio

@@ -396,8 +396,18 @@ const streamTokenParam = "st"
 
 // signSessionToken mints a stream token carrying the session's full
 // reconstruction recipe. Returns "" when no signing secret is configured
-// (reconstruct effectively disabled, e.g. in tests).
-func (h *PlaybackHandler) signSessionToken(card playback.RecipeCard) string {
+// (reconstruct effectively disabled, e.g. in tests), or when the attempt
+// negotiated header-authenticated media.
+//
+// requireMediaAuth is the attempt's negotiated media-auth mode, threaded from
+// the session/recipe state the caller holds. It is refused here, at the mint,
+// rather than only at the call sites that build URLs: a token that is never
+// signed cannot leak into a client-visible URL by way of a builder that forgot
+// to ask. Call sites keep their own checks as defense in depth.
+func (h *PlaybackHandler) signSessionToken(card playback.RecipeCard, requireMediaAuth bool) string {
+	if requireMediaAuth {
+		return ""
+	}
 	return h.signStreamClaims(card.ToClaims())
 }
 
@@ -441,6 +451,8 @@ func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID s
 	requestUserID := apimw.GetUserID(r.Context())
 	session, err := h.sessionMgr.GetSession(sessionID)
 	if err == nil {
+		// Defense in depth: LoadOrReconstructSession enforces the same rule for
+		// every serve handler, but this fast path never reaches it.
 		if session.RequireMediaAuthorization && requestUserID == 0 {
 			return nil, playback.SessionUnauthorized, nil
 		}
@@ -495,6 +507,12 @@ func appendStreamToken(rawURL, token string) string {
 // client re-supplies its byte position). Transcode sessions are told which URL
 // to play by their v3 plan; the URL here is an informational placeholder that
 // the plan's delivery URL supersedes.
+//
+// A session that requires media authorization gets the bare relative URL: it
+// authenticates every media request with the caller's own access token, so no
+// client-visible URL may carry a playback credential. Losing the token also
+// means losing transparent reconstruction after a restart, which is the
+// documented trade of that mode.
 func (h *PlaybackHandler) playbackStreamURL(s *playback.Session) string {
 	if s == nil {
 		return ""
@@ -502,8 +520,12 @@ func (h *PlaybackHandler) playbackStreamURL(s *playback.Session) string {
 	if s.PlayMethod == playback.PlayTranscode {
 		return fmt.Sprintf("/playback/transcode/%s/master.m3u8", s.ID)
 	}
+	streamURL := fmt.Sprintf("/stream/%s", s.ID)
+	if s.RequireMediaAuthorization {
+		return streamURL
+	}
 	card := identityRecipeCard(s)
-	return appendStreamToken(fmt.Sprintf("/stream/%s", s.ID), h.signSessionToken(card))
+	return appendStreamToken(streamURL, h.signSessionToken(card, s.RequireMediaAuthorization))
 }
 
 // identityRecipeCard builds the identity-only recipe for a direct-play or remux
@@ -1557,14 +1579,16 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 // reconstruction recipe and builds the manifest URL. proxyNode is the planner's
 // pick; when nil the URL falls back to the API-local path, where the token rides
 // the ?st= query parameter so the integrated server can reconstruct from it.
-func (h *PlaybackHandler) buildProxyManifestURL(card playback.RecipeCard, proxyNode *nodepool.Node) string {
-	token := h.signSessionToken(card)
+//
+// requireMediaAuth is the attempt's negotiated media-auth mode: such a session
+// never receives a token, and therefore never a proxy origin either, since a
+// proxy authenticates from the token in the URL path alone. It gets the
+// API-local manifest path, which the client fetches with its own credential.
+func (h *PlaybackHandler) buildProxyManifestURL(card playback.RecipeCard, proxyNode *nodepool.Node, requireMediaAuth bool) string {
+	token := h.signSessionToken(card, requireMediaAuth)
 	localURL := fmt.Sprintf("/playback/transcode/%s/master.m3u8", card.SessionID)
-	if proxyNode == nil {
+	if proxyNode == nil || token == "" {
 		return appendStreamToken(localURL, token)
-	}
-	if token == "" {
-		return localURL
 	}
 	return proxyNode.URL + "/stream/transcode/" + token + "/master.m3u8"
 }

@@ -376,13 +376,14 @@ func groupHealth(proxies, transcodes []*Node) map[string]bool {
 	return health
 }
 
-// pickTranscode returns the eligible transcode node with the fewest effective
-// jobs, keeping the session on currentURL unless a candidate has at least two
-// fewer jobs (the historical soft-affinity rule).
-func (p *Planner) pickTranscode(transcodes, proxies []*Node, groupHealthy map[string]bool, currentURL string, estKbps int, now time.Time) *Node {
+// pickNode returns the eligible node with the fewest effective jobs, keeping
+// the session on currentURL unless a candidate has at least two fewer jobs
+// (the historical soft-affinity rule). Shared by pickTranscode and
+// pickLocalEgressTranscode, which differ only in their eligibility predicate.
+func (p *Planner) pickNode(nodes []*Node, currentURL string, now time.Time, eligible func(*Node) bool) *Node {
 	var best, current *Node
-	for _, n := range transcodes {
-		if !p.transcodeEligible(n, proxies, groupHealthy, estKbps, now) {
+	for _, n := range nodes {
+		if !eligible(n) {
 			continue
 		}
 		if n.URL == currentURL {
@@ -401,31 +402,25 @@ func (p *Planner) pickTranscode(transcodes, proxies []*Node, groupHealthy map[st
 	return current
 }
 
+// pickTranscode returns the eligible transcode node with the fewest effective
+// jobs, keeping the session on currentURL unless a candidate has at least two
+// fewer jobs (the historical soft-affinity rule).
+func (p *Planner) pickTranscode(transcodes, proxies []*Node, groupHealthy map[string]bool, currentURL string, estKbps int, now time.Time) *Node {
+	return p.pickNode(transcodes, currentURL, now, func(n *Node) bool {
+		return p.transcodeEligible(n, proxies, groupHealthy, estKbps, now)
+	})
+}
+
 // pickLocalEgressTranscode applies the transcode half of normal session
 // admission without requiring a healthy proxy partner. The API server is the
 // egress hop for this route, so unrelated proxy health and capacity must not
-// suppress an otherwise healthy transcode executor.
+// suppress an otherwise healthy transcode executor. Passing nil proxies to
+// transcodeEligible reduces it to exactly that: healthy, enabled, under cap,
+// and group-healthy, with no proxy partner required.
 func (p *Planner) pickLocalEgressTranscode(transcodes []*Node, groupHealthy map[string]bool, currentURL string, now time.Time) *Node {
-	var best, current *Node
-	for _, node := range transcodes {
-		if node == nil || !node.Healthy || !node.Enabled || !p.underCap(node, now) ||
-			node.Group != nil && !groupHealthy[*node.Group] {
-			continue
-		}
-		if node.URL == currentURL {
-			current = node
-		}
-		if best == nil || p.effectiveJobs(node, now) < p.effectiveJobs(best, now) {
-			best = node
-		}
-	}
-	if current == nil || best == nil || current == best {
-		return best
-	}
-	if p.effectiveJobs(best, now)+2 <= p.effectiveJobs(current, now) {
-		return best
-	}
-	return current
+	return p.pickNode(transcodes, currentURL, now, func(n *Node) bool {
+		return p.transcodeEligible(n, nil, groupHealthy, 0, now)
+	})
 }
 
 // transcodeEligible reports whether a transcode node may take a new session:

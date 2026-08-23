@@ -238,7 +238,10 @@ func TestResolver_DetailedHardwareEvidenceOverridesLegacyDownloadCeiling(t *test
 	}
 }
 
-func TestResolver_DetailedDownloadEvidenceFailsClosedWhenProbeFactsAreIncomplete(t *testing.T) {
+func TestResolver_DetailedDownloadEvidenceFallsBackToFlatListsOnSparseProbeFacts(t *testing.T) {
+	// No video tracks: bit depth, dimensions, frame rate and bitrate are all
+	// unknown, so the decoder bounds cannot be evaluated. "Can't tell" must not
+	// force a transcode of an original-quality download.
 	file := &models.MediaFile{
 		CodecVideo: "av1", CodecAudio: "aac", Container: "mp4",
 		Resolution: "1080p",
@@ -256,8 +259,147 @@ func TestResolver_DetailedDownloadEvidenceFailsClosedWhenProbeFactsAreIncomplete
 		}},
 	}
 
+	if decision := playback.Resolve(file, caps, defaultSettings()); decision.Method != playback.PlayDirect {
+		t.Fatalf("sparse-metadata source with detailed caps = %q, want direct", decision.Method)
+	}
+
+	flatOnly := caps
+	flatOnly.VideoEvidence = ""
+	flatOnly.VideoDecode = nil
+	flat := playback.Resolve(file, flatOnly, defaultSettings())
+	if detailed := playback.Resolve(file, caps, defaultSettings()); detailed.Method != flat.Method {
+		t.Fatalf("sparse-metadata detailed caps = %q, flat caps = %q; want identical", detailed.Method, flat.Method)
+	}
+}
+
+func TestResolver_DetailedDownloadEvidenceFailsClosedOnCompleteMetadataMismatch(t *testing.T) {
+	// Complete probe facts whose decoder entry does not cover the source: a real
+	// mismatch, so the flat-list claim must not rescue it.
+	file := &models.MediaFile{
+		CodecVideo: "av1", CodecAudio: "aac", Container: "mp4",
+		Resolution: "2160p", Bitrate: 55_000,
+		VideoTracks: []models.VideoTrack{{
+			Codec: "av1", Profile: "Main", Width: 3840, Height: 2160, FrameRate: "60/1",
+			Bitrate: 55_000, BitDepth: 10,
+		}},
+	}
+	caps := playback.ClientCapabilities{
+		VideoEvidence: playback.EvidencePlatformAttestedV3,
+		CodecsVideo:   []string{"av1"},
+		CodecsAudio:   []string{"aac"},
+		Containers:    []string{"mp4"},
+		MaxResolution: "2160p",
+		VideoDecode: []playback.VideoDecodeCapabilityV3{{
+			Codec: "av1", BitDepths: []int{8, 10}, MaxWidth: 1920,
+			MaxHeight: 1080, MaxFrameRate: 60, MaxBitrateKbps: 40_000,
+			Hardware: true,
+		}},
+	}
+
 	if decision := playback.Resolve(file, caps, defaultSettings()); decision.Method != playback.PlayTranscode {
-		t.Fatalf("incomplete strict evidence = %q, want transcode", decision.Method)
+		t.Fatalf("out-of-bounds source with complete metadata = %q, want transcode", decision.Method)
+	}
+}
+
+func TestNormalizeAndValidateVideoDecode(t *testing.T) {
+	tests := []struct {
+		name    string
+		caps    playback.ClientCapabilities
+		wantErr bool
+	}{
+		{
+			name: "declared evidence with flat lists only",
+			caps: playback.ClientCapabilities{
+				VideoEvidence: playback.EvidenceDeclaredV3,
+				CodecsVideo:   []string{"h264"},
+				CodecsAudio:   []string{"aac"},
+				Containers:    []string{"mp4"},
+			},
+		},
+		{
+			name: "feature token only",
+			caps: playback.ClientCapabilities{
+				ClientFeatures: []string{playback.FeatureSoftwareVideoDecodeV3},
+				CodecsVideo:    []string{"h264"},
+			},
+		},
+		{
+			name: "legacy flat payload",
+			caps: playback.ClientCapabilities{CodecsVideo: []string{"h264"}},
+		},
+		{
+			name: "platform attested entries",
+			caps: playback.ClientCapabilities{
+				VideoEvidence: playback.EvidencePlatformAttestedV3,
+				CodecsVideo:   []string{"H264"},
+				VideoDecode: []playback.VideoDecodeCapabilityV3{{
+					Codec: "H264", MaxWidth: 1920, MaxHeight: 1080, Hardware: true,
+				}},
+			},
+		},
+		{
+			name: "entries with declared evidence",
+			caps: playback.ClientCapabilities{
+				VideoEvidence: playback.EvidenceDeclaredV3,
+				CodecsVideo:   []string{"av1"},
+				VideoDecode: []playback.VideoDecodeCapabilityV3{{
+					Codec: "av1", Hardware: true,
+				}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "entries without evidence",
+			caps: playback.ClientCapabilities{
+				CodecsVideo: []string{"av1"},
+				VideoDecode: []playback.VideoDecodeCapabilityV3{{
+					Codec: "av1", Hardware: true,
+				}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "malformed entry",
+			caps: playback.ClientCapabilities{
+				VideoEvidence: playback.EvidencePlatformAttestedV3,
+				CodecsVideo:   []string{"av1"},
+				VideoDecode: []playback.VideoDecodeCapabilityV3{{
+					Codec: "av1", MaxWidth: -1, Hardware: true,
+				}},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			caps := tc.caps
+			err := caps.NormalizeAndValidateVideoDecode()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("err = nil, want a validation error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestNormalizeAndValidateVideoDecodeLowercasesDetailedEntries(t *testing.T) {
+	caps := playback.ClientCapabilities{
+		VideoEvidence: playback.EvidencePlatformAttestedV3,
+		CodecsVideo:   []string{" HEVC "},
+		VideoDecode: []playback.VideoDecodeCapabilityV3{{
+			Codec: " HEVC ", MaxWidth: 3840, MaxHeight: 2160, Hardware: true,
+		}},
+	}
+	if err := caps.NormalizeAndValidateVideoDecode(); err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if caps.CodecsVideo[0] != "hevc" || caps.VideoDecode[0].Codec != "hevc" {
+		t.Fatalf("normalization did not apply: %+v", caps)
 	}
 }
 

@@ -666,8 +666,14 @@ type SubtitleArtifactV3 struct {
 }
 
 type SubtitleDecisionV3 struct {
-	Mode     SubtitleModeV3      `json:"mode"`
-	TrackID  string              `json:"track_id,omitempty"`
+	Mode    SubtitleModeV3 `json:"mode"`
+	TrackID string         `json:"track_id,omitempty"`
+	// Artifact is the single track the client draws. It exists only under
+	// SubtitleRenderV3 and SubtitleConvertV3; SubtitleOffV3 and
+	// SubtitleBurnInV3 have no client-fetchable artifact and must publish none,
+	// including on a plan derived from an earlier plan of the same session.
+	// SubtitleOffV3 carries no TrackID either. Inventory URLs are independent
+	// of the selection and stay published in every mode.
 	Artifact *SubtitleArtifactV3 `json:"artifact,omitempty"`
 	// Inventory is the complete, gap-free combined-ordinal subtitle track list
 	// for the effective source. It is authoritative: a client selects a track
@@ -1112,6 +1118,46 @@ func isFiniteV3(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 func HasFeatureV3(features []string, wanted string) bool {
 	return slices.ContainsFunc(features, func(v string) bool { return strings.EqualFold(strings.TrimSpace(v), wanted) })
+}
+
+// AttemptStickyFeaturesV3 lists the client features that are negotiated once,
+// at start, and are fixed for the lifetime of the playback attempt. Each of
+// them selects a contract the durable plan and its live transport are built
+// around rather than a per-plan preference:
+//
+//   - header_authenticated_media_v1 picks the media security contract. A legacy
+//     signed URL from an earlier plan can outlive the plan that minted it, so
+//     switching mid-attempt would leave two contracts alive for one session.
+//   - software_video_decode_v1 widens the direct-play evidence tiers. Dropping
+//     it on a replan silently converts a direct route into a transcode and
+//     persists that downgrade into the durable normalized request.
+//
+// Stop/start is the explicit boundary for changing either.
+func AttemptStickyFeaturesV3() []string {
+	return []string{FeatureHeaderAuthenticatedMediaV3, FeatureSoftwareVideoDecodeV3}
+}
+
+// PinAttemptStickyFeaturesV3 returns requested with every attempt-sticky
+// feature forced back to the state the start negotiation established: a replan
+// can neither add nor remove one, whatever its own client_features list says.
+// Non-sticky features are passed through untouched and in order.
+func PinAttemptStickyFeaturesV3(requested, negotiated []string) []string {
+	sticky := AttemptStickyFeaturesV3()
+	pinned := make([]string, 0, len(requested)+len(sticky))
+	for _, feature := range requested {
+		if slices.ContainsFunc(sticky, func(candidate string) bool {
+			return strings.EqualFold(strings.TrimSpace(feature), candidate)
+		}) {
+			continue
+		}
+		pinned = append(pinned, feature)
+	}
+	for _, feature := range sticky {
+		if HasFeatureV3(negotiated, feature) {
+			pinned = append(pinned, feature)
+		}
+	}
+	return pinned
 }
 
 func NewTerminalResponseV3(reason, message string, retryable bool) DecisionResponseV3 {

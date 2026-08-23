@@ -99,26 +99,16 @@ const (
 
 // downloadRequest represents the JSON body for POST /downloads.
 type downloadRequest struct {
-	ContentID string        `json:"content_id"`
-	EpisodeID string        `json:"episode_id,omitempty"`
-	FileID    int           `json:"file_id,omitempty"`
-	Quality   string        `json:"quality,omitempty"`       // original (default) | 20mbps | 10mbps | 5mbps | 2mbps | 1mbps
-	Series    bool          `json:"series,omitempty"`        // if true, downloads all episodes
-	Season    *int          `json:"season_number,omitempty"` // with series=true, downloads only this season (0 = Specials)
-	Caps      *downloadCaps `json:"caps,omitempty"`          // device decode capability (original fallback / transcode target)
-}
-
-// downloadCaps mirrors playback.ClientCapabilities for the request body.
-type downloadCaps struct {
-	ClientFeatures         []string                           `json:"client_features,omitempty"`
-	VideoEvidence          playback.CapabilityEvidenceV3      `json:"video_evidence,omitempty"`
-	CodecsVideo            []string                           `json:"codecs_video,omitempty"`
-	CodecsAudio            []string                           `json:"codecs_audio,omitempty"`
-	AudioPassthroughCodecs []string                           `json:"audio_passthrough_codecs,omitempty"`
-	Containers             []string                           `json:"containers,omitempty"`
-	MaxResolution          string                             `json:"max_resolution,omitempty"`
-	HDR                    bool                               `json:"hdr,omitempty"`
-	VideoDecode            []playback.VideoDecodeCapabilityV3 `json:"video_decode,omitempty"`
+	ContentID string `json:"content_id"`
+	EpisodeID string `json:"episode_id,omitempty"`
+	FileID    int    `json:"file_id,omitempty"`
+	Quality   string `json:"quality,omitempty"`       // original (default) | 20mbps | 10mbps | 5mbps | 2mbps | 1mbps
+	Series    bool   `json:"series,omitempty"`        // if true, downloads all episodes
+	Season    *int   `json:"season_number,omitempty"` // with series=true, downloads only this season (0 = Specials)
+	// Caps is the device decode capability (original fallback / transcode
+	// target). The playback type is decoded directly: its JSON contract is the
+	// download `caps` contract, and a mirror struct here could only drift.
+	Caps *playback.ClientCapabilities `json:"caps,omitempty"`
 }
 
 // patchDownloadRequest is the JSON body for PATCH /downloads/{id}.
@@ -278,17 +268,7 @@ func (h *DownloadHandler) HandleCreateDownload(w http.ResponseWriter, r *http.Re
 		DevicePlatform: devicePlatform,
 	}
 	if req.Caps != nil {
-		createReq.Caps = playback.ClientCapabilities{
-			ClientFeatures:         req.Caps.ClientFeatures,
-			VideoEvidence:          req.Caps.VideoEvidence,
-			CodecsVideo:            req.Caps.CodecsVideo,
-			CodecsAudio:            req.Caps.CodecsAudio,
-			AudioPassthroughCodecs: req.Caps.AudioPassthroughCodecs,
-			Containers:             req.Caps.Containers,
-			MaxResolution:          req.Caps.MaxResolution,
-			HDR:                    req.Caps.HDR,
-			VideoDecode:            req.Caps.VideoDecode,
-		}
+		createReq.Caps = *req.Caps
 		if err := createReq.Caps.NormalizeAndValidateVideoDecode(); err != nil {
 			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
