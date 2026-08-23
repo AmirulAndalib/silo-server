@@ -32,6 +32,12 @@ const (
 	RoleProducer      Role = "producer"
 )
 
+// AllFamilies lists every declared route family, in stable sorted order. It is
+// the canonical set Config.ObservesFamily and Config.ObservedFamilies fall
+// back to when SILO_STREAM_TELEMETRY_FAMILIES is unset, so the five families
+// are named once rather than duplicated across both functions.
+var AllFamilies = []Family{FamilyABS, FamilyJellycompat, FamilyNative, FamilyProxy, FamilyTranscodeNode}
+
 type MediaRoute struct {
 	Family              Family
 	Method              string

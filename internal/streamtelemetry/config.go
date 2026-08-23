@@ -31,21 +31,6 @@ const (
 	viewTTLEnv            = "SILO_STREAM_TELEMETRY_VIEW_TTL"
 )
 
-// defaultObservedFamilies is the set observed when SILO_STREAM_TELEMETRY_FAMILIES
-// is unset. It is deliberately NOT "every declared family": jellycompat and ABS
-// share the API process with native, so defaulting them on would widen
-// instrumentation across a live byte path on upgrade alone, which is exactly what
-// §6's one-family-at-a-time rollout exists to prevent. Proxy and transcode node
-// are separate processes, so their own SILO_STREAM_TELEMETRY_ENABLED already gates
-// them and they stay in the default set. Name a family in the variable to observe
-// it; move it in here once it has run in production, and delete this set when all
-// five have.
-var defaultObservedFamilies = map[Family]bool{
-	FamilyNative:        true,
-	FamilyProxy:         true,
-	FamilyTranscodeNode: true,
-}
-
 type Config struct {
 	// Enabled turns observation on for this process, and defaults ON:
 	// SILO_STREAM_TELEMETRY_ENABLED=false is the per-process kill switch. A value
@@ -64,9 +49,10 @@ type Config struct {
 	// be auto-derived — either the operator set SILO_STREAM_TELEMETRY_DISTRIBUTED,
 	// or an invalid distributed configuration has forced the mode off.
 	DistributedExplicit bool
-	// Families narrows which route families are observed. Empty means
-	// defaultObservedFamilies. It is a kill switch as much as a rollout control:
-	// one misbehaving family can be dropped without losing all observation.
+	// Families narrows which route families are observed. Empty means every
+	// declared family (AllFamilies) — observation is on for all five by default.
+	// The variable exists to narrow observation or drop one misbehaving family
+	// without losing the rest; it is a kill switch, not a staged rollout.
 	Families map[Family]bool
 
 	SweepInterval time.Duration
@@ -296,10 +282,12 @@ func ConfigFromEnv(nodeID string) Config {
 }
 
 // ObservesFamily reports whether routes in this family are wrapped. It is read
-// once per route at mount time, never on the hot path.
+// once per route at mount time, never on the hot path. An unset
+// SILO_STREAM_TELEMETRY_FAMILIES observes every declared family; naming the
+// variable narrows or kills observation from there.
 func (c Config) ObservesFamily(family Family) bool {
 	if len(c.Families) == 0 {
-		return defaultObservedFamilies[family]
+		return true
 	}
 	return c.Families[family]
 }
@@ -307,12 +295,16 @@ func (c Config) ObservesFamily(family Family) bool {
 // ObservedFamilies lists the observed families in a stable order, for the
 // startup log that makes the resolved set visible.
 func (c Config) ObservedFamilies() []string {
-	set := c.Families
-	if len(set) == 0 {
-		set = defaultObservedFamilies
+	if len(c.Families) == 0 {
+		names := make([]string, 0, len(AllFamilies))
+		for _, family := range AllFamilies {
+			names = append(names, string(family))
+		}
+		sort.Strings(names)
+		return names
 	}
-	names := make([]string, 0, len(set))
-	for family, observed := range set {
+	names := make([]string, 0, len(c.Families))
+	for family, observed := range c.Families {
 		if observed {
 			names = append(names, string(family))
 		}

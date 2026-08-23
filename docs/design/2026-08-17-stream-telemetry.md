@@ -571,30 +571,28 @@ hole and the ABS proxy-attribution bug are live defects on `main` regardless of 
 project. Four pieces plus one the phase did not originally name — the rolling write
 deadline's 64 MiB `ReadFrom` slice (§4.4). Details in §4.3 and §4.4.
 
-### P0b — local shadow telemetry ✅ built, all five families enrolled
+### P0b — local shadow telemetry ✅ built, all five families enrolled and observed by default
 
 Process-local, observation-only. `Observation`, `LogicalPlaybackSession`, `Transfer`,
-release-fold, bounded retention (§2.2). One router family at a time, benchmarked before
-the next.
+release-fold, bounded retention (§2.2). Originally rolled out one router family at a
+time, benchmarked before the next widening (see the soak notes below); the staged
+default has since been removed by owner decision, and all five families are now
+observed as soon as telemetry is enabled.
 
-**The family gate.** `SILO_STREAM_TELEMETRY_FAMILIES` defaults to
-`native,proxy,transcode_node`. The default is deliberately **not** every family: proxy
-and transcode node are separate processes where `SILO_STREAM_TELEMETRY_ENABLED` is
-already a per-family switch, while jellycompat and ABS share the API process with
-native, so defaulting them on would widen instrumentation across two more live byte
-paths on upgrade alone. "Set the variable before deploying" is a runbook, not a safe
-default.
+**The family gate.** `SILO_STREAM_TELEMETRY_FAMILIES` defaults to every declared
+family — `native`, `proxy`, `transcode_node`, `jellycompat`, `abs`. The variable exists
+to narrow observation or drop one misbehaving family without losing the rest, not to
+stage a rollout: naming it takes away families rather than adding them.
 
-Since `SILO_STREAM_TELEMETRY_ENABLED` now defaults on, this gate is what keeps the
-shared-process families off: the master switch decides whether a process observes at
-all, and the family list decides how far that observation reaches.
+Since `SILO_STREAM_TELEMETRY_ENABLED` now defaults on, that master switch decides
+whether a process observes at all, and the family list — left unset by default — no
+longer restricts how far that observation reaches within a process.
 
-**Rollout.** Name a shared-process family explicitly to enable it, one at a time. The
-same variable is the kill switch — drop one misbehaving family without losing the rest.
-The resolved set is logged at startup. An unrecognised name disables telemetry entirely
-and names the variable, because a typo that silently observed nothing would be worse
-than no telemetry. Once a family has run in production, move it into
-`defaultObservedFamilies` in `internal/streamtelemetry/config.go`.
+**Historical rollout (P0 soak).** The initial production rollout named the variable
+explicitly and widened it one family at a time — `native`, then `+jellycompat` — the
+same variable served as both the staged-rollout control and the kill switch. That
+staging discipline is retained below as a record of how the soak was run; it no longer
+describes the present-day default, which observes every family unless narrowed.
 
 ### P0c — distributed read-only view ✅ built
 
@@ -909,7 +907,7 @@ the feature running is the failure that costs them.
 | Variable | Default | Scope | Meaning |
 |---|---:|---|---|
 | `SILO_STREAM_TELEMETRY_ENABLED` | `true` | core | Master switch, per process. Set it to `false` to stop observing; a value that cannot be parsed also reads as off. |
-| `SILO_STREAM_TELEMETRY_FAMILIES` | `native,proxy,transcode_node` | core | Which route families are wrapped. Also the kill switch. |
+| `SILO_STREAM_TELEMETRY_FAMILIES` | all five (`native,proxy,transcode_node,jellycompat,abs`) | core | Which route families are wrapped. Narrows or kills observation; naming it takes families away rather than staging them in. |
 | `SILO_STREAM_TELEMETRY_SWEEP_INTERVAL` | `1s` | core | Collector period. |
 | `SILO_STREAM_TELEMETRY_RETENTION` | `5m` | core | How long a session survives its last observation. |
 | `SILO_STREAM_TELEMETRY_MAX_SESSIONS` | `10000` | core | Local session cap. |
@@ -936,20 +934,21 @@ self-heals when Redis returns.
 **It is on.** Every remaining threshold is a guess until the merged view has been
 compared against what admins see today, and that comparison only happens at scale if
 observation is the default rather than something each deployment has to opt into. A
-fresh install observes the default family set, and merges through Redis whenever Redis
+fresh install observes every declared family, and merges through Redis whenever Redis
 is configured; nothing has to be set to get a parity read.
 
 ```bash
-# 1. nothing to set: default family set native, proxy, transcode_node,
-#    distributed merge on wherever Redis is configured.
+# 1. nothing to set: every family observed by default (native, proxy,
+#    transcode_node, jellycompat, abs), distributed merge on wherever Redis is
+#    configured.
 curl -fsS localhost:8091/api/v1/admin/stream-telemetry/parity
 
 # 2. read repeatedly, over days — one report is a sample, not proof
 
-# 3. widen one family at a time, only after the previous one is quiet
-SILO_STREAM_TELEMETRY_FAMILIES=native,proxy,transcode_node,jellycompat
+# 3. narrow to specific families, or drop one that is misbehaving
+SILO_STREAM_TELEMETRY_FAMILIES=native,proxy,transcode_node
 
-# 4. back out: kill one family, or the whole process's observation
+# 4. back out further, or kill the whole process's observation
 SILO_STREAM_TELEMETRY_FAMILIES=native,transcode_node
 SILO_STREAM_TELEMETRY_ENABLED=false
 ```

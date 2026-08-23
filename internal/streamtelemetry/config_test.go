@@ -258,27 +258,45 @@ func clearConfigEnv(t *testing.T) {
 	}
 }
 
-// The family gate is what makes a shared-process family (jellycompat, ABS) safe
-// to enroll: it is both the staged-rollout control §6 asks for and a kill switch
-// for one misbehaving family that keeps the rest observing.
+// The family gate is a narrowing/kill switch, not a staged rollout: every
+// declared family is observed by default, and naming
+// SILO_STREAM_TELEMETRY_FAMILIES narrows observation or drops one misbehaving
+// family while the rest keep observing.
 func TestConfigFamilyGate(t *testing.T) {
-	t.Run("unset observes the shipped set only", func(t *testing.T) {
+	t.Run("unset observes every declared family", func(t *testing.T) {
 		clearConfigEnv(t)
 		cfg := ConfigFromEnv("node")
 		if len(cfg.Families) != 0 {
 			t.Fatalf("families = %+v, want unset", cfg.Families)
 		}
-		for _, family := range []Family{FamilyNative, FamilyProxy, FamilyTranscodeNode} {
+		for _, family := range AllFamilies {
 			if !cfg.ObservesFamily(family) {
 				t.Fatalf("%s not observed by default", family)
 			}
 		}
-		// Widening the default would instrument two more live byte paths in the
-		// API process on upgrade alone. That has to be an explicit opt-in.
-		for _, family := range []Family{FamilyJellycompat, FamilyABS} {
+		if got := cfg.ObservedFamilies(); len(got) != 5 ||
+			got[0] != "abs" || got[1] != "jellycompat" || got[2] != "native" || got[3] != "proxy" || got[4] != "transcode_node" {
+			t.Fatalf("observed families = %v", got)
+		}
+	})
+	t.Run("FAMILIES=proxy observes only proxy", func(t *testing.T) {
+		clearConfigEnv(t)
+		t.Setenv(enabledEnv, "true")
+		t.Setenv(familiesEnv, "proxy")
+		cfg := ConfigFromEnv("node")
+		if !cfg.Enabled {
+			t.Fatalf("config = %+v", cfg)
+		}
+		if !cfg.ObservesFamily(FamilyProxy) {
+			t.Fatal("proxy not observed")
+		}
+		for _, family := range []Family{FamilyNative, FamilyJellycompat, FamilyABS, FamilyTranscodeNode} {
 			if cfg.ObservesFamily(family) {
-				t.Fatalf("%s observed by default", family)
+				t.Fatalf("%s observed despite FAMILIES=proxy", family)
 			}
+		}
+		if got := cfg.ObservedFamilies(); len(got) != 1 || got[0] != "proxy" {
+			t.Fatalf("observed families = %v", got)
 		}
 	})
 	t.Run("explicit list narrows and widens", func(t *testing.T) {
@@ -312,12 +330,12 @@ func TestConfigFamilyGate(t *testing.T) {
 			t.Fatal("a typo in the family list must disable telemetry rather than silently observe nothing")
 		}
 	})
-	t.Run("only whitespace falls back to the default set", func(t *testing.T) {
+	t.Run("only whitespace falls back to observing every family", func(t *testing.T) {
 		clearConfigEnv(t)
 		t.Setenv(enabledEnv, "true")
 		t.Setenv(familiesEnv, "  ,  ")
 		cfg := ConfigFromEnv("node")
-		if !cfg.Enabled || !cfg.ObservesFamily(FamilyNative) || cfg.ObservesFamily(FamilyABS) {
+		if !cfg.Enabled || !cfg.ObservesFamily(FamilyNative) || !cfg.ObservesFamily(FamilyABS) {
 			t.Fatalf("config = %+v", cfg)
 		}
 	})
