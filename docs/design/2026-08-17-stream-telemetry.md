@@ -585,6 +585,10 @@ native, so defaulting them on would widen instrumentation across two more live b
 paths on upgrade alone. "Set the variable before deploying" is a runbook, not a safe
 default.
 
+Since `SILO_STREAM_TELEMETRY_ENABLED` now defaults on, this gate is what keeps the
+shared-process families off: the master switch decides whether a process observes at
+all, and the family list decides how far that observation reaches.
+
 **Rollout.** Name a shared-process family explicitly to enable it, one at a time. The
 same variable is the kill switch — drop one misbehaving family without losing the rest.
 The resolved set is logged at startup. An unrecognised name disables telemetry entirely
@@ -894,16 +898,24 @@ All settings are read once at startup. Invalid **core** settings disable telemet
 log the offending variable as an error; invalid **distributed-only** settings disable
 distributed mode while leaving local observation running.
 
+Telemetry runs unless it is switched off, and distributed mode follows the deployment:
+`SILO_STREAM_TELEMETRY_ENABLED=false` is the per-process kill switch,
+`SILO_STREAM_TELEMETRY_FAMILIES` narrows or kills individual families, and the merge is
+used whenever Redis is configured. Both switches fail towards off — a value that is set
+but cannot be parsed is treated as `false`, not as the default, because an operator who
+mistypes a kill switch was reaching for "stop", and a mistyped disable that quietly left
+the feature running is the failure that costs them.
+
 | Variable | Default | Scope | Meaning |
 |---|---:|---|---|
-| `SILO_STREAM_TELEMETRY_ENABLED` | `false` | core | Master switch, per process. |
+| `SILO_STREAM_TELEMETRY_ENABLED` | `true` | core | Master switch, per process. Set it to `false` to stop observing; a value that cannot be parsed also reads as off. |
 | `SILO_STREAM_TELEMETRY_FAMILIES` | `native,proxy,transcode_node` | core | Which route families are wrapped. Also the kill switch. |
 | `SILO_STREAM_TELEMETRY_SWEEP_INTERVAL` | `1s` | core | Collector period. |
 | `SILO_STREAM_TELEMETRY_RETENTION` | `5m` | core | How long a session survives its last observation. |
 | `SILO_STREAM_TELEMETRY_MAX_SESSIONS` | `10000` | core | Local session cap. |
 | `SILO_STREAM_TELEMETRY_MAX_TRANSFERS` | `10000` | core | Local transfer cap. |
 | `SILO_STREAM_TELEMETRY_MAX_OBSERVATIONS` | `50000` | core | Local in-flight observation cap. |
-| `SILO_STREAM_TELEMETRY_DISTRIBUTED` | `false` | distributed | Publish and read snapshots through Redis. |
+| `SILO_STREAM_TELEMETRY_DISTRIBUTED` | auto (on when Redis is configured) | distributed | Publish and read snapshots through Redis. Setting it pins the mode either way and stops the derivation; a rejected distributed configuration also pins it off. |
 | `SILO_STREAM_TELEMETRY_FRESHNESS` | `5s` | distributed | Maximum usable snapshot age; at least three sweep intervals. |
 | `SILO_STREAM_TELEMETRY_MEMBERSHIP_TTL` | `60s` | distributed | Heartbeat age after which a publisher has departed; must exceed freshness. |
 | `SILO_STREAM_TELEMETRY_KEY_PREFIX` | `silo:stelem` | distributed | Non-empty, whitespace-free Redis namespace. |
@@ -921,20 +933,25 @@ self-heals when Redis returns.
 
 ## Operating it
 
-**Turning it on is the next task, and everything in P1 depends on it.** Every remaining
-threshold is a guess until the merged view has been compared against what admins see
-today.
+**It is on.** Every remaining threshold is a guess until the merged view has been
+compared against what admins see today, and that comparison only happens at scale if
+observation is the default rather than something each deployment has to opt into. A
+fresh install observes the default family set, and merges through Redis whenever Redis
+is configured; nothing has to be set to get a parity read.
 
 ```bash
-# 1. default family set: native, proxy, transcode_node
-SILO_STREAM_TELEMETRY_ENABLED=true
-SILO_STREAM_TELEMETRY_DISTRIBUTED=true
+# 1. nothing to set: default family set native, proxy, transcode_node,
+#    distributed merge on wherever Redis is configured.
+curl -fsS localhost:8091/api/v1/admin/stream-telemetry/parity
 
 # 2. read repeatedly, over days — one report is a sample, not proof
-curl -fsS localhost:8091/api/v1/admin/stream-telemetry/parity
 
 # 3. widen one family at a time, only after the previous one is quiet
 SILO_STREAM_TELEMETRY_FAMILIES=native,proxy,transcode_node,jellycompat
+
+# 4. back out: kill one family, or the whole process's observation
+SILO_STREAM_TELEMETRY_FAMILIES=native,transcode_node
+SILO_STREAM_TELEMETRY_ENABLED=false
 ```
 
 What to watch:

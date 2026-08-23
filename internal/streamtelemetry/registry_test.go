@@ -410,6 +410,44 @@ func TestRegistryGlobalView(t *testing.T) {
 	}
 }
 
+// The single-process, Redis-less deployment is the default one now that
+// telemetry ships on: observed traffic has to reach a complete merged view
+// through LocalStore alone, with no publisher marked missing or stale. If this
+// breaks, every household running one container gets a degraded parity read.
+func TestLocalOnlyViewIsCompleteForASinglePublisher(t *testing.T) {
+	cfg := testConfig()
+	cfg.Retention = time.Minute
+	store := NewLocalStore()
+	registry := NewRegistry(cfg, store, slog.New(slog.DiscardHandler))
+	handler := registry.Observe(testRoute(ClassPlayback))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		Attach(r.Context(), testAttachment("session-1"))
+		_, _ = w.Write([]byte("payload"))
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/media/x", nil))
+
+	at := time.Now()
+	originalNow := now
+	now = func() time.Time { return at }
+	defer func() { now = originalNow }()
+	snapshot := registry.Sweep()
+	if err := store.Publish(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	view, err := registry.GlobalView(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.Complete || len(view.IncompleteReasons) != 0 {
+		t.Fatalf("local-only view degraded: complete=%v reasons=%v", view.Complete, view.IncompleteReasons)
+	}
+	if len(view.Publishers) != 1 || len(view.Sessions) != 1 {
+		t.Fatalf("view = %d publishers, %d sessions", len(view.Publishers), len(view.Sessions))
+	}
+	if session := view.Sessions[0]; session.SessionID != "session-1" || session.ViewerBytesAccepted != 7 {
+		t.Fatalf("session = %+v", session)
+	}
+}
+
 func TestLocalStoreDeepCopies(t *testing.T) {
 	store := NewLocalStore()
 	source := Snapshot{Sessions: []SessionView{{ViewerIPs: []string{"one"}, Routes: []RouteActivityView{{Pattern: "/one"}}, Outcomes: map[httpstream.StreamOutcome]int64{"completed": 1}}}}

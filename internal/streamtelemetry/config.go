@@ -47,11 +47,23 @@ var defaultObservedFamilies = map[Family]bool{
 }
 
 type Config struct {
+	// Enabled turns observation on for this process, and defaults ON:
+	// SILO_STREAM_TELEMETRY_ENABLED=false is the per-process kill switch. A value
+	// that is set but unparseable also reads as off (envutil.BoolDefault), so a
+	// mistyped kill switch fails towards silence rather than towards running.
 	Enabled        bool
 	NodeID         string
 	PublisherID    string
 	PublisherEpoch int64
-	Distributed    bool
+	// Distributed publishes and reads snapshots through Redis. ConfigFromEnv only
+	// reads the variable; when it was not set, wiring derives the mode from
+	// whether Redis is configured, so a single-process deployment stays local and
+	// a clustered one merges without either having to name a second variable.
+	Distributed bool
+	// DistributedExplicit reports that Distributed is already settled and must not
+	// be auto-derived — either the operator set SILO_STREAM_TELEMETRY_DISTRIBUTED,
+	// or an invalid distributed configuration has forced the mode off.
+	DistributedExplicit bool
 	// Families narrows which route families are observed. Empty means
 	// defaultObservedFamilies. It is a kill switch as much as a rollout control:
 	// one misbehaving family can be dropped without losing all observation.
@@ -105,18 +117,24 @@ func DefaultConfig(nodeID string) Config {
 	}
 }
 
-// ConfigFromEnv returns a safe configuration. Invalid core settings disable
-// telemetry; invalid distributed-only settings retain local telemetry.
+// ConfigFromEnv returns a safe configuration. Telemetry is on unless
+// SILO_STREAM_TELEMETRY_ENABLED turns it off, and distributed mode is left for
+// the caller to derive from Redis availability unless the operator pinned
+// SILO_STREAM_TELEMETRY_DISTRIBUTED. Invalid core settings disable telemetry;
+// invalid distributed-only settings retain local telemetry.
 func ConfigFromEnv(nodeID string) Config {
 	cfg := DefaultConfig(nodeID)
-	cfg.Enabled = envutil.Bool(enabledEnv)
+	cfg.Enabled = envutil.BoolDefault(enabledEnv, true)
 	coreInvalid := make([]string, 0)
 	distributedInvalid := make([]string, 0)
 	// The operator only owns the variables they actually set. The cross-checks
 	// below relate two knobs, and a violation involving an unset knob is not the
-	// operator's mistake — it is a default that has to move.
+	// operator's mistake — it is a default that has to move. Only the timing and
+	// sizing knobs are ever cross-checked; ENABLED and DISTRIBUTED are never
+	// blamed by crossCheckFailed, so defaulting them on cannot misreport anyone.
 	explicit := make(map[string]bool)
 	cfg.Distributed = envutil.Bool(distributedEnv)
+	cfg.DistributedExplicit = envutil.IsSet(distributedEnv)
 	parseDuration := func(name string, dst *time.Duration) {
 		value := strings.TrimSpace(os.Getenv(name))
 		if value == "" {
@@ -245,6 +263,10 @@ func ConfigFromEnv(nodeID string) Config {
 	if cfg.MembershipTTL > time.Duration(1<<63-1)/10 {
 		crossCheckFailed(membershipTTLEnv)
 	}
+	// Telemetry now runs by default, so this error is the common shape of a
+	// misconfiguration: the operator broke a variable and lost observation they
+	// never asked for. The warn branch is reserved for a process that had already
+	// been switched off.
 	if len(coreInvalid) > 0 {
 		if cfg.Enabled {
 			cfg.Enabled = false
@@ -254,12 +276,21 @@ func ConfigFromEnv(nodeID string) Config {
 		}
 	}
 	if len(distributedInvalid) > 0 {
-		if cfg.Distributed {
+		// Now that the mode is derived, "off" and "would have stayed off" are
+		// different outcomes: a rejected config that suppresses a merge the
+		// deployment would otherwise have run is an error, while a process that
+		// pinned the mode off loses nothing and only needs the noise recorded.
+		if cfg.Distributed || !cfg.DistributedExplicit {
 			cfg.Distributed = false
 			slog.Error("stream telemetry distributed mode disabled because configuration is invalid", "variables", strings.Join(distributedInvalid, ","))
 		} else {
 			slog.Warn("ignoring invalid distributed stream telemetry configuration", "variables", strings.Join(distributedInvalid, ","))
 		}
+		// A rejected distributed configuration settles the mode as firmly as the
+		// operator setting the variable would. Without this, the caller's "no
+		// DISTRIBUTED variable means derive it from Redis" rule would turn
+		// distributed mode straight back on with the configuration just refused.
+		cfg.DistributedExplicit = true
 	}
 	return cfg
 }

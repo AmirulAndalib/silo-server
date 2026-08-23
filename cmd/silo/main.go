@@ -171,12 +171,21 @@ func registerClientIPConfigReload(watcher *nodeconfig.Watcher, resolver *clienti
 }
 
 // newStreamTelemetryRegistry builds the telemetry registry for this process,
-// preferring the Redis-backed store in distributed mode. It never falls back to
-// LocalStore on a failed ping: cache.NewRedisClient builds a lazy client that
-// never dials, and a Redis restart mid-deploy must not strand a publisher
-// local-only for the life of the process.
+// preferring the Redis-backed store in distributed mode. Distributed mode is
+// derived from whether Redis is configured unless the operator pinned
+// SILO_STREAM_TELEMETRY_DISTRIBUTED: a single-process deployment then stays on
+// the local store and a clustered one merges, without either being asked to set
+// a variable that only restates its own topology. Every process builds its
+// registry here, so the derivation belongs in this function rather than at the
+// call sites. It never falls back to LocalStore on a failed ping:
+// cache.NewRedisClient builds a lazy client that never dials, and a Redis
+// restart mid-deploy must not strand a publisher local-only for the life of the
+// process.
 func newStreamTelemetryRegistry(ctx context.Context, nodeID string, redisClient *redis.Client) *streamtelemetry.Registry {
 	streamTelemetryConfig := streamtelemetry.ConfigFromEnv(nodeID)
+	if !streamTelemetryConfig.DistributedExplicit {
+		streamTelemetryConfig.Distributed = redisClient != nil
+	}
 	store := streamtelemetry.GlobalSnapshotStore(streamtelemetry.NewLocalStore())
 	if streamTelemetryConfig.Enabled && streamTelemetryConfig.Distributed {
 		if redisClient != nil {

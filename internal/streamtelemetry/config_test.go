@@ -6,12 +6,71 @@ import (
 )
 
 func TestConfigFromEnvValidation(t *testing.T) {
+	// Telemetry observes unless it is switched off, and leaves distributed mode
+	// unsettled so wiring can derive it from Redis.
 	t.Run("defaults", func(t *testing.T) {
 		clearConfigEnv(t)
 		cfg := ConfigFromEnv("node")
-		if cfg.Enabled || cfg.Distributed || cfg.SweepInterval != time.Second || cfg.Retention != 5*time.Minute || cfg.MaxObservations != 50_000 ||
+		if !cfg.Enabled || cfg.Distributed || cfg.DistributedExplicit || cfg.SweepInterval != time.Second || cfg.Retention != 5*time.Minute || cfg.MaxObservations != 50_000 ||
 			cfg.Freshness != 5*time.Second || cfg.MembershipTTL != time.Minute || cfg.KeyPrefix != "silo:stelem" || cfg.FullResyncEvery != 60 || cfg.MaxPublishers != 256 || cfg.MaxMergedSessions != 50_000 || cfg.MaxMergedTransfers != 50_000 {
 			t.Fatalf("defaults = %+v", cfg)
+		}
+	})
+	// The kill switch has to work, and has to fail towards off: an operator who
+	// mistypes it was reaching for "stop observing", so a value nobody can parse
+	// stops observation rather than quietly leaving it running.
+	for _, test := range []struct {
+		name    string
+		value   string
+		enabled bool
+	}{
+		{"empty stays on", "", true},
+		{"whitespace stays on", "   ", true},
+		{"explicit false kills", "false", false},
+		{"explicit off kills", "off", false},
+		{"malformed value kills", "flase", false},
+		{"explicit true stays on", "true", true},
+	} {
+		t.Run("enabled switch: "+test.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv(enabledEnv, test.value)
+			if cfg := ConfigFromEnv("node"); cfg.Enabled != test.enabled {
+				t.Fatalf("SILO_STREAM_TELEMETRY_ENABLED=%q gave Enabled=%v, want %v", test.value, cfg.Enabled, test.enabled)
+			}
+		})
+	}
+	// Wiring derives distributed mode from Redis only when the operator left the
+	// variable alone, so "set but false" and "unset" must stay distinguishable.
+	for _, test := range []struct {
+		name        string
+		value       string
+		distributed bool
+		explicit    bool
+	}{
+		{"unset leaves the mode to the caller", "", false, false},
+		{"whitespace leaves the mode to the caller", "  ", false, false},
+		{"explicit true pins it on", "true", true, true},
+		{"explicit false pins it off", "false", false, true},
+		{"malformed value pins it off", "flase", false, true},
+	} {
+		t.Run("distributed switch: "+test.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv(distributedEnv, test.value)
+			cfg := ConfigFromEnv("node")
+			if cfg.Distributed != test.distributed || cfg.DistributedExplicit != test.explicit {
+				t.Fatalf("SILO_STREAM_TELEMETRY_DISTRIBUTED=%q gave %v/%v, want %v/%v", test.value, cfg.Distributed, cfg.DistributedExplicit, test.distributed, test.explicit)
+			}
+		})
+	}
+	// A rejected distributed configuration has to pin the mode off too, or the
+	// caller's Redis derivation would re-enable exactly what was just refused.
+	t.Run("rejected distributed config pins the mode off", func(t *testing.T) {
+		clearConfigEnv(t)
+		t.Setenv(freshnessEnv, "10s")
+		t.Setenv(membershipTTLEnv, "10s")
+		cfg := ConfigFromEnv("node")
+		if !cfg.Enabled || cfg.Distributed || !cfg.DistributedExplicit {
+			t.Fatalf("config = %+v", cfg)
 		}
 	})
 	t.Run("valid distributed overrides", func(t *testing.T) {
@@ -50,8 +109,17 @@ func TestConfigFromEnvValidation(t *testing.T) {
 			t.Fatalf("invalid config remained enabled: %+v", cfg)
 		}
 	})
+	t.Run("invalid core disables the default-on process", func(t *testing.T) {
+		clearConfigEnv(t)
+		t.Setenv(maxTransfersEnv, "not-a-number")
+		cfg := ConfigFromEnv("node")
+		if cfg.Enabled || cfg.MaxTransfers != 10_000 {
+			t.Fatalf("invalid config remained enabled: %+v", cfg)
+		}
+	})
 	t.Run("invalid disabled is ignored", func(t *testing.T) {
 		clearConfigEnv(t)
+		t.Setenv(enabledEnv, "false")
 		t.Setenv(maxTransfersEnv, "not-a-number")
 		cfg := ConfigFromEnv("node")
 		if cfg.Enabled || cfg.MaxTransfers != 10_000 {
@@ -75,6 +143,8 @@ func TestConfigFromEnvValidation(t *testing.T) {
 	}
 	t.Run("invalid distributed while disabled warns and stays disabled", func(t *testing.T) {
 		clearConfigEnv(t)
+		t.Setenv(enabledEnv, "false")
+		t.Setenv(distributedEnv, "false")
 		t.Setenv(maxPublishersEnv, "0")
 		cfg := ConfigFromEnv("node")
 		if cfg.Enabled || cfg.Distributed {

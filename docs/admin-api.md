@@ -21,6 +21,11 @@ session. Design: [`docs/design/2026-08-17-stream-telemetry.md`](design/2026-08-1
 The view is served from a bounded-staleness cache with single-flight refresh, so
 several admins polling this route pay at most one rebuild per TTL.
 
+Stream telemetry runs by default, so this route reports on an unconfigured
+server. An `enabled: false` body means this process was switched off with
+`SILO_STREAM_TELEMETRY_ENABLED=false`, or that a bad core setting disabled it —
+the startup log names the variable in that case.
+
 ### Response
 
 Always `200 OK`. "Nothing to compare" is expressed in the body rather than as an
