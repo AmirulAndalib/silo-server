@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/models"
 )
@@ -33,6 +34,7 @@ func TestServerFeaturesV3ReturnsCompleteIndependentSlices(t *testing.T) {
 		FeatureHeaderAuthenticatedMediaV3: {},
 		FeatureAuthorizedMediaOriginsV3:   {},
 		FeatureSoftwareVideoDecodeV3:      {},
+		FeaturePlanInvalidatedV3:          {},
 		FeaturePlanSourceDurationV3:       {},
 	}
 	if len(first) != len(expected) {
@@ -1104,6 +1106,23 @@ func TestPlanPlaybackV3CopySafeSourceStillCopies(t *testing.T) {
 	}
 }
 
+// An unresolved verdict plans optimistically. Playback no longer waits on the
+// multi-second bitstream scan, so "not scanned yet" must read as "copy is
+// allowed"; the scan runs behind the issued plan and CopySafetyNotifier moves
+// the session off this route if it comes back multi-PPS.
+func TestPlanPlaybackV3UnknownCopySafetyStillCopies(t *testing.T) {
+	file, req := copyUnsafeFixtureV3(false)
+	file.VideoTracks[0].MultiplePPS = nil
+
+	result := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, Registry: testTransformationRegistryV3()})
+	if result.Plan == nil || result.Plan.Delivery != DeliveryRemuxProgressiveV3 {
+		t.Fatalf("result = %s", ExplainPlannerResultV3(result))
+	}
+	if result.Plan.Source.VideoCopyUnsafe {
+		t.Fatal("source.video_copy_unsafe = true for an unresolved verdict, want false")
+	}
+}
+
 func TestPlanPlaybackV3FallsBackFromProgressiveToHLSWithoutRepeatingKey(t *testing.T) {
 	file := detailedFixtureFileV3()
 	file.VideoTracks[0].VideoRange = "SDR"
@@ -1126,6 +1145,52 @@ func TestPlanPlaybackV3FallsBackFromProgressiveToHLSWithoutRepeatingKey(t *testi
 	third := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, Registry: testTransformationRegistryV3(), AttemptedKeys: []string{failedKey, secondKey}})
 	if third.Plan == nil || third.Plan.Delivery != DeliveryTranscodeHLSV3 || third.Plan.DecisionReason != "copy_routes_exhausted" {
 		t.Fatalf("third = %#v", third)
+	}
+}
+
+// The copy-safety verdict has to be readable from the row alone. The track
+// flags are stamped by the probe ensurer, which the replan path and the
+// Jellyfin-protocol route decision never run; without this the replan a
+// plan_invalidated command triggers would just walk to the sibling stream-copy
+// delivery, which is broken for exactly the same reason.
+func TestPlanPlaybackV3HonorsThePersistedCopySafetyVerdict(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.VideoTracks[0].VideoRange = "SDR"
+	file.VideoTracks[0].VideoRangeType = "SDR"
+	file.VideoTracks[0].ColorTransfer = "bt709"
+	req := validStartRequestV3()
+	req.Capabilities.Containers = []string{"mp4"}
+	req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{{Codec: "hevc", Profiles: []string{"main 10"}, Levels: []int{153}, BitDepths: []int{10}, MaxWidth: 3840, MaxHeight: 2160, MaxFrameRate: 60, MaxBitrateKbps: 80_000, Hardware: true}}
+	req.Capabilities.HDRDetails = &HDRCapabilitiesV3{HDR10: true}
+
+	// Only the persisted columns carry the verdict, exactly as a raw repository
+	// read delivers them.
+	mtime := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
+	multi := true
+	scanSize := file.FileSize
+	file.FileModifiedAt = &mtime
+	file.MultiplePPS = &multi
+	file.MultiplePPSScanSize = &scanSize
+	file.MultiplePPSScanMtime = &mtime
+	if file.VideoTracks[0].MultiplePPS != nil || file.VideoTracks[0].VideoCopyUnsafe {
+		t.Fatal("fixture already carries the runtime copy-safety flags; the test would prove nothing")
+	}
+
+	result := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, Registry: testTransformationRegistryV3()})
+	if result.Plan == nil {
+		t.Fatalf("result = %s", ExplainPlannerResultV3(result))
+	}
+	switch result.Plan.Delivery {
+	case DeliveryRemuxProgressiveV3, DeliveryRemuxHLSV3:
+		t.Fatalf("delivery = %q, want a route that does not stream-copy a copy-unsafe source", result.Plan.Delivery)
+	}
+
+	// A stale verdict (the file was rewritten) must not be honored.
+	staleSize := file.FileSize + 1
+	file.MultiplePPSScanSize = &staleSize
+	stale := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, Registry: testTransformationRegistryV3()})
+	if stale.Plan == nil || stale.Plan.Delivery != DeliveryRemuxProgressiveV3 {
+		t.Fatalf("stale verdict = %s, want the ordinary remux back", ExplainPlannerResultV3(stale))
 	}
 }
 
