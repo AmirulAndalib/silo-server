@@ -166,17 +166,22 @@ func (h *PlaybackHandler) handleRealtimeClientMessage(sessionID string, data []b
 			return playback.ErrInvalidRealtimePayload
 		}
 		h.touchSessionActivity(sessionID)
+		// Establish ownership before mutating anything: a result naming another
+		// session's command must be rejected without canceling that command's
+		// deadline or dropping its record. An unknown command_id is not an
+		// error — a duplicate or late result for an already-completed command
+		// is normal traffic.
+		record, ok := h.getRealtimeCommand(result.CommandID)
+		if ok && record.SessionID != sessionID {
+			return playback.ErrInvalidRealtimePayload
+		}
 		if h.CommandTracker != nil {
 			h.CommandTracker.Result(result.CommandID)
 		}
-		record, ok := h.getRealtimeCommand(result.CommandID)
 		if !ok {
 			return nil
 		}
 		h.forgetRealtimeCommand(result.CommandID)
-		if record.SessionID != sessionID {
-			return playback.ErrInvalidRealtimePayload
-		}
 		if result.Status != playback.RealtimeResultStatusCompleted {
 			// A rejected plan_invalidated leaves the client running a route the
 			// server has withdrawn, and the tracker's deadline was already

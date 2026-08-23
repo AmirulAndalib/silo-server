@@ -12,7 +12,7 @@ If the analysis then finds the file genuinely cannot be copied, Silo moves the s
 ### Browsing no longer waits on H.264 stream-copy analysis
 Silo checks each H.264 file once for a bitstream quirk that makes stream-copying unsafe. That check reads the opening seconds of the file, and it used to run while a media page was loading and be forgotten on every restart — so browsing a library, especially after a reboot, re-read part of every H.264 file. On remote or cloud storage that was the difference between an instant page and a slow one.
 
-Three things change. Media pages no longer trigger the analysis at all; it now happens when a play is actually being prepared, so browsing is fast regardless of where the files live. The result is stored on the file instead of being kept only in memory, so it survives restarts and is computed at most once per file. And the check itself reads 5 seconds instead of 15.
+Three things change. Media pages no longer trigger the analysis at all; it now happens when a play is actually being prepared, so browsing is fast regardless of where the files live. The result is stored on the file instead of being kept only in memory, so it survives restarts and is reused while the file's size and modification time still match. And the check itself reads 5 seconds instead of 15.
 
 A file that changes on disk is re-checked automatically: the stored answer is only trusted while the file's size and modification time still match, so re-encoding or replacing a file in place invalidates it without any manual step. Nothing is recorded when an analysis fails, so a transient error never turns into a stale verdict — the next request simply retries. No configuration changes, and playback behavior is unchanged.
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,22 +35,51 @@ func fakeFFmpeg(t *testing.T, stdoutPayload string, delay time.Duration) (string
 	if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake ffmpeg: %v", err)
 	}
-	return ffmpegPath, func() int {
-		data, err := os.ReadFile(logPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return 0
-			}
-			t.Fatalf("read fake ffmpeg log: %v", err)
-		}
-		runs := 0
-		for _, b := range data {
-			if b == '\n' {
-				runs++
-			}
-		}
-		return runs
+	return ffmpegPath, func() int { return countFFmpegRuns(t, logPath) }
+}
+
+// fakeFFmpegGated is like fakeFFmpeg but blocks after recording its invocation
+// until the returned release func is called, so a test can observe that a scan
+// has actually started — rather than assume it via a fixed sleep — before
+// letting it complete.
+func fakeFFmpegGated(t *testing.T, stdoutPayload string) (ffmpegPath string, runs func() int, release func()) {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "invocations.log")
+	releasePath := filepath.Join(dir, "release")
+	ffmpegPath = filepath.Join(dir, "ffmpeg")
+	// The invocation is logged before the gate so the log is the signal that
+	// this process has started, not that it has finished.
+	script := fmt.Sprintf("#!/bin/sh\necho run >> %q\nwhile [ ! -f %q ]; do sleep 0.01; done\nprintf '%s'\n", logPath, releasePath, stdoutPayload)
+	if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write gated fake ffmpeg: %v", err)
 	}
+	runs = func() int { return countFFmpegRuns(t, logPath) }
+	release = func() {
+		if err := os.WriteFile(releasePath, nil, 0o644); err != nil {
+			t.Fatalf("write gated fake ffmpeg release file: %v", err)
+		}
+	}
+	return ffmpegPath, runs, release
+}
+
+// countFFmpegRuns reports how many invocations a fake ffmpeg has logged.
+func countFFmpegRuns(t *testing.T, logPath string) int {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("read fake ffmpeg log: %v", err)
+	}
+	runs := 0
+	for _, b := range data {
+		if b == '\n' {
+			runs++
+		}
+	}
+	return runs
 }
 
 type recordedPPSWrite struct {
@@ -338,7 +368,7 @@ func TestEnsureProbeOnlySkipsCopySafetyScan(t *testing.T) {
 }
 
 func TestEnsureCopySafetyConcurrentCallsScanOnce(t *testing.T) {
-	ffmpegPath, runs := fakeFFmpeg(t, conflictingPPSAnnexB, 200*time.Millisecond)
+	ffmpegPath, runs, release := fakeFFmpegGated(t, conflictingPPSAnnexB)
 	writer := &fakeCopySafetyWriter{}
 	ensurer := &PlaybackProbeEnsurer{ffmpegPath: ffmpegPath, copySafetyRepo: writer}
 
@@ -346,6 +376,7 @@ func TestEnsureCopySafetyConcurrentCallsScanOnce(t *testing.T) {
 
 	const callers = 8
 	var wg sync.WaitGroup
+	var entered atomic.Int64
 	results := make([]*models.MediaFile, callers)
 	errs := make([]error, callers)
 	start := make(chan struct{})
@@ -354,11 +385,38 @@ func TestEnsureCopySafetyConcurrentCallsScanOnce(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
+			entered.Add(1)
 			results[i], errs[i] = ensurer.ensureCopySafety(context.Background(), copySafetyTestFile(mtime))
 		}(i)
 	}
 	close(start)
+
+	// Hold the winning ffmpeg inside its scan until observable state says the
+	// dedup path is genuinely under test: every caller has reached the
+	// ensureCopySafety call site, and exactly one ffmpeg process has started.
+	//
+	// ensureCopySafety dedupes through a singleflight.Group, which exposes no
+	// waiter count, so "all callers entered" is the strongest signal available
+	// from outside the package. It is sufficient here: between the call site
+	// and singleflight.Do, ensureCopySafety only does non-blocking work (a
+	// codec check and a sync.Map lookup), so a caller that has entered reaches
+	// the dedup point without waiting on anything — and the scan it would
+	// otherwise start for itself is still blocked when it gets there.
+	timeout := ""
+	deadline := time.Now().Add(5 * time.Second)
+	for int(entered.Load()) != callers || runs() != 1 {
+		if time.Now().After(deadline) {
+			timeout = fmt.Sprintf("timed out waiting for the deduped scan to start: %d/%d callers entered, %d ffmpeg runs", entered.Load(), callers, runs())
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Always release, even on timeout, so the callers are not left blocked.
+	release()
 	wg.Wait()
+	if timeout != "" {
+		t.Fatal(timeout)
+	}
 
 	for i, err := range errs {
 		if err != nil {
