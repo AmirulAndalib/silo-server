@@ -55,6 +55,11 @@ type SessionManagerInterface interface {
 	TouchActivity(sessionID string) error
 	BeginTransport(sessionID string) error
 	EndTransport(sessionID string) error
+	// WatchTransportStop is required rather than probed for at run time: it is
+	// the only thing that can interrupt a single-response transport, so an
+	// implementation without it would serve progressive remuxes that no session
+	// stop can withdraw.
+	WatchTransportStop(sessionID string) (<-chan struct{}, func())
 	SetRemoteTransport(sessionID string, remote bool) error
 	SetEffectiveMediaFileID(sessionID string, fileID int) error
 	SetTranscodeNodeURL(sessionID, url string) error

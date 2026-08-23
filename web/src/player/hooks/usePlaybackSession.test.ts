@@ -1529,6 +1529,195 @@ describe("usePlaybackSession server-invalidated plans", () => {
     unmount();
   });
 
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((settle) => {
+      resolve = settle;
+    });
+    return { promise, resolve };
+  }
+
+  /**
+   * A start and a replan whose response is held open, so a test can act while
+   * the client has a decision in flight — the state the server is always in
+   * when it pushes an invalidation: it commits the replacement plan and starts
+   * the copy-safety scan behind it before the response is on the wire.
+   */
+  function gatedReplanFetchMock(
+    replanBodies: Array<Record<string, unknown>>,
+    replans: unknown[],
+    gate: Promise<void>,
+  ) {
+    return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/playback/start")) {
+        return jsonResponse(
+          {
+            protocol_version: 3,
+            server_features: ["playback_plan_v3"],
+            outcome: "playable",
+            session_id: "session-1",
+            playback_plan: fixturePlanV3(),
+          },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/playback/session-1/replan")) {
+        replanBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (replanBodies.length === 1) await gate;
+        return jsonResponse(replans.shift());
+      }
+      if (url.endsWith("/playback/route-events")) {
+        return new Response(null, { status: 202 });
+      }
+      if (init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+  }
+
+  function playableDecision(plan: ReturnType<typeof fixturePlanV3>) {
+    return {
+      protocol_version: 3,
+      server_features: ["playback_plan_v3"],
+      outcome: "playable",
+      session_id: "session-1",
+      playback_plan: plan,
+    };
+  }
+
+  // The server commits the replacement plan and starts the scan behind it
+  // before the client can read the response, so the invalidation can name a
+  // plan this client has not adopted yet. Deciding against the plan on screen
+  // would complete the command as a no-op and then let the pending response
+  // install the very route the server withdrew.
+  it("waits out an in-flight replan and recovers off the plan it adopts", async () => {
+    const replanBodies: Array<Record<string, unknown>> = [];
+    const gate = deferred<void>();
+    vi.stubGlobal(
+      "fetch",
+      gatedReplanFetchMock(
+        replanBodies,
+        [
+          playableDecision(
+            fixturePlanV3({
+              plan_id: "plan:2222222222222222",
+              plan_attempt_key: "v3:2222222222222222",
+            }),
+          ),
+          playableDecision(
+            fixturePlanV3({
+              plan_id: "plan:3333333333333333",
+              plan_attempt_key: "v3:3333333333333333",
+              delivery: "server_transcode_hls",
+            }),
+          ),
+        ],
+        gate.promise,
+      ),
+    );
+
+    const { result, unmount } = renderHook(
+      () => usePlaybackSession("request-1", [], [], 7, 0, false, "auto"),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.plan?.plan_id).toBe("plan:0123456789abcdef"));
+
+    act(() => {
+      result.current.changeQuality("720p", 100);
+    });
+    await waitFor(() => expect(replanBodies).toHaveLength(1));
+
+    let invalidation: Promise<boolean> | undefined;
+    act(() => {
+      invalidation = result.current.invalidatePlan(
+        "plan:2222222222222222",
+        "video_copy_unsafe",
+        100,
+      );
+    });
+    // Nothing may be decided yet: the plan the command names is still in the
+    // response the client has not read.
+    expect(replanBodies).toHaveLength(1);
+
+    let outcome: boolean | undefined;
+    await act(async () => {
+      gate.resolve();
+      outcome = await invalidation;
+    });
+
+    expect(outcome).toBe(true);
+    expect(replanBodies).toHaveLength(2);
+    expect(replanBodies[1]).toMatchObject({
+      operation: "failure_recovery",
+      failed_plan_id: "plan:2222222222222222",
+      // The plan that was invalidated mid-adoption is the one excluded, not the
+      // one that was on screen when the command arrived.
+      attempted_plan_keys: ["v3:2222222222222222"],
+      failure: { classification: "video_copy_unsafe" },
+    });
+    await waitFor(() => expect(result.current.plan?.plan_id).toBe("plan:3333333333333333"));
+
+    unmount();
+  });
+
+  // The mirror image: the client really did move past the invalidated plan
+  // while the command was in flight. Waiting must not turn that into a replan —
+  // it would evict a route the server never complained about.
+  it("stays a no-op for a plan the in-flight replan replaced", async () => {
+    const replanBodies: Array<Record<string, unknown>> = [];
+    const gate = deferred<void>();
+    vi.stubGlobal(
+      "fetch",
+      gatedReplanFetchMock(
+        replanBodies,
+        [
+          playableDecision(
+            fixturePlanV3({
+              plan_id: "plan:2222222222222222",
+              plan_attempt_key: "v3:2222222222222222",
+            }),
+          ),
+        ],
+        gate.promise,
+      ),
+    );
+
+    const { result, unmount } = renderHook(
+      () => usePlaybackSession("request-1", [], [], 7, 0, false, "auto"),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.plan?.plan_id).toBe("plan:0123456789abcdef"));
+
+    act(() => {
+      result.current.changeQuality("720p", 100);
+    });
+    await waitFor(() => expect(replanBodies).toHaveLength(1));
+
+    let invalidation: Promise<boolean> | undefined;
+    act(() => {
+      invalidation = result.current.invalidatePlan(
+        "plan:0123456789abcdef",
+        "video_copy_unsafe",
+        100,
+      );
+    });
+
+    let outcome: boolean | undefined;
+    await act(async () => {
+      gate.resolve();
+      outcome = await invalidation;
+    });
+
+    // Reported as handled, with no second replan: the invalidated route is gone.
+    expect(outcome).toBe(true);
+    expect(replanBodies).toHaveLength(1);
+    expect(result.current.plan?.plan_id).toBe("plan:2222222222222222");
+
+    unmount();
+  });
+
   it("reports failure when the replan produces no replacement plan", async () => {
     const replanBodies: Array<Record<string, unknown>> = [];
     vi.stubGlobal(

@@ -166,6 +166,12 @@ func (h *StreamHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 				_ = h.sessionMgr.EndTransport(sessionID)
 			}()
 		}
+		// A progressive remux runs for the length of the title behind a single
+		// response, so a stop decided while it is playing — a copy-safety
+		// verdict withdrawing the route, an admin kill — has to reach the
+		// stream itself. Nothing else can: the ffmpeg belongs to this request.
+		abort, releaseAbort := h.sessionMgr.WatchTransportStop(sessionID)
+		defer releaseAbort()
 		seekSeconds := 0.0
 		if seekStr := r.URL.Query().Get("seek"); seekStr != "" {
 			if s, err := strconv.ParseFloat(seekStr, 64); err == nil && s >= 0 {
@@ -183,6 +189,7 @@ func (h *StreamHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 			AudioOnly:              file.IsAudioOnly(),
 			TargetAudioChannels:    session.TargetAudioChannels,
 			TargetAudioBitrateKbps: session.TargetAudioBitrateKbps,
+			Abort:                  abort,
 		}); err != nil {
 			h.handleTransportStartFailure(r.Context(), session, file, err)
 		}

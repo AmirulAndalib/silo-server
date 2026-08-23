@@ -17,6 +17,15 @@ import (
 // belongs to the HTTP request that triggered it.
 const copySafetyScanTimeout = time.Minute
 
+// copySafetyScanConcurrency caps how many copy-safety scans run at once across
+// the whole replica. Per-file dedupe collapses the repeat requests for one
+// popular file, but nothing bounds the number of *distinct* unknown files a
+// burst of watch-page loads can name, and each one costs an ffmpeg process
+// reading the opening seconds off remote storage. Excess races block their
+// goroutine on the semaphore rather than being dropped: the scan is cheap to
+// defer and must still happen, goroutines are cheap, ffmpeg is not.
+const copySafetyScanConcurrency = 4
+
 // CopySafetyScanner is the scanner-side half of the race: it decides whether a
 // file still needs the H.264 multi-PPS scan and runs it. *scanner.PlaybackProbeEnsurer
 // implements it.
@@ -48,7 +57,11 @@ type CopySafetyRace struct {
 	// load for a popular file would otherwise stack a goroutine that does
 	// nothing but wait on it.
 	inFlight sync.Map // file ID -> struct{}
-	timeout  time.Duration
+	// slots is the replica-wide scan semaphore. A goroutine holds its per-file
+	// inFlight entry while it waits for a slot, so queueing never lets a second
+	// goroutine for the same file through.
+	slots   chan struct{}
+	timeout time.Duration
 }
 
 // NewCopySafetyRace returns a racer, or nil when it has nothing to scan with. A
@@ -57,7 +70,13 @@ func NewCopySafetyRace(scanner CopySafetyScanner, files CopySafetyFileLoader, no
 	if scanner == nil || files == nil {
 		return nil
 	}
-	return &CopySafetyRace{scanner: scanner, files: files, notifier: notifier, timeout: copySafetyScanTimeout}
+	return &CopySafetyRace{
+		scanner:  scanner,
+		files:    files,
+		notifier: notifier,
+		slots:    make(chan struct{}, copySafetyScanConcurrency),
+		timeout:  copySafetyScanTimeout,
+	}
 }
 
 // RaceScan resolves the copy-safety verdict for fileID in the background. It
@@ -76,8 +95,26 @@ func (r *CopySafetyRace) RaceScan(fileID int) {
 	}
 	go func() {
 		defer r.inFlight.Delete(fileID)
+		// The slot is taken before the scan's own deadline starts: time spent
+		// queueing behind other files is not time the scan was given to run.
+		r.acquireSlot()
+		defer r.releaseSlot()
 		r.scan(fileID)
 	}()
+}
+
+func (r *CopySafetyRace) acquireSlot() {
+	if r.slots == nil {
+		return
+	}
+	r.slots <- struct{}{}
+}
+
+func (r *CopySafetyRace) releaseSlot() {
+	if r.slots == nil {
+		return
+	}
+	<-r.slots
 }
 
 func (r *CopySafetyRace) scan(fileID int) {
@@ -97,6 +134,24 @@ func (r *CopySafetyRace) scan(fileID int) {
 		return
 	}
 	if !r.scanner.NeedsCopySafetyScan(file) {
+		// Nothing left to scan, but that is not the same as nothing to do. The
+		// verdict may have been reached by another replica between this race
+		// being requested and the file being loaded: that replica notified its
+		// own sessions and has no way to reach ours, so a persisted unsafe
+		// verdict has to be applied locally even though no scan runs here. A
+		// known-safe verdict is silent, as always.
+		//
+		// This closes the window for sessions this replica raced against another
+		// replica's write. It is not distributed invalidation: a verdict that
+		// lands after every replica has stopped racing still reaches only the
+		// replica that reached it. Pushing invalidations across replicas —
+		// Redis-backed, like the other cross-replica playback signals — is
+		// follow-up work.
+		if multi, known := file.PersistedVideoCopyVerdict(); known && multi {
+			slog.InfoContext(ctx, "applying a persisted copy-unsafe verdict reached elsewhere",
+				"component", "playback", "file_id", fileID)
+			r.notifier.VideoCopyUnsafe(ctx, fileID)
+		}
 		return
 	}
 

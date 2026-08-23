@@ -11,13 +11,15 @@ import (
 )
 
 type fakeCopySafetyScanner struct {
-	mu       sync.Mutex
-	needs    bool
-	multi    bool
-	err      error
-	scans    int
-	release  chan struct{}
-	scanning chan struct{}
+	mu        sync.Mutex
+	needs     bool
+	multi     bool
+	err       error
+	scans     int
+	active    int
+	maxActive int
+	release   chan struct{}
+	scanning  chan struct{}
 }
 
 func (s *fakeCopySafetyScanner) NeedsCopySafetyScan(*models.MediaFile) bool {
@@ -29,7 +31,16 @@ func (s *fakeCopySafetyScanner) NeedsCopySafetyScan(*models.MediaFile) bool {
 func (s *fakeCopySafetyScanner) ScanCopySafety(context.Context, *models.MediaFile) (bool, error) {
 	s.mu.Lock()
 	s.scans++
+	s.active++
+	if s.active > s.maxActive {
+		s.maxActive = s.active
+	}
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.active--
+		s.mu.Unlock()
+	}()
 	if s.scanning != nil {
 		s.scanning <- struct{}{}
 	}
@@ -43,6 +54,14 @@ func (s *fakeCopySafetyScanner) scanCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.scans
+}
+
+// peakConcurrency is the largest number of scans that were ever running at the
+// same time.
+func (s *fakeCopySafetyScanner) peakConcurrency() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxActive
 }
 
 type fakeFileLoader struct {
@@ -63,6 +82,17 @@ func (l *fakeFileLoader) GetByID(context.Context, int) (*models.MediaFile, error
 // multi-PPS verdict is observable as a session stop.
 func raceFixture(t *testing.T, scanner *fakeCopySafetyScanner) (*CopySafetyRace, *SessionManager, *fakeCopySafetyControl) {
 	t.Helper()
+	return raceFixtureForFile(t, scanner, &models.MediaFile{
+		ID:          100,
+		CodecVideo:  "h264",
+		VideoTracks: []models.VideoTrack{{Codec: "h264"}},
+	})
+}
+
+// raceFixtureForFile is raceFixture over a specific media file, for the cases
+// that care about what the row carries — a persisted verdict, above all.
+func raceFixtureForFile(t *testing.T, scanner *fakeCopySafetyScanner, file *models.MediaFile) (*CopySafetyRace, *SessionManager, *fakeCopySafetyControl) {
+	t.Helper()
 	sessions := NewSessionManager(0, 0)
 	hub := NewRealtimeHub()
 	tracker := NewCommandTracker()
@@ -72,7 +102,7 @@ func raceFixture(t *testing.T, scanner *fakeCopySafetyScanner) (*CopySafetyRace,
 	// These tests are about the race, not about waiting out the window a
 	// just-started session gets before it can be stopped.
 	notifier.settle = 0
-	loader := &fakeFileLoader{file: &models.MediaFile{ID: 100, CodecVideo: "h264", VideoTracks: []models.VideoTrack{{Codec: "h264"}}}}
+	loader := &fakeFileLoader{file: file}
 	return NewCopySafetyRace(scanner, loader, notifier), sessions, control
 }
 
@@ -175,6 +205,84 @@ func TestCopySafetyRaceDedupesInFlightScans(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if got := scanner.scanCount(); got != 1 {
 		t.Fatalf("scans = %d, want 1 while a scan for the file is already running", got)
+	}
+}
+
+// fileWithPersistedVerdict is a media file row whose multi-PPS verdict is
+// already recorded and still describes the file, as it would be on a replica
+// that loads the row after another replica wrote it.
+func fileWithPersistedVerdict(multi bool) *models.MediaFile {
+	size := int64(4096)
+	return &models.MediaFile{
+		ID:                  100,
+		CodecVideo:          "h264",
+		VideoTracks:         []models.VideoTrack{{Codec: "h264", MultiplePPS: &multi}},
+		FileSize:            size,
+		MultiplePPS:         &multi,
+		MultiplePPSScanSize: &size,
+	}
+}
+
+// Another replica can reach the verdict first: it persists it, notifies its own
+// sessions, and cannot reach ours. Loading a row that already carries an unsafe
+// verdict therefore has to withdraw this replica's copy-routed sessions even
+// though there is nothing left to scan.
+func TestCopySafetyRaceAppliesPersistedUnsafeVerdict(t *testing.T) {
+	scanner := &fakeCopySafetyScanner{needs: false}
+	race, sessions, control := raceFixtureForFile(t, scanner, fileWithPersistedVerdict(true))
+	session, err := sessions.StartSession(1, "profile-1", 100, PlayRemux, false)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	race.RaceScan(100)
+
+	waitForStop(t, control, session.ID)
+	if got := scanner.scanCount(); got != 0 {
+		t.Fatalf("scans = %d, want 0 for a verdict that was already reached", got)
+	}
+}
+
+// A persisted copy-safe verdict is the common resolved state and must stay
+// silent: it is exactly the evidence that the route the session is on is fine.
+func TestCopySafetyRaceIgnoresPersistedSafeVerdict(t *testing.T) {
+	scanner := &fakeCopySafetyScanner{needs: false}
+	race, sessions, control := raceFixtureForFile(t, scanner, fileWithPersistedVerdict(false))
+	if _, err := sessions.StartSession(1, "profile-1", 100, PlayRemux, false); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	race.RaceScan(100)
+
+	time.Sleep(20 * time.Millisecond)
+	if stopped := control.stoppedSessions(); len(stopped) != 0 {
+		t.Fatalf("stopped = %v, want no session touched by a persisted copy-safe verdict", stopped)
+	}
+}
+
+// Per-file dedupe bounds the races for one popular file; nothing bounds the
+// number of distinct files a burst of watch-page loads names, and each scan
+// costs an ffmpeg process against remote storage.
+func TestCopySafetyRaceCapsConcurrentScans(t *testing.T) {
+	scanner := &fakeCopySafetyScanner{needs: true, release: make(chan struct{})}
+	race, _, _ := raceFixture(t, scanner)
+
+	const files = 12
+	for i := 0; i < files; i++ {
+		race.RaceScan(200 + i)
+	}
+
+	waitForScans(t, scanner, copySafetyScanConcurrency)
+	time.Sleep(50 * time.Millisecond)
+	if got := scanner.scanCount(); got != copySafetyScanConcurrency {
+		t.Fatalf("scans = %d, want %d in flight while every slot is held", got, copySafetyScanConcurrency)
+	}
+
+	// Every queued race still runs; the cap defers work rather than dropping it.
+	close(scanner.release)
+	waitForScans(t, scanner, files)
+	if got := scanner.peakConcurrency(); got > copySafetyScanConcurrency {
+		t.Fatalf("peak concurrency = %d, want at most %d", got, copySafetyScanConcurrency)
 	}
 }
 
