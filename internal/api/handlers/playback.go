@@ -161,26 +161,38 @@ type PlaybackHandler struct {
 	NodePlanner             nodepool.SessionPlanner   // optional; enables proxy/transcode node selection
 	JWTSecret               string                    // needed for signing stream tokens
 	StreamTelemetry         *streamtelemetry.Registry // local observation-only telemetry
-	ItemAccess              PlaybackItemAccessChecker // optional; enables file authorization checks
-	EpisodeLookup           PlaybackEpisodeLookup     // optional; resolves episode files to their series
-	ExtraLookup             PlaybackExtraLookup       // optional; resolves extras files to their parent item
-	OriginalLangLookup      PlaybackOriginalLanguageLookup
-	SettingsRepo            PlaybackSettingsReader     // optional; reads server settings (e.g., allow_4k_transcode)
-	FileVersionFetcher      PlaybackFileVersionFetcher // optional; queries sibling file versions for 4K guard
-	ProbeEnsurer            PlaybackProbeEnsurer       // optional; repairs missing probe metadata on demand
-	ChapterThumbnailQueuer  PlaybackChapterThumbnailQueuer
-	IntroAnalyzer           IntroEpisodeAnalyzer
-	IntroRepository         PlaybackIntroEligibilityChecker
-	MarkerRegistry          *markers.Registry
-	MarkerResolver          markers.ExternalIDResolver
-	MarkerUpserter          PlaybackMarkerUpserter
-	MarkerUpdateNotifier    PlaybackMarkerUpdateNotifier
-	MarkerLazyContext       context.Context
-	MarkerLazyInFlight      sync.Map
-	SubtitleRepo            subtitles.Repository // optional; enables downloaded subtitles in playback
-	RealtimeHub             *playback.RealtimeHub
-	CommandTracker          *playback.CommandTracker
-	CommandDispatcher       *playback.CommandDispatcher
+	// ProxyGrantStore hands a proxy the recipe it serves a header-authenticated
+	// session from. Optional: without it (or without Redis behind it) an attempt
+	// that negotiated authorized_media_origins_v1 simply stays on the API origin.
+	ProxyGrantStore recipeCardStoreV3
+	// NodeRecipeStore hands a transcode node the recipe it rebuilds a
+	// header-authenticated remote transcode from after its own restart, keyed by
+	// the transport id the node serves it under. A legacy attempt needs none —
+	// its client URL carries the recipe in a stream token — but a tokenless
+	// relayed request has nothing to reconstruct from. Optional and best effort:
+	// without it (or without Redis behind it) such a session replans instead of
+	// recovering, exactly as before.
+	NodeRecipeStore        recipeCardStoreV3
+	ItemAccess             PlaybackItemAccessChecker // optional; enables file authorization checks
+	EpisodeLookup          PlaybackEpisodeLookup     // optional; resolves episode files to their series
+	ExtraLookup            PlaybackExtraLookup       // optional; resolves extras files to their parent item
+	OriginalLangLookup     PlaybackOriginalLanguageLookup
+	SettingsRepo           PlaybackSettingsReader     // optional; reads server settings (e.g., allow_4k_transcode)
+	FileVersionFetcher     PlaybackFileVersionFetcher // optional; queries sibling file versions for 4K guard
+	ProbeEnsurer           PlaybackProbeEnsurer       // optional; repairs missing probe metadata on demand
+	ChapterThumbnailQueuer PlaybackChapterThumbnailQueuer
+	IntroAnalyzer          IntroEpisodeAnalyzer
+	IntroRepository        PlaybackIntroEligibilityChecker
+	MarkerRegistry         *markers.Registry
+	MarkerResolver         markers.ExternalIDResolver
+	MarkerUpserter         PlaybackMarkerUpserter
+	MarkerUpdateNotifier   PlaybackMarkerUpdateNotifier
+	MarkerLazyContext      context.Context
+	MarkerLazyInFlight     sync.Map
+	SubtitleRepo           subtitles.Repository // optional; enables downloaded subtitles in playback
+	RealtimeHub            *playback.RealtimeHub
+	CommandTracker         *playback.CommandTracker
+	CommandDispatcher      *playback.CommandDispatcher
 	// PlaybackConfig returns the current playback config (ffmpeg path,
 	// hwaccel, transcode dir). Wired to the live config in integrated mode
 	// so admin changes apply to newly started transcodes. Read it through
@@ -398,8 +410,18 @@ const streamTokenParam = "st"
 
 // signSessionToken mints a stream token carrying the session's full
 // reconstruction recipe. Returns "" when no signing secret is configured
-// (reconstruct effectively disabled, e.g. in tests).
-func (h *PlaybackHandler) signSessionToken(card playback.RecipeCard) string {
+// (reconstruct effectively disabled, e.g. in tests), or when the attempt
+// negotiated header-authenticated media.
+//
+// requireMediaAuth is the attempt's negotiated media-auth mode, threaded from
+// the session/recipe state the caller holds. It is refused here, at the mint,
+// rather than only at the call sites that build URLs: a token that is never
+// signed cannot leak into a client-visible URL by way of a builder that forgot
+// to ask. Call sites keep their own checks as defense in depth.
+func (h *PlaybackHandler) signSessionToken(card playback.RecipeCard, requireMediaAuth bool) string {
+	if requireMediaAuth {
+		return ""
+	}
 	return h.signStreamClaims(card.ToClaims())
 }
 
@@ -421,8 +443,10 @@ func (h *PlaybackHandler) signStreamClaims(claims streamtoken.Claims) string {
 
 // loadTranscodeServeSession resolves the playback Session for the transcode
 // manifest/segment serve routes while keeping stream-token verification off the
-// hot path. The overwhelmingly common case is a live in-memory session, which
-// needs no token at all, so the cheap GetSession lookup runs first and the
+// hot path. A V3 session that negotiated header-authenticated media requires a
+// live authenticated owner on every request; a legacy session retains its UUID
+// bearer behavior. The overwhelmingly common case is a live in-memory session,
+// so the cheap GetSession lookup runs first and the
 // (HMAC + JSON) token decode is performed only on a not-found miss where a
 // reconstruct is actually required. On that miss it delegates to the shared
 // LoadOrReconstructSession front door so reconstruct/ownership semantics stay
@@ -432,9 +456,14 @@ func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID s
 	requestUserID := apimw.GetUserID(r.Context())
 	session, err := h.sessionMgr.GetSession(sessionID)
 	if err == nil {
-		// Live session: enforce the same ownership rule as LoadOrReconstructSession
-		// (a zero caller is allowed; a non-zero mismatch is refused). No token
-		// verification on this hot path.
+		// Defense in depth: LoadOrReconstructSession enforces the same rule for
+		// every serve handler, but this fast path never reaches it.
+		if session.RequireMediaAuthorization && requestUserID == 0 {
+			return nil, playback.SessionUnauthorized, nil, nil
+		}
+		// Live session: secure transports require a user above; legacy bearer
+		// routes allow zero. Either way, a present but mismatched identity is
+		// forbidden. No token verification on this hot path.
 		if requestUserID != 0 && session.UserID != requestUserID {
 			return nil, playback.SessionForbidden, nil, nil
 		}
@@ -521,6 +550,12 @@ func appendStreamToken(rawURL, token string) string {
 // client re-supplies its byte position). Transcode sessions are told which URL
 // to play by their v3 plan; the URL here is an informational placeholder that
 // the plan's delivery URL supersedes.
+//
+// A session that requires media authorization gets the bare relative URL: it
+// authenticates every media request with the caller's own access token, so no
+// client-visible URL may carry a playback credential. Losing the token also
+// means losing transparent reconstruction after a restart, which is the
+// documented trade of that mode.
 func (h *PlaybackHandler) playbackStreamURL(s *playback.Session) string {
 	if s == nil {
 		return ""
@@ -528,8 +563,12 @@ func (h *PlaybackHandler) playbackStreamURL(s *playback.Session) string {
 	if s.PlayMethod == playback.PlayTranscode {
 		return fmt.Sprintf("/playback/transcode/%s/master.m3u8", s.ID)
 	}
+	streamURL := fmt.Sprintf("/stream/%s", s.ID)
+	if s.RequireMediaAuthorization {
+		return streamURL
+	}
 	card := identityRecipeCard(s)
-	return appendStreamToken(fmt.Sprintf("/stream/%s", s.ID), h.signSessionToken(card))
+	return appendStreamToken(streamURL, h.signSessionToken(card, s.RequireMediaAuthorization))
 }
 
 // identityRecipeCard builds the identity-only recipe for a direct-play or remux
@@ -941,6 +980,15 @@ func (h *PlaybackHandler) finalizeSessionStop(ctx context.Context, session *play
 	}
 
 	h.closeTranscodeForSession(session)
+	// A session that ends must stop egressing everywhere, not just here: the
+	// grant is a proxy's whole authority to serve these bytes, and unlike the
+	// recipe card it is never a reconstruction aid, so it is revoked on every
+	// stop and abort.
+	h.deleteProxyGrantV3(ctx, session.ID)
+	// The teardown above stopped the remote job, so its stored recipe must not
+	// outlive it: a buffered or retrying request would otherwise rebuild ffmpeg on
+	// the node for a transport that no longer exists.
+	h.deleteNodeRecipeV3(ctx, session.TranscodeTransportID)
 	if syncNow {
 		h.syncSessionsNow(ctx, syncReason)
 	}
@@ -975,6 +1023,15 @@ func (h *PlaybackHandler) finalizeSessionAbort(ctx context.Context, session *pla
 	// Abort is a connection drop / non-terminal teardown — keep the recipe card
 	// so the client can reconstruct on reconnect.
 	h.closeTranscodeForSession(session)
+	// A session that ends must stop egressing everywhere, not just here: the
+	// grant is a proxy's whole authority to serve these bytes, and unlike the
+	// recipe card it is never a reconstruction aid, so it is revoked on every
+	// stop and abort.
+	h.deleteProxyGrantV3(ctx, session.ID)
+	// The teardown above stopped the remote job, so its stored recipe must not
+	// outlive it: a buffered or retrying request would otherwise rebuild ffmpeg on
+	// the node for a transport that no longer exists.
+	h.deleteNodeRecipeV3(ctx, session.TranscodeTransportID)
 	if syncNow {
 		h.syncSessionsNow(ctx, syncReason)
 	}
@@ -1312,8 +1369,9 @@ func alignedSeekSeconds(seekSeconds float64, segmentDuration int, targetVideoCod
 }
 
 // HandleGetTranscodeManifest handles GET /playback/transcode/{session_id}/master.m3u8.
-// Auth is optional — the session UUID serves as an access token (same pattern
-// as /stream/{session_id}). When auth context is present, ownership is verified.
+// Legacy transports allow the session UUID to act as the access capability.
+// Header-authenticated V3 transports require the live session owner on every
+// request; their UUID is only a route identifier.
 //
 // Known-duration encoded sessions expose a synthetic full VOD manifest so the
 // player can seek immediately. Copy-video sessions expose FFmpeg's real
@@ -1331,6 +1389,9 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 		return
 	case playback.SessionForbidden:
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
+		return
+	case playback.SessionUnauthorized:
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
 		return
 	}
 	attachPlaybackSession(r.Context(), session, claims)
@@ -1374,7 +1435,8 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 }
 
 // HandleGetTranscodeSegment handles GET /playback/transcode/{session_id}/segment/{name}.
-// Auth is optional — the session UUID serves as an access token.
+// Authorization follows the same negotiated legacy-versus-header-authenticated
+// rule as the manifest endpoint above.
 func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
 	session, status, card, claims := h.loadTranscodeServeSession(r, sessionID)
@@ -1387,6 +1449,9 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 		return
 	case playback.SessionForbidden:
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
+		return
+	case playback.SessionUnauthorized:
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
 		return
 	}
 	attachPlaybackSession(r.Context(), session, claims)
@@ -1561,14 +1626,16 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 // reconstruction recipe and builds the manifest URL. proxyNode is the planner's
 // pick; when nil the URL falls back to the API-local path, where the token rides
 // the ?st= query parameter so the integrated server can reconstruct from it.
-func (h *PlaybackHandler) buildProxyManifestURL(card playback.RecipeCard, proxyNode *nodepool.Node) string {
-	token := h.signSessionToken(card)
+//
+// requireMediaAuth is the attempt's negotiated media-auth mode: such a session
+// never receives a token, and therefore never a proxy origin either, since a
+// proxy authenticates from the token in the URL path alone. It gets the
+// API-local manifest path, which the client fetches with its own credential.
+func (h *PlaybackHandler) buildProxyManifestURL(card playback.RecipeCard, proxyNode *nodepool.Node, requireMediaAuth bool) string {
+	token := h.signSessionToken(card, requireMediaAuth)
 	localURL := fmt.Sprintf("/playback/transcode/%s/master.m3u8", card.SessionID)
-	if proxyNode == nil {
+	if proxyNode == nil || token == "" {
 		return appendStreamToken(localURL, token)
-	}
-	if token == "" {
-		return localURL
 	}
 	return proxyNode.URL + "/stream/transcode/" + token + "/master.m3u8"
 }

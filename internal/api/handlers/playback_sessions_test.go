@@ -70,7 +70,8 @@ func TestSessionsCapabilitiesAdvertisesActivityFields(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode capabilities: %v", err)
 	}
-	if !resp.EffectivePlayMethod || !resp.IsJellyfinClient || !resp.ClientBuild || !resp.ClientChannel {
+	if !resp.EffectivePlayMethod || !resp.IsJellyfinClient || !resp.ClientBuild || !resp.ClientChannel ||
+		!resp.TargetAudioChannels {
 		t.Fatalf("capabilities must advertise every additive field: %+v", resp)
 	}
 	want := []string{"direct", "remux", "transcode", "audio"}

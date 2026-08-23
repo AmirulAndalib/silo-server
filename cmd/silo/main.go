@@ -813,6 +813,11 @@ func main() {
 			registerClientIPConfigReload(watcher, proxyIPResolver)
 			srv.SetClientIPResolver(proxyIPResolver)
 			srv.SetStreamTelemetry(streamTelemetryRegistry)
+			// Serve header-authenticated sessions: the recipe comes from the
+			// shared grant store central wrote at plan time, and the caller's
+			// own access token is re-checked against the live login session in
+			// Postgres, so a revoked login stops streaming here immediately.
+			srv.SetMediaGrantAuthority(noderecipe.NewProxyGrantStore(redisClient, 0), auth.NewSessionRepository(pool))
 			srv.SetRemoteArtifactMissReporter(downloads.NewArtifactManager(
 				downloads.NewArtifactRepository(pool),
 				downloads.NewRepository(pool),
