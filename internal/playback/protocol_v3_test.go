@@ -31,6 +31,7 @@ func TestServerFeaturesV3ReturnsCompleteIndependentSlices(t *testing.T) {
 		FeatureOutputChangeV3:             {},
 		FeatureDirectStreamResumeV3:       {},
 		FeatureHeaderAuthenticatedMediaV3: {},
+		FeatureAuthorizedMediaOriginsV3:   {},
 		FeatureSoftwareVideoDecodeV3:      {},
 		FeaturePlanSourceDurationV3:       {},
 	}

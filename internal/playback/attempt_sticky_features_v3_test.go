@@ -25,10 +25,25 @@ func TestPinAttemptStickyFeaturesV3(t *testing.T) {
 			want:       []string{FeaturePlaybackPlanV3},
 		},
 		{
-			name:       "an empty list still restores both sticky features",
+			name:       "an empty list still restores every sticky feature",
 			requested:  []string{},
-			negotiated: []string{FeatureHeaderAuthenticatedMediaV3, FeatureSoftwareVideoDecodeV3},
-			want:       []string{FeatureHeaderAuthenticatedMediaV3, FeatureSoftwareVideoDecodeV3},
+			negotiated: []string{FeatureHeaderAuthenticatedMediaV3, FeatureAuthorizedMediaOriginsV3, FeatureSoftwareVideoDecodeV3},
+			want:       []string{FeatureHeaderAuthenticatedMediaV3, FeatureAuthorizedMediaOriginsV3, FeatureSoftwareVideoDecodeV3},
+		},
+		{
+			// The origin trust set is what the client enforces against the URLs
+			// it was handed; a replan that revoked it mid-attempt would leave a
+			// live plan pointing at an origin the client no longer accepts.
+			name:       "a replan cannot drop the negotiated media origins",
+			requested:  []string{FeaturePlaybackPlanV3, FeatureHeaderAuthenticatedMediaV3},
+			negotiated: []string{FeatureHeaderAuthenticatedMediaV3, FeatureAuthorizedMediaOriginsV3},
+			want:       []string{FeaturePlaybackPlanV3, FeatureHeaderAuthenticatedMediaV3, FeatureAuthorizedMediaOriginsV3},
+		},
+		{
+			name:       "a replan cannot add media origins mid-attempt",
+			requested:  []string{FeatureHeaderAuthenticatedMediaV3, FeatureAuthorizedMediaOriginsV3},
+			negotiated: []string{FeatureHeaderAuthenticatedMediaV3},
+			want:       []string{FeatureHeaderAuthenticatedMediaV3},
 		},
 		{
 			name:       "case and padding do not smuggle a duplicate through",

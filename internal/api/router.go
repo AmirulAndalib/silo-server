@@ -49,6 +49,7 @@ import (
 	metatrakt "github.com/Silo-Server/silo-server/internal/metadata/trakt"
 	metadatatranslation "github.com/Silo-Server/silo-server/internal/metadata/translation"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
+	"github.com/Silo-Server/silo-server/internal/noderecipe"
 	"github.com/Silo-Server/silo-server/internal/notifications"
 	"github.com/Silo-Server/silo-server/internal/onboarding"
 	"github.com/Silo-Server/silo-server/internal/opslog"
@@ -1005,6 +1006,11 @@ func NewRouter(deps Dependencies) chi.Router {
 		if deps.Config != nil && deps.Config.Auth.JWTSecret != "" {
 			playbackHandler.JWTSecret = deps.Config.Auth.JWTSecret
 		}
+		// Hand proxy nodes the recipes they serve header-authenticated sessions
+		// from, so an attempt that negotiated authorized media origins egresses
+		// from the pool instead of this server. Nil-safe: without Redis the
+		// store reports itself disabled and every such attempt stays API-local.
+		playbackHandler.ProxyGrantStore = noderecipe.NewProxyGrantStore(deps.RedisClient, 0)
 		if deps.Config != nil {
 			playbackHandler.PlaybackConfig = func() config.PlaybackConfig {
 				return deps.CurrentConfig().Playback

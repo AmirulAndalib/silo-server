@@ -110,6 +110,26 @@ func TestPlaybackURLBuildersRefuseTokensForMediaAuthorizedSessions(t *testing.T)
 	if token := handler.signSessionToken(card, false); token == "" {
 		t.Fatal("signer refused a legacy session with a configured secret")
 	}
+
+	// The authorized-origins builders publish the same proxy origin the legacy
+	// ones do, but address it by session id against a stored grant — so they
+	// must never fall back to minting the credential the mode removed.
+	grants := &recordingProxyGrantStoreV3{}
+	handler.ProxyGrantStore = grants
+	got, servedByProxy := handler.identityGrantStreamURLV3(context.Background(), secure, file, proxy)
+	if !servedByProxy || got != proxy.URL+"/stream/v3/session-secure" {
+		t.Fatalf("origins identity URL = %q (proxy %v), want the credential-free proxy route", got, servedByProxy)
+	}
+	assertNoPlaybackCredentialV3(t, got)
+	if _, ok := grants.cards["session-secure"]; !ok {
+		t.Fatal("origins identity URL was published without a grant behind it")
+	}
+
+	got, servedByProxy = handler.grantManifestURLV3(context.Background(), card, proxy)
+	if !servedByProxy || got != proxy.URL+"/stream/v3/session-secure/master.m3u8" {
+		t.Fatalf("origins manifest URL = %q (proxy %v), want the credential-free proxy manifest", got, servedByProxy)
+	}
+	assertNoPlaybackCredentialV3(t, got)
 }
 
 // escalationFixtureV3 plans a progressive remux that must convert audio, which
@@ -161,7 +181,7 @@ func escalationFixtureV3(t *testing.T, hlsCapable bool) (*PlaybackHandler, playb
 // capacity error it can only recover from with a replan round trip.
 func TestEscalateRefusedProgressiveRemuxV3PlansHLSForCapableClients(t *testing.T) {
 	handler, input, result := escalationFixtureV3(t, true)
-	escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), true, func() playback.PlannerInputV3 { return input }, result)
+	escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), mediaAuthModeV3{headerAuth: true}, func() playback.PlannerInputV3 { return input }, result)
 	if transportErr != nil {
 		t.Fatalf("escalation error = %#v", transportErr)
 	}
@@ -174,7 +194,7 @@ func TestEscalateRefusedProgressiveRemuxV3PlansHLSForCapableClients(t *testing.T
 // final: a retryable error would make it retry a route no retry can satisfy.
 func TestEscalateRefusedProgressiveRemuxV3IsTerminalForProgressiveOnlyClients(t *testing.T) {
 	handler, input, result := escalationFixtureV3(t, false)
-	_, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), true, func() playback.PlannerInputV3 { return input }, result)
+	_, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), mediaAuthModeV3{headerAuth: true}, func() playback.PlannerInputV3 { return input }, result)
 	if transportErr == nil || transportErr.reason != "local_transcode_disabled" || transportErr.retryable {
 		t.Fatalf("transport error = %#v, want a non-retryable local_transcode_disabled", transportErr)
 	}
@@ -187,11 +207,11 @@ func TestEscalateRefusedProgressiveRemuxV3LeavesExecutableRoutesAlone(t *testing
 		planned++
 		return input
 	}
-	if escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), false, plannerInput, result); transportErr != nil || escalated.Plan.Delivery != playback.DeliveryRemuxProgressiveV3 {
+	if escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), mediaAuthModeV3{}, plannerInput, result); transportErr != nil || escalated.Plan.Delivery != playback.DeliveryRemuxProgressiveV3 {
 		t.Fatalf("legacy attempt was escalated: %#v %#v", escalated.Plan, transportErr)
 	}
 	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"playback.local_transcode_fallback": "true"}}
-	if escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), true, plannerInput, result); transportErr != nil || escalated.Plan.Delivery != playback.DeliveryRemuxProgressiveV3 {
+	if escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), mediaAuthModeV3{headerAuth: true}, plannerInput, result); transportErr != nil || escalated.Plan.Delivery != playback.DeliveryRemuxProgressiveV3 {
 		t.Fatalf("locally executable remux was escalated: %#v %#v", escalated.Plan, transportErr)
 	}
 	if planned != 0 {

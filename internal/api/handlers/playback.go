@@ -157,28 +157,32 @@ type PlaybackHandler struct {
 	SessionSyncer           PlaybackSessionSyncer // optional; enables immediate session sync to shared admin view
 	EventsHub               *evt.Hub
 	MissingMarker           MissingFileMarker
-	NodePlanner             nodepool.SessionPlanner   // optional; enables proxy/transcode node selection
-	JWTSecret               string                    // needed for signing stream tokens
-	ItemAccess              PlaybackItemAccessChecker // optional; enables file authorization checks
-	EpisodeLookup           PlaybackEpisodeLookup     // optional; resolves episode files to their series
-	ExtraLookup             PlaybackExtraLookup       // optional; resolves extras files to their parent item
-	OriginalLangLookup      PlaybackOriginalLanguageLookup
-	SettingsRepo            PlaybackSettingsReader     // optional; reads server settings (e.g., allow_4k_transcode)
-	FileVersionFetcher      PlaybackFileVersionFetcher // optional; queries sibling file versions for 4K guard
-	ProbeEnsurer            PlaybackProbeEnsurer       // optional; repairs missing probe metadata on demand
-	ChapterThumbnailQueuer  PlaybackChapterThumbnailQueuer
-	IntroAnalyzer           IntroEpisodeAnalyzer
-	IntroRepository         PlaybackIntroEligibilityChecker
-	MarkerRegistry          *markers.Registry
-	MarkerResolver          markers.ExternalIDResolver
-	MarkerUpserter          PlaybackMarkerUpserter
-	MarkerUpdateNotifier    PlaybackMarkerUpdateNotifier
-	MarkerLazyContext       context.Context
-	MarkerLazyInFlight      sync.Map
-	SubtitleRepo            subtitles.Repository // optional; enables downloaded subtitles in playback
-	RealtimeHub             *playback.RealtimeHub
-	CommandTracker          *playback.CommandTracker
-	CommandDispatcher       *playback.CommandDispatcher
+	NodePlanner             nodepool.SessionPlanner // optional; enables proxy/transcode node selection
+	JWTSecret               string                  // needed for signing stream tokens
+	// ProxyGrantStore hands a proxy the recipe it serves a header-authenticated
+	// session from. Optional: without it (or without Redis behind it) an attempt
+	// that negotiated authorized_media_origins_v1 simply stays on the API origin.
+	ProxyGrantStore        proxyGrantStoreV3
+	ItemAccess             PlaybackItemAccessChecker // optional; enables file authorization checks
+	EpisodeLookup          PlaybackEpisodeLookup     // optional; resolves episode files to their series
+	ExtraLookup            PlaybackExtraLookup       // optional; resolves extras files to their parent item
+	OriginalLangLookup     PlaybackOriginalLanguageLookup
+	SettingsRepo           PlaybackSettingsReader     // optional; reads server settings (e.g., allow_4k_transcode)
+	FileVersionFetcher     PlaybackFileVersionFetcher // optional; queries sibling file versions for 4K guard
+	ProbeEnsurer           PlaybackProbeEnsurer       // optional; repairs missing probe metadata on demand
+	ChapterThumbnailQueuer PlaybackChapterThumbnailQueuer
+	IntroAnalyzer          IntroEpisodeAnalyzer
+	IntroRepository        PlaybackIntroEligibilityChecker
+	MarkerRegistry         *markers.Registry
+	MarkerResolver         markers.ExternalIDResolver
+	MarkerUpserter         PlaybackMarkerUpserter
+	MarkerUpdateNotifier   PlaybackMarkerUpdateNotifier
+	MarkerLazyContext      context.Context
+	MarkerLazyInFlight     sync.Map
+	SubtitleRepo           subtitles.Repository // optional; enables downloaded subtitles in playback
+	RealtimeHub            *playback.RealtimeHub
+	CommandTracker         *playback.CommandTracker
+	CommandDispatcher      *playback.CommandDispatcher
 	// PlaybackConfig returns the current playback config (ffmpeg path,
 	// hwaccel, transcode dir). Wired to the live config in integrated mode
 	// so admin changes apply to newly started transcodes. Read it through
@@ -935,6 +939,11 @@ func (h *PlaybackHandler) finalizeSessionStop(ctx context.Context, session *play
 	}
 
 	h.closeTranscodeForSession(session)
+	// A session that ends must stop egressing everywhere, not just here: the
+	// grant is a proxy's whole authority to serve these bytes, and unlike the
+	// recipe card it is never a reconstruction aid, so it is revoked on every
+	// stop and abort.
+	h.deleteProxyGrantV3(ctx, session.ID)
 	if syncNow {
 		h.syncSessionsNow(ctx, syncReason)
 	}
@@ -969,6 +978,11 @@ func (h *PlaybackHandler) finalizeSessionAbort(ctx context.Context, session *pla
 	// Abort is a connection drop / non-terminal teardown — keep the recipe card
 	// so the client can reconstruct on reconnect.
 	h.closeTranscodeForSession(session)
+	// A session that ends must stop egressing everywhere, not just here: the
+	// grant is a proxy's whole authority to serve these bytes, and unlike the
+	// recipe card it is never a reconstruction aid, so it is revoked on every
+	// stop and abort.
+	h.deleteProxyGrantV3(ctx, session.ID)
 	if syncNow {
 		h.syncSessionsNow(ctx, syncReason)
 	}

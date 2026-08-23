@@ -98,13 +98,14 @@ the document is always the full one:
   "protocol_versions": [3],
   "features": ["playback_plan_v3", "neutral_playback_v3_contract_v1", "layout_aware_passthrough", "playback_route_diagnostics",
                "device_quirks_v1", "seek_reanchor_v1", "output_change_v1", "direct_stream_resume_v1",
-               "header_authenticated_media_v1", "software_video_decode_v1", "plan_source_duration_v1"],
+               "header_authenticated_media_v1", "authorized_media_origins_v1", "software_video_decode_v1",
+               "plan_source_duration_v1"],
   "deliveries": ["original_http", "server_remux_progressive", "server_remux_hls", "server_transcode_hls"],
   "transformations": [{"name": "audio_to_aac", "executor": "server", "recipe_version": "1", "validated_claims": ["audio_decode"]}]
 }
 ```
 
-The eleven feature strings above are the full set this server version advertises:
+The twelve feature strings above are the full set this server version advertises:
 
 | Feature | What it promises |
 | --- | --- |
@@ -116,7 +117,8 @@ The eleven feature strings above are the full set this server version advertises
 | `seek_reanchor_v1` | The `seek_reanchor` replan operation is available (§6) |
 | `output_change_v1` | The `output_change` intent replan is available; clients must keep the active route when this feature is absent |
 | `direct_stream_resume_v1` | A direct route may resume mid-file rather than restarting |
-| `header_authenticated_media_v1` | An opted-in client receives only API-local media URLs without signed credentials in their query or path, and authenticates every media request with its normal Authorization header (§4.1) |
+| `header_authenticated_media_v1` | An opted-in client receives media URLs without signed credentials in their query or path, and authenticates every media request with its normal Authorization header (§4.1) |
+| `authorized_media_origins_v1` | Meaningful only with the token above: the client also honors credential-free absolute media URLs on server-designated proxy origins, which restores distributed egress for a header-authenticated attempt (§4.1) |
 | `software_video_decode_v1` | Exact/platform-attested clients may qualify bounded `video_decode[]` entries with `hardware: false` for direct/original delivery; without the opt-in those evidence tiers remain hardware-only (§3) |
 | `plan_source_duration_v1` | `source.duration_seconds` is populated when known, so its absence means *unknown* rather than *unsupported* (§5) |
 
@@ -474,8 +476,12 @@ re-request headers from `header_refresh_url` rather than restarting playback.
 
 `header_authenticated_media_v1` is an engine-neutral client opt-in. A client
 uses it only after the server advertises the same token, then includes it in the
-top-level `client_features` on start and replan requests. For that attempt the
-server returns only relative URLs on the authenticated API origin:
+top-level `client_features` on start and replan requests. It negotiates *how*
+media URLs authenticate; `authorized_media_origins_v1` (below) separately
+negotiates *which origins* may serve them.
+
+With `header_authenticated_media_v1` alone, the server returns only relative
+URLs on the authenticated API origin:
 
 - direct and progressive remux: `/stream/{session_id}` (an ordinary `seek`
   parameter may still be present);
@@ -498,6 +504,31 @@ behind the API. A client that advertises no HLS delivery gets the non-retryable
 terminal `local_transcode_disabled` rather than a retryable capacity error it
 could only retry forever.
 
+**Authorized media origins.** A client that also sends
+`authorized_media_origins_v1` promises something further: it will fetch media
+from absolute URLs the plan returns on origins the server designates, attaching
+the same `Authorization` header it sends the API. For such an attempt a plan may
+return a proxy origin instead of a relative path:
+
+- direct and progressive remux: `{proxy}/stream/v3/{session_id}` (again with an
+  ordinary `seek` parameter when non-zero);
+- remux/transcode HLS: `{proxy}/stream/v3/{session_id}/master.m3u8`, whose
+  segment URIs stay relative and therefore resolve inside the same family.
+
+Those URLs still carry no credential of any kind — no `st`, no token path
+segment, no query parameter. The proxy is told what to serve out of band, and
+authenticates the caller itself: it validates the same access token against the
+same live login session the API checks, so revoking a session stops proxy
+playback immediately, exactly as it stops API playback. A server with no proxy
+pool, or one that cannot record the handoff, simply keeps the attempt on the API
+origin — the URLs above are an addition a plan may make, never one a client may
+assume. The escalation described just above therefore applies only when no proxy
+origin is available to run the remux.
+
+Only media moves. Start, replan, route events, progress and every other
+control-plane call stay on the API origin, and the attempt's plan remains the
+sole authority for which URL to fetch.
+
 The client must attach its current `Authorization: Bearer ...` header to the
 manifest/file request and every derived request, including HLS segments,
 subtitle artifacts and font bundles. `stream.headers` deliberately does not
@@ -517,14 +548,15 @@ credential-bearing URL.
 
 ### 4.2 Media and subtitle URL query parameters
 
-Every URL a plan publishes belongs to one of two route families, and the query
-parameters each family accepts are part of the contract. A client replays the
+Every URL a plan publishes belongs to one of the route families below, and the
+query parameters each family accepts are part of the contract. A client replays the
 URL it was handed byte-for-byte; it never composes one, never drops a
 parameter, and never carries a parameter across families.
 
 | Route family | Routes | Query parameters |
 | --- | --- | --- |
 | Media | `/stream/{session_id}`, `/playback/transcode/{session_id}/master.m3u8` and its segments | `seek` only — the progressive-remux start offset in seconds, present only when it is non-zero |
+| Media on a designated origin | `{proxy}/stream/v3/{session_id}`, `{proxy}/stream/v3/{session_id}/master.m3u8` and its `segment/{name}` children (§4.1) | `seek` only, with the same meaning; these routes never accept a credential parameter of any kind |
 | Subtitle artifact | `/stream/{session_id}/subtitles/{combined_index}{.ext}`, `/stream/{session_id}/subtitles/{combined_index}/fonts` | `file_id`, always; plus `downloaded_subtitle_id` when the track is a downloaded or AI-generated one (§8) |
 
 A media route never carries `file_id` or `downloaded_subtitle_id` — the session
@@ -674,18 +706,19 @@ seek is not an authority boundary for replacing the client's declared abilities
 mid-session.
 
 **Attempt-sticky features.** `client_features` is otherwise refreshed by any
-replan that sends it, but two entries are fixed by the start negotiation and a
+replan that sends it, but three entries are fixed by the start negotiation and a
 replan can neither add nor drop them:
 
 | Feature | Why it is fixed |
 | --- | --- |
 | `header_authenticated_media_v1` | It selects the media security contract. A signed URL from an earlier plan stays usable until its recipe expires, so a mid-attempt switch would leave two contracts alive for one session (§4.1) |
+| `authorized_media_origins_v1` | It selects which origins may serve the attempt's media. A plan that already handed out a proxy origin outlives the replan that would revoke it, so the client would be left holding a URL it no longer trusts (§4.1) |
 | `software_video_decode_v1` | It widens the direct-play evidence tiers. Dropping it converts a direct route into a transcode and persists that downgrade into the durable request |
 
-The server silently restores the negotiated state of both, whatever the replan
+The server silently restores the negotiated state of each, whatever the replan
 sends — including an explicit list that omits one, which is otherwise a valid
 way to drop a feature. Seek replans never replace the feature list at all.
-Changing either mode means stopping and starting a new attempt.
+Changing any of these modes means stopping and starting a new attempt.
 
 ---
 

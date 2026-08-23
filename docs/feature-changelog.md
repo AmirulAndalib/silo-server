@@ -1,5 +1,10 @@
 # Feature Changelog
 
+## 2026-08-23
+
+### Serve tokenless playback from proxy nodes again
+Playback protocol v3 now advertises the engine-neutral `authorized_media_origins_v1` opt-in, which a client sends together with `header_authenticated_media_v1`. Plans for such an attempt may return absolute, still credential-free media URLs on server-designated proxy origins (`/stream/v3/...`), so direct play, progressive remux, and HLS egress from the node pool instead of the API server. The proxy validates the caller's own access token against the same live login session the API checks, so revoking a session stops proxy playback immediately; replans and every other control-plane call stay on the API. A client that sends only `header_authenticated_media_v1` keeps today's API-local behavior unchanged, and so does a deployment with no proxy pool.
+
 ## 2026-08-22
 
 ### Qualify bounded software video decoders without weakening evidence tiers

@@ -34,14 +34,26 @@ const (
 	// access-token Authorization header to every media request, including HLS
 	// manifests/segments and sidecar subtitle/font requests.
 	FeatureHeaderAuthenticatedMediaV3 = "header_authenticated_media_v1"
-	PlanRecipeVersionV3               = "v3.4"
-	ClientDV7ToDV81V3                 = "client_dv7_to_dv81"
-	ClientDV7ToHDR10V3                = "client_dv7_to_hdr10"
-	ClientDVTransformVersionV3        = "1"
-	ClientDV8HDR10PlusSanitizerV3     = "client_dv8_hdr10plus_sanitizer_v1"
-	ClientPostResumeRecoveryV3        = "client_post_resume_video_recovery_v1"
-	ClientSurfaceRecoveryV3           = "client_surface_recovery_v1"
-	DeviceQuirkRegistryRevisionV3     = "2026-07-13.1"
+	// FeatureAuthorizedMediaOriginsV3 is the client's promise to fetch media
+	// from the absolute URLs a plan returns on server-designated origins (proxy
+	// nodes), attaching its normal access-token Authorization header to those
+	// requests exactly as it does to the API origin. It is meaningful only
+	// together with header_authenticated_media_v1: on its own there is nothing
+	// to designate, because a legacy attempt already receives signed proxy URLs
+	// that authenticate themselves.
+	//
+	// Without it a header-authenticated attempt stays entirely on the API
+	// origin, so every byte egresses from the API server; with it the plan may
+	// hand out credential-free proxy origins and distributed egress is restored.
+	FeatureAuthorizedMediaOriginsV3 = "authorized_media_origins_v1"
+	PlanRecipeVersionV3             = "v3.4"
+	ClientDV7ToDV81V3               = "client_dv7_to_dv81"
+	ClientDV7ToHDR10V3              = "client_dv7_to_hdr10"
+	ClientDVTransformVersionV3      = "1"
+	ClientDV8HDR10PlusSanitizerV3   = "client_dv8_hdr10plus_sanitizer_v1"
+	ClientPostResumeRecoveryV3      = "client_post_resume_video_recovery_v1"
+	ClientSurfaceRecoveryV3         = "client_surface_recovery_v1"
+	DeviceQuirkRegistryRevisionV3   = "2026-07-13.1"
 )
 
 // ServerFeaturesV3 returns the complete feature set advertised by protocol-v3
@@ -58,6 +70,7 @@ func ServerFeaturesV3() []string {
 		FeatureOutputChangeV3,
 		FeatureDirectStreamResumeV3,
 		FeatureHeaderAuthenticatedMediaV3,
+		FeatureAuthorizedMediaOriginsV3,
 		FeatureSoftwareVideoDecodeV3,
 		// Advertised so a client can tell "this server does not populate
 		// source.duration_seconds" apart from "this server knows the runtime
@@ -1128,13 +1141,17 @@ func HasFeatureV3(features []string, wanted string) bool {
 //   - header_authenticated_media_v1 picks the media security contract. A legacy
 //     signed URL from an earlier plan can outlive the plan that minted it, so
 //     switching mid-attempt would leave two contracts alive for one session.
+//   - authorized_media_origins_v1 selects which origins may serve the attempt's
+//     media. The trust set a client honors must not change mid-attempt: a plan
+//     that already handed out a proxy origin outlives the replan that would
+//     revoke it, so the client would be left holding a URL it no longer trusts.
 //   - software_video_decode_v1 widens the direct-play evidence tiers. Dropping
 //     it on a replan silently converts a direct route into a transcode and
 //     persists that downgrade into the durable normalized request.
 //
-// Stop/start is the explicit boundary for changing either.
+// Stop/start is the explicit boundary for changing any of them.
 func AttemptStickyFeaturesV3() []string {
-	return []string{FeatureHeaderAuthenticatedMediaV3, FeatureSoftwareVideoDecodeV3}
+	return []string{FeatureHeaderAuthenticatedMediaV3, FeatureAuthorizedMediaOriginsV3, FeatureSoftwareVideoDecodeV3}
 }
 
 // PinAttemptStickyFeaturesV3 returns requested with every attempt-sticky
