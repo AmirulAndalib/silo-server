@@ -167,11 +167,11 @@ func (s *Server) Handler() http.Handler {
 		// Credential-free grant routes (authorized_media_origins_v1). Same media
 		// bytes as the token routes above, addressed by session id and
 		// authorized by the caller's own Authorization header.
-		r.Head("/stream/v3/{session_id}", s.handleGrantIdentity)
-		r.Get("/stream/v3/{session_id}", s.handleGrantIdentity)
-		r.Head("/stream/v3/{session_id}/master.m3u8", s.handleGrantTranscodeManifest)
-		r.Get("/stream/v3/{session_id}/master.m3u8", s.handleGrantTranscodeManifest)
-		r.Get("/stream/v3/{session_id}/segment/{name}", s.handleGrantTranscodeSegment)
+		r.Head("/stream/v3/{session_id}", observeProxy(s.telemetry, http.MethodHead, "/stream/v3/{session_id}", s.handleGrantIdentity))
+		r.Get("/stream/v3/{session_id}", observeProxy(s.telemetry, http.MethodGet, "/stream/v3/{session_id}", s.handleGrantIdentity))
+		r.Head("/stream/v3/{session_id}/master.m3u8", observeProxy(s.telemetry, http.MethodHead, "/stream/v3/{session_id}/master.m3u8", s.handleGrantTranscodeManifest))
+		r.Get("/stream/v3/{session_id}/master.m3u8", observeProxy(s.telemetry, http.MethodGet, "/stream/v3/{session_id}/master.m3u8", s.handleGrantTranscodeManifest))
+		r.Get("/stream/v3/{session_id}/segment/{name}", observeProxy(s.telemetry, http.MethodGet, "/stream/v3/{session_id}/segment/{name}", s.handleGrantTranscodeSegment))
 		r.Get("/stream/subtitles/{token}/{track}/fonts", observeProxy(s.telemetry, http.MethodGet, "/stream/subtitles/{token}/{track}/fonts", s.handleSubtitleFonts))
 		r.Get("/stream/subtitles/{token}/{track}", observeProxy(s.telemetry, http.MethodGet, "/stream/subtitles/{token}/{track}", s.handleSubtitle))
 		r.Head("/downloads/file/{token}", observeProxy(s.telemetry, http.MethodHead, "/downloads/file/{token}", s.handleDownloadFile))
