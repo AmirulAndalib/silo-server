@@ -1011,6 +1011,10 @@ func NewRouter(deps Dependencies) chi.Router {
 		// from the pool instead of this server. Nil-safe: without Redis the
 		// store reports itself disabled and every such attempt stays API-local.
 		playbackHandler.ProxyGrantStore = noderecipe.NewProxyGrantStore(deps.RedisClient, 0)
+		// Hand transcode nodes the recipes they rebuild header-authenticated remote
+		// transcodes from after a restart. Same nil-safety: without Redis such a
+		// session replans instead of recovering, as it did before.
+		playbackHandler.NodeRecipeStore = noderecipe.NewStore(deps.RedisClient, 0)
 		if deps.Config != nil {
 			playbackHandler.PlaybackConfig = func() config.PlaybackConfig {
 				return deps.CurrentConfig().Playback

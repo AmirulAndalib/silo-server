@@ -50,6 +50,10 @@ const (
 	// the fetch helper's own 10s timeout: planning happens on the start
 	// request path, where a slow node must degrade the union, not the user.
 	v3NodeCapabilityPlanTimeout = 3 * time.Second
+	// The node-recipe handoff is restart insurance written while the client is
+	// blocked on the start response, so a stalled store must lose the insurance
+	// rather than the start. Matches the jellycompat handoff's budget.
+	nodeRecipeWriteTimeoutV3 = 2 * time.Second
 )
 
 var errSubtitleStoreUnavailableV3 = errors.New("subtitle store unavailable")
@@ -109,20 +113,22 @@ func headerAuthenticatedMediaV3(clientFeatures []string) mediaAuthModeV3 {
 	}
 }
 
-// proxyGrantStoreV3 hands a media-authorized session's recipe to the proxy that
-// will serve it. The grant replaces the signed URL token as the proxy's
-// instruction set; the proxy still authenticates the caller itself.
-type proxyGrantStoreV3 interface {
-	// Enabled reports whether the store can actually carry a grant. A disabled
-	// store accepts Put silently, so a URL that only a stored grant can serve
+// recipeCardStoreV3 is the shared control-plane store central hands a recipe
+// card to another Silo process through (*noderecipe.Store). One instance owns
+// one key space; the handler holds two of them, and what a stored card
+// authorizes or rebuilds is the field's business, not the interface's — see
+// PlaybackHandler.ProxyGrantStore and PlaybackHandler.NodeRecipeStore.
+type recipeCardStoreV3 interface {
+	// Enabled reports whether the store can actually carry a card. A disabled
+	// store accepts Put silently, so a URL that only a stored card can serve
 	// must not be published without checking it.
 	Enabled() bool
-	// Get reads the grant a session currently egresses from. A replan uses it
-	// to remember the recipe it is about to overwrite, so a failed replacement
-	// can hand the restored plan its authority back.
-	Get(ctx context.Context, sessionID string) (*playback.RecipeCard, bool)
-	Put(ctx context.Context, sessionID string, card playback.RecipeCard) error
-	Delete(ctx context.Context, sessionID string) error
+	// Get reads the card currently stored under key. A replan uses it to
+	// remember the card it is about to overwrite, so a failed replacement can
+	// hand the restored plan its authority back.
+	Get(ctx context.Context, key string) (*playback.RecipeCard, bool)
+	Put(ctx context.Context, key string, card playback.RecipeCard) error
+	Delete(ctx context.Context, key string) error
 }
 
 type transportErrorV3 struct {
@@ -170,6 +176,14 @@ type replacementStateManagerV3 interface {
 
 type sessionReservationReleaserV3 interface {
 	ReleaseSession(string)
+}
+
+// sessionProxyReservationReleaserV3 gives back only the proxy half of a node
+// reservation, for a start that keeps its transcode node but publishes a URL the
+// planned proxy does not serve. Optional: a planner without the method simply
+// keeps the whole reservation until it ages out. *nodepool.Planner implements it.
+type sessionProxyReservationReleaserV3 interface {
+	ReleaseSessionProxy(string)
 }
 
 func (e *transportErrorV3) Error() string {
@@ -1072,6 +1086,7 @@ func (h *PlaybackHandler) prepareIdentityTransportV3(r *http.Request, session *p
 			h.tm.CloseTranscodeSession(session.ID, "")
 			if previousNodeURL != "" {
 				h.tm.StopRemoteTranscode(previousTransportID, previousNodeURL)
+				h.deleteNodeRecipeV3(r.Context(), previousTransportID)
 			}
 			h.revokeStaleProxyGrantOnCommitV3(r.Context(), session.ID, mode, servedByProxy)
 			h.applyRemoteTransportMarkV3(r.Context(), session.ID, servedByProxy)
@@ -1201,6 +1216,45 @@ func (h *PlaybackHandler) deleteProxyGrantV3(ctx context.Context, sessionID stri
 	if err := h.ProxyGrantStore.Delete(context.WithoutCancel(ctx), sessionID); err != nil {
 		slog.WarnContext(ctx, "failed to revoke proxy egress grant",
 			"component", "api", "playback_session_id", sessionID, "error", err)
+	}
+}
+
+// putNodeRecipeV3 hands the transcode node the recipe it rebuilds this job from
+// after a restart, keyed by the transport id the node serves it under (which is
+// the id in every relayed node URL, not the playback session id).
+//
+// It exists because a header-authenticated attempt publishes no stream token, so
+// neither the client nor this server's relay has a recipe to forward when the
+// node comes back empty — the node would 404 until the client replanned. A node
+// dying mid-stream is a normal event, so tokenless playback recovers from it the
+// way a legacy token attempt already does.
+//
+// Best effort, exactly like the jellycompat handoff: the write is bounded and a
+// failure only forfeits restart resilience for this session, never the start.
+func (h *PlaybackHandler) putNodeRecipeV3(ctx context.Context, transportID string, card playback.RecipeCard) {
+	if h == nil || h.NodeRecipeStore == nil || transportID == "" {
+		return
+	}
+	putCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), nodeRecipeWriteTimeoutV3)
+	defer cancel()
+	if err := h.NodeRecipeStore.Put(putCtx, transportID, card); err != nil {
+		slog.WarnContext(ctx, "persist node transcode recipe failed; this session cannot survive a node restart",
+			"component", "api", "playback_session_id", card.SessionID, "transport", transportID,
+			"node", card.TranscodeNodeURL, "error", err)
+	}
+}
+
+// deleteNodeRecipeV3 drops a transport's stored recipe so a buffered or retrying
+// request cannot resurrect a transcode the server has replaced or ended. The
+// store's TTL is only the backstop for the paths that never run (a crashed API
+// process); every deliberate teardown deletes here.
+func (h *PlaybackHandler) deleteNodeRecipeV3(ctx context.Context, transportID string) {
+	if h == nil || h.NodeRecipeStore == nil || transportID == "" {
+		return
+	}
+	if err := h.NodeRecipeStore.Delete(context.WithoutCancel(ctx), transportID); err != nil {
+		slog.WarnContext(ctx, "failed to drop the node transcode recipe",
+			"component", "api", "transport", transportID, "error", err)
 	}
 }
 
@@ -1659,6 +1713,7 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 			}
 			if previousNodeURL != "" {
 				h.tm.StopRemoteTranscode(previousTransportID, previousNodeURL)
+				h.deleteNodeRecipeV3(r.Context(), previousTransportID)
 			}
 			ts.SetRestartHook(func(ctx context.Context) {
 				h.maybeStartThrottler(ctx, ts)
@@ -1708,6 +1763,7 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 		h.tm.StopRemoteTranscode(transportID, node.URL)
 		return preparedTransportV3{}, &transportErrorV3{reason: transcodeStartFailedReasonV3, message: "The selected transcode node rejected the playback transport.", retryable: true}
 	}
+	card := remoteTranscodeRecipeCardV3(session, file, node.URL, transportID, req, nodeResp)
 	url := fmt.Sprintf("/playback/transcode/%s/master.m3u8", session.ID)
 	// Either URL builder only returns an absolute proxy URL when a proxy was
 	// planned and its authority (a signed token, or a stored grant) could
@@ -1719,12 +1775,28 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 	var priorGrant *playback.RecipeCard
 	switch {
 	case !mode.headerAuth:
-		card := remoteTranscodeRecipeCardV3(session, file, node.URL, transportID, req, nodeResp)
 		url = h.buildProxyManifestURL(card, nodePlan.ProxyNode, mode.headerAuth)
 		servedByProxy = nodePlan.ProxyNode != nil && strings.HasPrefix(url, "http")
 	case mode.proxyEgress:
-		card := remoteTranscodeRecipeCardV3(session, file, node.URL, transportID, req, nodeResp)
 		url, servedByProxy, priorGrant = h.grantManifestURLV3(r.Context(), card, nodePlan.ProxyNode)
+	}
+	if mode.headerAuth {
+		// No client-visible URL carries a stream token in this mode, so neither the
+		// client nor the API relay can hand the node its recipe back after the node
+		// restarts. Store it for the node to fetch. Both sub-modes need it: the
+		// API-local relay is the fallback whenever a proxy origin is not used, and
+		// the proxy relays the same tokenless node URLs when it is.
+		h.putNodeRecipeV3(r.Context(), transportID, card)
+	}
+	if nodePlan.ProxyNode != nil && !servedByProxy {
+		// The planner charged a proxy for a stream that will not cross it (no
+		// writable grant, or a legacy no-token fallback). Give back the proxy half
+		// of the reservation now rather than let it pin that node's job slot and
+		// estimated bandwidth until it ages out; the transcode node keeps its half,
+		// because it is running the job.
+		if releaser, ok := h.NodePlanner.(sessionProxyReservationReleaserV3); ok {
+			releaser.ReleaseSessionProxy(session.ID)
+		}
 	}
 	committed := false
 	previousNodeURL := session.TranscodeNodeURL
@@ -1738,6 +1810,7 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 		h.tm.CloseTranscodeSession(session.ID, "")
 		if previousNodeURL != "" {
 			h.tm.StopRemoteTranscode(previousTransportID, previousNodeURL)
+			h.deleteNodeRecipeV3(r.Context(), previousTransportID)
 		}
 		h.revokeStaleProxyGrantOnCommitV3(r.Context(), session.ID, mode, servedByProxy)
 		h.applyRemoteTransportMarkV3(r.Context(), session.ID, servedByProxy)
@@ -1748,6 +1821,8 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 		}
 		committed = true
 		h.tm.StopRemoteTranscode(transportID, node.URL)
+		// The node job this recipe rebuilds is gone, so the recipe must go too.
+		h.deleteNodeRecipeV3(r.Context(), transportID)
 		// The accepted node job is gone; drop the planner reservation too so
 		// repeated failed starts cannot pin the node's max-job or bandwidth
 		// budget until the reservation ages out.

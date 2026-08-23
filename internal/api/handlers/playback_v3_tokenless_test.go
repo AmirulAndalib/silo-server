@@ -114,7 +114,7 @@ func TestPlaybackURLBuildersRefuseTokensForMediaAuthorizedSessions(t *testing.T)
 	// The authorized-origins builders publish the same proxy origin the legacy
 	// ones do, but address it by session id against a stored grant — so they
 	// must never fall back to minting the credential the mode removed.
-	grants := &recordingProxyGrantStoreV3{}
+	grants := &recordingRecipeCardStoreV3{}
 	handler.ProxyGrantStore = grants
 	got, servedByProxy, _ := handler.identityGrantStreamURLV3(context.Background(), secure, file, proxy)
 	if !servedByProxy || got != proxy.URL+"/stream/v3/session-secure" {

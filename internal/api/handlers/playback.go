@@ -162,7 +162,15 @@ type PlaybackHandler struct {
 	// ProxyGrantStore hands a proxy the recipe it serves a header-authenticated
 	// session from. Optional: without it (or without Redis behind it) an attempt
 	// that negotiated authorized_media_origins_v1 simply stays on the API origin.
-	ProxyGrantStore        proxyGrantStoreV3
+	ProxyGrantStore recipeCardStoreV3
+	// NodeRecipeStore hands a transcode node the recipe it rebuilds a
+	// header-authenticated remote transcode from after its own restart, keyed by
+	// the transport id the node serves it under. A legacy attempt needs none —
+	// its client URL carries the recipe in a stream token — but a tokenless
+	// relayed request has nothing to reconstruct from. Optional and best effort:
+	// without it (or without Redis behind it) such a session replans instead of
+	// recovering, exactly as before.
+	NodeRecipeStore        recipeCardStoreV3
 	ItemAccess             PlaybackItemAccessChecker // optional; enables file authorization checks
 	EpisodeLookup          PlaybackEpisodeLookup     // optional; resolves episode files to their series
 	ExtraLookup            PlaybackExtraLookup       // optional; resolves extras files to their parent item
@@ -944,6 +952,10 @@ func (h *PlaybackHandler) finalizeSessionStop(ctx context.Context, session *play
 	// recipe card it is never a reconstruction aid, so it is revoked on every
 	// stop and abort.
 	h.deleteProxyGrantV3(ctx, session.ID)
+	// The teardown above stopped the remote job, so its stored recipe must not
+	// outlive it: a buffered or retrying request would otherwise rebuild ffmpeg on
+	// the node for a transport that no longer exists.
+	h.deleteNodeRecipeV3(ctx, session.TranscodeTransportID)
 	if syncNow {
 		h.syncSessionsNow(ctx, syncReason)
 	}
@@ -983,6 +995,10 @@ func (h *PlaybackHandler) finalizeSessionAbort(ctx context.Context, session *pla
 	// recipe card it is never a reconstruction aid, so it is revoked on every
 	// stop and abort.
 	h.deleteProxyGrantV3(ctx, session.ID)
+	// The teardown above stopped the remote job, so its stored recipe must not
+	// outlive it: a buffered or retrying request would otherwise rebuild ffmpeg on
+	// the node for a transport that no longer exists.
+	h.deleteNodeRecipeV3(ctx, session.TranscodeTransportID)
 	if syncNow {
 		h.syncSessionsNow(ctx, syncReason)
 	}

@@ -3909,6 +3909,9 @@ type recordingNodePlannerV3 struct {
 	estBitrateKbps   int
 	plannedSessionID string
 	released         []string
+	// releasedProxy records the proxy-half releases: a start that keeps its
+	// transcode node but publishes a URL the planned proxy does not serve.
+	releasedProxy []string
 }
 
 func (p *recordingNodePlannerV3) PlanSession(sessionID, _ string, needsTranscode bool, estBitrateKbps int) nodepool.Plan {
@@ -3920,6 +3923,10 @@ func (p *recordingNodePlannerV3) PlanSession(sessionID, _ string, needsTranscode
 
 func (p *recordingNodePlannerV3) ReleaseSession(sessionID string) {
 	p.released = append(p.released, sessionID)
+}
+
+func (p *recordingNodePlannerV3) ReleaseSessionProxy(sessionID string) {
+	p.releasedProxy = append(p.releasedProxy, sessionID)
 }
 
 // PlanSessionWith mirrors the real planner: the eligibility predicate narrows

@@ -14,10 +14,11 @@ import (
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 )
 
-// recordingProxyGrantStoreV3 stands in for the shared Redis grant store: it
-// records what a proxy would be told to serve, so a test can assert on the
+// recordingRecipeCardStoreV3 stands in for either key space of the shared Redis
+// recipe store: it records what a proxy would be told to serve, or what a
+// restarted transcode node would rebuild from, so a test can assert on the
 // authority the URL depends on rather than only on the URL's shape.
-type recordingProxyGrantStoreV3 struct {
+type recordingRecipeCardStoreV3 struct {
 	disabled bool
 	putErr   error
 	cards    map[string]playback.RecipeCard
@@ -27,9 +28,9 @@ type recordingProxyGrantStoreV3 struct {
 	ops []string
 }
 
-func (s *recordingProxyGrantStoreV3) Enabled() bool { return !s.disabled }
+func (s *recordingRecipeCardStoreV3) Enabled() bool { return !s.disabled }
 
-func (s *recordingProxyGrantStoreV3) Get(_ context.Context, sessionID string) (*playback.RecipeCard, bool) {
+func (s *recordingRecipeCardStoreV3) Get(_ context.Context, sessionID string) (*playback.RecipeCard, bool) {
 	s.ops = append(s.ops, "get")
 	card, ok := s.cards[sessionID]
 	if !ok {
@@ -38,7 +39,7 @@ func (s *recordingProxyGrantStoreV3) Get(_ context.Context, sessionID string) (*
 	return &card, true
 }
 
-func (s *recordingProxyGrantStoreV3) Put(_ context.Context, sessionID string, card playback.RecipeCard) error {
+func (s *recordingRecipeCardStoreV3) Put(_ context.Context, sessionID string, card playback.RecipeCard) error {
 	s.ops = append(s.ops, "put")
 	if s.putErr != nil {
 		return s.putErr
@@ -50,7 +51,7 @@ func (s *recordingProxyGrantStoreV3) Put(_ context.Context, sessionID string, ca
 	return nil
 }
 
-func (s *recordingProxyGrantStoreV3) Delete(_ context.Context, sessionID string) error {
+func (s *recordingRecipeCardStoreV3) Delete(_ context.Context, sessionID string) error {
 	s.ops = append(s.ops, "delete")
 	s.deleted = append(s.deleted, sessionID)
 	delete(s.cards, sessionID)
@@ -69,7 +70,7 @@ func TestPrepareTransportV3AuthorizedOriginsRestoreDirectPlayProxyEgress(t *test
 	handler.JWTSecret = "test-secret"
 	planner := &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: "http://proxy-1"}}}
 	handler.NodePlanner = planner
-	grants := &recordingProxyGrantStoreV3{}
+	grants := &recordingRecipeCardStoreV3{}
 	handler.ProxyGrantStore = grants
 	file := v3HandlerFixtureFile(t)
 
@@ -119,7 +120,7 @@ func TestPrepareTransportV3AuthorizedOriginsRollbackRestoresTheDisplacedGrant(t 
 	handler.JWTSecret = "test-secret"
 	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: "http://proxy-1"}}}
 	priorCard := playback.RecipeCard{SessionID: "session-origin-replan", UserID: 7, InputPath: "/media/previous-plan.mkv"}
-	grants := &recordingProxyGrantStoreV3{cards: map[string]playback.RecipeCard{"session-origin-replan": priorCard}}
+	grants := &recordingRecipeCardStoreV3{cards: map[string]playback.RecipeCard{"session-origin-replan": priorCard}}
 	handler.ProxyGrantStore = grants
 	file := v3HandlerFixtureFile(t)
 
@@ -163,7 +164,7 @@ func TestPrepareTransportV3AuthorizedOriginsCommitOffTheProxyRevokesTheGrant(t *
 	// No proxy in the plan: direct play needs no server work, so this attempt
 	// legitimately commits onto the API-local identity route.
 	handler.NodePlanner = &recordingNodePlannerV3{}
-	grants := &recordingProxyGrantStoreV3{cards: map[string]playback.RecipeCard{
+	grants := &recordingRecipeCardStoreV3{cards: map[string]playback.RecipeCard{
 		"session-origin-offproxy": {SessionID: "session-origin-offproxy", UserID: 7, InputPath: "/media/previous-plan.mkv"},
 	}}
 	handler.ProxyGrantStore = grants
@@ -200,7 +201,7 @@ func TestPrepareTransportV3AuthorizedOriginsCarryRemuxSourceFacts(t *testing.T) 
 	stubCopySeekAnchorV3(handler)
 	proxy := capableProxyStubV3(t)
 	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: proxy.URL + "/"}}}
-	grants := &recordingProxyGrantStoreV3{}
+	grants := &recordingRecipeCardStoreV3{}
 	handler.ProxyGrantStore = grants
 
 	file := v3HandlerFixtureFile(t)
@@ -239,10 +240,10 @@ func TestPrepareTransportV3AuthorizedOriginsCarryRemuxSourceFacts(t *testing.T) 
 func TestPrepareTransportV3AuthorizedOriginsFallBackToTheAPIWhenTheGrantFails(t *testing.T) {
 	for _, test := range []struct {
 		name  string
-		store *recordingProxyGrantStoreV3
+		store *recordingRecipeCardStoreV3
 	}{
-		{name: "write error", store: &recordingProxyGrantStoreV3{putErr: errors.New("redis is down")}},
-		{name: "store disabled", store: &recordingProxyGrantStoreV3{disabled: true}},
+		{name: "write error", store: &recordingRecipeCardStoreV3{putErr: errors.New("redis is down")}},
+		{name: "store disabled", store: &recordingRecipeCardStoreV3{disabled: true}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
@@ -283,7 +284,7 @@ func TestPrepareTransportV3AuthorizedOriginsRefuseLocalRemuxWhenTheGrantFails(t 
 	proxy := capableProxyStubV3(t)
 	planner := &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: proxy.URL}}}
 	handler.NodePlanner = planner
-	handler.ProxyGrantStore = &recordingProxyGrantStoreV3{putErr: errors.New("redis is down")}
+	handler.ProxyGrantStore = &recordingRecipeCardStoreV3{putErr: errors.New("redis is down")}
 
 	transport, transportErr := handler.prepareTransportV3(
 		httptest.NewRequest(http.MethodPost, "/", nil),
@@ -309,7 +310,7 @@ func TestPrepareTransportV3HeaderAuthOnlyStaysOnTheAPIOrigin(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "test-secret"
 	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: "http://proxy-1"}}}
-	grants := &recordingProxyGrantStoreV3{}
+	grants := &recordingRecipeCardStoreV3{}
 	handler.ProxyGrantStore = grants
 
 	transport, transportErr := handler.prepareTransportV3(
@@ -357,7 +358,7 @@ func TestPrepareTransportV3AuthorizedOriginsPublishGrantBackedHLSManifest(t *tes
 	handler.JWTSecret = "test-secret"
 	planner := &recordingNodePlannerV3{plan: nodepool.Plan{TranscodeNode: &nodepool.Node{URL: node.URL}, ProxyNode: &nodepool.Node{URL: "http://proxy-1"}}}
 	handler.NodePlanner = planner
-	grants := &recordingProxyGrantStoreV3{}
+	grants := &recordingRecipeCardStoreV3{}
 	handler.ProxyGrantStore = grants
 
 	plan := &playback.PlanV3{
@@ -399,7 +400,7 @@ func TestPrepareTransportV3AuthorizedOriginsPublishGrantBackedHLSManifest(t *tes
 func TestEscalateRefusedProgressiveRemuxV3SkipsEscalationWhenOriginsHaveAProxy(t *testing.T) {
 	handler, input, result := escalationFixtureV3(t, true)
 	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: "http://proxy-1"}}}
-	handler.ProxyGrantStore = &recordingProxyGrantStoreV3{}
+	handler.ProxyGrantStore = &recordingRecipeCardStoreV3{}
 
 	escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), authorizedOriginsModeV3(), func() playback.PlannerInputV3 { return input }, result)
 	if transportErr != nil {
@@ -415,7 +416,7 @@ func TestEscalateRefusedProgressiveRemuxV3SkipsEscalationWhenOriginsHaveAProxy(t
 func TestEscalateRefusedProgressiveRemuxV3StillEscalatesWithoutAnyProxyOrigin(t *testing.T) {
 	handler, input, result := escalationFixtureV3(t, true)
 	handler.NodePlanner = &recordingNodePlannerV3{}
-	handler.ProxyGrantStore = &recordingProxyGrantStoreV3{}
+	handler.ProxyGrantStore = &recordingRecipeCardStoreV3{}
 
 	escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), authorizedOriginsModeV3(), func() playback.PlannerInputV3 { return input }, result)
 	if transportErr != nil {
@@ -434,10 +435,10 @@ func TestEscalateRefusedProgressiveRemuxV3StillEscalatesWithoutAnyProxyOrigin(t 
 func TestEscalateRefusedProgressiveRemuxV3StillEscalatesWithoutAUsableGrantStore(t *testing.T) {
 	for _, test := range []struct {
 		name  string
-		store proxyGrantStoreV3
+		store recipeCardStoreV3
 	}{
 		{name: "no grant store", store: nil},
-		{name: "grant store disabled", store: &recordingProxyGrantStoreV3{disabled: true}},
+		{name: "grant store disabled", store: &recordingRecipeCardStoreV3{disabled: true}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			handler, input, result := escalationFixtureV3(t, true)
