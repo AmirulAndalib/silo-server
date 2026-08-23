@@ -340,7 +340,7 @@ export default function ActionBar({
             variant="glass-static"
             onClick={onToggleWatched}
             disabled={isUpdatingWatched}
-            className={`${responsiveWatchedActionClass} h-11 cursor-pointer rounded-full px-5 text-[14px] font-semibold`}
+            className={`${compositedGlassHoverClass} ${responsiveWatchedActionClass} h-11 cursor-pointer rounded-full px-5 text-[14px] font-semibold`}
           >
             <Check className="size-[18px]" />
             {watchedLabel}

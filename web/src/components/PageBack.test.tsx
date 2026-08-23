@@ -103,7 +103,8 @@ describe("PageBack", () => {
       "rounded-full",
       "p-1.5",
     );
-    expect(button).not.toHaveClass("hover:bg-accent", "transition-colors");
+    expect(button).not.toHaveClass("hover:bg-accent");
+    expect(button).not.toHaveClass("transition-colors");
   });
 
   it("pins to the viewport on lg+ when floating is set", () => {
