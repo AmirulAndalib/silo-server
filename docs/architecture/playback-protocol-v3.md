@@ -401,14 +401,25 @@ HAL — can supply that. `platform_attested` and `declared` audio evidence still
 qualify for ordinary decode/copy routes; they simply cannot earn
 `claims.audio.passthrough = true`.
 
-**HDR is decided against the output, not the decoder.** `output.hdr_details` (the
-display or receiver actually attached) takes precedence over
-`client_capabilities.hdr_details` (what the device could do in principle). A
-source whose dynamic range is recorded as `hdr_unknown` — legacy rows that only
-stored a file-level HDR boolean — is treated as HDR10 when the output supports
-HDR10, and the plan carries the `hdr_range_assumed_hdr10` degradation warning.
-Refusing to play those outright would be worse than an assumption the client is
-told about.
+**Native HDR presentation is decided against the output, not the decoder.**
+`output.hdr_details` (the display or receiver actually attached) takes
+precedence over `client_capabilities.hdr_details` (what the device could do in
+principle). A source whose dynamic range is recorded as `hdr_unknown` — legacy
+rows that only stored a file-level HDR boolean — is treated as HDR10 when the
+output supports HDR10, and the plan carries the `hdr_range_assumed_hdr10`
+degradation warning. Refusing to play those outright would be worse than an
+assumption the client is told about.
+
+There is one delivery-scoped exception. An `original_http` capability carrying
+the validated claim `client_managed_dynamic_range_v1` asserts that its executor
+accepts the declared source range and resolves presentation against the live
+output after receiving the original bytes. The planner may therefore deliver
+HDR or Dolby Vision through that class even when the active sink does not
+natively advertise the source range. The exception does not apply to
+`progressive` or `hls`: those server-packaged streams remain output-gated. The
+output snapshot is still retained for plan identity, diagnostics, output-change
+replans, explicit Dolby Vision transformation selection, and future server
+tone-map targeting.
 
 The web client does not promote the generic high-dynamic-range media query to a
 format claim, and it does not gate format claims on it either. Decoder capability
@@ -443,6 +454,14 @@ client negotiates in three classes.
 | `server_remux_hls` | `hls` | Repackaged into HLS segments; codecs untouched |
 | `server_transcode_hls` | `hls` | Re-encoded and segmented |
 
+Because `original_http` carries the complete source file, a client may put
+`client_selected_audio_track_v1` in that delivery's `validated_claims`. The
+claim says it maps `selected_tracks.audio.index` onto its probed source
+inventory, so selecting a non-default audio track does not by itself require
+the server to remux the file. Without the claim, the historical default-track
+gate remains. A claiming client that cannot honor the identity reports a typed
+playback failure so the bounded replan ladder can choose a packaged route.
+
 `client_playback_context.deliveries` is keyed by **class**, because a client's
 answer to "can you play HLS" does not differ between a remux and a transcode —
 the same player component handles both. The server folds its four values into
@@ -470,6 +489,14 @@ Both booleans must be true for the class to be eligible; they are separate
 because "the user turned HLS off" and "this device has no HLS player" call for
 different degradation warnings and different diagnostics. A class the client
 omits entirely is unavailable — the server will not guess.
+
+`client_managed_dynamic_range_v1` is valid only as a `validated_claims` entry
+on `original_http`. It is not a selectable transformation: the server supplies
+the source and the client executor probes and routes it internally. If that
+executor later reports a typed load failure, normal attempted-plan-key
+exclusion applies. Until a server tone-map recipe exists, an exhausted HDR
+original route terminates honestly rather than pretending an ordinary video
+transcode can produce a supported result.
 
 `stream.header_refresh` tells the client what to do when the stream URL's auth
 expires: `none` means the URL is stable for the session, `session` means
@@ -1122,6 +1149,13 @@ Duplicate `executor:name:recipe_version` triples are rejected. Client
 transformations participate in plan identity exactly like server ones, so a
 client that changes its transform version invalidates its prior attempt keys —
 which is the intent.
+
+Automatic work wholly owned by an original-file executor is not enumerated as
+a transformation merely because it can include demuxing, local repackaging,
+audio bridging, or display adaptation. Those operations do not give the server
+a distinct selectable output recipe. Use a delivery claim for an executor
+property; reserve transformations for named outcomes the server deliberately
+selects and can describe in the plan.
 
 ---
 
