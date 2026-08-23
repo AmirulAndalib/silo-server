@@ -110,14 +110,53 @@ func NewCopySafetyNotifier(
 
 // VideoCopyUnsafe reports that fileID cannot be video stream-copied after all.
 // Sessions that are not on a copy route for that file are left alone.
+//
+// The verdict can land in the gap between a plan being decided and its session
+// becoming visible to the lookup — the scan and the start path race, and the
+// scan can win by milliseconds. One immediate pass would miss such a session
+// entirely and leave it playing a route the verdict just condemned, so a second
+// file-wide look runs after the settle window for sessions that appeared late.
+// Sessions the first pass saw are excluded: they were either acted on or have
+// their own per-session deferred look.
 func (n *CopySafetyNotifier) VideoCopyUnsafe(ctx context.Context, fileID int) {
 	if n == nil || fileID <= 0 {
 		return
 	}
 
+	seen := make(map[string]struct{})
 	for _, session := range n.sessions.GetSessionsByMediaFileID(fileID) {
+		if session != nil && session.ID != "" {
+			seen[session.ID] = struct{}{}
+		}
 		n.consider(ctx, session, fileID, true)
 	}
+	n.sweepLateSessionsAfter(ctx, fileID, seen, n.settleWindow())
+}
+
+// sweepLateSessionsAfter re-lists the file's sessions once the settle window
+// has passed and considers only the ones the immediate pass never saw. Like
+// reconsiderAfter, it must not inherit the scan context's cancellation.
+func (n *CopySafetyNotifier) sweepLateSessionsAfter(ctx context.Context, fileID int, seen map[string]struct{}, wait time.Duration) {
+	parent := context.WithoutCancel(ctx)
+	go func() {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		<-timer.C
+		ctx, cancel := context.WithTimeout(parent, copySafetyReconsiderTimeout)
+		defer cancel()
+		for _, session := range n.sessions.GetSessionsByMediaFileID(fileID) {
+			if session == nil || session.ID == "" {
+				continue
+			}
+			if _, handled := seen[session.ID]; handled {
+				continue
+			}
+			// The settle window has already elapsed since the verdict; a session
+			// still younger than that was planned after the verdict persisted and
+			// should never have been given a copy route at all.
+			n.consider(ctx, session, fileID, false)
+		}
+	}()
 }
 
 // consider decides what to do with one session the file lookup returned.
@@ -185,6 +224,16 @@ func (n *CopySafetyNotifier) reconsiderAfter(ctx context.Context, sessionID stri
 
 // settleRemaining reports how much of the settle window a session still has
 // left. A session with no recorded start is treated as settled.
+// settleWindow is the delay before the late-session sweep; zero settle keeps a
+// small floor so the sweep still runs after the start path has had time to
+// register the session.
+func (n *CopySafetyNotifier) settleWindow() time.Duration {
+	if n.settle <= 0 {
+		return CopySafetySessionSettleWindow
+	}
+	return n.settle
+}
+
 func (n *CopySafetyNotifier) settleRemaining(session *Session) time.Duration {
 	if n.settle <= 0 || session.StartedAt.IsZero() {
 		return 0

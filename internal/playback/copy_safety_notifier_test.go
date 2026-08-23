@@ -464,3 +464,35 @@ func TestCopySafetyNotifierCompletedResultKeepsSession(t *testing.T) {
 		t.Fatalf("stopped = %v, want the session kept after a completed replan", stopped)
 	}
 }
+
+// Regression for the scan winning the race against the start path by
+// milliseconds: the verdict lands while the session is being built, so the
+// immediate pass finds nothing at all. The deferred file-wide sweep must catch
+// the session that appears moments later, or it plays a condemned route
+// forever (observed live: plan decided at t, verdict persisted at t+4ms,
+// session registered after both, zero notifier action).
+func TestCopySafetyNotifierSweepsSessionsThatAppearAfterTheVerdict(t *testing.T) {
+	sessions, hub, tracker, control := newCopySafetyFixture(t)
+	notifier := NewCopySafetyNotifier(sessions, nil, NewCommandDispatcher(sessions, hub, tracker), control)
+	notifier.settle = 20 * time.Millisecond
+
+	// Verdict lands first; no session exists yet.
+	notifier.VideoCopyUnsafe(context.Background(), 100)
+
+	// The start path finishes registering the session just after.
+	session, err := sessions.StartSession(1, "profile-1", 100, PlayRemux, false)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if stopped := control.stoppedSessions(); len(stopped) == 1 && stopped[0] == session.ID {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stopped = %v, want the late-registered session swept after the settle window", control.stoppedSessions())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
