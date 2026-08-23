@@ -113,12 +113,23 @@ type MediaFile struct {
 	PresentationPartTotal        int
 	MultiEpisodeStart            int
 	MultiEpisodeEnd              int
-	ProbeSource                  string // arrs, local
-	ProbeUpdatedAt               *time.Time
-	MatchAttemptedAt             *time.Time
-	MissingSince                 *time.Time
-	CreatedAt                    time.Time
-	UpdatedAt                    time.Time
+	// MultiplePPS is the persisted H.264 multi-PPS copy-safety verdict; nil
+	// means the file has never been successfully analyzed. It is trusted only
+	// when MultiplePPSScanSize and MultiplePPSScanMtime still match the file's
+	// current size and mtime, so a rewritten file self-invalidates without any
+	// coordination from the writers that touch media_files.
+	//
+	// json:"-" on all three: MediaFile is not a client-facing shape, and the
+	// runtime copy-safety signal clients do act on lives on VideoTrack.
+	MultiplePPS          *bool      `json:"-"`
+	MultiplePPSScanSize  *int64     `json:"-"`
+	MultiplePPSScanMtime *time.Time `json:"-"`
+	ProbeSource          string     // arrs, local
+	ProbeUpdatedAt       *time.Time
+	MatchAttemptedAt     *time.Time
+	MissingSince         *time.Time
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 // MediaChapter represents a single media chapter derived from embedded file metadata.

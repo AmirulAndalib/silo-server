@@ -123,8 +123,15 @@ type PlaybackFileVersionFetcher interface {
 	GetByEpisodeID(ctx context.Context, episodeID string) ([]*models.MediaFile, error)
 }
 
+// PlaybackProbeEnsurer repairs probe metadata and resolves the H.264
+// copy-safety verdict. Playback keeps the full Ensure: the planner consumes
+// the verdict to decide whether a video stream-copy is safe.
+//
+// EnsureProbeOnly is declared so the same value satisfies catalog's narrower
+// browse-side contract when it is handed to the detail service.
 type PlaybackProbeEnsurer interface {
 	Ensure(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error)
+	EnsureProbeOnly(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error)
 }
 
 type PlaybackChapterThumbnailQueuer interface {

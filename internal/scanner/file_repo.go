@@ -59,6 +59,7 @@ const fileColumns = `id, content_id, episode_id, extra_id, season_number, episod
 	edition_raw, edition_key, edition_confidence, edition_source,
 	presentation_kind, presentation_group_key, presentation_part_index, presentation_part_total,
 	multi_episode_start, multi_episode_end,
+	multiple_pps, multiple_pps_scan_size, multiple_pps_scan_mtime,
 	probe_source, probe_updated_at, match_attempted_at, missing_since, created_at, updated_at`
 
 const overlayFileColumns = `content_id, episode_id, media_folder_id, file_path,
@@ -82,6 +83,7 @@ const mfFileColumns = `mf.id, mf.content_id, mf.episode_id, mf.extra_id, mf.seas
 	mf.edition_raw, mf.edition_key, mf.edition_confidence, mf.edition_source,
 	mf.presentation_kind, mf.presentation_group_key, mf.presentation_part_index, mf.presentation_part_total,
 	mf.multi_episode_start, mf.multi_episode_end,
+	mf.multiple_pps, mf.multiple_pps_scan_size, mf.multiple_pps_scan_mtime,
 	mf.probe_source, mf.probe_updated_at, mf.match_attempted_at, mf.missing_since, mf.created_at, mf.updated_at`
 
 // scanMediaFile scans a single row into a *models.MediaFile.
@@ -196,6 +198,9 @@ func scanMediaFile(row pgx.Row) (*models.MediaFile, error) {
 		&presentationPartTotal,
 		&multiEpisodeStart,
 		&multiEpisodeEnd,
+		&f.MultiplePPS,
+		&f.MultiplePPSScanSize,
+		&f.MultiplePPSScanMtime,
 		&probeSource,
 		&f.ProbeUpdatedAt,
 		&f.MatchAttemptedAt,
@@ -506,6 +511,9 @@ func scanMediaFiles(rows pgx.Rows) ([]*models.MediaFile, error) {
 			&presentationPartTotal,
 			&multiEpisodeStart,
 			&multiEpisodeEnd,
+			&f.MultiplePPS,
+			&f.MultiplePPSScanSize,
+			&f.MultiplePPSScanMtime,
 			&probeSource,
 			&f.ProbeUpdatedAt,
 			&f.MatchAttemptedAt,
@@ -1165,6 +1173,35 @@ func (r *FileRepository) SetChapterThumbnailFailure(
 	)
 	if err != nil {
 		return fmt.Errorf("updating chapter thumbnail failure state: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrFileNotFound
+	}
+	return nil
+}
+
+// UpdateMultiplePPS records the H.264 multi-PPS copy-safety verdict together
+// with the size and mtime it was computed from, so a later read can tell
+// whether the file has been rewritten since.
+//
+// It deliberately does not go through Upsert: that path also clears
+// match_suppressed_at and missing_since, which a copy-safety scan has no
+// business touching.
+func (r *FileRepository) UpdateMultiplePPS(ctx context.Context, fileID int, multiplePPS bool, scanSize int64, scanMtime time.Time) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE media_files
+		SET multiple_pps = $2,
+		    multiple_pps_scan_size = $3,
+		    multiple_pps_scan_mtime = $4,
+		    updated_at = NOW()
+		WHERE id = $1`,
+		fileID,
+		multiplePPS,
+		scanSize,
+		scanMtime,
+	)
+	if err != nil {
+		return fmt.Errorf("updating multiple pps verdict: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrFileNotFound

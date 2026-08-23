@@ -44,7 +44,11 @@ type batchDurationFetcher interface {
 }
 
 type PlaybackProbeEnsurer interface {
+	// Ensure repairs probe metadata and resolves the H.264 copy-safety
+	// verdict; EnsureProbeOnly does the repair alone. Browse surfaces use the
+	// latter — see prepareBrowseFiles.
 	Ensure(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error)
+	EnsureProbeOnly(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error)
 }
 
 type ChapterThumbnailQueuer interface {
@@ -1359,7 +1363,7 @@ func (s *DetailService) buildExtraItemDetail(ctx context.Context, contentID stri
 		return nil, fmt.Errorf("fetching extra files: %w", err)
 	}
 	files = FilterMediaFilesByAccess(files, filter)
-	files = s.preparePlaybackFiles(ctx, files)
+	files = s.prepareBrowseFiles(ctx, files)
 
 	detail := &ItemDetail{
 		ContentID: extra.ContentID,
@@ -1846,7 +1850,7 @@ func (s *DetailService) buildMediaItemDetail(ctx context.Context, item *models.M
 		if item.Type == "audiobook" {
 			sortAudiobookMediaFiles(files)
 		}
-		files = s.preparePlaybackFiles(ctx, files)
+		files = s.prepareBrowseFiles(ctx, files)
 		detail.Versions, detail.PlaybackVariants, detail.Subtitles, detail.Intro, detail.Credits, detail.Recap, detail.Preview = s.buildPlaybackInfo(
 			ctx,
 			files,
@@ -2697,7 +2701,7 @@ func (s *DetailService) buildEpisodeDetail(ctx context.Context, episode *models.
 		return nil, fmt.Errorf("fetching file versions: %w", err)
 	}
 	files = FilterMediaFilesByAccess(files, filter)
-	files = s.preparePlaybackFiles(ctx, files)
+	files = s.prepareBrowseFiles(ctx, files)
 	detail.Versions, detail.PlaybackVariants, detail.Subtitles, detail.Intro, detail.Credits, detail.Recap, detail.Preview = s.buildPlaybackInfo(
 		ctx,
 		files,
@@ -3694,7 +3698,22 @@ func fileIDOrZero(version *FileVersion) int {
 	return version.FileID
 }
 
+// preparePlaybackFiles repairs probe metadata and resolves the H.264
+// copy-safety verdict. Used by the watch surfaces, where a play is being
+// prepared and the verdict is about to matter.
 func (s *DetailService) preparePlaybackFiles(ctx context.Context, files []*models.MediaFile) []*models.MediaFile {
+	return s.prepareFiles(ctx, files, true)
+}
+
+// prepareBrowseFiles repairs probe metadata only. Item, episode and extra
+// detail pages never consume the copy-safety verdict — it is not serialized
+// into their responses — so scanning for it there was pure warm-up that cost a
+// multi-second read per H.264 file on remote storage.
+func (s *DetailService) prepareBrowseFiles(ctx context.Context, files []*models.MediaFile) []*models.MediaFile {
+	return s.prepareFiles(ctx, files, false)
+}
+
+func (s *DetailService) prepareFiles(ctx context.Context, files []*models.MediaFile, withCopySafety bool) []*models.MediaFile {
 	if len(files) == 0 {
 		return files
 	}
@@ -3705,7 +3724,13 @@ func (s *DetailService) preparePlaybackFiles(ctx context.Context, files []*model
 			continue
 		}
 		if s.probeEnsurer != nil {
-			ensured, err := s.probeEnsurer.Ensure(ctx, file)
+			var ensured *models.MediaFile
+			var err error
+			if withCopySafety {
+				ensured, err = s.probeEnsurer.Ensure(ctx, file)
+			} else {
+				ensured, err = s.probeEnsurer.EnsureProbeOnly(ctx, file)
+			}
 			if err == nil && ensured != nil {
 				file = ensured
 			}
