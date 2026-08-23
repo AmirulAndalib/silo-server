@@ -121,6 +121,11 @@ type copySafetyResult struct {
 	size  int64
 	mtime *time.Time
 	multi bool
+	// persisted records whether this verdict reached the media_files row. A
+	// verdict memoized with persisted=false is correct for this process but
+	// invisible to every other replica, so a later lookup retries the write —
+	// the write only, never the scan.
+	persisted bool
 }
 
 // matches reports whether a memoized verdict still describes the given file.
@@ -193,6 +198,7 @@ func (e *PlaybackProbeEnsurer) EnsureCopySafetyCached(ctx context.Context, file 
 		return current, nil
 	}
 	if multi, ok := e.knownCopySafetyVerdict(current); ok {
+		e.retryUnpersistedCopySafety(ctx, current)
 		return fileWithMultiplePPS(current, multi), nil
 	}
 	return current, nil
@@ -234,13 +240,12 @@ func (e *PlaybackProbeEnsurer) knownCopySafetyVerdict(file *models.MediaFile) (b
 	if e == nil || file == nil {
 		return false, false
 	}
-	if cached, ok := e.copySafety.Load(file.ID); ok {
-		if result, ok := cached.(copySafetyResult); ok && result.matches(file) {
-			return result.multi, true
-		}
+	if entry, ok := e.memoizedCopySafety(file); ok {
+		return entry.multi, true
 	}
 	if multi, ok := persistedCopySafetyVerdict(file); ok {
-		e.storeCopySafety(file, multi)
+		// The row already holds it, so there is nothing left to write.
+		e.storeCopySafety(file, multi, true)
 		return multi, true
 	}
 	return false, false
@@ -289,6 +294,7 @@ func (e *PlaybackProbeEnsurer) ensureCopySafety(ctx context.Context, file *model
 	}
 
 	if multi, ok := e.knownCopySafetyVerdict(file); ok {
+		e.retryUnpersistedCopySafety(ctx, file)
 		return fileWithMultiplePPS(file, multi), nil
 	}
 
@@ -312,7 +318,9 @@ func (e *PlaybackProbeEnsurer) ensureCopySafety(ctx context.Context, file *model
 // scanAndPersistCopySafety runs the multi-PPS bitstream scan, persists the
 // verdict, and memoizes it. Concurrent callers for the same file share one
 // scan; a failed database write is logged and the scan result is still used,
-// since it is correct for this request and the next one will retry the write.
+// since it is correct for this request. The memo remembers that the write did
+// not land, so the next lookup for the file retries it — see
+// retryUnpersistedCopySafety.
 func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, file *models.MediaFile) (bool, error) {
 	fileID := file.ID
 	filePath := file.FilePath
@@ -331,8 +339,12 @@ func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, fil
 			return false, err
 		}
 
+		// With no writer there is nowhere for the verdict to land, so it is not
+		// pending: nothing would ever clear the flag.
+		persisted := true
 		if e.copySafetyRepo != nil {
 			if writeErr := e.copySafetyRepo.UpdateMultiplePPS(ctx, fileID, multi, fileSize, fileModifiedAt); writeErr != nil {
+				persisted = false
 				slog.WarnContext(ctx, "persisting video copy-safety verdict failed",
 					"component", "scanner",
 					"file_id", fileID,
@@ -340,7 +352,7 @@ func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, fil
 				)
 			}
 		}
-		e.storeCopySafety(file, multi)
+		e.storeCopySafety(file, multi, persisted)
 		return multi, nil
 	})
 	if err != nil {
@@ -350,8 +362,62 @@ func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, fil
 	return result, nil
 }
 
-func (e *PlaybackProbeEnsurer) storeCopySafety(file *models.MediaFile, multi bool) {
-	entry := copySafetyResult{size: file.FileSize, multi: multi}
+// retryUnpersistedCopySafety re-attempts the media_files write for a verdict
+// this process already reached but never managed to store. No ffmpeg runs: the
+// memo holds the answer, so this is a bare UPDATE.
+//
+// Without the retry a single failed write is lost until the process restarts.
+// The verdict stays correct here, but every other replica keeps rescanning the
+// same file and keeps planning fresh sessions onto the copy route it condemns.
+// The write shares scanAndPersistCopySafety's singleflight key, so a burst of
+// playback requests for one file cannot stampede the row, and a retry racing a
+// scan simply joins it.
+func (e *PlaybackProbeEnsurer) retryUnpersistedCopySafety(ctx context.Context, file *models.MediaFile) {
+	if e == nil || file == nil || e.copySafetyRepo == nil {
+		return
+	}
+	if entry, ok := e.memoizedCopySafety(file); !ok || entry.persisted {
+		return
+	}
+
+	fileID := file.ID
+	_, _, _ = e.copySafetyFlight.Do(strconv.Itoa(fileID), func() (any, error) {
+		// Re-read inside the flight: a concurrent scan or retry may have landed
+		// the write while this caller queued behind it.
+		entry, ok := e.memoizedCopySafety(file)
+		if !ok || entry.persisted {
+			return entry.multi, nil
+		}
+		if err := e.copySafetyRepo.UpdateMultiplePPS(ctx, fileID, entry.multi, entry.size, entry.mtime); err != nil {
+			slog.WarnContext(ctx, "retrying the video copy-safety verdict write failed",
+				"component", "scanner",
+				"file_id", fileID,
+				"error", err,
+			)
+			return entry.multi, nil
+		}
+		entry.persisted = true
+		e.copySafety.Store(fileID, entry)
+		return entry.multi, nil
+	})
+}
+
+// memoizedCopySafety returns the process-cached verdict for file, but only
+// while it still describes the file as it stands.
+func (e *PlaybackProbeEnsurer) memoizedCopySafety(file *models.MediaFile) (copySafetyResult, bool) {
+	cached, ok := e.copySafety.Load(file.ID)
+	if !ok {
+		return copySafetyResult{}, false
+	}
+	entry, ok := cached.(copySafetyResult)
+	if !ok || !entry.matches(file) {
+		return copySafetyResult{}, false
+	}
+	return entry, true
+}
+
+func (e *PlaybackProbeEnsurer) storeCopySafety(file *models.MediaFile, multi, persisted bool) {
+	entry := copySafetyResult{size: file.FileSize, multi: multi, persisted: persisted}
 	if file.FileModifiedAt != nil {
 		mtime := *file.FileModifiedAt
 		entry.mtime = &mtime

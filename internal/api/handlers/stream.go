@@ -106,7 +106,7 @@ func (h *StreamHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 	// Without a token (or signing secret) reconstruct is off, collapsing to a
 	// plain GetSession + ownership check.
 	card, claims := verifiedStreamCardFromToken(r.URL.Query().Get(streamTokenParam), sessionID, h.JWTSecret)
-	session, status := h.TM.LoadOrReconstructSession(r.Context(), h.sessionMgr.GetSession, sessionID, userID, card)
+	session, status, reconstructed := h.TM.LoadOrReconstructSessionDetail(r.Context(), h.sessionMgr.GetSession, sessionID, userID, card)
 	switch status {
 	case playback.SessionMissing:
 		writePlaybackSessionNotFound(w)
@@ -148,6 +148,17 @@ func (h *StreamHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	attachPlaybackSession(r.Context(), session, claims)
+
+	// A reconstructed remux replays a recipe committed before the copy-safety
+	// verdict existed, and no notifier can reach it — see playback_copy_safety.go.
+	if reconstructed && session.PlayMethod == playback.PlayRemux &&
+		videoCopyUnsafeByVerdict(r.Context(), file, sessionID) {
+		// The reconstruct already registered the session; tear it down again so
+		// the refusal leaves no half-live session behind the client's replan.
+		h.abortPlaybackSession(r.Context(), session)
+		writePlaybackSessionNotFound(w)
+		return
+	}
 
 	switch session.PlayMethod {
 	case playback.PlayDirect:

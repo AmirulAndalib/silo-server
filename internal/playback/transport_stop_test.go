@@ -167,6 +167,43 @@ func TestWatchTransportStopSignalsEveryTransport(t *testing.T) {
 	}
 }
 
+// The serving handler calls BeginTransport and WatchTransportStop as two
+// separate steps. A stop landing between them used to register a watcher under
+// an id nothing would ever signal again, and the progressive remux it guarded
+// ran to EOF serving a route the server had already withdrawn. A watch for a
+// session that is already gone reports the stop it missed.
+func TestWatchTransportStopAfterStopSessionIsAlreadyClosed(t *testing.T) {
+	sessions := NewSessionManager(0, 0)
+	session, err := sessions.StartSession(1, "profile-1", 100, PlayRemux, false)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	if err := sessions.BeginTransport(session.ID); err != nil {
+		t.Fatalf("BeginTransport: %v", err)
+	}
+	if err := sessions.StopSession(session.ID); err != nil {
+		t.Fatalf("StopSession: %v", err)
+	}
+
+	stop, release := sessions.WatchTransportStop(session.ID)
+	select {
+	case <-stop:
+	default:
+		t.Fatal("a transport registered after its session was stopped was left waiting for a signal that can never come")
+	}
+
+	// The release is a no-op for a watcher that was never registered, and must
+	// stay safe to call from the serving handler's defer.
+	release()
+	release()
+	sessions.mu.RLock()
+	remaining := len(sessions.transportStops)
+	sessions.mu.RUnlock()
+	if remaining != 0 {
+		t.Fatalf("transportStops holds %d sessions, want 0", remaining)
+	}
+}
+
 // A transport that finished normally unregisters itself, so a later stop for
 // the same session ID has nothing to signal and nothing to leak.
 func TestWatchTransportStopReleaseUnregisters(t *testing.T) {

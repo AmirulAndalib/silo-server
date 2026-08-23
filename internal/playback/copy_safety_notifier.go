@@ -108,6 +108,24 @@ func NewCopySafetyNotifier(
 	}
 }
 
+// copySafetyDisposition is what one call to consider did with a session, and
+// therefore whether the post-settle sweep still owes it a second look.
+type copySafetyDisposition int
+
+const (
+	// copySafetyUnresolved: consider reached no decision about this session. It
+	// did not look like it was stream-copying this file — which is the ordinary
+	// answer for an unrelated session, and also the answer during the brief
+	// window where a replan has already moved the live session but has not yet
+	// committed the durable attempt that names the new file and plan. Only the
+	// sweep can tell those apart, so the session stays eligible for it.
+	copySafetyUnresolved copySafetyDisposition = iota
+	// copySafetyDisposed: consider dealt with the session — invalidated it,
+	// stopped it, scheduled its own deferred second look, or deliberately
+	// exempted it. The sweep must leave it alone.
+	copySafetyDisposed
+)
+
 // VideoCopyUnsafe reports that fileID cannot be video stream-copied after all.
 // Sessions that are not on a copy route for that file are left alone.
 //
@@ -116,8 +134,17 @@ func NewCopySafetyNotifier(
 // scan can win by milliseconds. One immediate pass would miss such a session
 // entirely and leave it playing a route the verdict just condemned, so a second
 // file-wide look runs after the settle window for sessions that appeared late.
-// Sessions the first pass saw are excluded: they were either acted on or have
-// their own per-session deferred look.
+//
+// Only sessions the first pass actually disposed of are excluded from that
+// sweep. A session the first pass merely could not classify has to stay
+// eligible: mid-replan, the live session already names the replacement file
+// while the durable attempt still names the previous one, and the durable
+// record wins the identity test — so the session reads as "serving another
+// file" for as long as the commit takes. Marking it seen there would strand it
+// permanently, because the persisted verdict also stops any later scan from
+// re-notifying. Re-considering a genuinely unrelated session in the sweep costs
+// one plan-store read and re-runs every check, so the conservative direction is
+// free.
 func (n *CopySafetyNotifier) VideoCopyUnsafe(ctx context.Context, fileID int) {
 	if n == nil || fileID <= 0 {
 		return
@@ -125,17 +152,16 @@ func (n *CopySafetyNotifier) VideoCopyUnsafe(ctx context.Context, fileID int) {
 
 	seen := make(map[string]struct{})
 	for _, session := range n.sessions.GetSessionsByMediaFileID(fileID) {
-		if session != nil && session.ID != "" {
+		if n.consider(ctx, session, fileID, true) == copySafetyDisposed {
 			seen[session.ID] = struct{}{}
 		}
-		n.consider(ctx, session, fileID, true)
 	}
 	n.sweepLateSessionsAfter(ctx, fileID, seen, n.settleWindow())
 }
 
 // sweepLateSessionsAfter re-lists the file's sessions once the settle window
-// has passed and considers only the ones the immediate pass never saw. Like
-// reconsiderAfter, it must not inherit the scan context's cancellation.
+// has passed and considers every one the immediate pass did not dispose of.
+// Like reconsiderAfter, it must not inherit the scan context's cancellation.
 func (n *CopySafetyNotifier) sweepLateSessionsAfter(ctx context.Context, fileID int, seen map[string]struct{}, wait time.Duration) {
 	parent := context.WithoutCancel(ctx)
 	go func() {
@@ -159,19 +185,19 @@ func (n *CopySafetyNotifier) sweepLateSessionsAfter(ctx context.Context, fileID 
 	}()
 }
 
-// consider decides what to do with one session the file lookup returned.
-// maySettle is false on the deferred second look, so a session can never be
-// postponed twice.
-func (n *CopySafetyNotifier) consider(ctx context.Context, session *Session, fileID int, maySettle bool) {
+// consider decides what to do with one session the file lookup returned, and
+// reports whether it disposed of it. maySettle is false on the deferred second
+// look, so a session can never be postponed twice.
+func (n *CopySafetyNotifier) consider(ctx context.Context, session *Session, fileID int, maySettle bool) copySafetyDisposition {
 	if session == nil || session.ID == "" {
-		return
+		return copySafetyUnresolved
 	}
 	record := n.attempt(ctx, session.ID)
 	if !sessionServesFileV3(session, record, fileID) {
-		return
+		return copySafetyUnresolved
 	}
 	if !sessionOnVideoCopyRouteV3(session, record) {
-		return
+		return copySafetyUnresolved
 	}
 	if session.IsJellyfinCompat {
 		// Stopping only helps a client whose recovery re-decides the route
@@ -188,15 +214,16 @@ func (n *CopySafetyNotifier) consider(ctx context.Context, session *Session, fil
 			"file_id", fileID,
 			"reason", PlanInvalidatedVideoCopyUnsafe,
 		)
-		return
+		return copySafetyDisposed
 	}
 	if maySettle && !n.canTellClient(session, record) {
 		if wait := n.settleRemaining(session); wait > 0 {
 			n.reconsiderAfter(ctx, session.ID, fileID, wait)
-			return
+			return copySafetyDisposed
 		}
 	}
 	n.invalidate(ctx, session, record, fileID)
+	return copySafetyDisposed
 }
 
 // reconsiderAfter re-examines one session once the settle window has passed.

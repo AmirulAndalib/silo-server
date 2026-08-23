@@ -114,6 +114,14 @@ func (w *fakeCopySafetyWriter) UpdateMultiplePPS(_ context.Context, fileID int, 
 	return w.err
 }
 
+// setErr changes what the next write returns, so a test can bring a failed
+// backing store back up.
+func (w *fakeCopySafetyWriter) setErr(err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.err = err
+}
+
 func (w *fakeCopySafetyWriter) recorded() []recordedPPSWrite {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -245,6 +253,58 @@ func TestEnsureCopySafetyScanSurvivesPersistFailure(t *testing.T) {
 	}
 	if track := got.VideoTracks[0]; track.MultiplePPS == nil || !*track.MultiplePPS {
 		t.Fatalf("MultiplePPS = %v, want the scan result despite the failed write", track.MultiplePPS)
+	}
+}
+
+// A verdict whose write failed is correct in this process but invisible to
+// every other replica, which keeps rescanning the file and keeps planning fresh
+// sessions onto the copy route it condemns. The next lookup has to retry the
+// write — and only the write: the answer is already memoized, so re-running
+// ffmpeg would pay the whole bitstream read again for nothing.
+func TestEnsureCopySafetyRetriesAFailedPersistWithoutRescanning(t *testing.T) {
+	ffmpegPath, runs := fakeFFmpeg(t, conflictingPPSAnnexB, 0)
+	writer := &fakeCopySafetyWriter{err: fmt.Errorf("database unavailable")}
+	ensurer := &PlaybackProbeEnsurer{ffmpegPath: ffmpegPath, copySafetyRepo: writer}
+
+	mtime := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
+	want := recordedPPSWrite{fileID: 42, multiplePPS: true, scanSize: 1234, scanMtime: mtime, scanMtimeSet: true}
+
+	if _, err := ensurer.ensureCopySafety(context.Background(), copySafetyTestFile(mtime)); err != nil {
+		t.Fatalf("ensureCopySafety() error = %v", err)
+	}
+	if runs() != 1 {
+		t.Fatalf("ffmpeg ran %d times for the first call, want 1", runs())
+	}
+	if writes := writer.recorded(); len(writes) != 1 || writes[0] != want {
+		t.Fatalf("first-call writes = %+v, want exactly [%+v]", writes, want)
+	}
+
+	// The database comes back. The next lookup answers from the memo and
+	// retries the write behind it.
+	writer.setErr(nil)
+	got, err := ensurer.ensureCopySafety(context.Background(), copySafetyTestFile(mtime))
+	if err != nil {
+		t.Fatalf("ensureCopySafety() error = %v", err)
+	}
+	if runs() != 1 {
+		t.Fatalf("ffmpeg ran %d times, want the retry to write only", runs())
+	}
+	if track := got.VideoTracks[0]; track.MultiplePPS == nil || !*track.MultiplePPS {
+		t.Fatalf("MultiplePPS = %v, want the memoized verdict", track.MultiplePPS)
+	}
+	if writes := writer.recorded(); len(writes) != 2 || writes[1] != want {
+		t.Fatalf("writes after the retry = %+v, want the verdict written a second time as %+v", writes, want)
+	}
+
+	// The verdict has landed, so a third lookup must not touch the row again.
+	if _, err := ensurer.ensureCopySafety(context.Background(), copySafetyTestFile(mtime)); err != nil {
+		t.Fatalf("ensureCopySafety() error = %v", err)
+	}
+	if writes := writer.recorded(); len(writes) != 2 {
+		t.Fatalf("UpdateMultiplePPS called %d times, want the successful write to stop the retries", len(writes))
+	}
+	if runs() != 1 {
+		t.Fatalf("ffmpeg ran %d times overall, want 1", runs())
 	}
 }
 

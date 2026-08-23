@@ -822,6 +822,19 @@ Delivery is in-process: the replica that owns the session owns its realtime
 connection, so a verdict resolved on one node acts on the sessions that node is
 serving.
 
+The row is what covers the gap that leaves. A signed stream URL is a durable
+capability the client replays on whichever replica answers next, and a replica
+that dies between persisting a verdict and pushing the invalidation takes the
+only notifier that knew about it with it. The replacement replica has no live
+session, so it rebuilds one from the recipe card — which would replay the exact
+remux the verdict condemned. Reconstruction therefore re-reads the persisted
+verdict before it rebuilds a video stream-copy transport (a progressive remux,
+or an HLS transport whose video target is `copy`) and refuses with the ordinary
+playback-session not-found when the verdict says the source is unsafe. The
+client's existing recovery mints a fresh attempt, which plans against the same
+row and lands on a transcode. Transcode reconstruction is untouched: re-encoding
+the bitstream is unaffected by conflicting parameter sets.
+
 ---
 
 ## 7. Registries

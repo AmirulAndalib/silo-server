@@ -73,7 +73,7 @@ func TestEnsureCopySafetyCachedStampsKnownVerdicts(t *testing.T) {
 		ensurer := &PlaybackProbeEnsurer{ffmpegPath: ffmpegPath}
 
 		file := copySafetyTestFile(mtime)
-		ensurer.storeCopySafety(file, false)
+		ensurer.storeCopySafety(file, false, true)
 
 		got, err := ensurer.EnsureCopySafetyCached(context.Background(), file)
 		if err != nil {
@@ -103,7 +103,7 @@ func TestNeedsCopySafetyScan(t *testing.T) {
 	t.Run("known verdict needs none", func(t *testing.T) {
 		ensurer := &PlaybackProbeEnsurer{ffmpegPath: ffmpegPath}
 		file := copySafetyTestFile(mtime)
-		ensurer.storeCopySafety(file, true)
+		ensurer.storeCopySafety(file, true, true)
 		if ensurer.NeedsCopySafetyScan(file) {
 			t.Fatal("NeedsCopySafetyScan() = true, want false once the verdict is known")
 		}

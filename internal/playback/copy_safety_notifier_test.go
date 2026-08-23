@@ -52,16 +52,31 @@ func (c *fakeCopySafetyControl) trackedCommands() []playbackCommandNote {
 	return append([]playbackCommandNote(nil), c.remembered...)
 }
 
+// fakeAttemptLookup is read by the notifier's deferred goroutines while a test
+// is still publishing attempts to it, so it is mutex-guarded and hands out
+// copies rather than the stored record.
 type fakeAttemptLookup struct {
+	mu      sync.Mutex
 	records map[string]*AttemptRecordV3
 }
 
 func (l *fakeAttemptLookup) GetAttempt(_ context.Context, sessionID string) (*AttemptRecordV3, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	record, ok := l.records[sessionID]
 	if !ok {
 		return nil, ErrSessionNotFound
 	}
-	return record, nil
+	copied := *record
+	return &copied, nil
+}
+
+// set publishes an attempt, replacing any previous one. Callers must supply a
+// fresh record rather than mutate one they already handed over.
+func (l *fakeAttemptLookup) set(sessionID string, record *AttemptRecordV3) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.records[sessionID] = record
 }
 
 func remuxAttempt(sessionID, planID string, features ...string) *AttemptRecordV3 {
@@ -305,7 +320,7 @@ func TestCopySafetyNotifierWaitsOutTheSettleWindowBeforeStopping(t *testing.T) {
 
 	// The start finishes inside the window: the attempt lands and the client
 	// connects, so the second look finds a session it can tell instead of kill.
-	attempts.records[session.ID] = remuxAttempt(session.ID, "plan-abc", FeaturePlanInvalidatedV3)
+	attempts.set(session.ID, remuxAttempt(session.ID, "plan-abc", FeaturePlanInvalidatedV3))
 	if err := sessions.SetRealtimeConnection(session.ID, true); err != nil {
 		t.Fatalf("SetRealtimeConnection: %v", err)
 	}
@@ -462,6 +477,92 @@ func TestCopySafetyNotifierCompletedResultKeepsSession(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	if stopped := control.stoppedSessions(); len(stopped) != 0 {
 		t.Fatalf("stopped = %v, want the session kept after a completed replan", stopped)
+	}
+}
+
+// Regression for the verdict landing inside a version-changing replan. Between
+// applySession and CompleteReplan the live session already names the
+// replacement file while the durable attempt still names the previous one, and
+// the durable record wins the identity test — so the immediate pass reads the
+// session as "serving another file" and does nothing. Marking it seen there
+// would strand it: the sweep would skip it, and the now-persisted verdict stops
+// any later scan from re-notifying, leaving it remuxing a condemned route for
+// the rest of the title.
+func TestCopySafetyNotifierSweepsSessionSkippedDuringAReplanCommit(t *testing.T) {
+	sessions, hub, tracker, control := newCopySafetyFixture(t)
+	// The live session has already been moved onto file 11 by applySession.
+	session, err := sessions.StartSessionWithFiles(1, "profile-1", 11, 10, PlayRemux, false)
+	if err != nil {
+		t.Fatalf("StartSessionWithFiles: %v", err)
+	}
+
+	// The durable attempt has not been committed yet, so it still names the
+	// file the replan moved off.
+	stale := remuxAttempt(session.ID, "plan-old")
+	stale.EffectiveMediaFileID = 10
+	attempts := &fakeAttemptLookup{records: map[string]*AttemptRecordV3{session.ID: stale}}
+	notifier := NewCopySafetyNotifier(sessions, attempts, NewCommandDispatcher(sessions, hub, tracker), control)
+	notifier.settle = 20 * time.Millisecond
+
+	// The verdict for the replacement file lands mid-commit.
+	notifier.VideoCopyUnsafe(context.Background(), 11)
+
+	if stopped := control.stoppedSessions(); len(stopped) != 0 {
+		t.Fatalf("stopped = %v, want nothing while the identities disagree", stopped)
+	}
+
+	// CompleteReplan lands: live and durable state now agree on file 11.
+	committed := remuxAttempt(session.ID, "plan-new")
+	committed.EffectiveMediaFileID = 11
+	attempts.set(session.ID, committed)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if stopped := control.stoppedSessions(); len(stopped) == 1 && stopped[0] == session.ID {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stopped = %v, want the mid-replan session swept once its identities agreed", control.stoppedSessions())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// The same hole on the route test rather than the file test: mid-commit the
+// durable plan still describes the transcode the replan moved off, so the
+// session reads as "not on a copy route" even though it is now remuxing.
+func TestCopySafetyNotifierSweepsSessionWhoseDurablePlanLagsTheRoute(t *testing.T) {
+	sessions, hub, tracker, control := newCopySafetyFixture(t)
+	session, err := sessions.StartSession(1, "profile-1", 100, PlayRemux, false)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	stale := remuxAttempt(session.ID, "plan-old")
+	stale.CurrentPlan.Delivery = DeliveryTranscodeHLSV3
+	attempts := &fakeAttemptLookup{records: map[string]*AttemptRecordV3{session.ID: stale}}
+	notifier := NewCopySafetyNotifier(sessions, attempts, NewCommandDispatcher(sessions, hub, tracker), control)
+	notifier.settle = 20 * time.Millisecond
+
+	notifier.VideoCopyUnsafe(context.Background(), 100)
+
+	if stopped := control.stoppedSessions(); len(stopped) != 0 {
+		t.Fatalf("stopped = %v, want nothing while the durable plan still says transcode", stopped)
+	}
+
+	committed := remuxAttempt(session.ID, "plan-new")
+	committed.CurrentPlan.Delivery = DeliveryRemuxProgressiveV3
+	attempts.set(session.ID, committed)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if stopped := control.stoppedSessions(); len(stopped) == 1 && stopped[0] == session.ID {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stopped = %v, want the session swept once its durable plan caught up", control.stoppedSessions())
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

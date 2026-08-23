@@ -1285,6 +1285,13 @@ func (m *SessionManager) EndTransport(sessionID string) error {
 // do not need it: each of their requests is short, and the next one is refused
 // once the session is gone.
 //
+// A session that is already gone yields an immediately-closed channel. The stop
+// that removed it has run and will never run again, so a watcher registered
+// after it would be closed by nobody: the caller's BeginTransport can succeed
+// and the session be stopped before the registration lands, and the progressive
+// remux that hole leaves behind runs to EOF serving bytes the server disowned.
+// Reporting the stop it missed collapses that race into the ordinary path.
+//
 // The channel is closed at most once: StopSession takes the whole watcher set
 // out of the map under the lock before closing it, and release drops a watcher
 // that was never signaled.
@@ -1295,6 +1302,11 @@ func (m *SessionManager) WatchTransportStop(sessionID string) (<-chan struct{}, 
 
 	stop := make(chan struct{})
 	m.mu.Lock()
+	if _, live := m.sessions[sessionID]; !live {
+		m.mu.Unlock()
+		close(stop)
+		return stop, func() {}
+	}
 	if m.transportStops == nil {
 		m.transportStops = make(map[string]map[chan struct{}]struct{})
 	}
