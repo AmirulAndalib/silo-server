@@ -398,6 +398,12 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 	case playback.SessionForbidden:
 		writeError(w, http.StatusForbidden, "Forbidden", "Session belongs to another user")
 		return
+	case playback.SessionUnauthorized:
+		// Defensive against invariant drift, not a reachable path: this caller
+		// resolves a non-zero user before loading. Falling through would
+		// dereference the nil session the status carries.
+		writeError(w, http.StatusUnauthorized, "Unauthorized", "Authentication required")
+		return
 	}
 
 	transcodeSession := h.tm.GetTranscodeSession(playSession.UpstreamSessionID)

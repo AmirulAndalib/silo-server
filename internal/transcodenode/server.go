@@ -419,11 +419,15 @@ func (s *Server) reapSession(sessionID string, session *playback.TranscodeSessio
 }
 
 // recipeStore reads a remote transcode's reconstruction recipe written by central
-// at transcode start. The jellycompat node-hop token is identity-only by design —
-// not because a Jellyfin client can't round-trip it, but because the recipe is
-// mutated in place and the client can't be driven to refresh a stale token, so the
-// authoritative recipe lives server-side (see internal/noderecipe). On a node
-// restart the node fetches it here instead of 404ing. *noderecipe.Store implements it.
+// at transcode start, keyed by the transport id this node serves the job under.
+// It is the reconstruct source for every flow whose request cannot carry a
+// complete recipe itself: the jellycompat node-hop token is identity-only by
+// design — not because a Jellyfin client can't round-trip it, but because the
+// recipe is mutated in place and the client can't be driven to refresh a stale
+// token — and a header-authenticated (tokenless) attempt publishes no credential
+// at all, so the relayed request carries nothing to rebuild from (see
+// internal/noderecipe). On a node restart the node fetches the recipe here
+// instead of 404ing. *noderecipe.Store implements it.
 type recipeStore interface {
 	Get(ctx context.Context, sessionID string) (*playback.RecipeCard, bool)
 	// Delete drops a session's recipe so a buffered/retrying request after a node
@@ -433,8 +437,9 @@ type recipeStore interface {
 }
 
 // SetRecipeStore wires the control-plane recipe store so this node can rebuild a
-// jellycompat transcode after its own restart. Optional; without it a recipe-less
-// (jellycompat) token cannot reconstruct and the request 404s as before.
+// jellycompat or header-authenticated transcode after its own restart. Optional;
+// without it a request that carries no complete recipe of its own cannot
+// reconstruct and 404s as before.
 func (s *Server) SetRecipeStore(store recipeStore) {
 	s.recipeStore = store
 }
@@ -871,48 +876,54 @@ func (s *Server) requireApprovedInputPath(w http.ResponseWriter, r *http.Request
 }
 
 // reconstructFromToken rebuilds a transcode session this node lost to its own
-// restart. The proxy forwards the client's verified stream token in the
-// X-Silo-Stream-Token header; the token carries the full byte-affecting recipe
-// (the former Postgres "recipe card"), so the node can re-spawn ffmpeg seeked to
-// the requested segment rather than 404ing — mirroring the integrated server's
-// token-carried reconstruct. Returns nil when the request carries no usable
-// transcode token, which the caller renders as a genuine not-found.
+// restart, from whichever recipe source the request has.
+//
+// A legacy attempt forwards the client's verified stream token in the
+// X-Silo-Stream-Token header, and a native token carries the full byte-affecting
+// recipe (the former Postgres "recipe card"), so the node can re-spawn ffmpeg
+// seeked to the requested segment rather than 404ing — mirroring the integrated
+// server's token-carried reconstruct.
+//
+// Two flows reach this path with no usable token at all and rebuild from the
+// control-plane recipe store instead: jellycompat, whose node-hop token is
+// identity-only by design (see internal/noderecipe), and a header-authenticated
+// (tokenless) attempt, where no client-visible URL carries a credential and the
+// relayed request therefore has no token to forward. The token was never this
+// route's authorization — the static bearer already authenticated the caller —
+// so its absence only removes a recipe source, never a permission.
+//
+// Returns nil when no source yields a complete transcode recipe for the session
+// id in the URL, which the caller renders as a genuine not-found.
 //
 // requestedSegment is the segment the client is fetching, or negative on the
 // manifest path. Reconstruction is single-flighted per session id so concurrent
 // manifest and segment requests for the same lost session share one ffmpeg.
 func (s *Server) reconstructFromToken(r *http.Request, sessionID string, requestedSegment int) *playback.TranscodeSession {
-	tokenStr := r.Header.Get("X-Silo-Stream-Token")
-	if tokenStr == "" {
-		return nil
+	var card playback.RecipeCard
+	tokenComplete := false
+	if tokenStr := r.Header.Get("X-Silo-Stream-Token"); tokenStr != "" {
+		cfg := s.watcher.Config()
+		if cfg == nil {
+			return nil
+		}
+		claims, err := streamtoken.Verify(tokenStr, cfg.Auth.JWTSecret)
+		if err != nil {
+			slog.WarnContext(r.Context(), "transcode node reconstruct: invalid stream token", "component", "transcodenode", "error", err,
+				"session", sessionID, "playback_session_id", sessionID)
+			return nil
+		}
+		card = playback.RecipeCardFromClaims(claims)
+		// A presented token's recipe must be a transcode card for the session id in
+		// the URL: a mismatch is a forged or stale request, and direct/remux cards
+		// carry no encode parameters to rebuild. An empty PlayMethod is a transcode
+		// card (back-compat).
+		if !recipeServesTransport(card, sessionID) {
+			return nil
+		}
+		tokenComplete = recipeIsComplete(card)
 	}
-	cfg := s.watcher.Config()
-	if cfg == nil {
-		return nil
-	}
-	claims, err := streamtoken.Verify(tokenStr, cfg.Auth.JWTSecret)
-	if err != nil {
-		slog.WarnContext(r.Context(), "transcode node reconstruct: invalid stream token", "component", "transcodenode", "error", err,
-			"session", sessionID, "playback_session_id", sessionID)
-		return nil
-	}
-	card := playback.RecipeCardFromClaims(claims)
-	// The token's recipe must be a transcode card for the session id in the URL: a
-	// mismatch is a forged or stale request, and direct/remux cards carry no encode
-	// parameters to rebuild. An empty PlayMethod is a transcode card (back-compat).
-	expectedTransportID := card.SessionID
-	if card.TranscodeTransportID != "" {
-		expectedTransportID = card.TranscodeTransportID
-	}
-	if expectedTransportID != sessionID || (card.PlayMethod != "" && card.PlayMethod != playback.PlayTranscode) {
-		return nil
-	}
-	// A native token carries the full byte-affecting recipe. The jellycompat node
-	// hop signs an identity-only token by design (see internal/noderecipe for why),
-	// so its card decodes with no encode parameters. For the jellycompat case the
-	// recipe is fetched from the control-plane recipe store below; without that
-	// store there is nothing to rebuild from, so 404.
-	tokenComplete := card.SegmentDuration > 0 && card.TargetCodecVideo != ""
+	// Without a complete token recipe the store is the only remaining source; with
+	// no store wired there is nothing to rebuild from, so 404.
 	if !tokenComplete && s.recipeStore == nil {
 		return nil
 	}
@@ -928,12 +939,13 @@ func (s *Server) reconstructFromToken(r *http.Request, sessionID string, request
 		}
 		resolved := card
 		if !tokenComplete {
-			// Recipe-less (jellycompat) token: fetch the recipe central wrote to the
-			// control-plane store at transcode start. A miss / incomplete recipe is a
-			// genuine not-found (404), never a spawn from a bad recipe.
+			// No complete token recipe (jellycompat's identity-only token, or a
+			// header-authenticated attempt with no token at all): fetch the recipe
+			// central wrote to the control-plane store at transcode start. A miss,
+			// a recipe for another transport, or an incomplete one is a genuine
+			// not-found (404), never a spawn from a bad recipe.
 			fetched, ok := s.recipeStore.Get(r.Context(), sessionID)
-			if !ok || fetched == nil || fetched.SessionID != sessionID ||
-				fetched.SegmentDuration <= 0 || fetched.TargetCodecVideo == "" {
+			if !ok || fetched == nil || !recipeServesTransport(*fetched, sessionID) || !recipeIsComplete(*fetched) {
 				return (*playback.TranscodeSession)(nil), nil
 			}
 			resolved = *fetched
@@ -944,6 +956,31 @@ func (s *Server) reconstructFromToken(r *http.Request, sessionID string, request
 		return session
 	}
 	return nil
+}
+
+// recipeServesTransport reports whether a recipe card describes the transcode
+// this node serves under transportID — the id in the node-facing URL.
+//
+// The two writers key that id differently and both shapes are accepted. A native
+// v3 remote transcode runs under a plan-scoped transport id (so a prepared
+// successor can coexist with its predecessor), recorded on the card as
+// TranscodeTransportID; jellycompat runs under the upstream playback session id
+// and leaves the field empty, so SessionID is the transport id there. A card
+// that matches neither is a forged, stale, or misrouted request. An empty
+// PlayMethod counts as a transcode card (back-compat).
+func recipeServesTransport(card playback.RecipeCard, transportID string) bool {
+	expected := card.SessionID
+	if card.TranscodeTransportID != "" {
+		expected = card.TranscodeTransportID
+	}
+	return expected == transportID && (card.PlayMethod == "" || card.PlayMethod == playback.PlayTranscode)
+}
+
+// recipeIsComplete reports whether a recipe carries the encode parameters
+// ffmpeg needs. An identity-only card (the jellycompat node-hop token) is not
+// complete and has to be resolved against the control-plane store.
+func recipeIsComplete(card playback.RecipeCard) bool {
+	return card.SegmentDuration > 0 && card.TargetCodecVideo != ""
 }
 
 // spawnReconstruct re-spawns ffmpeg for a lost session from its recipe card and

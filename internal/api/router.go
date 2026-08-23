@@ -49,6 +49,7 @@ import (
 	metatrakt "github.com/Silo-Server/silo-server/internal/metadata/trakt"
 	metadatatranslation "github.com/Silo-Server/silo-server/internal/metadata/translation"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
+	"github.com/Silo-Server/silo-server/internal/noderecipe"
 	"github.com/Silo-Server/silo-server/internal/notifications"
 	"github.com/Silo-Server/silo-server/internal/onboarding"
 	"github.com/Silo-Server/silo-server/internal/opslog"
@@ -1005,6 +1006,15 @@ func NewRouter(deps Dependencies) chi.Router {
 		if deps.Config != nil && deps.Config.Auth.JWTSecret != "" {
 			playbackHandler.JWTSecret = deps.Config.Auth.JWTSecret
 		}
+		// Hand proxy nodes the recipes they serve header-authenticated sessions
+		// from, so an attempt that negotiated authorized media origins egresses
+		// from the pool instead of this server. Nil-safe: without Redis the
+		// store reports itself disabled and every such attempt stays API-local.
+		playbackHandler.ProxyGrantStore = noderecipe.NewProxyGrantStore(deps.RedisClient, 0)
+		// Hand transcode nodes the recipes they rebuild header-authenticated remote
+		// transcodes from after a restart. Same nil-safety: without Redis such a
+		// session replans instead of recovering, as it did before.
+		playbackHandler.NodeRecipeStore = noderecipe.NewStore(deps.RedisClient, 0)
 		if deps.Config != nil {
 			playbackHandler.PlaybackConfig = func() config.PlaybackConfig {
 				return deps.CurrentConfig().Playback
@@ -2654,9 +2664,9 @@ func NewRouter(deps Dependencies) chi.Router {
 
 					r.Route("/playback", func(r chi.Router) {
 						r.Get("/capability", playbackHandler.HandlePlaybackCapabilityV3)
-						// HLS transcode delivery — no profile auth needed;
-						// session ID (UUID) serves as the access token, same
-						// pattern as /stream/{session_id}.
+						// HLS transcode delivery. Legacy sessions treat the UUID
+						// as a bearer capability; negotiated V3 sessions require
+						// the authenticated owner inside the handler.
 						r.Get("/transcode/{session_id}/master.m3u8", playbackHandler.HandleGetTranscodeManifest)
 						r.Get("/transcode/{session_id}/segment/{name}", playbackHandler.HandleGetTranscodeSegment)
 

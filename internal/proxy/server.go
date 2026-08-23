@@ -32,7 +32,13 @@ type Server struct {
 	tracker              *nodesessions.Tracker
 	httpClient           *http.Client
 	artifactMissReporter remoteArtifactMissReporter
-	egress               *egressMeter
+	// grants and loginSessions back the credential-free /stream/v3 routes: the
+	// grant says what to serve, the login-session validator says whether the
+	// caller may still have it. Both nil in a deployment that predates the
+	// mode, which is why those routes answer 503 rather than assuming either.
+	grants        proxyGrantLookup
+	loginSessions loginSessionValidator
+	egress        *egressMeter
 	// subCache stores full-track PGS (.sup) extracts under the transcode dir
 	// so repeat selections skip the whole-file ffmpeg demux.
 	subCache *playback.SubtitleCache
@@ -68,6 +74,17 @@ func NewServer(watcher *nodeconfig.Watcher, tracker *nodesessions.Tracker) *Serv
 			return watcher.Config().Playback.TranscodeDir
 		}),
 	}
+}
+
+// SetMediaGrantAuthority wires the two dependencies the credential-free
+// /stream/v3 routes need: the store central writes a session's recipe to, and
+// the live login-session validator this proxy re-checks every request against.
+// It must be called during construction, before the server begins handling
+// requests. Either argument may be nil, which leaves those routes unavailable
+// (503) while the token routes keep working unchanged.
+func (s *Server) SetMediaGrantAuthority(grants proxyGrantLookup, sessions loginSessionValidator) {
+	s.grants = grants
+	s.loginSessions = sessions
 }
 
 // SetRemoteArtifactMissReporter wires the authoritative database transition
@@ -127,6 +144,14 @@ func (s *Server) Handler() http.Handler {
 		r.Head("/stream/transcode/{token}/master.m3u8", s.handleTranscodeManifest)
 		r.Get("/stream/transcode/{token}/master.m3u8", s.handleTranscodeManifest)
 		r.Get("/stream/transcode/{token}/segment/{name}", s.handleTranscodeSegment)
+		// Credential-free grant routes (authorized_media_origins_v1). Same media
+		// bytes as the token routes above, addressed by session id and
+		// authorized by the caller's own Authorization header.
+		r.Head("/stream/v3/{session_id}", s.handleGrantIdentity)
+		r.Get("/stream/v3/{session_id}", s.handleGrantIdentity)
+		r.Head("/stream/v3/{session_id}/master.m3u8", s.handleGrantTranscodeManifest)
+		r.Get("/stream/v3/{session_id}/master.m3u8", s.handleGrantTranscodeManifest)
+		r.Get("/stream/v3/{session_id}/segment/{name}", s.handleGrantTranscodeSegment)
 		r.Get("/stream/subtitles/{token}/{track}/fonts", s.handleSubtitleFonts)
 		r.Get("/stream/subtitles/{token}/{track}", s.handleSubtitle)
 		r.Head("/downloads/file/{token}", s.handleDownloadFile)
@@ -213,7 +238,14 @@ func (s *Server) handleDirectPlay(w http.ResponseWriter, r *http.Request) {
 	if claims == nil {
 		return
 	}
+	s.serveDirectPlayClaims(w, r, claims)
+}
 
+// serveDirectPlayClaims serves a direct-play session from an already-authorized
+// recipe. The token routes reach it with claims they verified; the grant routes
+// reach it with the same claims projected from a grant they authorized against
+// the caller's login session — the serving behavior must not differ.
+func (s *Server) serveDirectPlayClaims(w http.ResponseWriter, r *http.Request, claims *streamtoken.Claims) {
 	info := sessionInfo(s.tracker, claims, "direct_play")
 	s.tracker.Track(r.Context(), info)
 	defer s.tracker.Remove(r.Context(), claims.SessionID)
@@ -351,7 +383,13 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 	if claims == nil {
 		return
 	}
+	s.serveRemuxClaims(w, r, claims)
+}
 
+// serveRemuxClaims serves a progressive remux from an already-authorized
+// recipe, shared by the token routes and the grant routes for the same reason
+// serveDirectPlayClaims is.
+func (s *Server) serveRemuxClaims(w http.ResponseWriter, r *http.Request, claims *streamtoken.Claims) {
 	info := sessionInfo(s.tracker, claims, "remux")
 	s.tracker.Track(r.Context(), info)
 	defer s.tracker.Remove(r.Context(), claims.SessionID)
@@ -381,7 +419,7 @@ func (s *Server) handleTranscodeManifest(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.touchTranscodeSession(r, claims)
-	s.proxyToTranscodeNode(w, r, claims, "/transcode/"+transcodeTransportIDFromClaims(claims)+"/master.m3u8")
+	s.proxyToTranscodeNode(w, r, claims, "/transcode/"+transcodeTransportIDFromClaims(claims)+"/master.m3u8", chi.URLParam(r, "token"))
 }
 
 func (s *Server) handleTranscodeSegment(w http.ResponseWriter, r *http.Request) {
@@ -391,7 +429,7 @@ func (s *Server) handleTranscodeSegment(w http.ResponseWriter, r *http.Request) 
 	}
 	s.touchTranscodeSession(r, claims)
 	name := chi.URLParam(r, "name")
-	s.proxyToTranscodeNode(w, r, claims, "/transcode/"+transcodeTransportIDFromClaims(claims)+"/segment/"+name)
+	s.proxyToTranscodeNode(w, r, claims, "/transcode/"+transcodeTransportIDFromClaims(claims)+"/segment/"+name, chi.URLParam(r, "token"))
 }
 
 func transcodeTransportIDFromClaims(claims *streamtoken.Claims) string {
@@ -527,8 +565,11 @@ func (s *Server) handleSubtitleFonts(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// proxyToTranscodeNode forwards the request to the transcode node specified in the claims.
-func (s *Server) proxyToTranscodeNode(w http.ResponseWriter, r *http.Request, claims *streamtoken.Claims, path string) {
+// proxyToTranscodeNode forwards the request to the transcode node specified in
+// the claims. forwardToken is the stream token handed to the node out of band
+// (never to the client): the client's own token on a token route, a
+// proxy-minted one on a grant route.
+func (s *Server) proxyToTranscodeNode(w http.ResponseWriter, r *http.Request, claims *streamtoken.Claims, path, forwardToken string) {
 	cfg := s.watcher.Config()
 	if claims.TranscodeNode == "" {
 		http.Error(w, "no transcode node in token", http.StatusBadRequest)
@@ -551,8 +592,8 @@ func (s *Server) proxyToTranscodeNode(w http.ResponseWriter, r *http.Request, cl
 	// recipe, so the node can re-spawn ffmpeg seeked to the requested segment instead
 	// of 404ing (the integrated server already does this from the same token). The
 	// node re-verifies the token independently before trusting it.
-	if token := chi.URLParam(r, "token"); token != "" {
-		req.Header.Set("X-Silo-Stream-Token", token)
+	if forwardToken != "" {
+		req.Header.Set("X-Silo-Stream-Token", forwardToken)
 	}
 
 	resp, err := s.httpClient.Do(req)

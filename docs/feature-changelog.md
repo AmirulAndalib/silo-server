@@ -1,6 +1,19 @@
 # Feature Changelog
 
+## 2026-08-23
+
+### Serve tokenless playback from proxy nodes again
+Playback protocol v3 now advertises the engine-neutral `authorized_media_origins_v1` opt-in, which a client sends together with `header_authenticated_media_v1`. Plans for such an attempt may return absolute, still credential-free media URLs on server-designated proxy origins (`/stream/v3/...`), so direct play, progressive remux, and HLS egress from the node pool instead of the API server. The proxy validates the caller's own access token against the same live login session the API checks, so revoking a session stops proxy playback immediately; replans and every other control-plane call stay on the API. A client that sends only `header_authenticated_media_v1` keeps today's API-local behavior unchanged, and so does a deployment with no proxy pool.
+
+## 2026-08-22
+
+### Qualify bounded software video decoders without weakening evidence tiers
+Playback protocol v3 now advertises the engine-neutral `software_video_decode_v1` opt-in. Exact and platform-attested clients may use bounded `hardware: false` entries from `video_decode[]` for original/direct eligibility only when they send the feature. Download creation accepts the same additive feature, evidence tier, and detailed decoder entries so persistent originals do not flatten a 1080p software claim into a device-wide 4K claim. Existing clients remain hardware-only at strict playback tiers and existing flat download payloads remain unchanged.
+
 ## 2026-08-21
+
+### Keep signed playback credentials out of client-visible media URLs
+Playback protocol v3 now advertises the engine-neutral `header_authenticated_media_v1` opt-in. Capable clients receive API-local direct, remux, HLS, subtitle, and font URLs without a signed stream token in the query or path, and attach their current API Authorization header to every media request instead. Existing clients keep the restart-resilient token URLs unchanged. Remote HLS executors can still run behind the API route, while direct/progressive proxy delivery is bypassed in this mode; transparent reconstruction after an API restart is intentionally replaced by a fresh client playback attempt.
 
 ### Admin accounts are never capped by an access group
 An account promoted to admin kept its access group, so the Default Group's stream cap and library list still applied to it. Admins are now ungrouped everywhere: promoting clears the group, demoting lands the account on the default group unless the request names one, and `POST /admin/users`, `PUT /admin/users/{id}`, and `POST /admin/invitations` reject `role: "admin"` together with an `access_group_id` with `422`. Policy resolution ignores any group an admin row still carries, and a migration clears the admins that were grouped before this change.

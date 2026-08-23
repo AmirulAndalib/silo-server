@@ -46,8 +46,15 @@ type RecipeCard struct {
 	// Encode parameters — mirror of the byte-affecting TranscodeOpts fields.
 	// Direct cards leave them zero; remux cards use the audio targets when the
 	// selected stream must be converted.
-	InputPath              string  `json:"input_path"`
-	OutputSubdir           string  `json:"output_subdir,omitempty"`
+	InputPath    string `json:"input_path"`
+	OutputSubdir string `json:"output_subdir,omitempty"`
+	// DVProfile and AudioOnly are source facts the catalog owns and a remote
+	// executor cannot look up for itself: the remux needs the Dolby Vision
+	// profile to strip a dangling Profile 7 RPU, and the audio-only flag to keep
+	// the content type the plan promised. They ride the card so a proxy serving
+	// this session from a grant produces the same bytes the API would have.
+	DVProfile              int     `json:"dv_profile,omitempty"`
+	AudioOnly              bool    `json:"audio_only,omitempty"`
 	SourceVideoCodec       string  `json:"source_video_codec,omitempty"`
 	SourceVideoProfile     string  `json:"source_video_profile,omitempty"`
 	SourceVideoBitDepth    int     `json:"source_video_bit_depth,omitempty"`
@@ -212,6 +219,8 @@ func (c RecipeCard) ToClaims() streamtoken.Claims {
 		SessionID:              c.SessionID,
 		MediaPath:              c.InputPath,
 		OutputSubdir:           c.OutputSubdir,
+		DVProfile:              c.DVProfile,
+		AudioOnly:              c.AudioOnly,
 		PlayMethod:             string(c.PlayMethod),
 		TranscodeAudio:         c.TranscodeAudio,
 		RemuxDVMode:            string(c.RemuxDVMode),
@@ -269,6 +278,8 @@ func RecipeCardFromClaims(c *streamtoken.Claims) RecipeCard {
 		RemuxDVMode:            RemuxDVMode(c.RemuxDVMode),
 		InputPath:              c.MediaPath,
 		OutputSubdir:           c.OutputSubdir,
+		DVProfile:              c.DVProfile,
+		AudioOnly:              c.AudioOnly,
 		SourceVideoCodec:       c.SourceVideoCodec,
 		SourceVideoProfile:     c.SourceVideoProfile,
 		SourceVideoBitDepth:    c.SourceVideoBitDepth,
