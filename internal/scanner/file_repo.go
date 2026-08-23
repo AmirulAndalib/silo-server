@@ -1182,12 +1182,13 @@ func (r *FileRepository) SetChapterThumbnailFailure(
 
 // UpdateMultiplePPS records the H.264 multi-PPS copy-safety verdict together
 // with the size and mtime it was computed from, so a later read can tell
-// whether the file has been rewritten since.
+// whether the file has been rewritten since. A nil scanMtime records a verdict
+// for a row that has no file mtime; reading it back validates on size alone.
 //
 // It deliberately does not go through Upsert: that path also clears
 // match_suppressed_at and missing_since, which a copy-safety scan has no
 // business touching.
-func (r *FileRepository) UpdateMultiplePPS(ctx context.Context, fileID int, multiplePPS bool, scanSize int64, scanMtime time.Time) error {
+func (r *FileRepository) UpdateMultiplePPS(ctx context.Context, fileID int, multiplePPS bool, scanSize int64, scanMtime *time.Time) error {
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE media_files
 		SET multiple_pps = $2,

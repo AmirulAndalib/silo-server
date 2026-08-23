@@ -2,6 +2,13 @@
 
 ## 2026-08-23
 
+### Never wait on H.264 stream-copy analysis to start playing
+The check that decides whether an H.264 file can be stream-copied reads the opening seconds of the source, which on remote or cloud storage takes seconds. It used to run before playback could start, and a file it had never seen was held at the Play button; when the check itself failed, playback fell back to a full transcode even though nothing had actually proven the file unsafe.
+
+It no longer runs on the request path at all. A file with no stored verdict is now played optimistically — the cheap stream-copy route — and the analysis runs behind the stream that is already playing. Watch pages behave the same way: they start the analysis and render immediately.
+
+If the analysis then finds the file genuinely cannot be copied, Silo moves the sessions playing it off that route. Clients that advertise the new `plan_invalidated_v1` capability are told to switch, and they re-plan onto a transcode without the viewer seeing more than a brief rebuffer. Any other client — including every app version shipped before this change — has its session ended and recovers the way it already does; because the verdict is now stored, its next attempt starts on the transcode directly. An analysis that fails or is inconclusive changes nothing: nothing is stored and playback continues untouched, instead of the old behavior of transcoding on a failed check.
+
 ### Browsing no longer waits on H.264 stream-copy analysis
 Silo checks each H.264 file once for a bitstream quirk that makes stream-copying unsafe. That check reads the opening seconds of the file, and it used to run while a media page was loading and be forgotten on every restart — so browsing a library, especially after a reboot, re-read part of every H.264 file. On remote or cloud storage that was the difference between an instant page and a slow one.
 

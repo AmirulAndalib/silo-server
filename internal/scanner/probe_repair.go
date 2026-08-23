@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -88,8 +89,13 @@ func videoTracksMissingColorRange(tracks []models.VideoTrack) bool {
 
 // copySafetyWriter persists a multi-PPS verdict. *FileRepository satisfies it;
 // the indirection keeps the ensurer testable without a database.
+//
+// scanMtime is nil for a row that carries no file mtime: such a verdict is
+// still recorded, and validated on size alone when it is read back. Refusing to
+// write it would leave those rows permanently unverdicted, so every replica
+// would rescan and re-invalidate the same sessions forever.
 type copySafetyWriter interface {
-	UpdateMultiplePPS(ctx context.Context, fileID int, multiplePPS bool, scanSize int64, scanMtime time.Time) error
+	UpdateMultiplePPS(ctx context.Context, fileID int, multiplePPS bool, scanSize int64, scanMtime *time.Time) error
 }
 
 // PlaybackProbeEnsurer repairs missing playback-critical probe metadata on
@@ -168,6 +174,78 @@ func (e *PlaybackProbeEnsurer) EnsureProbeOnly(ctx context.Context, file *models
 	return e.ensureProbeRepair(ctx, file)
 }
 
+// EnsureCopySafetyCached repairs playback-critical probe metadata and stamps
+// the copy-safety verdict only when it is already known — from the process
+// cache or from the verdict persisted on the media_files row. It never execs
+// ffmpeg, so it never blocks a play or a watch page on a bitstream scan.
+//
+// An unknown verdict is left unknown: VideoTrack.MultiplePPS stays nil and
+// VideoCopyUnsafe stays false, which the planner reads as "stream copy is
+// allowed". That is the optimistic half of the race — the caller is expected to
+// kick off ScanCopySafety asynchronously and switch live sessions off the copy
+// route if the scan comes back multi-PPS.
+func (e *PlaybackProbeEnsurer) EnsureCopySafetyCached(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error) {
+	current, err := e.ensureProbeRepair(ctx, file)
+	if err != nil || current == nil || e == nil {
+		return current, err
+	}
+	if !needsCopySafetyProbe(current) {
+		return current, nil
+	}
+	if multi, ok := e.knownCopySafetyVerdict(current); ok {
+		return fileWithMultiplePPS(current, multi), nil
+	}
+	return current, nil
+}
+
+// NeedsCopySafetyScan reports whether an asynchronous ScanCopySafety would do
+// real work for this file: an H.264 video whose verdict is neither cached nor
+// persisted, on a server that has an ffmpeg to scan with.
+func (e *PlaybackProbeEnsurer) NeedsCopySafetyScan(file *models.MediaFile) bool {
+	if e == nil || strings.TrimSpace(e.ffmpegPath) == "" || !needsCopySafetyProbe(file) {
+		return false
+	}
+	_, known := e.knownCopySafetyVerdict(file)
+	return !known
+}
+
+// ScanCopySafety runs the multi-PPS bitstream scan for a file whose verdict is
+// unknown, persisting and memoizing the result. Concurrent callers for one file
+// share a single scan, so a start, a replan and a watch-page load racing on the
+// same file spawn one ffmpeg between them.
+func (e *PlaybackProbeEnsurer) ScanCopySafety(ctx context.Context, file *models.MediaFile) (bool, error) {
+	if e == nil || file == nil {
+		return false, nil
+	}
+	if strings.TrimSpace(e.ffmpegPath) == "" {
+		return false, errCopySafetyScanUnavailable
+	}
+	return e.scanAndPersistCopySafety(ctx, file)
+}
+
+var errCopySafetyScanUnavailable = errors.New("ffmpeg path not configured")
+
+// knownCopySafetyVerdict answers the copy-safety question from memory or from
+// the persisted row, never from ffmpeg. A persisted verdict is self-validating:
+// it is only honored while the recorded size and mtime still describe the file,
+// so a rewrite in place falls through to a rescan without any writer having to
+// clear it. Promoting it into the process cache keeps later calls off the row.
+func (e *PlaybackProbeEnsurer) knownCopySafetyVerdict(file *models.MediaFile) (bool, bool) {
+	if e == nil || file == nil {
+		return false, false
+	}
+	if cached, ok := e.copySafety.Load(file.ID); ok {
+		if result, ok := cached.(copySafetyResult); ok && result.matches(file) {
+			return result.multi, true
+		}
+	}
+	if multi, ok := persistedCopySafetyVerdict(file); ok {
+		e.storeCopySafety(file, multi)
+		return multi, true
+	}
+	return false, false
+}
+
 func (e *PlaybackProbeEnsurer) ensureProbeRepair(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error) {
 	if file == nil || e == nil || e.fileRepo == nil {
 		return file, nil
@@ -210,17 +288,7 @@ func (e *PlaybackProbeEnsurer) ensureCopySafety(ctx context.Context, file *model
 		return file, nil
 	}
 
-	if cached, ok := e.copySafety.Load(file.ID); ok {
-		if result, ok := cached.(copySafetyResult); ok && result.matches(file) {
-			return fileWithMultiplePPS(file, result.multi), nil
-		}
-	}
-
-	// A persisted verdict is self-validating: it is only honored while the
-	// recorded size and mtime still describe the file, so a rewrite in place
-	// falls through to a rescan without any writer having to clear it.
-	if multi, ok := persistedCopySafetyVerdict(file); ok {
-		e.storeCopySafety(file, multi)
+	if multi, ok := e.knownCopySafetyVerdict(file); ok {
 		return fileWithMultiplePPS(file, multi), nil
 	}
 
@@ -263,8 +331,8 @@ func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, fil
 			return false, err
 		}
 
-		if e.copySafetyRepo != nil && fileModifiedAt != nil {
-			if writeErr := e.copySafetyRepo.UpdateMultiplePPS(ctx, fileID, multi, fileSize, *fileModifiedAt); writeErr != nil {
+		if e.copySafetyRepo != nil {
+			if writeErr := e.copySafetyRepo.UpdateMultiplePPS(ctx, fileID, multi, fileSize, fileModifiedAt); writeErr != nil {
 				slog.WarnContext(ctx, "persisting video copy-safety verdict failed",
 					"component", "scanner",
 					"file_id", fileID,
@@ -292,20 +360,11 @@ func (e *PlaybackProbeEnsurer) storeCopySafety(file *models.MediaFile, multi boo
 }
 
 // persistedCopySafetyVerdict returns the multi-PPS verdict stored on the
-// media_files row, and whether it is still valid for the file as it stands. A
-// verdict is valid only when it was computed from the same size and mtime the
-// row now reports.
+// media_files row, and whether it is still valid for the file as it stands.
+// The rule lives on the model because playback reads the same columns from
+// files this package never touches.
 func persistedCopySafetyVerdict(file *models.MediaFile) (bool, bool) {
-	if file == nil || file.MultiplePPS == nil || file.MultiplePPSScanSize == nil || file.MultiplePPSScanMtime == nil {
-		return false, false
-	}
-	if *file.MultiplePPSScanSize != file.FileSize {
-		return false, false
-	}
-	if file.FileModifiedAt == nil || !sameFileModifiedAt(file.MultiplePPSScanMtime, *file.FileModifiedAt) {
-		return false, false
-	}
-	return *file.MultiplePPS, true
+	return file.PersistedVideoCopyVerdict()
 }
 
 // fileWithMultiplePPS returns a shallow copy of file with the (runtime-only)
@@ -329,17 +388,7 @@ func fileWithCopySafety(file *models.MediaFile, multiplePPS *bool, copyUnsafe bo
 // needsCopySafetyProbe reports whether the file is an H.264 video whose
 // multi-PPS copy-safety flag has not yet been computed.
 func needsCopySafetyProbe(file *models.MediaFile) bool {
-	if file == nil || len(file.VideoTracks) == 0 {
-		return false
-	}
-	if file.VideoTracks[0].MultiplePPS != nil {
-		return false
-	}
-	codec := strings.ToLower(strings.TrimSpace(file.VideoTracks[0].Codec))
-	if codec == "" {
-		codec = strings.ToLower(strings.TrimSpace(file.CodecVideo))
-	}
-	return codec == "h264" || codec == "avc" || codec == "avc1"
+	return file.VideoCopySafetyUnknown()
 }
 
 // reprobeMayScanPackets reports whether reprobing this file is likely to hit

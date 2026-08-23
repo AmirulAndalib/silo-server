@@ -123,15 +123,26 @@ type PlaybackFileVersionFetcher interface {
 	GetByEpisodeID(ctx context.Context, episodeID string) ([]*models.MediaFile, error)
 }
 
-// PlaybackProbeEnsurer repairs probe metadata and resolves the H.264
-// copy-safety verdict. Playback keeps the full Ensure: the planner consumes
-// the verdict to decide whether a video stream-copy is safe.
+// PlaybackProbeEnsurer repairs probe metadata and stamps the H.264 copy-safety
+// verdict when it is already known.
 //
-// EnsureProbeOnly is declared so the same value satisfies catalog's narrower
-// browse-side contract when it is handed to the detail service.
+// It deliberately exposes no blocking variant: a play must never wait on the
+// multi-second bitstream scan, so an unknown verdict is planned optimistically
+// and resolved behind the play (see PlaybackCopySafetyRacer).
+//
+// EnsureProbeOnly is declared because this interface is also the type the
+// router carries the shared ensurer in when handing it to the catalog and
+// chapter-thumbnail services, which repair probe metadata and nothing else.
 type PlaybackProbeEnsurer interface {
-	Ensure(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error)
 	EnsureProbeOnly(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error)
+	EnsureCopySafetyCached(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error)
+}
+
+// PlaybackCopySafetyRacer resolves an unknown H.264 copy-safety verdict out of
+// band, after a plan that stream-copies video has already been issued.
+// *playback.CopySafetyRace implements it.
+type PlaybackCopySafetyRacer interface {
+	RaceScanForPlan(fileID int, plan *playback.PlanV3)
 }
 
 type PlaybackChapterThumbnailQueuer interface {
@@ -179,14 +190,18 @@ type PlaybackHandler struct {
 	// relayed request has nothing to reconstruct from. Optional and best effort:
 	// without it (or without Redis behind it) such a session replans instead of
 	// recovering, exactly as before.
-	NodeRecipeStore        recipeCardStoreV3
-	ItemAccess             PlaybackItemAccessChecker // optional; enables file authorization checks
-	EpisodeLookup          PlaybackEpisodeLookup     // optional; resolves episode files to their series
-	ExtraLookup            PlaybackExtraLookup       // optional; resolves extras files to their parent item
-	OriginalLangLookup     PlaybackOriginalLanguageLookup
-	SettingsRepo           PlaybackSettingsReader     // optional; reads server settings (e.g., allow_4k_transcode)
-	FileVersionFetcher     PlaybackFileVersionFetcher // optional; queries sibling file versions for 4K guard
-	ProbeEnsurer           PlaybackProbeEnsurer       // optional; repairs missing probe metadata on demand
+	NodeRecipeStore    recipeCardStoreV3
+	ItemAccess         PlaybackItemAccessChecker // optional; enables file authorization checks
+	EpisodeLookup      PlaybackEpisodeLookup     // optional; resolves episode files to their series
+	ExtraLookup        PlaybackExtraLookup       // optional; resolves extras files to their parent item
+	OriginalLangLookup PlaybackOriginalLanguageLookup
+	SettingsRepo       PlaybackSettingsReader     // optional; reads server settings (e.g., allow_4k_transcode)
+	FileVersionFetcher PlaybackFileVersionFetcher // optional; queries sibling file versions for 4K guard
+	ProbeEnsurer       PlaybackProbeEnsurer       // optional; repairs missing probe metadata on demand
+	// CopySafetyRacer resolves an unknown H.264 copy-safety verdict behind an
+	// already-issued stream-copy plan. Optional: without it an unknown verdict
+	// simply stays unknown and the copy route is never withdrawn.
+	CopySafetyRacer        PlaybackCopySafetyRacer
 	ChapterThumbnailQueuer PlaybackChapterThumbnailQueuer
 	IntroAnalyzer          IntroEpisodeAnalyzer
 	IntroRepository        PlaybackIntroEligibilityChecker
@@ -390,11 +405,16 @@ func semanticPlayMethod(s *playback.Session) playback.PlayMethod {
 	return s.PlayMethod
 }
 
+// ensurePlaybackProbe repairs probe metadata and stamps the H.264 copy-safety
+// verdict when it is already known. It never runs the bitstream scan: an
+// unknown verdict plans optimistically (the planner reads nil MultiplePPS as
+// "copy is allowed") and is resolved asynchronously once the plan is issued, so
+// starting playback never waits on a multi-second read of the source.
 func (h *PlaybackHandler) ensurePlaybackProbe(ctx context.Context, file *models.MediaFile) *models.MediaFile {
 	if h == nil || h.ProbeEnsurer == nil || file == nil {
 		return file
 	}
-	repaired, err := h.ProbeEnsurer.Ensure(ctx, file)
+	repaired, err := h.ProbeEnsurer.EnsureCopySafetyCached(ctx, file)
 	if err != nil {
 		slog.WarnContext(ctx, "playback probe repair failed", "component", "api", "file_id", file.ID, "path", file.FilePath, "error", err)
 		return file

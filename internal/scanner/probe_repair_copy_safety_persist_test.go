@@ -56,7 +56,10 @@ type recordedPPSWrite struct {
 	fileID      int
 	multiplePPS bool
 	scanSize    int64
-	scanMtime   time.Time
+	// scanMtime is flattened to a comparable pair so a write for a row with no
+	// mtime is distinguishable from one that carries the zero time.
+	scanMtime    time.Time
+	scanMtimeSet bool
 }
 
 type fakeCopySafetyWriter struct {
@@ -65,15 +68,19 @@ type fakeCopySafetyWriter struct {
 	err    error
 }
 
-func (w *fakeCopySafetyWriter) UpdateMultiplePPS(_ context.Context, fileID int, multiplePPS bool, scanSize int64, scanMtime time.Time) error {
+func (w *fakeCopySafetyWriter) UpdateMultiplePPS(_ context.Context, fileID int, multiplePPS bool, scanSize int64, scanMtime *time.Time) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.writes = append(w.writes, recordedPPSWrite{
+	write := recordedPPSWrite{
 		fileID:      fileID,
 		multiplePPS: multiplePPS,
 		scanSize:    scanSize,
-		scanMtime:   scanMtime,
-	})
+	}
+	if scanMtime != nil {
+		write.scanMtime = *scanMtime
+		write.scanMtimeSet = true
+	}
+	w.writes = append(w.writes, write)
 	return w.err
 }
 
@@ -186,7 +193,7 @@ func TestEnsureCopySafetyPersistsScanResult(t *testing.T) {
 	if len(writes) != 1 {
 		t.Fatalf("UpdateMultiplePPS called %d times, want 1", len(writes))
 	}
-	want := recordedPPSWrite{fileID: 42, multiplePPS: true, scanSize: 1234, scanMtime: mtime}
+	want := recordedPPSWrite{fileID: 42, multiplePPS: true, scanSize: 1234, scanMtime: mtime, scanMtimeSet: true}
 	if writes[0] != want {
 		t.Fatalf("UpdateMultiplePPS(%+v), want %+v", writes[0], want)
 	}
@@ -208,6 +215,51 @@ func TestEnsureCopySafetyScanSurvivesPersistFailure(t *testing.T) {
 	}
 	if track := got.VideoTracks[0]; track.MultiplePPS == nil || !*track.MultiplePPS {
 		t.Fatalf("MultiplePPS = %v, want the scan result despite the failed write", track.MultiplePPS)
+	}
+}
+
+// Rows predating the file_modified_at column carry no mtime. Their verdict is
+// still persisted and still honored on read — refusing to write it would leave
+// them permanently unverdicted, so every replica would rescan the same file and
+// tear down the same playback again.
+func TestEnsureCopySafetyPersistsVerdictForRowWithoutMtime(t *testing.T) {
+	ffmpegPath, runs := fakeFFmpeg(t, conflictingPPSAnnexB, 0)
+	writer := &fakeCopySafetyWriter{}
+	ensurer := &PlaybackProbeEnsurer{ffmpegPath: ffmpegPath, copySafetyRepo: writer}
+
+	file := copySafetyTestFile(time.Now())
+	file.FileModifiedAt = nil
+
+	if _, err := ensurer.ensureCopySafety(context.Background(), file); err != nil {
+		t.Fatalf("ensureCopySafety() error = %v", err)
+	}
+	if runs() != 1 {
+		t.Fatalf("ffmpeg ran %d times, want 1", runs())
+	}
+	writes := writer.recorded()
+	want := recordedPPSWrite{fileID: 42, multiplePPS: true, scanSize: 1234}
+	if len(writes) != 1 || writes[0] != want {
+		t.Fatalf("UpdateMultiplePPS writes = %+v, want exactly [%+v]", writes, want)
+	}
+
+	// A fresh process reading that row back must trust the verdict on size
+	// alone rather than rescanning.
+	reread := copySafetyTestFile(time.Now())
+	reread.FileModifiedAt = nil
+	verdict := true
+	scanSize := reread.FileSize
+	reread.MultiplePPS = &verdict
+	reread.MultiplePPSScanSize = &scanSize
+	cold := &PlaybackProbeEnsurer{ffmpegPath: ffmpegPath}
+	if cold.NeedsCopySafetyScan(reread) {
+		t.Fatal("NeedsCopySafetyScan() = true, want the persisted mtime-less verdict honored")
+	}
+	got, err := cold.ensureCopySafety(context.Background(), reread)
+	if err != nil {
+		t.Fatalf("ensureCopySafety() error = %v", err)
+	}
+	if track := got.VideoTracks[0]; track.MultiplePPS == nil || !*track.MultiplePPS || !track.VideoCopyUnsafe {
+		t.Fatalf("track = %+v, want the persisted multi-PPS verdict stamped", track)
 	}
 }
 

@@ -1049,6 +1049,29 @@ func NewRouter(deps Dependencies) chi.Router {
 			playbackHandler.MarkerUpserter = deps.FileRepo
 		}
 		playbackHandler.MarkerUpdateNotifier = playback.NewMarkerUpdateNotifier(deps.SessionMgr, realtimeHub)
+		// Optimistic remux: a play is never blocked on the H.264 copy-safety
+		// scan, so the scan runs behind the issued plan and the notifier moves
+		// any session that is already stream-copying an unsafe source off that
+		// route (or stops it, for a client that cannot be told). Both halves
+		// need the same probe ensurer the playback and detail surfaces use.
+		if copySafetyScanner, ok := deps.ProbeEnsurer.(playback.CopySafetyScanner); ok && deps.FileRepo != nil {
+			copySafetyRace := playback.NewCopySafetyRace(
+				copySafetyScanner,
+				deps.FileRepo,
+				playback.NewCopySafetyNotifier(
+					deps.SessionMgr,
+					playbackHandler.PlanStoreV3,
+					playbackHandler.CommandDispatcher,
+					handlers.NewCopySafetyPlaybackControl(playbackHandler),
+				),
+			)
+			if copySafetyRace != nil {
+				playbackHandler.CopySafetyRacer = copySafetyRace
+				if detailSvc != nil {
+					detailSvc.SetCopySafetyRacer(copySafetyRace)
+				}
+			}
+		}
 		// A resolver lets subtitle realtime events carry the combined ordinal
 		// the new track will hold in the next plan. Without a file repository
 		// the notifier still fires; its events just omit the track block.

@@ -178,6 +178,18 @@ func (h *PlaybackHandler) handleRealtimeClientMessage(sessionID string, data []b
 			return playback.ErrInvalidRealtimePayload
 		}
 		if result.Status != playback.RealtimeResultStatusCompleted {
+			// A rejected plan_invalidated leaves the client running a route the
+			// server has withdrawn, and the tracker's deadline was already
+			// canceled by the result. Fall back to the same session stop an
+			// unnegotiated client gets; its recovery replans against the
+			// persisted verdict.
+			if record.Name == playback.CommandPlanInvalidated {
+				slog.Warn("client rejected a plan invalidation; stopping the session",
+					"session", sessionID, "playback_session_id", sessionID, "error", result.Error)
+				if err := h.stopPlaybackSessionByID(context.Background(), sessionID, false); err != nil && !errors.Is(err, playback.ErrSessionNotFound) {
+					slog.Error("failed to stop playback after a rejected plan invalidation", "session", sessionID, "playback_session_id", sessionID, "error", err)
+				}
+			}
 			return nil
 		}
 		switch record.Name {
@@ -186,6 +198,9 @@ func (h *PlaybackHandler) handleRealtimeClientMessage(sessionID string, data []b
 			if err != nil && !errors.Is(err, playback.ErrSessionNotFound) {
 				slog.Error("failed to stop playback after realtime completion", "session", sessionID, "playback_session_id", sessionID, "error", err)
 			}
+		case playback.CommandPlanInvalidated:
+			// Completion means the client replanned itself; the session stays
+			// alive on its replacement plan and nothing else is required here.
 		}
 		return nil
 	default:

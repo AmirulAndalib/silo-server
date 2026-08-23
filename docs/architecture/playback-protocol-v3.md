@@ -48,7 +48,9 @@ The server never claims something it did not verify.
 **Route events are diagnostics, not control.** A client reports what happened
 (`first_frame`, `plan_failed`, `terminal`) so the server can learn; the report
 never changes the session. Playback recovery goes through replan (§6), which is a
-request with a response, not a fire-and-forget event.
+request with a response, not a fire-and-forget event. The server may *ask* for a
+replan — the `plan_invalidated` realtime command, §6.1 — but even then the plan
+only changes when the client comes back through the replan endpoint.
 
 Two consequences worth stating early, because they surprise implementers:
 
@@ -99,13 +101,13 @@ the document is always the full one:
   "features": ["playback_plan_v3", "neutral_playback_v3_contract_v1", "layout_aware_passthrough", "playback_route_diagnostics",
                "device_quirks_v1", "seek_reanchor_v1", "output_change_v1", "direct_stream_resume_v1",
                "header_authenticated_media_v1", "authorized_media_origins_v1", "software_video_decode_v1",
-               "plan_source_duration_v1"],
+               "plan_invalidated_v1", "plan_source_duration_v1"],
   "deliveries": ["original_http", "server_remux_progressive", "server_remux_hls", "server_transcode_hls"],
   "transformations": [{"name": "audio_to_aac", "executor": "server", "recipe_version": "1", "validated_claims": ["audio_decode"]}]
 }
 ```
 
-The twelve feature strings above are the full set this server version advertises:
+The thirteen feature strings above are the full set this server version advertises:
 
 | Feature | What it promises |
 | --- | --- |
@@ -120,6 +122,7 @@ The twelve feature strings above are the full set this server version advertises
 | `header_authenticated_media_v1` | An opted-in client receives media URLs without signed credentials in their query or path, and authenticates every media request with its normal Authorization header (§4.1) |
 | `authorized_media_origins_v1` | Meaningful only with the token above: the client also honors credential-free absolute media URLs on server-designated proxy origins, which restores distributed egress for a header-authenticated attempt (§4.1) |
 | `software_video_decode_v1` | Exact/platform-attested clients may qualify bounded `video_decode[]` entries with `hardware: false` for direct/original delivery; without the opt-in those evidence tiers remain hardware-only (§3) |
+| `plan_invalidated_v1` | The client can be told mid-session that the plan it is playing was withdrawn, over the realtime `plan_invalidated` command, and replans off it. A session that did not negotiate it is stopped instead (§6.1) |
 | `plan_source_duration_v1` | `source.duration_seconds` is populated when known, so its absence means *unknown* rather than *unsupported* (§5) |
 
 That last one is the reason feature detection is a list and not a version
@@ -731,6 +734,93 @@ The server silently restores the negotiated state of each, whatever the replan
 sends — including an explicit list that omits one, which is otherwise a valid
 way to drop a feature. Seek replans never replace the feature list at all.
 Changing any of these modes means stopping and starting a new attempt.
+
+### 6.1 `plan_invalidated_v1` — the server withdraws a plan
+
+Every other control message in this protocol travels client → server. This one
+does not: `plan_invalidated` is the only **server-initiated control push**, and
+it exists because the server can learn a route is wrong *after* the plan is
+already playing.
+
+The concrete case is H.264 stream-copy safety. Some encoders redefine the same
+`pic_parameter_set_id` in-band with conflicting content, which cannot be copied
+into an avc1/fMP4 segment (§4). Detecting it means reading the opening seconds
+of the source, which on remote storage costs seconds — so the server no longer
+waits for it. An unresolved verdict plans **optimistically** (a remux is
+allowed), the scan runs behind the issued plan, and if it comes back unsafe the
+plan that was handed out has to be taken back.
+
+The push is a realtime **command** on the session control socket
+(`GET /playback/sessions/{session_id}/control/ws`) — acked and answered like
+any other, not a fire-and-forget event:
+
+```json
+{
+  "type": "command",
+  "command_id": "…",
+  "session_id": "…",
+  "name": "plan_invalidated",
+  "reason": "video_copy_unsafe",
+  "deadline_ms": 8000,
+  "payload": {"reason": "video_copy_unsafe", "plan_id": "<the invalidated plan>"}
+}
+```
+
+`payload.plan_id` names the plan being withdrawn, which is not necessarily the
+one on screen: a client that has already replanned past it has nothing to do and
+completes the command as a no-op. That is why the field is required — acting
+without checking it would evict a route the server never complained about.
+
+A client that advertises `plan_invalidated_v1` in `client_features` promises to:
+
+1. send `{"type":"ack","status":"accepted"}` immediately,
+2. run its ordinary recovery replan — `operation: "failure_recovery"`, with the
+   invalidated plan's `plan_attempt_key` in `attempted_plan_keys` so the copy
+   route is excluded deterministically (the now-persisted verdict excludes it
+   too), and
+3. send `{"type":"result","status":"completed"}` when the replan is done.
+
+**Everything else is a session stop.** The server pushes the command only to a
+session that negotiated the feature *and* holds a live realtime connection. No
+feature, no connection, no `completed` result within `deadline_ms` (an ack
+alone does not stop the clock), or a `rejected` result, and the session is
+terminated instead. That is deliberate, and it is the whole
+backwards-compatibility story: a client shipped before this token sees its
+session end, runs the recovery it already has, and its fresh attempt is planned
+against the persisted verdict — which lands it on a transcode. No client has to
+implement anything to stay correct; the feature only buys a seamless switch
+instead of a stopped session.
+
+An inconclusive scan changes nothing: nothing is persisted, no command is
+pushed, and live sessions keep the route they were given. Only a positive
+"this source cannot be copied" verdict withdraws a plan.
+
+Three scoping rules keep the stop from firing where it cannot help:
+
+- **The verdict is about the effective file.** A session whose *requested*
+  edition turned out to be copy-unsafe, but which is streaming a different
+  edition after the 4K guard or a version replan, is left alone: the bytes it is
+  serving are copy-safe.
+- **A session still being established is given time.** A session exists in the
+  session manager before its attempt record is written and long before its
+  client can open a realtime channel. A verdict landing inside that window would
+  see a session it cannot tell and stop one that is mid-start, so a session that
+  would otherwise be stopped waits out `CopySafetySessionSettleWindow` and is
+  examined once more; by then it is normally reachable and gets the command.
+- **Jellyfin-compatibility sessions are exempt.** That surface decides direct
+  stream from the device profile and the catalog version, never from the
+  copy-safety verdict, so a stopped compat client reconnects onto the identical
+  remux. The stop is only correct for clients whose recovery re-decides the
+  route, which for a Silo client means planning against the persisted verdict.
+
+That persisted verdict is read from the `media_files` row on every path that
+plans a route — start, replan, and the v2 resolver — not only from the probe
+ensurer's in-memory stamp. A replan that did not see it would simply walk from
+one stream-copy delivery to the other.
+
+Delivery is in-process: the replica that owns the session owns its realtime
+connection, so a verdict resolved on one node acts on the sessions that node is
+serving.
 
 ---
 

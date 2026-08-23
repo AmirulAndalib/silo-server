@@ -43,12 +43,27 @@ type batchDurationFetcher interface {
 	FirstDurationsByEpisodeIDs(ctx context.Context, ids []string) (map[string]int, error)
 }
 
+// PlaybackProbeEnsurer repairs probe metadata for catalog responses. Neither
+// half of it runs the H.264 bitstream scan: no catalog surface may block on it.
 type PlaybackProbeEnsurer interface {
-	// Ensure repairs probe metadata and resolves the H.264 copy-safety
-	// verdict; EnsureProbeOnly does the repair alone. Browse surfaces use the
-	// latter — see prepareBrowseFiles.
-	Ensure(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error)
+	// EnsureProbeOnly does the probe repair alone. Browse surfaces use it — see
+	// prepareBrowseFiles.
 	EnsureProbeOnly(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error)
+	// EnsureCopySafetyCached adds the copy-safety verdict when it is already
+	// known, and never execs ffmpeg. Watch surfaces use it — see
+	// preparePlaybackFiles.
+	EnsureCopySafetyCached(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error)
+}
+
+// CopySafetyRacer resolves an unknown H.264 copy-safety verdict out of band.
+// The watch page asks for it and never waits: the verdict is not part of the
+// response, and any session that later ends up on a stream-copy route for the
+// file is switched off it by the playback-side notifier when the scan lands.
+//
+// It is a narrow injected interface so the catalog keeps no dependency on the
+// playback session machinery that implements it.
+type CopySafetyRacer interface {
+	RaceScan(fileID int)
 }
 
 type ChapterThumbnailQueuer interface {
@@ -662,6 +677,7 @@ type DetailService struct {
 	workSummary       WorkSummaryProvider
 	originalLangFn    func(context.Context, string) string
 	probeEnsurer      PlaybackProbeEnsurer
+	copySafetyRacer   CopySafetyRacer
 	chapterThumbs     ChapterThumbnailQueuer
 
 	// resolver is built once on first use; see settingsResolver.
@@ -710,6 +726,15 @@ func (s *DetailService) SetWorkSummaryProvider(provider WorkSummaryProvider) {
 
 func (s *DetailService) SetProbeEnsurer(ensurer PlaybackProbeEnsurer) {
 	s.probeEnsurer = ensurer
+}
+
+// SetCopySafetyRacer wires the out-of-band H.264 copy-safety scan the watch
+// surfaces trigger. Optional: without it an unknown verdict is simply left
+// unknown until a play resolves it.
+func (s *DetailService) SetCopySafetyRacer(racer CopySafetyRacer) {
+	if s != nil {
+		s.copySafetyRacer = racer
+	}
 }
 
 func (s *DetailService) SetChapterThumbnailQueuer(queuer ChapterThumbnailQueuer) {
@@ -3698,9 +3723,15 @@ func fileIDOrZero(version *FileVersion) int {
 	return version.FileID
 }
 
-// preparePlaybackFiles repairs probe metadata and resolves the H.264
-// copy-safety verdict. Used by the watch surfaces, where a play is being
-// prepared and the verdict is about to matter.
+// preparePlaybackFiles repairs probe metadata and stamps the H.264 copy-safety
+// verdict when it is already known. Used by the watch surfaces, where a play is
+// about to be prepared and the verdict is about to matter.
+//
+// It deliberately does not wait for an unknown verdict: the bitstream scan is
+// started in the background instead, so opening the watch page costs nothing
+// even for a file nobody has played yet. No session exists at this point — if
+// one appears and lands on a stream-copy route before the scan finishes, the
+// playback-side notifier switches it off that route when the verdict lands.
 func (s *DetailService) preparePlaybackFiles(ctx context.Context, files []*models.MediaFile) []*models.MediaFile {
 	return s.prepareFiles(ctx, files, true)
 }
@@ -3727,13 +3758,16 @@ func (s *DetailService) prepareFiles(ctx context.Context, files []*models.MediaF
 			var ensured *models.MediaFile
 			var err error
 			if withCopySafety {
-				ensured, err = s.probeEnsurer.Ensure(ctx, file)
+				ensured, err = s.probeEnsurer.EnsureCopySafetyCached(ctx, file)
 			} else {
 				ensured, err = s.probeEnsurer.EnsureProbeOnly(ctx, file)
 			}
 			if err == nil && ensured != nil {
 				file = ensured
 			}
+		}
+		if withCopySafety && s.copySafetyRacer != nil && file.ID > 0 && file.VideoCopySafetyUnknown() {
+			s.copySafetyRacer.RaceScan(file.ID)
 		}
 		prepared = append(prepared, file)
 	}

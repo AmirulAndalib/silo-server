@@ -28,6 +28,7 @@ import {
   buildReplanRequestV3,
   buildStartRequestV3,
   routeEventPlanIdentityV3,
+  VIDEO_CLIENT_FEATURES_V3,
   type ReplanOptions,
 } from "../playback-session-wire-v3";
 import type {
@@ -87,6 +88,12 @@ export interface UsePlaybackSessionResult extends PlaybackSessionState {
   changeQuality: (label: string, currentPosition: number) => void;
   /** `failure_recovery` replan after the client could not play the plan. */
   recoverFromFailure: (failure: FailureV3, currentPosition: number) => void;
+  /**
+   * `failure_recovery` replan for a plan the *server* invalidated over the
+   * realtime `plan_invalidated` command. Resolves to whether a replacement plan
+   * is now playing; the caller reports that back as the command's result.
+   */
+  invalidatePlan: (planId: string, reason: string, currentPosition: number) => Promise<boolean>;
   /** `seek_reanchor` replan when the target lies outside the seekable window. */
   reanchorSeek: (positionSeconds: number) => void;
   /** Re-reads the subtitle inventory by replanning with the selection unchanged. */
@@ -416,6 +423,7 @@ export function usePlaybackSession(
       playbackAttemptId: string,
     ): Promise<DecisionResponseV3> => {
       const body = buildStartRequestV3({
+        extraClientFeatures: VIDEO_CLIENT_FEATURES_V3,
         fileId: targetFileId,
         profileId: config.getProfileId() ?? "",
         playbackAttemptId,
@@ -793,6 +801,7 @@ export function usePlaybackSession(
 
       const body = buildReplanRequestV3({
         ...options,
+        extraClientFeatures: VIDEO_CLIENT_FEATURES_V3,
         plan,
         playbackAttemptId,
         replanRequestId: randomUUID(),
@@ -1008,6 +1017,35 @@ export function usePlaybackSession(
     [replan, reportEvent],
   );
 
+  /**
+   * Replans off a plan the server invalidated mid-playback.
+   *
+   * This is an ordinary `failure_recovery`, deliberately: that operation is
+   * what folds the current plan's attempt key into `attempted_plan_keys`, so
+   * the route the server just disqualified is excluded from the replacement
+   * plan without the client reasoning about deliveries at all. The plan
+   * revision the adopted plan bumps rebuilds the transport and restores the
+   * position, exactly as it does after a client-detected failure.
+   */
+  const invalidatePlan = useCallback(
+    async (planId: string, reason: string, currentPosition: number): Promise<boolean> => {
+      const plan = planRef.current;
+      if (!plan) return false;
+      // The command names the plan the server invalidated. Once the client has
+      // moved past it there is nothing to recover from, and replanning anyway
+      // would evict a route the server never complained about.
+      if (plan.plan_id !== planId) return true;
+      const classification = reason.trim().slice(0, 64) || "plan_invalidated";
+      reportEvent("plan_invalidated", { fallbackReason: classification });
+      return replan({
+        operation: "failure_recovery",
+        positionSeconds: currentPosition,
+        failure: { classification, message: "The server invalidated this plan." },
+      });
+    },
+    [replan, reportEvent],
+  );
+
   const reanchorSeek = useCallback(
     (positionSeconds: number) => {
       playbackPositionRef.current = positionSeconds;
@@ -1111,6 +1149,7 @@ export function usePlaybackSession(
     changeSubtitleTrack,
     changeQuality,
     recoverFromFailure,
+    invalidatePlan,
     reanchorSeek,
     refreshSubtitles,
     applySubtitleTrack,

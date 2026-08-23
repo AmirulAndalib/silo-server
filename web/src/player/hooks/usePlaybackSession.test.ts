@@ -12,6 +12,7 @@ import {
   buildReplanRequestV3,
   buildStartRequestV3,
   routeEventPlanIdentityV3,
+  VIDEO_CLIENT_FEATURES_V3,
 } from "../playback-session-wire-v3";
 import { usePlaybackSession } from "./usePlaybackSession";
 
@@ -67,6 +68,16 @@ const replanBase = {
 };
 
 describe("buildStartRequestV3", () => {
+  // Feature tokens are promises the server enforces, so a surface advertises
+  // only what it implements: the base set alone unless the caller names more.
+  it("advertises only the surface's own features", () => {
+    expect(
+      buildStartRequestV3({ ...startBase, extraClientFeatures: VIDEO_CLIENT_FEATURES_V3 })
+        .client_features,
+    ).toEqual(["playback_plan_v3", "plan_invalidated_v1"]);
+    expect(buildStartRequestV3(startBase).client_features).toEqual(["playback_plan_v3"]);
+  });
+
   it("declares the protocol version and the plan feature", () => {
     expect(buildStartRequestV3(startBase)).toMatchObject({
       protocol_version: 3,
@@ -143,6 +154,19 @@ describe("buildReplanRequestV3", () => {
       plan_attempt_key: "v3:0123456789abcdef",
       position_seconds: 120,
     });
+  });
+
+  // A replan that sends `client_features` replaces the negotiated list, so a
+  // replan which advertised less than the start did would silently withdraw the
+  // promise the server gates the invalidation command on.
+  it("re-advertises the same features a start negotiated", () => {
+    expect(
+      buildReplanRequestV3({
+        ...replanBase,
+        operation: "failure_recovery",
+        extraClientFeatures: VIDEO_CLIENT_FEATURES_V3,
+      }).client_features,
+    ).toEqual(["playback_plan_v3", "plan_invalidated_v1"]);
   });
 
   it("names a new audio track by index alone", () => {
@@ -1391,6 +1415,155 @@ describe("usePlaybackSession replans", () => {
       expect(result.current.error).toBe("Playback failed after repeated recovery attempts.");
     });
     expect(replanCount).toBe(8);
+
+    unmount();
+  });
+});
+
+describe("usePlaybackSession server-invalidated plans", () => {
+  function invalidationFetchMock(replanBodies: Array<Record<string, unknown>>, replan: unknown) {
+    return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/playback/start")) {
+        return jsonResponse(
+          {
+            protocol_version: 3,
+            server_features: ["playback_plan_v3"],
+            outcome: "playable",
+            session_id: "session-1",
+            playback_plan: fixturePlanV3(),
+          },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/playback/session-1/replan")) {
+        replanBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return jsonResponse(replan);
+      }
+      if (url.endsWith("/playback/route-events")) {
+        return new Response(null, { status: 202 });
+      }
+      if (init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+  }
+
+  it("recovers off the invalidated plan and excludes its attempt key", async () => {
+    const replanBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      invalidationFetchMock(replanBodies, {
+        protocol_version: 3,
+        server_features: ["playback_plan_v3"],
+        outcome: "playable",
+        session_id: "session-1",
+        playback_plan: fixturePlanV3({
+          plan_id: "plan:2222222222222222",
+          plan_attempt_key: "v3:2222222222222222",
+          delivery: "server_transcode_hls",
+        }),
+      }),
+    );
+
+    const { result, unmount } = renderHook(
+      () => usePlaybackSession("request-1", [], [], 7, 0, false, "auto"),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.plan?.plan_id).toBe("plan:0123456789abcdef"));
+
+    let outcome: boolean | undefined;
+    await act(async () => {
+      outcome = await result.current.invalidatePlan(
+        "plan:0123456789abcdef",
+        "video_copy_unsafe",
+        450,
+      );
+    });
+
+    // The server only pushes the command to a session that promised to handle
+    // it, so the promise has to be on the wire for any of this to be reachable.
+    const startCall = vi
+      .mocked(fetch)
+      .mock.calls.find(([url]) => String(url).endsWith("/playback/start"));
+    const startBody = JSON.parse(String(startCall?.[1]?.body)) as { client_features: string[] };
+    expect(startBody.client_features).toContain("plan_invalidated_v1");
+
+    expect(outcome).toBe(true);
+    expect(replanBodies).toHaveLength(1);
+    expect(replanBodies[0]).toMatchObject({
+      operation: "failure_recovery",
+      failed_plan_id: "plan:0123456789abcdef",
+      position_seconds: 450,
+      // The invalidated route is excluded by key, so the replacement plan
+      // cannot be the same copy route the server just disqualified.
+      attempted_plan_keys: ["v3:0123456789abcdef"],
+      failure: { classification: "video_copy_unsafe" },
+    });
+    await waitFor(() => expect(result.current.plan?.plan_id).toBe("plan:2222222222222222"));
+
+    unmount();
+  });
+
+  it("does nothing for a plan the session already moved past", async () => {
+    const replanBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", invalidationFetchMock(replanBodies, {}));
+
+    const { result, unmount } = renderHook(
+      () => usePlaybackSession("request-1", [], [], 7, 0, false, "auto"),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.plan?.plan_id).toBe("plan:0123456789abcdef"));
+
+    let outcome: boolean | undefined;
+    await act(async () => {
+      outcome = await result.current.invalidatePlan("plan:superseded", "video_copy_unsafe", 12);
+    });
+
+    // Reported as handled: the invalidated route is already gone, and replanning
+    // would evict a plan the server never complained about.
+    expect(outcome).toBe(true);
+    expect(replanBodies).toHaveLength(0);
+
+    unmount();
+  });
+
+  it("reports failure when the replan produces no replacement plan", async () => {
+    const replanBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      invalidationFetchMock(replanBodies, {
+        protocol_version: 3,
+        server_features: ["playback_plan_v3"],
+        outcome: "adaptation_unavailable",
+        terminal: {
+          reason: "video_conversion_unsupported",
+          message: "No executor can transcode this source.",
+          retryable: false,
+        },
+      }),
+    );
+
+    const { result, unmount } = renderHook(
+      () => usePlaybackSession("request-1", [], [], 7, 0, false, "auto"),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.plan?.plan_id).toBe("plan:0123456789abcdef"));
+
+    let outcome: boolean | undefined;
+    await act(async () => {
+      outcome = await result.current.invalidatePlan(
+        "plan:0123456789abcdef",
+        "video_copy_unsafe",
+        30,
+      );
+    });
+
+    // The caller rejects the realtime command on false, which is what makes the
+    // server stop the session instead of leaving the copy route playing.
+    expect(outcome).toBe(false);
+    expect(replanBodies).toHaveLength(1);
 
     unmount();
   });
