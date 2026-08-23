@@ -403,6 +403,38 @@ func TestNormalizeAndValidateVideoDecodeLowercasesDetailedEntries(t *testing.T) 
 	}
 }
 
+func TestResolver_DetailedCapsWithSparseMetadataFailsClosedToCoarseCeiling(t *testing.T) {
+	// Detailed platform_attested caps with a hardware entry bounded to
+	// 1920x1080, but the source's probe metadata is incomplete (zero bitrate)
+	// so the detailed bounds walk cannot run at all. The coarse max_resolution
+	// ceiling must still apply — same outcome as a flat-only payload — rather
+	// than approving an original-quality 2160p download past the device ceiling.
+	file := &models.MediaFile{
+		CodecVideo: "hevc", CodecAudio: "aac", Container: "mp4",
+		Resolution: "2160p", Bitrate: 0,
+		VideoTracks: []models.VideoTrack{{
+			Codec: "hevc", Profile: "Main 10", Width: 3840, Height: 2160,
+			FrameRate: "60/1", Bitrate: 0, BitDepth: 10,
+		}},
+	}
+	caps := playback.ClientCapabilities{
+		VideoEvidence: playback.EvidencePlatformAttestedV3,
+		CodecsVideo:   []string{"hevc"},
+		CodecsAudio:   []string{"aac"},
+		Containers:    []string{"mp4"},
+		MaxResolution: "1080p",
+		VideoDecode: []playback.VideoDecodeCapabilityV3{{
+			Codec: "hevc", BitDepths: []int{8, 10}, MaxWidth: 1920,
+			MaxHeight: 1080, MaxFrameRate: 60, MaxBitrateKbps: 40_000,
+			Hardware: true,
+		}},
+	}
+
+	if decision := playback.Resolve(file, caps, defaultSettings()); decision.Method != playback.PlayTranscode {
+		t.Fatalf("sparse-metadata source with coarse-ceiling-exceeding detailed caps = %q, want transcode", decision.Method)
+	}
+}
+
 func TestResolver_Transcode_ResolutionExceeds(t *testing.T) {
 	file := &models.MediaFile{
 		CodecVideo: "h264", CodecAudio: "aac", Container: "mp4",

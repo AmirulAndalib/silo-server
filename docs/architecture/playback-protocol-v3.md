@@ -346,7 +346,11 @@ ceilings: the flat `max_resolution` remains a coarse device ceiling, while the
 detailed entry decides whether a particular original file is safe. Apple keeps
 the legacy coarse ceiling at 1080p so older servers fail safely; a detailed
 hardware entry may independently preserve a 4K original on a new server.
-Legacy flat-only download clients keep the previous resolver behavior.
+Legacy flat-only download clients keep the previous resolver behavior. When a
+file's probe metadata is too sparse for the detailed bounds walk to run at
+all, the flat claims decide instead — including the coarse `max_resolution`
+ceiling — so sparse metadata cannot widen eligibility beyond the flat
+contract.
 
 **An omitted bound means "unconstrained", not "unknown".** Within a
 `video_decode[]` entry, an empty `profiles`, `levels`, or `bit_depths` list and a

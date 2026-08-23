@@ -95,6 +95,13 @@ func Resolve(file *models.MediaFile, caps ClientCapabilities, settings AdminSett
 	// Check if client supports the video codec.
 	videoOK := containsStr(caps.CodecsVideo, file.CodecVideo)
 	detailedVideoEvidence := caps.hasDetailedVideoEvidence()
+	// detailedBoundsChecked is true only when the videoEligibleV3 bounds walk
+	// below actually ran. It gates the resolution ceiling check further down:
+	// when the detailed walk ran, its per-decoder max_width/max_height are
+	// authoritative and the coarse ceiling is redundant; when it could not run
+	// (sparse probe metadata), the coarse ceiling must still apply so sparse
+	// metadata cannot widen eligibility beyond the flat contract.
+	detailedBoundsChecked := false
 	if detailedVideoEvidence {
 		source := SourceDescriptorFromFileV3(file, 0)
 		// Detailed validation needs complete probe facts (codec, bit depth,
@@ -102,9 +109,12 @@ func Resolve(file *models.MediaFile, caps ClientCapabilities, settings AdminSett
 		// sparse cannot be checked against the decoder bounds at all — that is
 		// "can't tell", not "incompatible", and forcing a transcode of an
 		// original-quality download over it would be a silent quality loss. Keep
-		// the flat-list answer in that case; a real mismatch (complete metadata
+		// the flat-list answer in that case — which includes the coarse
+		// max_resolution ceiling, so sparse metadata fails closed to that
+		// ceiling instead of failing open; a real mismatch (complete metadata
 		// whose entries do not cover the source) still fails closed below.
 		if routeVideoMetadataCompleteV3(source) {
+			detailedBoundsChecked = true
 			videoOK, _ = videoEligibleV3(source, StartRequestV3{
 				ClientFeatures: caps.ClientFeatures,
 				Capabilities: ClientCodecCapabilitiesV3{
@@ -124,7 +134,7 @@ func Resolve(file *models.MediaFile, caps ClientCapabilities, settings AdminSett
 	containerOK := containsStr(caps.Containers, file.Container)
 
 	// Check resolution constraint.
-	if !detailedVideoEvidence && !resolutionFits(file.Resolution, caps.MaxResolution) {
+	if !detailedBoundsChecked && !resolutionFits(file.Resolution, caps.MaxResolution) {
 		if !settings.TranscodeEnabled {
 			return &PlayDecision{
 				Method: PlayDirect,
