@@ -409,6 +409,9 @@ func NewRouter(deps Dependencies) chi.Router {
 			profileTokenService,
 		)
 		authHandler = handlers.NewAuthHandler(authService, jwtService, deviceLoginService)
+		if accessGroupStore != nil {
+			authHandler.SetAccessGroupProvider(accessGroupStore)
+		}
 		authMiddleware = apimw.NewAuthMiddleware(jwtService, sessionRepo, apiKeyRepo, userRepo)
 		if deps.UserStoreProvider != nil {
 			if deps.PolicySystem != nil {
@@ -435,6 +438,7 @@ func NewRouter(deps Dependencies) chi.Router {
 					userRepo,
 					metadataLibraries,
 					checkPrimaryProfile,
+					accessGroupStore,
 				).RequireMetadataCurationForItem
 			}
 		}
@@ -487,6 +491,9 @@ func NewRouter(deps Dependencies) chi.Router {
 	var libraryHandler *handlers.LibraryHandler
 	if deps.FolderRepo != nil {
 		libraryHandler = handlers.NewLibraryHandler(deps.FolderRepo, deps.LibraryIngester, userRepo, deps.DB, deps.Refresher, deps.AppContext)
+		if accessGroupStore != nil {
+			libraryHandler.AccessGroups = accessGroupStore
+		}
 		libraryHandler.EventBus = deps.EventBus
 		libraryHandler.EventsHub = deps.EventsHub
 		libraryHandler.ScanRegistry = deps.ScanRegistry
@@ -638,6 +645,9 @@ func NewRouter(deps Dependencies) chi.Router {
 		}
 		itemsHandler.EventsHub = deps.EventsHub
 		itemsHandler.UserRepo = userRepo
+		if accessGroupStore != nil {
+			itemsHandler.AccessGroups = accessGroupStore
+		}
 		if requester, ok := deps.MetadataService.(handlers.MetadataRefreshRequester); ok {
 			itemsHandler.SetMetadataRefreshRequester(requester)
 		}
@@ -692,6 +702,9 @@ func NewRouter(deps Dependencies) chi.Router {
 		)
 		AttachRequestRouter(requestSvc, deps.PluginService)
 		requestSvc.SetGroupPolicyProvider(accessGroupStore)
+		if userRepo != nil {
+			requestSvc.SetUserRepository(userRepo)
+		}
 		requestSvc.SetRequesterIdentityResolver(plugins.RequesterIdentityFromLookup(plugins.NewPgUserIdentityLookup(deps.DB)))
 		if viewerResolver != nil {
 			requestSvc.SetEntitlementResolver(scopeEntitlementResolver{resolver: viewerResolver})
@@ -1421,6 +1434,9 @@ func NewRouter(deps Dependencies) chi.Router {
 		if userRepo != nil {
 			sectionHandler.UserRepo = userRepo
 		}
+		if accessGroupStore != nil {
+			sectionHandler.AccessGroups = accessGroupStore
+		}
 		if settingsRepo != nil {
 			sectionHandler.Settings = settingsRepo
 			sectionSettingsHandler = &handlers.SectionSettingsHandler{Settings: settingsRepo}
@@ -1823,6 +1839,9 @@ func NewRouter(deps Dependencies) chi.Router {
 
 			if invitationService != nil {
 				invitationHandler := handlers.NewInvitationHandler(invitationService)
+				if accessGroupStore != nil {
+					invitationHandler.SetAccessGroupProvider(accessGroupStore)
+				}
 				r.Route("/invitations/{token}", func(r chi.Router) {
 					if deps.RateLimitMW != nil {
 						r.With(deps.RateLimitMW.AuthEndpointHandler("invitation")).Get("/", invitationHandler.HandleLookupInvitation)
@@ -1941,6 +1960,7 @@ func NewRouter(deps Dependencies) chi.Router {
 				r.Route("/api-keys", func(r chi.Router) {
 					r.Post("/", apiKeyHandler.HandleCreateAPIKey)
 					r.Get("/", apiKeyHandler.HandleListAPIKeys)
+					r.Get("/scopes", apiKeyHandler.HandleListAPIKeyScopes)
 					r.Delete("/{id}", apiKeyHandler.HandleDeleteAPIKey)
 				})
 			})
@@ -3444,6 +3464,11 @@ func resolveOptionalPluginAccessUser(
 		}
 		apiKey, err := apiKeyRepo.GetByKey(r.Context(), token)
 		if err != nil {
+			return false, false, 0, ""
+		}
+		// Scoped keys are allowlist credentials for the routes their scopes
+		// name; plugin access is not on any scope's allowlist.
+		if len(apiKey.Scopes) > 0 {
 			return false, false, 0, ""
 		}
 		user, err := userRepo.GetByID(r.Context(), apiKey.UserID)

@@ -17,7 +17,7 @@
 > before proposing anything that looks like a simplification; most simplifications
 > here have already been tried and have a recorded reason for failing.
 >
-> **Related:** [streaming write deadline](2026-07-09-streaming-write-deadline.md) —
+> **Related:** [streaming write deadlines and writer-chain conformance](../architecture/streaming-write-deadline.md) —
 > the writer-chain conformance rules §4.4 depends on.
 
 ---

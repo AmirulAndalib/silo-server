@@ -5,9 +5,9 @@ the contract the Apple (`silo-apple`) and Android (`silo-android`) apps should u
 to download movies and episodes for fully offline playback and reconcile watch
 state after reconnect.
 
-It documents the current HTTP contract implemented by this server. Design rationale
-and server internals live in
-[`docs/superpowers/specs/2026-06-18-offline-sync-mobile-design.md`](superpowers/specs/2026-06-18-offline-sync-mobile-design.md).
+It documents the current HTTP contract implemented by this server. Server-side
+design rationale is summarized in [section 14](#14-design-notes-server-internals);
+the implementation lives in `internal/downloads`.
 
 > All endpoints are under `/api/v1`. Examples use `https://your-server` as the origin.
 
@@ -158,7 +158,8 @@ Response:
   "transcode_user_allowed": true,
   "season_download": true,
   "series_monitoring": true,
-  "monitoring_modes": ["all", "future", "latest_season", "specific_seasons"]
+  "monitoring_modes": ["all", "future", "latest_season", "specific_seasons"],
+  "proxy_delivery": true
 }
 ```
 
@@ -172,6 +173,7 @@ Response:
 | `season_download`        | Per-season batch downloads are available.                                         |
 | `series_monitoring`      | Auto-download subscriptions are available.                                        |
 | `monitoring_modes`       | Subscription modes the client may request.                                        |
+| `proxy_delivery`         | Proxy-aware download routes are mounted (§4.11); redirects are per-request.        |
 
 `quality_presets` is always an array — `[]` (never `null`) when downloads are
 disabled or the user lacks download permission — so clients can rely on
@@ -418,6 +420,33 @@ For browser-friendly links, the endpoint accepts the session access token as a
 > **Security note:** the query token is the session access token. Treat
 > direct-download URLs as secrets — they end up in browser history and proxy
 > logs. A short-lived download-scoped URL is a planned follow-up.
+
+### 4.11 Distributed proxy delivery
+
+`proxy_delivery` on the capability response reports whether the proxy-aware
+routes exist:
+
+```http
+GET  /api/v1/downloads/{id}/file-proxy
+HEAD /api/v1/downloads/{id}/file-proxy
+GET  /api/v1/direct-download-proxy?file_id={id}
+HEAD /api/v1/direct-download-proxy?file_id={id}
+```
+
+`true` means the routes are mounted, not that every request redirects. A
+proxy-aware route returns `307` to a proxy node when one is eligible for that
+file, and otherwise serves bytes directly with the same status-code contract as
+the non-proxy route. Bandwidth-limited downloads (server-wide or per-user) are
+never redirected, and neither are files no proxy node can reach. Clients must
+follow the redirect or accept the direct response; they cannot assume either.
+
+The established `/file` and `/direct-download` routes never redirect. When a
+prepared artifact for `/downloads/{id}/file` lives on a transcode node, the API
+relays it; the client sees an ordinary direct response. `/direct-download`
+serves source files only and has no artifact case.
+
+Treat proxy delivery as an advertised capability, not something inferred from a
+server version.
 
 ---
 
@@ -1169,3 +1198,62 @@ Cross-device download visibility, DRM/leases, cumulative per-user storage quotas
 and server-initiated deletion of client files remain out of scope. Artifact garbage
 collection may remove server-side prepared files only when no managed row still
 references them.
+
+---
+
+## 14. Design notes (server internals)
+
+Durable design decisions behind the contract above, kept here for server
+maintainers. The implementation is `internal/downloads`.
+
+### Storage model
+
+Ephemeral web rows and managed device entries share one `downloads` table.
+`device_id` is nullable: `NULL` means an ephemeral account-level row; a value
+means a managed device-library entry, unique per
+`(user, profile, device, content, episode)` via a partial unique index (movies
+coalesce a `NULL` episode id so one movie is one entry per device). One table
+and one endpoint family let web and mobile share the quality/format machinery.
+
+### Prepared artifacts
+
+Remux and transcode both need a finalized single file (`+faststart` requires a
+finalization pass), so both go through a prepare-to-file job that writes a
+`download_artifacts` row. Artifacts are deduplicated by
+`(media_file_id, format, params_hash)` and shared across users and devices —
+two devices requesting the same target reuse one encode. The artifact table is
+a durable, leased job queue: transactional claims (`FOR UPDATE SKIP LOCKED`),
+lease heartbeats, attempt counting, and a startup sweep guarantee a crash
+mid-encode cannot strand a download in `preparing` or double-encode. Ready
+artifacts are evicted LRU under a byte budget, but never while a managed row —
+including a completed one representing a device's local library — still
+references them.
+
+### Progress sync ordering
+
+Progress rows carry two server-owned facets, deliberately split:
+
+- `event_at` — the client event time, clamped on ingest to
+  `server_now + skew`, used only as the last-write-wins comparison key for the
+  caller's own profile.
+- `synced_seq` — a server-assigned monotonic marker set on every write, never
+  client-influenced, and the sole basis for the `?since=` cursor.
+
+A skewed or malicious clock can therefore at most claim "now" for its own
+profile — authority it already has — and can never lock in a far-future win or
+poison another device's cursor.
+
+### Authorization
+
+Household profiles share a `user_id`, so a user-only check would leak one
+profile's downloads to another. Every managed endpoint authorizes the row on
+`(user_id, profile_id, header device_id)` — `device_id` from the header only —
+and byte/asset endpoints additionally re-check per-profile content and library
+access before serving, so a stale or out-of-scope row cannot pull restricted
+media by download id.
+
+### Manifest stability
+
+Manifests never carry presigned or expiring URLs. Artwork and subtitle
+references are session-authenticated proxy paths rather than time-limited
+tokens, so a manifest stored on-device stays valid indefinitely.
