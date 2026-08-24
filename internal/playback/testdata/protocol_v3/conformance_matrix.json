@@ -232,13 +232,43 @@
             "preserves_source": true
           },
           {
-            "label": "720p",
+            "label": "1080p-medium",
+            "display_name": "1080p Medium",
+            "height": 1080,
+            "bitrate_kbps": 6000,
+            "preserves_source": false
+          },
+          {
+            "label": "1080p-low",
+            "display_name": "1080p Low",
+            "height": 1080,
+            "bitrate_kbps": 3000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-high",
+            "display_name": "720p High",
+            "height": 720,
+            "bitrate_kbps": 4000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-medium",
+            "display_name": "720p Medium",
             "height": 720,
             "bitrate_kbps": 2000,
             "preserves_source": false
           },
           {
+            "label": "720p-low",
+            "display_name": "720p Low",
+            "height": 720,
+            "bitrate_kbps": 1500,
+            "preserves_source": false
+          },
+          {
             "label": "480p",
+            "display_name": "480p",
             "height": 480,
             "bitrate_kbps": 1500,
             "preserves_source": false
@@ -459,13 +489,43 @@
             "preserves_source": true
           },
           {
-            "label": "720p",
+            "label": "1080p-medium",
+            "display_name": "1080p Medium",
+            "height": 1080,
+            "bitrate_kbps": 6000,
+            "preserves_source": false
+          },
+          {
+            "label": "1080p-low",
+            "display_name": "1080p Low",
+            "height": 1080,
+            "bitrate_kbps": 3000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-high",
+            "display_name": "720p High",
+            "height": 720,
+            "bitrate_kbps": 4000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-medium",
+            "display_name": "720p Medium",
             "height": 720,
             "bitrate_kbps": 2000,
             "preserves_source": false
           },
           {
+            "label": "720p-low",
+            "display_name": "720p Low",
+            "height": 720,
+            "bitrate_kbps": 1500,
+            "preserves_source": false
+          },
+          {
             "label": "480p",
+            "display_name": "480p",
             "height": 480,
             "bitrate_kbps": 1500,
             "preserves_source": false
@@ -667,13 +727,43 @@
             "preserves_source": true
           },
           {
-            "label": "720p",
+            "label": "1080p-medium",
+            "display_name": "1080p Medium",
+            "height": 1080,
+            "bitrate_kbps": 6000,
+            "preserves_source": false
+          },
+          {
+            "label": "1080p-low",
+            "display_name": "1080p Low",
+            "height": 1080,
+            "bitrate_kbps": 3000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-high",
+            "display_name": "720p High",
+            "height": 720,
+            "bitrate_kbps": 4000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-medium",
+            "display_name": "720p Medium",
             "height": 720,
             "bitrate_kbps": 2000,
             "preserves_source": false
           },
           {
+            "label": "720p-low",
+            "display_name": "720p Low",
+            "height": 720,
+            "bitrate_kbps": 1500,
+            "preserves_source": false
+          },
+          {
             "label": "480p",
+            "display_name": "480p",
             "height": 480,
             "bitrate_kbps": 1500,
             "preserves_source": false
@@ -875,13 +965,43 @@
             "preserves_source": true
           },
           {
-            "label": "720p",
+            "label": "1080p-medium",
+            "display_name": "1080p Medium",
+            "height": 1080,
+            "bitrate_kbps": 6000,
+            "preserves_source": false
+          },
+          {
+            "label": "1080p-low",
+            "display_name": "1080p Low",
+            "height": 1080,
+            "bitrate_kbps": 3000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-high",
+            "display_name": "720p High",
+            "height": 720,
+            "bitrate_kbps": 4000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-medium",
+            "display_name": "720p Medium",
             "height": 720,
             "bitrate_kbps": 2000,
             "preserves_source": false
           },
           {
+            "label": "720p-low",
+            "display_name": "720p Low",
+            "height": 720,
+            "bitrate_kbps": 1500,
+            "preserves_source": false
+          },
+          {
             "label": "480p",
+            "display_name": "480p",
             "height": 480,
             "bitrate_kbps": 1500,
             "preserves_source": false
@@ -1086,13 +1206,43 @@
             "preserves_source": true
           },
           {
-            "label": "720p",
+            "label": "1080p-medium",
+            "display_name": "1080p Medium",
+            "height": 1080,
+            "bitrate_kbps": 6000,
+            "preserves_source": false
+          },
+          {
+            "label": "1080p-low",
+            "display_name": "1080p Low",
+            "height": 1080,
+            "bitrate_kbps": 3000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-high",
+            "display_name": "720p High",
+            "height": 720,
+            "bitrate_kbps": 4000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-medium",
+            "display_name": "720p Medium",
             "height": 720,
             "bitrate_kbps": 2000,
             "preserves_source": false
           },
           {
+            "label": "720p-low",
+            "display_name": "720p Low",
+            "height": 720,
+            "bitrate_kbps": 1500,
+            "preserves_source": false
+          },
+          {
             "label": "480p",
+            "display_name": "480p",
             "height": 480,
             "bitrate_kbps": 1500,
             "preserves_source": false
@@ -1298,13 +1448,43 @@
             "preserves_source": true
           },
           {
-            "label": "720p",
+            "label": "1080p-medium",
+            "display_name": "1080p Medium",
+            "height": 1080,
+            "bitrate_kbps": 6000,
+            "preserves_source": false
+          },
+          {
+            "label": "1080p-low",
+            "display_name": "1080p Low",
+            "height": 1080,
+            "bitrate_kbps": 3000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-high",
+            "display_name": "720p High",
+            "height": 720,
+            "bitrate_kbps": 4000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-medium",
+            "display_name": "720p Medium",
             "height": 720,
             "bitrate_kbps": 2000,
             "preserves_source": false
           },
           {
+            "label": "720p-low",
+            "display_name": "720p Low",
+            "height": 720,
+            "bitrate_kbps": 1500,
+            "preserves_source": false
+          },
+          {
             "label": "480p",
+            "display_name": "480p",
             "height": 480,
             "bitrate_kbps": 1500,
             "preserves_source": false
@@ -1524,13 +1704,43 @@
             "preserves_source": true
           },
           {
-            "label": "720p",
+            "label": "1080p-medium",
+            "display_name": "1080p Medium",
+            "height": 1080,
+            "bitrate_kbps": 6000,
+            "preserves_source": false
+          },
+          {
+            "label": "1080p-low",
+            "display_name": "1080p Low",
+            "height": 1080,
+            "bitrate_kbps": 3000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-high",
+            "display_name": "720p High",
+            "height": 720,
+            "bitrate_kbps": 4000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-medium",
+            "display_name": "720p Medium",
             "height": 720,
             "bitrate_kbps": 2000,
             "preserves_source": false
           },
           {
+            "label": "720p-low",
+            "display_name": "720p Low",
+            "height": 720,
+            "bitrate_kbps": 1500,
+            "preserves_source": false
+          },
+          {
             "label": "480p",
+            "display_name": "480p",
             "height": 480,
             "bitrate_kbps": 1500,
             "preserves_source": false
@@ -2214,19 +2424,71 @@
             "preserves_source": true
           },
           {
-            "label": "1080p",
+            "label": "2160p-high",
+            "display_name": "4K High",
+            "height": 2160,
+            "bitrate_kbps": 40000,
+            "preserves_source": false
+          },
+          {
+            "label": "2160p-medium",
+            "display_name": "4K Medium",
+            "height": 2160,
+            "bitrate_kbps": 20000,
+            "preserves_source": false
+          },
+          {
+            "label": "2160p-low",
+            "display_name": "4K Low",
+            "height": 2160,
+            "bitrate_kbps": 10000,
+            "preserves_source": false
+          },
+          {
+            "label": "1080p-high",
+            "display_name": "1080p High",
+            "height": 1080,
+            "bitrate_kbps": 10000,
+            "preserves_source": false
+          },
+          {
+            "label": "1080p-medium",
+            "display_name": "1080p Medium",
             "height": 1080,
             "bitrate_kbps": 6000,
             "preserves_source": false
           },
           {
-            "label": "720p",
+            "label": "1080p-low",
+            "display_name": "1080p Low",
+            "height": 1080,
+            "bitrate_kbps": 3000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-high",
+            "display_name": "720p High",
+            "height": 720,
+            "bitrate_kbps": 4000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-medium",
+            "display_name": "720p Medium",
             "height": 720,
             "bitrate_kbps": 2000,
             "preserves_source": false
           },
           {
+            "label": "720p-low",
+            "display_name": "720p Low",
+            "height": 720,
+            "bitrate_kbps": 1500,
+            "preserves_source": false
+          },
+          {
             "label": "480p",
+            "display_name": "480p",
             "height": 480,
             "bitrate_kbps": 1500,
             "preserves_source": false
@@ -3191,19 +3453,71 @@
             "preserves_source": true
           },
           {
-            "label": "1080p",
+            "label": "2160p-high",
+            "display_name": "4K High",
+            "height": 2160,
+            "bitrate_kbps": 40000,
+            "preserves_source": false
+          },
+          {
+            "label": "2160p-medium",
+            "display_name": "4K Medium",
+            "height": 2160,
+            "bitrate_kbps": 20000,
+            "preserves_source": false
+          },
+          {
+            "label": "2160p-low",
+            "display_name": "4K Low",
+            "height": 2160,
+            "bitrate_kbps": 10000,
+            "preserves_source": false
+          },
+          {
+            "label": "1080p-high",
+            "display_name": "1080p High",
+            "height": 1080,
+            "bitrate_kbps": 10000,
+            "preserves_source": false
+          },
+          {
+            "label": "1080p-medium",
+            "display_name": "1080p Medium",
             "height": 1080,
             "bitrate_kbps": 6000,
             "preserves_source": false
           },
           {
-            "label": "720p",
+            "label": "1080p-low",
+            "display_name": "1080p Low",
+            "height": 1080,
+            "bitrate_kbps": 3000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-high",
+            "display_name": "720p High",
+            "height": 720,
+            "bitrate_kbps": 4000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-medium",
+            "display_name": "720p Medium",
             "height": 720,
             "bitrate_kbps": 2000,
             "preserves_source": false
           },
           {
+            "label": "720p-low",
+            "display_name": "720p Low",
+            "height": 720,
+            "bitrate_kbps": 1500,
+            "preserves_source": false
+          },
+          {
             "label": "480p",
+            "display_name": "480p",
             "height": 480,
             "bitrate_kbps": 1500,
             "preserves_source": false
@@ -4448,13 +4762,43 @@
             "preserves_source": true
           },
           {
-            "label": "720p",
+            "label": "1080p-medium",
+            "display_name": "1080p Medium",
+            "height": 1080,
+            "bitrate_kbps": 6000,
+            "preserves_source": false
+          },
+          {
+            "label": "1080p-low",
+            "display_name": "1080p Low",
+            "height": 1080,
+            "bitrate_kbps": 3000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-high",
+            "display_name": "720p High",
+            "height": 720,
+            "bitrate_kbps": 4000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-medium",
+            "display_name": "720p Medium",
             "height": 720,
             "bitrate_kbps": 2000,
             "preserves_source": false
           },
           {
+            "label": "720p-low",
+            "display_name": "720p Low",
+            "height": 720,
+            "bitrate_kbps": 1500,
+            "preserves_source": false
+          },
+          {
             "label": "480p",
+            "display_name": "480p",
             "height": 480,
             "bitrate_kbps": 1500,
             "preserves_source": false
@@ -4656,13 +5000,43 @@
             "preserves_source": true
           },
           {
-            "label": "720p",
+            "label": "1080p-medium",
+            "display_name": "1080p Medium",
+            "height": 1080,
+            "bitrate_kbps": 6000,
+            "preserves_source": false
+          },
+          {
+            "label": "1080p-low",
+            "display_name": "1080p Low",
+            "height": 1080,
+            "bitrate_kbps": 3000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-high",
+            "display_name": "720p High",
+            "height": 720,
+            "bitrate_kbps": 4000,
+            "preserves_source": false
+          },
+          {
+            "label": "720p-medium",
+            "display_name": "720p Medium",
             "height": 720,
             "bitrate_kbps": 2000,
             "preserves_source": false
           },
           {
+            "label": "720p-low",
+            "display_name": "720p Low",
+            "height": 720,
+            "bitrate_kbps": 1500,
+            "preserves_source": false
+          },
+          {
             "label": "480p",
+            "display_name": "480p",
             "height": 480,
             "bitrate_kbps": 1500,
             "preserves_source": false

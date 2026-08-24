@@ -3,6 +3,7 @@ package playback
 import (
 	"encoding/json"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -113,6 +114,39 @@ func TestStartRequestV3UnknownQualityFallsBackToAuto(t *testing.T) {
 	}
 	if req.QualityPreference != "auto" || len(warnings) != 1 || warnings[0].Code != "quality_preference_normalized" {
 		t.Fatalf("quality=%q warnings=%#v", req.QualityPreference, warnings)
+	}
+
+	for _, quality := range []string{QualityRung2160pMediumV3, QualityRung1080pLowV3, QualityRung720pHighV3, "1080P-MEDIUM"} {
+		req := validStartRequestV3()
+		req.QualityPreference = quality
+		warnings, err := req.NormalizeAndValidate()
+		if err != nil {
+			t.Fatalf("NormalizeAndValidate(%q): %v", quality, err)
+		}
+		if req.QualityPreference != strings.ToLower(quality) || len(warnings) != 0 {
+			t.Fatalf("quality %q normalized to %q warnings=%#v", quality, req.QualityPreference, warnings)
+		}
+	}
+}
+
+func TestResolveQualityPolicyV3CompoundRung(t *testing.T) {
+	request := validStartRequestV3()
+	request.QualityPreference = QualityRung2160pMediumV3
+	source := SourceDescriptorV3{Width: 3840, Height: 1540, BitrateKbps: 25_200}
+
+	result := ResolveQualityPolicyV3(request, source)
+	if result.Width != 3840 || result.Height != 1540 || result.Label != "1540p" || result.BitrateKbps != 20_000 || !result.RequiresTranscode || !result.ExplicitRung {
+		t.Fatalf("cropped UHD + 4K Medium = %#v", result)
+	}
+
+	capKbps := 8_000
+	request.BandwidthCapKbps = &capKbps
+	result = ResolveQualityPolicyV3(request, source)
+	if result.Height != 1540 || result.BitrateKbps != capKbps || result.Reason != decisionReasonBandwidthCapV3 {
+		t.Fatalf("capped 4K Medium = %#v", result)
+	}
+	if !hasDegradationWarningV3(result.Warnings, "bandwidth_cap_applied") {
+		t.Fatalf("capped 4K Medium has no cap warning: %#v", result.Warnings)
 	}
 }
 
@@ -1375,7 +1409,7 @@ func TestPlanPlaybackV3ToneMapSettingsSelectValidatedExecutor(t *testing.T) {
 	file.VideoTracks[0].ColorTransfer = "smpte2084"
 	file.VideoTracks[0].ColorSpace = "bt2020nc"
 	req := validStartRequestV3()
-	req.QualityPreference = "1080p"
+	req.QualityPreference = QualityRung2160pMediumV3
 	registry := NewTransformationRegistryV3([]TransformationSpecV3{
 		{Name: TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
 		{Name: TransformationVideoToH264V3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, Available: true},
@@ -1411,6 +1445,9 @@ func TestPlanPlaybackV3ToneMapSettingsSelectValidatedExecutor(t *testing.T) {
 			}
 			if result.Plan == nil || result.ToneMapMode != tt.wantMode || result.ToneMapSourceKind != tonemap.SourcePQ {
 				t.Fatalf("result = %#v", result)
+			}
+			if result.TargetResolution != "2160p" || result.TargetBitrateKbps != 20_000 || result.Plan.EffectiveRecipe.Height == nil || *result.Plan.EffectiveRecipe.Height != 2160 {
+				t.Fatalf("4K Medium target = resolution %q bitrate %d recipe %#v", result.TargetResolution, result.TargetBitrateKbps, result.Plan.EffectiveRecipe)
 			}
 			if result.Plan.EffectiveRecipe.DynamicRange != DynamicRangeSDRV3 || !hasDegradationWarningV3(result.Plan.DegradationWarnings, DegradationWarningHDRToneMappedV3) {
 				t.Fatalf("plan = %#v", result.Plan)
@@ -2683,9 +2720,9 @@ func TestPlanPlaybackV3DoesNotProbeWhenNoStripIsOnTheTable(t *testing.T) {
 	}
 }
 
-// availableQualities must publish the transcode ladder below the source height
-// plus the source-preserving "original" entry, and shrink to "original" alone
-// when the transcode route cannot execute.
+// availableQualities must publish useful same-class bitrate steps and every
+// lower resolution step alongside the source-preserving "original" entry, and
+// shrink to "original" alone when the transcode route cannot execute.
 func TestPlanPlaybackV3PublishesAvailableQualities(t *testing.T) {
 	file := detailedFixtureFileV3()
 	file.VideoTracks[0].VideoRange = "SDR"
@@ -2702,14 +2739,21 @@ func TestPlanPlaybackV3PublishesAvailableQualities(t *testing.T) {
 	for _, quality := range result.Plan.AvailableQualities {
 		labels = append(labels, quality.Label)
 	}
-	if len(labels) != 4 || labels[0] != "original" || labels[1] != "1080p" || labels[2] != "720p" || labels[3] != "480p" {
-		t.Fatalf("labels = %v", labels)
+	want := []string{
+		"original",
+		QualityRung2160pHighV3, QualityRung2160pMediumV3, QualityRung2160pLowV3,
+		QualityRung1080pHighV3, QualityRung1080pMediumV3, QualityRung1080pLowV3,
+		QualityRung720pHighV3, QualityRung720pMediumV3, QualityRung720pLowV3,
+		"480p",
+	}
+	if !reflect.DeepEqual(labels, want) {
+		t.Fatalf("labels = %v, want %v", labels, want)
 	}
 	if !result.Plan.AvailableQualities[0].PreservesSource || result.Plan.AvailableQualities[0].Height != 2160 {
 		t.Fatalf("original entry = %#v", result.Plan.AvailableQualities[0])
 	}
-	if result.Plan.AvailableQualities[2].BitrateKbps != 2_000 {
-		t.Fatalf("720p bitrate = %#v", result.Plan.AvailableQualities[2])
+	if got := result.Plan.AvailableQualities[2]; got.BitrateKbps != 20_000 || got.DisplayName != "4K Medium" {
+		t.Fatalf("4K Medium = %#v", got)
 	}
 
 	// Without an HLS delivery the ladder cannot execute: menu shrinks to
@@ -2734,12 +2778,14 @@ func TestAvailableQualitiesV3UnknownSourceHeightPublishesNoFixedRungs(t *testing
 	}
 }
 
-// TestAvailableQualitiesV3KeepsDirectHDRPlanningCapabilityLazy verifies direct HDR playback avoids unnecessary probing.
+// TestAvailableQualitiesV3KeepsDirectHDRPlanningCapabilityLazy verifies direct
+// HDR playback advertises configured lower-quality choices without probing an
+// executor until the user selects one.
 func TestAvailableQualitiesV3KeepsDirectHDRPlanningCapabilityLazy(t *testing.T) {
 	capabilityCalls := 0
 	input := PlannerInputV3{
 		Request:  validStartRequestV3(),
-		Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true},
+		Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true, SoftwareToneMapEnabled: true},
 		HLSRegistry: func() *TransformationRegistryV3 {
 			capabilityCalls++
 			return testTransformationRegistryV3()
@@ -2749,18 +2795,43 @@ func TestAvailableQualitiesV3KeepsDirectHDRPlanningCapabilityLazy(t *testing.T) 
 			return nil
 		},
 	}
-	source := SourceDescriptorV3{Height: 2160, BitrateKbps: 80_000, DynamicRange: DynamicRangeHDR10V3}
-	if got := availableQualitiesV3(input, source); len(got) != 1 || got[0].Label != QualityOriginalV3 {
-		t.Fatalf("direct HDR qualities = %#v, want original only", got)
+	source := SourceDescriptorV3{Width: 3840, Height: 2160, BitrateKbps: 80_000, DynamicRange: DynamicRangeHDR10V3}
+	if got := availableQualitiesV3(input, source); len(got) != 11 || got[0].Label != QualityOriginalV3 || got[1].Label != QualityRung2160pHighV3 {
+		t.Fatalf("direct HDR qualities = %#v, want original plus compound ladder", got)
 	}
 	if capabilityCalls != 0 {
 		t.Fatalf("direct HDR quality planning performed %d lazy capability lookups", capabilityCalls)
 	}
-	if got := availableQualitiesForRouteV3(input, source, true); len(got) != 4 {
-		t.Fatalf("validated HDR transcode qualities = %#v, want original plus lower rungs", got)
+
+	input.Settings.SoftwareToneMapEnabled = false
+	if got := availableQualitiesV3(input, source); len(got) != 1 || got[0].Label != QualityOriginalV3 {
+		t.Fatalf("disabled HDR tone-map qualities = %#v, want original only", got)
 	}
 	if capabilityCalls != 0 {
-		t.Fatalf("validated quality ladder unexpectedly performed %d capability lookups", capabilityCalls)
+		t.Fatalf("disabled HDR quality planning performed %d lazy capability lookups", capabilityCalls)
+	}
+}
+
+func TestAvailableQualitiesV3Cropped4KPublishesOnlyUsefulSameClassRungs(t *testing.T) {
+	input := PlannerInputV3{
+		Request:  validStartRequestV3(),
+		Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true},
+	}
+	source := SourceDescriptorV3{Width: 3840, Height: 1540, BitrateKbps: 25_200}
+	qualities := availableQualitiesV3(input, source)
+	labels := make([]string, 0, len(qualities))
+	for _, quality := range qualities {
+		labels = append(labels, quality.Label)
+	}
+	want := []string{
+		QualityOriginalV3,
+		QualityRung2160pMediumV3, QualityRung2160pLowV3,
+		QualityRung1080pHighV3, QualityRung1080pMediumV3, QualityRung1080pLowV3,
+		QualityRung720pHighV3, QualityRung720pMediumV3, QualityRung720pLowV3,
+		"480p",
+	}
+	if !reflect.DeepEqual(labels, want) {
+		t.Fatalf("cropped 4K labels = %v, want %v", labels, want)
 	}
 }
 

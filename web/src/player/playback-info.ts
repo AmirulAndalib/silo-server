@@ -170,7 +170,7 @@ export function buildPlaybackInfoSections({
 export function qualityOptionsFromPlanV3(plan: PlanV3): QualityOption[] {
   const rungs = plan.available_qualities.map((quality) => ({
     id: quality.label,
-    label: qualityRungLabel(quality.label),
+    label: quality.display_name || qualityRungLabel(quality.label),
     sublabel: formatQualityBitrate(quality.bitrate_kbps),
     resolution: quality.height ? `${quality.height}p` : "",
     bitrateKbps: quality.bitrate_kbps ?? 0,

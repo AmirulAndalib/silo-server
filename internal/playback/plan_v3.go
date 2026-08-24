@@ -543,20 +543,21 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 
 // availableQualitiesV3 publishes the server ladder rungs a client could
 // request for this source through a quality_change replan. The source rung is
-// always present; transcode rungs are listed only below the source's own
-// height and only when the cheap transcode gates pass. Registry availability
-// is deliberately not consulted: it can trigger lazy node-capability fetches,
-// which source-preserving starts must never pay for, and a rung whose
-// toolchain is missing degrades to a retryable terminal at replan time.
+// always present; transcode rungs are listed below the source resolution class,
+// and at the same class when they reduce bitrate, only when the cheap transcode
+// gates pass. Registry availability is deliberately not consulted: it can
+// trigger lazy node-capability fetches, which source-preserving starts must
+// never pay for, and a rung whose toolchain is missing degrades to a retryable
+// terminal at replan time.
 func availableQualitiesV3(input PlannerInputV3, source SourceDescriptorV3) []AvailableQualityV3 {
-	return availableQualitiesForRouteV3(input, source, false)
+	return availableQualitiesForRouteV3(input, source)
 }
 
-// availableQualitiesForRouteV3 keeps source-preserving HDR planning lazy. A
-// direct or remux route publishes only original for HDR; once a video transcode
-// has validated its tone-map executor, includeHDRTranscodeRungs preserves the
-// ordinary lower quality ladder without another capability lookup.
-func availableQualitiesForRouteV3(input PlannerInputV3, source SourceDescriptorV3, includeHDRTranscodeRungs bool) []AvailableQualityV3 {
+// availableQualitiesForRouteV3 keeps source-preserving HDR planning lazy while
+// still advertising the choices the configured policy allows. Selecting a
+// lower HDR rung performs the executor capability lookup during the replan;
+// building the menu itself never probes local or pooled executors.
+func availableQualitiesForRouteV3(input PlannerInputV3, source SourceDescriptorV3) []AvailableQualityV3 {
 	qualities := []AvailableQualityV3{{
 		Label:           QualityOriginalV3,
 		Height:          source.Height,
@@ -574,17 +575,19 @@ func availableQualitiesForRouteV3(input PlannerInputV3, source SourceDescriptorV
 	if is4KSourceV3(input.EffectiveFile, source) && !input.Settings.Allow4KTranscode {
 		return qualities
 	}
-	if source.DynamicRange != "" && source.DynamicRange != DynamicRangeSDRV3 && !includeHDRTranscodeRungs {
+	if source.DynamicRange != "" && source.DynamicRange != DynamicRangeSDRV3 &&
+		tonemap.NewPolicy(input.Settings.HardwareToneMapEnabled, input.Settings.SoftwareToneMapEnabled) == tonemap.PolicyNone {
 		return qualities
 	}
-	for _, height := range []int{2160, 1080, 720, 480} {
-		if height >= source.Height {
+	for _, rung := range ladderRungsV3 {
+		if !ladderRungPublishableV3(rung, source) {
 			continue
 		}
 		qualities = append(qualities, AvailableQualityV3{
-			Label:       resolutionLabelV3(height),
-			Height:      height,
-			BitrateKbps: ladderBitrateKbpsV3(height),
+			Label:       rung.Label,
+			DisplayName: rung.DisplayName,
+			Height:      rung.Height,
+			BitrateKbps: rung.BitrateKbps,
 		})
 	}
 	return qualities
@@ -808,7 +811,7 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 		return terminalPlannerResultV3("conversion_tool_unavailable", "The required validated H.264/AAC conversion toolchain is unavailable.", true)
 	}
 	if source.DynamicRange != "" && source.DynamicRange != DynamicRangeSDRV3 {
-		base.AvailableQualities = availableQualitiesForRouteV3(input, source, true)
+		base.AvailableQualities = availableQualitiesForRouteV3(input, source)
 	}
 	plan := base
 	plan.Delivery = DeliveryTranscodeHLSV3
@@ -982,6 +985,9 @@ func ResolveQualityPolicyV3(request StartRequestV3, source SourceDescriptorV3) Q
 		result.Warnings = warnings
 		return result
 	}
+	if rung, ok := ladderRungForLabelV3(quality); ok {
+		return compoundRungQualityResultV3(rung, source, capKbps, warnings)
+	}
 	targetHeight := source.Height
 	reason := "quality_auto_source"
 	explicitRung := false
@@ -1067,6 +1073,70 @@ func ResolveQualityPolicyV3(request StartRequestV3, source SourceDescriptorV3) Q
 	result := QualityResultV3{Label: label, Width: width, Height: effectiveHeight, BitrateKbps: bitrate, PreservesSource: !capApplied && source.Height > 0 && effectiveHeight >= source.Height, ExplicitRung: explicitRung, Reason: reason, Warnings: warnings}
 	result.RequiresTranscode = !result.PreservesSource
 	return result
+}
+
+// compoundRungQualityResultV3 resolves one explicit menu step. Its resolution
+// class never changes under a bandwidth cap; only the bitrate is clamped. For
+// cinema-aspect sources (for example 3840x1540 UHD), a same-class rung keeps
+// the probed dimensions instead of upscaling to the class's nominal height.
+func compoundRungQualityResultV3(rung ladderRungV3, source SourceDescriptorV3, capKbps int, warnings []DegradationWarningV3) QualityResultV3 {
+	sourceClassHeight := sourceLadderHeightV3(source)
+	height := rung.Height
+	sameResolutionClass := sourceClassHeight == rung.Height
+	if source.Height > 0 && (sameResolutionClass || source.Height < height) {
+		height = source.Height
+	}
+	bitrate := rung.BitrateKbps
+	if source.BitrateKbps > 0 && source.BitrateKbps < bitrate {
+		bitrate = source.BitrateKbps
+	}
+	capApplied := capKbps > 0 && bitrate > capKbps
+	if capApplied {
+		bitrate = capKbps
+	}
+	reason := "quality_fixed_rung"
+	if capApplied {
+		reason = decisionReasonBandwidthCapV3
+		warnings = append(warnings, DegradationWarningV3{Code: "bandwidth_cap_applied", Message: "Delivery quality is limited by the configured bandwidth cap."})
+	}
+	fitsRung := sourceClassHeight > 0 && sourceClassHeight <= rung.Height && source.BitrateKbps > 0 && source.BitrateKbps <= rung.BitrateKbps
+	if fitsRung && !capApplied {
+		return QualityResultV3{
+			Label:           strconv.Itoa(source.Height) + "p",
+			Width:           source.Width,
+			Height:          source.Height,
+			BitrateKbps:     source.BitrateKbps,
+			PreservesSource: true,
+			ExplicitRung:    true,
+			Reason:          reason,
+			Warnings:        warnings,
+		}
+	}
+	width := 0
+	if source.Width > 0 && source.Height > 0 {
+		width = source.Width * height / source.Height
+		width -= width % 2
+	}
+	if width == 0 {
+		width, _ = dimensionsFromResolutionV3(resolutionLabelV3(height))
+	}
+	targetLabel := resolutionLabelV3(height)
+	if sameResolutionClass && source.Height > 0 && source.Height != rung.Height {
+		// The transcoder treats an unknown exact-height label as "do not scale",
+		// which preserves the source's cinema crop while still applying the
+		// selected bitrate and tone-map recipe.
+		targetLabel = strconv.Itoa(source.Height) + "p"
+	}
+	return QualityResultV3{
+		Label:             targetLabel,
+		Width:             width,
+		Height:            height,
+		BitrateKbps:       bitrate,
+		RequiresTranscode: true,
+		ExplicitRung:      true,
+		Reason:            reason,
+		Warnings:          warnings,
+	}
 }
 
 func originalQualityResultV3(source SourceDescriptorV3) QualityResultV3 {
@@ -1312,12 +1382,78 @@ func minPositiveV3(a, b int) int {
 	return b
 }
 
-// ladderBitrateKbpsV3 matches the established web ladder's standard shared
-// rungs; 2160p is the v3-only extension until the web menu exposes a 4K
-// transcode tier.
+// ladderBitrateKbpsV3 retains the established bitrate for each plain
+// resolution preference. Explicit menu steps use ladderRungsV3 below.
 func ladderBitrateKbpsV3(height int) int {
 	bitrates := map[int]int{480: 1_500, 720: 2_000, 1080: 6_000, 2160: 20_000}
 	return bitrates[resolutionHeightV3(resolutionLabelV3(height))]
+}
+
+type ladderRungV3 struct {
+	Label       string
+	DisplayName string
+	Height      int
+	BitrateKbps int
+}
+
+// ladderRungsV3 is the canonical menu ladder in descending resolution and
+// bitrate order. The medium values retain the existing plain-rung bitrates;
+// their compound labels make the bitrate constraint explicit at same height.
+var ladderRungsV3 = []ladderRungV3{
+	{Label: QualityRung2160pHighV3, DisplayName: "4K High", Height: 2160, BitrateKbps: 40_000},
+	{Label: QualityRung2160pMediumV3, DisplayName: "4K Medium", Height: 2160, BitrateKbps: 20_000},
+	{Label: QualityRung2160pLowV3, DisplayName: "4K Low", Height: 2160, BitrateKbps: 10_000},
+	{Label: QualityRung1080pHighV3, DisplayName: "1080p High", Height: 1080, BitrateKbps: 10_000},
+	{Label: QualityRung1080pMediumV3, DisplayName: "1080p Medium", Height: 1080, BitrateKbps: 6_000},
+	{Label: QualityRung1080pLowV3, DisplayName: "1080p Low", Height: 1080, BitrateKbps: 3_000},
+	{Label: QualityRung720pHighV3, DisplayName: "720p High", Height: 720, BitrateKbps: 4_000},
+	{Label: QualityRung720pMediumV3, DisplayName: "720p Medium", Height: 720, BitrateKbps: 2_000},
+	{Label: QualityRung720pLowV3, DisplayName: "720p Low", Height: 720, BitrateKbps: 1_500},
+	{Label: "480p", DisplayName: "480p", Height: 480, BitrateKbps: 1_500},
+}
+
+func ladderRungForLabelV3(label string) (ladderRungV3, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(label))
+	for _, rung := range ladderRungsV3 {
+		if rung.Label == normalized {
+			return rung, true
+		}
+	}
+	return ladderRungV3{}, false
+}
+
+// sourceLadderHeightV3 classifies cinema-aspect encodes by width as well as
+// height. A 3840x1540 source is still a 4K source for menu purposes.
+func sourceLadderHeightV3(source SourceDescriptorV3) int {
+	switch {
+	case source.Width >= 3840 || source.Height >= 2160:
+		return 2160
+	case source.Width >= 1920 || source.Height >= 1080:
+		return 1080
+	case source.Width >= 1280 || source.Height >= 720:
+		return 720
+	case source.Width > 0 || source.Height > 0:
+		return 480
+	default:
+		return 0
+	}
+}
+
+// ladderRungPublishableV3 avoids upscaling and pointless same-resolution
+// re-encodes. Every lower resolution-class rung is useful; a same-class rung
+// appears only when its bitrate is a real reduction from the source.
+func ladderRungPublishableV3(rung ladderRungV3, source SourceDescriptorV3) bool {
+	sourceHeight := sourceLadderHeightV3(source)
+	if sourceHeight <= 0 {
+		return false
+	}
+	if rung.Height < sourceHeight {
+		return true
+	}
+	if rung.Height > sourceHeight || rung.Label == "480p" {
+		return false
+	}
+	return source.BitrateKbps > 0 && rung.BitrateKbps < source.BitrateKbps
 }
 
 func qualityDimensionsV3(height, sourceWidth, sourceHeight int) (int, int) {

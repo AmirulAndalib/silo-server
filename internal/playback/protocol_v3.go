@@ -749,11 +749,29 @@ type DegradationWarningV3 struct {
 // a track's original language.
 const QualityOriginalV3 = "original"
 
+// Compound ladder rung labels pin a bitrate as well as a resolution class.
+// The plain resolution labels remain valid for stored/default preferences;
+// menu selections use these explicit variants so every visible entry has
+// unambiguous quality semantics, including at the source's own resolution.
+const (
+	QualityRung2160pHighV3   = "2160p-high"
+	QualityRung2160pMediumV3 = "2160p-medium"
+	QualityRung2160pLowV3    = "2160p-low"
+	QualityRung1080pHighV3   = "1080p-high"
+	QualityRung1080pMediumV3 = "1080p-medium"
+	QualityRung1080pLowV3    = "1080p-low"
+	QualityRung720pHighV3    = "720p-high"
+	QualityRung720pMediumV3  = "720p-medium"
+	QualityRung720pLowV3     = "720p-low"
+)
+
 // AvailableQualityV3 is one server-ladder rung valid for this source and
 // client, published on the plan so clients can render a quality menu without
-// owning a bitrate table. The QualityOriginalV3 entry preserves the source.
+// owning a bitrate table. The QualityOriginalV3 entry preserves the source;
+// DisplayName gives compound rungs their human-facing High/Medium/Low label.
 type AvailableQualityV3 struct {
 	Label           string `json:"label"`
+	DisplayName     string `json:"display_name,omitempty"`
 	Height          int    `json:"height,omitempty"`
 	BitrateKbps     int    `json:"bitrate_kbps,omitempty"`
 	PreservesSource bool   `json:"preserves_source"`
@@ -887,6 +905,9 @@ func NormalizeQualityV3(value string) (string, bool) {
 	case "480p", "sd":
 		return "480p", false
 	default:
+		if rung, ok := ladderRungForLabelV3(value); ok {
+			return rung.Label, false
+		}
 		return "auto", true
 	}
 }

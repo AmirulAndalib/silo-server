@@ -9,7 +9,7 @@ It is off until an administrator turns it on. Playback settings gain two indepen
 
 Dolby Vision Profile 7 sources benefit too. Where the source declares a standards-compatible base layer, Silo now plays that base layer instead of refusing the file. Sources whose metadata cannot prove a usable base layer — Profile 5, and anything with incomplete signaling — are still refused rather than guessed at, and are re-examined automatically the next time the file is scanned.
 
-Admin activity shows which path a session actually used, so a stream that fell back from hardware to software reads as software rather than as whatever was planned. Direct play and direct stream of HDR are unchanged, and a device that manages HDR itself is never pushed onto a tone-map route.
+Admin activity shows which path a session actually used, so a stream that fell back from hardware to software reads as software rather than as whatever was planned. Direct play and direct stream of HDR are unchanged, and a device that manages HDR itself is never pushed onto a tone-map route. When tone mapping and 4K transcoding are enabled, the quality menu still offers lower resolutions during source-preserving HDR playback; choosing one validates the executor then starts the tone-mapped transcode. Quality choices now include explicit High, Medium, and Low bitrate steps at 4K, 1080p, and 720p, while omitting same-resolution steps that would not actually reduce the source bitrate.
 
 ## 2026-08-23
 

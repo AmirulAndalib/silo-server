@@ -1088,19 +1088,40 @@ selection, sends a `quality_change` replan with the entry's `label`. It does not
 compute rungs.
 
 The source rung is always present, labelled `original`, with
-`preserves_source: true`. Transcode rungs are added only below the source's own
-height, and only when HLS is available to the client, transcoding is enabled,
-and 4K transcoding is permitted for a 4K source. Source-preserving HDR plans
-publish only `original` so they never trigger lazy executor probes; an HDR
-transcode plan adds the lower rungs after its tone-map executor has been
-validated. Ladder bitrates:
+`preserves_source: true`. Transcode rungs are added below the source resolution
+class, plus at the same class when they reduce bitrate, and only when HLS is
+available to the client, transcoding is enabled, and 4K transcoding is permitted
+for a 4K source. HDR plans additionally require
+at least one enabled tone-map policy. A source-preserving HDR plan advertises
+those lower rungs without probing an executor; selecting one performs the lazy
+capability validation during the quality-change replan. The published ladder
+uses compound labels so each menu selection pins both a resolution class and a
+bitrate:
 
-| Rung | kbps |
-| --- | --- |
-| 2160p | 20000 |
-| 1080p | 6000 |
-| 720p | 2000 |
-| 480p | 1500 |
+| label | display_name | height | kbps |
+| --- | --- | --- | --- |
+| `2160p-high` | 4K High | 2160 | 40000 |
+| `2160p-medium` | 4K Medium | 2160 | 20000 |
+| `2160p-low` | 4K Low | 2160 | 10000 |
+| `1080p-high` | 1080p High | 1080 | 10000 |
+| `1080p-medium` | 1080p Medium | 1080 | 6000 |
+| `1080p-low` | 1080p Low | 1080 | 3000 |
+| `720p-high` | 720p High | 720 | 4000 |
+| `720p-medium` | 720p Medium | 720 | 2000 |
+| `720p-low` | 720p Low | 720 | 1500 |
+| `480p` | 480p | 480 | 1500 |
+
+A rung below the source resolution class is always useful. At the source's own
+class, a rung is published only when it undercuts the source bitrate; a 25.2
+Mbps 4K file therefore offers 4K Medium and 4K Low but not a pointless 40 Mbps
+4K High encode. Resolution classification also considers width, so cinema-crop
+UHD sources such as 3840x1540 retain their native dimensions on a 4K bitrate
+step instead of being upscaled to 2160 lines.
+
+Compound rungs are strict resolution/bitrate selections. A bandwidth cap can
+clamp their bitrate but does not silently demote their resolution. Plain labels
+remain accepted for stored/default preferences and retain their existing
+height-only behavior.
 
 Registry availability is deliberately *not* consulted when building the menu: a
 capability check there could trigger lazy node fetches that a source-preserving
@@ -1110,10 +1131,11 @@ to a retryable terminal at replan time instead.
 Audio-only sources publish a single `original` rung — quality rungs are a video
 concept.
 
-`quality_preference` accepts `auto`, `original` (aliases `source`, `max`), and
-`2160p` / `1080p` / `720p` / `480p` with the obvious aliases (`4k`, `uhd`, `fhd`,
-`hd`, `sd`). An unrecognized value normalizes to `auto` and the response carries
-the `quality_preference_normalized` warning rather than an error.
+`quality_preference` accepts `auto`, `original` (aliases `source`, `max`), the
+plain `2160p` / `1080p` / `720p` / `480p` values with their obvious aliases
+(`4k`, `uhd`, `fhd`, `hd`, `sd`), and the compound labels in the table above.
+An unrecognized value normalizes to `auto` and the response carries the
+`quality_preference_normalized` warning rather than an error.
 
 ---
 

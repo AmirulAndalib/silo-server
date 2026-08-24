@@ -259,13 +259,24 @@ describe("qualityOptionsFromPlanV3", () => {
       fixturePlanV3({
         available_qualities: [
           { label: "original", height: 2160, bitrate_kbps: 22500, preserves_source: true },
-          { label: "1080p", height: 1080, bitrate_kbps: 6000, preserves_source: false },
+          {
+            label: "1080p-medium",
+            display_name: "1080p Medium",
+            height: 1080,
+            bitrate_kbps: 6000,
+            preserves_source: false,
+          },
           { label: "480p", height: 480, bitrate_kbps: 1500, preserves_source: false },
         ],
       }),
     );
 
-    expect(options.map((option) => option.id)).toEqual(["auto", "original", "1080p", "480p"]);
+    expect(options.map((option) => option.id)).toEqual([
+      "auto",
+      "original",
+      "1080p-medium",
+      "480p",
+    ]);
     expect(options[1]).toMatchObject({
       id: "original",
       label: "Original",
@@ -275,8 +286,8 @@ describe("qualityOptionsFromPlanV3", () => {
       isOriginal: true,
     });
     expect(options[2]).toMatchObject({
-      id: "1080p",
-      label: "1080p",
+      id: "1080p-medium",
+      label: "1080p Medium",
       sublabel: "6 Mbps",
       isOriginal: false,
     });
