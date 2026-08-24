@@ -189,19 +189,36 @@ func buildConditionValues(version catalog.FileVersion, audioStreamIndex *int) co
 
 	values := conditionValues{
 		"videorangetype": {text: compatVideoRangeType(video, version.HDR)},
-		"videoprofile":   {text: video.Profile},
 		"isinterlaced":   {text: strconv.FormatBool(video.Interlaced)},
-		"videolevel":     intConditionValue(video.Level),
-		"refframes":      intConditionValue(video.ReferenceFrames),
-		"width":          intConditionValue(video.Width),
-		"height":         intConditionValue(video.Height),
-		"videobitdepth":  intConditionValue(video.BitDepth),
-		"audiochannels":  intConditionValue(audio.Channels),
 	}
 
 	// Everything below is only inserted when Silo actually knows the value.
 	// An absent key falls through to conditionMatches' IsRequired handling,
 	// mirroring how Jellyfin's ConditionProcessor treats a null value.
+	if strings.TrimSpace(video.Profile) != "" {
+		values["videoprofile"] = conditionValue{text: video.Profile}
+	}
+	if level := intConditionValue(video.Level); level.hasNum {
+		values["videolevel"] = level
+	}
+	if refFrames := intConditionValue(video.ReferenceFrames); refFrames.hasNum {
+		values["refframes"] = refFrames
+	}
+	if width := intConditionValue(video.Width); width.hasNum {
+		values["width"] = width
+	}
+	if height := intConditionValue(video.Height); height.hasNum {
+		values["height"] = height
+	}
+	if bitDepth := intConditionValue(video.BitDepth); bitDepth.hasNum {
+		values["videobitdepth"] = bitDepth
+	}
+	if channels := intConditionValue(audio.Channels); channels.hasNum {
+		values["audiochannels"] = channels
+	}
+	if strings.TrimSpace(video.Codec) != "" {
+		values["isavc"] = conditionValue{text: strconv.FormatBool(strings.EqualFold(video.Codec, "h264"))}
+	}
 	if anamorphic, known := compatIsAnamorphic(video); known {
 		values["isanamorphic"] = conditionValue{text: strconv.FormatBool(anamorphic)}
 	}

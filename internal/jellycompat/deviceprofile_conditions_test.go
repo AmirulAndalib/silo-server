@@ -709,6 +709,128 @@ func TestConditionMatchesAudioProfileWithOmittedIsRequired(t *testing.T) {
 	}
 }
 
+func TestConditionMatchesLegacyValuesOnlyWhenKnown(t *testing.T) {
+	tests := []struct {
+		name      string
+		version   catalog.FileVersion
+		condition ProfileCondition
+		want      bool
+	}{
+		{
+			name:      "level 0 satisfies an optional level cap",
+			version:   catalog.FileVersion{VideoTracks: []models.VideoTrack{{Codec: "hevc", Width: 1920, Height: 1080, Level: 0}}},
+			condition: ProfileCondition{Condition: "LessThanOrEqual", Property: "VideoLevel", Value: "183"},
+			want:      true,
+		},
+		{
+			name:      "level 0 fails a required level cap",
+			version:   catalog.FileVersion{VideoTracks: []models.VideoTrack{{Codec: "hevc", Width: 1920, Height: 1080, Level: 0}}},
+			condition: ProfileCondition{Condition: "LessThanOrEqual", Property: "VideoLevel", Value: "183", IsRequired: true},
+			want:      false,
+		},
+		{
+			name:      "level -99 sentinel satisfies an optional level cap",
+			version:   catalog.FileVersion{VideoTracks: []models.VideoTrack{{Codec: "hevc", Width: 1920, Height: 1080, Level: -99}}},
+			condition: ProfileCondition{Condition: "LessThanOrEqual", Property: "VideoLevel", Value: "183"},
+			want:      true,
+		},
+		{
+			name:      "level -99 sentinel fails a required level cap",
+			version:   catalog.FileVersion{VideoTracks: []models.VideoTrack{{Codec: "hevc", Width: 1920, Height: 1080, Level: -99}}},
+			condition: ProfileCondition{Condition: "LessThanOrEqual", Property: "VideoLevel", Value: "183", IsRequired: true},
+			want:      false,
+		},
+		{
+			name:      "known level 120 passes a looser cap",
+			version:   catalog.FileVersion{VideoTracks: []models.VideoTrack{{Codec: "hevc", Width: 1920, Height: 1080, Level: 120}}},
+			condition: ProfileCondition{Condition: "LessThanOrEqual", Property: "VideoLevel", Value: "183"},
+			want:      true,
+		},
+		{
+			name:      "known level 120 fails a tighter cap",
+			version:   catalog.FileVersion{VideoTracks: []models.VideoTrack{{Codec: "hevc", Width: 1920, Height: 1080, Level: 120}}},
+			condition: ProfileCondition{Condition: "LessThanOrEqual", Property: "VideoLevel", Value: "100"},
+			want:      false,
+		},
+		{
+			name: "channels 0 satisfies an optional channel cap",
+			version: catalog.FileVersion{
+				CodecAudio:  "aac",
+				AudioTracks: []models.AudioTrack{{Codec: "aac", Channels: 0, Default: true}},
+			},
+			condition: ProfileCondition{Condition: "LessThanEqual", Property: "AudioChannels", Value: "2"},
+			want:      true,
+		},
+		{
+			name: "channels 0 fails a required channel cap",
+			version: catalog.FileVersion{
+				CodecAudio:  "aac",
+				AudioTracks: []models.AudioTrack{{Codec: "aac", Channels: 0, Default: true}},
+			},
+			condition: ProfileCondition{Condition: "LessThanEqual", Property: "AudioChannels", Value: "2", IsRequired: true},
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			values := buildConditionValues(tt.version, nil)
+			if got := conditionMatches(tt.condition, values); got != tt.want {
+				t.Fatalf("conditionMatches() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConditionMatchesIsAVC(t *testing.T) {
+	tests := []struct {
+		name      string
+		version   catalog.FileVersion
+		condition ProfileCondition
+		want      bool
+	}{
+		{
+			name:      "h264 track passes Equals true",
+			version:   catalog.FileVersion{VideoTracks: []models.VideoTrack{{Codec: "h264", Width: 1920, Height: 1080}}},
+			condition: ProfileCondition{Condition: "Equals", Property: "IsAVC", Value: "true"},
+			want:      true,
+		},
+		{
+			name:      "hevc track passes NotEquals true",
+			version:   catalog.FileVersion{VideoTracks: []models.VideoTrack{{Codec: "hevc", Width: 1920, Height: 1080}}},
+			condition: ProfileCondition{Condition: "NotEquals", Property: "IsAVC", Value: "true"},
+			want:      true,
+		},
+		{
+			name:      "hevc track fails Equals true",
+			version:   catalog.FileVersion{VideoTracks: []models.VideoTrack{{Codec: "hevc", Width: 1920, Height: 1080}}},
+			condition: ProfileCondition{Condition: "Equals", Property: "IsAVC", Value: "true"},
+			want:      false,
+		},
+		{
+			name:      "empty codec satisfies an optional IsAVC condition",
+			version:   catalog.FileVersion{VideoTracks: []models.VideoTrack{{Width: 1920, Height: 1080}}},
+			condition: ProfileCondition{Condition: "Equals", Property: "IsAVC", Value: "true"},
+			want:      true,
+		},
+		{
+			name:      "empty codec fails a required IsAVC condition",
+			version:   catalog.FileVersion{VideoTracks: []models.VideoTrack{{Width: 1920, Height: 1080}}},
+			condition: ProfileCondition{Condition: "Equals", Property: "IsAVC", Value: "true", IsRequired: true},
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			values := buildConditionValues(tt.version, nil)
+			if got := conditionMatches(tt.condition, values); got != tt.want {
+				t.Fatalf("conditionMatches() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func withVideoTrack(version catalog.FileVersion, track models.VideoTrack, resolution string) catalog.FileVersion {
 	version.VideoTracks = []models.VideoTrack{track}
 	version.Resolution = resolution
