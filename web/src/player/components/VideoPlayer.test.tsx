@@ -4,13 +4,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PlayerConfigProvider, type PlayerConfig } from "../context/PlayerConfigContext";
 import { fixturePlanV3 } from "../protocol-v3.fixtures";
-import type { PlaybackRealtimeEventEnvelope } from "../realtime-protocol";
+import type {
+  PlaybackRealtimeCommandEnvelope,
+  PlaybackRealtimeEventEnvelope,
+} from "../realtime-protocol";
 import type { PlayerSubtitleInfo } from "../types";
 import { HLS_STARTUP_TIMEOUT_MS } from "../utils/hlsStartupGuard";
 import { VideoPlayer } from "./VideoPlayer";
 
 const realtimeOptions = vi.hoisted(() => ({
-  current: null as null | { onEvent?: (event: PlaybackRealtimeEventEnvelope) => void },
+  current: null as null | {
+    onEvent?: (event: PlaybackRealtimeEventEnvelope) => void;
+    onCommand: (command: PlaybackRealtimeCommandEnvelope) => Promise<void> | void;
+  },
 }));
 const controls = vi.hoisted(() => ({
   current: null as null | {
@@ -118,6 +124,22 @@ function renderPlayer(overrides: Partial<Parameters<typeof VideoPlayer>[0]> = {}
     rerenderPlayer(next: Partial<Parameters<typeof VideoPlayer>[0]>) {
       rendered.rerender(createElement(VideoPlayer, { ...props, ...next }));
     },
+  };
+}
+
+function planInvalidatedCommand(
+  payload: Record<string, unknown> = {
+    reason: "video_copy_unsafe",
+    plan_id: directPlan.plan_id,
+  },
+): PlaybackRealtimeCommandEnvelope {
+  return {
+    type: "command",
+    command_id: "cmd-invalidate-1",
+    session_id: "session-1",
+    name: "plan_invalidated",
+    deadline_ms: 8_000,
+    payload,
   };
 }
 
@@ -234,6 +256,45 @@ describe("VideoPlayer plan failure recovery", () => {
     expect(onPlanFailure).toHaveBeenCalledTimes(2);
   });
 
+  it("replans off a plan the server invalidated", async () => {
+    const onPlanInvalidated = vi.fn().mockResolvedValue(true);
+    renderPlayer({ onPlanInvalidated });
+    const onCommand = realtimeOptions.current?.onCommand;
+    if (!onCommand) throw new Error("expected the realtime command handler");
+
+    await act(async () => {
+      await onCommand(planInvalidatedCommand());
+    });
+
+    expect(onPlanInvalidated).toHaveBeenCalledWith(directPlan.plan_id, "video_copy_unsafe", 0);
+  });
+
+  // A rejected result is the server's cue to stop the session, which is what
+  // lets the client's own recovery mint a fresh attempt against the persisted
+  // verdict. Swallowing the failure here would leave the copy route playing.
+  it("rejects the invalidation command when no replacement plan is adopted", async () => {
+    const onPlanInvalidated = vi.fn().mockResolvedValue(false);
+    renderPlayer({ onPlanInvalidated });
+    const onCommand = realtimeOptions.current?.onCommand;
+    if (!onCommand) throw new Error("expected the realtime command handler");
+
+    await expect(onCommand(planInvalidatedCommand())).rejects.toThrow(
+      "plan_invalidation_replan_failed",
+    );
+  });
+
+  it("rejects an invalidation command that names no plan", async () => {
+    const onPlanInvalidated = vi.fn().mockResolvedValue(true);
+    renderPlayer({ onPlanInvalidated });
+    const onCommand = realtimeOptions.current?.onCommand;
+    if (!onCommand) throw new Error("expected the realtime command handler");
+
+    await expect(
+      onCommand(planInvalidatedCommand({ reason: "video_copy_unsafe" })),
+    ).rejects.toThrow("invalid_plan_invalidated_payload");
+    expect(onPlanInvalidated).not.toHaveBeenCalled();
+  });
+
   it("does not retry an auto-selected subtitle after its replan is refused", async () => {
     const onSubtitleTrackChange = vi.fn();
     const sidecarTrack: PlayerSubtitleInfo = {
@@ -340,6 +401,102 @@ describe("VideoPlayer plan failure recovery", () => {
     rerenderPlayer({ replanError: "Silo could not apply the subtitle selection." });
     await waitFor(() => expect(controls.current?.activeSubtitleIndex).toBeNull());
     expect(toastError).toHaveBeenCalledOnce();
+  });
+});
+
+describe("VideoPlayer intro skip prompt", () => {
+  beforeEach(() => {
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  async function enterIntro(mode: "never" | "ask" | "always") {
+    const rendered = renderPlayer({
+      intro: { start: 10, end: 20 },
+      introSkipMode: mode,
+    });
+    const video = rendered.container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+
+    video.currentTime = 12;
+    fireEvent.timeUpdate(video);
+    await act(async () => Promise.resolve());
+    return rendered;
+  }
+
+  it("renders the ask pill and consumes Escape", async () => {
+    await enterIntro("ask");
+    expect(await screen.findByRole("button", { name: "Skip Intro" })).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Skip Intro" })).not.toBeInTheDocument(),
+    );
+  });
+
+  it("renders the undo action after an automatic skip", async () => {
+    await enterIntro("always");
+    const undo = await screen.findByRole("button", {
+      name: "Watch Intro",
+    });
+
+    fireEvent.click(undo);
+
+    await waitFor(() => expect(undo).not.toBeInTheDocument());
+  });
+
+  it("renders no intro action in never mode", async () => {
+    await enterIntro("never");
+
+    expect(screen.queryByRole("button", { name: /Intro/ })).not.toBeInTheDocument();
+  });
+
+  it("prompts for nothing while the intro mode is still unknown", async () => {
+    const rendered = renderPlayer({ intro: { start: 10, end: 20 }, introSkipMode: null });
+    const video = rendered.container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+
+    video.currentTime = 12;
+    fireEvent.timeUpdate(video);
+    await act(async () => Promise.resolve());
+
+    expect(screen.queryByRole("button", { name: /Intro/ })).not.toBeInTheDocument();
+    // Nothing was skipped either: an unknown mode must not act like "always".
+    expect(video.currentTime).toBe(12);
+  });
+
+  // Space belongs to whatever control has focus. Consuming it at the document
+  // both skipped the intro and swallowed the press meant for Play/Pause.
+  it("leaves Select to the focused transport control", async () => {
+    const rendered = await enterIntro("ask");
+    const prompt = await screen.findByRole("button", { name: "Skip Intro" });
+
+    const transport = document.createElement("button");
+    transport.textContent = "Play";
+    rendered.container.firstElementChild?.appendChild(transport);
+    transport.focus();
+
+    const notPrevented = fireEvent.keyDown(transport, { key: " " });
+
+    expect(notPrevented).toBe(true);
+    expect(prompt).toBeInTheDocument();
+  });
+
+  it("acts on Select while the pill itself is focused", async () => {
+    await enterIntro("ask");
+    const prompt = await screen.findByRole("button", { name: "Skip Intro" });
+    prompt.focus();
+
+    fireEvent.keyDown(prompt, { key: " " });
+
+    await waitFor(() => expect(prompt).not.toBeInTheDocument());
   });
 });
 
