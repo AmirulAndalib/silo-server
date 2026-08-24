@@ -2111,82 +2111,10 @@ func compactScanRoots(paths []string) []string {
 	return out
 }
 
+// syncPresentLibraryState repairs the catalog memberships owned by every
+// present media file in a folder.
 func (s *Scanner) syncPresentLibraryState(ctx context.Context, folderID int) error {
-	if _, err := s.fileRepo.Pool().Exec(ctx, `
-		UPDATE media_files mf
-		SET content_id = NULL,
-			updated_at = NOW()
-		WHERE mf.media_folder_id = $1
-		  AND mf.missing_since IS NULL
-		  AND mf.content_id IS NOT NULL
-		  AND NOT EXISTS (
-			SELECT 1
-			FROM media_items mi
-			WHERE mi.content_id = mf.content_id
-		  )
-	`, folderID); err != nil {
-		return fmt.Errorf("clearing dangling content links: %w", err)
-	}
-
-	if _, err := s.fileRepo.Pool().Exec(ctx, `
-		UPDATE media_files mf
-		SET episode_id = NULL,
-			updated_at = NOW()
-		WHERE mf.media_folder_id = $1
-		  AND mf.missing_since IS NULL
-		  AND mf.episode_id IS NOT NULL
-		  AND NOT EXISTS (
-			SELECT 1
-			FROM episodes e
-			WHERE e.content_id = mf.episode_id
-		  )
-	`, folderID); err != nil {
-		return fmt.Errorf("clearing dangling episode links: %w", err)
-	}
-
-	if _, err := s.fileRepo.Pool().Exec(ctx, `
-		INSERT INTO media_item_libraries (content_id, media_folder_id, first_seen_at)
-		SELECT DISTINCT mf.content_id, mf.media_folder_id, NOW()
-		FROM media_files mf
-		JOIN media_items mi ON mi.content_id = mf.content_id
-		WHERE mf.media_folder_id = $1
-		  AND mf.missing_since IS NULL
-		  AND mf.content_id IS NOT NULL
-		ON CONFLICT (content_id, media_folder_id) DO NOTHING
-	`, folderID); err != nil {
-		return fmt.Errorf("restoring folder memberships: %w", err)
-	}
-
-	if _, err := s.fileRepo.Pool().Exec(ctx, `
-		WITH inserted AS (
-			INSERT INTO episode_libraries (episode_id, media_folder_id, first_seen_at)
-			SELECT mf.episode_id, mf.media_folder_id, MIN(mf.created_at)
-			FROM media_files mf
-			JOIN episodes e ON e.content_id = mf.episode_id
-			WHERE mf.media_folder_id = $1
-			  AND mf.missing_since IS NULL
-			  AND mf.episode_id IS NOT NULL
-			GROUP BY mf.episode_id, mf.media_folder_id
-			ON CONFLICT (episode_id, media_folder_id) DO NOTHING
-			RETURNING episode_id, first_seen_at
-		)
-		-- Bump each parent series' latest-episode-added denorm for the
-		-- genuinely new links ("Latest Episodes" sort, issue #202).
-		UPDATE media_items mi
-		SET latest_episode_added_at = GREATEST(COALESCE(mi.latest_episode_added_at, sub.latest_added), sub.latest_added)
-		FROM (
-			SELECT e.series_id, MAX(i.first_seen_at) AS latest_added
-			FROM inserted i
-			JOIN episodes e ON e.content_id = i.episode_id
-			GROUP BY e.series_id
-		) sub
-		WHERE mi.content_id = sub.series_id
-		  AND mi.type = 'series'
-	`, folderID); err != nil {
-		return fmt.Errorf("restoring episode folder memberships: %w", err)
-	}
-
-	return nil
+	return s.syncPresentState(ctx, folderID, nil)
 }
 
 // syncPresentFileState repairs the catalog memberships owned by one present
@@ -2194,12 +2122,38 @@ func (s *Scanner) syncPresentLibraryState(ctx context.Context, folderID int) err
 // syncPresentLibraryState: a large library can contain hundreds of thousands
 // of files while this path has exactly one changed row to reconcile.
 func (s *Scanner) syncPresentFileState(ctx context.Context, folderID int, filePath string) error {
-	if _, err := s.fileRepo.Pool().Exec(ctx, `
+	if strings.TrimSpace(filePath) == "" {
+		return fmt.Errorf("syncing present file state: empty file path")
+	}
+	return s.syncPresentState(ctx, folderID, &filePath)
+}
+
+// syncPresentState is the single implementation behind both entry points. When
+// filePath is nil the repair covers every present file in the folder; when it
+// is set the exact same statements are narrowed to that one row.
+//
+// The path predicate is appended in Go rather than expressed as
+// "($2::text IS NULL OR mf.file_path = $2)" so the folder-wide plan is not
+// forced onto a filter the planner cannot use an index for.
+func (s *Scanner) syncPresentState(ctx context.Context, folderID int, filePath *string) error {
+	args := []any{folderID}
+	filePredicate := ""
+	if filePath != nil {
+		args = append(args, *filePath)
+		filePredicate = "\n\t\t  AND mf.file_path = $2"
+	}
+
+	statements := []struct {
+		desc string
+		sql  string
+	}{
+		{
+			desc: "clearing dangling content links",
+			sql: `
 		UPDATE media_files mf
 		SET content_id = NULL,
 			updated_at = NOW()
-		WHERE mf.media_folder_id = $1
-		  AND mf.file_path = $2
+		WHERE mf.media_folder_id = $1` + filePredicate + `
 		  AND mf.missing_since IS NULL
 		  AND mf.content_id IS NOT NULL
 		  AND NOT EXISTS (
@@ -2207,16 +2161,15 @@ func (s *Scanner) syncPresentFileState(ctx context.Context, folderID int, filePa
 			FROM media_items mi
 			WHERE mi.content_id = mf.content_id
 		  )
-	`, folderID, filePath); err != nil {
-		return fmt.Errorf("clearing dangling content link for file: %w", err)
-	}
-
-	if _, err := s.fileRepo.Pool().Exec(ctx, `
+	`,
+		},
+		{
+			desc: "clearing dangling episode links",
+			sql: `
 		UPDATE media_files mf
 		SET episode_id = NULL,
 			updated_at = NOW()
-		WHERE mf.media_folder_id = $1
-		  AND mf.file_path = $2
+		WHERE mf.media_folder_id = $1` + filePredicate + `
 		  AND mf.missing_since IS NULL
 		  AND mf.episode_id IS NOT NULL
 		  AND NOT EXISTS (
@@ -2224,31 +2177,32 @@ func (s *Scanner) syncPresentFileState(ctx context.Context, folderID int, filePa
 			FROM episodes e
 			WHERE e.content_id = mf.episode_id
 		  )
-	`, folderID, filePath); err != nil {
-		return fmt.Errorf("clearing dangling episode link for file: %w", err)
-	}
-
-	if _, err := s.fileRepo.Pool().Exec(ctx, `
+	`,
+		},
+		{
+			desc: "restoring folder memberships",
+			sql: `
 		INSERT INTO media_item_libraries (content_id, media_folder_id, first_seen_at)
-		SELECT mf.content_id, mf.media_folder_id, NOW()
+		SELECT DISTINCT mf.content_id, mf.media_folder_id, NOW()
 		FROM media_files mf
 		JOIN media_items mi ON mi.content_id = mf.content_id
-		WHERE mf.media_folder_id = $1
-		  AND mf.file_path = $2
+		WHERE mf.media_folder_id = $1` + filePredicate + `
 		  AND mf.missing_since IS NULL
 		  AND mf.content_id IS NOT NULL
 		ON CONFLICT (content_id, media_folder_id) DO NOTHING
-	`, folderID, filePath); err != nil {
-		return fmt.Errorf("restoring folder membership for file: %w", err)
-	}
-
-	if _, err := s.fileRepo.Pool().Exec(ctx, `
+	`,
+		},
+		{
+			// target_episode selects the episodes in scope; candidate then
+			// re-joins every active file of those episodes so first_seen_at
+			// aggregates over the whole episode, not just the scanned path.
+			desc: "restoring episode folder memberships",
+			sql: `
 		WITH target_episode AS (
-			SELECT mf.episode_id, mf.media_folder_id
+			SELECT DISTINCT mf.episode_id, mf.media_folder_id
 			FROM media_files mf
 			JOIN episodes e ON e.content_id = mf.episode_id
-			WHERE mf.media_folder_id = $1
-			  AND mf.file_path = $2
+			WHERE mf.media_folder_id = $1` + filePredicate + `
 			  AND mf.missing_since IS NULL
 			  AND mf.episode_id IS NOT NULL
 		),
@@ -2270,8 +2224,10 @@ func (s *Scanner) syncPresentFileState(ctx context.Context, folderID int, filePa
 			ON CONFLICT (episode_id, media_folder_id) DO NOTHING
 			RETURNING episode_id, first_seen_at
 		)
+		-- Bump each parent series' latest-episode-added denorm for the
+		-- genuinely new links ("Latest Episodes" sort, issue #202).
 		UPDATE media_items mi
-		SET latest_episode_added_at = GREATEST(COALESCE(mi.latest_episode_added_at, sub.latest_added), sub.latest_added)
+		SET latest_episode_added_at = GREATEST(mi.latest_episode_added_at, sub.latest_added)
 		FROM (
 			SELECT e.series_id, MAX(i.first_seen_at) AS latest_added
 			FROM inserted i
@@ -2280,10 +2236,27 @@ func (s *Scanner) syncPresentFileState(ctx context.Context, folderID int, filePa
 		) sub
 		WHERE mi.content_id = sub.series_id
 		  AND mi.type = 'series'
-	`, folderID, filePath); err != nil {
-		return fmt.Errorf("restoring episode folder membership for file: %w", err)
+	`,
+		},
 	}
 
+	// One transaction: a crash part-way through must not leave a row with some
+	// links cleared and its memberships unrepaired.
+	tx, err := s.fileRepo.Pool().Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning present state repair: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	for _, stmt := range statements {
+		if _, err := tx.Exec(ctx, stmt.sql, args...); err != nil {
+			return fmt.Errorf("%s: %w", stmt.desc, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing present state repair: %w", err)
+	}
 	return nil
 }
 
@@ -2501,12 +2474,11 @@ func (s *Scanner) ScanFile(ctx context.Context, filePath string, folder *models.
 		if stats.Errors > 0 {
 			return fmt.Errorf("processing extra file %s failed", cleanFile)
 		}
-		// Converting a previously-primary row into an extra clears its
-		// content linkage; run the same membership cleanup a full scan would
-		// so stale library membership doesn't linger until the next scan.
-		if err := s.syncPresentFileState(ctx, folder.ID, cleanFile); err != nil {
-			return fmt.Errorf("syncing present library state for extra file: %w", err)
-		}
+		// The Upsert above already nulled this row's content/episode links as
+		// part of converting it into an extra. What still needs repair is the
+		// library membership: if this was the last primary file behind an
+		// item, the folder membership must go away too, which is what
+		// reconcileLibraryMemberships below does.
 		protectedRoots, err := s.protectedConfiguredRoots(ctx, folder)
 		if err != nil {
 			return err
