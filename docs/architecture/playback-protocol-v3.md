@@ -1178,6 +1178,71 @@ a distinct selectable output recipe. Use a delivery claim for an executor
 property; reserve transformations for named outcomes the server deliberately
 selects and can describe in the plan.
 
+### 11.1 Tone-map execution integrity
+
+`hdr_to_sdr_tonemap` is the only transformation whose output is not derivable
+from the plan alone: the same recipe run against a different executor, or
+against bytes the catalog no longer describes, produces silently wrong pixels
+rather than an error. These rules exist to make that impossible, and they bind
+every executor — local FFmpeg, pooled transcode node, and prepared-download
+worker alike.
+
+**A frozen recipe carries every source fact its FFmpeg graph depends on.**
+Source video profile and bit depth ride the frozen recipe alongside codec,
+decode mode, duration, tone-map source kind, source revision, and Dolby Vision
+provenance. A seek, restart, or reconstruct rebuilds from the frozen snapshot,
+never from a later catalog row — a 10-bit hardware SDR-base recipe that dropped
+its profile would degrade to an 8-bit assumption on reconstruct and change the
+output. For the same reason a sidecar-only replan may reuse existing
+audio/video bytes only when profile and bit depth are equal too; otherwise it
+gets a new transport rather than old bytes under a new recipe.
+
+**Every tone-map execution re-verifies the source immediately before it runs.**
+Size, mtime, and content hashes are change signals, not proof that the executor
+about to run sees the metadata the plan froze. So each attempt runs a bounded
+FFprobe on the executor, normalized through the same `mediaprobe` path the
+scanner persists with, and requires an exact match against the frozen
+signature. A mismatch is permanent (the recipe is stale); an unavailable,
+malformed, cancelled, or timed-out probe is transient and retryable. The two
+must stay distinguishable across the local, jellycompat, and transcode-node
+boundaries, and a frozen tone-map recipe is never replaced by a fresh plan
+merely because its reconstruction failed. Verification runs for starts,
+restarts, reconstructs, and prepared downloads — never for direct play, direct
+stream, or an ordinary non-tone-mapped transcode.
+
+**A tone-mapped reconstruction token is rejected by readers that predate it.**
+Stream tokens for a tone-map transcode carry the `transcode_tonemap_v1`
+play-method discriminator instead of `transcode`. Current readers map it back
+to an ordinary transcode; an older binary in a rolling deployment rejects it
+rather than reconstructing the HDR recipe without its tone-map stage.
+
+**A remote prepared artifact is accepted only against its attestation.** A node
+that advertised tone-map support can be replaced by an older binary before its
+queued job runs, and an older decoder ignores the frozen recipe fields — so
+artifact ID and size cannot prove the HDR source was tone-mapped. After a
+successful encode the node publishes a receipt beside the artifact recording
+the confirmed mode, output size, and a canonical fingerprint over every
+transported byte-affecting field (the artifact ID is excluded: it is the
+idempotency handle, not an encoding input). Publication is crash-ordered — the
+output and its directory are synced before the receipt — so the receipt is the
+commit record for bytes already on disk. Central accepts an artifact only when
+every attested value matches its frozen request, and the expected size and
+fingerprint travel through direct file targets and signed proxy claims too, so
+a missing or mismatched receipt fails closed at delivery instead of serving
+unverified bytes.
+
+**Ambiguous Dolby Vision provenance fails closed.** Resolving a DV source for
+tone mapping requires authoritative evidence that the configuration record was
+present, that the base-layer compatibility ID was present and nonzero, and that
+a base layer exists. Profile 5 and incomplete provenance are refused rather than
+guessed at. Because a row written before the provenance columns existed decodes
+to explicit `false` — indistinguishable from a source that genuinely has none —
+the scanner records whether those keys were literally present, and a row that
+predates them is reprobed once rather than trusted. A failed repair probe
+preserves the previous technical metadata and leaves the probe timestamp empty
+for a later bounded retry, so a legacy writer in a rolling upgrade can never
+make an incomplete row look current.
+
 ---
 
 ## 12. Conformance
