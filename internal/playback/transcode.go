@@ -142,6 +142,11 @@ type TranscodeSession struct {
 	stderrLineIndex      int
 	stderrWriter         *ffmpegStderrWriter
 	restartHook          func(context.Context)
+	// generationStartedAt is when the currently-owning ffmpeg process was
+	// spawned. Output in the shared directory older than this timestamp was
+	// written by a previous generation (or a previous session sharing the
+	// directory) and describes media this process has not produced yet.
+	generationStartedAt time.Time
 	// reserveHWDeviceOnRestart is true when StartTranscode selected and reserved
 	// one device from a multi-device QSV/VAAPI setting. Each replacement ffmpeg
 	// process reacquires that same concrete device.
@@ -166,10 +171,15 @@ func (s *TranscodeSession) SetRestartHook(fn func(context.Context)) {
 
 // SegmentProgress describes the media ffmpeg has actually produced on disk.
 type SegmentProgress struct {
-	ProducedHead         int
-	ProducedCount        int
-	LastProducedAt       time.Time
-	ManifestModTime      time.Time
+	ProducedHead    int
+	ProducedCount   int
+	LastProducedAt  time.Time
+	ManifestModTime time.Time
+	// GenerationStartedAt is when the ffmpeg process that currently owns the
+	// output directory was spawned. It is the zero time for sessions that never
+	// started a process. Output stamped before it belongs to an earlier
+	// generation and must not be read as this process's progress.
+	GenerationStartedAt  time.Time
 	HasManifest          bool
 	Running              bool
 	Restarting           bool
@@ -298,6 +308,9 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	cmd.Stderr = s.newStderrWriter(ctx)
 	cmd.WaitDelay = 3 * time.Second
 
+	// Stamp the generation before the process can write anything, so every file
+	// this ffmpeg produces is strictly newer than the stamp.
+	startedAt := time.Now()
 	if err := cmd.Start(); err != nil {
 		cancel()
 		releaseHWDevice()
@@ -306,6 +319,7 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	}
 	s.cmd = cmd
 	s.stdinPipe = stdinPipe
+	s.generationStartedAt = startedAt
 	s.logFFmpegEvent(ctx, "ffmpeg process started", "")
 
 	// Monitor ffmpeg in background. The process-specific reservation is released
@@ -2052,6 +2066,7 @@ func (s *TranscodeSession) SegmentProgress(time.Time) SegmentProgress {
 		StartSegmentNumber:   opts.StartSegmentNumber,
 		SegmentDuration:      opts.SegmentDuration,
 		LastRequestedSegment: s.lastRequestedSegment,
+		GenerationStartedAt:  s.generationStartedAt,
 	}
 	s.mu.Unlock()
 
@@ -2337,12 +2352,58 @@ func (s *TranscodeSession) cleanStaleSegments(startSegment int) {
 	}
 }
 
+// emittedStreamRecipe captures the opts fields that decide what bytes ffmpeg
+// writes into the output directory. Two generations that agree on all of them
+// emit interchangeable segments, so the older ones stay reusable for a backward
+// seek; any difference makes the older segments wrong-generation media and
+// their manifest a description of a stream that no longer exists.
+type emittedStreamRecipe struct {
+	videoCodec      string
+	bitstreamFilter string
+	toneMapMode     tonemap.Mode
+	toneMapFilter   string
+	hwAccel         string
+}
+
+func emittedRecipeOf(opts TranscodeOpts) emittedStreamRecipe {
+	return emittedStreamRecipe{
+		videoCodec:      strings.ToLower(strings.TrimSpace(opts.TargetCodecVideo)),
+		bitstreamFilter: strings.TrimSpace(opts.VideoBitstreamFilter),
+		toneMapMode:     opts.ToneMapMode,
+		toneMapFilter:   strings.TrimSpace(opts.ToneMapFilter),
+		hwAccel:         strings.ToLower(strings.TrimSpace(opts.HWAccel)),
+	}
+}
+
+// cleanStaleOutputForRestart removes output the replacement generation must not
+// inherit. Old segments are only reusable when the previous and next generation
+// emit the same recipe: a recipe change (copy to an encoded target, a tone-map
+// mode or filter switch, a different hardware backend) leaves both
+// wrong-generation segments at or after the restart point and a manifest
+// describing a stream the new process will never produce. Serving either mixes
+// generations, and reading the stale manifest as produced progress makes the
+// throttler pause a process that has not produced anything yet.
+//
+// Copy-mode restarts always clean, recipe change or not: a copy generation's
+// segment boundaries follow source keyframes, so a re-seek re-cuts the timeline
+// even when the recipe is identical.
+//
+// It reports whether it cleaned, so callers can log the decision.
+func (s *TranscodeSession) cleanStaleOutputForRestart(previous, next TranscodeOpts, startSegment int) bool {
+	if !strings.EqualFold(next.TargetCodecVideo, "copy") && emittedRecipeOf(previous) == emittedRecipeOf(next) {
+		return false
+	}
+	s.cleanStaleSegments(startSegment)
+	return true
+}
+
 // Restart kills the current ffmpeg process and starts a new one seeking to
 // the given position. startSegment sets -hls_segment_start_number so that
-// output filenames align with the expected segment numbering. Existing
-// segment files are preserved so backward seeks can reuse them; for
-// copy-mode sessions, stale segments at or after the restart point are
-// cleaned to prevent serving data from the wrong timeline position.
+// output filenames align with the expected segment numbering. Existing segment
+// files are preserved so backward seeks can reuse them, but only while the
+// replacement generation emits the same recipe; copy-mode restarts and
+// recipe-changing restarts clean the manifest and the segments at or after the
+// restart point (see cleanStaleOutputForRestart).
 func (s *TranscodeSession) Restart(ctx context.Context, seekSeconds float64, startSegment int) error {
 	return s.restart(ctx, seekSeconds, startSegment, 0, false)
 }
@@ -2433,11 +2494,7 @@ func (s *TranscodeSession) restart(
 	reserveHWDevice := s.reserveHWDeviceOnRestart
 	s.mu.Unlock()
 
-	// Copy-mode restarts must clean stale segments so ffmpeg writes fresh
-	// output. Encoded transcodes keep old segments for backward seek reuse.
-	if strings.EqualFold(opts.TargetCodecVideo, "copy") {
-		s.cleanStaleSegments(startSegment)
-	}
+	previousOpts := opts
 
 	opts.SeekSeconds = seekSeconds
 	opts.StartSegmentNumber = startSegment
@@ -2450,6 +2507,14 @@ func (s *TranscodeSession) restart(
 		opts.CopySeekAnchorResolved = copySeekAnchorResolved
 	}
 	opts.FastStart = false // seek-restarts use veryfast for better quality
+
+	// Old segments are only reusable when this generation emits the same recipe
+	// as the previous one; otherwise they, and the manifest describing them,
+	// have to go before the replacement process starts.
+	if s.cleanStaleOutputForRestart(previousOpts, opts, startSegment) {
+		log.Printf("playback: cleaned stale transcode output at/after segment %d before restart (video %q -> %q)",
+			startSegment, previousOpts.TargetCodecVideo, opts.TargetCodecVideo)
+	}
 
 	args := buildFFmpegArgs(opts)
 	bin := opts.FFmpegPath
@@ -2487,6 +2552,8 @@ func (s *TranscodeSession) restart(
 		releaseHWDevice = reserveConcreteHWDevice(opts.HWDevice)
 	}
 
+	// As in StartTranscode, stamp the generation before the process can write.
+	startedAt := time.Now()
 	if err := cmd.Start(); err != nil {
 		cancel()
 		releaseHWDevice()
@@ -2511,6 +2578,7 @@ func (s *TranscodeSession) restart(
 	s.restarting = nil
 	s.stdinPipe = stdinPipe
 	s.lastRequestedSegment = startSegment
+	s.generationStartedAt = startedAt
 	s.done = make(chan struct{})
 	hook := s.restartHook
 	s.mu.Unlock()
