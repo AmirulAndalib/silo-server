@@ -70,6 +70,25 @@ import {
 } from "@/lib/watchTogetherActions";
 import { toast } from "sonner";
 
+let hlsJSModule: Promise<typeof HlsType> | null = null;
+
+function loadHLSJS(): Promise<typeof HlsType> {
+  hlsJSModule ??= import("hls.js").then(
+    (module) => module.default,
+    (error) => {
+      // Drop the memoized rejection so a later playback retries the fetch.
+      hlsJSModule = null;
+      throw error;
+    },
+  );
+  return hlsJSModule;
+}
+
+// Warm the hls.js chunk at module load so the first playback's time to first
+// frame doesn't pay the cold dynamic-import latency on top of plan resolution.
+// A failed warm-up stays quiet here; playback retries and reports it.
+void loadHLSJS().catch(() => {});
+
 // Reserved index for the in-progress live AI translation track. Sits well above
 // any real subtitle index so it never collides.
 const LIVE_SUBTITLE_INDEX = 1_000_000;
@@ -1440,8 +1459,13 @@ export function VideoPlayer({
       if (isHlsStream) {
         try {
           const nativeSupported = video.canPlayType("application/vnd.apple.mpegurl") !== "";
-          const resolution = await resolveHLSEngineV3(plannedDynamicRange, nativeSupported, () =>
-            import("hls.js").then((module) => module.default),
+          const resolution = await resolveHLSEngineV3(
+            plannedDynamicRange,
+            nativeSupported,
+            loadHLSJS,
+            (error) => {
+              console.error("[hls.js] Failed to initialize, falling back to native HLS:", error);
+            },
           );
           if (destroyed || hlsStartupGuardRef.current?.hasFailed()) return;
 

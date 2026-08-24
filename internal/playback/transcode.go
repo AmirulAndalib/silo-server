@@ -108,6 +108,18 @@ func validVideoSampleEntry(value string) bool {
 	return value == "" || value == VideoSampleEntryDVH1 || value == VideoSampleEntryHVC1
 }
 
+// VideoSampleEntryForDVCopy returns the sample entry a copy-video HLS session
+// should tag when it preserves a Dolby Vision source as-is: dvh1 for the
+// single-layer HEVC profiles (5 and 8), whose DOVI configuration record
+// survives the copy and whose consumers key decoder selection off the sample
+// entry. Every other profile keeps ffmpeg's default labeling.
+func VideoSampleEntryForDVCopy(dvProfile int) string {
+	if dvProfile == 5 || dvProfile == 8 {
+		return VideoSampleEntryDVH1
+	}
+	return ""
+}
+
 const (
 	transcodeCodecH264 = "h264"
 	transcodeHWQSV     = "qsv"

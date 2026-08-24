@@ -93,6 +93,8 @@ describe("structured HDR capabilities", () => {
     expect(deliveries.progressive?.hdr_details?.dolby_vision_profiles).toEqual([]);
     expect(deliveries.hls?.hdr_details).toEqual(probe.hdrDetails);
     expect(deliveries.hls?.video_codecs).toContain("hevc");
+    expect(deliveries.original_http?.hdr_details?.hdr10).toBe(false);
+    expect(deliveries.original_http?.hdr_details?.dolby_vision_profiles).toEqual([]);
   });
 
   it("keeps normalized HDR sample entries on progressive without native HLS", () => {
@@ -100,6 +102,8 @@ describe("structured HDR capabilities", () => {
 
     expect(deliveries.progressive?.hdr_details).toEqual(probe.hdrDetails);
     expect(deliveries.hls?.hdr_details?.dolby_vision_profiles).toEqual([]);
+    expect(deliveries.original_http?.hdr_details?.hdr10).toBe(false);
+    expect(deliveries.original_http?.hdr_details?.dolby_vision_profiles).toEqual([]);
   });
 
   it("keeps media-element-only HEVC evidence out of original and HLS delivery", () => {

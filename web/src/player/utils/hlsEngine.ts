@@ -27,6 +27,7 @@ export async function resolveHLSEngineV3<T extends HLSJSSupportV3>(
   dynamicRange: string | undefined,
   nativeSupported: boolean,
   loadHLSJS: () => Promise<T>,
+  onHLSJSUnavailable?: (error: unknown) => void,
 ): Promise<ResolvedHLSEngineV3<T>> {
   if (nativeHDRPreferred(dynamicRange, nativeSupported)) {
     return { engine: "native" };
@@ -37,7 +38,13 @@ export async function resolveHLSEngineV3<T extends HLSJSSupportV3>(
     const engine = selectHLSEngineV3(dynamicRange, nativeSupported, hlsjs.isSupported());
     return engine === "hlsjs" ? { engine, hlsjs } : { engine };
   } catch (error) {
-    if (nativeSupported) return { engine: "native" };
+    if (nativeSupported) {
+      // Falling back to the media element keeps playback alive, but the
+      // preferred engine's loss (and its tuned retry/recovery behavior) must
+      // not be silent — hand the cause to the caller before degrading.
+      onHLSJSUnavailable?.(error);
+      return { engine: "native" };
+    }
     throw error;
   }
 }

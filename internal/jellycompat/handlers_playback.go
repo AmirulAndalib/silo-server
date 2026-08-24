@@ -468,6 +468,7 @@ func (h *PlaybackHandler) startRemoteTranscode(
 	}
 	if source.TranscodeAudio {
 		reqBody.TargetCodecVideo = "copy"
+		reqBody.VideoSampleEntry = playback.VideoSampleEntryForDVCopy(file.PrimaryDVProfile())
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -510,6 +511,7 @@ func (h *PlaybackHandler) startRemoteTranscode(
 		StartSegmentNumber:  reqBody.StartSegmentNumber,
 		TargetCodecVideo:    reqBody.TargetCodecVideo,
 		TargetCodecAudio:    reqBody.TargetCodecAudio,
+		VideoSampleEntry:    reqBody.VideoSampleEntry,
 		SegmentDuration:     reqBody.SegmentDuration,
 		HWAccel:             reqBody.HWAccel,
 		AudioTrackIndex:     reqBody.AudioTrackIndex,
