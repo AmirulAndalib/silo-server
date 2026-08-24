@@ -2189,6 +2189,104 @@ func (s *Scanner) syncPresentLibraryState(ctx context.Context, folderID int) err
 	return nil
 }
 
+// syncPresentFileState repairs the catalog memberships owned by one present
+// media file. Single-file Autoscan work must not pay the folder-wide cost of
+// syncPresentLibraryState: a large library can contain hundreds of thousands
+// of files while this path has exactly one changed row to reconcile.
+func (s *Scanner) syncPresentFileState(ctx context.Context, folderID int, filePath string) error {
+	if _, err := s.fileRepo.Pool().Exec(ctx, `
+		UPDATE media_files mf
+		SET content_id = NULL,
+			updated_at = NOW()
+		WHERE mf.media_folder_id = $1
+		  AND mf.file_path = $2
+		  AND mf.missing_since IS NULL
+		  AND mf.content_id IS NOT NULL
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM media_items mi
+			WHERE mi.content_id = mf.content_id
+		  )
+	`, folderID, filePath); err != nil {
+		return fmt.Errorf("clearing dangling content link for file: %w", err)
+	}
+
+	if _, err := s.fileRepo.Pool().Exec(ctx, `
+		UPDATE media_files mf
+		SET episode_id = NULL,
+			updated_at = NOW()
+		WHERE mf.media_folder_id = $1
+		  AND mf.file_path = $2
+		  AND mf.missing_since IS NULL
+		  AND mf.episode_id IS NOT NULL
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM episodes e
+			WHERE e.content_id = mf.episode_id
+		  )
+	`, folderID, filePath); err != nil {
+		return fmt.Errorf("clearing dangling episode link for file: %w", err)
+	}
+
+	if _, err := s.fileRepo.Pool().Exec(ctx, `
+		INSERT INTO media_item_libraries (content_id, media_folder_id, first_seen_at)
+		SELECT mf.content_id, mf.media_folder_id, NOW()
+		FROM media_files mf
+		JOIN media_items mi ON mi.content_id = mf.content_id
+		WHERE mf.media_folder_id = $1
+		  AND mf.file_path = $2
+		  AND mf.missing_since IS NULL
+		  AND mf.content_id IS NOT NULL
+		ON CONFLICT (content_id, media_folder_id) DO NOTHING
+	`, folderID, filePath); err != nil {
+		return fmt.Errorf("restoring folder membership for file: %w", err)
+	}
+
+	if _, err := s.fileRepo.Pool().Exec(ctx, `
+		WITH target_episode AS (
+			SELECT mf.episode_id, mf.media_folder_id
+			FROM media_files mf
+			JOIN episodes e ON e.content_id = mf.episode_id
+			WHERE mf.media_folder_id = $1
+			  AND mf.file_path = $2
+			  AND mf.missing_since IS NULL
+			  AND mf.episode_id IS NOT NULL
+		),
+		candidate AS (
+			SELECT target.episode_id,
+			       target.media_folder_id,
+			       MIN(mf.created_at) AS first_seen_at
+			FROM target_episode target
+			JOIN media_files mf
+			  ON mf.episode_id = target.episode_id
+			 AND mf.media_folder_id = target.media_folder_id
+			 AND mf.missing_since IS NULL
+			GROUP BY target.episode_id, target.media_folder_id
+		),
+		inserted AS (
+			INSERT INTO episode_libraries (episode_id, media_folder_id, first_seen_at)
+			SELECT episode_id, media_folder_id, first_seen_at
+			FROM candidate
+			ON CONFLICT (episode_id, media_folder_id) DO NOTHING
+			RETURNING episode_id, first_seen_at
+		)
+		UPDATE media_items mi
+		SET latest_episode_added_at = GREATEST(COALESCE(mi.latest_episode_added_at, sub.latest_added), sub.latest_added)
+		FROM (
+			SELECT e.series_id, MAX(i.first_seen_at) AS latest_added
+			FROM inserted i
+			JOIN episodes e ON e.content_id = i.episode_id
+			GROUP BY e.series_id
+		) sub
+		WHERE mi.content_id = sub.series_id
+		  AND mi.type = 'series'
+	`, folderID, filePath); err != nil {
+		return fmt.Errorf("restoring episode folder membership for file: %w", err)
+	}
+
+	return nil
+}
+
 func (s *Scanner) syncFolderScopedAudioLibraryState(ctx context.Context, folderID int) error {
 	if err := s.syncPresentLibraryState(ctx, folderID); err != nil {
 		return err
@@ -2406,7 +2504,7 @@ func (s *Scanner) ScanFile(ctx context.Context, filePath string, folder *models.
 		// Converting a previously-primary row into an extra clears its
 		// content linkage; run the same membership cleanup a full scan would
 		// so stale library membership doesn't linger until the next scan.
-		if err := s.syncPresentLibraryState(ctx, folder.ID); err != nil {
+		if err := s.syncPresentFileState(ctx, folder.ID, cleanFile); err != nil {
 			return fmt.Errorf("syncing present library state for extra file: %w", err)
 		}
 		protectedRoots, err := s.protectedConfiguredRoots(ctx, folder)
@@ -2473,7 +2571,7 @@ func (s *Scanner) ScanFile(ctx context.Context, filePath string, folder *models.
 	if err := s.reconcileScannedGroups(ctx, folder.ID, false, []string{scopePath}, false, groupInference); err != nil {
 		return fmt.Errorf("reconciling scanned groups for file: %w", err)
 	}
-	if err := s.syncPresentLibraryState(ctx, folder.ID); err != nil {
+	if err := s.syncPresentFileState(ctx, folder.ID, filePath); err != nil {
 		return fmt.Errorf("syncing present library state for file: %w", err)
 	}
 	if s.seriesQueueSyncer != nil {
