@@ -1735,6 +1735,7 @@ func (h *PlaybackHandler) ensureTranscodeSession(ctx context.Context, playSessio
 	}
 	if source.TranscodeAudio {
 		opts.TargetCodecVideo = "copy"
+		opts.VideoSampleEntry = playback.VideoSampleEntryForDVCopy(file.PrimaryDVProfile())
 	}
 	opts.SegmentDuration = h.compatSegmentDuration()
 
