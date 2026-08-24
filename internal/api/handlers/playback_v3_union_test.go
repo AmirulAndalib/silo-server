@@ -769,13 +769,13 @@ func TestPlanNodeSessionV3PrefersCapabilityMatchingNode(t *testing.T) {
 			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "1"},
 		},
 	}
-	selected := handler.planNodeSessionV3(context.Background(), &playback.Session{ID: "session-hetero"}, playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayTranscode})
+	selected := handler.planNodeSessionV3(context.Background(), &playback.Session{ID: "session-hetero"}, playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayTranscode}, false)
 	if selected.TranscodeNode == nil || selected.TranscodeNode.URL != capable.URL {
 		t.Fatalf("capability-requiring plan selected %+v, want the capable node", selected.TranscodeNode)
 	}
 
 	free := &playback.PlanV3{PlanID: "plan:copy", Delivery: playback.DeliveryRemuxHLSV3, Transformations: []playback.TransformationV3{}}
-	loadBased := handler.planNodeSessionV3(context.Background(), &playback.Session{ID: "session-copy"}, playback.PlannerResultV3{Plan: free, PlayMethod: playback.PlayRemux})
+	loadBased := handler.planNodeSessionV3(context.Background(), &playback.Session{ID: "session-copy"}, playback.PlannerResultV3{Plan: free, PlayMethod: playback.PlayRemux}, false)
 	if loadBased.TranscodeNode == nil || loadBased.TranscodeNode.URL != incapable.URL {
 		t.Fatalf("transformation-free plan selected %+v, want load-based selection", loadBased.TranscodeNode)
 	}
@@ -796,7 +796,7 @@ func TestPrepareTransportV3LocalFallbackRejectsUnavailableTransformations(t *tes
 		},
 	}
 	request := httptest.NewRequest(http.MethodPost, "/", nil)
-	_, transportErr := handler.prepareTransportV3(request, &playback.Session{ID: "session-local-capability"}, v3HandlerFixtureFile(t), playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac"})
+	_, transportErr := handler.prepareTransportV3(request, &playback.Session{ID: "session-local-capability"}, v3HandlerFixtureFile(t), playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac"}, mediaAuthModeV3{})
 	if transportErr == nil || transportErr.reason != "transcode_node_capability_unavailable" || !transportErr.retryable {
 		t.Fatalf("transport error = %#v", transportErr)
 	}
@@ -865,14 +865,14 @@ func TestPrepareTransportV3AcceptsEveryValidatedLocalToneMapExecutor(t *testing.
 			if err != nil {
 				t.Fatalf("start playback session: %v", err)
 			}
-			transport, transportErr := handler.prepareTransportV3(httptest.NewRequest(http.MethodPost, "/", nil), session, file, result)
+			transport, transportErr := handler.prepareTransportV3(httptest.NewRequest(http.MethodPost, "/", nil), session, file, result, mediaAuthModeV3{})
 			if transportErr != nil {
 				t.Fatalf("prepare %s tone-map transport: %v", test.name, transportErr)
 			}
 			if transport.hwAccel != test.configuredHW || transport.toneMapMode != test.mode {
 				t.Fatalf("prepared execution facts = hw %q tone_map %q, want %q %q", transport.hwAccel, transport.toneMapMode, test.configuredHW, test.mode)
 			}
-			if err := handler.updateV3SessionState(context.Background(), session, file, result, transport); err != nil {
+			if err := handler.updateV3SessionState(context.Background(), session, file, result, transport, mediaAuthModeV3{}); err != nil {
 				t.Fatalf("update session state: %v", err)
 			}
 			transport.commit()
@@ -956,7 +956,7 @@ func TestNVENCSDRBaseInitialAndThawedRecipeUseIdenticalFFmpegArgs(t *testing.T) 
 				HWAccel: tonemap.BackendNVENC, HWDevice: "0",
 			}
 		}
-		transport, transportErr := handler.prepareTransportV3(httptest.NewRequest(http.MethodPost, "/", nil), session, file, result)
+		transport, transportErr := handler.prepareTransportV3(httptest.NewRequest(http.MethodPost, "/", nil), session, file, result, mediaAuthModeV3{})
 		if transportErr != nil {
 			t.Fatalf("prepare %s NVENC transport: %v", name, transportErr)
 		}
@@ -1047,7 +1047,7 @@ func TestPrepareTransportV3ReportsSoftwareToneMapFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start playback session: %v", err)
 	}
-	transport, transportErr := handler.prepareTransportV3(httptest.NewRequest(http.MethodPost, "/", nil), session, file, result)
+	transport, transportErr := handler.prepareTransportV3(httptest.NewRequest(http.MethodPost, "/", nil), session, file, result, mediaAuthModeV3{})
 	if transportErr != nil {
 		t.Fatalf("prepare fallback transport: %v", transportErr)
 	}
@@ -1100,7 +1100,7 @@ func TestPrepareSoftwareToneMapFallbackV3ValidatesLocalRegistry(t *testing.T) {
 	_, attempted, transportErr := handler.prepareSoftwareToneMapFallbackV3(
 		httptest.NewRequest(http.MethodPost, "/", nil),
 		&playback.Session{ID: "session-invalid-local-fallback", UserID: 7, ProfileID: "profile-1"},
-		file, result, preparedTimelineV3{},
+		file, result, preparedTimelineV3{}, mediaAuthModeV3{},
 	)
 	if !attempted {
 		t.Fatal("software fallback was not attempted")
@@ -1181,6 +1181,7 @@ func TestPrepareTransportV3FallsBackToSoftwareCapacity(t *testing.T) {
 		&playback.Session{ID: "session-tone-map-capacity", UserID: 7, ProfileID: "profile-1"},
 		file,
 		result,
+		mediaAuthModeV3{},
 	)
 	if transportErr != nil || transport.nodeURL != software.URL || transport.toneMapMode != tonemap.ModeSoftware {
 		t.Fatalf("transport = %+v error = %v, want software node fallback", transport, transportErr)
@@ -1243,7 +1244,7 @@ func TestPrepareTransportV3TriesNextSoftwareNodeAfterStartFailure(t *testing.T) 
 		ToneMapPolicy: tonemap.PolicyHardwareThenSoftware, ToneMapMode: tonemap.ModeHardware, ToneMapSourceKind: tonemap.SourcePQ,
 		ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3, ToneMapSourceRevision: tonemap.RevisionForFile(file),
 	}
-	transport, transportErr := handler.prepareTransportV3(httptest.NewRequest(http.MethodPost, "/", nil), &playback.Session{ID: "session-tone-map-retry", UserID: 7, ProfileID: "profile-1"}, file, result)
+	transport, transportErr := handler.prepareTransportV3(httptest.NewRequest(http.MethodPost, "/", nil), &playback.Session{ID: "session-tone-map-retry", UserID: 7, ProfileID: "profile-1"}, file, result, mediaAuthModeV3{})
 	if transportErr != nil || transport.nodeURL != healthySoftware.URL || transport.toneMapMode != tonemap.ModeSoftware {
 		t.Fatalf("transport = %+v error = %v, want second software node", transport, transportErr)
 	}
@@ -1311,6 +1312,7 @@ func TestPrepareTransportV3ClassifiesExhaustedRemoteLiveValidation(t *testing.T)
 				&playback.Session{ID: "session-remote-live-validation", UserID: 7, ProfileID: "profile-1"},
 				file,
 				result,
+				mediaAuthModeV3{},
 			)
 			if transportErr == nil || transportErr.retryable != tt.wantRetryable ||
 				(tt.wantCause != nil && !errors.Is(transportErr.cause, tt.wantCause)) ||

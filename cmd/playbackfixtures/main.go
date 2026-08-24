@@ -572,6 +572,25 @@ func goldenConformanceMatrix() playback.ConformanceMatrixV3 {
 	softwarePQ := tonemap.Capabilities{{Mode: tonemap.ModeSoftware, Backend: "software", Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}}}
 	planner = append(planner, makePlannerScenario("hdr10_to_sdr_tone_map", "hdr_dv_matrix", toneMapRequest, conformanceHDRFile(), nil, toneMapSettings, toneMapRegistry, softwarePQ))
 
+	clientManagedFile := conformanceHDRFile()
+	clientManagedFile.AudioTracks = append(clientManagedFile.AudioTracks, models.AudioTrack{Codec: codecAAC, Channels: 2, Layout: audioLayoutStereo})
+	clientManagedRequest := conformanceHDRRequest()
+	clientManagedRequest.PlaybackAttemptID = "attempt-client-managed-original"
+	clientManagedRequest.Capabilities.HDR = false
+	clientManagedRequest.Capabilities.HDRDetails = &playback.HDRCapabilitiesV3{DolbyVisionProfiles: []int{}}
+	clientManagedRequest.ClientPlaybackContext.Output.HDRDetails = &playback.HDRCapabilitiesV3{DolbyVisionProfiles: []int{}}
+	clientManagedAudioIndex := 1
+	clientManagedRequest.AudioTrackIndex = &clientManagedAudioIndex
+	clientManagedRequest.AudioTrackID = playback.TrackIDV3(clientManagedFile.ID, "audio", clientManagedAudioIndex)
+	clientManagedDelivery := clientManagedRequest.ClientPlaybackContext.Deliveries[playback.DeliveryClassOriginalHTTPV3]
+	clientManagedDelivery.HDRDetails = &playback.HDRCapabilitiesV3{DolbyVisionProfiles: []int{}}
+	clientManagedDelivery.ValidatedClaims = []string{playback.ClaimClientManagedDynamicRangeV3, playback.ClaimClientSelectedAudioTrackV3}
+	clientManagedRequest.ClientPlaybackContext.Deliveries[playback.DeliveryClassOriginalHTTPV3] = clientManagedDelivery
+	planner = append(planner, makePlannerScenarioWithAudioIndex(
+		"client_managed_hdr_selected_audio", "hdr_dv_matrix", clientManagedRequest, clientManagedFile,
+		clientManagedAudioIndex, nil, settings, registry,
+	))
+
 	dv8File := conformanceHDRFile()
 	dv8File.VideoTracks[0].DVProfile = 8
 	dv8File.VideoTracks[0].DVBLCompatID = 1
@@ -778,12 +797,16 @@ func goldenConformanceMatrix() playback.ConformanceMatrixV3 {
 
 // makePlannerScenario builds one deterministic protocol-v3 planner fixture.
 func makePlannerScenario(name, category string, request playback.StartRequestV3, file *models.MediaFile, attempted []string, settings playback.PlannerSettingsV3, registry *playback.TransformationRegistryV3, toneMapCapabilities ...tonemap.Capabilities) playback.PlannerScenarioV3 {
+	return makePlannerScenarioWithAudioIndex(name, category, request, file, 0, attempted, settings, registry, toneMapCapabilities...)
+}
+
+func makePlannerScenarioWithAudioIndex(name, category string, request playback.StartRequestV3, file *models.MediaFile, audioTrackIndex int, attempted []string, settings playback.PlannerSettingsV3, registry *playback.TransformationRegistryV3, toneMapCapabilities ...tonemap.Capabilities) playback.PlannerScenarioV3 {
 	var capabilities tonemap.Capabilities
 	if len(toneMapCapabilities) > 0 {
 		capabilities = toneMapCapabilities[0]
 	}
 	result := playback.PlanPlaybackV3(playback.PlannerInputV3{
-		Request: request, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
+		Request: request, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: audioTrackIndex,
 		Settings: settings, Registry: registry, AttemptedKeys: attempted, ToneMapCapabilities: capabilities,
 	})
 	expected := playback.PlannerExpectationV3{Outcome: playback.OutcomeAdaptationUnavailableV3}
@@ -808,7 +831,7 @@ func makePlannerScenario(name, category string, request playback.StartRequestV3,
 	}
 	return playback.PlannerScenarioV3{
 		Name: name, Category: category, Request: request,
-		Source:        playback.SourceDescriptorFromFileV3(file, 0),
+		Source:        playback.SourceDescriptorFromFileV3(file, audioTrackIndex),
 		AttemptedKeys: append([]string(nil), attempted...), Expected: expected,
 	}
 }

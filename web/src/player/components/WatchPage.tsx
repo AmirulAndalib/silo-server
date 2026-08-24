@@ -78,7 +78,7 @@ export function WatchPage({
   subtitleMode,
   showForcedSubtitles,
   profileLanguage,
-  autoSkipIntro,
+  introSkipMode,
   autoSkipRecap,
   autoPlayNextPreview,
   canEditMarkers,
@@ -450,6 +450,7 @@ export function WatchPage({
       onQualitySelect={session.changeQuality}
       onSubtitleTrackChange={session.changeSubtitleTrack}
       onPlanFailure={session.recoverFromFailure}
+      onPlanInvalidated={session.invalidatePlan}
       onReanchorSeek={session.reanchorSeek}
       onApplySubtitleTrack={session.applySubtitleTrack}
       preferredSubtitleLanguage={preferredSubtitleLanguage}
@@ -458,7 +459,7 @@ export function WatchPage({
       showForcedSubtitles={showForcedSubtitles}
       profileLanguage={profileLanguage}
       intro={activeMarkers.intro}
-      autoSkipIntro={autoSkipIntro}
+      introSkipMode={introSkipMode}
       credits={activeMarkers.credits}
       recap={activeMarkers.recap}
       autoSkipRecap={autoSkipRecap}

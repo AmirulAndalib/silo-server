@@ -30,7 +30,7 @@ func TestTranscodeServeReconstructsPlainTranscodeFromTokenOnLiveSession(t *testi
 		TargetCodecVideo: "h264", TargetCodecAudio: "aac", SegmentDuration: 2,
 		AudioTrackIndex: -1, SubtitleTrackIndex: -1,
 	})
-	token := handler.signSessionToken(card)
+	token := handler.signSessionToken(card, false)
 	if token == "" {
 		t.Fatal("sign stream token returned empty")
 	}
@@ -74,7 +74,7 @@ func TestTranscodeServePlainCardRecoveryFailureStays404(t *testing.T) {
 		TargetCodecVideo: "h264", TargetCodecAudio: "aac", SegmentDuration: 2,
 		AudioTrackIndex: -1, SubtitleTrackIndex: -1,
 	})
-	token := handler.signSessionToken(card)
+	token := handler.signSessionToken(card, false)
 	if token == "" {
 		t.Fatal("sign stream token returned empty")
 	}
