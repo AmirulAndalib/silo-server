@@ -3,6 +3,7 @@ package jellycompat
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"unicode"
@@ -33,7 +34,7 @@ func (c *ProfileCondition) UnmarshalJSON(data []byte) error {
 		Condition  string `json:"Condition"`
 		Property   string `json:"Property"`
 		Value      any    `json:"Value"`
-		IsRequired bool   `json:"IsRequired"`
+		IsRequired *bool  `json:"IsRequired"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -45,7 +46,11 @@ func (c *ProfileCondition) UnmarshalJSON(data []byte) error {
 	c.Condition = raw.Condition
 	c.Property = raw.Property
 	c.Value = value
-	c.IsRequired = raw.IsRequired
+	// Jellyfin's C# ProfileCondition defaults IsRequired to true in its
+	// parameterless constructor, and its deserializer only overwrites
+	// properties actually present in the payload. An omitted key therefore
+	// means "required", not the Go zero value.
+	c.IsRequired = raw.IsRequired == nil || *raw.IsRequired
 	return nil
 }
 
@@ -185,7 +190,7 @@ func buildConditionValues(version catalog.FileVersion, audioStreamIndex *int) co
 	values := conditionValues{
 		"videorangetype": {text: compatVideoRangeType(video, version.HDR)},
 		"videoprofile":   {text: video.Profile},
-		"isanamorphic":   {text: strconv.FormatBool(false)},
+		"isinterlaced":   {text: strconv.FormatBool(video.Interlaced)},
 		"videolevel":     intConditionValue(video.Level),
 		"refframes":      intConditionValue(video.ReferenceFrames),
 		"width":          intConditionValue(video.Width),
@@ -193,7 +198,72 @@ func buildConditionValues(version catalog.FileVersion, audioStreamIndex *int) co
 		"videobitdepth":  intConditionValue(video.BitDepth),
 		"audiochannels":  intConditionValue(audio.Channels),
 	}
+
+	// Everything below is only inserted when Silo actually knows the value.
+	// An absent key falls through to conditionMatches' IsRequired handling,
+	// mirroring how Jellyfin's ConditionProcessor treats a null value.
+	if anamorphic, known := compatIsAnamorphic(video); known {
+		values["isanamorphic"] = conditionValue{text: strconv.FormatBool(anamorphic)}
+	}
+	if frameRate := parseCompatFrameRate(video.FrameRate); frameRate > 0 {
+		rounded := int(math.Round(frameRate))
+		values["videoframerate"] = conditionValue{text: strconv.Itoa(rounded), number: rounded, hasNum: true}
+	}
+	videoBitrate := video.Bitrate
+	if videoBitrate == 0 && version.Bitrate > 0 {
+		videoBitrate = version.Bitrate * 1000
+	}
+	if videoBitrate > 0 {
+		values["videobitrate"] = intConditionValue(videoBitrate)
+	}
+	if audio.Bitrate > 0 {
+		values["audiobitrate"] = intConditionValue(audio.Bitrate)
+	}
+	if audio.SampleRate > 0 {
+		values["audiosamplerate"] = intConditionValue(audio.SampleRate)
+	}
+	if strings.TrimSpace(audio.Profile) != "" {
+		values["audioprofile"] = conditionValue{text: audio.Profile}
+	}
 	return values
+}
+
+// compatIsAnamorphic reports whether a video track's display aspect ratio
+// disagrees with its storage aspect ratio, and whether that determination
+// could be made at all. Jellyfin treats an unknown value as "no answer"
+// rather than false, so callers must respect the second return value.
+func compatIsAnamorphic(track models.VideoTrack) (anamorphic, known bool) {
+	displayRatio, ok := parseCompatAspectRatio(track.AspectRatio)
+	if !ok || track.Width <= 0 || track.Height <= 0 {
+		return false, false
+	}
+	storageRatio := float64(track.Width) / float64(track.Height)
+	// The tolerance absorbs rounding in reported DARs, e.g. 1920x816
+	// reported as "40:17".
+	const tolerance = 0.02
+	return math.Abs(displayRatio-storageRatio)/storageRatio > tolerance, true
+}
+
+// parseCompatAspectRatio parses an ffprobe display aspect ratio ("16:9").
+// A bare decimal ratio is accepted too; anything else is unknown.
+func parseCompatAspectRatio(raw string) (float64, bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, false
+	}
+	if numerator, denominator, found := strings.Cut(value, ":"); found {
+		width, widthErr := strconv.ParseFloat(strings.TrimSpace(numerator), 64)
+		height, heightErr := strconv.ParseFloat(strings.TrimSpace(denominator), 64)
+		if widthErr != nil || heightErr != nil || width <= 0 || height <= 0 {
+			return 0, false
+		}
+		return width / height, true
+	}
+	ratio, err := strconv.ParseFloat(value, 64)
+	if err != nil || ratio <= 0 {
+		return 0, false
+	}
+	return ratio, true
 }
 
 func intConditionValue(value int) conditionValue {
