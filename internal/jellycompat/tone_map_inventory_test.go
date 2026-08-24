@@ -125,7 +125,7 @@ func TestPlanCompatTranscodeSessionFallsBackToSoftwareCapacity(t *testing.T) {
 		}))
 	}
 	hardware := newToneMapNode(tonemap.Capability{
-		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI,
+		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterOpenCL,
 		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
 	})
 	defer hardware.Close()

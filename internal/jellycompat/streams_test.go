@@ -266,7 +266,7 @@ func TestEnsureTranscodeSessionGivesSoftwareFallbackFreshManifestBudget(t *testi
 
 	ffmpegPath := filepath.Join(t.TempDir(), "fallback-ffmpeg.sh")
 	script := "#!/bin/sh\n" +
-		"case \"$*\" in *tonemap_vaapi*) sleep 30; exit 0;; esac\n" +
+		"case \"$*\" in *tonemap_opencl*) sleep 30; exit 0;; esac\n" +
 		"out=\"\"\n" +
 		"for arg in \"$@\"; do case \"$arg\" in *.m3u8) out=\"$(dirname \"$arg\")\";; esac; done\n" +
 		"mkdir -p \"$out\"\n" +
@@ -312,7 +312,7 @@ func TestEnsureTranscodeSessionGivesSoftwareFallbackFreshManifestBudget(t *testi
 		tm: playback.NewTranscodeManager(),
 		compatToneMapProbe: func(context.Context, string, string, string) (tonemap.Capabilities, error) {
 			return tonemap.Capabilities{
-				{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+				{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterOpenCL, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
 				{Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
 			}, nil
 		},

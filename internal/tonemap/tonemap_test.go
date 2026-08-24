@@ -134,7 +134,7 @@ func TestProbeAdvertisesOnlySuccessfulSourceKinds(t *testing.T) {
 		joined := strings.Join(args, " ")
 		switch {
 		case slices.Contains(args, "-filters"):
-			return []byte(" .S. sidedata V->V\n .S. zscale V->V\n .S. tonemap V->V\n .S. tonemapx V->V\n .S. tonemap_vaapi V->V\n .S. scale_vaapi V->V\n"), nil
+			return []byte(" .S. sidedata V->V\n .S. zscale V->V\n .S. tonemap V->V\n .S. tonemapx V->V\n .S. tonemap_opencl V->V\n .S. hwmap V->V\n .S. scale_vaapi V->V\n"), nil
 		case slices.Contains(args, "-encoders"):
 			return []byte("libx264 h264_qsv"), nil
 		case strings.Contains(joined, "libx264"):
@@ -162,7 +162,7 @@ func TestProbeValidatesEveryConfiguredHardwareDevice(t *testing.T) {
 		joined := strings.Join(args, " ")
 		switch {
 		case slices.Contains(args, "-filters"):
-			return []byte(" .S. tonemap_vaapi V->V\n .S. scale_vaapi V->V\n"), nil
+			return []byte(" .S. tonemap_opencl V->V\n .S. hwmap V->V\n .S. scale_vaapi V->V\n"), nil
 		case slices.Contains(args, "-encoders"):
 			return []byte("h264_qsv"), nil
 		case strings.Contains(joined, "renderD129"):
@@ -190,6 +190,7 @@ func TestFiltersDeclareBT709Output(t *testing.T) {
 	for name, filter := range map[string]string{
 		"software pq":  SoftwareFilter(SourcePQ, "tonemapx"),
 		"software hlg": SoftwareFilter(SourceHLG, "tonemap"),
+		"qsv":          QSVFilter(SourcePQ),
 		"vaapi":        VAAPIFilter(SourcePQ),
 		"cuda":         CUDAFilter(),
 	} {

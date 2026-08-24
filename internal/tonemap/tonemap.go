@@ -13,6 +13,7 @@ import (
 const (
 	SoftwareFilterBT2390 = "tonemapx"
 	SoftwareFilterHable  = "tonemap"
+	HardwareFilterOpenCL = "tonemap_opencl"
 	HardwareFilterVAAPI  = "tonemap_vaapi"
 	HardwareFilterCUDA   = "tonemap_cuda"
 
@@ -610,6 +611,28 @@ func VAAPIFilter(kind SourceKind) string {
 		return SourceParameters(kind) + "," + vaapiSDRFilter()
 	}
 	return SourceParameters(kind) + "," + vaapiToneMapFilter()
+}
+
+// QSVFilter builds the Intel HDR-to-SDR conversion graph. Intel's VAAPI/VPP
+// tone mapper can severely crush midtones on otherwise valid PQ sources, so
+// HDR frames take Jellyfin FFmpeg's GPU OpenCL path and return to the VAAPI
+// surface family before the existing QSV encoder interop. SDR base layers only
+// need color conversion and retain the cheaper VAAPI path.
+func QSVFilter(kind SourceKind) string {
+	if IsSDRSource(kind) {
+		return VAAPIFilter(kind)
+	}
+	return SourceParameters(kind) +
+		",scale_vaapi=format=p010" +
+		",hwmap=derive_device=opencl:mode=read" +
+		"," + openCLToneMapFilter() +
+		",hwmap=derive_device=vaapi:mode=write:reverse=1:extra_hw_frames=16,format=vaapi"
+}
+
+// openCLToneMapFilter matches Jellyfin's BT.2390 GPU recipe. A fixed 100-nit
+// SDR peak keeps output stable across sources while preserving PQ midtones.
+func openCLToneMapFilter() string {
+	return HardwareFilterOpenCL + "=format=nv12:p=bt709:t=bt709:m=bt709:tonemap=bt2390:peak=100:desat=0"
 }
 
 // vaapiToneMapFilter returns the HDR luminance and color conversion stage.

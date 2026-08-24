@@ -991,7 +991,7 @@ func TestCleanStaleOutputForRestart_CopyToToneMapEncodeRemovesStaleOutput(t *tes
 		SegmentDuration:  2,
 		HWAccel:          "qsv",
 		ToneMapMode:      tonemap.ModeHardware,
-		ToneMapFilter:    "tonemap_vaapi",
+		ToneMapFilter:    "tonemap_opencl",
 	}
 
 	session := &TranscodeSession{outputDir: tempDir, opts: previous}
@@ -1019,7 +1019,7 @@ func TestCleanStaleOutputForRestart_ToneMapModeChangeRemovesStaleOutput(t *testi
 		t.Fatalf("write segment: %v", err)
 	}
 
-	previous := TranscodeOpts{TargetCodecVideo: "h264", HWAccel: "qsv", ToneMapMode: tonemap.ModeHardware, ToneMapFilter: "tonemap_vaapi"}
+	previous := TranscodeOpts{TargetCodecVideo: "h264", HWAccel: "qsv", ToneMapMode: tonemap.ModeHardware, ToneMapFilter: "tonemap_opencl"}
 	next := TranscodeOpts{TargetCodecVideo: "h264", HWAccel: HWAccelNone, ToneMapMode: tonemap.ModeSoftware, ToneMapFilter: "tonemap"}
 
 	session := &TranscodeSession{outputDir: tempDir, opts: previous}
@@ -1042,7 +1042,7 @@ func TestCleanStaleOutputForRestart_SameEncodedRecipeKeepsSegments(t *testing.T)
 		t.Fatalf("write segment: %v", err)
 	}
 
-	opts := TranscodeOpts{TargetCodecVideo: "h264", HWAccel: "qsv", ToneMapMode: tonemap.ModeHardware, ToneMapFilter: "tonemap_vaapi"}
+	opts := TranscodeOpts{TargetCodecVideo: "h264", HWAccel: "qsv", ToneMapMode: tonemap.ModeHardware, ToneMapFilter: "tonemap_opencl"}
 	session := &TranscodeSession{outputDir: tempDir, opts: opts}
 
 	// A backward seek within one generation keeps its segments reusable.

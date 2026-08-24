@@ -196,7 +196,11 @@ func TestLocalToneMapCapabilitiesV3UsesLivePlaybackHardware(t *testing.T) {
 	var calls []string
 	handler.v3ToneMapProbe = func(_ context.Context, ffmpegPath, backend, device string) (tonemap.Capabilities, error) {
 		calls = append(calls, ffmpegPath+"|"+backend+"|"+device)
-		return tonemap.Capabilities{{Mode: tonemap.ModeHardware, Backend: backend, Filter: tonemap.HardwareFilterVAAPI, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}}}, nil
+		filter := tonemap.HardwareFilterVAAPI
+		if backend == tonemap.BackendQSV {
+			filter = tonemap.HardwareFilterOpenCL
+		}
+		return tonemap.Capabilities{{Mode: tonemap.ModeHardware, Backend: backend, Filter: filter, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}}}, nil
 	}
 
 	for i := 0; i < 2; i++ {
@@ -814,7 +818,7 @@ func TestPrepareTransportV3AcceptsEveryValidatedLocalToneMapExecutor(t *testing.
 		configuredHW   string
 		hardwareDevice string
 	}{
-		{name: "QSV", mode: tonemap.ModeHardware, backend: tonemap.BackendQSV, filter: tonemap.HardwareFilterVAAPI, policy: tonemap.PolicyHardwareOnly, settingKey: config.PlaybackTranscodeHardwareToneMapSettingKey, configuredHW: tonemap.BackendQSV, hardwareDevice: "/dev/dri/renderD128"},
+		{name: "QSV", mode: tonemap.ModeHardware, backend: tonemap.BackendQSV, filter: tonemap.HardwareFilterOpenCL, policy: tonemap.PolicyHardwareOnly, settingKey: config.PlaybackTranscodeHardwareToneMapSettingKey, configuredHW: tonemap.BackendQSV, hardwareDevice: "/dev/dri/renderD128"},
 		{name: "VAAPI", mode: tonemap.ModeHardware, backend: tonemap.BackendVAAPI, filter: tonemap.HardwareFilterVAAPI, policy: tonemap.PolicyHardwareOnly, settingKey: config.PlaybackTranscodeHardwareToneMapSettingKey, configuredHW: tonemap.BackendVAAPI, hardwareDevice: "/dev/dri/renderD128"},
 		{name: "NVENC", mode: tonemap.ModeHardware, backend: tonemap.BackendNVENC, filter: tonemap.HardwareFilterCUDA, policy: tonemap.PolicyHardwareOnly, settingKey: config.PlaybackTranscodeHardwareToneMapSettingKey, configuredHW: tonemap.BackendNVENC, hardwareDevice: "0"},
 		{name: "software", mode: tonemap.ModeSoftware, backend: tonemap.BackendSoftware, filter: tonemap.SoftwareFilterBT2390, policy: tonemap.PolicySoftwareOnly, settingKey: config.PlaybackTranscodeSoftwareToneMapSettingKey, configuredHW: playback.HWAccelNone},
@@ -1015,7 +1019,7 @@ func TestPrepareTransportV3PrefersLocalHardwareBeforeSoftwareFallback(t *testing
 	}}
 	handler.v3ToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
 		return tonemap.Capabilities{
-			{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+			{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterOpenCL, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
 			{Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
 		}, nil
 	}
@@ -1057,7 +1061,7 @@ func TestPrepareTransportV3ReportsSoftwareToneMapFallback(t *testing.T) {
 		"out=\"\"\n" +
 		"for arg in \"$@\"; do case \"$arg\" in *.m3u8) out=\"$(dirname \"$arg\")\";; esac; done\n" +
 		"for arg in \"$@\"; do\n" +
-		"  case \"$arg\" in *tonemap_vaapi*) mkdir -p \"$out\"; printf partial > \"$out/hardware-partial.marker\"; echo 'hardware tone map failed' >&2; exit 1;; esac\n" +
+		"  case \"$arg\" in *tonemap_opencl*) mkdir -p \"$out\"; printf partial > \"$out/hardware-partial.marker\"; echo 'hardware tone map failed' >&2; exit 1;; esac\n" +
 		"done\n" +
 		"exec \"" + baseFFmpeg + "\" \"$@\"\n"
 	if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
@@ -1078,7 +1082,7 @@ func TestPrepareTransportV3ReportsSoftwareToneMapFallback(t *testing.T) {
 	}}
 	handler.v3ToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
 		return tonemap.Capabilities{
-			{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+			{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterOpenCL, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
 			{Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
 		}, nil
 	}
@@ -1198,7 +1202,7 @@ func TestPrepareTransportV3FallsBackToSoftwareCapacity(t *testing.T) {
 		}))
 	}
 	hardware := newToneMapNode(tonemap.Capability{
-		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI,
+		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterOpenCL,
 		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
 	})
 	defer hardware.Close()

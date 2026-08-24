@@ -456,7 +456,11 @@ func validateToneMapOpts(opts TranscodeOpts) error {
 	case tonemap.ModeHardware:
 		switch opts.HWAccel {
 		case transcodeHWQSV, transcodeHWVAAPI:
-			if opts.ToneMapFilter != tonemap.HardwareFilterVAAPI {
+			expected := tonemap.HardwareFilterVAAPI
+			if opts.HWAccel == transcodeHWQSV {
+				expected = tonemap.HardwareFilterOpenCL
+			}
+			if opts.ToneMapFilter != expected {
 				return fmt.Errorf("unsupported %s tone-map filter %q", opts.HWAccel, opts.ToneMapFilter)
 			}
 		case transcodeHWNVENC:
@@ -819,8 +823,11 @@ func appendHWAccelArgs(args []string, opts TranscodeOpts) []string {
 		args = append(args,
 			"-init_hw_device", fmt.Sprintf("vaapi=va:%s,driver=iHD,kernel_driver=i915,vendor_id=0x8086", hwDevice),
 			"-init_hw_device", "qsv=qs@va",
-			"-filter_hw_device", "va",
 		)
+		if opts.ToneMapMode == tonemap.ModeHardware && opts.ToneMapFilter == tonemap.HardwareFilterOpenCL {
+			args = append(args, "-init_hw_device", "opencl=ocl@va")
+		}
+		args = append(args, "-filter_hw_device", "va")
 		if !opts.SoftwareVideoDecode {
 			args = append(args, "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi")
 		}
@@ -1033,7 +1040,7 @@ func toneMapScaleFilter(opts TranscodeOpts) string {
 	case tonemap.ModeHardware:
 		switch opts.HWAccel {
 		case transcodeHWQSV:
-			return softwareToneMapUploadFilter(opts) + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "," + qsvToneMapScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter()
+			return softwareToneMapUploadFilter(opts) + tonemap.QSVFilter(opts.ToneMapSourceKind) + "," + qsvToneMapScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter()
 		case transcodeHWVAAPI:
 			return softwareToneMapUploadFilter(opts) + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "," + vaapiScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter()
 		case transcodeHWNVENC:
@@ -1069,7 +1076,7 @@ func toneMappedTextSubtitleFilter(opts TranscodeOpts) string {
 	}
 	switch opts.HWAccel {
 	case transcodeHWQSV:
-		return softwareToneMapUploadFilter(opts) + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + ",hwdownload,format=nv12," + cpuTail + ",format=nv12,hwupload,hwmap=derive_device=qsv:mode=read+write,format=qsv," + tonemap.HDRMetadataRemovalFilter()
+		return softwareToneMapUploadFilter(opts) + tonemap.QSVFilter(opts.ToneMapSourceKind) + ",hwdownload,format=nv12," + cpuTail + ",format=nv12,hwupload,hwmap=derive_device=qsv:mode=read+write,format=qsv," + tonemap.HDRMetadataRemovalFilter()
 	case transcodeHWVAAPI:
 		return softwareToneMapUploadFilter(opts) + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + ",hwdownload,format=nv12," + cpuTail + ",format=nv12,hwupload," + tonemap.HDRMetadataRemovalFilter()
 	case transcodeHWNVENC:
@@ -1099,7 +1106,7 @@ func appendToneMappedBitmapSubtitleArgs(args []string, opts TranscodeOpts) []str
 
 	switch opts.HWAccel {
 	case transcodeHWQSV:
-		graph = "[0:v:0]" + softwareToneMapUploadFilter(opts) + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "[vmain];" +
+		graph = "[0:v:0]" + softwareToneMapUploadFilter(opts) + tonemap.QSVFilter(opts.ToneMapSourceKind) + "[vmain];" +
 			subInput + "format=bgra,hwupload[sub];[vmain][sub]overlay_vaapi=eof_action=pass," +
 			qsvToneMapScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter() + "[vout]"
 	case transcodeHWVAAPI:
@@ -1124,11 +1131,15 @@ func appendToneMappedBitmapSubtitleArgs(args []string, opts TranscodeOpts) []str
 	return append(args, "-filter_complex", graph)
 }
 
-// softwareToneMapUploadFilter moves CPU-decoded AVC High 10 frames onto the
-// VAAPI device before invoking the hardware-only tonemap_vaapi filter.
+// softwareToneMapUploadFilter moves CPU-decoded frames onto the configured
+// Intel or VAAPI device before invoking the selected hardware tone-map graph.
 func softwareToneMapUploadFilter(opts TranscodeOpts) string {
 	if opts.SoftwareVideoDecode && (opts.HWAccel == transcodeHWQSV || opts.HWAccel == transcodeHWVAAPI) {
-		return "format=nv12,hwupload,"
+		format := "nv12"
+		if !tonemap.IsSDRSource(opts.ToneMapSourceKind) {
+			format = "p010le"
+		}
+		return "format=" + format + ",hwupload,"
 	}
 	return ""
 }

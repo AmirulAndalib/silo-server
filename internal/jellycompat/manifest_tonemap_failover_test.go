@@ -50,7 +50,7 @@ func (r *modeRecorder) reset() {
 
 func TestHandleMasterManifestReplansAfterRemoteSoftwareToneMapFailure(t *testing.T) {
 	hardware := tonemap.Capability{
-		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI,
+		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterOpenCL,
 		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
 	}
 	software := tonemap.Capability{
@@ -181,7 +181,7 @@ func TestHandleMasterManifestFallsBackToValidatedLocalSoftwareAfterRemoteFailure
 	t.Cleanup(func() { compatManifestStartupTimeout = previousTimeout })
 
 	hardware := tonemap.Capability{
-		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI,
+		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterOpenCL,
 		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
 	}
 	software := tonemap.Capability{
@@ -269,7 +269,7 @@ func TestHandleMasterManifestFallsBackToValidatedLocalSoftwareAfterRemoteFailure
 	localHardwareMarker := filepath.Join(t.TempDir(), "local-hardware-attempted")
 	handler.FFmpegPath = filepath.Join(t.TempDir(), "ffmpeg")
 	ffmpegScript := "#!/bin/sh\n" +
-		"case \"$*\" in *tonemap_vaapi*) touch " + localHardwareMarker + "; exit 41;; esac\n" +
+		"case \"$*\" in *tonemap_opencl*) touch " + localHardwareMarker + "; exit 41;; esac\n" +
 		"out=\"\"\n" +
 		"for arg in \"$@\"; do case \"$arg\" in *.m3u8) out=\"$(dirname \"$arg\")\";; esac; done\n" +
 		"mkdir -p \"$out\"\n" +
@@ -317,7 +317,7 @@ func TestHandleMasterManifestFallsBackToValidatedLocalSoftwareAfterRemoteFailure
 
 func TestHandleMasterManifestClassifiesExhaustedRemoteLiveValidation(t *testing.T) {
 	hardware := tonemap.Capability{
-		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI,
+		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterOpenCL,
 		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
 	}
 	software := tonemap.Capability{
@@ -373,7 +373,7 @@ func TestEnsureTranscodeSessionRequiredSoftwareReplacesExistingHardware(t *testi
 	t.Cleanup(func() { compatManifestStartupTimeout = previousTimeout })
 
 	hardware := tonemap.Capability{
-		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI,
+		Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterOpenCL,
 		SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
 	}
 	software := tonemap.Capability{
@@ -390,7 +390,7 @@ func TestEnsureTranscodeSessionRequiredSoftwareReplacesExistingHardware(t *testi
 	softwareMarker := filepath.Join(t.TempDir(), "software")
 	handler.FFmpegPath = filepath.Join(t.TempDir(), "ffmpeg")
 	ffmpegScript := "#!/bin/sh\n" +
-		"case \"$*\" in *tonemap_vaapi*) touch " + hardwareMarker + ";; *tonemapx*) touch " + softwareMarker + ";; esac\n" +
+		"case \"$*\" in *tonemap_opencl*) touch " + hardwareMarker + ";; *tonemapx*) touch " + softwareMarker + ";; esac\n" +
 		"out=\"\"\n" +
 		"for arg in \"$@\"; do case \"$arg\" in *.m3u8) out=\"$(dirname \"$arg\")\";; esac; done\n" +
 		"mkdir -p \"$out\"\n" +
@@ -469,7 +469,7 @@ func TestEnsureTranscodeSessionReadyHardwareYieldsPublicationToSoftwareWinner(t 
 			t.Cleanup(func() { compatManifestStartupTimeout = previousTimeout })
 
 			hardware := tonemap.Capability{
-				Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI,
+				Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterOpenCL,
 				SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
 			}
 			software := tonemap.Capability{

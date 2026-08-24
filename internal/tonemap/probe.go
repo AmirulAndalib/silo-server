@@ -283,10 +283,14 @@ func intersectSourceKinds(left, right []SourceKind) []SourceKind {
 
 // hardwareFilter returns the FFmpeg tone-map filter required by a backend.
 func hardwareFilter(backend string) string {
-	if backend == BackendNVENC {
+	switch backend {
+	case BackendQSV:
+		return HardwareFilterOpenCL
+	case BackendNVENC:
 		return HardwareFilterCUDA
+	default:
+		return HardwareFilterVAAPI
 	}
-	return HardwareFilterVAAPI
 }
 
 // runCommand executes a probe command and retains stderr alongside stdout for
@@ -313,7 +317,7 @@ func hasToken(output []byte, token string) bool {
 func hardwareProbeAvailable(backend string, filters, encoders []byte) bool {
 	switch backend {
 	case BackendQSV:
-		return hasToken(filters, HardwareFilterVAAPI) && hasToken(filters, "scale_vaapi") && hasToken(encoders, "h264_qsv")
+		return hasToken(filters, HardwareFilterOpenCL) && hasToken(filters, "hwmap") && hasToken(filters, "scale_vaapi") && hasToken(encoders, "h264_qsv")
 	case BackendVAAPI:
 		return hasToken(filters, HardwareFilterVAAPI) && hasToken(filters, "scale_vaapi") && hasToken(encoders, "h264_vaapi")
 	case BackendNVENC:
@@ -364,6 +368,7 @@ func hardwareSmokeArgs(fixturePath, backend, hardwareDevice string, kind SourceK
 		base = append(base,
 			"-init_hw_device", qsvVAAPIInitDevice(device),
 			"-init_hw_device", "qsv=qs@va",
+			"-init_hw_device", "opencl=ocl@va",
 			"-filter_hw_device", "va",
 			"-hwaccel", BackendVAAPI, "-hwaccel_output_format", BackendVAAPI,
 		)
@@ -395,7 +400,7 @@ func hardwareSmokeFilter(backend string, kind SourceKind, sourceVideoBitDepth in
 	}
 	filter := VAAPIFilter(kind)
 	if backend == BackendQSV {
-		filter += "," + QSVInteropFilter()
+		filter = QSVFilter(kind) + "," + QSVInteropFilter()
 	}
 	return filter + "," + HDRMetadataRemovalFilter()
 }

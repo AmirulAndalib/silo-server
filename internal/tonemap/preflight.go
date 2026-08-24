@@ -441,7 +441,7 @@ func sourceConversionPreflightArgs(request SourcePreflightRequest, position floa
 			if device == "" {
 				device = defaultDRIRenderDevice
 			}
-			args = append(args, "-init_hw_device", qsvVAAPIInitDevice(device), "-init_hw_device", "qsv=qs@va", "-filter_hw_device", "va")
+			args = append(args, "-init_hw_device", qsvVAAPIInitDevice(device), "-init_hw_device", "qsv=qs@va", "-init_hw_device", "opencl=ocl@va", "-filter_hw_device", "va")
 			if !request.SoftwareVideoDecode {
 				args = append(args, "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi")
 			}
@@ -492,7 +492,14 @@ func sourceConversionPreflightFilter(request SourcePreflightRequest) string {
 		filter = "format=nv12,hwupload," + filter
 	}
 	if request.Backend == BackendQSV {
-		filter += "," + QSVInteropFilter()
+		filter = QSVFilter(request.Kind) + "," + QSVInteropFilter()
+		if request.SoftwareVideoDecode {
+			format := "nv12"
+			if !IsSDRSource(request.Kind) {
+				format = "p010le"
+			}
+			filter = "format=" + format + ",hwupload," + filter
+		}
 	}
 	return filter + "," + HDRMetadataRemovalFilter()
 }

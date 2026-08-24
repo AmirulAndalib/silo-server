@@ -22,7 +22,7 @@ func TestToneMapFFmpegGraphsCoverSupportedExecutors(t *testing.T) {
 	}{
 		{name: "software PQ", mode: tonemap.ModeSoftware, hwAccel: "none", filter: "tonemapx", sourceKind: tonemap.SourcePQ, want: []string{"tonemapx=tonemap=bt2390", "color_trc=smpte2084", "libx264"}},
 		{name: "software HLG fallback", mode: tonemap.ModeSoftware, hwAccel: "none", filter: "tonemap", sourceKind: tonemap.SourceHLG, want: []string{"tonemap=hable", "color_trc=arib-std-b67", "libx264"}},
-		{name: "QSV", mode: tonemap.ModeHardware, hwAccel: "qsv", filter: "tonemap_vaapi", sourceKind: tonemap.SourcePQ, want: []string{"tonemap_vaapi", "hwmap=derive_device=qsv:mode=read+write", "h264_qsv"}},
+		{name: "QSV", mode: tonemap.ModeHardware, hwAccel: "qsv", filter: "tonemap_opencl", sourceKind: tonemap.SourcePQ, want: []string{"-init_hw_device opencl=ocl@va", "tonemap_opencl", "hwmap=derive_device=qsv:mode=read+write", "h264_qsv"}},
 		{name: "VAAPI", mode: tonemap.ModeHardware, hwAccel: "vaapi", filter: "tonemap_vaapi", sourceKind: tonemap.SourceHLG, want: []string{"tonemap_vaapi", "scale_vaapi", "h264_vaapi"}},
 		{name: "NVENC", mode: tonemap.ModeHardware, hwAccel: "nvenc", filter: "tonemap_cuda", sourceKind: tonemap.SourcePQ, want: []string{"color_trc=smpte2084", "tonemap_cuda", "scale_cuda", "h264_nvenc"}},
 	}
@@ -84,7 +84,7 @@ func TestEveryToneMapSourceKindBuildsEveryExecutorGraph(t *testing.T) {
 		encoder string
 	}{
 		{name: "software", mode: tonemap.ModeSoftware, hwAccel: "none", filter: tonemap.SoftwareFilterHable, encoder: "libx264"},
-		{name: "qsv", mode: tonemap.ModeHardware, hwAccel: "qsv", filter: tonemap.HardwareFilterVAAPI, encoder: "h264_qsv"},
+		{name: "qsv", mode: tonemap.ModeHardware, hwAccel: "qsv", filter: tonemap.HardwareFilterOpenCL, encoder: "h264_qsv"},
 		{name: "vaapi", mode: tonemap.ModeHardware, hwAccel: "vaapi", filter: tonemap.HardwareFilterVAAPI, encoder: "h264_vaapi"},
 		{name: "nvenc", mode: tonemap.ModeHardware, hwAccel: "nvenc", filter: tonemap.HardwareFilterCUDA, encoder: "h264_nvenc"},
 	}
@@ -103,7 +103,7 @@ func TestEveryToneMapSourceKindBuildsEveryExecutorGraph(t *testing.T) {
 						t.Fatalf("%s/%s graph missing %q: %s", kind, executor.name, token, joined)
 					}
 				}
-				hasLuminanceToneMap := strings.Contains(joined, "tonemap=hable") || strings.Contains(joined, "tonemap_vaapi") || strings.Contains(joined, "tonemap_cuda")
+				hasLuminanceToneMap := strings.Contains(joined, "tonemap=hable") || strings.Contains(joined, "tonemap_opencl") || strings.Contains(joined, "tonemap_vaapi") || strings.Contains(joined, "tonemap_cuda")
 				if hasLuminanceToneMap == tonemap.IsSDRSource(kind) {
 					t.Fatalf("%s/%s luminance tone-map decision is wrong: %s", kind, executor.name, joined)
 				}
@@ -120,7 +120,7 @@ func TestHardwareToneMapRemovesMetadataAfterHardwareFormatConversion(t *testing.
 		filter  string
 		before  string
 	}{
-		{name: "QSV", hwAccel: "qsv", filter: tonemap.HardwareFilterVAAPI, before: "hwmap=derive_device=qsv"},
+		{name: "QSV", hwAccel: "qsv", filter: tonemap.HardwareFilterOpenCL, before: "hwmap=derive_device=qsv"},
 		{name: "VAAPI", hwAccel: "vaapi", filter: tonemap.HardwareFilterVAAPI, before: "scale_vaapi"},
 		{name: "NVENC", hwAccel: "nvenc", filter: tonemap.HardwareFilterCUDA, before: "scale_cuda"},
 	}
@@ -182,7 +182,7 @@ func TestSDRBaseGraphsBypassLuminanceToneMapping(t *testing.T) {
 	}{
 		{name: "software BT709", mode: tonemap.ModeSoftware, hwAccel: "none", filter: tonemap.SoftwareFilterHable, sourceKind: tonemap.SourceSDRBT709, want: []string{"color_primaries=bt709", "zscale=p=bt709"}},
 		{name: "software BT2020", mode: tonemap.ModeSoftware, hwAccel: "none", filter: tonemap.SoftwareFilterBT2390, sourceKind: tonemap.SourceSDRBT2020, want: []string{"color_primaries=bt2020", "zscale=p=bt709"}},
-		{name: "QSV", mode: tonemap.ModeHardware, hwAccel: "qsv", filter: tonemap.HardwareFilterVAAPI, sourceKind: tonemap.SourceSDRBT709, want: []string{"scale_vaapi=format=nv12", "hwmap=derive_device=qsv"}},
+		{name: "QSV", mode: tonemap.ModeHardware, hwAccel: "qsv", filter: tonemap.HardwareFilterOpenCL, sourceKind: tonemap.SourceSDRBT709, want: []string{"scale_vaapi=format=nv12", "hwmap=derive_device=qsv"}},
 		{name: "VAAPI", mode: tonemap.ModeHardware, hwAccel: "vaapi", filter: tonemap.HardwareFilterVAAPI, sourceKind: tonemap.SourceSDRBT2020, want: []string{"scale_vaapi=format=nv12", "h264_vaapi"}},
 		{name: "NVENC", mode: tonemap.ModeHardware, hwAccel: "nvenc", filter: tonemap.HardwareFilterCUDA, sourceKind: tonemap.SourceSDRBT2020, want: []string{"hwdownload,format=p010le", "zscale=p=bt709", "hwupload_cuda", "h264_nvenc"}},
 	}
@@ -302,7 +302,7 @@ func TestValidateToneMapOptsRequiresFrozenSourceRevision(t *testing.T) {
 	opts := TranscodeOpts{
 		TargetCodecVideo: "h264", HWAccel: "qsv", ToneMapPolicy: tonemap.PolicyHardwareOnly,
 		ToneMapMode: tonemap.ModeHardware, ToneMapSourceKind: tonemap.SourcePQ,
-		ToneMapFilter: tonemap.HardwareFilterVAAPI, ToneMapRecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3,
+		ToneMapFilter: tonemap.HardwareFilterOpenCL, ToneMapRecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3,
 	}
 	if err := validateToneMapOpts(opts); err == nil {
 		t.Fatal("tone-map recipe without a frozen source revision was accepted")
@@ -700,7 +700,7 @@ func TestBuildFFmpegArgs_H264High10UploadsBeforeHardwareToneMap(t *testing.T) {
 					TargetCodecVideo: "h264", TargetCodecAudio: "aac", SegmentDuration: 2,
 					HWAccel: test.hwAccel, TargetResolution: "720p",
 					ToneMapPolicy: tonemap.PolicyHardwareOnly, ToneMapMode: tonemap.ModeHardware,
-					ToneMapSourceKind: tonemap.SourcePQ, ToneMapFilter: tonemap.HardwareFilterVAAPI,
+					ToneMapSourceKind: tonemap.SourcePQ, ToneMapFilter: map[string]string{transcodeHWQSV: tonemap.HardwareFilterOpenCL, transcodeHWVAAPI: tonemap.HardwareFilterVAAPI}[test.hwAccel],
 					ToneMapRecipeVersion:  TransformationHDRToSDRToneMapRecipeVersionV3,
 					ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 1},
 					SubtitleTrackIndex:    -1,
@@ -711,10 +711,14 @@ func TestBuildFFmpegArgs_H264High10UploadsBeforeHardwareToneMap(t *testing.T) {
 					opts.SubtitleCodec = subtitle.codec
 				}
 				joined := strings.Join(buildFFmpegArgs(opts), " ")
-				upload := strings.Index(joined, "format=nv12,hwupload")
-				toneMap := strings.Index(joined, "tonemap_vaapi")
+				upload := strings.Index(joined, "format=p010le,hwupload")
+				toneMapName := tonemap.HardwareFilterVAAPI
+				if test.hwAccel == transcodeHWQSV {
+					toneMapName = tonemap.HardwareFilterOpenCL
+				}
+				toneMap := strings.Index(joined, toneMapName)
 				if upload < 0 || toneMap < 0 || upload >= toneMap {
-					t.Fatalf("software frames were not uploaded before tonemap_vaapi: %s", joined)
+					t.Fatalf("software frames were not uploaded before %s: %s", toneMapName, joined)
 				}
 				if strings.Contains(joined, "-hwaccel vaapi") || strings.Contains(joined, "-hwaccel_output_format vaapi") {
 					t.Fatalf("High 10 source unexpectedly selected hardware decode: %s", joined)
