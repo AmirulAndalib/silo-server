@@ -1,5 +1,16 @@
 # Feature Changelog
 
+## 2026-08-24
+
+### Play HDR video on SDR-only devices
+An HDR source used to be a dead end for a device that cannot display HDR: Silo had no recipe that could convert one, so the plan refused rather than washing the picture out. Silo can now tone-map HDR to SDR, on streaming and on prepared downloads alike, so those devices get a watchable picture with the colors mapped rather than clipped.
+
+It is off until an administrator turns it on. Playback settings gain two independent switches — hardware tone mapping and software tone mapping — both default off, because the result is a re-encode and the quality is a judgement call that belongs to whoever runs the server. Turning on only one pins every tone-map to that path; turning on both prefers hardware and falls back to software when no hardware executor has capacity, so a busy GPU no longer refuses a stream an idle CPU could serve.
+
+Dolby Vision Profile 7 sources benefit too. Where the source declares a standards-compatible base layer, Silo now plays that base layer instead of refusing the file. Sources whose metadata cannot prove a usable base layer — Profile 5, and anything with incomplete signaling — are still refused rather than guessed at, and are re-examined automatically the next time the file is scanned.
+
+Admin activity shows which path a session actually used, so a stream that fell back from hardware to software reads as software rather than as whatever was planned. Direct play and direct stream of HDR are unchanged, and a device that manages HDR itself is never pushed onto a tone-map route.
+
 ## 2026-08-23
 
 ### Never wait on H.264 stream-copy analysis to start playing
