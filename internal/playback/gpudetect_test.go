@@ -99,7 +99,13 @@ func TestResolveHWAccelWithFFmpegContextHonorsCallerDeadline(t *testing.T) {
 	env.addRenderDevice(t, "renderD128", "0x10de")
 	ffmpeg := writeFakeFFmpeg(t, fakeFFmpegProbe{hang: true})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	// 60ms, not the caller deadline's natural handful of milliseconds: the
+	// budget has to cover the fake sysfs walk in listRenderDevices before the
+	// probe is reached, which is cold when this test runs after the rest of the
+	// package. Too tight and exec never starts the process, so nothing is
+	// logged. It stays far below the 200ms per-command timeout the assertion
+	// below distinguishes it from.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	started := time.Now()
 	got := ResolveHWAccelWithFFmpegContext(ctx, "auto", ffmpeg.path)
 	cancel()
@@ -113,7 +119,7 @@ func TestResolveHWAccelWithFFmpegContextHonorsCallerDeadline(t *testing.T) {
 		t.Fatalf("context error = %v, want deadline exceeded", ctx.Err())
 	}
 
-	retryCtx, retryCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	retryCtx, retryCancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	_ = ResolveHWAccelWithFFmpegContext(retryCtx, "auto", ffmpeg.path)
 	retryCancel()
 	logData, err := os.ReadFile(ffmpeg.logPath)
