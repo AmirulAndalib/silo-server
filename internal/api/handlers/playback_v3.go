@@ -1323,13 +1323,14 @@ func (h *PlaybackHandler) prepareTransportV3(r *http.Request, session *playback.
 	if result.Plan.Delivery != playback.DeliveryTranscodeHLSV3 && result.Plan.Delivery != playback.DeliveryRemuxHLSV3 {
 		return h.prepareIdentityTransportV3(r, session, file, result, timeline, mode)
 	}
+	localFallbackAllowed := h.NodePlanner == nil || nodepool.LocalTranscodeFallbackAllowed(r.Context(), h.SettingsRepo)
 	if h.NodePlanner != nil {
 		// Local egress is the header-authenticated mode WITHOUT authorized
 		// origins: the API is then the only client-facing media origin, so a
 		// proxy must not be selected at all. With authorized origins the normal
 		// proxy+transcode pairing applies again.
 		plan := h.planNodeSessionV3(r.Context(), session, result, mode.headerAuth && !mode.proxyEgress)
-		if plan.TranscodeNode == nil {
+		if plan.TranscodeNode == nil && !localFallbackAllowed {
 			if fallback, attempted, fallbackErr := h.prepareSoftwareToneMapFallbackV3(r, session, file, result, timeline, mode); attempted {
 				return fallback, fallbackErr
 			}
@@ -1374,7 +1375,7 @@ func (h *PlaybackHandler) prepareTransportV3(r *http.Request, session *playback.
 				return preparedTransportV3{}, &transportErrorV3{reason: "transcode_node_capability_unavailable", message: "No transcode node can execute the selected playback recipe.", retryable: true, cause: err}
 			}
 		}
-		if !nodepool.LocalTranscodeFallbackAllowed(r.Context(), h.SettingsRepo) {
+		if !localFallbackAllowed {
 			return preparedTransportV3{}, &transportErrorV3{reason: "capacity_unavailable", message: "No transcode node is available and local fallback is disabled.", retryable: true}
 		}
 	}
@@ -1384,6 +1385,12 @@ func (h *PlaybackHandler) prepareTransportV3(r *http.Request, session *playback.
 	// a capable node freeing up satisfies the same plan. Transformation-free
 	// plans skip the check (and the local probe behind it) entirely.
 	if capabilityErr := h.validateLocalTransportCapabilitiesV3(r.Context(), result); capabilityErr != nil {
+		if fallback, attempted, fallbackErr := h.prepareSoftwareToneMapFallbackV3(r, session, file, result, timeline, mode); attempted {
+			if fallbackErr != nil {
+				fallbackErr = combineTransportErrorsV3(capabilityErr, fallbackErr)
+			}
+			return fallback, fallbackErr
+		}
 		return preparedTransportV3{}, capabilityErr
 	}
 	return h.prepareLocalTransportV3(r, session, file, result, timeline, mode)

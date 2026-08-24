@@ -994,6 +994,61 @@ func TestNVENCSDRBaseInitialAndThawedRecipeUseIdenticalFFmpegArgs(t *testing.T) 
 	}
 }
 
+func TestPrepareTransportV3PrefersLocalHardwareBeforeSoftwareFallback(t *testing.T) {
+	ffmpegPath := writePlaybackTestFFmpeg(t)
+	file := stableToneMapTransportFileV3(t)
+	writePlaybackToneMapFFprobe(t, ffmpegPath, file.VideoTracks[0])
+	manager := playback.NewSessionManager(0, 0)
+	handler := NewPlaybackHandler(manager)
+	handler.NodePlanner = staticNodePlannerV3{}
+	transcodeDir := t.TempDir()
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{
+			FFmpegPath: ffmpegPath, TranscodeDir: transcodeDir, TranscodeEnabled: true,
+			HWAccel: tonemap.BackendQSV, HWDevice: "/dev/dri/renderD128",
+		}
+	}
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{
+		config.PlaybackLocalTranscodeFallbackSettingKey:   "true",
+		config.PlaybackTranscodeHardwareToneMapSettingKey: "true",
+		config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
+	}}
+	handler.v3ToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+		return tonemap.Capabilities{
+			{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV, Filter: tonemap.HardwareFilterVAAPI, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+			{Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}},
+		}, nil
+	}
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
+		{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},
+		{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
+	}))
+	result := playback.PlannerResultV3{
+		Plan: &playback.PlanV3{PlanID: "plan:local-hardware-first", Delivery: playback.DeliveryTranscodeHLSV3, Transformations: []playback.TransformationV3{
+			{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
+			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+			{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
+		}},
+		PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac", TargetResolution: "1080p", TargetBitrateKbps: 6_000,
+		SubtitleTrackIndex: -1, SubtitleTransportTrackIndex: -1,
+		ToneMapPolicy: tonemap.PolicyHardwareThenSoftware, ToneMapMode: tonemap.ModeHardware, ToneMapSourceKind: tonemap.SourcePQ,
+		ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3, ToneMapSourceRevision: tonemap.RevisionForFile(file),
+	}
+	session, err := manager.StartSession(7, "profile-1", file.ID, playback.PlayTranscode, true)
+	if err != nil {
+		t.Fatalf("start playback session: %v", err)
+	}
+	transport, transportErr := handler.prepareTransportV3(httptest.NewRequest(http.MethodPost, "/", nil), session, file, result, mediaAuthModeV3{})
+	if transportErr != nil {
+		t.Fatalf("prepare local hardware transport: %v", transportErr)
+	}
+	defer transport.rollback()
+	if transport.hwAccel != tonemap.BackendQSV || transport.toneMapMode != tonemap.ModeHardware {
+		t.Fatalf("execution facts = hw %q tone_map %q, want qsv and hardware", transport.hwAccel, transport.toneMapMode)
+	}
+}
+
 // TestPrepareTransportV3ReportsSoftwareToneMapFallback verifies failed hardware output is discarded before retry.
 func TestPrepareTransportV3ReportsSoftwareToneMapFallback(t *testing.T) {
 	baseFFmpeg := writePlaybackTestFFmpeg(t)
