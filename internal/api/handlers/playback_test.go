@@ -1155,6 +1155,65 @@ func TestFindAlternateFile_DoesNotCrossEdition(t *testing.T) {
 	}
 }
 
+// The fallback exists to escape the 4K-transcode refusal, so it has to exclude
+// every spelling the planner treats as 4K — not only the "2160p" literal.
+func TestFindAlternateFile_ExcludesAll4KLabels(t *testing.T) {
+	source := &models.MediaFile{
+		ID:         1,
+		ContentID:  "movie-1",
+		Resolution: "2160p",
+		HDR:        true,
+		Bitrate:    30_000_000,
+	}
+
+	handler := &PlaybackHandler{
+		FileVersionFetcher: testPlaybackFileVersionFetcher{
+			byContent: map[string][]*models.MediaFile{
+				"movie-1": {
+					source,
+					{ID: 2, ContentID: "movie-1", Resolution: "4K", Bitrate: 28_000_000},
+					{ID: 3, ContentID: "movie-1", Resolution: " uhd ", Bitrate: 26_000_000},
+					{ID: 4, ContentID: "movie-1", Resolution: "1080p", Bitrate: 12_000_000},
+				},
+			},
+		},
+	}
+
+	alternate, err := handler.findAlternateFile(context.Background(), source)
+	if err != nil {
+		t.Fatalf("findAlternateFile: %v", err)
+	}
+	if alternate == nil {
+		t.Fatal("expected alternate file")
+	}
+	if alternate.ID != 4 {
+		t.Fatalf("alternate.ID = %d (resolution %q), want 4", alternate.ID, alternate.Resolution)
+	}
+}
+
+func TestFindAlternateFile_NoNon4KVersion(t *testing.T) {
+	source := &models.MediaFile{ID: 1, ContentID: "movie-1", Resolution: "2160p", Bitrate: 30_000_000}
+
+	handler := &PlaybackHandler{
+		FileVersionFetcher: testPlaybackFileVersionFetcher{
+			byContent: map[string][]*models.MediaFile{
+				"movie-1": {
+					source,
+					{ID: 2, ContentID: "movie-1", Resolution: "uhd", Bitrate: 26_000_000},
+				},
+			},
+		},
+	}
+
+	alternate, err := handler.findAlternateFile(context.Background(), source)
+	if err != nil {
+		t.Fatalf("findAlternateFile: %v", err)
+	}
+	if alternate != nil {
+		t.Fatalf("alternate = %+v, want none", alternate)
+	}
+}
+
 func TestTranscodeResolutionHeight(t *testing.T) {
 	tests := []struct {
 		resolution string

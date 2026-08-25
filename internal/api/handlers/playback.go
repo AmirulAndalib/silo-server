@@ -1924,7 +1924,11 @@ func (h *PlaybackHandler) findAlternateFile(ctx context.Context, source *models.
 	// Filter to non-4K candidates.
 	candidates := make([]*models.MediaFile, 0, len(files))
 	for _, f := range files {
-		if f.ID == source.ID || f.Resolution == "2160p" {
+		// Share the planner's 4K test: a sibling labeled "4K" or "UHD" is just
+		// as refused by the 4K policy as one labeled "2160p", and offering it
+		// as the fallback only reproduces the terminal this picker exists to
+		// escape.
+		if f.ID == source.ID || playback.Is4KMediaFileV3(f) {
 			continue
 		}
 		if source.EditionKey != "" && f.EditionKey != source.EditionKey {
