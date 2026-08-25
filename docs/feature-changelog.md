@@ -7,7 +7,28 @@ The web player asks the server to burn PGS/DVD/DVB subtitles into the opening pl
 
 Successful hardware bitmap burn-in starts faster too. The browser capability check is warmed before the viewer presses Play, the encoder uses one-second fragments with a one-fragment startup window, and large signed HLS playlists carry their repeated request query once through standard variable substitution instead of copying it onto thousands of segment lines. The shorter segment cadence is kept consistent across resume/seek alignment, reconstruction recipes, and session state.
 
+### Keep card menus accessible on touchscreen computers
+Media-card action buttons now remain visible on desktop-width touchscreen and hybrid computers
+whose primary input cannot hover. Mouse and trackpad systems retain the existing reveal-on-hover
+behavior.
+
+### Clear stale library troubleshooting entries after path changes
+Full library scans now reconcile troubleshooting entries across the whole library, so diagnostics for removed or replaced root paths disappear after the path-change scan completes. Subtree and single-file scans remain scoped and cannot clear diagnostics elsewhere in the library.
+
+### Start Firefox MKV playback without downloading the whole file first
+Firefox reports native Matroska support even though common MKV files with audio can still require
+the entire source to download before the first frame. The web player no longer advertises native
+MKV delivery on Firefox, so Silo selects a streaming-safe codec-copy remux instead. Other browsers
+that can stream MKV keep direct play, and Firefox keeps its video and audio codec capabilities.
+
 ## 2026-08-24
+
+### Restore loudness when Silo downmixes surround audio to stereo
+Surround sound mixed down by Silo could be about 6 dB quieter than the same
+file in other media apps. Server-owned stereo conversions now restore that
+headroom after the channels are combined, with a limiter to prevent clipping.
+Direct play, copied audio, stereo sources, mono output, and surround output are
+unchanged.
 
 ### Start audiobook playback once after browser capability detection
 The web audiobook player now waits for the browser's capability check to finish before requesting a playback session. It previously reacted to each intermediate capability result, creating and immediately replacing multiple sessions when one play request should have produced only one.

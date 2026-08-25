@@ -1536,7 +1536,7 @@ func TestHandleReplanPlaybackV3SeekReanchorPreservesFallbackRecipe(t *testing.T)
 	stubCopySeekAnchorV3(handler)
 	handler.PlaybackConfig = playbackTestConfig(writePlaybackTestFFmpeg(t), t.TempDir())
 	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
-		{Name: "audio_to_aac", RecipeVersion: "1", Available: true},
+		{Name: "audio_to_aac", RecipeVersion: "2", Available: true},
 		{Name: "video_to_h264", RecipeVersion: "2", Available: true},
 		{Name: "server_dv7_to_hdr10", RecipeVersion: "1", Available: true},
 	}))
@@ -2185,7 +2185,7 @@ func TestFrozenSeekReanchorResultV3PreservesRouteMatrix(t *testing.T) {
 		}},
 		{name: "audio converting remux", mutate: func(plan *playback.PlanV3, result *playback.PlannerResultV3) {
 			plan.Delivery = playback.DeliveryRemuxProgressiveV3
-			plan.Transformations = []playback.TransformationV3{{Name: "audio_to_aac", Executor: "server", RecipeVersion: "1"}}
+			plan.Transformations = []playback.TransformationV3{{Name: "audio_to_aac", Executor: "server", RecipeVersion: "2"}}
 			result.PlayMethod = playback.PlayRemux
 			result.TranscodeAudio = true
 			result.TargetAudioCodec = "aac"
@@ -2629,7 +2629,7 @@ func TestPrepareTransportV3RejectsNodeMissingRequiredTransformation(t *testing.T
 		Delivery: playback.DeliveryTranscodeHLSV3,
 		Transformations: []playback.TransformationV3{
 			{Name: "video_to_h264", Executor: "server", RecipeVersion: "2"},
-			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "1"},
+			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "2"},
 		},
 	}
 	request := httptest.NewRequest(http.MethodPost, "/", nil)
@@ -2650,7 +2650,7 @@ func TestPrepareTransportV3RequiresRemoteManifestReadiness(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
 			writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{
 				{Name: "video_to_h264", Executor: "server", RecipeVersion: "2"},
-				{Name: "audio_to_aac", Executor: "server", RecipeVersion: "1"},
+				{Name: "audio_to_aac", Executor: "server", RecipeVersion: "2"},
 			}})
 		case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
 			if err := json.NewDecoder(r.Body).Decode(&startRequest); err != nil {
@@ -2673,7 +2673,7 @@ func TestPrepareTransportV3RequiresRemoteManifestReadiness(t *testing.T) {
 		Delivery: playback.DeliveryTranscodeHLSV3,
 		Transformations: []playback.TransformationV3{
 			{Name: "video_to_h264", Executor: "server", RecipeVersion: "2"},
-			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "1"},
+			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "2"},
 		},
 	}
 	request := httptest.NewRequest(http.MethodPost, "/", nil)
@@ -2705,7 +2705,7 @@ func TestPrepareTransportV3KeepsHeaderAuthenticatedRemoteHLSBehindAPI(t *testing
 				case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
 					writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{
 						{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
-						{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+						{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 					}})
 				case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
 					writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{Status: "started"})
@@ -2728,7 +2728,7 @@ func TestPrepareTransportV3KeepsHeaderAuthenticatedRemoteHLSBehindAPI(t *testing
 				Delivery: playback.DeliveryTranscodeHLSV3,
 				Transformations: []playback.TransformationV3{
 					{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
-					{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+					{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 				},
 			}
 			request := httptest.NewRequest(http.MethodPost, "/", nil)
@@ -3438,7 +3438,7 @@ func TestHandleReplanPlaybackV3BitmapSubtitleFallsBackFromHDRToSDRVersion(t *tes
 	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"transcode_enabled": "true", "allow_4k_transcode": "true"}}
 	handler.PlaybackConfig = playbackTestConfig(writePlaybackTestFFmpeg(t), t.TempDir())
 	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
-		{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3, Available: true},
 		{Name: playback.TransformationVideoToH264V3, RecipeVersion: "2", Available: true},
 	}))
 	handler.ItemAccess = allowAllPlaybackItemAccess{}
@@ -3961,7 +3961,7 @@ func TestHandleReplanPlaybackV3FailureRecoveryPreservesOmittedQuality(t *testing
 	handler.ItemAccess = allowAllPlaybackItemAccess{}
 	handler.PlaybackConfig = playbackTestConfig(writePlaybackTestFFmpeg(t), t.TempDir())
 	handler.v3Registry = playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
-		{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3, Available: true},
 		{Name: playback.TransformationVideoToH264V3, RecipeVersion: "2", Available: true},
 	})
 
@@ -4339,7 +4339,7 @@ func TestPrepareTransportV3RoutesProgressiveRemuxThroughProxyNodeWithSeekAndDV(t
 	file := v3HandlerFixtureFile(t)
 	file.VideoTracks[0].DVProfile = 7
 
-	plan := identityProxyPlanV3(playback.DeliveryRemuxProgressiveV3, playback.TransformationV3{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"})
+	plan := identityProxyPlanV3(playback.DeliveryRemuxProgressiveV3, playback.TransformationV3{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3})
 	plan.Timeline = playback.TimelineV3{SourceStartSeconds: 39.5}
 
 	transport, transportErr := handler.prepareTransportV3(
@@ -4369,6 +4369,54 @@ func TestPrepareTransportV3RoutesProgressiveRemuxThroughProxyNodeWithSeekAndDV(t
 	}
 	if !claims.TranscodeAudio {
 		t.Fatal("token must tell the proxy to convert audio")
+	}
+}
+
+func TestIdentityStreamURLV3VersionsOnlyBoostedRemuxRoutes(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	file := v3HandlerFixtureFile(t)
+	proxy := &nodepool.Node{URL: "http://proxy-1/"}
+
+	boosted := &playback.Session{
+		ID: "boosted", UserID: 7, ProfileID: "profile-1", MediaFileID: file.ID,
+		PlayMethod: playback.PlayRemux, TranscodeAudio: true,
+		TargetAudioCodec: "aac", SourceAudioChannels: 6, TargetAudioChannels: 2,
+	}
+	boostedURL, servedByProxy := handler.identityStreamURLV3(boosted, file, proxy)
+	boostedPrefix := "http://proxy-1/stream/remux/audio-v2/"
+	if !servedByProxy || !strings.HasPrefix(boostedURL, boostedPrefix) {
+		t.Fatalf("boosted remux URL = %q (proxy %v), want the audio-v2 route", boostedURL, servedByProxy)
+	}
+	claims, err := streamtoken.Verify(strings.TrimPrefix(boostedURL, boostedPrefix), handler.JWTSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.PlayMethod != streamtoken.PlayMethodAudioDownmixRemux || claims.SourceAudioChannels != 6 {
+		t.Fatalf("boosted claims = %#v", claims)
+	}
+
+	ordinaryCases := []struct {
+		name   string
+		mutate func(*playback.Session)
+	}{
+		{name: "unknown source", mutate: func(s *playback.Session) { s.SourceAudioChannels = 0 }},
+		{name: "stereo source", mutate: func(s *playback.Session) { s.SourceAudioChannels = 2 }},
+		{name: "copy-only remux", mutate: func(s *playback.Session) { s.TranscodeAudio = false }},
+		{name: "surround output", mutate: func(s *playback.Session) { s.TargetAudioChannels = 6 }},
+		{name: "non AAC output", mutate: func(s *playback.Session) { s.TargetAudioCodec = "eac3" }},
+	}
+	for _, test := range ordinaryCases {
+		t.Run(test.name, func(t *testing.T) {
+			ordinary := *boosted
+			ordinary.ID = "ordinary"
+			test.mutate(&ordinary)
+			ordinaryURL, ordinaryByProxy := handler.identityStreamURLV3(&ordinary, file, proxy)
+			legacyPrefix := "http://proxy-1/stream/remux/"
+			if !ordinaryByProxy || !strings.HasPrefix(ordinaryURL, legacyPrefix) || strings.HasPrefix(ordinaryURL, boostedPrefix) {
+				t.Fatalf("ordinary remux URL = %q (proxy %v), want the legacy route", ordinaryURL, ordinaryByProxy)
+			}
+		})
 	}
 }
 
@@ -4448,7 +4496,7 @@ func TestPrepareTransportV3RefusesLocalRemuxWhenFallbackDisabled(t *testing.T) {
 		&playback.Session{ID: "session-remux-refused", UserID: 7, ProfileID: "profile-1"},
 		v3HandlerFixtureFile(t),
 		playback.PlannerResultV3{
-			Plan:           identityProxyPlanV3(playback.DeliveryRemuxProgressiveV3, playback.TransformationV3{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"}),
+			Plan:           identityProxyPlanV3(playback.DeliveryRemuxProgressiveV3, playback.TransformationV3{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3}),
 			PlayMethod:     playback.PlayRemux,
 			TranscodeAudio: true,
 		}, mediaAuthModeV3{})
@@ -4507,7 +4555,7 @@ func capableProxyStubV3(t *testing.T) *httptest.Server {
 			return
 		}
 		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{
-			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 			{Name: playback.TransformationServerDV7HDR10V3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
 		}})
 	}))
@@ -4515,12 +4563,13 @@ func capableProxyStubV3(t *testing.T) *httptest.Server {
 	return server
 }
 
-func TestPrepareTransportV3KeepsRemuxLocalWhenProxyLacksTheRecipe(t *testing.T) {
-	// A proxy on an older ffmpeg build advertises no aac encoder. Sending the
-	// remux there would 500 at stream time, so selection must reject it.
+func TestPrepareTransportV3KeepsBoostedDownmixLocalWhenProxyHasOldRecipe(t *testing.T) {
+	// A rolling-upgrade proxy can support AAC while still advertising the old
+	// recipe that does not apply the stereo-downmix loudness filter. Selection
+	// must reject it so mixed-version deployments never silently lose the boost.
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{
-			{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: "2"},
+			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
 		}})
 	}))
 	defer proxy.Close()
@@ -4536,9 +4585,11 @@ func TestPrepareTransportV3KeepsRemuxLocalWhenProxyLacksTheRecipe(t *testing.T) 
 		&playback.Session{ID: "session-incapable-proxy", UserID: 7, ProfileID: "profile-1"},
 		v3HandlerFixtureFile(t),
 		playback.PlannerResultV3{
-			Plan:           identityProxyPlanV3(playback.DeliveryRemuxProgressiveV3, playback.TransformationV3{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"}),
-			PlayMethod:     playback.PlayRemux,
-			TranscodeAudio: true,
+			Plan:                identityProxyPlanV3(playback.DeliveryRemuxProgressiveV3, playback.TransformationV3{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3}),
+			PlayMethod:          playback.PlayRemux,
+			TranscodeAudio:      true,
+			SourceAudioChannels: 6,
+			TargetAudioChannels: 2,
 		}, mediaAuthModeV3{})
 	if transportErr != nil {
 		t.Fatalf("prepare identity transport: %v", transportErr)
@@ -4546,7 +4597,7 @@ func TestPrepareTransportV3KeepsRemuxLocalWhenProxyLacksTheRecipe(t *testing.T) 
 	defer transport.rollback()
 
 	if strings.HasPrefix(transport.url, proxy.URL) {
-		t.Fatalf("stream url = %q, want local fallback when the proxy lacks the recipe", transport.url)
+		t.Fatalf("stream url = %q, want local fallback when the proxy only has audio recipe v1", transport.url)
 	}
 	// Narrowing happens before selection, so no reservation is made against an
 	// incapable proxy in the first place and none needs releasing.
@@ -4699,7 +4750,7 @@ func TestPrepareTransportV3PrefersACapableSiblingProxy(t *testing.T) {
 		&playback.Session{ID: "session-sibling", UserID: 7, ProfileID: "profile-1"},
 		v3HandlerFixtureFile(t),
 		playback.PlannerResultV3{
-			Plan:           identityProxyPlanV3(playback.DeliveryRemuxProgressiveV3, playback.TransformationV3{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"}),
+			Plan:           identityProxyPlanV3(playback.DeliveryRemuxProgressiveV3, playback.TransformationV3{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3}),
 			PlayMethod:     playback.PlayRemux,
 			TranscodeAudio: true,
 		}, mediaAuthModeV3{})

@@ -80,6 +80,8 @@ export interface WebCapabilityProbe {
   progressiveCodecsVideo: string[];
   /** Audio codec names the browser reported support for. */
   codecsAudio: string[];
+  /** Audio codecs supported specifically inside progressive MP4 delivery. */
+  progressiveCodecsAudio: string[];
   /** Best-effort screen-derived resolution ceiling. */
   maxResolution: string;
   /** Best-effort HDR display detection. */
@@ -168,6 +170,7 @@ export function buildDeliveriesV3(
     }),
     progressive: buildDeliveryCapability(probe, {
       video_codecs: probe.progressiveCodecsVideo,
+      audio_decode_codecs: probe.progressiveCodecsAudio,
       hdr_details: progressiveHDRDetails,
     }),
     hls: buildDeliveryCapability(probe, {
