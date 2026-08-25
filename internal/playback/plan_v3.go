@@ -23,6 +23,7 @@ const (
 	containerMP4V3                       = "mp4"
 	mimeVideoMP4V3                       = "video/mp4"
 	degradationAudioConvertedV3          = "audio_converted"
+	hlsAudioAdaptationReasonV3           = "hls_audio_adaptation"
 	audioLayoutMonoV3                    = "mono"
 	audioLayoutStereoV3                  = "stereo"
 	audioLayoutSurround51V3              = "5.1"
@@ -491,7 +492,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 						return terminalPlannerResultV3(TerminalAudioConversionUnsupportedV3, "The HLS route requires the validated AAC conversion toolchain.", true)
 					}
 					plan.EffectiveRecipe.AudioCodec = "aac"
-					plan.Claims.Audio = AudioClaimsV3{Codec: "aac", Reason: "hls_audio_adaptation"}
+					plan.Claims.Audio = AudioClaimsV3{Codec: "aac", Reason: hlsAudioAdaptationReasonV3}
 					plan.Transformations = append(plan.Transformations, TransformationV3{Name: TransformationAudioToAACV3, Executor: ExecutorServerV3, RecipeVersion: "1", ValidatedClaims: []string{ClaimAudioDecodeV3}})
 					plan.DegradationWarnings = append(plan.DegradationWarnings, DegradationWarningV3{Code: degradationAudioConvertedV3, Message: "The selected audio track is converted to AAC for HLS delivery."})
 				}
@@ -528,7 +529,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 				plan.EffectiveRecipe.AudioCodec = "aac"
 				plan.EffectiveRecipe.AudioChannels = intPointerV3(hlsAudioChannels)
 				plan.EffectiveRecipe.AudioLayout = audioLayoutForChannelsV3(hlsAudioChannels)
-				plan.Claims.Audio = AudioClaimsV3{Codec: "aac", Reason: "hls_audio_adaptation"}
+				plan.Claims.Audio = AudioClaimsV3{Codec: "aac", Reason: hlsAudioAdaptationReasonV3}
 				plan.Transformations = append(plan.Transformations, TransformationV3{Name: TransformationAudioToAACV3, Executor: ExecutorServerV3, RecipeVersion: TransformationAudioToAACRecipeVersionV3, ValidatedClaims: []string{ClaimAudioDecodeV3}})
 				plan.DegradationWarnings = append(plan.DegradationWarnings, DegradationWarningV3{Code: degradationAudioConvertedV3, Message: "The selected audio track is converted to AAC for HLS delivery."})
 			}
@@ -536,7 +537,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 				applyCopiedVideoQuirksV3(&plan, source, input.Request, high10Quirk)
 			}
 			if hlsTranscodeAudio {
-				plan.DecisionReason = "hls_audio_adaptation"
+				plan.DecisionReason = hlsAudioAdaptationReasonV3
 			} else {
 				plan.DecisionReason = "hls_packaging_required"
 			}
