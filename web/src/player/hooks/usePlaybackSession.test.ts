@@ -122,6 +122,12 @@ describe("buildStartRequestV3", () => {
     });
   });
 
+  it("includes the resolved subtitle track in the initial request", () => {
+    expect(buildStartRequestV3({ ...startBase, subtitleTrackIndex: 0 })).toMatchObject({
+      subtitle_track_index: 0,
+    });
+  });
+
   it("omits the bandwidth estimate when the browser reports none", () => {
     expect(buildStartRequestV3({ ...startBase, bandwidthEstimateKbps: null })).not.toHaveProperty(
       "bandwidth_estimate_kbps",
