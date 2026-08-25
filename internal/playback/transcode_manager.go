@@ -792,8 +792,9 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 	cfg := m.runtimeConfig()
 	outputDir := reconstructionOutputDir(cfg.TranscodeDir, sessionID, card.OutputSubdir)
 	opts := card.TranscodeOpts(outputDir, cfg.FFmpegPath, m.logSink())
-	// FreshStart is launch-only tuning. A reconstructed generation needs the
-	// standard manifest lead even when the signed recipe came from hardware.
+	// Recipe cards preserve the original launch tuning, but a reconstruction is
+	// not a fresh generation: restore the conservative manifest lead so recovery
+	// never exposes a hardware encoder after only one fragment.
 	opts.FastStart = false
 	// Re-resolve environment-specific encode knobs from current config so an
 	// operator config change applies to reconstructed sessions too.
