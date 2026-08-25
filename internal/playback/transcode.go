@@ -867,7 +867,7 @@ func appendHWAccelArgs(args []string, opts TranscodeOpts) []string {
 		}
 		// VAAPI→QSV hardware pipeline: derive QSV from VAAPI device.
 		args = append(args,
-			"-init_hw_device", fmt.Sprintf("vaapi=va:%s,driver=iHD,kernel_driver=i915,vendor_id=0x8086", hwDevice),
+			"-init_hw_device", qsvVAAPIInitDevice(hwDevice),
 			"-init_hw_device", "qsv=qs@va",
 		)
 		if opts.ToneMapMode == tonemap.ModeHardware && opts.ToneMapFilter == tonemap.HardwareFilterOpenCL {
@@ -901,6 +901,10 @@ func appendHWAccelArgs(args []string, opts TranscodeOpts) []string {
 		}
 	}
 	return args
+}
+
+func qsvVAAPIInitDevice(device string) string {
+	return fmt.Sprintf("vaapi=va:%s,driver=iHD,kernel_driver=i915,vendor_id=0x8086", device)
 }
 
 // videoPreset returns an encoder-compatible preset. CPU encoders use a faster
@@ -1598,16 +1602,24 @@ const minManifestSegments = 3
 // unnecessary latency at playback start.
 const minCopyManifestSegments = 2
 
+// minFreshHardwareManifestSegments keeps one complete fragment of headroom
+// after the first playable fragment. A fresh hardware encoder produces that
+// window comfortably ahead of real time, while CPU encodes and reconstructed
+// generations retain the larger three-fragment safety margin below.
+const minFreshHardwareManifestSegments = 2
+
 func startupSegmentRequirement(opts TranscodeOpts) int {
 	if strings.EqualFold(opts.TargetCodecVideo, "copy") {
 		return minCopyManifestSegments
 	}
-	// A fresh hardware bitmap-burn-in generation can be handed to the player as
-	// soon as its first atomically-written fragment exists. Segment requests
-	// already wait for active FFmpeg output. CPU encodes and every seek/restart
-	// (FastStart=false) retain the three-fragment cushion.
-	if opts.FastStart && bitmapBurnInActive(opts) && opts.HWAccel != "" && opts.HWAccel != HWAccelNone {
-		return 1
+	if opts.FastStart {
+		switch opts.HWAccel {
+		case transcodeHWQSV, transcodeHWVAAPI, transcodeHWNVENC:
+			if bitmapBurnInActive(opts) {
+				return 1
+			}
+			return minFreshHardwareManifestSegments
+		}
 	}
 	return minManifestSegments
 }

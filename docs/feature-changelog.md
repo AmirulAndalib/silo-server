@@ -12,6 +12,17 @@ Media-card action buttons now remain visible on desktop-width touchscreen and hy
 whose primary input cannot hover. Mouse and trackpad systems retain the existing reveal-on-hover
 behavior.
 
+### Keep fast HDR remuxes on their requested browser timeline
+The web player now keeps Safari on its native HLS engine and scopes Safari's HLS capability claims to that media-element path. Chromium browsers that advertise native HLS instead advertise and use their hls.js/MediaSource capabilities, preventing a rapidly generated EVENT playlist from being mistaken for live playback and jumping from the requested position toward the production edge. Browsers without Media Source support still fall back to conservative native HLS plans.
+
+### Allow Dolby Vision video-copy playback when only audio needs adaptation
+Protocol-v3 playback no longer attaches tone-map-only Dolby Vision provenance to an HDR-preserving HLS remux. A compatible Dolby Vision Profile 8.1 source can now keep its video-copy route while the server converts unsupported audio, instead of the transport rejecting the orphaned fields as an incomplete tone-map recipe. The same source-metadata boundary covers integrated and pooled transcode execution, including thawed session recipes.
+
+### Return playback plans before bookkeeping finishes
+Playback startup no longer waits for provider scrobbling, chapter and marker scheduling, series preference persistence, or the shared live-session refresh after the stream transport is ready and the plan is durable. Those ordered, bounded follow-up tasks now run behind the committed session, while an immediate stop still waits for its start event so provider history cannot be reversed. The three server policy reads needed for planning also run concurrently. Fresh hardware transcodes now start after two complete, atomically written fragments instead of three; CPU encodes and every seek, restart, and node reconstruction retain the larger safety window. This reduces start latency for the web, Apple, and Android clients without changing the playback protocol.
+
+Startup and transport stages now carry request-correlated timing logs, including local manifest wait and remote-node startup time, so slow direct-play, remux, and transcode starts can be separated before tuning their safety margins. Local and pooled-node conversion capabilities are warmed when the API starts, and a previously successful node inventory refreshes behind sparse playback traffic instead of making the first viewer after each cache expiry wait for it. The API and standalone transcode nodes also perform a bounded, single-frame hardware encode in the background at startup when tone-map probing would otherwise skip encoder initialization, keeping that one-time driver cost away from the first viewer.
+
 ### Clear stale library troubleshooting entries after path changes
 Full library scans now reconcile troubleshooting entries across the whole library, so diagnostics for removed or replaced root paths disappear after the path-change scan completes. Subtree and single-file scans remain scoped and cannot clear diagnostics elsewhere in the library.
 
