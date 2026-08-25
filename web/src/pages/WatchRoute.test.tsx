@@ -399,6 +399,7 @@ describe("buildWatchPageProps", () => {
     // Bitmap burn-in must not ride the start request: on HDR that transcode
     // terminals when tone mapping / 4K transcode is off (the defaults).
     expect(props.initialSubtitleTrackIndexByFileId).toEqual({});
+    expect(props.deferredSubtitleTrackIndexByFileId).toEqual({ 42: 0 });
   });
 
   it("passes a selected text subtitle ordinal into the initial playback request", () => {
@@ -453,5 +454,6 @@ describe("buildWatchPageProps", () => {
     });
 
     expect(props.initialSubtitleTrackIndexByFileId).toEqual({ 42: 0 });
+    expect(props.deferredSubtitleTrackIndexByFileId).toEqual({});
   });
 });

@@ -190,12 +190,16 @@ function buildInitialSubtitleTrackIndexes({
   preferredSubtitleTrackSignature: PlayerSubtitleTrackSignature | null;
   profileLanguage: string | null;
   showForcedSubtitles: boolean;
-}): Record<number, number> {
-  const selections: Record<number, number> = {};
+}): {
+  start: Record<number, number>;
+  deferred: Record<number, number>;
+} {
+  const start: Record<number, number> = {};
+  const deferred: Record<number, number> = {};
   // Downloaded tracks are session inventory, not part of watch detail, so the
   // client cannot know their combined ordinal before the server creates one.
   if (preferredSubtitleTrackSignature?.source === "downloaded") {
-    return selections;
+    return { start, deferred };
   }
 
   for (const version of item.versions) {
@@ -241,15 +245,16 @@ function buildInitialSubtitleTrackIndexes({
     // them on the start request makes the planner transcode — and for HDR, that
     // transcode needs tone mapping / 4K transcode, both off by default. A refused
     // start has no stream to fall back to. Text tracks stay on the start request;
-    // bitmap selection is applied after a playable plan exists, and a refused
-    // replan keeps that plan (VideoPlayer already rolls the menu back).
+    // bitmap selection is applied after a playable plan exists but before that
+    // plan is exposed to VideoPlayer, so the viewer never sees a transport swap.
     if (selectedTrack && isBitmapCodec(selectedTrack.codec)) {
+      deferred[version.file_id] = selectedSubtitleTrackIndex;
       continue;
     }
-    selections[version.file_id] = selectedSubtitleTrackIndex;
+    start[version.file_id] = selectedSubtitleTrackIndex;
   }
 
-  return selections;
+  return { start, deferred };
 }
 
 export function buildWatchPageProps({
@@ -336,7 +341,7 @@ export function buildWatchPageProps({
       : request.prePlaySubtitleMode === "off"
         ? null
         : preferredSubtitleTrackSignature;
-  const initialSubtitleTrackIndexByFileId = buildInitialSubtitleTrackIndexes({
+  const initialSubtitleTrackIndexes = buildInitialSubtitleTrackIndexes({
     item,
     audioTrackIndex: request.audioTrackIndex,
     subtitleMode,
@@ -398,7 +403,8 @@ export function buildWatchPageProps({
     forceInitialPosition: request.restart,
     qualityPreference,
     explicitAudioTrackIndex: request.audioTrackIndex ?? null,
-    initialSubtitleTrackIndexByFileId,
+    initialSubtitleTrackIndexByFileId: initialSubtitleTrackIndexes.start,
+    deferredSubtitleTrackIndexByFileId: initialSubtitleTrackIndexes.deferred,
     preferredSubtitleLanguage,
     preferredSubtitleTrackSignature: effectivePreferredSubtitleTrackSignature,
     subtitleMode,

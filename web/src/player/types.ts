@@ -248,6 +248,11 @@ export interface WatchPageProps {
   explicitAudioTrackIndex?: number | null;
   /** Initial server subtitle ordinal keyed by file ID. Missing entries mean subtitles start off. */
   initialSubtitleTrackIndexByFileId?: Record<number, number>;
+  /**
+   * Bitmap subtitle ordinals that must be applied only after a playable start
+   * plan exists. WatchPage keeps the player hidden while this replan settles.
+   */
+  deferredSubtitleTrackIndexByFileId?: Record<number, number>;
   preferredSubtitleLanguage?: string | null;
   preferredSubtitleTrackSignature?: PlayerSubtitleTrackSignature | null;
   subtitleMode?: SubtitleMode;
