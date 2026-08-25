@@ -14,6 +14,26 @@ import (
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
+func TestStartupSegmentRequirementScopesFastHardwareWindowsToFreshGenerations(t *testing.T) {
+	tests := []struct {
+		name string
+		opts TranscodeOpts
+		want int
+	}{
+		{name: "ordinary fresh hardware transcode", opts: TranscodeOpts{TargetCodecVideo: "h264", HWAccel: transcodeHWQSV, FastStart: true}, want: 2},
+		{name: "ordinary hardware restart", opts: TranscodeOpts{TargetCodecVideo: "h264", HWAccel: transcodeHWQSV, FastStart: false}, want: 3},
+		{name: "ordinary CPU transcode", opts: TranscodeOpts{TargetCodecVideo: "h264", HWAccel: HWAccelNone, FastStart: true}, want: 3},
+		{name: "copy video", opts: TranscodeOpts{TargetCodecVideo: "copy", HWAccel: transcodeHWQSV, FastStart: true}, want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := startupSegmentRequirement(tt.opts); got != tt.want {
+				t.Fatalf("startupSegmentRequirement() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildPlaybackManifest_CopyVideoUsesRealManifest(t *testing.T) {
 	tempDir := t.TempDir()
 	manifest := strings.Join([]string{

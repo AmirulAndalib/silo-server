@@ -1031,6 +1031,7 @@ func NewRouter(deps Dependencies) chi.Router {
 			playbackHandler.SetProfileStaler(recsRepoForStale)
 			playbackHandler.SetProfileRefreshRequester(deps.RecWorker)
 		}
+		playbackHandler.StartCapabilityWarmupV3(deps.AppContext)
 
 		realtimeHub := deps.PlaybackRealtimeHub
 		if realtimeHub == nil {
