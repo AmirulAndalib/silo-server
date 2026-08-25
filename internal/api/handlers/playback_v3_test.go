@@ -29,7 +29,6 @@ import (
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 	"github.com/Silo-Server/silo-server/internal/userstore"
-	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
 
 type mutablePlaybackSettingsV3 struct {
@@ -38,70 +37,6 @@ type mutablePlaybackSettingsV3 struct {
 	getCalls  map[string]int
 	err       error
 	getErrors map[string]error
-}
-
-type gatedPlaybackSettingsV3 struct {
-	started chan string
-	release chan struct{}
-}
-
-func (s *gatedPlaybackSettingsV3) Get(_ context.Context, key string) (string, error) {
-	s.started <- key
-	<-s.release
-	return "true", nil
-}
-
-type blockingPlaybackSessionSyncerV3 struct {
-	started chan struct{}
-	release chan struct{}
-}
-
-func (s *blockingPlaybackSessionSyncerV3) SyncNow(context.Context) error {
-	select {
-	case s.started <- struct{}{}:
-	default:
-	}
-	<-s.release
-	return nil
-}
-
-type orderedBlockingPlaybackScrobblerV3 struct {
-	mu           sync.Mutex
-	startEntered chan struct{}
-	releaseStart chan struct{}
-	events       []string
-}
-
-func (s *orderedBlockingPlaybackScrobblerV3) ScrobbleStart(context.Context, watchsync.ScrobbleEvent) error {
-	select {
-	case s.startEntered <- struct{}{}:
-	default:
-	}
-	<-s.releaseStart
-	s.mu.Lock()
-	s.events = append(s.events, "start")
-	s.mu.Unlock()
-	return nil
-}
-
-func (s *orderedBlockingPlaybackScrobblerV3) ScrobblePause(context.Context, watchsync.ScrobbleEvent) error {
-	s.mu.Lock()
-	s.events = append(s.events, "pause")
-	s.mu.Unlock()
-	return nil
-}
-
-func (s *orderedBlockingPlaybackScrobblerV3) ScrobbleStop(context.Context, watchsync.ScrobbleEvent) error {
-	s.mu.Lock()
-	s.events = append(s.events, "stop")
-	s.mu.Unlock()
-	return nil
-}
-
-func (s *orderedBlockingPlaybackScrobblerV3) recordedEvents() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.events...)
 }
 
 type failingAudioPreferenceStoreV3 struct {
@@ -386,42 +321,6 @@ func TestPlannerSettingsV3ResultPreservesAllow4KStoreFailure(t *testing.T) {
 	}
 }
 
-func TestPlannerSettingsV3ResultReadsPolicyKeysConcurrently(t *testing.T) {
-	store := &gatedPlaybackSettingsV3{
-		started: make(chan string, 3),
-		release: make(chan struct{}),
-	}
-	handler := &PlaybackHandler{SettingsRepo: store}
-	result := make(chan error, 1)
-	go func() {
-		_, err := handler.plannerSettingsV3Result(context.Background())
-		result <- err
-	}()
-
-	started := make(map[string]bool, 3)
-	for len(started) < 3 {
-		select {
-		case key := <-store.started:
-			started[key] = true
-		case <-time.After(time.Second):
-			t.Fatalf("settings reads started concurrently = %v, want all three keys", started)
-		}
-	}
-	close(store.release)
-	if err := <-result; err != nil {
-		t.Fatalf("plannerSettingsV3Result() error = %v", err)
-	}
-	for _, key := range []string{
-		config.Allow4KTranscodeSettingKey,
-		config.PlaybackTranscodeHardwareToneMapSettingKey,
-		config.PlaybackTranscodeSoftwareToneMapSettingKey,
-	} {
-		if !started[key] {
-			t.Fatalf("settings read missing key %q", key)
-		}
-	}
-}
-
 // A build that predates the neutral contract cannot interpret a plan, so the
 // start endpoint refuses it outright instead of allocating a session it would
 // have no way to drive.
@@ -496,7 +395,6 @@ func TestHandleStartPlaybackV3CommitsStartSideEffectsOnce(t *testing.T) {
 	if first.SessionID != second.SessionID {
 		t.Fatalf("idempotent replay session = %q, want %q", second.SessionID, first.SessionID)
 	}
-	handler.waitForPlaybackStartSideEffectsV3(context.Background(), first.SessionID)
 	if len(scrobbler.starts) != 1 {
 		t.Fatalf("start scrobbles = %d, want 1", len(scrobbler.starts))
 	}
@@ -511,87 +409,6 @@ func TestHandleStartPlaybackV3CommitsStartSideEffectsOnce(t *testing.T) {
 	}
 	if analyzer.callCount() != 1 {
 		t.Fatalf("lazy marker calls = %d, want 1", analyzer.callCount())
-	}
-}
-
-func TestHandleStartPlaybackV3DoesNotWaitForSessionSync(t *testing.T) {
-	file := v3HandlerFixtureFile(t)
-	syncer := &blockingPlaybackSessionSyncerV3{
-		started: make(chan struct{}, 1),
-		release: make(chan struct{}),
-	}
-	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0), testPlaybackFileResolver{file: file})
-	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{}}
-	handler.ItemAccess = allowAllPlaybackItemAccess{}
-	handler.SessionSyncer = syncer
-	body := marshalV3StartRequest(t, v3HandlerStartRequest())
-	responseReady := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		rr := httptest.NewRecorder()
-		handler.HandleStartPlayback(rr, httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(body)).WithContext(newAuthorizedPlaybackContext()))
-		responseReady <- rr
-	}()
-
-	select {
-	case <-syncer.started:
-	case <-time.After(time.Second):
-		t.Fatal("session sync did not start")
-	}
-	select {
-	case rr := <-responseReady:
-		if rr.Code != http.StatusCreated {
-			t.Fatalf("start status=%d body=%s", rr.Code, rr.Body.String())
-		}
-	case <-time.After(time.Second):
-		t.Fatal("playback start waited for the blocked session sync")
-	}
-	close(syncer.release)
-}
-
-func TestPlaybackStartSideEffectsPreserveImmediateStopScrobbleOrder(t *testing.T) {
-	file := v3HandlerFixtureFile(t)
-	scrobbler := &orderedBlockingPlaybackScrobblerV3{
-		startEntered: make(chan struct{}, 1),
-		releaseStart: make(chan struct{}),
-	}
-	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0), testPlaybackFileResolver{file: file})
-	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{}}
-	handler.ItemAccess = allowAllPlaybackItemAccess{}
-	handler.WatchScrobbler = scrobbler
-	body := marshalV3StartRequest(t, v3HandlerStartRequest())
-	rr := httptest.NewRecorder()
-	handler.HandleStartPlayback(rr, httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(body)).WithContext(newAuthorizedPlaybackContext()))
-	var response playback.DecisionResponseV3
-	if rr.Code != http.StatusCreated || json.Unmarshal(rr.Body.Bytes(), &response) != nil {
-		t.Fatalf("start status=%d body=%s", rr.Code, rr.Body.String())
-	}
-	select {
-	case <-scrobbler.startEntered:
-	case <-time.After(time.Second):
-		t.Fatal("start scrobble did not begin")
-	}
-	session, err := handler.sessionMgr.GetSession(response.SessionID)
-	if err != nil {
-		t.Fatalf("GetSession() error = %v", err)
-	}
-	stopped := make(chan struct{})
-	go func() {
-		handler.finalizeSessionStop(context.Background(), session, false, "", true)
-		close(stopped)
-	}()
-	select {
-	case <-stopped:
-		t.Fatal("stop completed before the start side effects were released")
-	default:
-	}
-	close(scrobbler.releaseStart)
-	select {
-	case <-stopped:
-	case <-time.After(time.Second):
-		t.Fatal("stop did not complete after start side effects")
-	}
-	if got := scrobbler.recordedEvents(); !reflect.DeepEqual(got, []string{"start", "stop"}) {
-		t.Fatalf("scrobble events = %v, want [start stop]", got)
 	}
 }
 
@@ -3110,120 +2927,6 @@ func TestSourceExecutionMetadataV3FreezesH264High10SoftwareDecode(t *testing.T) 
 	thawed := recipe.PlannerResult(plan)
 	if thawed.FrozenSourceMetadata == nil || !thawed.FrozenSourceMetadata.SoftwareVideoDecode {
 		t.Fatalf("thawed source metadata = %#v, want software decode", thawed.FrozenSourceMetadata)
-	}
-}
-
-func TestSourceExecutionMetadataV3ScopesDolbyVisionProvenanceToToneMapRecipe(t *testing.T) {
-	file := v3HandlerFixtureFile(t)
-	file.VideoTracks[0].DVConfigPresent = true
-	file.VideoTracks[0].DVBLCompatIDPresent = true
-	file.VideoTracks[0].DVBLPresent = true
-	file.VideoTracks[0].DVRPUPresent = true
-
-	metadata := sourceExecutionMetadataV3(file, playback.PlannerResultV3{})
-	if metadata.ToneMapDVConfigPresent || metadata.ToneMapDVBLCompatIDPresent || metadata.ToneMapDVBLPresent || metadata.ToneMapDVRPUPresent {
-		t.Fatalf("non-tone-map source metadata retained Dolby Vision provenance: %#v", metadata)
-	}
-
-	toneMapResult := playback.PlannerResultV3{
-		ToneMapMode:              tonemap.ModeHardware,
-		ToneMapSourceKind:        tonemap.SourcePQ,
-		ToneMapPreflightRequired: true,
-		ToneMapSourceRevision:    tonemap.RevisionForFile(file),
-	}
-	metadata = sourceExecutionMetadataV3(file, toneMapResult)
-	if !metadata.ToneMapDVConfigPresent || !metadata.ToneMapDVBLCompatIDPresent || !metadata.ToneMapDVBLPresent || !metadata.ToneMapDVRPUPresent {
-		t.Fatalf("tone-map source metadata lost Dolby Vision provenance: %#v", metadata)
-	}
-
-	frozen := metadata
-	result := playback.PlannerResultV3{FrozenSourceMetadata: &frozen}
-	metadata = sourceExecutionMetadataV3(file, result)
-	if metadata.ToneMapSourceKind != "" || metadata.ToneMapPreflightRequired || !metadata.ToneMapSourceRevision.IsZero() ||
-		metadata.ToneMapDVConfigPresent || metadata.ToneMapDVBLCompatIDPresent || metadata.ToneMapDVBLPresent || metadata.ToneMapDVRPUPresent {
-		t.Fatalf("non-tone-map frozen metadata retained a partial recipe: %#v", metadata)
-	}
-}
-
-func TestPrepareLocalTransportV3AllowsDolbyVisionVideoCopyAudioAdaptation(t *testing.T) {
-	manager := playback.NewSessionManager(0, 0)
-	handler := NewPlaybackHandler(manager)
-	ffmpegPath := writePlaybackTestFFmpeg(t)
-	transcodeDir := t.TempDir()
-	handler.PlaybackConfig = func() config.PlaybackConfig {
-		return config.PlaybackConfig{FFmpegPath: ffmpegPath, TranscodeDir: transcodeDir, TranscodeEnabled: true, HWAccel: playback.HWAccelNone}
-	}
-	file := v3HandlerFixtureFile(t)
-	file.CodecVideo = "hevc"
-	file.CodecAudio = "eac3"
-	file.Resolution = "2160p"
-	file.VideoTracks[0].Codec = "hevc"
-	file.VideoTracks[0].DVProfile = 8
-	file.VideoTracks[0].DVBLCompatID = 1
-	file.VideoTracks[0].DVConfigPresent = true
-	file.VideoTracks[0].DVBLCompatIDPresent = true
-	file.VideoTracks[0].DVBLPresent = true
-	file.VideoTracks[0].DVRPUPresent = true
-	result := playback.PlannerResultV3{
-		Plan:       &playback.PlanV3{PlanID: "plan:dv-copy-audio-adaptation", Delivery: playback.DeliveryRemuxHLSV3},
-		PlayMethod: playback.PlayRemux, TargetVideoCodec: "copy", TargetAudioCodec: "aac", TargetResolution: "2160p",
-		SubtitleTrackIndex: -1, SubtitleTransportTrackIndex: -1,
-	}
-	request := httptest.NewRequest(http.MethodPost, "/", nil)
-	transport, transportErr := handler.prepareLocalTransportV3(request,
-		&playback.Session{ID: "session-dv-copy-audio-adaptation", UserID: 7, ProfileID: "profile-1"},
-		file, result, preparedTimelineV3{}, mediaAuthModeV3{})
-	if transportErr != nil {
-		t.Fatalf("prepare Dolby Vision remux transport: %v (cause: %v)", transportErr, transportErr.cause)
-	}
-	transport.rollback()
-}
-
-func TestPrepareRemoteTransportV3OmitsToneMapProvenanceForDolbyVisionRemux(t *testing.T) {
-	var startRequest transcodenode.TranscodeStartRequest
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
-			if err := json.NewDecoder(r.Body).Decode(&startRequest); err != nil {
-				t.Errorf("decode remote start: %v", err)
-			}
-			if startRequest.ToneMapMode == "" && (startRequest.ToneMapDVConfigPresent || startRequest.ToneMapDVBLCompatIDPresent || startRequest.ToneMapDVBLPresent || startRequest.ToneMapDVRPUPresent) {
-				http.Error(w, "incomplete tone-map recipe", http.StatusUnprocessableEntity)
-				return
-			}
-			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: startRequest.SessionID, Status: "started"})
-		case r.Method == http.MethodDelete:
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer remote.Close()
-
-	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
-	handler.JWTSecret = "test-secret"
-	file := v3HandlerFixtureFile(t)
-	file.CodecVideo = "hevc"
-	file.VideoTracks[0].Codec = "hevc"
-	file.VideoTracks[0].DVConfigPresent = true
-	file.VideoTracks[0].DVBLCompatIDPresent = true
-	file.VideoTracks[0].DVBLPresent = true
-	file.VideoTracks[0].DVRPUPresent = true
-	result := playback.PlannerResultV3{
-		Plan:       &playback.PlanV3{PlanID: "plan:remote-dv-remux", Delivery: playback.DeliveryRemuxHLSV3},
-		PlayMethod: playback.PlayRemux, TargetVideoCodec: "copy", TargetAudioCodec: "aac", TargetResolution: "2160p",
-		SubtitleTrackIndex: -1, SubtitleTransportTrackIndex: -1,
-	}
-	transport, transportErr := handler.prepareRemoteTransportV3(
-		httptest.NewRequest(http.MethodPost, "/", nil),
-		&playback.Session{ID: "session-remote-dv-remux", UserID: 7, ProfileID: "profile-1"},
-		file, result, nodepool.Plan{TranscodeNode: &nodepool.Node{URL: remote.URL}}, preparedTimelineV3{}, mediaAuthModeV3{})
-	if transportErr != nil {
-		t.Fatalf("prepare remote Dolby Vision remux transport: %v (cause: %v)", transportErr, transportErr.cause)
-	}
-	defer transport.rollback()
-	if startRequest.TargetCodecVideo != "copy" || startRequest.ToneMapMode != "" || startRequest.ToneMapDVConfigPresent || startRequest.ToneMapDVBLCompatIDPresent || startRequest.ToneMapDVBLPresent || startRequest.ToneMapDVRPUPresent {
-		t.Fatalf("remote remux request carried a partial tone-map recipe: %#v", startRequest)
 	}
 }
 

@@ -847,7 +847,6 @@ func main() {
 			// restart (the node hop token is recipe-less). Shares the offload Redis.
 			srv.SetRecipeStore(noderecipe.NewStore(redisClient, 0))
 			srv.SetStreamTelemetry(streamTelemetryRegistry)
-			srv.StartHardwareEncoderWarmup(appCtx)
 			// Reclaim orphaned transcode dirs at boot and hourly thereafter, bound
 			// to appCtx so it stops on shutdown.
 			srv.StartOrphanSweeper(appCtx)

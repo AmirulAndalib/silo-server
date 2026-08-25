@@ -8,32 +8,16 @@ export type ResolvedHLSEngineV3<T extends HLSJSSupportV3> =
   | { engine: "native" | "unsupported" }
   | { engine: "hlsjs"; hlsjs: T };
 
-export function isSafariBrowserV3(userAgent: string): boolean {
-  return (
-    /Safari\//i.test(userAgent) &&
-    !/(?:Chrome|Chromium|CriOS|Edg|EdgiOS|OPR|OPiOS|Firefox|FxiOS)\//i.test(userAgent)
-  );
-}
-
-function nativeHDRPreferred(
-  dynamicRange: string | undefined,
-  nativeSupported: boolean,
-  preferNativeHDR: boolean,
-): boolean {
-  return (
-    preferNativeHDR &&
-    nativeSupported &&
-    (dynamicRange === "dolby_vision" || dynamicRange === "hdr10")
-  );
+function nativeHDRPreferred(dynamicRange: string | undefined, nativeSupported: boolean): boolean {
+  return nativeSupported && (dynamicRange === "dolby_vision" || dynamicRange === "hdr10");
 }
 
 export function selectHLSEngineV3(
   dynamicRange: string | undefined,
   nativeSupported: boolean,
   hlsJSSupported: boolean,
-  preferNativeHDR = false,
 ): HLSEngineV3 {
-  if (nativeHDRPreferred(dynamicRange, nativeSupported, preferNativeHDR)) return "native";
+  if (nativeHDRPreferred(dynamicRange, nativeSupported)) return "native";
   if (hlsJSSupported) return "hlsjs";
   if (nativeSupported) return "native";
   return "unsupported";
@@ -44,20 +28,14 @@ export async function resolveHLSEngineV3<T extends HLSJSSupportV3>(
   nativeSupported: boolean,
   loadHLSJS: () => Promise<T>,
   onHLSJSUnavailable?: (error: unknown) => void,
-  preferNativeHDR = false,
 ): Promise<ResolvedHLSEngineV3<T>> {
-  if (nativeHDRPreferred(dynamicRange, nativeSupported, preferNativeHDR)) {
+  if (nativeHDRPreferred(dynamicRange, nativeSupported)) {
     return { engine: "native" };
   }
 
   try {
     const hlsjs = await loadHLSJS();
-    const engine = selectHLSEngineV3(
-      dynamicRange,
-      nativeSupported,
-      hlsjs.isSupported(),
-      preferNativeHDR,
-    );
+    const engine = selectHLSEngineV3(dynamicRange, nativeSupported, hlsjs.isSupported());
     return engine === "hlsjs" ? { engine, hlsjs } : { engine };
   } catch (error) {
     if (nativeSupported) {
