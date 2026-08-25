@@ -435,7 +435,7 @@ export function usePlaybackSession(
   const adoptDecision = useCallback(
     (
       decision: DecisionResponseV3,
-      initialSubtitleFailure: PlaybackSessionErrorState | null = null,
+      initialSubtitleFailure?: PlaybackSessionErrorState | null,
     ): boolean => {
       serverFeaturesRef.current = decision.server_features;
       const plan = decision.playback_plan;
@@ -475,7 +475,7 @@ export function usePlaybackSession(
         awaitingInitialPlayerPositionRef.current = plan.timeline.source_start_seconds > 0;
       }
 
-      setState({
+      setState((current) => ({
         ...planToSessionState(
           plan,
           sessionId ?? null,
@@ -485,9 +485,15 @@ export function usePlaybackSession(
           playbackPlayingRef.current,
           config,
         ),
-        initialSubtitleErrorTitle: initialSubtitleFailure?.title ?? null,
-        initialSubtitleError: initialSubtitleFailure?.message ?? null,
-      });
+        initialSubtitleErrorTitle:
+          initialSubtitleFailure === undefined
+            ? current.initialSubtitleErrorTitle
+            : (initialSubtitleFailure?.title ?? null),
+        initialSubtitleError:
+          initialSubtitleFailure === undefined
+            ? current.initialSubtitleError
+            : (initialSubtitleFailure?.message ?? null),
+      }));
       reportEvent("plan_selected");
       return true;
     },
@@ -986,7 +992,13 @@ export function usePlaybackSession(
           attemptCountRef.current = 1;
         }
 
-        const adopted = adoptDecision(decision);
+        // Keep a refused-start subtitle pinned off across unrelated replans.
+        // A successful explicit subtitle choice is the one action that clears
+        // the marker and lets the new server-selected track take ownership.
+        const adopted = adoptDecision(
+          decision,
+          options.operation === "track_change" && options.subtitle !== undefined ? null : undefined,
+        );
         if (!adopted && retireSessionOnRefusal) {
           const pending = pendingReplanRef.current;
           const pendingCanValidateOutput =

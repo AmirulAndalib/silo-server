@@ -27,6 +27,7 @@ const BITMAP_CODECS = new Set([
   "vobsub",
   "dvb_subtitle",
   "dvbsub",
+  "dvb_teletext",
 ]);
 
 /** Returns true if the given subtitle codec is bitmap-based (PGS/DVD/DVB). */

@@ -14,28 +14,6 @@ import (
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
-func TestStartupSegmentDurationUsesShortFragmentsOnlyForBitmapBurnIn(t *testing.T) {
-	tests := []struct {
-		name   string
-		burnIn bool
-		codec  string
-		want   int
-	}{
-		{name: "no subtitle", want: 2},
-		{name: "text burn in", burnIn: true, codec: "ass", want: 2},
-		{name: "bitmap selected but not burned", codec: "hdmv_pgs_subtitle", want: 2},
-		{name: "PGS burn in", burnIn: true, codec: "hdmv_pgs_subtitle", want: 1},
-		{name: "legacy DVD alias burn in", burnIn: true, codec: "dvdsub", want: 1},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := StartupSegmentDuration(tt.burnIn, tt.codec); got != tt.want {
-				t.Fatalf("StartupSegmentDuration(%t, %q) = %d, want %d", tt.burnIn, tt.codec, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestStartupSegmentRequirementUsesOneHardwareBitmapFragment(t *testing.T) {
 	bitmap := TranscodeOpts{
 		TargetCodecVideo:   "h264",

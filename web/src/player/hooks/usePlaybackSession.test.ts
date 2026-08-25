@@ -447,6 +447,7 @@ describe("usePlaybackSession initial bitmap subtitles", () => {
   it("retries a refused bitmap subtitle start without subtitles", async () => {
     const fallbackPlan = fixturePlanV3({ session_id: "session-2" });
     const startBodies: Array<Record<string, unknown>> = [];
+    let replanCount = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/playback/start")) {
@@ -473,6 +474,19 @@ describe("usePlaybackSession initial bitmap subtitles", () => {
           },
           { status: 201 },
         );
+      }
+      if (url.endsWith("/playback/session-2/replan")) {
+        replanCount += 1;
+        return jsonResponse({
+          protocol_version: 3,
+          server_features: ["playback_plan_v3"],
+          outcome: "playable",
+          session_id: "session-2",
+          playback_plan: fixturePlanV3({
+            session_id: "session-2",
+            plan_id: `plan:replan-${replanCount}`,
+          }),
+        });
       }
       if (url.endsWith("/playback/route-events")) return new Response(null, { status: 202 });
       if (init?.method === "DELETE") return new Response(null, { status: 204 });
@@ -508,7 +522,15 @@ describe("usePlaybackSession initial bitmap subtitles", () => {
     expect(result.current.error).toBeNull();
     expect(result.current.initialSubtitleErrorTitle).toBe("This HDR format can't be converted");
     expect(result.current.initialSubtitleError).toContain("dynamic range can't be converted");
-    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/replan"))).toBe(false);
+
+    act(() => result.current.changeQuality("1080p", 30));
+    await waitFor(() => expect(result.current.plan?.plan_id).toBe("plan:replan-1"));
+    expect(result.current.initialSubtitleError).toContain("dynamic range can't be converted");
+
+    act(() => result.current.changeSubtitleTrack(0, 45));
+    await waitFor(() => expect(result.current.plan?.plan_id).toBe("plan:replan-2"));
+    expect(result.current.initialSubtitleErrorTitle).toBeNull();
+    expect(result.current.initialSubtitleError).toBeNull();
     unmount();
   });
 });

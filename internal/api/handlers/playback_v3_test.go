@@ -3111,7 +3111,7 @@ func TestConfigureHLSTimelineV3MatchesTransportSeekSemantics(t *testing.T) {
 	}
 }
 
-func TestBitmapFastStartUsesOneSecondTimelineAndSessionSegments(t *testing.T) {
+func TestBitmapFastStartKeepsDefaultTimelineAndSessionSegments(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	plan := &playback.PlanV3{
 		Delivery: playback.DeliveryTranscodeHLSV3,
@@ -3128,12 +3128,12 @@ func TestBitmapFastStartUsesOneSecondTimelineAndSessionSegments(t *testing.T) {
 	if timelineErr != nil {
 		t.Fatalf("prepare timeline: %v", timelineErr)
 	}
-	if timeline.seekSeconds != 658 || timeline.startSegmentNumber != 658 {
-		t.Fatalf("timeline = %#v, want one-second segment alignment", timeline)
+	if timeline.seekSeconds != 658 || timeline.startSegmentNumber != 329 {
+		t.Fatalf("timeline = %#v, want default segment alignment", timeline)
 	}
 	state := handler.v3SessionStreamState(context.Background(), &playback.Session{}, nil, result, preparedTransportV3{}, mediaAuthModeV3{})
-	if state.SegmentDuration != 1 {
-		t.Fatalf("session segment duration = %d, want 1", state.SegmentDuration)
+	if state.SegmentDuration != playback.DefaultSegmentDuration {
+		t.Fatalf("session segment duration = %d, want %d", state.SegmentDuration, playback.DefaultSegmentDuration)
 	}
 }
 

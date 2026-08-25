@@ -229,28 +229,11 @@ type SegmentRecoveryDecision struct {
 // efficient HTTP delivery. This matches the approach used by Plex.
 const defaultSegmentDuration = 2
 
-// bitmapFastStartSegmentDuration keeps the first independently decodable
-// bitmap-burn-in fragment small enough for a hardware encoder to produce in
-// roughly one second. The shorter duration is scoped to bitmap burn-in because
-// those subtitles force an otherwise avoidable video transcode at playback
-// start; ordinary HLS keeps the more efficient two-second fragments.
-const bitmapFastStartSegmentDuration = 1
-
 // DefaultSegmentDuration is the exported segment length used when a transcode
 // request does not specify one. Callers minting a reconstruct recipe must embed
 // a concrete (>0) value so the token passes the node's completeness gate and the
 // embedded length matches what the node actually produces.
 const DefaultSegmentDuration = defaultSegmentDuration
-
-// StartupSegmentDuration selects the fragment duration for a fresh playback
-// generation. Bitmap subtitle burn-in uses short fragments so the first safe
-// frame is not held behind multiple seconds of media production.
-func StartupSegmentDuration(subtitleBurnIn bool, subtitleCodec string) int {
-	if subtitleBurnIn && NeedsBurnIn(subtitleCodec) {
-		return bitmapFastStartSegmentDuration
-	}
-	return defaultSegmentDuration
-}
 
 // maxSyntheticManifestSegments caps complete synthetic playlists by entry
 // count. At the default two-second duration this preserves the historical
@@ -1621,9 +1604,8 @@ func startupSegmentRequirement(opts TranscodeOpts) int {
 	}
 	// A fresh hardware bitmap-burn-in generation can be handed to the player as
 	// soon as its first atomically-written fragment exists. Segment requests
-	// already wait for active FFmpeg output, and the one-second fragments keep
-	// the encoder comfortably ahead on the hardware path. CPU encodes and every
-	// seek/restart (FastStart=false) retain the three-fragment cushion.
+	// already wait for active FFmpeg output. CPU encodes and every seek/restart
+	// (FastStart=false) retain the three-fragment cushion.
 	if opts.FastStart && bitmapBurnInActive(opts) && opts.HWAccel != "" && opts.HWAccel != HWAccelNone {
 		return 1
 	}

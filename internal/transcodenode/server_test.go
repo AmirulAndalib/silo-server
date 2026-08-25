@@ -2091,6 +2091,7 @@ func TestRemoteSessionTrackingPreservesResolvedToneMapMode(t *testing.T) {
 				ToneMapPolicy: tonemap.PolicySoftwareOnly, ToneMapMode: tonemap.ModeSoftware,
 				ToneMapSourceKind: tonemap.SourcePQ, ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
 				ToneMapSourceRevision: tonemap.RevisionForFile(&models.MediaFile{ID: 1, FileSize: info.Size(), VideoTracks: []models.VideoTrack{track}}),
+				FastStart:             true,
 			}
 
 			var session *playback.TranscodeSession
@@ -2123,6 +2124,9 @@ func TestRemoteSessionTrackingPreservesResolvedToneMapMode(t *testing.T) {
 				if session == nil {
 					t.Fatal("remote session was not registered")
 				}
+			}
+			if test.reconstruct && session.Opts().FastStart {
+				t.Fatal("reconstructed node runtime retained fresh-start manifest tuning")
 			}
 			defer func() { _ = session.CloseProcess() }()
 

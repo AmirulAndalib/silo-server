@@ -27,6 +27,7 @@ describe("isBitmapCodec", () => {
     expect(isBitmapCodec("vobsub")).toBe(true);
     expect(isBitmapCodec("dvb_subtitle")).toBe(true);
     expect(isBitmapCodec("dvbsub")).toBe(true);
+    expect(isBitmapCodec("dvb_teletext")).toBe(true);
   });
 
   it("rejects text codecs", () => {
