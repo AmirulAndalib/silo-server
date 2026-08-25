@@ -7,6 +7,13 @@ Full library scans now reconcile troubleshooting entries across the whole librar
 
 ## 2026-08-24
 
+### Restore loudness when Silo downmixes surround audio to stereo
+Surround sound mixed down by Silo could be about 6 dB quieter than the same
+file in other media apps. Server-owned stereo conversions now restore that
+headroom after the channels are combined, with a limiter to prevent clipping.
+Direct play, copied audio, stereo sources, mono output, and surround output are
+unchanged.
+
 ### Start audiobook playback once after browser capability detection
 The web audiobook player now waits for the browser's capability check to finish before requesting a playback session. It previously reacted to each intermediate capability result, creating and immediately replacing multiple sessions when one play request should have produced only one.
 

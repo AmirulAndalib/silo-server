@@ -124,7 +124,7 @@ func TestHLSPlanningRegistryV3UnionsPooledNodeCapabilities(t *testing.T) {
 		}
 		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{
 			{Name: "video_to_h264", Executor: "server", RecipeVersion: "2"},
-			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "1"},
+			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "2"},
 		}})
 	}))
 	defer remote.Close()
@@ -133,7 +133,7 @@ func TestHLSPlanningRegistryV3UnionsPooledNodeCapabilities(t *testing.T) {
 	handler.JWTSecret = "test-secret"
 	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
 		{Name: "video_to_h264", RecipeVersion: "2"},
-		{Name: "audio_to_aac", RecipeVersion: "1"},
+		{Name: "audio_to_aac", RecipeVersion: "2"},
 		{Name: "server_dv7_to_hdr10", RecipeVersion: "1"},
 	}))
 	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{remote.URL}}
@@ -152,7 +152,7 @@ func TestHLSPlanningRegistryV3UnionsPooledNodeCapabilities(t *testing.T) {
 
 func TestHLSPlanningRegistryV3WithoutEnumeratorIsLocal(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
-	local := playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{Name: "audio_to_aac", RecipeVersion: "1", Available: true}})
+	local := playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{Name: "audio_to_aac", RecipeVersion: "2", Available: true}})
 	presetLocalRegistryV3(handler, local)
 	handler.NodePlanner = staticNodePlannerV3{plan: nodepool.Plan{}}
 
@@ -608,7 +608,7 @@ func TestHandlePlaybackCapabilityV3AdvertisesPooledTransformationsWhenToneMapDis
 		}
 		hits.Add(1)
 		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{
-			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 			{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
 		}})
 	}))
@@ -619,7 +619,7 @@ func TestHandlePlaybackCapabilityV3AdvertisesPooledTransformationsWhenToneMapDis
 	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{remote.URL}}
 	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{config.PlaybackLocalTranscodeFallbackSettingKey: "false"}}
 	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
-		{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1"},
+		{Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 		{Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
 	}))
 
@@ -657,7 +657,7 @@ func TestRemoteTransformationsV3FailureCacheSplit(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{{Name: "audio_to_aac", Executor: "server", RecipeVersion: "1"}}})
+		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{{Name: "audio_to_aac", Executor: "server", RecipeVersion: "2"}}})
 	}))
 	defer remote.Close()
 
@@ -723,7 +723,7 @@ func TestLookupRemoteCapabilitiesV3PreservesConcurrentFreshSuccessOnRefetchFailu
 	<-requestStarted
 
 	fresh := v3NodeCapabilityCache{
-		transformations: []playback.TransformationV3{{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"}},
+		transformations: []playback.TransformationV3{{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3}},
 		expiresAt:       time.Now().Add(time.Minute),
 	}
 	handler.v3NodeCapabilitiesMu.Lock()
@@ -747,7 +747,7 @@ func TestPlanNodeSessionV3PrefersCapabilityMatchingNode(t *testing.T) {
 	capable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{
 			{Name: "video_to_h264", Executor: "server", RecipeVersion: "2"},
-			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "1"},
+			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "2"},
 		}})
 	}))
 	defer capable.Close()
@@ -770,7 +770,7 @@ func TestPlanNodeSessionV3PrefersCapabilityMatchingNode(t *testing.T) {
 		Delivery: playback.DeliveryTranscodeHLSV3,
 		Transformations: []playback.TransformationV3{
 			{Name: "video_to_h264", Executor: "server", RecipeVersion: "2"},
-			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "1"},
+			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "2"},
 		},
 	}
 	selected := handler.planNodeSessionV3(context.Background(), &playback.Session{ID: "session-hetero"}, playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayTranscode}, false)
@@ -789,14 +789,14 @@ func TestPrepareTransportV3LocalFallbackRejectsUnavailableTransformations(t *tes
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
 		{Name: "video_to_h264", RecipeVersion: "2"},
-		{Name: "audio_to_aac", RecipeVersion: "1"},
+		{Name: "audio_to_aac", RecipeVersion: "2"},
 	}))
 	plan := &playback.PlanV3{
 		PlanID:   "plan:local-capability",
 		Delivery: playback.DeliveryTranscodeHLSV3,
 		Transformations: []playback.TransformationV3{
 			{Name: "video_to_h264", Executor: "server", RecipeVersion: "2"},
-			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "1"},
+			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "2"},
 		},
 	}
 	request := httptest.NewRequest(http.MethodPost, "/", nil)
@@ -846,14 +846,14 @@ func TestPrepareTransportV3AcceptsEveryValidatedLocalToneMapExecutor(t *testing.
 			}
 			presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
 				{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},
-				{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+				{Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3, Available: true},
 				{Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
 			}))
 			plan := &playback.PlanV3{
 				PlanID: "plan:local-tone-map:" + test.backend, Delivery: playback.DeliveryTranscodeHLSV3,
 				Transformations: []playback.TransformationV3{
 					{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
-					{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+					{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 					{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
 				},
 			}
@@ -925,14 +925,14 @@ func TestNVENCSDRBaseInitialAndThawedRecipeUseIdenticalFFmpegArgs(t *testing.T) 
 	}
 	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
 		{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},
-		{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3, Available: true},
 		{Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
 	}))
 	plan := &playback.PlanV3{
 		PlanID: "plan:nvenc-sdr-base-thaw", Delivery: playback.DeliveryTranscodeHLSV3,
 		Transformations: []playback.TransformationV3{
 			{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
-			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 			{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
 		},
 	}
@@ -1025,13 +1025,13 @@ func TestPrepareTransportV3PrefersLocalHardwareBeforeSoftwareFallback(t *testing
 	}
 	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
 		{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},
-		{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3, Available: true},
 		{Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
 	}))
 	result := playback.PlannerResultV3{
 		Plan: &playback.PlanV3{PlanID: "plan:local-hardware-first", Delivery: playback.DeliveryTranscodeHLSV3, Transformations: []playback.TransformationV3{
 			{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
-			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 			{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
 		}},
 		PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac", TargetResolution: "1080p", TargetBitrateKbps: 6_000,
@@ -1088,13 +1088,13 @@ func TestPrepareTransportV3ReportsSoftwareToneMapFallback(t *testing.T) {
 	}
 	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
 		{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},
-		{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3, Available: true},
 		{Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
 	}))
 	result := playback.PlannerResultV3{
 		Plan: &playback.PlanV3{PlanID: "plan:local-tone-map-fallback", Delivery: playback.DeliveryTranscodeHLSV3, Transformations: []playback.TransformationV3{
 			{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
-			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 			{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
 		}},
 		PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac", TargetResolution: "2160p", TargetBitrateKbps: 32_000,
@@ -1143,13 +1143,13 @@ func TestPrepareSoftwareToneMapFallbackV3ValidatesLocalRegistry(t *testing.T) {
 		}}, nil
 	}
 	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
-		{Name: playback.TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3, Available: true},
 		{Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
 	}))
 	result := playback.PlannerResultV3{
 		Plan: &playback.PlanV3{PlanID: "plan:invalid-local-fallback", Delivery: playback.DeliveryTranscodeHLSV3, Transformations: []playback.TransformationV3{
 			{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
-			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 			{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
 		}},
 		PlayMethod: playback.PlayTranscode, ToneMapPolicy: tonemap.PolicyHardwareThenSoftware,
@@ -1172,7 +1172,7 @@ func TestPrepareSoftwareToneMapFallbackV3ValidatesLocalRegistry(t *testing.T) {
 func TestPrepareTransportV3FallsBackToSoftwareCapacity(t *testing.T) {
 	requiredTransformations := []playback.TransformationV3{
 		{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
-		{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+		{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 		{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
 	}
 	newToneMapNode := func(capability tonemap.Capability) *httptest.Server {
@@ -1251,7 +1251,7 @@ func TestPrepareTransportV3FallsBackToSoftwareCapacity(t *testing.T) {
 func TestPrepareTransportV3TriesNextSoftwareNodeAfterStartFailure(t *testing.T) {
 	required := []playback.TransformationV3{
 		{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
-		{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+		{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 		{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
 	}
 	newNode := func(capability tonemap.Capability, startStatus int) *httptest.Server {
@@ -1313,7 +1313,7 @@ func TestPrepareTransportV3TriesNextSoftwareNodeAfterStartFailure(t *testing.T) 
 func TestPrepareTransportV3ClassifiesExhaustedRemoteLiveValidation(t *testing.T) {
 	required := []playback.TransformationV3{
 		{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
-		{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
+		{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 		{Name: playback.TransformationHDRToSDRToneMapV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
 	}
 	tests := []struct {
@@ -1390,7 +1390,7 @@ func TestPlanRequiresServerTransformationsV3(t *testing.T) {
 	if planRequiresServerTransformationsV3(clientOnly) {
 		t.Fatal("client-executed transformations must not require a server executor")
 	}
-	server := &playback.PlanV3{Transformations: []playback.TransformationV3{{Name: "audio_to_aac", Executor: "server", RecipeVersion: "1"}}}
+	server := &playback.PlanV3{Transformations: []playback.TransformationV3{{Name: "audio_to_aac", Executor: "server", RecipeVersion: "2"}}}
 	if !planRequiresServerTransformationsV3(server) {
 		t.Fatal("server-executed transformations must require executor validation")
 	}

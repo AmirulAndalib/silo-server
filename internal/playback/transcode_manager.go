@@ -622,6 +622,7 @@ func (m *TranscodeManager) reconstructSession(ctx context.Context, sessionID str
 		TargetResolution:       card.TargetResolution,
 		TargetVideoCodec:       card.TargetCodecVideo,
 		TargetAudioCodec:       card.TargetCodecAudio,
+		SourceAudioChannels:    card.SourceAudioChannels,
 		TargetAudioChannels:    card.TargetAudioChannels,
 		TargetAudioBitrateKbps: card.TargetAudioBitrateKbps,
 		TargetBitrateKbps:      card.TargetBitrateKbps,
