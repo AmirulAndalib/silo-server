@@ -17,6 +17,8 @@ const (
 	hardwareEncoderWarmupNegativeTTL = 15 * time.Second
 	defaultRenderDevicePath          = "/dev/dri/renderD128"
 	ffmpegHideBannerArg              = "-hide_banner"
+	ffmpegLogLevelArg                = "-loglevel"
+	ffmpegErrorLogLevel              = "error"
 )
 
 type hardwareEncoderWarmupCacheEntry struct {
@@ -154,7 +156,7 @@ func hardwareEncoderWarmupDevices(backend, configured string) []string {
 }
 
 func hardwareEncoderWarmupArgs(backend, device string) []string {
-	base := []string{ffmpegHideBannerArg, "-loglevel", "error"}
+	base := []string{ffmpegHideBannerArg, ffmpegLogLevelArg, ffmpegErrorLogLevel}
 	switch backend {
 	case transcodeHWQSV:
 		if strings.TrimSpace(device) == "" {

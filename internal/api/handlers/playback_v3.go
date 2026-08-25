@@ -70,6 +70,7 @@ const (
 	playbackStartSideEffectsQueueSizeV3 = 256
 	playbackCapabilityWarmupWorkersV3   = 4
 	requestIDLogKeyV3                   = "request_id"
+	playbackLogValueV3                  = "playback"
 	playbackRemoteOutcomeFailedV3       = "failed"
 )
 
@@ -121,7 +122,7 @@ func (t *playbackStartTimingsV3) mark(stage string) {
 
 func (t *playbackStartTimingsV3) log(ctx context.Context, attemptID string) {
 	attrs := []any{
-		logComponentKey, "playback",
+		logComponentKey, playbackLogValueV3,
 		requestIDLogKeyV3, chimw.GetReqID(ctx),
 		"playback_attempt_id", attemptID,
 		"total_ms", time.Since(t.started).Milliseconds(),
@@ -1150,7 +1151,7 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 	clientInfo := playbackClientInfoForStartV3(r, req.ClientPlaybackContext)
 	if result.Terminal != nil {
 		slog.InfoContext(r.Context(), "playback plan decided", append([]any{
-			logComponentKey, "playback",
+			logComponentKey, playbackLogValueV3,
 			requestIDLogKeyV3, chimw.GetReqID(r.Context()),
 			"outcome", "terminal",
 			"reason", result.Terminal.Reason,
@@ -1189,7 +1190,7 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 	// server logs alone (finding a mis-planned route previously required
 	// correlating client logcat, ffmpeg commands, and session rows).
 	slog.InfoContext(r.Context(), "playback plan decided", append([]any{
-		logComponentKey, "playback",
+		logComponentKey, playbackLogValueV3,
 		requestIDLogKeyV3, chimw.GetReqID(r.Context()),
 		"outcome", "plan",
 		"decision_reason", result.Plan.DecisionReason,
@@ -1213,7 +1214,7 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 			return
 		}
 		failureAttrs := []any{
-			logComponentKey, "playback",
+			logComponentKey, playbackLogValueV3,
 			"reason", statusErr.reason,
 			"retryable", statusErr.retryable,
 			"playback_attempt_id", req.PlaybackAttemptID,
@@ -1566,10 +1567,8 @@ func (h *PlaybackHandler) cancelPlaybackStartSideEffectsV3(ctx context.Context, 
 		return
 	}
 	state.stopRequested = true
+	state.cancel()
 	started := state.started
-	if !started {
-		state.cancel()
-	}
 	done := state.done
 	h.v3StartEffectsMu.Unlock()
 	// A queued task observes stopRequested before issuing any side effect. A
@@ -1582,7 +1581,7 @@ func (h *PlaybackHandler) cancelPlaybackStartSideEffectsV3(ctx context.Context, 
 	select {
 	case <-done:
 	case <-waitCtx.Done():
-		slog.WarnContext(ctx, "timed out cancelling playback start side effects", logComponentKey, "api", "session", sessionID)
+		slog.WarnContext(ctx, "timed out canceling playback start side effects", logComponentKey, "api", "session", sessionID)
 	}
 }
 
@@ -2262,7 +2261,7 @@ func (h *PlaybackHandler) escalateRefusedProgressiveRemuxV3(ctx context.Context,
 			reason = escalated.Terminal.Reason
 		}
 		slog.WarnContext(ctx, "protocol v3 header-authenticated remux has no executable delivery",
-			logComponentKey, "playback",
+			logComponentKey, playbackLogValueV3,
 			"delivery", result.Plan.Delivery,
 			"replanned_terminal_reason", reason,
 		)
@@ -2272,7 +2271,7 @@ func (h *PlaybackHandler) escalateRefusedProgressiveRemuxV3(ctx context.Context,
 		}
 	}
 	slog.InfoContext(ctx, "protocol v3 escalated refused progressive remux",
-		logComponentKey, "playback",
+		logComponentKey, playbackLogValueV3,
 		"delivery", escalated.Plan.Delivery,
 		"decision_reason", escalated.Plan.DecisionReason,
 	)
@@ -2513,7 +2512,7 @@ func (h *PlaybackHandler) startReadyLocalPlaybackTransportV3(ctx context.Context
 	spawnFinishedAt := time.Now()
 	if err != nil {
 		slog.InfoContext(ctx, "playback transport startup timing",
-			logComponentKey, "playback",
+			logComponentKey, playbackLogValueV3,
 			requestIDLogKeyV3, chimw.GetReqID(ctx),
 			"transport", "local",
 			"session", opts.SessionID,
@@ -2526,7 +2525,7 @@ func (h *PlaybackHandler) startReadyLocalPlaybackTransportV3(ctx context.Context
 	}
 	if _, err := ts.WaitForManifest(playback.ManifestStartupTimeout); err != nil {
 		slog.InfoContext(ctx, "playback transport startup timing",
-			logComponentKey, "playback",
+			logComponentKey, playbackLogValueV3,
 			requestIDLogKeyV3, chimw.GetReqID(ctx),
 			"transport", "local",
 			"session", opts.SessionID,
@@ -2544,7 +2543,7 @@ func (h *PlaybackHandler) startReadyLocalPlaybackTransportV3(ctx context.Context
 		return nil, failure
 	}
 	slog.InfoContext(ctx, "playback transport startup timing",
-		logComponentKey, "playback",
+		logComponentKey, playbackLogValueV3,
 		requestIDLogKeyV3, chimw.GetReqID(ctx),
 		"transport", "local",
 		"session", opts.SessionID,
@@ -2594,7 +2593,7 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 	if startupFailure != nil && startupFailure.failedToStart {
 		if softwareOpts, eligible := h.softwareToneMapRetryOptsV3(r.Context(), opts, result.FrozenSourceMetadata != nil); eligible {
 			slog.WarnContext(r.Context(), "hardware tone-map failed to start; retrying once in software",
-				logComponentKey, "playback", "playback_session_id", session.ID, "error", startupFailure.cause)
+				logComponentKey, playbackLogValueV3, "playback_session_id", session.ID, "error", startupFailure.cause)
 			opts = softwareOpts
 			usedToneMapFallback = true
 			ts, startupFailure = h.startReadyLocalPlaybackTransportV3(r.Context(), opts)
@@ -2613,7 +2612,7 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 
 		if fallbackOpts, eligible := h.softwareToneMapRetryOptsV3(r.Context(), opts, result.FrozenSourceMetadata != nil); eligible {
 			slog.WarnContext(r.Context(), "hardware tone-map failed during startup; retrying once in software",
-				logComponentKey, "playback",
+				logComponentKey, playbackLogValueV3,
 				"playback_session_id", session.ID,
 				"failed_device", startupFailure.failedDevice,
 				"error", startupFailure.cause)
@@ -2638,7 +2637,7 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 			retryOpts := opts
 			retryOpts.AvoidHWDevice = startupFailure.failedDevice
 			slog.WarnContext(r.Context(), "local transcode crashed during startup; retrying once",
-				logComponentKey, "playback",
+				logComponentKey, playbackLogValueV3,
 				"playback_session_id", session.ID,
 				"failed_device", startupFailure.failedDevice,
 				"configured_devices", retryOpts.HWDevice,
@@ -2779,7 +2778,7 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 		remoteOutcome = playbackRemoteOutcomeFailedV3
 	}
 	slog.InfoContext(r.Context(), "playback transport startup timing",
-		logComponentKey, "playback",
+		logComponentKey, playbackLogValueV3,
 		requestIDLogKeyV3, chimw.GetReqID(r.Context()),
 		"transport", "remote",
 		"session", session.ID,
@@ -3776,7 +3775,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 		result.Plan.ExpiresAt = record.CurrentPlan.ExpiresAt
 		transport = reusedHLSTransportV3(session, record.CurrentPlan.Stream.URL)
 		slog.InfoContext(r.Context(), "protocol v3 replan reused active HLS A/V transport",
-			logComponentKey, "playback",
+			logComponentKey, playbackLogValueV3,
 			"playback_session_id", session.ID,
 			"previous_plan_id", record.CurrentPlanID,
 			"plan_id", result.Plan.PlanID,
