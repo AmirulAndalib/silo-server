@@ -2,6 +2,9 @@
 
 ## 2026-08-25
 
+### Start Safari HLS remuxes for Dolby Vision files
+Safari playback could stop before requesting an HLS manifest when a Dolby Vision file needed server-side HLS packaging but no video re-encode. Silo now keeps tone-map-only source evidence out of copy/remux jobs, so local and remote HLS transports can preserve the planned Dolby Vision sample entry or bitstream transformation without being rejected as an incomplete tone-map recipe. Genuine HDR-to-SDR recipes retain the same fail-closed validation.
+
 ### Clear stale library troubleshooting entries after path changes
 Full library scans now reconcile troubleshooting entries across the whole library, so diagnostics for removed or replaced root paths disappear after the path-change scan completes. Subtree and single-file scans remain scoped and cannot clear diagnostics elsewhere in the library.
 
