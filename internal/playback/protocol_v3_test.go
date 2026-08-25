@@ -3219,6 +3219,38 @@ func TestPlanPlaybackV3VideoRemuxPreservesHLSOnlyAudioCodec(t *testing.T) {
 	}
 }
 
+func TestPlanPlaybackV3VideoRemuxAdaptsProgressiveWhenHLSVideoUnsupported(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.CodecAudio = "eac3"
+	file.VideoTracks[0].VideoRange = "SDR"
+	file.VideoTracks[0].VideoRangeType = "SDR"
+	file.AudioTracks[0] = models.AudioTrack{Codec: "eac3", Channels: 6, Layout: "5.1"}
+
+	req := validStartRequestV3()
+	req.Capabilities.VideoEvidence = EvidenceDeclaredV3
+	req.Capabilities.AudioEvidence = EvidenceDeclaredV3
+	req.Capabilities.CodecsAudio = []string{"aac", "eac3"}
+	delete(req.ClientPlaybackContext.Deliveries, DeliveryClassOriginalHTTPV3)
+	progressive := req.ClientPlaybackContext.Deliveries[DeliveryClassProgressiveV3]
+	progressive.Containers = []string{"mp4"}
+	progressive.VideoCodecs = []string{"hevc"}
+	progressive.AudioDecodeCodecs = []string{"aac"}
+	req.ClientPlaybackContext.Deliveries[DeliveryClassProgressiveV3] = progressive
+	hls := req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3]
+	hls.Containers = []string{"hls"}
+	hls.VideoCodecs = []string{"h264"}
+	hls.AudioDecodeCodecs = []string{"eac3"}
+	req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3] = hls
+
+	result := PlanPlaybackV3(PlannerInputV3{
+		Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
+		Settings: PlannerSettingsV3{TranscodeEnabled: true}, Registry: testTransformationRegistryV3(),
+	})
+	if result.Plan == nil || result.Plan.Delivery != DeliveryRemuxProgressiveV3 || !result.TranscodeAudio || result.TargetAudioCodec != "aac" {
+		t.Fatalf("result = %s", ExplainPlannerResultV3(result))
+	}
+}
+
 func TestPlanPlaybackV3VideoRemuxHonorsProgressiveAudioPassthrough(t *testing.T) {
 	file := detailedFixtureFileV3()
 	file.CodecAudio = "ac3"
@@ -3319,9 +3351,10 @@ func TestPlanPlaybackV3VideoRemuxWithNilRegistryReturnsAudioConversionTerminal(t
 func TestPlanPlaybackV3VideoRemuxUsesCurrentAACRecipeForHLSFallback(t *testing.T) {
 	file := detailedFixtureFileV3()
 	file.CodecAudio = "opus"
+	file.AudioChannels = 6
 	file.VideoTracks[0].VideoRange = "SDR"
 	file.VideoTracks[0].VideoRangeType = "SDR"
-	file.AudioTracks[0] = models.AudioTrack{Codec: "opus", Channels: 2, Layout: "stereo"}
+	file.AudioTracks[0] = models.AudioTrack{Codec: "opus", Channels: 6, Layout: "5.1"}
 
 	req := validStartRequestV3()
 	req.Capabilities.VideoEvidence = EvidenceDeclaredV3
@@ -3355,6 +3388,9 @@ func TestPlanPlaybackV3VideoRemuxUsesCurrentAACRecipeForHLSFallback(t *testing.T
 	}
 	if hlsResult.Plan.Transformations[0].RecipeVersion != TransformationAudioToAACRecipeVersionV3 {
 		t.Fatalf("AAC recipe version = %q, want %q", hlsResult.Plan.Transformations[0].RecipeVersion, TransformationAudioToAACRecipeVersionV3)
+	}
+	if hlsResult.TargetAudioChannels != 6 || hlsResult.Plan.EffectiveRecipe.AudioChannels == nil || *hlsResult.Plan.EffectiveRecipe.AudioChannels != 6 {
+		t.Fatalf("HLS AAC channels = %d, recipe = %#v", hlsResult.TargetAudioChannels, hlsResult.Plan.EffectiveRecipe)
 	}
 }
 
