@@ -58,6 +58,8 @@ func TestBuildRemuxArgsBoostsOnlySurroundToStereoAAC(t *testing.T) {
 		{name: "stereo encode", transcodeAudio: true, sourceChannels: 2, targetChannels: 2},
 		{name: "unknown source", transcodeAudio: true, sourceChannels: 0, targetChannels: 2},
 		{name: "surround to mono", transcodeAudio: true, sourceChannels: 6, targetChannels: 1},
+		{name: "negative target resolves to ordinary stereo", transcodeAudio: true, sourceChannels: 6, targetChannels: -1},
+		{name: "noncanonical target resolves to ordinary stereo", transcodeAudio: true, sourceChannels: 6, targetChannels: 3},
 		{name: "surround preserved", transcodeAudio: true, sourceChannels: 6, targetChannels: 6},
 		{name: "audio copy", sourceChannels: 6, targetChannels: 2},
 	}

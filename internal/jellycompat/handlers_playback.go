@@ -949,13 +949,14 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 		MediaPath:           file.FilePath,
 		PlayMethod:          method,
 		TranscodeAudio:      source.TranscodeAudio,
+		TargetCodecAudio:    compatTargetAudioCodec,
 		AudioTrackIndex:     audioTrackIndex,
 		SourceAudioChannels: sourceAudioChannels,
 		AudioOnly:           file.IsAudioOnly(),
 		TranscodeNode:       transcodeNodeURL,
 		DVProfile:           file.PrimaryDVProfile(),
 	}
-	if claims.SourceAudioChannels > 0 {
+	if playback.IsAudioToAACStereoDownmixV3(claims.SourceAudioChannels, claims.TargetCodecAudio, claims.TargetAudioChannels) {
 		// Compatibility AAC output is stereo by default. Freeze that effective
 		// value so the proxy's versioned route can validate the whole downmix
 		// shape before starting FFmpeg.
@@ -966,6 +967,10 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 		case string(playback.PlayRemux):
 			claims.PlayMethod = streamtoken.PlayMethodAudioDownmixRemux
 		}
+	} else {
+		// SourceAudioChannels is meaningful only inside the versioned recipe.
+		// Keep ordinary tokens safe for mixed-generation proxy fleets.
+		claims.SourceAudioChannels = 0
 	}
 	if claims.SourceAudioChannels == 0 && method == string(playback.PlayTranscode) && !source.TranscodeAudio && compatVersionRequiresToneMap(source.Version) {
 		// Older binaries do not understand the frozen tone-map claims. Give them
@@ -991,7 +996,7 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 		return proxyNode.URL + "/stream/direct/" + token, nil
 	case string(playback.PlayRemux):
 		remuxPath := "/stream/remux/"
-		if claims.SourceAudioChannels > 0 {
+		if claims.PlayMethod == streamtoken.PlayMethodAudioDownmixRemux {
 			remuxPath = "/stream/remux/audio-v2/"
 		}
 		redirectURL := proxyNode.URL + remuxPath + token
@@ -1178,10 +1183,12 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		TotalDuration:       float64(source.Version.Duration),
 		RequireReady:        toneMapRecipe.mode != "",
 	}
-	if reqBody.SourceAudioChannels > 0 {
+	if playback.IsAudioToAACStereoDownmixV3(reqBody.SourceAudioChannels, reqBody.TargetCodecAudio, reqBody.TargetAudioChannels) {
 		reqBody.AudioRecipeVersion = playback.TransformationAudioToAACRecipeVersionV3
 		reqBody.TargetAudioChannels = 2
 		reqBody.RequireReady = true
+	} else {
+		reqBody.SourceAudioChannels = 0
 	}
 	if toneMapRecipe.mode != "" {
 		reqBody.ToneMapPolicy = toneMapRecipe.policy

@@ -90,9 +90,8 @@ func validateAudioRecipeRequest(req TranscodeStartRequest) error {
 	if req.SourceAudioChannels == 0 && req.AudioRecipeVersion == "" {
 		return nil
 	}
-	if req.SourceAudioChannels <= 2 ||
-		req.AudioRecipeVersion != playback.TransformationAudioToAACRecipeVersionV3 ||
-		!strings.EqualFold(strings.TrimSpace(req.TargetCodecAudio), "aac") ||
+	if req.AudioRecipeVersion != playback.TransformationAudioToAACRecipeVersionV3 ||
+		!playback.IsAudioToAACStereoDownmixV3(req.SourceAudioChannels, req.TargetCodecAudio, req.TargetAudioChannels) ||
 		req.TargetAudioChannels != 2 {
 		return fmt.Errorf("%w: source_channels=%d target_codec=%q target_channels=%d recipe_version=%q",
 			ErrAudioRecipeAttestationMismatch, req.SourceAudioChannels, req.TargetCodecAudio, req.TargetAudioChannels, req.AudioRecipeVersion)
@@ -675,7 +674,7 @@ func expectedDownloadPrepareResult(req downloadprepare.Request, fileSize int64) 
 }
 
 func downloadPrepareReceiptRequested(req downloadprepare.Request) bool {
-	return req.ToneMapRequested() || req.AudioRecipeRequested()
+	return req.ExecutionAttestationRequested()
 }
 
 func existingDownloadPrepareResult(outputPath string, req downloadprepare.Request) (downloadprepare.Result, bool) {

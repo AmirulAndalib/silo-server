@@ -333,7 +333,7 @@ func TestRecipeCardClaimsRoundTrip(t *testing.T) {
 	// Byte-affecting encode parameters.
 	if got.InputPath != card.InputPath || got.SourceVideoCodec != card.SourceVideoCodec ||
 		got.SourceVideoProfile != card.SourceVideoProfile || got.SourceVideoBitDepth != card.SourceVideoBitDepth ||
-		got.SourceAudioChannels != card.SourceAudioChannels ||
+		got.SourceAudioChannels != 0 ||
 		got.SoftwareVideoDecode != card.SoftwareVideoDecode ||
 		got.ToneMapPolicy != card.ToneMapPolicy || got.ToneMapMode != card.ToneMapMode ||
 		got.ToneMapSourceKind != card.ToneMapSourceKind || got.ToneMapFilter != "" ||
@@ -350,7 +350,7 @@ func TestRecipeCardClaimsRoundTrip(t *testing.T) {
 		got.SubtitleCodec != card.SubtitleCodec ||
 		got.AudioTrackIndex != card.AudioTrackIndex || got.TargetBitrateKbps != card.TargetBitrateKbps ||
 		got.TotalDuration != card.TotalDuration || got.FastStart != card.FastStart {
-		t.Fatalf("encode parameters lost in round trip:\n have %+v\n want %+v", got, card)
+		t.Fatalf("encode parameters lost in round trip (non-v2 source channels must be stripped):\n have %+v\n want %+v", got, card)
 	}
 }
 
@@ -374,6 +374,65 @@ func TestReconstructSessionRestoresSourceAudioChannels(t *testing.T) {
 	legacy := RecipeCardFromClaims(&streamtoken.Claims{SessionID: "legacy", UserID: 42, MediaFileID: 77})
 	if legacy.SourceAudioChannels != 0 {
 		t.Fatalf("legacy token source audio channels = %d, want unknown", legacy.SourceAudioChannels)
+	}
+}
+
+func TestRecipeCardAudioV2DiscriminatorRequiresExactAACStereoDownmix(t *testing.T) {
+	tests := []struct {
+		name               string
+		card               RecipeCard
+		wantMethod         string
+		wantSourceChannels int
+		wantTargetChannels int
+	}{
+		{
+			name:       "explicit stereo downmix",
+			card:       RecipeCard{PlayMethod: PlayTranscode, TranscodeAudio: true, TargetCodecAudio: "aac", SourceAudioChannels: 6, TargetAudioChannels: 2},
+			wantMethod: streamtoken.PlayMethodAudioDownmixTranscode, wantSourceChannels: 6, wantTargetChannels: 2,
+		},
+		{
+			name:       "default stereo downmix",
+			card:       RecipeCard{PlayMethod: PlayRemux, TranscodeAudio: true, TargetCodecAudio: "aac", SourceAudioChannels: 6},
+			wantMethod: streamtoken.PlayMethodAudioDownmixRemux, wantSourceChannels: 6, wantTargetChannels: 2,
+		},
+		{
+			name:       "stereo source",
+			card:       RecipeCard{PlayMethod: PlayRemux, TranscodeAudio: true, TargetCodecAudio: "aac", SourceAudioChannels: 2, TargetAudioChannels: 2},
+			wantMethod: string(PlayRemux), wantTargetChannels: 2,
+		},
+		{
+			name:       "copy-only remux",
+			card:       RecipeCard{PlayMethod: PlayRemux, TranscodeAudio: false, TargetCodecAudio: "aac", SourceAudioChannels: 6, TargetAudioChannels: 2},
+			wantMethod: string(PlayRemux), wantTargetChannels: 2,
+		},
+		{
+			name:       "non AAC output",
+			card:       RecipeCard{PlayMethod: PlayTranscode, TranscodeAudio: true, TargetCodecAudio: "eac3", SourceAudioChannels: 6, TargetAudioChannels: 2},
+			wantMethod: string(PlayTranscode), wantTargetChannels: 2,
+		},
+		{
+			name:       "Opus output",
+			card:       RecipeCard{PlayMethod: PlayTranscode, TranscodeAudio: true, TargetCodecAudio: "opus", SourceAudioChannels: 6, TargetAudioChannels: 2},
+			wantMethod: string(PlayTranscode), wantTargetChannels: 2,
+		},
+		{
+			name:       "unknown codec fallback",
+			card:       RecipeCard{PlayMethod: PlayTranscode, TranscodeAudio: true, TargetCodecAudio: "unknown", SourceAudioChannels: 6, TargetAudioChannels: 2},
+			wantMethod: string(PlayTranscode), wantTargetChannels: 2,
+		},
+		{
+			name:       "surround output",
+			card:       RecipeCard{PlayMethod: PlayTranscode, TranscodeAudio: true, TargetCodecAudio: "aac", SourceAudioChannels: 6, TargetAudioChannels: 6},
+			wantMethod: string(PlayTranscode), wantTargetChannels: 6,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			claims := test.card.ToClaims()
+			if claims.PlayMethod != test.wantMethod || claims.SourceAudioChannels != test.wantSourceChannels || claims.TargetAudioChannels != test.wantTargetChannels {
+				t.Fatalf("claims method/source/target = %q/%d/%d, want %q/%d/%d", claims.PlayMethod, claims.SourceAudioChannels, claims.TargetAudioChannels, test.wantMethod, test.wantSourceChannels, test.wantTargetChannels)
+			}
+		})
 	}
 }
 
@@ -408,7 +467,10 @@ func TestSourceAudioRecipeClaimsUseOldReaderVisibleDiscriminators(t *testing.T) 
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.method), func(t *testing.T) {
-			card := RecipeCard{PlayMethod: tt.method, SourceAudioChannels: 6}
+			card := RecipeCard{
+				PlayMethod: tt.method, TranscodeAudio: true,
+				TargetCodecAudio: "aac", SourceAudioChannels: 6, TargetAudioChannels: 2,
+			}
 			claims := card.ToClaims()
 			if claims.PlayMethod != tt.want {
 				t.Fatalf("source-audio token method = %q, want %q", claims.PlayMethod, tt.want)

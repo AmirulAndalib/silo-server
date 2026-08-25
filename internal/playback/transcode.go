@@ -1193,7 +1193,18 @@ func nvencSDRFallbackDownload(opts TranscodeOpts) string {
 // cards, and the compat mirror — must share this predicate or the activity
 // bucket flips between remux and audio across restarts.
 func TranscodesAudio(targetCodecAudio string) bool {
-	return !strings.EqualFold(targetCodecAudio, "copy")
+	return !strings.EqualFold(strings.TrimSpace(targetCodecAudio), "copy")
+}
+
+// IsAudioToAACStereoDownmixV3 reports whether the frozen audio facts select
+// the versioned surround-to-stereo AAC recipe. A zero target channel count is
+// the historical AAC default and therefore resolves to stereo; every other
+// codec or output layout remains on its ordinary recipe.
+func IsAudioToAACStereoDownmixV3(sourceChannels int, targetCodecAudio string, targetAudioChannels int) bool {
+	codec := strings.TrimSpace(targetCodecAudio)
+	return sourceChannels > 2 &&
+		(codec == "" || strings.EqualFold(codec, "aac")) &&
+		(targetAudioChannels == 0 || targetAudioChannels == 2)
 }
 
 const stereoDownmixBoostFilterV3 = "aresample=out_chlayout=stereo,alimiter=level_in=2:limit=0.794328235:attack=5:release=50:level=false:latency=true"
@@ -1218,7 +1229,7 @@ func appendStereoDownmixBoostArgs(args []string, sourceChannels, outputChannels 
 func appendAudioArgs(args []string, opts TranscodeOpts) []string {
 	// Case-insensitive so the switch agrees with TranscodesAudio for any
 	// client-supplied spelling.
-	codec := strings.ToLower(opts.TargetCodecAudio)
+	codec := strings.ToLower(strings.TrimSpace(opts.TargetCodecAudio))
 	if codec == "" {
 		codec = "aac"
 	}
@@ -1228,7 +1239,6 @@ func appendAudioArgs(args []string, opts TranscodeOpts) []string {
 		args = append(args, "-c:a", "copy")
 	case "opus":
 		args = append(args, "-c:a", "libopus", "-b:a", "192k", "-ac", "2")
-		args = appendStereoDownmixBoostArgs(args, opts.SourceAudioChannels, 2)
 	case "eac3":
 		// Typical Dolby Digital Plus 5.1 bitrate; let the source dictate channel
 		// count so we preserve surround when possible.
@@ -1239,7 +1249,9 @@ func appendAudioArgs(args []string, opts TranscodeOpts) []string {
 	default:
 		channels, bitrateKbps := resolvedAACOutputV3(opts.TargetAudioChannels, opts.TargetAudioBitrateKbps)
 		args = append(args, "-c:a", "aac", "-b:a", strconv.Itoa(bitrateKbps)+"k", "-ac", strconv.Itoa(channels))
-		args = appendStereoDownmixBoostArgs(args, opts.SourceAudioChannels, channels)
+		if IsAudioToAACStereoDownmixV3(opts.SourceAudioChannels, opts.TargetCodecAudio, opts.TargetAudioChannels) {
+			args = appendStereoDownmixBoostArgs(args, opts.SourceAudioChannels, channels)
+		}
 	}
 
 	return args

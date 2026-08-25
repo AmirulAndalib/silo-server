@@ -206,6 +206,28 @@ func TestPreparedAudioBoostFreezesSelectedSourceChannelsInExecutionFingerprint(t
 	}
 }
 
+func TestPreparedSourceAudioChannelsRequiresAACSurroundToDefaultStereo(t *testing.T) {
+	file := &models.MediaFile{AudioTracks: []models.AudioTrack{{Channels: 2}, {Channels: 6}}}
+	for _, test := range []struct {
+		name       string
+		trackIndex int
+		codec      string
+		want       int
+	}{
+		{name: "AAC surround", trackIndex: 1, codec: "aac", want: 6},
+		{name: "AAC stereo", trackIndex: 0, codec: "aac"},
+		{name: "EAC3 surround", trackIndex: 1, codec: "eac3"},
+		{name: "Opus surround", trackIndex: 1, codec: "opus"},
+		{name: "copy surround", trackIndex: 1, codec: "copy"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := preparedSourceAudioChannels(file, test.trackIndex, test.codec); got != test.want {
+				t.Fatalf("preparedSourceAudioChannels() = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
 func TestResolveToneMapTargetRejectsHDRTranscodeWhenToneMapPolicyUnavailable(t *testing.T) {
 	file := hdrDownloadTestFile()
 	target := playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"}

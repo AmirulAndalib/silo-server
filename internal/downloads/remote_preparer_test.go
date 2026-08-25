@@ -393,6 +393,32 @@ func TestRemotePrepareResultRejectsPartialToneMapRecipeWithoutAttestation(t *tes
 	}
 }
 
+func TestRemotePrepareResultRejectsPartialAudioRecipeWithoutAttestation(t *testing.T) {
+	partial := downloadprepare.Request{
+		ArtifactID: "artifact-partial-audio", TargetCodecAudio: "eac3",
+		SourceAudioChannels: 6, AudioRecipeVersion: playback.TransformationAudioToAACRecipeVersionV3,
+	}
+	if remotePrepareResultMatches(downloadprepare.Result{ArtifactID: partial.ArtifactID, FileSize: 55}, partial.ArtifactID, partial) {
+		t.Fatal("partial audio recipe accepted an unattested result")
+	}
+}
+
+func TestRemotePrepareResultRequiresAttestationForExplicitAudioOutput(t *testing.T) {
+	request := downloadprepare.NewRequest("artifact-explicit-audio", playback.TranscodeOpts{
+		TargetCodecAudio: "aac", SourceAudioChannels: 2,
+		TargetAudioChannels: 1, TargetAudioBitrateKbps: 256,
+	})
+	unattested := downloadprepare.Result{ArtifactID: request.ArtifactID, FileSize: 55}
+	if remotePrepareResultMatches(unattested, request.ArtifactID, request) {
+		t.Fatal("explicit audio output accepted an unattested mixed-generation result")
+	}
+	attested := unattested
+	attested.ExecutionFingerprint = request.ExecutionFingerprint()
+	if !remotePrepareResultMatches(attested, request.ArtifactID, request) {
+		t.Fatal("explicit audio output rejected its exact execution receipt")
+	}
+}
+
 func TestNodeAwarePreparerDoesNotDispatchPartialToneMapRecipeAsOrdinary(t *testing.T) {
 	pool := nodepool.NewTranscodePool()
 	pool.SetNodes([]*nodepool.Node{{ID: 23, URL: "http://ordinary-node", Enabled: true, Healthy: true}})

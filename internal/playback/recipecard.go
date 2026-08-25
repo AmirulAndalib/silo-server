@@ -274,7 +274,13 @@ const MaxTokenTTL = 24 * time.Hour
 // change applies to reconstructed sessions too.
 func (c RecipeCard) ToClaims() streamtoken.Claims {
 	playMethod := string(c.PlayMethod)
-	if c.SourceAudioChannels > 0 {
+	sourceAudioChannels := 0
+	targetAudioChannels := c.TargetAudioChannels
+	if c.TranscodeAudio && IsAudioToAACStereoDownmixV3(c.SourceAudioChannels, c.TargetCodecAudio, targetAudioChannels) {
+		sourceAudioChannels = c.SourceAudioChannels
+		// Tokens cross executor generations, so spell out the effective stereo
+		// default before selecting the v2-only method discriminator.
+		targetAudioChannels = 2
 		switch c.PlayMethod {
 		case PlayTranscode:
 			playMethod = streamtoken.PlayMethodAudioDownmixTranscode
@@ -313,7 +319,7 @@ func (c RecipeCard) ToClaims() streamtoken.Claims {
 		SourceVideoCodec:           c.SourceVideoCodec,
 		SourceVideoProfile:         c.SourceVideoProfile,
 		SourceVideoBitDepth:        c.SourceVideoBitDepth,
-		SourceAudioChannels:        c.SourceAudioChannels,
+		SourceAudioChannels:        sourceAudioChannels,
 		SoftwareVideoDecode:        c.SoftwareVideoDecode,
 		ToneMapPolicy:              string(c.ToneMapPolicy),
 		ToneMapMode:                string(c.ToneMapMode),
@@ -339,7 +345,7 @@ func (c RecipeCard) ToClaims() streamtoken.Claims {
 		TotalDuration:              c.TotalDuration,
 		FastStart:                  c.FastStart,
 		TargetCodecAudio:           c.TargetCodecAudio,
-		TargetAudioChannels:        c.TargetAudioChannels,
+		TargetAudioChannels:        targetAudioChannels,
 		TargetAudioBitrateKbps:     c.TargetAudioBitrateKbps,
 	}
 }

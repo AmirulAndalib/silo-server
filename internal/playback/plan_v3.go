@@ -704,7 +704,7 @@ func planAudioOnlyV3(input PlannerInputV3, file *models.MediaFile, source Source
 }
 
 func stereoDownmixSourceChannelsV3(sourceChannels, targetChannels int, transcodeAudio bool) int {
-	if !transcodeAudio || sourceChannels <= 2 || targetChannels != 2 {
+	if !transcodeAudio || sourceChannels <= 2 || (targetChannels != 0 && targetChannels != 2) {
 		return 0
 	}
 	return sourceChannels

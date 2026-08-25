@@ -211,7 +211,9 @@ func buildRemuxArgsWithAudioV3(filePath, outputFormat string, seekSeconds float6
 			"-ac", strconv.Itoa(channels),
 			"-b:a", strconv.Itoa(bitrateKbps)+"k",
 		)
-		args = appendStereoDownmixBoostArgs(args, sourceAudioChannels, channels)
+		if IsAudioToAACStereoDownmixV3(sourceAudioChannels, "aac", targetAudioChannels) {
+			args = appendStereoDownmixBoostArgs(args, sourceAudioChannels, channels)
+		}
 	} else {
 		args = append(args, "-c", "copy")
 	}

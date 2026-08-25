@@ -3084,6 +3084,7 @@ func TestStereoDownmixSourceChannelsV3OnlyFreezesBoostedRoutes(t *testing.T) {
 		transcodeAudio, wantSet bool
 	}{
 		{name: "surround to stereo", source: 6, target: 2, transcodeAudio: true, wantSet: true},
+		{name: "surround to default stereo", source: 6, target: 0, transcodeAudio: true, wantSet: true},
 		{name: "surround preserved", source: 6, target: 6, transcodeAudio: true},
 		{name: "stereo re-encode", source: 2, target: 2, transcodeAudio: true},
 		{name: "mono output", source: 6, target: 1, transcodeAudio: true},

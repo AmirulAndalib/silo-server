@@ -4355,7 +4355,7 @@ func TestIdentityStreamURLV3VersionsOnlyBoostedRemuxRoutes(t *testing.T) {
 	boosted := &playback.Session{
 		ID: "boosted", UserID: 7, ProfileID: "profile-1", MediaFileID: file.ID,
 		PlayMethod: playback.PlayRemux, TranscodeAudio: true,
-		SourceAudioChannels: 6, TargetAudioChannels: 2,
+		TargetAudioCodec: "aac", SourceAudioChannels: 6, TargetAudioChannels: 2,
 	}
 	boostedURL, servedByProxy := handler.identityStreamURLV3(boosted, file, proxy)
 	boostedPrefix := "http://proxy-1/stream/remux/audio-v2/"
@@ -4370,13 +4370,27 @@ func TestIdentityStreamURLV3VersionsOnlyBoostedRemuxRoutes(t *testing.T) {
 		t.Fatalf("boosted claims = %#v", claims)
 	}
 
-	legacy := *boosted
-	legacy.ID = "legacy"
-	legacy.SourceAudioChannels = 0
-	legacyURL, servedByProxy := handler.identityStreamURLV3(&legacy, file, proxy)
-	legacyPrefix := "http://proxy-1/stream/remux/"
-	if !servedByProxy || !strings.HasPrefix(legacyURL, legacyPrefix) || strings.HasPrefix(legacyURL, boostedPrefix) {
-		t.Fatalf("ordinary remux URL = %q (proxy %v), want the legacy route", legacyURL, servedByProxy)
+	ordinaryCases := []struct {
+		name   string
+		mutate func(*playback.Session)
+	}{
+		{name: "unknown source", mutate: func(s *playback.Session) { s.SourceAudioChannels = 0 }},
+		{name: "stereo source", mutate: func(s *playback.Session) { s.SourceAudioChannels = 2 }},
+		{name: "copy-only remux", mutate: func(s *playback.Session) { s.TranscodeAudio = false }},
+		{name: "surround output", mutate: func(s *playback.Session) { s.TargetAudioChannels = 6 }},
+		{name: "non AAC output", mutate: func(s *playback.Session) { s.TargetAudioCodec = "eac3" }},
+	}
+	for _, test := range ordinaryCases {
+		t.Run(test.name, func(t *testing.T) {
+			ordinary := *boosted
+			ordinary.ID = "ordinary"
+			test.mutate(&ordinary)
+			ordinaryURL, ordinaryByProxy := handler.identityStreamURLV3(&ordinary, file, proxy)
+			legacyPrefix := "http://proxy-1/stream/remux/"
+			if !ordinaryByProxy || !strings.HasPrefix(ordinaryURL, legacyPrefix) || strings.HasPrefix(ordinaryURL, boostedPrefix) {
+				t.Fatalf("ordinary remux URL = %q (proxy %v), want the legacy route", ordinaryURL, ordinaryByProxy)
+			}
+		})
 	}
 }
 

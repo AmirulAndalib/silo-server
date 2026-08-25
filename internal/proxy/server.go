@@ -459,7 +459,7 @@ func validAudioV2RemuxClaims(claims *streamtoken.Claims) bool {
 	return claims != nil &&
 		claims.PlayMethod == streamtoken.PlayMethodAudioDownmixRemux &&
 		claims.TranscodeAudio &&
-		claims.SourceAudioChannels > 2 &&
+		playback.IsAudioToAACStereoDownmixV3(claims.SourceAudioChannels, claims.TargetCodecAudio, claims.TargetAudioChannels) &&
 		claims.TargetAudioChannels == 2
 }
 

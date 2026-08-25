@@ -54,6 +54,58 @@ func remoteHLSResultV3() playback.PlannerResultV3 {
 	return playback.PlannerResultV3{Plan: remoteHLSPlanV3(), PlayMethod: playback.PlayTranscode, TranscodeAudio: true, TargetVideoCodec: "h264", TargetAudioCodec: "aac", SourceAudioChannels: 6, TargetAudioChannels: 2}
 }
 
+func TestPrepareRemoteTransportV3VersionsOnlyExactAACStereoDownmix(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(*playback.PlannerResultV3)
+		wantSource int
+		wantTarget int
+		wantRecipe string
+	}{
+		{name: "explicit stereo", wantSource: 6, wantTarget: 2, wantRecipe: playback.TransformationAudioToAACRecipeVersionV3},
+		{name: "default stereo", mutate: func(r *playback.PlannerResultV3) { r.TargetAudioChannels = 0 }, wantSource: 6, wantTarget: 2, wantRecipe: playback.TransformationAudioToAACRecipeVersionV3},
+		{name: "stereo source", mutate: func(r *playback.PlannerResultV3) { r.SourceAudioChannels = 2 }, wantTarget: 2},
+		{name: "surround output", mutate: func(r *playback.PlannerResultV3) { r.TargetAudioChannels = 6 }, wantTarget: 6},
+		{name: "non AAC output", mutate: func(r *playback.PlannerResultV3) { r.TargetAudioCodec = "eac3" }, wantTarget: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var got transcodenode.TranscodeStartRequest
+			node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/transcode/start" {
+					if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+						t.Errorf("decode remote start: %v", err)
+					}
+					writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: got.SessionID, Status: "started", AudioRecipeVersion: got.AudioRecipeVersion})
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer node.Close()
+
+			handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+			handler.JWTSecret = "test-secret"
+			result := remoteHLSResultV3()
+			if test.mutate != nil {
+				test.mutate(&result)
+			}
+			transport, transportErr := handler.prepareRemoteTransportV3(
+				httptest.NewRequest(http.MethodPost, "/", nil),
+				&playback.Session{ID: "session-exact-recipe", UserID: 7, ProfileID: "profile-1"},
+				v3HandlerFixtureFile(t), result,
+				nodepool.Plan{TranscodeNode: &nodepool.Node{URL: node.URL}}, preparedTimelineV3{}, mediaAuthModeV3{},
+			)
+			if transportErr != nil {
+				t.Fatalf("prepare remote transport: %v", transportErr)
+			}
+			defer transport.rollback()
+			if got.SourceAudioChannels != test.wantSource || got.TargetAudioChannels != test.wantTarget || got.AudioRecipeVersion != test.wantRecipe {
+				t.Fatalf("remote audio recipe = source %d, target %d, version %q; want %d, %d, %q", got.SourceAudioChannels, got.TargetAudioChannels, got.AudioRecipeVersion, test.wantSource, test.wantTarget, test.wantRecipe)
+			}
+		})
+	}
+}
+
 func TestPrepareRemoteTransportV3RejectsOldNodeAfterStaleAudioCapabilityProbe(t *testing.T) {
 	var startRequest transcodenode.TranscodeStartRequest
 	stopRequests := 0

@@ -44,6 +44,7 @@ func TestAudioV2RemuxClaimsRequireExactStereoEncodeShape(t *testing.T) {
 	valid := streamtoken.Claims{
 		PlayMethod:          streamtoken.PlayMethodAudioDownmixRemux,
 		TranscodeAudio:      true,
+		TargetCodecAudio:    "aac",
 		SourceAudioChannels: 6,
 		TargetAudioChannels: 2,
 	}
@@ -55,6 +56,8 @@ func TestAudioV2RemuxClaimsRequireExactStereoEncodeShape(t *testing.T) {
 		{name: "complete recipe", want: true},
 		{name: "ordinary method", mutate: func(c *streamtoken.Claims) { c.PlayMethod = "remux" }},
 		{name: "audio copy", mutate: func(c *streamtoken.Claims) { c.TranscodeAudio = false }},
+		{name: "default AAC codec", mutate: func(c *streamtoken.Claims) { c.TargetCodecAudio = "" }, want: true},
+		{name: "non AAC codec", mutate: func(c *streamtoken.Claims) { c.TargetCodecAudio = "eac3" }},
 		{name: "stereo source", mutate: func(c *streamtoken.Claims) { c.SourceAudioChannels = 2 }},
 		{name: "missing target", mutate: func(c *streamtoken.Claims) { c.TargetAudioChannels = 0 }},
 		{name: "surround target", mutate: func(c *streamtoken.Claims) { c.TargetAudioChannels = 6 }},

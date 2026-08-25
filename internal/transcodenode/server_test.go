@@ -653,6 +653,17 @@ func TestHandleDownloadPreparePublishesStereoDownmixReceiptAndStatusAttestation(
 	}
 }
 
+func TestExpectedDownloadPrepareResultAttestsExplicitAudioOutput(t *testing.T) {
+	request := downloadprepare.Request{
+		ArtifactID: "artifact-explicit-audio", TargetCodecAudio: "aac",
+		TargetAudioChannels: 1, TargetAudioBitrateKbps: 256,
+	}
+	result, ok := expectedDownloadPrepareResult(request, 55)
+	if !ok || result.ExecutionFingerprint != request.ExecutionFingerprint() {
+		t.Fatalf("explicit audio output result = (%+v, %t), want exact execution receipt", result, ok)
+	}
+}
+
 func TestHandleDownloadPrepareRejectsPartialStereoDownmixRecipe(t *testing.T) {
 	server := newTestServer(t)
 	request := downloadprepare.Request{
@@ -1102,6 +1113,11 @@ func TestAudioRecipeRequestAndStartAttestationFailClosed(t *testing.T) {
 	if err := validateAudioRecipeRequest(current); err != nil {
 		t.Fatalf("current recipe rejected: %v", err)
 	}
+	defaultAAC := current
+	defaultAAC.TargetCodecAudio = ""
+	if err := validateAudioRecipeRequest(defaultAAC); err != nil {
+		t.Fatalf("default AAC recipe rejected: %v", err)
+	}
 	if err := ValidateAudioRecipeAttestation(current, TranscodeStartResponse{AudioRecipeVersion: current.AudioRecipeVersion}); err != nil {
 		t.Fatalf("current attestation rejected: %v", err)
 	}
@@ -1120,7 +1136,7 @@ func TestAudioRecipeRequestAndStartAttestationFailClosed(t *testing.T) {
 	}{
 		{name: "unversioned", mutate: func(r *TranscodeStartRequest) { r.AudioRecipeVersion = "" }},
 		{name: "stereo source", mutate: func(r *TranscodeStartRequest) { r.SourceAudioChannels = 2 }},
-		{name: "missing codec", mutate: func(r *TranscodeStartRequest) { r.TargetCodecAudio = "" }},
+		{name: "unknown codec", mutate: func(r *TranscodeStartRequest) { r.TargetCodecAudio = "unknown" }},
 		{name: "audio copy", mutate: func(r *TranscodeStartRequest) { r.TargetCodecAudio = "copy" }},
 		{name: "surround preserving codec", mutate: func(r *TranscodeStartRequest) { r.TargetCodecAudio = "eac3" }},
 		{name: "missing target channels", mutate: func(r *TranscodeStartRequest) { r.TargetAudioChannels = 0 }},

@@ -132,14 +132,14 @@ func TestToneMapRecipeEnvelopeFailsClosedOnLegacyReader(t *testing.T) {
 func TestStereoDownmixRecipeEnvelopeFailsClosedOnLegacyReader(t *testing.T) {
 	for _, card := range []playback.RecipeCard{
 		{
-			SessionID: "sid", PlayMethod: playback.PlayTranscode,
+			SessionID: "sid", PlayMethod: playback.PlayTranscode, TranscodeAudio: true,
 			InputPath: "/media/movie.mkv", SegmentDuration: 4, TargetCodecVideo: "h264",
-			SourceAudioChannels: 6,
+			TargetCodecAudio: "aac", SourceAudioChannels: 6, TargetAudioChannels: 2,
 		},
 		{
-			SessionID: "sid", PlayMethod: playback.PlayTranscode,
+			SessionID: "sid", PlayMethod: playback.PlayTranscode, TranscodeAudio: true,
 			InputPath: "/media/movie.mkv", SegmentDuration: 4, TargetCodecVideo: "h264",
-			SourceAudioChannels: 6, ToneMapMode: tonemap.ModeHardware,
+			TargetCodecAudio: "aac", SourceAudioChannels: 6, TargetAudioChannels: 2, ToneMapMode: tonemap.ModeHardware,
 		},
 	} {
 		data, err := marshalCard(card)
@@ -162,16 +162,31 @@ func TestStereoDownmixRecipeEnvelopeFailsClosedOnLegacyReader(t *testing.T) {
 }
 
 func TestOrdinaryRecipeRemainsLegacyFlatJSON(t *testing.T) {
-	card := playback.RecipeCard{SessionID: "sid", PlayMethod: playback.PlayTranscode, InputPath: "/media/movie.mkv", SegmentDuration: 4, TargetCodecVideo: "h264"}
-	data, err := marshalCard(card)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var legacy playback.RecipeCard
-	if err := json.Unmarshal(data, &legacy); err != nil {
-		t.Fatal(err)
-	}
-	if legacy != card {
-		t.Fatalf("legacy flat decode = %+v, want %+v", legacy, card)
+	for _, card := range []playback.RecipeCard{
+		{SessionID: "sid", PlayMethod: playback.PlayTranscode, InputPath: "/media/movie.mkv", SegmentDuration: 4, TargetCodecVideo: "h264"},
+		{SessionID: "stereo-source", PlayMethod: playback.PlayTranscode, TranscodeAudio: true, TargetCodecAudio: "aac", SourceAudioChannels: 2, TargetAudioChannels: 2},
+		{SessionID: "copy-remux", PlayMethod: playback.PlayRemux, TranscodeAudio: false, TargetCodecAudio: "aac", SourceAudioChannels: 6, TargetAudioChannels: 2},
+		{SessionID: "surround-output", PlayMethod: playback.PlayTranscode, TranscodeAudio: true, TargetCodecAudio: "aac", SourceAudioChannels: 6, TargetAudioChannels: 6},
+		{SessionID: "non-aac", PlayMethod: playback.PlayTranscode, TranscodeAudio: true, TargetCodecAudio: "eac3", SourceAudioChannels: 6, TargetAudioChannels: 2},
+		{SessionID: "opus", PlayMethod: playback.PlayTranscode, TranscodeAudio: true, TargetCodecAudio: "opus", SourceAudioChannels: 6, TargetAudioChannels: 2},
+		{SessionID: "unknown-codec", PlayMethod: playback.PlayTranscode, TranscodeAudio: true, TargetCodecAudio: "unknown", SourceAudioChannels: 6, TargetAudioChannels: 2},
+	} {
+		data, err := marshalCard(card)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var legacy playback.RecipeCard
+		if err := json.Unmarshal(data, &legacy); err != nil {
+			t.Fatal(err)
+		}
+		want := card
+		want.SourceAudioChannels = 0
+		if legacy != want {
+			t.Fatalf("legacy flat decode = %+v, want sanitized %+v", legacy, want)
+		}
+		decoded, ok := unmarshalCard(data)
+		if !ok || decoded != want {
+			t.Fatalf("current decode = (%+v, %v), want sanitized %+v", decoded, ok, want)
+		}
 	}
 }

@@ -1087,7 +1087,7 @@ func (m *ArtifactManager) buildOpts(file *models.MediaFile, a *Artifact) playbac
 }
 
 func preparedSourceAudioChannels(file *models.MediaFile, audioTrackIndex int, targetAudioCodec string) int {
-	if file == nil || len(file.AudioTracks) == 0 || !playback.TranscodesAudio(targetAudioCodec) {
+	if file == nil || len(file.AudioTracks) == 0 {
 		return 0
 	}
 	if audioTrackIndex < 0 {
@@ -1097,7 +1097,7 @@ func preparedSourceAudioChannels(file *models.MediaFile, audioTrackIndex int, ta
 		return 0
 	}
 	channels := file.AudioTracks[audioTrackIndex].Channels
-	if channels <= 2 {
+	if !playback.IsAudioToAACStereoDownmixV3(channels, targetAudioCodec, 0) {
 		return 0
 	}
 	return channels

@@ -149,6 +149,10 @@ func marshalCard(card playback.RecipeCard) ([]byte, error) {
 	if audioRecipeCard(card) {
 		return json.Marshal(audioRecipeEnvelope{Version: audioRecipeEnvelopeVersion, Recipe: card})
 	}
+	// SourceAudioChannels only has byte-affecting meaning as part of the exact
+	// v2 recipe. Do not leak a partial recipe through a legacy flat card or
+	// tone-map envelope where an older executor could interpret it broadly.
+	card.SourceAudioChannels = 0
 	if toneMapCard(card) {
 		return json.Marshal(toneMapEnvelope{Version: toneMapEnvelopeVersion, Recipe: card})
 	}
@@ -193,7 +197,7 @@ func toneMapCard(card playback.RecipeCard) bool {
 }
 
 func audioRecipeCard(card playback.RecipeCard) bool {
-	return card.SourceAudioChannels > 0
+	return card.TranscodeAudio && playback.IsAudioToAACStereoDownmixV3(card.SourceAudioChannels, card.TargetCodecAudio, card.TargetAudioChannels)
 }
 
 // Delete removes the stored recipe for sessionID so an explicitly-stopped

@@ -659,9 +659,11 @@ func identityRecipeCard(s *playback.Session) playback.RecipeCard {
 	case playback.PlayRemux:
 		card = playback.NewRemuxRecipeCard(s.ID, s.UserID, s.ProfileID, s.MediaFileID, s.TranscodeAudio, s.AudioTrackIndex, s.RemuxDVMode)
 		card.TargetCodecAudio = s.TargetAudioCodec
-		card.SourceAudioChannels = s.SourceAudioChannels
 		card.TargetAudioChannels = s.TargetAudioChannels
 		card.TargetAudioBitrateKbps = s.TargetAudioBitrateKbps
+		if s.TranscodeAudio && playback.IsAudioToAACStereoDownmixV3(s.SourceAudioChannels, s.TargetAudioCodec, s.TargetAudioChannels) {
+			card.SourceAudioChannels = s.SourceAudioChannels
+		}
 	default:
 		card = playback.NewDirectRecipeCard(s.ID, s.UserID, s.ProfileID, s.MediaFileID)
 	}

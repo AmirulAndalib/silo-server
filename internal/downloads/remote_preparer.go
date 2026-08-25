@@ -228,7 +228,10 @@ func remotePrepareResultMatches(result downloadprepare.Result, artifactID string
 	if result.ArtifactID != artifactID {
 		return false
 	}
-	if !request.ToneMapRequested() && !request.StereoDownmixBoostRequested() {
+	if request.AudioRecipeRequested() && !request.StereoDownmixBoostRequested() {
+		return false
+	}
+	if !request.ExecutionAttestationRequested() {
 		return true
 	}
 	if request.ToneMapRequested() {
