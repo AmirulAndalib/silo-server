@@ -336,7 +336,7 @@ describe("buildWatchPageProps", () => {
     });
   });
 
-  it("passes the selected PGS ordinal into the initial playback request", () => {
+  it("omits a selected PGS track from the initial playback request", () => {
     const props = buildWatchPageProps({
       request: createWatchRouteRequest({
         contentId: "movie-1",
@@ -387,7 +387,62 @@ describe("buildWatchPageProps", () => {
       currentProfile: profile,
     });
 
-    // Playback ordinals are dense; the container stream index 4 is ordinal 0.
+    // Bitmap burn-in must not ride the start request: on HDR that transcode
+    // terminals when tone mapping / 4K transcode is off (the defaults).
+    expect(props.initialSubtitleTrackIndexByFileId).toEqual({});
+  });
+
+  it("passes a selected text subtitle ordinal into the initial playback request", () => {
+    const props = buildWatchPageProps({
+      request: createWatchRouteRequest({
+        contentId: "movie-1",
+        fileId: 42,
+        prePlaySubtitleMode: "explicit",
+        prePlaySubtitleSelection: {
+          source: "embedded",
+          language: "en",
+          codec: "subrip",
+          label: "English",
+          track_index: 3,
+        },
+      }),
+      item: makeWatchDetail({
+        versions: [
+          {
+            file_id: 42,
+            resolution: "1080p",
+            codec_video: "h264",
+            codec_audio: "aac",
+            hdr: false,
+            container: "mkv",
+            file_size: 1,
+            duration: 120,
+            bitrate: 8_000,
+            effective_audio_track_index: 0,
+            effective_audio_language: "ja",
+            subtitle_tracks: [
+              {
+                index: 3,
+                language: "en",
+                codec: "subrip",
+                title: "English",
+              },
+            ],
+          },
+        ],
+        subtitles: [
+          {
+            source: "embedded",
+            language: "en",
+            codec: "subrip",
+            forced: false,
+            title: "English",
+          },
+        ],
+      }),
+      currentProfile: profile,
+    });
+
     expect(props.initialSubtitleTrackIndexByFileId).toEqual({ 42: 0 });
   });
 });

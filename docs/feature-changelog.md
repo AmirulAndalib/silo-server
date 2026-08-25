@@ -1,5 +1,10 @@
 # Feature Changelog
 
+## 2026-08-25
+
+### Keep HDR playback playable when a bitmap subtitle is auto-selected
+The web player started asking the server to burn PGS/DVD/DVB subtitles into the opening playback plan. On HDR titles that forces a transcode, and with tone mapping and 4K transcoding off (the defaults) the planner refuses the start entirely — there is no prior stream to fall back to. Text subtitles still go out on the start request. Bitmap tracks are applied after a playable plan exists; if that follow-up replan is refused, the video keeps playing.
+
 ## 2026-08-24
 
 ### Start audiobook playback once after browser capability detection

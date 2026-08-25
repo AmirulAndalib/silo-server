@@ -11,6 +11,7 @@ import type {
   WatchPageProps,
 } from "@/player";
 import { resolveVersionAudioLanguage } from "@/player/utils/effectiveAudioLanguage";
+import { isBitmapCodec } from "@/player/utils/subtitleCodecs";
 import { resolveSubtitleAutoSelect } from "@/player/utils/subtitleSort";
 
 export interface WatchRouteRequest {
@@ -232,9 +233,20 @@ function buildInitialSubtitleTrackIndexes({
       profileLanguage,
       showForcedSubtitles,
     });
-    if (selectedSubtitleTrackIndex !== null) {
-      selections[version.file_id] = selectedSubtitleTrackIndex;
+    if (selectedSubtitleTrackIndex === null) {
+      continue;
     }
+    const selectedTrack = tracks.find((track) => track.index === selectedSubtitleTrackIndex);
+    // Bitmap tracks (PGS/DVD/DVB) have to be burned in on the web player. Putting
+    // them on the start request makes the planner transcode — and for HDR, that
+    // transcode needs tone mapping / 4K transcode, both off by default. A refused
+    // start has no stream to fall back to. Text tracks stay on the start request;
+    // bitmap selection is applied after a playable plan exists, and a refused
+    // replan keeps that plan (VideoPlayer already rolls the menu back).
+    if (selectedTrack && isBitmapCodec(selectedTrack.codec)) {
+      continue;
+    }
+    selections[version.file_id] = selectedSubtitleTrackIndex;
   }
 
   return selections;
