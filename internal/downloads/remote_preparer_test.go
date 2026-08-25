@@ -102,7 +102,7 @@ func (p *nilCandidatePlanner) TranscodeNode(int) (*nodepool.Node, bool) {
 
 func (p *recordingRemotePreparer) Prepare(_ context.Context, nodeURL, secret string, req downloadprepare.Request) (downloadprepare.Result, error) {
 	p.nodeURL, p.secret, p.request = nodeURL, secret, req
-	return downloadprepare.Result{ArtifactID: req.ArtifactID, FileSize: 1234}, nil
+	return downloadprepare.Result{ArtifactID: req.ArtifactID, FileSize: 1234, ExecutionFingerprint: req.ExecutionFingerprint()}, nil
 }
 
 func (p *recordingRemotePreparer) Stat(_ context.Context, _, _ string, artifactID string) (downloadprepare.Result, error) {
@@ -241,6 +241,45 @@ func TestNodeAwarePreparerUsesLeastLoadedHealthyNode(t *testing.T) {
 	}
 	if prepared.OutputPath != "" || prepared.OriginNodeID != 17 || prepared.OriginNodeURL != "http://idle" || prepared.OriginNodeGroup != group || prepared.OriginArtifactID != "artifact-1" || prepared.FileSize != 1234 {
 		t.Fatalf("prepared = %+v", prepared)
+	}
+}
+
+func TestNodeAwarePreparerRequiresAudioToAACV2ForSurroundDownmix(t *testing.T) {
+	capabilityNode := func(recipeVersion string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{Transformations: []playback.TransformationV3{{
+				Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: recipeVersion,
+			}}})
+		}))
+	}
+	legacy := capabilityNode("1")
+	defer legacy.Close()
+	current := capabilityNode(playback.TransformationAudioToAACRecipeVersionV3)
+	defer current.Close()
+
+	pool := nodepool.NewTranscodePool()
+	pool.SetNodes([]*nodepool.Node{
+		{ID: 1, URL: legacy.URL, Enabled: true, Healthy: true},
+		{ID: 2, URL: current.URL, Enabled: true, Healthy: true, ActiveJobs: 1},
+	})
+	local := &recordingEncodePreparer{}
+	remote := &recordingRemotePreparer{}
+	cfg := &config.Config{}
+	cfg.Auth.JWTSecret = "secret"
+	p := NewNodeAwarePreparer(local, nodepool.NewPlanner(nodepool.NewProxyPool(), pool), func() *config.Config { return cfg })
+	p.remote = remote
+	opts := playback.TranscodeOpts{
+		InputPath: "/media/movie.mkv", TargetCodecVideo: "h264", TargetCodecAudio: "aac", SourceAudioChannels: 6,
+	}
+	prepared, err := p.PrepareFile(context.Background(), "artifact-audio-v2", opts, "/local/artifact.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if local.calls != 0 || remote.nodeURL != current.URL {
+		t.Fatalf("local calls = %d, remote node = %q, want v2 node %q", local.calls, remote.nodeURL, current.URL)
+	}
+	if remote.request.SourceAudioChannels != 6 || prepared.OriginNodeID != 2 {
+		t.Fatalf("remote request = %#v prepared = %#v", remote.request, prepared)
 	}
 }
 

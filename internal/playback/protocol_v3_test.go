@@ -1461,7 +1461,7 @@ func TestPlanPlaybackV3ToneMapSettingsSelectValidatedExecutor(t *testing.T) {
 	req := validStartRequestV3()
 	req.QualityPreference = QualityRung2160pMediumV3
 	registry := NewTransformationRegistryV3([]TransformationSpecV3{
-		{Name: TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: TransformationAudioToAACV3, RecipeVersion: TransformationAudioToAACRecipeVersionV3, Available: true},
 		{Name: TransformationVideoToH264V3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, Available: true},
 		{Name: TransformationHDRToSDRToneMapV3, RecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3, Available: true},
 	})
@@ -1523,7 +1523,7 @@ func TestPlanPlaybackV3ResolvesToneMapRecipeOnce(t *testing.T) {
 	req := validStartRequestV3()
 	req.QualityPreference = "1080p"
 	registry := NewTransformationRegistryV3([]TransformationSpecV3{
-		{Name: TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: TransformationAudioToAACV3, RecipeVersion: TransformationAudioToAACRecipeVersionV3, Available: true},
 		{Name: TransformationVideoToH264V3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, Available: true},
 		{Name: TransformationHDRToSDRToneMapV3, RecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3, Available: true},
 	})
@@ -1559,7 +1559,7 @@ func TestPlanPlaybackV3ResolvesToneMapRecipeOnce(t *testing.T) {
 // TestPlanPlaybackV3RejectsDolbyOnlyAndFreezesAmbiguousFallbacks verifies unsafe or uncertain sources are handled explicitly.
 func TestPlanPlaybackV3RejectsDolbyOnlyAndFreezesAmbiguousFallbacks(t *testing.T) {
 	registry := NewTransformationRegistryV3([]TransformationSpecV3{
-		{Name: TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: TransformationAudioToAACV3, RecipeVersion: TransformationAudioToAACRecipeVersionV3, Available: true},
 		{Name: TransformationVideoToH264V3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, Available: true},
 		{Name: TransformationHDRToSDRToneMapV3, RecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3, Available: true},
 	})
@@ -2650,7 +2650,7 @@ func TestPlanPlaybackV3ToneMapEscapeRequiresExecutableTranscode(t *testing.T) {
 	registry := NewTransformationRegistryV3([]TransformationSpecV3{
 		{Name: TransformationServerDV7HDR10V3, RecipeVersion: "1", Available: true},
 		{Name: TransformationVideoToH264V3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, Available: true},
-		{Name: TransformationAudioToAACV3, RecipeVersion: "1", Available: true},
+		{Name: TransformationAudioToAACV3, RecipeVersion: TransformationAudioToAACRecipeVersionV3, Available: true},
 		{Name: TransformationHDRToSDRToneMapV3, RecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3, Available: true},
 	})
 	capabilities := tonemap.Capabilities{{
@@ -3066,8 +3066,40 @@ func TestPlanPlaybackV3HLSAudioConversionHonorsChannelCeiling(t *testing.T) {
 	if result.Plan == nil || result.Plan.Delivery != DeliveryRemuxHLSV3 || !result.TranscodeAudio || result.TargetAudioChannels != 2 {
 		t.Fatalf("result = %s", ExplainPlannerResultV3(result))
 	}
+	if result.SourceAudioChannels != 8 {
+		t.Fatalf("frozen source audio channels = %d, want selected 7.1 track", result.SourceAudioChannels)
+	}
 	if result.Plan.EffectiveRecipe.AudioChannels == nil || *result.Plan.EffectiveRecipe.AudioChannels != 2 || result.Plan.EffectiveRecipe.AudioLayout != "stereo" {
 		t.Fatalf("AAC recipe = %#v", result.Plan.EffectiveRecipe)
+	}
+	if len(result.Plan.Transformations) != 1 || result.Plan.Transformations[0].RecipeVersion != TransformationAudioToAACRecipeVersionV3 {
+		t.Fatalf("audio transformation = %#v, want recipe %s", result.Plan.Transformations, TransformationAudioToAACRecipeVersionV3)
+	}
+}
+
+func TestStereoDownmixSourceChannelsV3OnlyFreezesBoostedRoutes(t *testing.T) {
+	tests := []struct {
+		name                    string
+		source, target          int
+		transcodeAudio, wantSet bool
+	}{
+		{name: "surround to stereo", source: 6, target: 2, transcodeAudio: true, wantSet: true},
+		{name: "surround preserved", source: 6, target: 6, transcodeAudio: true},
+		{name: "stereo re-encode", source: 2, target: 2, transcodeAudio: true},
+		{name: "mono output", source: 6, target: 1, transcodeAudio: true},
+		{name: "audio copy", source: 6, target: 2},
+		{name: "unknown source", source: 0, target: 2, transcodeAudio: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := stereoDownmixSourceChannelsV3(test.source, test.target, test.transcodeAudio)
+			if test.wantSet && got != test.source {
+				t.Fatalf("source channels = %d, want %d", got, test.source)
+			}
+			if !test.wantSet && got != 0 {
+				t.Fatalf("source channels = %d, want zero for an unchanged recipe", got)
+			}
+		})
 	}
 }
 
@@ -3090,7 +3122,7 @@ func TestPlanPlaybackV3AudioOnlyConvertsUnsupportedCodec(t *testing.T) {
 		t.Fatalf("plan = %#v", result.Plan)
 	}
 
-	noToolchain := NewTransformationRegistryV3([]TransformationSpecV3{{Name: "audio_to_aac", RecipeVersion: "1"}})
+	noToolchain := NewTransformationRegistryV3([]TransformationSpecV3{{Name: "audio_to_aac", RecipeVersion: "2"}})
 	result = PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true}, Registry: noToolchain})
 	if result.Terminal == nil || result.Terminal.Reason != "audio_conversion_unsupported" || !result.Terminal.Retryable {
 		t.Fatalf("result = %s", ExplainPlannerResultV3(result))

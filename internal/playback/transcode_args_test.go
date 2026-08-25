@@ -1226,3 +1226,41 @@ func TestTranscodesAudioMatchesFFmpegDefault(t *testing.T) {
 		}
 	}
 }
+
+func TestAppendAudioArgsBoostsOnlyEncodedSurroundToStereo(t *testing.T) {
+	const wantFilter = "aresample=out_chlayout=stereo,alimiter=level_in=2:limit=0.794328235:attack=5:release=50:level=false:latency=true"
+	tests := []struct {
+		name           string
+		codec          string
+		sourceChannels int
+		targetChannels int
+		wantBoost      bool
+	}{
+		{name: "aac 5.1 to stereo", codec: "aac", sourceChannels: 6, targetChannels: 2, wantBoost: true},
+		{name: "default aac 7.1 to stereo", sourceChannels: 8, targetChannels: 2, wantBoost: true},
+		{name: "aac default target is stereo", codec: "aac", sourceChannels: 6, wantBoost: true},
+		{name: "opus output is stereo", codec: "opus", sourceChannels: 6, wantBoost: true},
+		{name: "stereo aac encode", codec: "aac", sourceChannels: 2, targetChannels: 2},
+		{name: "unknown source channels", codec: "aac", targetChannels: 2},
+		{name: "surround to mono", codec: "aac", sourceChannels: 6, targetChannels: 1},
+		{name: "surround preserved", codec: "aac", sourceChannels: 6, targetChannels: 6},
+		{name: "copy", codec: "copy", sourceChannels: 6, targetChannels: 2},
+		{name: "ac3 preserves source layout", codec: "ac3", sourceChannels: 6, targetChannels: 2},
+		{name: "eac3 preserves source layout", codec: "eac3", sourceChannels: 6, targetChannels: 2},
+		{name: "stereo opus encode", codec: "opus", sourceChannels: 2, targetChannels: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := appendAudioArgs(nil, TranscodeOpts{
+				TargetCodecAudio:    tt.codec,
+				SourceAudioChannels: tt.sourceChannels,
+				TargetAudioChannels: tt.targetChannels,
+			})
+			gotBoost := argsContainPair(args, "-af", wantFilter)
+			if gotBoost != tt.wantBoost {
+				t.Fatalf("downmix boost present=%t, want %t; args=%s", gotBoost, tt.wantBoost, strings.Join(args, " "))
+			}
+		})
+	}
+}

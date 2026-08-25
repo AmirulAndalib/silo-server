@@ -172,6 +172,36 @@ func TestToneMapArtifactExecutionFingerprintRejectsRefreshedPathOrDuration(t *te
 	}
 }
 
+func TestPreparedAudioBoostFreezesSelectedSourceChannelsInExecutionFingerprint(t *testing.T) {
+	manager := &ArtifactManager{}
+	file := &models.MediaFile{
+		ID: 42, FilePath: "/media/movie.mkv", Duration: 3600,
+		AudioTracks: []models.AudioTrack{{Channels: 2}, {Channels: 6}},
+	}
+	artifact := &Artifact{
+		ID: "artifact-audio", MediaFileID: file.ID, Format: "transcode",
+		Container: "mp4", CodecVideo: "h264", CodecAudio: "aac", AudioTrackIndex: 1,
+	}
+	artifact.ParamsHash = paramsHash(artifact.Format, artifact.Container, artifact.CodecVideo, artifact.CodecAudio, artifact.Resolution, artifact.AudioTrackIndex, artifact.TargetBitrateKbps, false)
+	opts := manager.buildOpts(file, artifact)
+	if opts.SourceAudioChannels != 6 {
+		t.Fatalf("SourceAudioChannels = %d, want selected surround track", opts.SourceAudioChannels)
+	}
+	if artifactUsesExecutionFingerprint(artifact) {
+		t.Fatal("legacy parameter hash was misclassified as a frozen execution fingerprint")
+	}
+
+	artifact.ParamsHash = downloadprepare.NewRequest(artifact.ID, opts).ExecutionFingerprint()
+	if !artifactUsesExecutionFingerprint(artifact) || !artifactExecutionFingerprintMatches(artifact, opts) {
+		t.Fatal("source-sensitive audio recipe was not protected by its execution fingerprint")
+	}
+	changed := opts
+	changed.SourceAudioChannels = 8
+	if artifactExecutionFingerprintMatches(artifact, changed) {
+		t.Fatal("changed selected source channels reused the frozen audio artifact")
+	}
+}
+
 func TestResolveToneMapTargetRejectsHDRTranscodeWhenToneMapPolicyUnavailable(t *testing.T) {
 	file := hdrDownloadTestFile()
 	target := playback.PrepareTarget{CodecVideo: "h264", Resolution: "1080p"}

@@ -452,6 +452,7 @@ func (s *Server) serveRemuxClaims(w http.ResponseWriter, r *http.Request, claims
 		FFmpegPath:             s.watcher.Config().Playback.FFmpegPath,
 		ContentType:            playback.RemuxContentType(claims.AudioOnly),
 		AudioOnly:              claims.AudioOnly,
+		SourceAudioChannels:    claims.SourceAudioChannels,
 		TargetAudioChannels:    claims.TargetAudioChannels,
 		TargetAudioBitrateKbps: claims.TargetAudioBitrateKbps,
 	})

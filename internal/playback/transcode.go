@@ -94,6 +94,10 @@ type TranscodeOpts struct {
 	// Empty preserves the legacy text path for callers minted before the field.
 	SubtitleCodec   string
 	AudioTrackIndex int // -1 = default (first track), >= 0 = specific track
+	// SourceAudioChannels is the selected source stream's channel count. Zero
+	// means unknown and deliberately disables stereo downmix gain: boosting an
+	// already-stereo stream would change its authored level.
+	SourceAudioChannels int
 	// TargetAudioChannels selects mono (1), stereo (2/default), or 5.1 (6+)
 	// output. Ignored for copy/passthrough audio targets.
 	TargetAudioChannels int
@@ -1192,6 +1196,20 @@ func TranscodesAudio(targetCodecAudio string) bool {
 	return !strings.EqualFold(targetCodecAudio, "copy")
 }
 
+const stereoDownmixBoostFilterV3 = "aresample=out_chlayout=stereo,alimiter=level_in=2:limit=0.794328235:attack=5:release=50:level=false:latency=true"
+
+// appendStereoDownmixBoostArgs applies the playback downmix policy only after
+// the source is explicitly rematrixed to stereo. The order matters: limiting
+// the source channels before FFmpeg sums them would still allow the final
+// stereo signal to clip. The limiter's input gain is +6.0206 dB; its -2 dBFS
+// sample ceiling leaves headroom for lossy-codec and inter-sample overshoot.
+func appendStereoDownmixBoostArgs(args []string, sourceChannels, outputChannels int) []string {
+	if sourceChannels <= 2 || outputChannels != 2 {
+		return args
+	}
+	return append(args, "-af", stereoDownmixBoostFilterV3)
+}
+
 // appendAudioArgs adds audio codec arguments. Supports "copy" for passthrough,
 // plus opus / aac / eac3 / ac3 as re-encode targets. EAC3 and AC3 are useful
 // when we must transcode video but want to preserve surround channels for an
@@ -1210,6 +1228,7 @@ func appendAudioArgs(args []string, opts TranscodeOpts) []string {
 		args = append(args, "-c:a", "copy")
 	case "opus":
 		args = append(args, "-c:a", "libopus", "-b:a", "192k", "-ac", "2")
+		args = appendStereoDownmixBoostArgs(args, opts.SourceAudioChannels, 2)
 	case "eac3":
 		// Typical Dolby Digital Plus 5.1 bitrate; let the source dictate channel
 		// count so we preserve surround when possible.
@@ -1220,6 +1239,7 @@ func appendAudioArgs(args []string, opts TranscodeOpts) []string {
 	default:
 		channels, bitrateKbps := resolvedAACOutputV3(opts.TargetAudioChannels, opts.TargetAudioBitrateKbps)
 		args = append(args, "-c:a", "aac", "-b:a", strconv.Itoa(bitrateKbps)+"k", "-ac", strconv.Itoa(channels))
+		args = appendStereoDownmixBoostArgs(args, opts.SourceAudioChannels, channels)
 	}
 
 	return args
@@ -2365,6 +2385,15 @@ func (s *TranscodeSession) SetAudioTrackIndex(index int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.opts.AudioTrackIndex = index
+}
+
+// SetSourceAudioChannels updates the selected source track's channel count in
+// the session's opts. Must be called before Restart() so the rebuilt ffmpeg
+// command applies (or removes) the stereo-downmix loudness filter.
+func (s *TranscodeSession) SetSourceAudioChannels(channels int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.opts.SourceAudioChannels = channels
 }
 
 // cleanStaleSegments removes segment files at or after startSegment and the

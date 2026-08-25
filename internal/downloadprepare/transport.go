@@ -90,7 +90,10 @@ type Request struct {
 	TargetResolution           string                 `json:"target_resolution,omitempty"`
 	TargetBitrateKbps          int                    `json:"target_bitrate_kbps,omitempty"`
 	AudioTrackIndex            int                    `json:"audio_track_index"`
-	TotalDuration              float64                `json:"total_duration,omitempty"`
+	// SourceAudioChannels freezes the selected input stream's probed channel
+	// count. Zero is the mixed-version-safe unknown value and never enables gain.
+	SourceAudioChannels int     `json:"source_audio_channels,omitempty"`
+	TotalDuration       float64 `json:"total_duration,omitempty"`
 }
 
 // Result identifies a completed artifact without exposing the node's local
@@ -171,6 +174,13 @@ func (r Request) ToneMapRequested() bool {
 		r.ToneMapDVConfigPresent || r.ToneMapDVBLCompatIDPresent || r.ToneMapDVBLPresent || r.ToneMapDVRPUPresent
 }
 
+// StereoDownmixBoostRequested reports whether this prepared-file recipe needs
+// the source-sensitive audio_to_aac v2 behavior. Prepared AAC output uses the
+// historical stereo default, so only a known surround source qualifies.
+func (r Request) StereoDownmixBoostRequested() bool {
+	return r.SourceAudioChannels > 2 && playback.TranscodesAudio(r.TargetCodecAudio)
+}
+
 // ValidToneMapAttestation reports whether a requested recipe carries every
 // frozen field needed to compare a node's artifact receipt exactly.
 func (r Request) ValidToneMapAttestation() bool {
@@ -217,6 +227,7 @@ func NewRequest(artifactID string, opts playback.TranscodeOpts) Request {
 		TargetResolution:           opts.TargetResolution,
 		TargetBitrateKbps:          opts.TargetBitrateKbps,
 		AudioTrackIndex:            opts.AudioTrackIndex,
+		SourceAudioChannels:        opts.SourceAudioChannels,
 		TotalDuration:              opts.TotalDuration,
 	}
 }
@@ -245,6 +256,7 @@ func (r Request) TranscodeOpts(ffmpegPath, hwAccel, hwDevice string, sink playba
 		TargetResolution:           r.TargetResolution,
 		TargetBitrateKbps:          r.TargetBitrateKbps,
 		AudioTrackIndex:            r.AudioTrackIndex,
+		SourceAudioChannels:        r.SourceAudioChannels,
 		SubtitleTrackIndex:         -1,
 		FFmpegPath:                 ffmpegPath,
 		HWAccel:                    hwAccel,

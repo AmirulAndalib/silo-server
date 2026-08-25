@@ -772,6 +772,7 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 		TranscodeRouteSet:    true,
 		SubtitleTrackIndex:   -1,
 		StreamBitrateKbps:    8_000,
+		SourceAudioChannels:  6,
 		TranscodeHWAccel:     "qsv",
 		ToneMapMode:          tonemap.ModeHardware,
 		TranscodeNodeURL:     "http://old-node",
@@ -790,6 +791,7 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 			TranscodeRouteSet:    true,
 			SubtitleTrackIndex:   1,
 			StreamBitrateKbps:    3_500,
+			SourceAudioChannels:  8,
 			TranscodeHWAccel:     "none",
 			ToneMapMode:          tonemap.ModeSoftware,
 			TranscodeNodeURL:     "http://new-node",
@@ -806,6 +808,7 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	if replaced.MediaFileID != 84 || replaced.PlayMethod != playback.PlayTranscode || replaced.AudioTrackIndex != 2 ||
+		replaced.SourceAudioChannels != 8 ||
 		replaced.TranscodeNodeURL != "http://new-node" || replaced.TranscodeHWAccel != "none" || replaced.ToneMapMode != "software" || replaced.Position != position || !replaced.IsPaused {
 		t.Fatalf("replacement session = %#v", replaced)
 	}
@@ -817,6 +820,7 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	if restored.MediaFileID != 42 || restored.PlayMethod != playback.PlayDirect || restored.AudioTrackIndex != 0 ||
+		restored.SourceAudioChannels != 6 ||
 		restored.TranscodeNodeURL != "http://old-node" || restored.TranscodeTransportID != "old-transport" ||
 		restored.TranscodeHWAccel != "qsv" || restored.ToneMapMode != "hardware" ||
 		restored.Position != 0 || restored.IsPaused {

@@ -23,6 +23,7 @@ func remoteTranscodeNodeStubV3(t *testing.T) *httptest.Server {
 		case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
 			writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{
 				{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
+				{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 			}})
 		case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
 			var request transcodenode.TranscodeStartRequest
@@ -40,14 +41,17 @@ func remoteTranscodeNodeStubV3(t *testing.T) *httptest.Server {
 
 func remoteHLSPlanV3() *playback.PlanV3 {
 	return &playback.PlanV3{
-		PlanID:          "plan:node-recipe",
-		Delivery:        playback.DeliveryTranscodeHLSV3,
-		Transformations: []playback.TransformationV3{{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3}},
+		PlanID:   "plan:node-recipe",
+		Delivery: playback.DeliveryTranscodeHLSV3,
+		Transformations: []playback.TransformationV3{
+			{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
+			{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
+		},
 	}
 }
 
 func remoteHLSResultV3() playback.PlannerResultV3 {
-	return playback.PlannerResultV3{Plan: remoteHLSPlanV3(), PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac"}
+	return playback.PlannerResultV3{Plan: remoteHLSPlanV3(), PlayMethod: playback.PlayTranscode, TranscodeAudio: true, TargetVideoCodec: "h264", TargetAudioCodec: "aac", SourceAudioChannels: 6, TargetAudioChannels: 2}
 }
 
 // A header-authenticated attempt publishes no stream token, so when the node
@@ -89,7 +93,7 @@ func TestPrepareTransportV3HeaderAuthStoresTheNodeRecipeForRestartRecovery(t *te
 			if !ok {
 				t.Fatalf("no recipe stored under transport %q; a node restart would 404 this session", transport.transportID)
 			}
-			if card.TranscodeNodeURL != node.URL || card.TargetCodecVideo != "h264" || card.SegmentDuration <= 0 {
+			if card.TranscodeNodeURL != node.URL || card.TargetCodecVideo != "h264" || card.SourceAudioChannels != 6 || card.TargetAudioChannels != 2 || card.SegmentDuration <= 0 {
 				t.Fatalf("stored recipe = %#v, want the complete recipe the node accepted", card)
 			}
 			if _, keyedBySession := recipes.cards["session-node-recipe"]; keyedBySession {

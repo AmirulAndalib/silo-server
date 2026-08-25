@@ -82,7 +82,7 @@ func TestRequestRoundTripPreservesFrozenToneMapRecipe(t *testing.T) {
 		ToneMapFilter: "tonemap_vaapi", ToneMapRecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3,
 		ToneMapPreflightRequired: true, ToneMapSourceRevision: revision,
 		ToneMapDVConfigPresent: true, ToneMapDVBLCompatIDPresent: true, ToneMapDVBLPresent: true, ToneMapDVRPUPresent: true,
-		TargetCodecVideo: "h264", TargetCodecAudio: "aac",
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac", SourceAudioChannels: 6,
 	}
 	request := NewRequest("artifact-1", want)
 	wire, err := json.Marshal(request)
@@ -96,7 +96,8 @@ func TestRequestRoundTripPreservesFrozenToneMapRecipe(t *testing.T) {
 	got := decoded.TranscodeOpts("/usr/bin/ffmpeg", "qsv", "/dev/dri/renderD128", nil)
 	if got.ToneMapPolicy != want.ToneMapPolicy || got.ToneMapMode != want.ToneMapMode ||
 		got.ToneMapSourceKind != want.ToneMapSourceKind || got.ToneMapRecipeVersion != want.ToneMapRecipeVersion ||
-		got.ToneMapPreflightRequired != want.ToneMapPreflightRequired || got.ToneMapSourceRevision != revision {
+		got.ToneMapPreflightRequired != want.ToneMapPreflightRequired || got.ToneMapSourceRevision != revision ||
+		got.SourceAudioChannels != want.SourceAudioChannels {
 		t.Fatalf("tone-map request round trip = %+v, want %+v", got, want)
 	}
 	if !got.ToneMapDVConfigPresent || !got.ToneMapDVBLCompatIDPresent || !got.ToneMapDVBLPresent || !got.ToneMapDVRPUPresent {
@@ -128,7 +129,7 @@ func TestRequestExecutionFingerprintBindsRecipeButNotArtifactHandle(t *testing.T
 		ToneMapPreflightRequired: true, ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 42, FileSize: 100},
 		ToneMapDVConfigPresent: true, ToneMapDVBLCompatIDPresent: true, ToneMapDVBLPresent: true, ToneMapDVRPUPresent: true,
 		TargetCodecVideo: "h264", TargetCodecAudio: "aac", TargetResolution: "1080p",
-		TargetBitrateKbps: 8000, AudioTrackIndex: 1, TotalDuration: 7200,
+		TargetBitrateKbps: 8000, AudioTrackIndex: 1, SourceAudioChannels: 6, TotalDuration: 7200,
 	}
 	want := base.ExecutionFingerprint()
 	if want == "" {
@@ -145,9 +146,33 @@ func TestRequestExecutionFingerprintBindsRecipeButNotArtifactHandle(t *testing.T
 		t.Fatal("byte-affecting software decode did not change execution fingerprint")
 	}
 	changed = base
+	changed.SourceAudioChannels = 8
+	if got := changed.ExecutionFingerprint(); got == want {
+		t.Fatal("byte-affecting source channel count did not change execution fingerprint")
+	}
+	changed = base
 	changed.TotalDuration++
 	if got := changed.ExecutionFingerprint(); got == want {
 		t.Fatal("byte-affecting duration did not change execution fingerprint")
+	}
+}
+
+func TestRequestStereoDownmixBoostRequested(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		req  Request
+		want bool
+	}{
+		{name: "surround AAC", req: Request{TargetCodecAudio: "aac", SourceAudioChannels: 6}, want: true},
+		{name: "stereo AAC", req: Request{TargetCodecAudio: "aac", SourceAudioChannels: 2}},
+		{name: "unknown AAC", req: Request{TargetCodecAudio: "aac"}},
+		{name: "surround copy", req: Request{TargetCodecAudio: "copy", SourceAudioChannels: 6}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.req.StereoDownmixBoostRequested(); got != test.want {
+				t.Fatalf("StereoDownmixBoostRequested() = %t, want %t", got, test.want)
+			}
+		})
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
@@ -119,6 +120,24 @@ func paramsHashWithToneMapRevision(params paramsHashParams) string {
 	}
 	sum := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(sum[:])
+}
+
+// artifactUsesExecutionFingerprint distinguishes the new source-sensitive
+// recipe hash from the legacy parameter-only hash without adding a second
+// durable column. Existing ordinary artifacts keep their historical identity;
+// newly boosted downmixes use the transported execution fingerprint instead.
+func artifactUsesExecutionFingerprint(a *Artifact) bool {
+	if a == nil {
+		return false
+	}
+	if a.ToneMapMode != "" {
+		return true
+	}
+	if !playback.TranscodesAudio(a.CodecAudio) {
+		return false
+	}
+	legacyHash := paramsHash(a.Format, a.Container, a.CodecVideo, a.CodecAudio, a.Resolution, a.AudioTrackIndex, a.TargetBitrateKbps, false)
+	return a.ParamsHash != legacyHash
 }
 
 // effectiveArtifactDir resolves where prepared artifacts are written: the

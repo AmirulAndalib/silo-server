@@ -469,6 +469,51 @@ func TestConcurrentRemoteStartsPublishOneTrackedRoute(t *testing.T) {
 	}
 }
 
+func TestStartRemoteTranscodeDoesNotAdoptMismatchedAudioRecipe(t *testing.T) {
+	tests := []struct {
+		name               string
+		oldAudioTrackIndex int
+		oldSourceChannels  int
+	}{
+		{name: "selected track changed channel layout", oldAudioTrackIndex: 1, oldSourceChannels: 6},
+		{name: "selected track changed at same channel layout", oldAudioTrackIndex: 0, oldSourceChannels: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var received transcodenode.TranscodeStartRequest
+			node := fakeTranscodeNode(t, &received)
+			handler, _, playbackStore := newRemoteTranscodeHandler(t, node.URL, &stubRecipeNodeStore{})
+			oldRecipe := playback.NewRecipeCard(7, "profile-1", 42, node.URL, playback.TranscodeOpts{
+				SessionID:           "upstream-1",
+				InputPath:           "/media/movie.mkv",
+				TargetCodecVideo:    compatTargetVideoCodec,
+				TargetCodecAudio:    compatTargetAudioCodec,
+				SegmentDuration:     compatSegmentDuration,
+				AudioTrackIndex:     tt.oldAudioTrackIndex,
+				SourceAudioChannels: tt.oldSourceChannels,
+			})
+			playbackStore.Put(PlaybackSession{
+				ID: "play-1", UpstreamSessionID: "upstream-1", TranscodeStarted: true, Recipe: &oldRecipe,
+			})
+
+			err := handler.startRemoteTranscode(
+				context.Background(), "play-1", "upstream-1", testRemoteTranscodeSource(),
+				&models.MediaFile{ID: 42, FilePath: "/media/movie.mkv"}, 0, node.URL,
+			)
+			if err != nil {
+				t.Fatalf("startRemoteTranscode: %v", err)
+			}
+			if received.AudioTrackIndex != 1 || received.SourceAudioChannels != 0 {
+				t.Fatalf("replacement request = track %d, channels %d; want track 1, channels 0", received.AudioTrackIndex, received.SourceAudioChannels)
+			}
+			stored, ok := playbackStore.Get("play-1")
+			if !ok || stored.Recipe == nil || stored.Recipe.AudioTrackIndex != 1 || stored.Recipe.SourceAudioChannels != 0 {
+				t.Fatalf("replacement recipe = %+v, found=%v; want track 1, channels 0", stored.Recipe, ok)
+			}
+		})
+	}
+}
+
 // TestMasterManifestGatesUnhealthyRemoteAdoption verifies the adoption redirect
 // only fires while the winner's node is still healthy: a recipe another API
 // server published is re-checked against the local pool before the client is
@@ -506,7 +551,10 @@ func TestMasterManifestGatesUnhealthyRemoteAdoption(t *testing.T) {
 				MediaSources:      []PlaybackMediaSource{source},
 				UpstreamSessionID: "upstream-1", UpstreamPlayMethod: "transcode",
 				TranscodeStarted: true,
-				Recipe:           &playback.RecipeCard{TranscodeNodeURL: adoptedURL},
+				Recipe: &playback.RecipeCard{
+					TranscodeNodeURL: adoptedURL,
+					AudioTrackIndex:  compatAudioTrackIndexOrDefault(source),
+				},
 			})
 			request := httptest.NewRequest(http.MethodGet, "/Videos/item/master.m3u8?PlaySessionId=play-1&MediaSourceId="+source.ID, nil)
 			request = request.WithContext(context.WithValue(request.Context(), compatSessionKey, &Session{Token: "compat-token", StreamAppUserID: 7, ProfileID: "profile-1"}))

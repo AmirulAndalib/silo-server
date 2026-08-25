@@ -37,6 +37,7 @@ type TranscodeStartRequest struct {
 	SourceVideoCodec           string                 `json:"source_video_codec"`
 	SourceVideoProfile         string                 `json:"source_video_profile,omitempty"`
 	SourceVideoBitDepth        int                    `json:"source_video_bit_depth,omitempty"`
+	SourceAudioChannels        int                    `json:"source_audio_channels,omitempty"`
 	SoftwareVideoDecode        bool                   `json:"software_video_decode,omitempty"`
 	ToneMapPolicy              tonemap.Policy         `json:"tone_map_policy,omitempty"`
 	ToneMapMode                tonemap.Mode           `json:"tone_map_mode,omitempty"`
@@ -605,7 +606,7 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "prepared download artifact has invalid attestation", http.StatusInternalServerError)
 		return
 	}
-	if req.ToneMapRequested() {
+	if downloadPrepareReceiptRequested(req) {
 		if err := writeDownloadArtifactReceipt(outputPath, result); err != nil {
 			_ = os.Remove(outputPath)
 			http.Error(w, "failed to publish download artifact receipt", http.StatusInternalServerError)
@@ -617,17 +618,23 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 
 func expectedDownloadPrepareResult(req downloadprepare.Request, fileSize int64) (downloadprepare.Result, bool) {
 	result := downloadprepare.Result{ArtifactID: req.ArtifactID, FileSize: fileSize}
-	if !req.ToneMapRequested() {
+	if !downloadPrepareReceiptRequested(req) {
 		return result, true
 	}
-	if !req.ValidToneMapAttestation() {
-		return downloadprepare.Result{}, false
+	if req.ToneMapRequested() {
+		if !req.ValidToneMapAttestation() {
+			return downloadprepare.Result{}, false
+		}
+		result.ToneMapRecipeVersion = req.ToneMapRecipeVersion
+		result.ToneMapMode = req.ToneMapMode
+		result.ToneMapSourceRevisionFingerprint = req.ToneMapSourceRevision.Fingerprint()
 	}
-	result.ToneMapRecipeVersion = req.ToneMapRecipeVersion
-	result.ToneMapMode = req.ToneMapMode
-	result.ToneMapSourceRevisionFingerprint = req.ToneMapSourceRevision.Fingerprint()
 	result.ExecutionFingerprint = req.ExecutionFingerprint()
-	return result, true
+	return result, result.ExecutionFingerprint != ""
+}
+
+func downloadPrepareReceiptRequested(req downloadprepare.Request) bool {
+	return req.ToneMapRequested() || req.StereoDownmixBoostRequested()
 }
 
 func existingDownloadPrepareResult(outputPath string, req downloadprepare.Request) (downloadprepare.Result, bool) {
@@ -639,7 +646,7 @@ func existingDownloadPrepareResult(outputPath string, req downloadprepare.Reques
 	if !valid {
 		return downloadprepare.Result{}, false
 	}
-	if !req.ToneMapRequested() {
+	if !downloadPrepareReceiptRequested(req) {
 		return want, true
 	}
 	receipt, err := readDownloadArtifactReceipt(outputPath)
@@ -947,6 +954,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		SourceVideoCodec:           req.SourceVideoCodec,
 		SourceVideoProfile:         req.SourceVideoProfile,
 		SourceVideoBitDepth:        req.SourceVideoBitDepth,
+		SourceAudioChannels:        req.SourceAudioChannels,
 		SoftwareVideoDecode:        req.SoftwareVideoDecode,
 		ToneMapPolicy:              req.ToneMapPolicy,
 		ToneMapMode:                req.ToneMapMode,

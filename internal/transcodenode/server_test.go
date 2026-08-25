@@ -584,6 +584,74 @@ func TestHandleDownloadPreparePublishesToneMapReceiptAndStatusAttestation(t *tes
 	}
 }
 
+func TestHandleDownloadPreparePublishesStereoDownmixReceiptAndStatusAttestation(t *testing.T) {
+	server := newTestServer(t)
+	ffmpegPath := filepath.Join(t.TempDir(), "ffmpeg.sh")
+	if err := os.WriteFile(ffmpegPath, []byte("#!/bin/sh\nfor last; do :; done\nprintf artifact > \"$last\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server.watcher.Config().Playback.FFmpegPath = ffmpegPath
+	server.watcher.Config().Playback.HWAccel = playback.HWAccelNone
+	prepareRequest := downloadprepare.Request{
+		ArtifactID:          "artifact-stereo-downmix",
+		InputPath:           "/media/movie.mkv",
+		TargetCodecVideo:    "copy",
+		TargetCodecAudio:    "aac",
+		AudioTrackIndex:     0,
+		SourceAudioChannels: 6,
+	}
+	body, err := json.Marshal(prepareRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	server.handleDownloadPrepare(recorder, httptest.NewRequest(http.MethodPost, "/downloads/prepare", bytes.NewReader(body)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	want := downloadprepare.Result{
+		ArtifactID:           prepareRequest.ArtifactID,
+		FileSize:             int64(len("artifact")),
+		ExecutionFingerprint: prepareRequest.ExecutionFingerprint(),
+	}
+	var result downloadprepare.Result
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result != want {
+		t.Fatalf("prepare result = %+v, want %+v", result, want)
+	}
+
+	outputPath := filepath.Join(server.artifactRoot, prepareRequest.ArtifactID+".mp4")
+	receiptBytes, err := os.ReadFile(outputPath + ".receipt.json")
+	if err != nil {
+		t.Fatalf("read receipt: %v", err)
+	}
+	var receipt downloadprepare.Result
+	if err := json.Unmarshal(receiptBytes, &receipt); err != nil {
+		t.Fatalf("decode receipt: %v", err)
+	}
+	if receipt != want {
+		t.Fatalf("stored receipt = %+v, want %+v", receipt, want)
+	}
+
+	head := httptest.NewRequest(http.MethodHead, "/downloads/artifacts/"+prepareRequest.ArtifactID, nil)
+	head.Header.Set("Authorization", "Bearer "+testSecret)
+	headRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(headRecorder, head)
+	if headRecorder.Code != http.StatusOK {
+		t.Fatalf("HEAD status = %d, body = %s", headRecorder.Code, headRecorder.Body.String())
+	}
+	attestation, err := downloadprepare.ResultFromHeaders(headRecorder.Header())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attestation.ExecutionFingerprint != want.ExecutionFingerprint || attestation.FileSize != want.FileSize {
+		t.Fatalf("HEAD attestation = %+v, want fingerprint %q and size %d", attestation, want.ExecutionFingerprint, want.FileSize)
+	}
+}
+
 func TestHandleDownloadPrepareDoesNotReuseToneMapArtifactWithoutReceipt(t *testing.T) {
 	server := newTestServer(t)
 	if err := os.MkdirAll(server.artifactRoot, 0o755); err != nil {

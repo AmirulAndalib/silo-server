@@ -295,6 +295,7 @@ func TestHandlePlaybackReport_UpdatesSelectedAudioStreamAndUpstreamTrack(t *test
 // TestEnsureTranscodeSession_UsesSelectedAudioTrack verifies compatibility playback keeps the requested audio stream.
 func TestEnsureTranscodeSession_UsesSelectedAudioTrack(t *testing.T) {
 	version := testCompatVersion()
+	version.AudioTracks[1].Channels = 6
 	codec := NewResourceIDCodec()
 	source := testCompatSource(codec, version)
 	filePath := filepath.Join(t.TempDir(), "movie.mkv")
@@ -331,6 +332,9 @@ func TestEnsureTranscodeSession_UsesSelectedAudioTrack(t *testing.T) {
 
 	if got := transcodeSession.Opts().AudioTrackIndex; got != 1 {
 		t.Fatalf("AudioTrackIndex = %d, want 1", got)
+	}
+	if got := transcodeSession.Opts().SourceAudioChannels; got != 6 {
+		t.Fatalf("SourceAudioChannels = %d, want 6", got)
 	}
 	upstream := sessionMgr.sessions["upstream-1"]
 	if upstream.TranscodeHWAccel != playback.HWAccelNone || upstream.ToneMapMode != "" {
@@ -379,6 +383,7 @@ func TestEnsureTranscodeSessionReportsReconstructedRecipeFacts(t *testing.T) {
 
 func TestStartRemoteTranscode_IncludesSelectedAudioTrack(t *testing.T) {
 	version := testCompatVersion()
+	version.AudioTracks[1].Channels = 6
 	codec := NewResourceIDCodec()
 	source := testCompatSource(codec, version)
 	filePath := filepath.Join(t.TempDir(), "movie.mkv")
@@ -388,6 +393,12 @@ func TestStartRemoteTranscode_IncludesSelectedAudioTrack(t *testing.T) {
 
 	var remoteReq transcodenode.TranscodeStartRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{Transformations: []playback.TransformationV3{{
+				Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3,
+			}}})
+			return
+		}
 		if err := json.NewDecoder(r.Body).Decode(&remoteReq); err != nil {
 			t.Fatalf("decode remote request: %v", err)
 		}
@@ -400,7 +411,10 @@ func TestStartRemoteTranscode_IncludesSelectedAudioTrack(t *testing.T) {
 	handler := &PlaybackHandler{
 		JWTSecret:     "secret",
 		playbackStore: playbackStore,
-		tm:            playback.NewTranscodeManager(),
+		sessionMgr: &testCompatSessionManager{sessions: map[string]*playback.Session{
+			"upstream-1": {ID: "upstream-1", UserID: 7, ProfileID: "profile-1", MediaFileID: version.FileID, PlayMethod: playback.PlayTranscode},
+		}},
+		tm: playback.NewTranscodeManager(),
 	}
 	if err := handler.startRemoteTranscode(
 		context.Background(),
@@ -416,5 +430,12 @@ func TestStartRemoteTranscode_IncludesSelectedAudioTrack(t *testing.T) {
 
 	if got := remoteReq.AudioTrackIndex; got != 1 {
 		t.Fatalf("remote AudioTrackIndex = %d, want 1", got)
+	}
+	if got := remoteReq.SourceAudioChannels; got != 6 {
+		t.Fatalf("remote SourceAudioChannels = %d, want 6", got)
+	}
+	persisted, ok := playbackStore.Get("play-1")
+	if !ok || persisted.Recipe == nil || persisted.Recipe.SourceAudioChannels != 6 {
+		t.Fatalf("persisted remote recipe = %#v, want six source channels", persisted)
 	}
 }

@@ -113,7 +113,8 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 		seekSeconds = d
 	}
 	if h.NodePlanner != nil && h.JWTSecret != "" {
-		plan := h.NodePlanner.PlanSession(playSession.UpstreamSessionID, "", false, source.Version.Bitrate)
+		requiresAudioBoost := method == string(playback.PlayRemux) && source.TranscodeAudio && compatSourceAudioChannels(*source) > 0
+		plan := h.planCompatProxySession(r.Context(), playSession.UpstreamSessionID, source.Version.Bitrate, requiresAudioBoost)
 		if redirectURL, redirectErr := h.buildProxyRedirectURL(playSession.ID, playSession.UpstreamSessionID, method, file, *source, session, playSession.CreatedAt, "", seekSeconds, plan.ProxyNode); redirectErr == nil {
 			http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 			return
@@ -138,9 +139,14 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 		if resolvedAudioTrackIndex, ok := compatAudioTrackIndex(*source); ok {
 			audioTrackIndex = resolvedAudioTrackIndex
 		}
+		sourceAudioChannels := 0
+		if source.TranscodeAudio {
+			sourceAudioChannels = compatSourceAudioChannels(*source)
+		}
 		_ = playback.ServeRemuxWithOptions(w, r, file.FilePath, "mp4", seekSeconds, source.TranscodeAudio, audioTrackIndex, file.PrimaryDVProfile(), playback.RemuxServeOptions{
-			ContentType: playback.RemuxContentType(file.IsAudioOnly()),
-			AudioOnly:   file.IsAudioOnly(),
+			ContentType:         playback.RemuxContentType(file.IsAudioOnly()),
+			AudioOnly:           file.IsAudioOnly(),
+			SourceAudioChannels: sourceAudioChannels,
 		})
 	default:
 		_ = playback.ServeDirectPlay(w, r, file.FilePath)
@@ -263,7 +269,7 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 				writeError(w, http.StatusNotFound, "NotFound", "Media file not found")
 				return
 			}
-			plan, planErr := h.planCompatTranscodeSession(r.Context(), upstreamSession, file, source.Version.Bitrate, !source.TranscodeAudio)
+			plan, planErr := h.planCompatTranscodeSession(r.Context(), upstreamSession, file, source.Version.Bitrate, !source.TranscodeAudio, compatSourceAudioChannels(*source))
 			if planErr != nil {
 				failRemoteStart()
 				if errors.Is(planErr, errToneMapCapabilityUnavailable) {
@@ -305,7 +311,7 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 							h.releaseCompatSessionReservation(playSession.UpstreamSessionID)
 							failedNodeURLs[strings.TrimRight(tcNode.URL, "/")] = struct{}{}
 							requiredToneMapMode = tonemap.ModeSoftware
-							plan, planErr = h.planCompatSoftwareToneMapSession(r.Context(), upstreamSession, file, source.Version.Bitrate, failedNodeURLs)
+							plan, planErr = h.planCompatSoftwareToneMapSession(r.Context(), upstreamSession, file, source.Version.Bitrate, compatSourceAudioChannels(*source), failedNodeURLs)
 							if planErr == nil {
 								continue
 							}
@@ -1492,6 +1498,9 @@ func (h *PlaybackHandler) upstreamRecipeCard(ps *PlaybackSession, cs *Session, s
 		card = *ps.Recipe
 	} else if method == "remux" {
 		card = playback.NewRemuxRecipeCard(ps.UpstreamSessionID, cs.StreamAppUserID, cs.ProfileID, source.FileID, source.TranscodeAudio, compatAudioTrackIndexOrDefault(source))
+		if source.TranscodeAudio {
+			card.SourceAudioChannels = compatSourceAudioChannels(source)
+		}
 	} else {
 		card = playback.NewDirectRecipeCard(ps.UpstreamSessionID, cs.StreamAppUserID, cs.ProfileID, source.FileID)
 	}
@@ -1853,6 +1862,7 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 		FFmpegPath:          h.FFmpegPath,
 		HWAccel:             h.HWAccel,
 		AudioTrackIndex:     compatAudioTrackIndexOrDefault(source),
+		SourceAudioChannels: compatSourceAudioChannels(source),
 		TotalDuration:       float64(source.Version.Duration),
 		FastStart:           true,
 	}
@@ -2100,6 +2110,7 @@ func (h *PlaybackHandler) restartCompatTranscodeForAudioSelection(
 
 	if transcodeSession := h.tm.GetTranscodeSession(playSession.UpstreamSessionID); transcodeSession != nil {
 		transcodeSession.SetAudioTrackIndex(audioTrackIndex)
+		transcodeSession.SetSourceAudioChannels(compatSourceAudioChannels(source))
 		startSegment := 0
 		if segmentDuration := transcodeSession.Opts().SegmentDuration; segmentDuration > 0 && positionSeconds > 0 {
 			startSegment = int(positionSeconds / float64(segmentDuration))

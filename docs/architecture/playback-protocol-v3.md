@@ -103,7 +103,7 @@ the document is always the full one:
                "header_authenticated_media_v1", "authorized_media_origins_v1", "software_video_decode_v1",
                "plan_invalidated_v1", "plan_source_duration_v1"],
   "deliveries": ["original_http", "server_remux_progressive", "server_remux_hls", "server_transcode_hls"],
-  "transformations": [{"name": "audio_to_aac", "executor": "server", "recipe_version": "1", "validated_claims": ["audio_decode"]}]
+  "transformations": [{"name": "audio_to_aac", "executor": "server", "recipe_version": "2", "validated_claims": ["audio_decode"]}]
 }
 ```
 
@@ -1152,10 +1152,16 @@ A transformation is a named, versioned media operation with claims attached.
 
 | Name | Executor | Recipe version | Promises | Claims |
 | --- | --- | --- | --- | --- |
-| `audio_to_aac` | `server` | `1` | — | `audio_decode` |
+| `audio_to_aac` | `server` | `2` | — | `audio_decode` |
 | `video_to_h264` | `server` | `2` | `sdr` output | `h264_decode` |
 | `hdr_to_sdr_tonemap` | `server` | `1` | limited-range BT.709 `sdr` output with HDR metadata removed | `hdr_metadata_removed`, `sdr_bt709_output` |
 | `server_dv7_to_hdr10` | `server` | `1` | `hdr10` output | `dolby_vision_metadata_removed`, `hdr10_base_layer_preserved`, `enhancement_layer_discarded` |
+
+`audio_to_aac` recipe version 2 treats the selected source channel count as a
+byte-affecting input. When a source with more than two channels is encoded to
+stereo, FFmpeg first rematrixes it to stereo, then applies up to 6 dB of input
+gain through a limiter with a -2 dBFS sample ceiling. Mono output, surround
+output, stereo sources, and copied audio do not use the boost.
 
 They are advertised only if an eligible executor actually has the required
 capability. The ordinary FFmpeg feature probe is cached; the more expensive
@@ -1164,7 +1170,7 @@ tone-map smoke probe is lazy and cached by binary, backend, and device:
 | Transformation | Probe |
 | --- | --- |
 | `server_dv7_to_hdr10` | `ffmpeg -bsfs` contains `dovi_rpu` |
-| `audio_to_aac` | `ffmpeg -encoders` contains an `aac` encoder |
+| `audio_to_aac` | `ffmpeg -encoders` contains an `aac` encoder and a bounded silent-frame smoke test executes the exact stereo-downmix limiter graph |
 | `video_to_h264` | `ffmpeg -encoders` contains any of `libx264`, `h264_qsv`, `h264_vaapi`, `h264_nvenc`, `h264_videotoolbox` |
 | `hdr_to_sdr_tonemap` | A bounded decode → BT.709 H.264 encode succeeds for the advertised PQ, BT.2100 HLG, legacy HLG, BT.709 SDR-base, and/or BT.2020 SDR-base source kinds on the real software, VAAPI/QSV, or NVENC executor |
 

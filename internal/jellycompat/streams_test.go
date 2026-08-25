@@ -425,12 +425,19 @@ func TestBuildProxyRedirectURLMarksToneMapForOldReaderRejection(t *testing.T) {
 
 func TestBuildProxyRedirectURLCarriesAudioOnlyRemuxClaim(t *testing.T) {
 	h := &PlaybackHandler{JWTSecret: "test-secret"}
+	source := PlaybackMediaSource{
+		TranscodeAudio:          true,
+		DefaultAudioStreamIndex: intPtr(0),
+		Version: catalog.FileVersion{AudioTracks: []models.AudioTrack{{
+			Codec: "ac3", Channels: 6, Default: true,
+		}}},
+	}
 	redirectURL, err := h.buildProxyRedirectURL(
 		"play-1",
 		"upstream-1",
 		string(playback.PlayRemux),
 		&models.MediaFile{FilePath: "/media/book.m4b", BaseType: "audiobook", CodecAudio: "aac"},
-		PlaybackMediaSource{},
+		source,
 		nil,
 		time.Time{},
 		"",
@@ -447,6 +454,31 @@ func TestBuildProxyRedirectURLCarriesAudioOnlyRemuxClaim(t *testing.T) {
 	}
 	if !claims.AudioOnly {
 		t.Fatalf("audio-only remux claim = false: %#v", claims)
+	}
+	if claims.SourceAudioChannels != 6 || claims.PlayMethod != streamtoken.PlayMethodAudioDownmixRemux {
+		t.Fatalf("audio downmix claims = %#v, want six-channel v2 remux", claims)
+	}
+}
+
+func TestUpstreamRemuxRecipeCardFreezesSelectedSurroundChannels(t *testing.T) {
+	selected := 2 // one video stream, then audio track index 1
+	source := PlaybackMediaSource{
+		FileID:                   77,
+		TranscodeAudio:           true,
+		SelectedAudioStreamIndex: &selected,
+		Version: catalog.FileVersion{
+			VideoTracks: []models.VideoTrack{{Codec: "h264"}},
+			AudioTracks: []models.AudioTrack{{Channels: 2}, {Channels: 6}},
+		},
+	}
+	card := (&PlaybackHandler{}).upstreamRecipeCard(
+		&PlaybackSession{UpstreamSessionID: "upstream"},
+		&Session{StreamAppUserID: 7, ProfileID: "profile-1"},
+		source,
+		"remux",
+	)
+	if card.AudioTrackIndex != 1 || card.SourceAudioChannels != 6 {
+		t.Fatalf("remux recipe = %#v, want selected six-channel source", card)
 	}
 }
 
@@ -837,6 +869,8 @@ func TestHandleDeleteActiveEncodings_NotYetStartedNotTornDown(t *testing.T) {
 func TestRestartCompatTranscodeForAudioSelection_LocalRePersistsRecipe(t *testing.T) {
 	codec := NewResourceIDCodec()
 	version := testCompatVersion() // 1 video track, 2 audio tracks.
+	version.AudioTracks[0].Channels = 2
+	version.AudioTracks[1].Channels = 6
 
 	// Initial source selects the first (main) audio track -> AudioTrackIndex 0.
 	mainSource := testCompatSource(codec, version)
@@ -892,6 +926,9 @@ func TestRestartCompatTranscodeForAudioSelection_LocalRePersistsRecipe(t *testin
 	if got := transcodeSession.Opts().AudioTrackIndex; got != 0 {
 		t.Fatalf("initial AudioTrackIndex = %d, want 0", got)
 	}
+	if got := transcodeSession.Opts().SourceAudioChannels; got != 0 {
+		t.Fatalf("initial SourceAudioChannels = %d, want zero for stereo", got)
+	}
 	if initial, ok := playbackStore.Get("play-1"); !ok || initial.Recipe == nil {
 		t.Fatal("expected initial recipe persisted after ensureTranscodeSession")
 	} else if initial.Recipe.AudioTrackIndex != 0 {
@@ -921,6 +958,9 @@ func TestRestartCompatTranscodeForAudioSelection_LocalRePersistsRecipe(t *testin
 	if got := transcodeSession.Opts().AudioTrackIndex; got != 1 {
 		t.Fatalf("live AudioTrackIndex after switch = %d, want 1", got)
 	}
+	if got := transcodeSession.Opts().SourceAudioChannels; got != 6 {
+		t.Fatalf("live SourceAudioChannels after switch = %d, want 6", got)
+	}
 
 	// ...and, crucially, the durable recipe must track it so a reconstruct after
 	// a central restart rebuilds ffmpeg on the commentary track.
@@ -933,6 +973,23 @@ func TestRestartCompatTranscodeForAudioSelection_LocalRePersistsRecipe(t *testin
 	}
 	if updated.Recipe.AudioTrackIndex != 1 {
 		t.Fatalf("Recipe.AudioTrackIndex = %d, want 1 (re-persisted to newly selected track)", updated.Recipe.AudioTrackIndex)
+	}
+	if updated.Recipe.SourceAudioChannels != 6 {
+		t.Fatalf("Recipe.SourceAudioChannels = %d, want 6", updated.Recipe.SourceAudioChannels)
+	}
+
+	// Switching back to the stereo track must clear the source-sensitive field;
+	// retaining 6 would boost an authored stereo stream after the next restart.
+	restarted, err = handler.restartCompatTranscodeForAudioSelection(context.Background(), playSession, mainSource, 0)
+	if err != nil || !restarted {
+		t.Fatalf("restart back to stereo = %t, err %v", restarted, err)
+	}
+	if got := transcodeSession.Opts().SourceAudioChannels; got != 0 {
+		t.Fatalf("live SourceAudioChannels after stereo switch = %d, want 0", got)
+	}
+	updated, ok = playbackStore.Get("play-1")
+	if !ok || updated.Recipe == nil || updated.Recipe.AudioTrackIndex != 0 || updated.Recipe.SourceAudioChannels != 0 {
+		t.Fatalf("stereo switch recipe = %#v, want track 0 with unknown source channels", updated)
 	}
 }
 

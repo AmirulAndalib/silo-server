@@ -49,6 +49,7 @@ type Session struct {
 	TargetResolution       string       // requested output resolution for transcodes
 	TargetVideoCodec       string       // requested output video codec for transcodes
 	TargetAudioCodec       string       // requested output audio codec when audio is transcoded
+	SourceAudioChannels    int          // selected source track channels; zero means unknown/legacy
 	TargetAudioChannels    int          // requested encoded audio channel count
 	TargetAudioBitrateKbps int          // requested encoded audio bitrate cap
 	TargetBitrateKbps      int          // requested output bitrate cap for transcodes
@@ -98,6 +99,7 @@ type SessionStreamState struct {
 	TargetResolution          string
 	TargetVideoCodec          string
 	TargetAudioCodec          string
+	SourceAudioChannels       int
 	TargetAudioChannels       int
 	TargetAudioBitrateKbps    int
 	TargetBitrateKbps         int
@@ -942,6 +944,7 @@ func applySessionStreamStateLocked(s *Session, state SessionStreamState) {
 	s.TargetResolution = state.TargetResolution
 	s.TargetVideoCodec = state.TargetVideoCodec
 	s.TargetAudioCodec = state.TargetAudioCodec
+	s.SourceAudioChannels = state.SourceAudioChannels
 	s.TargetAudioChannels = state.TargetAudioChannels
 	s.TargetAudioBitrateKbps = state.TargetAudioBitrateKbps
 	s.TargetBitrateKbps = state.TargetBitrateKbps
@@ -981,6 +984,7 @@ func snapshotSessionStreamStateLocked(s *Session) SessionStreamState {
 		TargetResolution:          s.TargetResolution,
 		TargetVideoCodec:          s.TargetVideoCodec,
 		TargetAudioCodec:          s.TargetAudioCodec,
+		SourceAudioChannels:       s.SourceAudioChannels,
 		TargetAudioChannels:       s.TargetAudioChannels,
 		TargetAudioBitrateKbps:    s.TargetAudioBitrateKbps,
 		TargetBitrateKbps:         s.TargetBitrateKbps,
@@ -1012,6 +1016,7 @@ func restoreSessionStreamStateLocked(s *Session, state SessionStreamState) {
 	s.TargetResolution = state.TargetResolution
 	s.TargetVideoCodec = state.TargetVideoCodec
 	s.TargetAudioCodec = state.TargetAudioCodec
+	s.SourceAudioChannels = state.SourceAudioChannels
 	s.TargetAudioChannels = state.TargetAudioChannels
 	s.TargetAudioBitrateKbps = state.TargetAudioBitrateKbps
 	s.TargetBitrateKbps = state.TargetBitrateKbps
