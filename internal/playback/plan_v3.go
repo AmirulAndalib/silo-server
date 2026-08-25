@@ -202,7 +202,8 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 	audioOK, passthrough, audioClaims := audioEligibilityV3(source, input.Request)
 	originalAudioSelectionOK := audioSelectionUsesContainerDefaultV3(file, input.AudioTrackIndex) ||
 		clientSelectsOriginalAudioTrackV3(input.Request)
-	if !audioOK && source.AudioCodec == "" && (file == nil || len(file.AudioTracks) == 0) {
+	noAudioTrack := source.AudioCodec == "" && (file == nil || len(file.AudioTracks) == 0)
+	if !audioOK && noAudioTrack {
 		// Video-only media has no audio stream to adapt: treating the absence
 		// as an unsupported codec would force a pointless AAC conversion — or
 		// a terminal when conversion is unavailable — on a playable file. An
@@ -425,8 +426,8 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 		plan.Delivery = DeliveryRemuxProgressiveV3
 		plan.Stream = StreamV3{Protocol: StreamHTTPProgressiveV3, Container: containerMP4V3, MIMEType: mimeVideoMP4V3, Headers: map[string]string{}, HeaderRefresh: HeaderRefreshNoneV3}
 		plan.DecisionReason = "container_normalization"
-		progressiveAudioOK := deliverySupportsAudioClaimV3(input.Request, DeliveryClassProgressiveV3, source.AudioCodec, audioClaims, audioOK)
-		hlsAudioOK := hlsNativeAudioCodecV3(source.AudioCodec) &&
+		progressiveAudioOK := noAudioTrack || deliverySupportsAudioClaimV3(input.Request, DeliveryClassProgressiveV3, source.AudioCodec, audioClaims, audioOK)
+		hlsAudioOK := noAudioTrack || hlsNativeAudioCodecV3(source.AudioCodec) &&
 			deliverySupportsAudioClaimV3(input.Request, DeliveryClassHLSV3, source.AudioCodec, audioClaims, audioOK)
 		// Defer conversion when either packaging route can preserve the source
 		// audio. A progressive-incompatible codec can still take an HLS copy
@@ -493,7 +494,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 					}
 					plan.EffectiveRecipe.AudioCodec = "aac"
 					plan.Claims.Audio = AudioClaimsV3{Codec: "aac", Reason: hlsAudioAdaptationReasonV3}
-					plan.Transformations = append(plan.Transformations, TransformationV3{Name: TransformationAudioToAACV3, Executor: ExecutorServerV3, RecipeVersion: "1", ValidatedClaims: []string{ClaimAudioDecodeV3}})
+					plan.Transformations = append(plan.Transformations, TransformationV3{Name: TransformationAudioToAACV3, Executor: ExecutorServerV3, RecipeVersion: TransformationAudioToAACRecipeVersionV3, ValidatedClaims: []string{ClaimAudioDecodeV3}})
 					plan.DegradationWarnings = append(plan.DegradationWarnings, DegradationWarningV3{Code: degradationAudioConvertedV3, Message: "The selected audio track is converted to AAC for HLS delivery."})
 				}
 				hlsAudioChannels = aacOutputChannelsV3(input.Request, DeliveryClassHLSV3, source.AudioChannels, false)
