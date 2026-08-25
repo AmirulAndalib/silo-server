@@ -36,6 +36,7 @@ import { resolvePendingSeekTime } from "../utils/pendingSeek";
 import { resolveVersionAudioLanguage } from "../utils/effectiveAudioLanguage";
 import { HlsStartupGuard } from "../utils/hlsStartupGuard";
 import { resolveHLSEngineV3 } from "../utils/hlsEngine";
+import { isFirefoxUserAgent } from "../utils/browser";
 import { normalizeSubtitleMode } from "../utils/subtitleMode";
 import type {
   PlaybackExitState,
@@ -514,9 +515,7 @@ export function VideoPlayer({
   }, [isPlayerReady, planRevision]);
 
   const isFirefoxBrowser =
-    typeof navigator !== "undefined" &&
-    /firefox/i.test(navigator.userAgent) &&
-    !/seamonkey/i.test(navigator.userAgent);
+    typeof navigator !== "undefined" && isFirefoxUserAgent(navigator.userAgent);
   const watchTogether =
     watchTogetherConnection ??
     ({
