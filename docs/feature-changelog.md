@@ -2,6 +2,9 @@
 
 ## 2026-08-24
 
+### Start audiobook playback once after browser capability detection
+The web audiobook player now waits for the browser's capability check to finish before requesting a playback session. It previously reacted to each intermediate capability result, creating and immediately replacing multiple sessions when one play request should have produced only one.
+
 ### Play HDR video on SDR-only devices
 An HDR source used to be a dead end for a device that cannot display HDR: Silo had no recipe that could convert one, so the plan refused rather than washing the picture out. Silo can now tone-map HDR to SDR, on streaming and on prepared downloads alike, so those devices get a watchable picture with the colors mapped rather than clipped.
 
