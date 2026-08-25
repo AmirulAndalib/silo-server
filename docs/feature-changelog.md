@@ -2,6 +2,17 @@
 
 ## 2026-08-25
 
+### Keep fast HDR remuxes on their requested browser timeline
+The web player now limits its native-HLS HDR preservation path to Safari. Chromium browsers that advertise native HLS use hls.js for Dolby Vision and HDR10 remuxes, preventing a rapidly generated EVENT playlist from being mistaken for live playback and jumping from the requested position toward the production edge. Browsers without Media Source support still fall back to native HLS.
+
+### Allow Dolby Vision video-copy playback when only audio needs adaptation
+Protocol-v3 playback no longer attaches tone-map-only Dolby Vision provenance to an HDR-preserving HLS remux. A compatible Dolby Vision Profile 8.1 source can now keep its video-copy route while the server converts unsupported audio, instead of the transport rejecting the orphaned fields as an incomplete tone-map recipe. The same source-metadata boundary covers integrated and pooled transcode execution, including thawed session recipes.
+
+### Return playback plans before bookkeeping finishes
+Playback startup no longer waits for provider scrobbling, chapter and marker scheduling, series preference persistence, or the shared live-session refresh after the stream transport is ready and the plan is durable. Those ordered, bounded follow-up tasks now run behind the committed session, while an immediate stop still waits for its start event so provider history cannot be reversed. The three server policy reads needed for planning also run concurrently. Fresh hardware transcodes now start after two complete, atomically written fragments instead of three; CPU encodes and every seek, restart, and node reconstruction retain the larger safety window. This reduces start latency for the web, Apple, and Android clients without changing the playback protocol.
+
+Startup and transport stages now carry request-correlated timing logs, including local manifest wait and remote-node startup time, so slow direct-play, remux, and transcode starts can be separated before tuning their safety margins. Local and pooled-node conversion capabilities are warmed when the API starts, and a previously successful node inventory refreshes behind sparse playback traffic instead of making the first viewer after each cache expiry wait for it. The API and standalone transcode nodes also perform a bounded, single-frame hardware encode in the background at startup when tone-map probing would otherwise skip encoder initialization, keeping that one-time driver cost away from the first viewer.
+
 ### Keep HDR playback playable when a bitmap subtitle is auto-selected
 The web player asks the server to burn PGS/DVD/DVB subtitles into the opening playback plan. On HDR titles that forces a transcode, and with tone mapping and 4K transcoding off (the defaults) the planner can refuse the start entirely. The player now retries a refused bitmap-subtitle start with subtitles off, keeping playback available while successful subtitle starts remain a single request with no visible transport reload.
 
