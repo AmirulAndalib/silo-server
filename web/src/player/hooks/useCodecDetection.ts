@@ -161,6 +161,7 @@ function testMediaElementType(mime: string): boolean {
 export function probeWebCapabilities(): WebCapabilityProbe {
   const codecsVideo: string[] = [];
   const codecsAudio: string[] = [];
+  const progressiveCodecsAudio: string[] = [];
   const containers: string[] = [];
   const isFirefox =
     typeof navigator !== "undefined" && isFirefoxUserAgent(navigator.userAgent ?? "");
@@ -189,6 +190,13 @@ export function probeWebCapabilities(): WebCapabilityProbe {
   for (const [name, mimeTypes] of Object.entries(AUDIO_CODEC_MAP)) {
     if (mimeTypes.some(testMediaType)) {
       codecsAudio.push(name);
+    }
+    if (
+      mimeTypes
+        .filter((mime) => mime.startsWith("audio/mp4") || mime.startsWith("video/mp4"))
+        .some(testMediaType)
+    ) {
+      progressiveCodecsAudio.push(name);
     }
   }
 
@@ -252,6 +260,7 @@ export function probeWebCapabilities(): WebCapabilityProbe {
     codecsVideo,
     progressiveCodecsVideo,
     codecsAudio,
+    progressiveCodecsAudio,
     maxResolution,
     hdr,
     hdrDetails,

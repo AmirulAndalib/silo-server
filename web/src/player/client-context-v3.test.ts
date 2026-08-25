@@ -39,6 +39,7 @@ describe("buildDeliveriesV3", () => {
       codecsVideo: ["h264"],
       progressiveCodecsVideo: ["h264"],
       codecsAudio: ["aac"],
+      progressiveCodecsAudio: ["aac"],
       maxResolution: "1080p",
       hdr: false,
       hdrDetails: {
@@ -65,6 +66,7 @@ describe("structured HDR capabilities", () => {
     codecsVideo: ["hevc"],
     progressiveCodecsVideo: ["hevc"],
     codecsAudio: ["eac3"],
+    progressiveCodecsAudio: ["eac3"],
     maxResolution: "2160p",
     hdr: true,
     hdrDetails: {
@@ -118,5 +120,19 @@ describe("structured HDR capabilities", () => {
     expect(deliveries.original_http?.video_codecs).toEqual(["h264"]);
     expect(deliveries.progressive?.video_codecs).toEqual(["h264", "hevc"]);
     expect(deliveries.hls?.video_codecs).toEqual(["h264"]);
+  });
+
+  it("scopes container-specific audio evidence to progressive MP4", () => {
+    const containerScopedProbe = {
+      ...probe,
+      codecsAudio: ["aac", "vorbis"],
+      progressiveCodecsAudio: ["aac"],
+    };
+
+    const deliveries = buildDeliveriesV3(containerScopedProbe);
+
+    expect(deliveries.original_http?.audio_decode_codecs).toEqual(["aac", "vorbis"]);
+    expect(deliveries.progressive?.audio_decode_codecs).toEqual(["aac"]);
+    expect(deliveries.hls?.audio_decode_codecs).toEqual(["aac", "vorbis"]);
   });
 });

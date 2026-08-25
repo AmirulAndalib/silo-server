@@ -252,6 +252,8 @@ describe("probeWebCapabilities", () => {
     expect(capabilities.codecsAudio).toEqual(
       expect.arrayContaining(["mp3", "flac", "opus", "vorbis"]),
     );
+    expect(capabilities.progressiveCodecsAudio).toEqual(expect.arrayContaining(["flac", "opus"]));
+    expect(capabilities.progressiveCodecsAudio).not.toContain("vorbis");
     expect(capabilities.containers).toEqual(expect.arrayContaining(["mp4", "mp3", "flac", "ogg"]));
   });
 
@@ -278,6 +280,7 @@ describe("probeWebCapabilities", () => {
       'video/x-matroska; codecs="avc1.640028"',
       'video/mp4; codecs="avc1.640028"',
       'audio/mp4; codecs="mp4a.40.2"',
+      'audio/webm; codecs="vorbis"',
     ]);
     vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockImplementation((mime) =>
       supportedTypes.has(mime) ? "probably" : "",
@@ -288,6 +291,9 @@ describe("probeWebCapabilities", () => {
     expect(capabilities.containers).not.toContain("mkv");
     expect(capabilities.codecsVideo).toContain("h264");
     expect(capabilities.codecsAudio).toContain("aac");
+    expect(capabilities.codecsAudio).toContain("vorbis");
+    expect(capabilities.progressiveCodecsAudio).toContain("aac");
+    expect(capabilities.progressiveCodecsAudio).not.toContain("vorbis");
   });
 
   it("keeps advertising native MKV playback on other capable browsers", () => {

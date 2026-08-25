@@ -3157,6 +3157,36 @@ func TestPlanPlaybackV3AudioOnlyConvertsForProgressiveCodecSubset(t *testing.T) 
 	}
 }
 
+func TestPlanPlaybackV3VideoRemuxConvertsForProgressiveAudioCodecSubset(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.CodecAudio = "vorbis"
+	file.VideoTracks[0].VideoRange = "SDR"
+	file.VideoTracks[0].VideoRangeType = "SDR"
+	file.AudioTracks[0] = models.AudioTrack{Codec: "vorbis", Channels: 2, Layout: "stereo"}
+
+	req := validStartRequestV3()
+	req.Capabilities.VideoEvidence = EvidenceDeclaredV3
+	req.Capabilities.AudioEvidence = EvidenceDeclaredV3
+	req.Capabilities.CodecsAudio = []string{"aac", "vorbis"}
+	req.Capabilities.Containers = []string{"mp4"}
+	progressive := req.ClientPlaybackContext.Deliveries[DeliveryClassProgressiveV3]
+	progressive.Containers = []string{"mp4"}
+	progressive.VideoCodecs = []string{"hevc"}
+	progressive.AudioDecodeCodecs = []string{"aac"}
+	req.ClientPlaybackContext.Deliveries[DeliveryClassProgressiveV3] = progressive
+
+	result := PlanPlaybackV3(PlannerInputV3{
+		Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
+		Settings: PlannerSettingsV3{TranscodeEnabled: true}, Registry: testTransformationRegistryV3(),
+	})
+	if result.Plan == nil || result.Plan.Delivery != DeliveryRemuxProgressiveV3 || !result.TranscodeAudio || result.TargetAudioCodec != "aac" {
+		t.Fatalf("result = %s", ExplainPlannerResultV3(result))
+	}
+	if result.Plan.DecisionReason != "audio_adaptation" || len(result.Plan.Transformations) != 1 || result.Plan.Transformations[0].Name != TransformationAudioToAACV3 {
+		t.Fatalf("converted plan = %#v", result.Plan)
+	}
+}
+
 // A container mismatch on decodable audio is a remux, not a conversion, and a
 // client with neither route left gets an honest terminal. An audio-only file
 // with no probed audio codec keeps its own metadata terminal.

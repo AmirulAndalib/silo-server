@@ -424,7 +424,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 		plan.Delivery = DeliveryRemuxProgressiveV3
 		plan.Stream = StreamV3{Protocol: StreamHTTPProgressiveV3, Container: containerMP4V3, MIMEType: mimeVideoMP4V3, Headers: map[string]string{}, HeaderRefresh: HeaderRefreshNoneV3}
 		plan.DecisionReason = "container_normalization"
-		transcodeAudio := !audioOK
+		transcodeAudio := !deliveryDecodesAudioCodecV3(input.Request, DeliveryClassProgressiveV3, source.AudioCodec, audioOK)
 		progressiveAudioChannels := 0
 		localAudioConvertOK := input.Registry != nil && input.Registry.Available(TransformationAudioToAACV3)
 		if transcodeAudio {
@@ -1494,6 +1494,17 @@ func deliveryAvailableV3(request StartRequestV3, deliveryClass string) bool {
 		return false
 	}
 	return capability.Enabled && capability.SupportedOnDevice
+}
+
+// deliveryDecodesAudioCodecV3 narrows a device-wide audio claim to the active
+// delivery when the client supplies a scoped list. Empty scoped lists retain
+// the legacy fallback because older clients use them to mean "unspecified."
+func deliveryDecodesAudioCodecV3(request StartRequestV3, deliveryClass, codec string, fallback bool) bool {
+	capability, ok := request.ClientPlaybackContext.Deliveries[deliveryClass]
+	if !ok || len(capability.AudioDecodeCodecs) == 0 {
+		return fallback
+	}
+	return containsFoldV3(capability.AudioDecodeCodecs, codec)
 }
 
 // deliverySupportsPlanV3 applies the capability limits scoped to the delivery
