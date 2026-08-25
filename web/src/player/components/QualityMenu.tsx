@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Settings } from "lucide-react";
+import { Check, Settings } from "lucide-react";
+import { resolveActiveQualityOptionId } from "../playback-info";
 import type { QualityOption } from "../types";
 
 export interface VersionInfo {
@@ -91,7 +92,8 @@ export function QualityMenu({
 
   if (options.length === 0) return null;
 
-  const activeOption = options.find((o) => o.id === activeId);
+  const resolvedActiveId = resolveActiveQualityOptionId(options, activeId);
+  const activeOption = options.find((option) => option.id === resolvedActiveId);
   let menuItemIndex = 0;
 
   return (
@@ -177,12 +179,21 @@ export function QualityMenu({
                 role="menuitem"
                 type="button"
                 className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:outline-none ${
-                  opt.id === activeId ? "text-white" : "text-white/70"
+                  opt.id === resolvedActiveId ? "text-white" : "text-white/70"
                 }`}
+                aria-current={opt.id === resolvedActiveId ? "true" : undefined}
                 onClick={() => handleSelect(opt.id)}
               >
                 <span>{opt.label}</span>
-                <span className="text-xs text-white/40">{opt.sublabel}</span>
+                <span className="flex items-center gap-2">
+                  <span className="text-xs text-white/40">{opt.sublabel}</span>
+                  {opt.id === resolvedActiveId && (
+                    <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-white text-black">
+                      <Check className="size-3" strokeWidth={3} aria-hidden="true" />
+                      <span className="sr-only">Selected</span>
+                    </span>
+                  )}
+                </span>
               </button>
             );
           })}
