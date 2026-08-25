@@ -76,6 +76,7 @@ type RecipeCard struct {
 	ToneMapDVBLPresent         bool                   `json:"tone_map_dv_bl_present,omitempty"`
 	ToneMapDVRPUPresent        bool                   `json:"tone_map_dv_rpu_present,omitempty"`
 	VideoBitstreamFilter       string                 `json:"video_bitstream_filter,omitempty"`
+	VideoSampleEntry           string                 `json:"video_sample_entry,omitempty"`
 	SeekSeconds                float64                `json:"seek_seconds"`
 	StreamOriginSeconds        float64                `json:"stream_origin_seconds,omitempty"`
 	CopySeekAnchorResolved     bool                   `json:"copy_seek_anchor_resolved,omitempty"`
@@ -131,6 +132,7 @@ func NewRecipeCard(userID int, profileID string, mediaFileID int, transcodeNodeU
 		ToneMapDVBLPresent:         opts.ToneMapDVBLPresent,
 		ToneMapDVRPUPresent:        opts.ToneMapDVRPUPresent,
 		VideoBitstreamFilter:       opts.VideoBitstreamFilter,
+		VideoSampleEntry:           opts.VideoSampleEntry,
 		SeekSeconds:                opts.SeekSeconds,
 		StreamOriginSeconds:        opts.StreamOriginSeconds,
 		CopySeekAnchorResolved:     opts.CopySeekAnchorResolved,
@@ -227,6 +229,7 @@ func (c RecipeCard) TranscodeOpts(outputDir, ffmpegPath string, logSink FFmpegLo
 		ToneMapDVBLPresent:         c.ToneMapDVBLPresent,
 		ToneMapDVRPUPresent:        c.ToneMapDVRPUPresent,
 		VideoBitstreamFilter:       c.VideoBitstreamFilter,
+		VideoSampleEntry:           c.VideoSampleEntry,
 		SeekSeconds:                c.SeekSeconds,
 		StreamOriginSeconds:        c.StreamOriginSeconds,
 		CopySeekAnchorResolved:     c.CopySeekAnchorResolved,
@@ -312,6 +315,7 @@ func (c RecipeCard) ToClaims() streamtoken.Claims {
 		ToneMapDVBLPresent:         c.ToneMapDVBLPresent,
 		ToneMapDVRPUPresent:        c.ToneMapDVRPUPresent,
 		VideoBitstreamFilter:       c.VideoBitstreamFilter,
+		VideoSampleEntry:           c.VideoSampleEntry,
 		SeekSeconds:                c.SeekSeconds,
 		StreamOriginSeconds:        c.StreamOriginSeconds,
 		CopySeekAnchorResolved:     c.CopySeekAnchorResolved,
@@ -380,6 +384,7 @@ func RecipeCardFromClaims(c *streamtoken.Claims) RecipeCard {
 		ToneMapDVBLPresent:         c.ToneMapDVBLPresent,
 		ToneMapDVRPUPresent:        c.ToneMapDVRPUPresent,
 		VideoBitstreamFilter:       c.VideoBitstreamFilter,
+		VideoSampleEntry:           c.VideoSampleEntry,
 		SeekSeconds:                c.SeekSeconds,
 		StreamOriginSeconds:        c.StreamOriginSeconds,
 		CopySeekAnchorResolved:     c.CopySeekAnchorResolved,

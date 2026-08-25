@@ -236,6 +236,7 @@ export function probeWebCapabilities(): WebCapabilityProbe {
       };
     }),
   };
+  const hlsSupport = detectHLSSupport();
 
   return {
     containers,
@@ -245,7 +246,8 @@ export function probeWebCapabilities(): WebCapabilityProbe {
     maxResolution,
     hdr,
     hdrDetails,
-    hls: detectHLSSupport(),
+    hls: hlsSupport.supported,
+    nativeHLS: hlsSupport.native,
   };
 }
 

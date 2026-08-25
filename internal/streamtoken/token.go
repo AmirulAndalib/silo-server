@@ -91,6 +91,7 @@ type Claims struct {
 	ToneMapDVBLPresent         bool    `json:"tmdb,omitempty"`
 	ToneMapDVRPUPresent        bool    `json:"tmdr,omitempty"`
 	VideoBitstreamFilter       string  `json:"vbsf,omitempty"`
+	VideoSampleEntry           string  `json:"vse,omitempty"`
 	OutputSubdir               string  `json:"osd,omitempty"`
 	SeekSeconds                float64 `json:"seek,omitempty"`
 	StreamOriginSeconds        float64 `json:"origin,omitempty"`

@@ -46,6 +46,7 @@ type TranscodeOpts struct {
 	SourceVideoProfile   string
 	SourceVideoBitDepth  int
 	VideoBitstreamFilter string // validated copy-mode BSF, e.g. dovi_rpu=strip=1
+	VideoSampleEntry     string // allowlisted copy-HLS sample entry: dvh1 or hvc1
 	SeekSeconds          float64
 	// StreamOriginSeconds is the keyframe timestamp at which a copy-video
 	// stream actually begins. SeekSeconds remains the client-requested -ss so
@@ -110,6 +111,27 @@ type TranscodeOpts struct {
 // DV7ToHDR10BitstreamFilter strips Dolby Vision RPU metadata during a
 // copy-mode HLS remux; the enhancement layer is dropped by stream mapping.
 const DV7ToHDR10BitstreamFilter = "dovi_rpu=strip=1"
+
+const (
+	VideoSampleEntryDVH1 = "dvh1"
+	VideoSampleEntryHVC1 = "hvc1"
+)
+
+func validVideoSampleEntry(value string) bool {
+	return value == "" || value == VideoSampleEntryDVH1 || value == VideoSampleEntryHVC1
+}
+
+// VideoSampleEntryForDVCopy returns the sample entry a copy-video HLS session
+// should tag when it preserves a Dolby Vision source as-is: dvh1 for the
+// single-layer HEVC profiles (5 and 8), whose DOVI configuration record
+// survives the copy and whose consumers key decoder selection off the sample
+// entry. Every other profile keeps ffmpeg's default labeling.
+func VideoSampleEntryForDVCopy(dvProfile int) string {
+	if dvProfile == 5 || dvProfile == 8 {
+		return VideoSampleEntryDVH1
+	}
+	return ""
+}
 
 const (
 	transcodeCodecH264 = "h264"
@@ -240,6 +262,10 @@ const (
 
 // StartTranscode launches an ffmpeg process that produces HLS segments.
 func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession, error) {
+	if !validVideoSampleEntry(opts.VideoSampleEntry) ||
+		opts.VideoSampleEntry != "" && !strings.EqualFold(opts.TargetCodecVideo, "copy") {
+		return nil, fmt.Errorf("unsupported video sample-entry recipe")
+	}
 	if opts.VideoBitstreamFilter != "" &&
 		(opts.VideoBitstreamFilter != DV7ToHDR10BitstreamFilter || !strings.EqualFold(opts.TargetCodecVideo, "copy")) {
 		return nil, fmt.Errorf("unsupported video bitstream filter recipe")
@@ -572,7 +598,7 @@ func classifyToneMapPreflightError(err error) error {
 func buildFFmpegArgs(opts TranscodeOpts) []string {
 	opts = normalizeTranscodeOpts(opts)
 
-	isVideoCopy := opts.TargetCodecVideo == "copy"
+	isVideoCopy := strings.EqualFold(opts.TargetCodecVideo, "copy")
 	isAudioCopy := opts.TargetCodecAudio == "copy"
 
 	args := []string{
@@ -617,6 +643,12 @@ func buildFFmpegArgs(opts TranscodeOpts) []string {
 		args = append(args, "-c:v", "copy")
 		if opts.VideoBitstreamFilter == DV7ToHDR10BitstreamFilter {
 			args = append(args, "-bsf:v", opts.VideoBitstreamFilter)
+		}
+		switch opts.VideoSampleEntry {
+		case VideoSampleEntryDVH1:
+			args = append(args, "-tag:v", VideoSampleEntryDVH1, "-strict", "unofficial")
+		case VideoSampleEntryHVC1:
+			args = append(args, "-tag:v", VideoSampleEntryHVC1)
 		}
 	} else {
 		args = appendVideoArgs(args, opts)

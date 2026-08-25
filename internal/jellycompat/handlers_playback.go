@@ -1020,6 +1020,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 	}
 	if source.TranscodeAudio {
 		reqBody.TargetCodecVideo = "copy"
+		reqBody.VideoSampleEntry = playback.VideoSampleEntryForDVCopy(file.PrimaryDVProfile())
 	}
 
 	dispatch := func(request transcodenode.TranscodeStartRequest) (transcodenode.TranscodeStartResponse, int, bool, error) {
@@ -1193,6 +1194,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		StartSegmentNumber:  reqBody.StartSegmentNumber,
 		TargetCodecVideo:    reqBody.TargetCodecVideo,
 		TargetCodecAudio:    reqBody.TargetCodecAudio,
+		VideoSampleEntry:    reqBody.VideoSampleEntry,
 		SegmentDuration:     reqBody.SegmentDuration,
 		AudioTrackIndex:     reqBody.AudioTrackIndex,
 		TotalDuration:       reqBody.TotalDuration,
@@ -1710,6 +1712,7 @@ func buildMediaStreamsWithSelection(routeItemID, mediaSourceID string, version c
 		if bitrate == 0 && version.Bitrate > 0 {
 			bitrate = version.Bitrate * 1000
 		}
+		anamorphic, anamorphicKnown := compatIsAnamorphic(track)
 		streams = append(streams, mediaStreamDTO{
 			Index:                  index,
 			Type:                   "Video",
@@ -1725,7 +1728,7 @@ func buildMediaStreamsWithSelection(routeItemID, mediaSourceID string, version c
 			SupportsExternalStream: false,
 			IsInterlaced:           track.Interlaced,
 			IsAVC:                  strings.EqualFold(track.Codec, "h264"),
-			IsAnamorphic:           false,
+			IsAnamorphic:           anamorphicKnown && anamorphic,
 			NalLengthSize:          "4",
 			BitDepth:               track.BitDepth,
 			RefFrames:              track.ReferenceFrames,

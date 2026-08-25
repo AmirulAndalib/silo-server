@@ -29,6 +29,7 @@ func TestRecipeCardRoundTripOpts(t *testing.T) {
 		ToneMapSourceRevision:    revision,
 		ToneMapDVConfigPresent:   true, ToneMapDVBLCompatIDPresent: true, ToneMapDVBLPresent: true, ToneMapDVRPUPresent: true,
 		VideoBitstreamFilter:   "dovi_rpu=strip=1",
+		VideoSampleEntry:       VideoSampleEntryDVH1,
 		SeekSeconds:            900,
 		StreamOriginSeconds:    896,
 		CopySeekAnchorResolved: true,
@@ -83,6 +84,9 @@ func TestRecipeCardRoundTripOpts(t *testing.T) {
 	}
 	if got.VideoBitstreamFilter != "dovi_rpu=strip=1" {
 		t.Errorf("VideoBitstreamFilter = %q", got.VideoBitstreamFilter)
+	}
+	if got.VideoSampleEntry != VideoSampleEntryDVH1 {
+		t.Errorf("VideoSampleEntry = %q", got.VideoSampleEntry)
 	}
 	if !got.SoftwareVideoDecode {
 		t.Error("SoftwareVideoDecode lost in round trip")
@@ -292,6 +296,7 @@ func TestRecipeCardClaimsRoundTrip(t *testing.T) {
 		ToneMapSourceRevision:    revision,
 		ToneMapDVConfigPresent:   true, ToneMapDVBLCompatIDPresent: true, ToneMapDVBLPresent: true, ToneMapDVRPUPresent: true,
 		VideoBitstreamFilter:   "dovi_rpu=strip=1",
+		VideoSampleEntry:       VideoSampleEntryDVH1,
 		SeekSeconds:            900,
 		StreamOriginSeconds:    896,
 		CopySeekAnchorResolved: true,
@@ -329,6 +334,7 @@ func TestRecipeCardClaimsRoundTrip(t *testing.T) {
 		got.ToneMapRecipeVersion != card.ToneMapRecipeVersion || got.ToneMapPreflightRequired != card.ToneMapPreflightRequired || got.ToneMapSourceRevision != revision ||
 		got.ToneMapDVConfigPresent != card.ToneMapDVConfigPresent || got.ToneMapDVBLCompatIDPresent != card.ToneMapDVBLCompatIDPresent || got.ToneMapDVBLPresent != card.ToneMapDVBLPresent || got.ToneMapDVRPUPresent != card.ToneMapDVRPUPresent ||
 		got.VideoBitstreamFilter != card.VideoBitstreamFilter ||
+		got.VideoSampleEntry != card.VideoSampleEntry ||
 		got.SeekSeconds != card.SeekSeconds || got.StreamOriginSeconds != card.StreamOriginSeconds ||
 		got.CopySeekAnchorResolved != card.CopySeekAnchorResolved || got.TargetResolution != card.TargetResolution ||
 		got.TargetCodecVideo != card.TargetCodecVideo || got.TargetCodecAudio != card.TargetCodecAudio ||

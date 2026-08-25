@@ -1858,6 +1858,7 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 	}
 	if source.TranscodeAudio {
 		opts.TargetCodecVideo = "copy"
+		opts.VideoSampleEntry = playback.VideoSampleEntryForDVCopy(file.PrimaryDVProfile())
 	}
 	var toneMapCapabilities tonemap.Capabilities
 	if !source.TranscodeAudio {

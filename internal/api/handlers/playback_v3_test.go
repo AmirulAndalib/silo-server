@@ -2781,7 +2781,15 @@ func TestPrepareTransportV3SendsResolvedCopyAnchorToRemoteExecutor(t *testing.T)
 	handler.copySeekAnchor = func(context.Context, string, string, float64, int) (float64, int, error) {
 		return 1085.501, 542, nil
 	}
-	plan := &playback.PlanV3{PlanID: "plan:remote-copy-anchor", Delivery: playback.DeliveryRemuxHLSV3, Timeline: playback.TimelineV3{SourceStartSeconds: 1086.2}}
+	plan := &playback.PlanV3{
+		PlanID:   "plan:remote-copy-anchor",
+		Delivery: playback.DeliveryRemuxHLSV3,
+		Source:   playback.SourceDescriptorV3{DVProfile: 8},
+		EffectiveRecipe: playback.EffectiveRecipeV3{
+			DynamicRange: playback.DynamicRangeDolbyVisionV3,
+		},
+		Timeline: playback.TimelineV3{SourceStartSeconds: 1086.2},
+	}
 	transport, transportErr := handler.prepareTransportV3(
 		httptest.NewRequest(http.MethodPost, "/", nil),
 		&playback.Session{ID: "session-remote-copy-anchor", UserID: 7, ProfileID: "profile-1"},
@@ -2795,9 +2803,47 @@ func TestPrepareTransportV3SendsResolvedCopyAnchorToRemoteExecutor(t *testing.T)
 		!startRequest.CopySeekAnchorResolved || startRequest.StartSegmentNumber != 542 {
 		t.Fatalf("remote copy timeline = %#v", startRequest)
 	}
+	if startRequest.VideoSampleEntry != playback.VideoSampleEntryDVH1 {
+		t.Fatalf("remote copy VideoSampleEntry = %q", startRequest.VideoSampleEntry)
+	}
 	if plan.Timeline.StreamOriginSeconds != 1085.501 || plan.Timeline.TimelineOffsetSeconds != 1085.501 ||
 		math.Abs(plan.Timeline.PlayerStartSeconds-0.699) > 0.0001 {
 		t.Fatalf("advertised copy timeline = %#v", plan.Timeline)
+	}
+}
+
+func TestVideoSampleEntryForPlanV3(t *testing.T) {
+	tests := []struct {
+		name string
+		plan *playback.PlanV3
+		want string
+	}{
+		{
+			name: "preserved profile 8",
+			plan: &playback.PlanV3{Delivery: playback.DeliveryRemuxHLSV3,
+				Source:          playback.SourceDescriptorV3{DVProfile: 8},
+				EffectiveRecipe: playback.EffectiveRecipeV3{DynamicRange: playback.DynamicRangeDolbyVisionV3}},
+			want: playback.VideoSampleEntryDVH1,
+		},
+		{
+			name: "stripped HDR10",
+			plan: &playback.PlanV3{Delivery: playback.DeliveryRemuxHLSV3,
+				Transformations: []playback.TransformationV3{{Name: playback.TransformationServerDV7HDR10V3}}},
+			want: playback.VideoSampleEntryHVC1,
+		},
+		{
+			name: "progressive unchanged",
+			plan: &playback.PlanV3{Delivery: playback.DeliveryRemuxProgressiveV3,
+				Source:          playback.SourceDescriptorV3{DVProfile: 8},
+				EffectiveRecipe: playback.EffectiveRecipeV3{DynamicRange: playback.DynamicRangeDolbyVisionV3}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := videoSampleEntryForPlanV3(tc.plan); got != tc.want {
+				t.Fatalf("sample entry = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

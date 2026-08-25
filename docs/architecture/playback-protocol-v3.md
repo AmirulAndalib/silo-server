@@ -437,11 +437,14 @@ sample entry because the explicit v3 HDR10 strip remux labels its output `hvc1`
 requires a definitive media-element answer for exactly `dvh1.05.06` or
 `dvh1.08.06`, because the preserve remux tags its output `dvh1`. An answer only
 for the other spelling (`hev1`/`dvhe`) is evidence for a file Silo never sends
-and earns no claim. Both claims are scoped to `progressive`: they
-are cleared from `original_http` and `hls` because those delivery paths were not
-tested by the same probe. An HDR10 claim can carry `hdr10_max_width`, `hdr10_max_height`,
-`hdr10_max_frame_rate`, and `hdr10_max_bitrate_kbps`; these ceilings keep a
-successful format probe from admitting an untested stream class.
+and earns no claim. When native HLS is available, these media-element `dvh1` and
+`hvc1` claims are scoped to `hls`, and `progressive` does not inherit them. When
+native HLS is unavailable, they remain scoped to `progressive`; the hls.js MSE
+path does not inherit evidence from a different playback engine.
+`original_http` never receives normalized-remux evidence. An HDR10 claim can
+carry `hdr10_max_width`, `hdr10_max_height`, `hdr10_max_frame_rate`, and
+`hdr10_max_bitrate_kbps`; these ceilings keep a successful format probe from
+admitting an untested stream class.
 
 ---
 
@@ -646,6 +649,10 @@ position, `can_seek_anywhere` is true when the runtime is known, and
 
 **Copy remux over HLS** is served from FFmpeg's live, still-growing playlist,
 which starts at the preceding keyframe selected by FFmpeg's input seek.
+For HEVC HDR copy packaging, the frozen plan also controls the sample entry: a
+preserved Dolby Vision Profile 5 or 8 plan emits `dvh1` with FFmpeg's unofficial
+strictness relaxation so the DOVI configuration record is retained, while a
+validated Dolby Vision-to-HDR10 plan emits `hvc1`.
 `stream_origin` and `timeline_offset` both equal that resolved source position,
 while `player_start` is the requested position minus the resolved origin so the
 client advances past copied pre-roll. `seek_window_start_seconds` is the resolved

@@ -11,6 +11,20 @@ Dolby Vision Profile 7 sources benefit too. Where the source declares a standard
 
 Admin activity shows which path a session actually used, so a stream that fell back from hardware to software reads as software rather than as whatever was planned. Direct play and direct stream of HDR are unchanged, and a device that manages HDR itself is never pushed onto a tone-map route. When tone mapping and 4K transcoding are enabled, the quality menu still offers lower resolutions during source-preserving HDR playback; choosing one validates the executor then starts the tone-mapped transcode. Quality choices now include explicit High, Medium, and Low bitrate steps at 4K, 1080p, and 720p, while omitting same-resolution steps that would not actually reduce the source bitrate.
 
+### Fix Jellyfin-compatible playback negotiation for optional codec-profile conditions
+Jellyfin clients send codec profiles whose conditions are frequently optional, and Silo previously
+failed every condition it did not model — including the `IsAnamorphic` check that jellyfin-web's
+webOS profile sends — so compatible H.264 and HEVC files were pushed into a needless transcode.
+Condition evaluation now matches Jellyfin's semantics and answers from real scanner data.
+- Honors `IsRequired` on profile conditions: an optional condition Silo cannot evaluate no longer
+  blocks direct play, while a required one still does. An omitted `IsRequired` key now decodes as
+  required, matching Jellyfin's own deserialization default.
+- Evaluates interlacing, frame rate, video and audio bitrate, audio sample rate, and audio profile
+  from the scanned track data instead of leaving those conditions unanswered.
+- Derives `IsAnamorphic` by comparing the track's display aspect ratio against its storage aspect
+  ratio, and reports the same derived value on the media stream returned to clients.
+- Restores direct play for compatible webOS H.264 and HEVC media that previously transcoded.
+
 ## 2026-08-23
 
 ### Never wait on H.264 stream-copy analysis to start playing

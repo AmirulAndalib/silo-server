@@ -2244,3 +2244,37 @@ func TestNodeReconstructLifecycleWaitDoesNotConsumeGlobalSlot(t *testing.T) {
 		t.Fatal("node session-lock waiter consumed the only global reconstruct slot")
 	}
 }
+
+func TestHandleStartPreservesVideoSampleEntry(t *testing.T) {
+	server := newTestServer(t)
+	ffmpegPath := filepath.Join(t.TempDir(), "looping-ffmpeg.sh")
+	if err := os.WriteFile(ffmpegPath, []byte("#!/bin/sh\nwhile :; do sleep 0.1; done\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server.tracker = nodesessions.NewTracker(nil, "http://node", "node", "transcode")
+	server.watcher.Config().Playback.FFmpegPath = ffmpegPath
+	requestBody, err := json.Marshal(TranscodeStartRequest{
+		SessionID: "sample-entry-start-1", InputPath: "/media/movie.mkv",
+		VideoSampleEntry: playback.VideoSampleEntryHVC1,
+		TargetCodecVideo: "copy", TargetCodecAudio: "copy", SegmentDuration: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/transcode/start", bytes.NewReader(requestBody))
+	rr := httptest.NewRecorder()
+	server.handleStart(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	server.mu.RLock()
+	session := server.sessions["sample-entry-start-1"]
+	server.mu.RUnlock()
+	if session == nil {
+		t.Fatal("session was not registered")
+	}
+	defer func() { _ = session.CloseProcess() }()
+	if got := session.Opts().VideoSampleEntry; got != playback.VideoSampleEntryHVC1 {
+		t.Fatalf("VideoSampleEntry = %q", got)
+	}
+}
