@@ -3111,6 +3111,32 @@ func TestConfigureHLSTimelineV3MatchesTransportSeekSemantics(t *testing.T) {
 	}
 }
 
+func TestBitmapFastStartKeepsDefaultTimelineAndSessionSegments(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	plan := &playback.PlanV3{
+		Delivery: playback.DeliveryTranscodeHLSV3,
+		Timeline: playback.TimelineV3{SourceStartSeconds: 658},
+	}
+	result := playback.PlannerResultV3{
+		Plan:                 plan,
+		TargetVideoCodec:     "h264",
+		SubtitleBurnIn:       true,
+		SubtitleCodec:        "hdmv_pgs_subtitle",
+		FrozenSourceMetadata: &playback.SourceExecutionMetadataV3{DurationSeconds: 1_000_000},
+	}
+	timeline, timelineErr := handler.prepareTransportTimelineV3(context.Background(), &playback.Session{ID: "bitmap-fast-start"}, nil, result)
+	if timelineErr != nil {
+		t.Fatalf("prepare timeline: %v", timelineErr)
+	}
+	if timeline.seekSeconds != 658 || timeline.startSegmentNumber != 329 {
+		t.Fatalf("timeline = %#v, want default segment alignment", timeline)
+	}
+	state := handler.v3SessionStreamState(context.Background(), &playback.Session{}, nil, result, preparedTransportV3{}, mediaAuthModeV3{})
+	if state.SegmentDuration != playback.DefaultSegmentDuration {
+		t.Fatalf("session segment duration = %d, want %d", state.SegmentDuration, playback.DefaultSegmentDuration)
+	}
+}
+
 func TestTransportGenerationV3IsUniqueAndSessionScoped(t *testing.T) {
 	first := transportGenerationV3("session-1", "plan:abcdef")
 	second := transportGenerationV3("session-1", "plan:abcdef")

@@ -3,12 +3,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   detectHDRFromMatchMedia,
   detectMaxResolutionFromScreen,
+  prewarmCodecDetection,
   probeHDR10PlaybackSupport,
   probeWebCapabilities,
+  resetCodecDetectionForTests,
   useCodecDetection,
 } from "./useCodecDetection";
 
 afterEach(() => {
+  resetCodecDetectionForTests();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -235,6 +238,25 @@ describe("probeWebCapabilities", () => {
     expect(result.current.codecsVideo).not.toContain("hevc");
     expect(result.current.progressiveCodecsVideo).toContain("hevc");
     expect(result.current.settled).toBe(true);
+    unmount();
+  });
+
+  it("reuses a capability probe warmed before playback mounts", async () => {
+    const decodingInfo = vi.fn().mockResolvedValue({
+      supported: true,
+      smooth: true,
+      powerEfficient: true,
+      keySystemAccess: null,
+    });
+    vi.stubGlobal("navigator", { mediaCapabilities: { decodingInfo } });
+
+    await prewarmCodecDetection();
+    const { result, unmount } = renderHook(() => useCodecDetection());
+    await act(async () => Promise.resolve());
+
+    expect(decodingInfo).toHaveBeenCalledTimes(1);
+    expect(result.current.settled).toBe(true);
+    expect(result.current.hdrDetails.hdr10).toBe(true);
     unmount();
   });
 
