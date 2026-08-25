@@ -217,6 +217,7 @@ describe("probeWebCapabilities", () => {
     });
 
     const { result, unmount } = renderHook(() => useCodecDetection());
+    expect(result.current.settled).toBe(false);
     expect(result.current.hdrDetails.hdr10).toBe(false);
     expect(result.current.codecsVideo).not.toContain("hevc");
     expect(result.current.progressiveCodecsVideo).not.toContain("hevc");
@@ -230,6 +231,7 @@ describe("probeWebCapabilities", () => {
     });
     expect(result.current.codecsVideo).not.toContain("hevc");
     expect(result.current.progressiveCodecsVideo).toContain("hevc");
+    expect(result.current.settled).toBe(true);
     unmount();
   });
 

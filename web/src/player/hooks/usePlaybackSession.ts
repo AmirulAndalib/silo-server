@@ -261,6 +261,7 @@ export function usePlaybackSession(
 ): UsePlaybackSessionResult {
   const config = usePlayerConfig();
   const probe = useCodecDetection();
+  const capabilitiesSettled = probe.settled;
   const clientCapabilities = useMemo(() => buildClientCapabilitiesV3(probe), [probe]);
   const clientPlaybackContext = useMemo(() => buildClientPlaybackContextV3(probe), [probe]);
   const capabilityRequestKey = useMemo(
@@ -716,6 +717,7 @@ export function usePlaybackSession(
   );
 
   useEffect(() => {
+    if (!capabilitiesSettled) return;
     if (activeRequestKeyRef.current === requestKey) {
       return;
     }
@@ -742,6 +744,7 @@ export function usePlaybackSession(
     });
   }, [
     capabilityRequestKey,
+    capabilitiesSettled,
     fileId,
     forceInitialPosition,
     initialPosition,
@@ -993,6 +996,7 @@ export function usePlaybackSession(
   issueReplanRef.current = replan;
 
   useEffect(() => {
+    if (!capabilitiesSettled) return;
     if (
       activeRequestKeyRef.current !== requestKey ||
       activeCapabilityRequestKeyRef.current === capabilityRequestKey
@@ -1028,7 +1032,15 @@ export function usePlaybackSession(
       },
       true,
     );
-  }, [capabilityRequestKey, fileId, loadSession, replan, requestKey, retireActiveSession]);
+  }, [
+    capabilityRequestKey,
+    capabilitiesSettled,
+    fileId,
+    loadSession,
+    replan,
+    requestKey,
+    retireActiveSession,
+  ]);
 
   const switchAudioTrack = useCallback(
     (index: number, currentPosition: number) => {
