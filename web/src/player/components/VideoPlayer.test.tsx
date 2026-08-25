@@ -609,6 +609,129 @@ describe("VideoPlayer native HLS timeline", () => {
   });
 });
 
+// A server-invalidated plan swaps the transport without any user gesture, and
+// it is the one swap that can cross transport kinds — an optimistic progressive
+// remux replaced by a tone-mapping HLS transcode. The replacement has to resume
+// on its own: nothing is going to press play, and once the engine has filled its
+// buffer it stops fetching, so a player left paused here is a player that stays
+// paused until the viewer seeks.
+describe("VideoPlayer server-invalidated transport swap", () => {
+  const invalidatedHlsPlan = fixturePlanV3({
+    delivery: "server_transcode_hls",
+    plan_id: "plan:3333333333333333",
+    plan_attempt_key: "v3:3333333333333333",
+    stream: {
+      url: "/playback/transcode/session-1/master.m3u8",
+      protocol: "hls",
+      headers: {},
+      header_refresh: "none",
+    },
+    timeline: {
+      source_start_seconds: 24,
+      player_start_seconds: 24,
+      stream_origin_seconds: 0,
+      timeline_offset_seconds: 0,
+      can_seek_anywhere: true,
+      seek_restoration: "player_position",
+    },
+  });
+
+  beforeEach(() => {
+    realtimeOptions.current = null;
+    hlsJS.supported = false;
+    hlsJS.constructed.mockClear();
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
+    vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockImplementation((mime) =>
+      mime === "application/vnd.apple.mpegurl" ? "probably" : "",
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("resumes playback and restores the position on the replacement transport", async () => {
+    const play = vi.mocked(HTMLMediaElement.prototype.play);
+    let rerender: ((next: Partial<Parameters<typeof VideoPlayer>[0]>) => void) | null = null;
+    const onPlanInvalidated = vi.fn(async () => {
+      rerender?.({
+        plan: invalidatedHlsPlan,
+        planRevision: 2,
+        streamUrl: "/api/v1/playback/transcode/session-1/master.m3u8?token=token",
+      });
+      return true;
+    });
+
+    const rendered = renderPlayer({ onPlanInvalidated });
+    rerender = rendered.rerenderPlayer;
+    const video = rendered.container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+
+    await waitFor(() => expect(video.src).toContain("/api/v1/stream/session-1"));
+    play.mockClear();
+
+    const onCommand = realtimeOptions.current?.onCommand;
+    if (!onCommand) throw new Error("expected the realtime command handler");
+    await act(async () => {
+      await onCommand(planInvalidatedCommand());
+    });
+
+    await waitFor(() => expect(video.src).toContain("master.m3u8"));
+    fireEvent.loadedMetadata(video);
+    expect(video.currentTime).toBe(24);
+
+    Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+    fireEvent.canPlay(video);
+
+    expect(play).toHaveBeenCalledOnce();
+  });
+
+  // The previous transport is torn down with `load()` in the same commit that
+  // builds the replacement, and the load algorithm is required to reject a play
+  // that is still pending. Latching the autoplay attempt on that first rejection
+  // left the element paused on a healthy buffer with nothing to restart it.
+  it("retries a rejected play instead of leaving the replacement paused", async () => {
+    vi.useFakeTimers();
+    try {
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play
+        .mockRejectedValueOnce(
+          Object.assign(new Error("The play() request was interrupted"), { name: "AbortError" }),
+        )
+        .mockResolvedValue(undefined);
+
+      const { container, rerenderPlayer } = renderPlayer();
+      const video = container.querySelector("video");
+      if (!video) throw new Error("expected video element");
+
+      rerenderPlayer({
+        plan: invalidatedHlsPlan,
+        planRevision: 2,
+        streamUrl: "/api/v1/playback/transcode/session-1/master.m3u8?token=token",
+      });
+      play.mockClear();
+
+      Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+      fireEvent.canPlay(video);
+      expect(play).toHaveBeenCalledOnce();
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1_000);
+      });
+
+      expect(play).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("VideoPlayer translation handoff", () => {
   beforeEach(() => {
     realtimeOptions.current = null;
