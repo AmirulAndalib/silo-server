@@ -3212,7 +3212,7 @@ func TestPlanPlaybackV3VideoRemuxPreservesHLSOnlyAudioCodec(t *testing.T) {
 
 	result := PlanPlaybackV3(PlannerInputV3{
 		Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
-		Settings: PlannerSettingsV3{TranscodeEnabled: true}, Registry: NewTransformationRegistryV3(nil),
+		Settings: PlannerSettingsV3{TranscodeEnabled: true}, Registry: testTransformationRegistryV3(),
 	})
 	if result.Plan == nil || result.Plan.Delivery != DeliveryRemuxHLSV3 || result.TranscodeAudio || result.TargetAudioCodec != "copy" {
 		t.Fatalf("result = %s", ExplainPlannerResultV3(result))
