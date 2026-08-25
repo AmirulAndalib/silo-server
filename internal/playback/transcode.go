@@ -1602,8 +1602,11 @@ func startupSegmentRequirement(opts TranscodeOpts) int {
 	if strings.EqualFold(opts.TargetCodecVideo, "copy") {
 		return minCopyManifestSegments
 	}
-	if opts.FastStart && opts.HWAccel != "" && opts.HWAccel != HWAccelNone {
-		return minFreshHardwareManifestSegments
+	if opts.FastStart {
+		switch opts.HWAccel {
+		case transcodeHWQSV, transcodeHWVAAPI, transcodeHWNVENC:
+			return minFreshHardwareManifestSegments
+		}
 	}
 	return minManifestSegments
 }

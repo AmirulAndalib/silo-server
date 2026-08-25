@@ -15,6 +15,8 @@ import (
 const (
 	hardwareEncoderWarmupTimeout     = 3 * time.Second
 	hardwareEncoderWarmupNegativeTTL = 15 * time.Second
+	defaultRenderDevicePath          = "/dev/dri/renderD128"
+	ffmpegHideBannerArg              = "-hide_banner"
 )
 
 type hardwareEncoderWarmupCacheEntry struct {
@@ -148,15 +150,15 @@ func hardwareEncoderWarmupDevices(backend, configured string) []string {
 	if len(renderDevices) > 0 {
 		return renderDevices
 	}
-	return []string{"/dev/dri/renderD128"}
+	return []string{defaultRenderDevicePath}
 }
 
 func hardwareEncoderWarmupArgs(backend, device string) []string {
-	base := []string{"-hide_banner", "-loglevel", "error"}
+	base := []string{ffmpegHideBannerArg, "-loglevel", "error"}
 	switch backend {
 	case transcodeHWQSV:
 		if strings.TrimSpace(device) == "" {
-			device = "/dev/dri/renderD128"
+			device = defaultRenderDevicePath
 		}
 		base = append(base,
 			"-init_hw_device", qsvVAAPIInitDevice(device),
@@ -165,7 +167,7 @@ func hardwareEncoderWarmupArgs(backend, device string) []string {
 		)
 	case transcodeHWVAAPI:
 		if strings.TrimSpace(device) == "" {
-			device = "/dev/dri/renderD128"
+			device = defaultRenderDevicePath
 		}
 		base = append(base, "-init_hw_device", "vaapi=va:"+device, "-filter_hw_device", "va")
 	case transcodeHWNVENC:

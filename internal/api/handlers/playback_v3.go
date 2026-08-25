@@ -68,6 +68,9 @@ const (
 	playbackStartSideEffectsTimeoutV3   = 15 * time.Second
 	playbackStartSideEffectsWorkersV3   = 4
 	playbackStartSideEffectsQueueSizeV3 = 256
+	playbackCapabilityWarmupWorkersV3   = 4
+	requestIDLogKeyV3                   = "request_id"
+	playbackRemoteOutcomeFailedV3       = "failed"
 )
 
 var errSubtitleStoreUnavailableV3 = errors.New("subtitle store unavailable")
@@ -118,8 +121,8 @@ func (t *playbackStartTimingsV3) mark(stage string) {
 
 func (t *playbackStartTimingsV3) log(ctx context.Context, attemptID string) {
 	attrs := []any{
-		"component", "playback",
-		"request_id", chimw.GetReqID(ctx),
+		logComponentKey, "playback",
+		requestIDLogKeyV3, chimw.GetReqID(ctx),
 		"playback_attempt_id", attemptID,
 		"total_ms", time.Since(t.started).Milliseconds(),
 	}
@@ -128,13 +131,20 @@ func (t *playbackStartTimingsV3) log(ctx context.Context, attemptID string) {
 }
 
 type playbackStartSideEffectsV3 struct {
-	ctx             context.Context
 	session         playback.Session
 	file            models.MediaFile
 	userID          int
 	profileID       string
 	audioTrackIndex int
-	done            chan struct{}
+	state           *playbackStartSideEffectsStateV3
+}
+
+type playbackStartSideEffectsStateV3 struct {
+	ctx           context.Context
+	cancel        context.CancelFunc
+	done          chan struct{}
+	started       bool
+	stopRequested bool
 }
 
 // mediaAuthModeV3 is the attempt's negotiated media transport mode: how a
@@ -443,16 +453,33 @@ func (h *PlaybackHandler) warmPlaybackCapabilitiesV3(ctx context.Context) {
 		return
 	}
 	nodeURLs := enumerator.TranscodeNodeURLs()
+	workerCount := min(playbackCapabilityWarmupWorkersV3, len(nodeURLs))
+	if workerCount == 0 {
+		return
+	}
+	jobs := make(chan string)
 	var group sync.WaitGroup
-	group.Add(len(nodeURLs))
-	for _, nodeURL := range nodeURLs {
+	group.Add(workerCount)
+	for range workerCount {
 		go func() {
 			defer group.Done()
-			if _, err := h.lookupRemoteCapabilitiesV3(ctx, nodeURL, false); err != nil {
-				slog.DebugContext(ctx, "protocol v3 node capability warmup failed", "component", "api", "node", logredact.SanitizeURL(nodeURL), "error", err)
+			for nodeURL := range jobs {
+				if _, err := h.lookupRemoteCapabilitiesV3(ctx, nodeURL, false); err != nil {
+					slog.DebugContext(ctx, "protocol v3 node capability warmup failed", logComponentKey, "api", "node", logredact.SanitizeURL(nodeURL), "error", err)
+				}
 			}
 		}()
 	}
+	for _, nodeURL := range nodeURLs {
+		select {
+		case jobs <- nodeURL:
+		case <-ctx.Done():
+			close(jobs)
+			group.Wait()
+			return
+		}
+	}
+	close(jobs)
 	group.Wait()
 }
 
@@ -1124,7 +1151,7 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 	if result.Terminal != nil {
 		slog.InfoContext(r.Context(), "playback plan decided", append([]any{
 			logComponentKey, "playback",
-			"request_id", chimw.GetReqID(r.Context()),
+			requestIDLogKeyV3, chimw.GetReqID(r.Context()),
 			"outcome", "terminal",
 			"reason", result.Terminal.Reason,
 			"file_id", effectiveFile.ID,
@@ -1163,7 +1190,7 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 	// correlating client logcat, ffmpeg commands, and session rows).
 	slog.InfoContext(r.Context(), "playback plan decided", append([]any{
 		logComponentKey, "playback",
-		"request_id", chimw.GetReqID(r.Context()),
+		requestIDLogKeyV3, chimw.GetReqID(r.Context()),
 		"outcome", "plan",
 		"decision_reason", result.Plan.DecisionReason,
 		"delivery", result.Plan.Delivery,
@@ -1186,7 +1213,7 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 			return
 		}
 		failureAttrs := []any{
-			"component", "playback",
+			logComponentKey, "playback",
 			"reason", statusErr.reason,
 			"retryable", statusErr.retryable,
 			"playback_attempt_id", req.PlaybackAttemptID,
@@ -1415,7 +1442,7 @@ func (h *PlaybackHandler) enqueuePlaybackStartSideEffectsV3(ctx context.Context,
 	}
 	h.v3StartEffectsOnce.Do(func() {
 		h.v3StartEffectsQueue = make(chan playbackStartSideEffectsV3, playbackStartSideEffectsQueueSizeV3)
-		h.v3StartEffectsPending = make(map[string]chan struct{})
+		h.v3StartEffectsPending = make(map[string]*playbackStartSideEffectsStateV3)
 		for range playbackStartSideEffectsWorkersV3 {
 			go func() {
 				for task := range h.v3StartEffectsQueue {
@@ -1425,18 +1452,22 @@ func (h *PlaybackHandler) enqueuePlaybackStartSideEffectsV3(ctx context.Context,
 		}
 	})
 
-	done := make(chan struct{})
+	taskCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), playbackStartSideEffectsTimeoutV3)
+	state := &playbackStartSideEffectsStateV3{
+		ctx:    taskCtx,
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
 	task := playbackStartSideEffectsV3{
-		ctx:             context.WithoutCancel(ctx),
 		session:         *session,
 		file:            *file,
 		userID:          userID,
 		profileID:       profileID,
 		audioTrackIndex: audioTrackIndex,
-		done:            done,
+		state:           state,
 	}
 	h.v3StartEffectsMu.Lock()
-	h.v3StartEffectsPending[session.ID] = done
+	h.v3StartEffectsPending[session.ID] = state
 	h.v3StartEffectsMu.Unlock()
 	select {
 	case h.v3StartEffectsQueue <- task:
@@ -1449,16 +1480,27 @@ func (h *PlaybackHandler) enqueuePlaybackStartSideEffectsV3(ctx context.Context,
 }
 
 func (h *PlaybackHandler) runPlaybackStartSideEffectsV3(task playbackStartSideEffectsV3) {
-	ctx, cancel := context.WithTimeout(task.ctx, playbackStartSideEffectsTimeoutV3)
-	defer cancel()
+	state := task.state
+	if state == nil {
+		return
+	}
+	h.v3StartEffectsMu.Lock()
+	state.started = true
+	stopRequested := state.stopRequested
+	h.v3StartEffectsMu.Unlock()
 	defer func() {
-		close(task.done)
+		state.cancel()
+		close(state.done)
 		h.v3StartEffectsMu.Lock()
-		if h.v3StartEffectsPending[task.session.ID] == task.done {
+		if h.v3StartEffectsPending[task.session.ID] == state {
 			delete(h.v3StartEffectsPending, task.session.ID)
 		}
 		h.v3StartEffectsMu.Unlock()
 	}()
+	if stopRequested || state.ctx.Err() != nil {
+		return
+	}
+	ctx := state.ctx
 
 	if !task.session.DisableProgressPersistence && h.WatchScrobbler != nil {
 		targetID := playbackProgressTarget(&task.file)
@@ -1468,6 +1510,9 @@ func (h *PlaybackHandler) runPlaybackStartSideEffectsV3(task playbackStartSideEf
 				slog.WarnContext(ctx, "failed to queue watch provider start scrobble", "component", "api", "session", task.session.ID, "error", err)
 			}
 		}
+	}
+	if ctx.Err() != nil {
+		return
 	}
 	if h.ChapterThumbnailQueuer != nil {
 		slog.InfoContext(ctx,
@@ -1479,8 +1524,15 @@ func (h *PlaybackHandler) runPlaybackStartSideEffectsV3(task playbackStartSideEf
 		)
 		h.ChapterThumbnailQueuer.QueuePriorityFileAtPosition(ctx, task.file.ID, task.session.Position)
 	}
+	if ctx.Err() != nil {
+		return
+	}
 	h.maybeQueueLazyPlaybackMarkers(ctx, &task.session, &task.file)
-	h.persistSeriesSelectionsV3(ctx, task.userID, task.profileID, &task.file, task.audioTrackIndex)
+	if ctx.Err() != nil {
+		return
+	}
+	h.persistSeriesPlaybackPreference(ctx, task.userID, task.profileID, &task.file)
+	h.persistCurrentAudioPreferenceV3(ctx, task.session.ID, task.userID, task.profileID, &task.file, task.audioTrackIndex)
 	h.syncSessionsNow(ctx, "v3_start")
 }
 
@@ -1489,9 +1541,40 @@ func (h *PlaybackHandler) waitForPlaybackStartSideEffectsV3(ctx context.Context,
 		return
 	}
 	h.v3StartEffectsMu.Lock()
-	done := h.v3StartEffectsPending[sessionID]
+	state := h.v3StartEffectsPending[sessionID]
 	h.v3StartEffectsMu.Unlock()
-	if done == nil {
+	if state == nil {
+		return
+	}
+	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), playbackStartSideEffectsTimeoutV3)
+	defer cancel()
+	select {
+	case <-state.done:
+	case <-waitCtx.Done():
+		slog.WarnContext(ctx, "timed out waiting for playback start side effects", logComponentKey, "api", "session", sessionID)
+	}
+}
+
+func (h *PlaybackHandler) cancelPlaybackStartSideEffectsV3(ctx context.Context, sessionID string) {
+	if h == nil || sessionID == "" {
+		return
+	}
+	h.v3StartEffectsMu.Lock()
+	state := h.v3StartEffectsPending[sessionID]
+	if state == nil {
+		h.v3StartEffectsMu.Unlock()
+		return
+	}
+	state.stopRequested = true
+	started := state.started
+	if !started {
+		state.cancel()
+	}
+	done := state.done
+	h.v3StartEffectsMu.Unlock()
+	// A queued task observes stopRequested before issuing any side effect. A
+	// running task is allowed to unwind so provider start cannot cross the stop.
+	if !started {
 		return
 	}
 	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), playbackStartSideEffectsTimeoutV3)
@@ -1499,17 +1582,20 @@ func (h *PlaybackHandler) waitForPlaybackStartSideEffectsV3(ctx context.Context,
 	select {
 	case <-done:
 	case <-waitCtx.Done():
-		slog.WarnContext(ctx, "timed out waiting for playback start side effects", "component", "api", "session", sessionID)
+		slog.WarnContext(ctx, "timed out cancelling playback start side effects", logComponentKey, "api", "session", sessionID)
 	}
 }
 
-// persistSeriesSelectionsV3 records the version and audio-track choices this
-// plan settled on, so the next episode of the same series opens with them
-// already applied. The catalog reads both preferences back
-// (internal/catalog/detail.go), and v3 is now the only writer: the legacy start
-// and audio-PATCH endpoints that used to record them are gone.
-func (h *PlaybackHandler) persistSeriesSelectionsV3(ctx context.Context, userID int, profileID string, file *models.MediaFile, audioTrackIndex int) {
-	h.persistSeriesPlaybackPreference(ctx, userID, profileID, file)
+// persistCurrentAudioPreferenceV3 serializes start and replan preference writes
+// and rejects a delayed start value after the live session has already adopted
+// a newer track. The lock makes the final write match replacement commit order.
+func (h *PlaybackHandler) persistCurrentAudioPreferenceV3(ctx context.Context, sessionID string, userID int, profileID string, file *models.MediaFile, audioTrackIndex int) {
+	h.v3AudioPreferenceMu.Lock()
+	defer h.v3AudioPreferenceMu.Unlock()
+	current, err := h.sessionMgr.GetSession(sessionID)
+	if err != nil || current.AudioTrackIndex != audioTrackIndex {
+		return
+	}
 	h.persistAudioPreference(ctx, userID, profileID, file, audioTrackIndex)
 }
 
@@ -2176,7 +2262,7 @@ func (h *PlaybackHandler) escalateRefusedProgressiveRemuxV3(ctx context.Context,
 			reason = escalated.Terminal.Reason
 		}
 		slog.WarnContext(ctx, "protocol v3 header-authenticated remux has no executable delivery",
-			"component", "playback",
+			logComponentKey, "playback",
 			"delivery", result.Plan.Delivery,
 			"replanned_terminal_reason", reason,
 		)
@@ -2186,7 +2272,7 @@ func (h *PlaybackHandler) escalateRefusedProgressiveRemuxV3(ctx context.Context,
 		}
 	}
 	slog.InfoContext(ctx, "protocol v3 escalated refused progressive remux",
-		"component", "playback",
+		logComponentKey, "playback",
 		"delivery", escalated.Plan.Delivery,
 		"decision_reason", escalated.Plan.DecisionReason,
 	)
@@ -2427,8 +2513,8 @@ func (h *PlaybackHandler) startReadyLocalPlaybackTransportV3(ctx context.Context
 	spawnFinishedAt := time.Now()
 	if err != nil {
 		slog.InfoContext(ctx, "playback transport startup timing",
-			"component", "playback",
-			"request_id", chimw.GetReqID(ctx),
+			logComponentKey, "playback",
+			requestIDLogKeyV3, chimw.GetReqID(ctx),
 			"transport", "local",
 			"session", opts.SessionID,
 			"spawn_ms", spawnFinishedAt.Sub(startedAt).Milliseconds(),
@@ -2440,8 +2526,8 @@ func (h *PlaybackHandler) startReadyLocalPlaybackTransportV3(ctx context.Context
 	}
 	if _, err := ts.WaitForManifest(playback.ManifestStartupTimeout); err != nil {
 		slog.InfoContext(ctx, "playback transport startup timing",
-			"component", "playback",
-			"request_id", chimw.GetReqID(ctx),
+			logComponentKey, "playback",
+			requestIDLogKeyV3, chimw.GetReqID(ctx),
 			"transport", "local",
 			"session", opts.SessionID,
 			"spawn_ms", spawnFinishedAt.Sub(startedAt).Milliseconds(),
@@ -2458,8 +2544,8 @@ func (h *PlaybackHandler) startReadyLocalPlaybackTransportV3(ctx context.Context
 		return nil, failure
 	}
 	slog.InfoContext(ctx, "playback transport startup timing",
-		"component", "playback",
-		"request_id", chimw.GetReqID(ctx),
+		logComponentKey, "playback",
+		requestIDLogKeyV3, chimw.GetReqID(ctx),
 		"transport", "local",
 		"session", opts.SessionID,
 		"spawn_ms", spawnFinishedAt.Sub(startedAt).Milliseconds(),
@@ -2508,7 +2594,7 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 	if startupFailure != nil && startupFailure.failedToStart {
 		if softwareOpts, eligible := h.softwareToneMapRetryOptsV3(r.Context(), opts, result.FrozenSourceMetadata != nil); eligible {
 			slog.WarnContext(r.Context(), "hardware tone-map failed to start; retrying once in software",
-				"component", "playback", "playback_session_id", session.ID, "error", startupFailure.cause)
+				logComponentKey, "playback", "playback_session_id", session.ID, "error", startupFailure.cause)
 			opts = softwareOpts
 			usedToneMapFallback = true
 			ts, startupFailure = h.startReadyLocalPlaybackTransportV3(r.Context(), opts)
@@ -2527,7 +2613,7 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 
 		if fallbackOpts, eligible := h.softwareToneMapRetryOptsV3(r.Context(), opts, result.FrozenSourceMetadata != nil); eligible {
 			slog.WarnContext(r.Context(), "hardware tone-map failed during startup; retrying once in software",
-				"component", "playback",
+				logComponentKey, "playback",
 				"playback_session_id", session.ID,
 				"failed_device", startupFailure.failedDevice,
 				"error", startupFailure.cause)
@@ -2552,7 +2638,7 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 			retryOpts := opts
 			retryOpts.AvoidHWDevice = startupFailure.failedDevice
 			slog.WarnContext(r.Context(), "local transcode crashed during startup; retrying once",
-				"component", "playback",
+				logComponentKey, "playback",
 				"playback_session_id", session.ID,
 				"failed_device", startupFailure.failedDevice,
 				"configured_devices", retryOpts.HWDevice,
@@ -2690,11 +2776,11 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 	nodeResp, status, err := h.startRemotePlaybackTransport(r.Context(), node.URL, req)
 	remoteOutcome := "ready"
 	if err != nil || status != http.StatusAccepted {
-		remoteOutcome = "failed"
+		remoteOutcome = playbackRemoteOutcomeFailedV3
 	}
 	slog.InfoContext(r.Context(), "playback transport startup timing",
-		"component", "playback",
-		"request_id", chimw.GetReqID(r.Context()),
+		logComponentKey, "playback",
+		requestIDLogKeyV3, chimw.GetReqID(r.Context()),
 		"transport", "remote",
 		"session", session.ID,
 		"total_ms", time.Since(remoteStartAt).Milliseconds(),
@@ -3690,7 +3776,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 		result.Plan.ExpiresAt = record.CurrentPlan.ExpiresAt
 		transport = reusedHLSTransportV3(session, record.CurrentPlan.Stream.URL)
 		slog.InfoContext(r.Context(), "protocol v3 replan reused active HLS A/V transport",
-			"component", "playback",
+			logComponentKey, "playback",
 			"playback_session_id", session.ID,
 			"previous_plan_id", record.CurrentPlanID,
 			"plan_id", result.Plan.PlanID,
@@ -3776,7 +3862,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 			// A deliberate track switch is the same signal the legacy audio
 			// PATCH recorded; a failure recovery is not, so its forced audio
 			// route must not be written back as a user preference.
-			h.persistAudioPreference(r.Context(), session.UserID, session.ProfileID, effectiveFile, plannedAudioTrackIndexV3(result, session.AudioTrackIndex))
+			h.persistCurrentAudioPreferenceV3(r.Context(), session.ID, session.UserID, session.ProfileID, effectiveFile, plannedAudioTrackIndexV3(result, session.AudioTrackIndex))
 		}
 		h.syncSessionsNow(r.Context(), "v3_replan")
 		event := playback.RouteEventPlanSelectedV3

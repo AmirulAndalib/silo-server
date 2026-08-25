@@ -259,7 +259,8 @@ type PlaybackHandler struct {
 	v3StartEffectsOnce      sync.Once
 	v3StartEffectsQueue     chan playbackStartSideEffectsV3
 	v3StartEffectsMu        sync.Mutex
-	v3StartEffectsPending   map[string]chan struct{}
+	v3StartEffectsPending   map[string]*playbackStartSideEffectsStateV3
+	v3AudioPreferenceMu     sync.Mutex
 	v3ReplanMu              sync.Mutex
 	v3ReplanLocks           map[string]*v3ReplanLock
 	v3ReplanSlotsOnce       sync.Once
@@ -1038,7 +1039,7 @@ func (h *PlaybackHandler) finalizeSessionStop(ctx context.Context, session *play
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	h.waitForPlaybackStartSideEffectsV3(ctx, session.ID)
+	h.cancelPlaybackStartSideEffectsV3(ctx, session.ID)
 
 	stopResult := h.persistStopAndHistory(ctx, session)
 	if h.WatchScrobbler != nil {
@@ -1088,7 +1089,7 @@ func (h *PlaybackHandler) finalizeSessionAbort(ctx context.Context, session *pla
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	h.waitForPlaybackStartSideEffectsV3(ctx, session.ID)
+	h.cancelPlaybackStartSideEffectsV3(ctx, session.ID)
 
 	if h.WatchScrobbler != nil && h.fileResolver != nil {
 		if file, err := h.loadFileByPreferredID(ctx, requestedMediaFileID(session), session.MediaFileID); err == nil && file != nil {

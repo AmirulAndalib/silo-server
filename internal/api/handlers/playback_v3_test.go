@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,6 +71,44 @@ type orderedBlockingPlaybackScrobblerV3 struct {
 	startEntered chan struct{}
 	releaseStart chan struct{}
 	events       []string
+}
+
+type saturatingPlaybackScrobblerV3 struct {
+	entered chan string
+	release chan struct{}
+	mu      sync.Mutex
+	starts  []string
+}
+
+func (s *saturatingPlaybackScrobblerV3) ScrobbleStart(ctx context.Context, event watchsync.ScrobbleEvent) error {
+	select {
+	case s.entered <- event.PlaybackSessionID:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	s.mu.Lock()
+	s.starts = append(s.starts, event.PlaybackSessionID)
+	s.mu.Unlock()
+	return nil
+}
+
+func (*saturatingPlaybackScrobblerV3) ScrobblePause(context.Context, watchsync.ScrobbleEvent) error {
+	return nil
+}
+
+func (*saturatingPlaybackScrobblerV3) ScrobbleStop(context.Context, watchsync.ScrobbleEvent) error {
+	return nil
+}
+
+func (s *saturatingPlaybackScrobblerV3) recordedStarts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.starts...)
 }
 
 func (s *orderedBlockingPlaybackScrobblerV3) ScrobbleStart(context.Context, watchsync.ScrobbleEvent) error {
@@ -592,6 +631,38 @@ func TestPlaybackStartSideEffectsPreserveImmediateStopScrobbleOrder(t *testing.T
 	}
 	if got := scrobbler.recordedEvents(); !reflect.DeepEqual(got, []string{"start", "stop"}) {
 		t.Fatalf("scrobble events = %v, want [start stop]", got)
+	}
+}
+
+func TestQueuedPlaybackStartSideEffectsAreDroppedOnStop(t *testing.T) {
+	scrobbler := &saturatingPlaybackScrobblerV3{
+		entered: make(chan string, playbackStartSideEffectsWorkersV3+1),
+		release: make(chan struct{}),
+	}
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.WatchScrobbler = scrobbler
+	file := &models.MediaFile{ID: 1, ContentID: "movie-1", Duration: 600}
+
+	for i := range playbackStartSideEffectsWorkersV3 {
+		sessionID := fmt.Sprintf("running-%d", i)
+		handler.enqueuePlaybackStartSideEffectsV3(context.Background(), &playback.Session{ID: sessionID}, file, 1, "profile-1", 0)
+	}
+	for range playbackStartSideEffectsWorkersV3 {
+		select {
+		case <-scrobbler.entered:
+		case <-time.After(time.Second):
+			t.Fatal("start side-effect workers did not saturate")
+		}
+	}
+
+	queuedSessionID := "queued-stop"
+	handler.enqueuePlaybackStartSideEffectsV3(context.Background(), &playback.Session{ID: queuedSessionID}, file, 1, "profile-1", 0)
+	handler.cancelPlaybackStartSideEffectsV3(context.Background(), queuedSessionID)
+	close(scrobbler.release)
+	handler.waitForPlaybackStartSideEffectsV3(context.Background(), queuedSessionID)
+
+	if starts := scrobbler.recordedStarts(); slices.Contains(starts, queuedSessionID) {
+		t.Fatalf("queued stopped session emitted a start scrobble: %v", starts)
 	}
 }
 

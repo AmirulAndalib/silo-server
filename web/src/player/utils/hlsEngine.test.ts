@@ -20,7 +20,7 @@ describe("isSafariBrowserV3", () => {
 });
 
 describe("selectHLSEngineV3", () => {
-  it.each(["dolby_vision", "hdr10"])(
+  it.each(["sdr", "dolby_vision", "hdr10"])(
     "prefers native HLS for Safari %s when both engines are available",
     (dynamicRange) => {
       expect(selectHLSEngineV3(dynamicRange, true, true, true)).toBe("native");
@@ -31,7 +31,7 @@ describe("selectHLSEngineV3", () => {
     expect(selectHLSEngineV3("dolby_vision", true, true, false)).toBe("hlsjs");
   });
 
-  it("keeps hls.js first for SDR", () => {
+  it("keeps hls.js first for non-Safari SDR", () => {
     expect(selectHLSEngineV3("sdr", true, true)).toBe("hlsjs");
   });
 
@@ -43,12 +43,12 @@ describe("selectHLSEngineV3", () => {
     expect(selectHLSEngineV3("dolby_vision", false, false)).toBe("unsupported");
   });
 
-  it("selects native HDR without loading hls.js", async () => {
+  it("selects native Safari HLS without loading hls.js", async () => {
     const loadHLSJS = vi.fn(async () => ({ isSupported: () => true }));
 
-    await expect(
-      resolveHLSEngineV3("dolby_vision", true, loadHLSJS, undefined, true),
-    ).resolves.toEqual({ engine: "native" });
+    await expect(resolveHLSEngineV3("sdr", true, loadHLSJS, undefined, true)).resolves.toEqual({
+      engine: "native",
+    });
     expect(loadHLSJS).not.toHaveBeenCalled();
   });
 

@@ -1519,11 +1519,12 @@ export function VideoPlayer({
       if (isHlsStream) {
         try {
           const nativeSupported = video.canPlayType("application/vnd.apple.mpegurl") !== "";
-          // Native HDR HLS is a Safari preservation path. Chromium can also
-          // advertise native HLS now, but treats an in-progress copy remux as
-          // live and jumps toward its rapidly advancing production edge.
-          // hls.js keeps that append-only EVENT playlist on its VOD timeline.
-          const preferNativeHDR =
+          // Safari's HLS capability evidence comes from its media element, so
+          // keep every Safari plan on that same engine. Chromium can also
+          // advertise native HLS, but treats an in-progress copy remux as live
+          // and jumps toward its rapidly advancing production edge; its
+          // conservative HLS claims and runtime both use hls.js instead.
+          const preferNativeHLS =
             typeof navigator !== "undefined" && isSafariBrowserV3(navigator.userAgent);
           const resolution = await resolveHLSEngineV3(
             plannedDynamicRange,
@@ -1532,7 +1533,7 @@ export function VideoPlayer({
             (error) => {
               console.error("[hls.js] Failed to initialize, falling back to native HLS:", error);
             },
-            preferNativeHDR,
+            preferNativeHLS,
           );
           if (destroyed || hlsStartupGuardRef.current?.hasFailed()) return;
 

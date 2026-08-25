@@ -15,25 +15,17 @@ export function isSafariBrowserV3(userAgent: string): boolean {
   );
 }
 
-function nativeHDRPreferred(
-  dynamicRange: string | undefined,
-  nativeSupported: boolean,
-  preferNativeHDR: boolean,
-): boolean {
-  return (
-    preferNativeHDR &&
-    nativeSupported &&
-    (dynamicRange === "dolby_vision" || dynamicRange === "hdr10")
-  );
+function nativeHLSPreferred(nativeSupported: boolean, preferNativeHLS: boolean): boolean {
+  return preferNativeHLS && nativeSupported;
 }
 
 export function selectHLSEngineV3(
-  dynamicRange: string | undefined,
+  _dynamicRange: string | undefined,
   nativeSupported: boolean,
   hlsJSSupported: boolean,
-  preferNativeHDR = false,
+  preferNativeHLS = false,
 ): HLSEngineV3 {
-  if (nativeHDRPreferred(dynamicRange, nativeSupported, preferNativeHDR)) return "native";
+  if (nativeHLSPreferred(nativeSupported, preferNativeHLS)) return "native";
   if (hlsJSSupported) return "hlsjs";
   if (nativeSupported) return "native";
   return "unsupported";
@@ -44,9 +36,9 @@ export async function resolveHLSEngineV3<T extends HLSJSSupportV3>(
   nativeSupported: boolean,
   loadHLSJS: () => Promise<T>,
   onHLSJSUnavailable?: (error: unknown) => void,
-  preferNativeHDR = false,
+  preferNativeHLS = false,
 ): Promise<ResolvedHLSEngineV3<T>> {
-  if (nativeHDRPreferred(dynamicRange, nativeSupported, preferNativeHDR)) {
+  if (nativeHLSPreferred(nativeSupported, preferNativeHLS)) {
     return { engine: "native" };
   }
 
@@ -56,7 +48,7 @@ export async function resolveHLSEngineV3<T extends HLSJSSupportV3>(
       dynamicRange,
       nativeSupported,
       hlsjs.isSupported(),
-      preferNativeHDR,
+      preferNativeHLS,
     );
     return engine === "hlsjs" ? { engine, hlsjs } : { engine };
   } catch (error) {
