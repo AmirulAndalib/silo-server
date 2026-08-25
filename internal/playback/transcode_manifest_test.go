@@ -14,6 +14,56 @@ import (
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
+func TestStartupSegmentDurationUsesShortFragmentsOnlyForBitmapBurnIn(t *testing.T) {
+	tests := []struct {
+		name   string
+		burnIn bool
+		codec  string
+		want   int
+	}{
+		{name: "no subtitle", want: 2},
+		{name: "text burn in", burnIn: true, codec: "ass", want: 2},
+		{name: "bitmap selected but not burned", codec: "hdmv_pgs_subtitle", want: 2},
+		{name: "PGS burn in", burnIn: true, codec: "hdmv_pgs_subtitle", want: 1},
+		{name: "legacy DVD alias burn in", burnIn: true, codec: "dvdsub", want: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := StartupSegmentDuration(tt.burnIn, tt.codec); got != tt.want {
+				t.Fatalf("StartupSegmentDuration(%t, %q) = %d, want %d", tt.burnIn, tt.codec, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStartupSegmentRequirementUsesOneHardwareBitmapFragment(t *testing.T) {
+	bitmap := TranscodeOpts{
+		TargetCodecVideo:   "h264",
+		SubtitleBurnIn:     true,
+		SubtitleTrackIndex: 0,
+		SubtitleCodec:      "hdmv_pgs_subtitle",
+		FastStart:          true,
+	}
+	tests := []struct {
+		name string
+		opts TranscodeOpts
+		want int
+	}{
+		{name: "hardware bitmap fast start", opts: func() TranscodeOpts { o := bitmap; o.HWAccel = transcodeHWQSV; return o }(), want: 1},
+		{name: "CPU bitmap fast start", opts: func() TranscodeOpts { o := bitmap; o.HWAccel = HWAccelNone; return o }(), want: 3},
+		{name: "hardware bitmap restart", opts: func() TranscodeOpts { o := bitmap; o.HWAccel = transcodeHWQSV; o.FastStart = false; return o }(), want: 3},
+		{name: "ordinary hardware transcode", opts: TranscodeOpts{TargetCodecVideo: "h264", HWAccel: transcodeHWQSV, FastStart: true}, want: 3},
+		{name: "copy video", opts: TranscodeOpts{TargetCodecVideo: "copy", HWAccel: transcodeHWQSV, FastStart: true}, want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := startupSegmentRequirement(tt.opts); got != tt.want {
+				t.Fatalf("startupSegmentRequirement() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildPlaybackManifest_CopyVideoUsesRealManifest(t *testing.T) {
 	tempDir := t.TempDir()
 	manifest := strings.Join([]string{
@@ -265,6 +315,34 @@ func TestBuildPlaybackManifest_EncodedTranscodeUsesSyntheticVODManifest(t *testi
 	}
 	if strings.Contains(text, "#EXT-X-MAP:") {
 		t.Fatalf("encoded manifest should not use fMP4 init map:\n%s", text)
+	}
+}
+
+func TestGenerateFullManifestCompactsRepeatedAuthenticationQuery(t *testing.T) {
+	rawQuery := "st=" + strings.Repeat("recipe", 80) + "&token=" + strings.Repeat("access", 40)
+	session := &TranscodeSession{opts: TranscodeOpts{
+		TargetCodecVideo: "h264",
+		SegmentDuration:  1,
+		TotalDuration:    300,
+	}}
+
+	manifest := string(session.GenerateFullManifest("segment/", rawQuery))
+	if strings.Count(manifest, rawQuery) != 1 {
+		t.Fatalf("authentication query appears %d times, want exactly one definition", strings.Count(manifest, rawQuery))
+	}
+	for _, want := range []string{
+		"#EXT-X-VERSION:8",
+		"#EXT-X-DEFINE:NAME=\"silo_query\",VALUE=\"" + rawQuery + "\"",
+		"segment/seg_00000.ts?{$silo_query}",
+		"segment/seg_00299.ts?{$silo_query}",
+	} {
+		if !strings.Contains(manifest, want) {
+			t.Fatalf("manifest missing %q", want)
+		}
+	}
+	legacyBytes := 300 * len("segment/seg_00000.ts?"+rawQuery+"\n")
+	if len(manifest) >= legacyBytes/4 {
+		t.Fatalf("compact manifest size = %d, want less than one quarter of legacy %d", len(manifest), legacyBytes)
 	}
 }
 

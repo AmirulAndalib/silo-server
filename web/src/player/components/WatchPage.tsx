@@ -75,7 +75,7 @@ export function WatchPage({
   maxBitrateKbps,
   explicitAudioTrackIndex,
   initialSubtitleTrackIndexByFileId,
-  deferredSubtitleTrackIndexByFileId,
+  initialBitmapSubtitleTrackIndexByFileId,
   preferredSubtitleLanguage,
   preferredSubtitleTrackSignature,
   subtitleMode,
@@ -132,7 +132,7 @@ export function WatchPage({
     resumeHints,
     explicitAudioTrackIndex,
     initialSubtitleTrackIndexByFileId,
-    deferredSubtitleTrackIndexByFileId,
+    initialBitmapSubtitleTrackIndexByFileId,
   );
 
   const initialSubtitleErrorKeyRef = useRef<string | null>(null);

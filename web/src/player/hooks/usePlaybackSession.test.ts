@@ -15,6 +15,7 @@ import {
   VIDEO_CLIENT_FEATURES_V3,
 } from "../playback-session-wire-v3";
 import { usePlaybackSession } from "./usePlaybackSession";
+import { resetCodecDetectionForTests } from "./useCodecDetection";
 
 const playerConfig: PlayerConfig = {
   apiBaseUrl: "/api/v1",
@@ -37,6 +38,7 @@ function jsonResponse(body: unknown, init: ResponseInit = {}) {
 }
 
 afterEach(() => {
+  resetCodecDetectionForTests();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -381,19 +383,8 @@ describe("usePlaybackSession quality changes", () => {
   });
 });
 
-describe("usePlaybackSession deferred initial subtitles", () => {
-  it("keeps the initial stream hidden until the bitmap subtitle replan is ready", async () => {
-    const initialPlan = fixturePlanV3({
-      session_id: "session-1",
-      delivery: "original_http",
-      stream: {
-        url: "/stream/session-1/direct",
-        protocol: "http_progressive",
-        mime_type: "video/mp4",
-        headers: {},
-        header_refresh: "none",
-      },
-    });
+describe("usePlaybackSession initial bitmap subtitles", () => {
+  it("adopts a successful bitmap subtitle start without replanning", async () => {
     const subtitlePlan = fixturePlanV3({
       session_id: "session-1",
       plan_id: "plan:bitmap-subtitle",
@@ -403,16 +394,7 @@ describe("usePlaybackSession deferred initial subtitles", () => {
         subtitle: { id: "file:7:subtitle:0", index: 0 },
       },
     });
-    let resolveReplan!: (response: Response) => void;
-    const replanResponse = new Promise<Response>((resolve) => {
-      resolveReplan = resolve;
-    });
     const startBodies: Array<Record<string, unknown>> = [];
-    const replanBodies: Array<{
-      operation: string;
-      position_seconds: number;
-      selected_tracks: { subtitle?: { id: string; index: number } };
-    }> = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/playback/start")) {
@@ -423,14 +405,10 @@ describe("usePlaybackSession deferred initial subtitles", () => {
             server_features: ["playback_plan_v3"],
             outcome: "playable",
             session_id: "session-1",
-            playback_plan: initialPlan,
+            playback_plan: subtitlePlan,
           },
           { status: 201 },
         );
-      }
-      if (url.endsWith("/playback/session-1/replan")) {
-        replanBodies.push(JSON.parse(String(init?.body)) as (typeof replanBodies)[number]);
-        return replanResponse;
       }
       if (url.endsWith("/playback/route-events")) return new Response(null, { status: 202 });
       if (init?.method === "DELETE") return new Response(null, { status: 204 });
@@ -451,70 +429,50 @@ describe("usePlaybackSession deferred initial subtitles", () => {
           null,
           undefined,
           null,
-          {},
+          { 7: 0 },
           { 7: 0 },
         ),
       { wrapper },
     );
 
-    await waitFor(() => expect(replanBodies).toHaveLength(1));
-    expect(startBodies[0]).not.toHaveProperty("subtitle_track_index");
-    expect(replanBodies[0]).toMatchObject({
-      operation: "track_change",
-      position_seconds: 0,
-      selected_tracks: { subtitle: { id: "", index: 0 } },
-    });
-    expect(result.current.plan).toBeNull();
-    expect(result.current.streamUrl).toBeNull();
-    expect(result.current.loading).toBe(true);
-
-    await act(async () => {
-      resolveReplan(
-        jsonResponse({
-          protocol_version: 3,
-          server_features: ["playback_plan_v3"],
-          outcome: "playable",
-          session_id: "session-1",
-          playback_plan: subtitlePlan,
-        }),
-      );
-      await replanResponse;
-    });
-
     await waitFor(() => expect(result.current.plan?.plan_id).toBe("plan:bitmap-subtitle"));
+    expect(startBodies).toHaveLength(1);
+    expect(startBodies[0]).toMatchObject({ subtitle_track_index: 0 });
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/replan"))).toBe(false);
     expect(result.current.planRevision).toBe(1);
     expect(result.current.initialSubtitleError).toBeNull();
     unmount();
   });
 
-  it("falls back to the playable start plan when the initial subtitle replan is refused", async () => {
-    const initialPlan = fixturePlanV3({ session_id: "session-1" });
-    let replanCount = 0;
+  it("retries a refused bitmap subtitle start without subtitles", async () => {
+    const fallbackPlan = fixturePlanV3({ session_id: "session-2" });
+    const startBodies: Array<Record<string, unknown>> = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/playback/start")) {
+        startBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (startBodies.length === 1) {
+          return jsonResponse({
+            protocol_version: 3,
+            server_features: ["playback_plan_v3"],
+            outcome: "terminal",
+            session_id: "session-1",
+            terminal: {
+              reason: "hdr_transcode_unsupported",
+              message: "Enable HDR transcoding to use this subtitle.",
+            },
+          });
+        }
         return jsonResponse(
           {
             protocol_version: 3,
             server_features: ["playback_plan_v3"],
             outcome: "playable",
-            session_id: "session-1",
-            playback_plan: initialPlan,
+            session_id: "session-2",
+            playback_plan: fallbackPlan,
           },
           { status: 201 },
         );
-      }
-      if (url.endsWith("/playback/session-1/replan")) {
-        replanCount += 1;
-        return jsonResponse({
-          protocol_version: 3,
-          server_features: ["playback_plan_v3"],
-          outcome: "terminal",
-          terminal: {
-            reason: "hdr_transcode_unsupported",
-            message: "Enable HDR transcoding to use this subtitle.",
-          },
-        });
       }
       if (url.endsWith("/playback/route-events")) return new Response(null, { status: 202 });
       if (init?.method === "DELETE") return new Response(null, { status: 204 });
@@ -535,18 +493,22 @@ describe("usePlaybackSession deferred initial subtitles", () => {
           null,
           undefined,
           null,
-          {},
+          { 7: 0 },
           { 7: 0 },
         ),
       { wrapper },
     );
 
-    await waitFor(() => expect(result.current.plan?.plan_id).toBe(initialPlan.plan_id));
+    await waitFor(() => expect(result.current.plan?.plan_id).toBe(fallbackPlan.plan_id));
+    expect(startBodies).toHaveLength(2);
+    expect(startBodies[0]).toMatchObject({ subtitle_track_index: 0 });
+    expect(startBodies[1]).not.toHaveProperty("subtitle_track_index");
+    expect(startBodies[0]?.playback_attempt_id).not.toBe(startBodies[1]?.playback_attempt_id);
     expect(result.current.planRevision).toBe(1);
     expect(result.current.error).toBeNull();
     expect(result.current.initialSubtitleErrorTitle).toBe("This HDR format can't be converted");
     expect(result.current.initialSubtitleError).toContain("dynamic range can't be converted");
-    expect(replanCount).toBe(1);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/replan"))).toBe(false);
     unmount();
   });
 });

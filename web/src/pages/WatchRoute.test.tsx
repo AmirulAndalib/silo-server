@@ -396,10 +396,10 @@ describe("buildWatchPageProps", () => {
       currentProfile: profile,
     });
 
-    // Bitmap burn-in must not ride the start request: on HDR that transcode
-    // terminals when tone mapping / 4K transcode is off (the defaults).
-    expect(props.initialSubtitleTrackIndexByFileId).toEqual({});
-    expect(props.deferredSubtitleTrackIndexByFileId).toEqual({ 42: 0 });
+    // Bitmap burn-in rides the normal start request, while its separate marker
+    // enables the subtitle-free fallback if that start is refused.
+    expect(props.initialSubtitleTrackIndexByFileId).toEqual({ 42: 0 });
+    expect(props.initialBitmapSubtitleTrackIndexByFileId).toEqual({ 42: 0 });
   });
 
   it("passes a selected text subtitle ordinal into the initial playback request", () => {
@@ -454,6 +454,6 @@ describe("buildWatchPageProps", () => {
     });
 
     expect(props.initialSubtitleTrackIndexByFileId).toEqual({ 42: 0 });
-    expect(props.deferredSubtitleTrackIndexByFileId).toEqual({});
+    expect(props.initialBitmapSubtitleTrackIndexByFileId).toEqual({});
   });
 });

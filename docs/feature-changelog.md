@@ -3,7 +3,9 @@
 ## 2026-08-25
 
 ### Keep HDR playback playable when a bitmap subtitle is auto-selected
-The web player started asking the server to burn PGS/DVD/DVB subtitles into the opening playback plan. On HDR titles that forces a transcode, and with tone mapping and 4K transcoding off (the defaults) the planner refuses the start entirely — there is no prior stream to fall back to. Text subtitles still go out on the start request. Bitmap tracks are applied after a playable plan exists; if that follow-up replan is refused, the video keeps playing.
+The web player asks the server to burn PGS/DVD/DVB subtitles into the opening playback plan. On HDR titles that forces a transcode, and with tone mapping and 4K transcoding off (the defaults) the planner can refuse the start entirely. The player now retries a refused bitmap-subtitle start with subtitles off, keeping playback available while successful subtitle starts remain a single request with no visible transport reload.
+
+Successful hardware bitmap burn-in starts faster too. The browser capability check is warmed before the viewer presses Play, the encoder uses one-second fragments with a one-fragment startup window, and large signed HLS playlists carry their repeated request query once through standard variable substitution instead of copying it onto thousands of segment lines. The shorter segment cadence is kept consistent across resume/seek alignment, reconstruction recipes, and session state.
 
 ## 2026-08-24
 

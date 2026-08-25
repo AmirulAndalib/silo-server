@@ -263,7 +263,7 @@ export function usePlaybackSession(
   resumeHints?: ResumeHints,
   explicitAudioTrackIndex?: number | null,
   initialSubtitleTrackIndexByFileId?: Record<number, number>,
-  deferredSubtitleTrackIndexByFileId?: Record<number, number>,
+  initialBitmapSubtitleTrackIndexByFileId?: Record<number, number>,
 ): UsePlaybackSessionResult {
   const config = usePlayerConfig();
   const probe = useCodecDetection();
@@ -500,6 +500,7 @@ export function usePlaybackSession(
       position: number,
       forceStartPosition: boolean,
       playbackAttemptId: string,
+      subtitleTrackIndex: number | undefined,
     ): Promise<DecisionResponseV3> => {
       const body = buildStartRequestV3({
         extraClientFeatures: VIDEO_CLIENT_FEATURES_V3,
@@ -510,7 +511,7 @@ export function usePlaybackSession(
         position,
         forceStartPosition,
         explicitAudioTrackIndex,
-        subtitleTrackIndex: initialSubtitleTrackIndexByFileId?.[targetFileId],
+        subtitleTrackIndex,
         metered: detectMeteredV3(),
         bandwidthEstimateKbps: detectBandwidthEstimateKbpsV3(),
         bandwidthCapKbps: maxBitrateKbps,
@@ -523,14 +524,7 @@ export function usePlaybackSession(
         body: JSON.stringify(body),
       });
     },
-    [
-      clientCapabilities,
-      clientPlaybackContext,
-      config,
-      explicitAudioTrackIndex,
-      initialSubtitleTrackIndexByFileId,
-      maxBitrateKbps,
-    ],
+    [clientCapabilities, clientPlaybackContext, config, explicitAudioTrackIndex, maxBitrateKbps],
   );
 
   const stopSession = useCallback(
@@ -636,7 +630,7 @@ export function usePlaybackSession(
       }));
 
       // A start begins a new attempt chain: fresh attempt id, empty loop guard.
-      const playbackAttemptId = randomUUID();
+      let playbackAttemptId = randomUUID();
       playbackAttemptIdRef.current = playbackAttemptId;
       attemptedPlanKeysRef.current = [];
       attemptCountRef.current = 1;
@@ -681,6 +675,7 @@ export function usePlaybackSession(
           position,
           forceStartPosition,
           playbackAttemptId,
+          initialSubtitleTrackIndexByFileId?.[selectedFileId],
         );
 
         if (loadSequence !== loadSequenceRef.current) {
@@ -695,51 +690,30 @@ export function usePlaybackSession(
 
         let decisionToAdopt = decision;
         let initialSubtitleFailure: PlaybackSessionErrorState | null = null;
-        const startPlan = decision.playback_plan;
-        const deferredSubtitleTrackIndex = deferredSubtitleTrackIndexByFileId?.[selectedFileId];
-        if (startPlan && deferredSubtitleTrackIndex !== undefined) {
-          const sessionId = startPlan.session_id ?? decision.session_id;
-          if (sessionId) {
-            const body = buildReplanRequestV3({
-              operation: "track_change",
-              positionSeconds: startPlan.timeline.source_start_seconds,
-              subtitle: { id: "", index: deferredSubtitleTrackIndex },
-              extraClientFeatures: VIDEO_CLIENT_FEATURES_V3,
-              plan: startPlan,
-              playbackAttemptId,
-              replanRequestId: randomUUID(),
-              planAttemptId: randomUUID(),
-              qualityPreference: qualityRef.current,
-              attemptedPlanKeys: [],
-              attemptCount: 1,
-              metered: detectMeteredV3(),
-              bandwidthEstimateKbps: detectBandwidthEstimateKbpsV3(),
-              bandwidthCapKbps: maxBitrateKbps,
-              clientCapabilities,
-              clientPlaybackContext,
+        const bitmapSubtitleTrackIndex = initialBitmapSubtitleTrackIndexByFileId?.[selectedFileId];
+        if (!decision.playback_plan && bitmapSubtitleTrackIndex !== undefined) {
+          initialSubtitleFailure = describeDecisionWithoutPlan(decision);
+          if (decision.session_id) {
+            void stopSession(decision.session_id).catch(() => {
+              // Best effort cleanup for the refused subtitle-bearing start.
             });
-            try {
-              const subtitleDecision = await playerFetch<DecisionResponseV3>(
-                config,
-                `/playback/${sessionId}/replan`,
-                { method: "POST", body: JSON.stringify(body) },
-              );
-              if (subtitleDecision.playback_plan) {
-                decisionToAdopt = subtitleDecision;
-              } else {
-                initialSubtitleFailure = describeDecisionWithoutPlan(subtitleDecision);
-              }
-            } catch (error) {
-              initialSubtitleFailure = describePlaybackSessionError(
-                error,
-                "Silo could not apply the initial subtitle selection.",
-              );
-            }
-          } else {
-            initialSubtitleFailure = {
-              title: "That subtitle track can't be used",
-              message: "Silo could not apply the initial subtitle selection.",
-            };
+          }
+
+          // A fresh attempt id avoids colliding with start idempotency: the
+          // retry intentionally changes the request by dropping the bitmap
+          // subtitle that made the first plan impossible.
+          const fallbackPlaybackAttemptId = randomUUID();
+          playbackAttemptId = fallbackPlaybackAttemptId;
+          playbackAttemptIdRef.current = fallbackPlaybackAttemptId;
+          decisionToAdopt = await requestStart(
+            selectedFileId,
+            position,
+            forceStartPosition,
+            fallbackPlaybackAttemptId,
+            undefined,
+          );
+          if (!decisionToAdopt.playback_plan) {
+            initialSubtitleFailure = null;
           }
         }
 
@@ -803,12 +777,9 @@ export function usePlaybackSession(
     [
       adoptDecision,
       beginAdoption,
-      clientCapabilities,
-      clientPlaybackContext,
-      config,
-      deferredSubtitleTrackIndexByFileId,
       endAdoption,
-      maxBitrateKbps,
+      initialBitmapSubtitleTrackIndexByFileId,
+      initialSubtitleTrackIndexByFileId,
       requestStart,
       selectFileId,
       stopSession,

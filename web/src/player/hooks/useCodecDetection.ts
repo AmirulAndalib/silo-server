@@ -116,6 +116,22 @@ export async function probeHDR10PlaybackSupport(): Promise<boolean> {
   }
 }
 
+let initialHDR10Probe: Promise<boolean> | null = null;
+
+/**
+ * Starts the expensive Media Capabilities query once for the lifetime of the
+ * app. The shell calls this before playback is requested so opening a video
+ * does not have to wait several seconds for the browser's first decoder probe.
+ */
+export function prewarmCodecDetection(): Promise<boolean> {
+  initialHDR10Probe ??= probeHDR10PlaybackSupport();
+  return initialHDR10Probe;
+}
+
+export function resetCodecDetectionForTests(): void {
+  initialHDR10Probe = null;
+}
+
 function testMediaType(mime: string): boolean {
   if (typeof MediaSource !== "undefined") {
     try {
@@ -274,12 +290,12 @@ export function useCodecDetection(): SettledWebCapabilityProbe {
       typeof matchMedia === "undefined"
         ? []
         : [matchMedia("(dynamic-range: high)"), matchMedia("(video-dynamic-range: high)")];
-    const refresh = () => {
+    const refresh = (hdr10Probe: Promise<boolean>) => {
       const generation = ++probeGeneration;
       const next = probeWebCapabilities();
       setCapabilities({ ...next, settled: false });
 
-      void probeHDR10PlaybackSupport().then((hdr10) => {
+      void hdr10Probe.then((hdr10) => {
         if (disposed || generation !== probeGeneration) return;
         setCapabilities((current) => ({
           ...current,
@@ -306,17 +322,19 @@ export function useCodecDetection(): SettledWebCapabilityProbe {
         }));
       });
     };
-    refresh();
+    refresh(prewarmCodecDetection());
+    const refreshForOutputChange = () => refresh(probeHDR10PlaybackSupport());
     for (const query of queries) {
-      if (typeof query.addEventListener === "function") query.addEventListener("change", refresh);
-      else query.addListener?.(refresh);
+      if (typeof query.addEventListener === "function")
+        query.addEventListener("change", refreshForOutputChange);
+      else query.addListener?.(refreshForOutputChange);
     }
     return () => {
       disposed = true;
       for (const query of queries) {
         if (typeof query.removeEventListener === "function")
-          query.removeEventListener("change", refresh);
-        else query.removeListener?.(refresh);
+          query.removeEventListener("change", refreshForOutputChange);
+        else query.removeListener?.(refreshForOutputChange);
       }
     };
   }, []);

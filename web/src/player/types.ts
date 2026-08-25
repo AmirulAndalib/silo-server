@@ -249,10 +249,11 @@ export interface WatchPageProps {
   /** Initial server subtitle ordinal keyed by file ID. Missing entries mean subtitles start off. */
   initialSubtitleTrackIndexByFileId?: Record<number, number>;
   /**
-   * Bitmap subtitle ordinals that must be applied only after a playable start
-   * plan exists. WatchPage keeps the player hidden while this replan settles.
+   * The subset of initial subtitle ordinals that require bitmap burn-in. A
+   * refused initial start is retried without these tracks so playback remains
+   * available when the server cannot perform the required video conversion.
    */
-  deferredSubtitleTrackIndexByFileId?: Record<number, number>;
+  initialBitmapSubtitleTrackIndexByFileId?: Record<number, number>;
   preferredSubtitleLanguage?: string | null;
   preferredSubtitleTrackSignature?: PlayerSubtitleTrackSignature | null;
   subtitleMode?: SubtitleMode;
