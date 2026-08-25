@@ -424,7 +424,13 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 		plan.Delivery = DeliveryRemuxProgressiveV3
 		plan.Stream = StreamV3{Protocol: StreamHTTPProgressiveV3, Container: containerMP4V3, MIMEType: mimeVideoMP4V3, Headers: map[string]string{}, HeaderRefresh: HeaderRefreshNoneV3}
 		plan.DecisionReason = "container_normalization"
-		transcodeAudio := !deliveryDecodesAudioCodecV3(input.Request, DeliveryClassProgressiveV3, source.AudioCodec, audioOK)
+		progressiveAudioOK := deliverySupportsAudioClaimV3(input.Request, DeliveryClassProgressiveV3, source.AudioCodec, audioClaims, audioOK)
+		hlsAudioOK := hlsNativeAudioCodecV3(source.AudioCodec) &&
+			deliverySupportsAudioClaimV3(input.Request, DeliveryClassHLSV3, source.AudioCodec, audioClaims, audioOK)
+		// Defer conversion when either packaging route can preserve the source
+		// audio. A progressive-incompatible codec can still take an HLS copy
+		// route without requiring an AAC encoder.
+		transcodeAudio := !progressiveAudioOK && !hlsAudioOK
 		progressiveAudioChannels := 0
 		localAudioConvertOK := input.Registry != nil && input.Registry.Available(TransformationAudioToAACV3)
 		if transcodeAudio {
@@ -477,9 +483,18 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 			plan.RuntimeCorrections = []string{}
 			plan.Delivery = DeliveryRemuxHLSV3
 			plan.Stream = StreamV3{Protocol: StreamHLSV3, Container: "hls", MIMEType: "application/vnd.apple.mpegurl", Headers: map[string]string{}, HeaderRefresh: HeaderRefreshNoneV3}
-			hlsTranscodeAudio := transcodeAudio
+			hlsTranscodeAudio := !hlsAudioOK
 			hlsAudioChannels := 0
 			if hlsTranscodeAudio {
+				if !transcodeAudio {
+					if !input.hlsRegistry().Available(TransformationAudioToAACV3) {
+						return terminalPlannerResultV3(TerminalAudioConversionUnsupportedV3, "The HLS route requires the validated AAC conversion toolchain.", true)
+					}
+					plan.EffectiveRecipe.AudioCodec = "aac"
+					plan.Claims.Audio = AudioClaimsV3{Codec: "aac", Reason: "hls_audio_adaptation"}
+					plan.Transformations = append(plan.Transformations, TransformationV3{Name: TransformationAudioToAACV3, Executor: ExecutorServerV3, RecipeVersion: "1", ValidatedClaims: []string{ClaimAudioDecodeV3}})
+					plan.DegradationWarnings = append(plan.DegradationWarnings, DegradationWarningV3{Code: degradationAudioConvertedV3, Message: "The selected audio track is converted to AAC for HLS delivery."})
+				}
 				hlsAudioChannels = aacOutputChannelsV3(input.Request, DeliveryClassHLSV3, source.AudioChannels, false)
 				plan.EffectiveRecipe.AudioChannels = intPointerV3(hlsAudioChannels)
 				plan.EffectiveRecipe.AudioLayout = audioLayoutForChannelsV3(hlsAudioChannels)
@@ -1496,15 +1511,24 @@ func deliveryAvailableV3(request StartRequestV3, deliveryClass string) bool {
 	return capability.Enabled && capability.SupportedOnDevice
 }
 
-// deliveryDecodesAudioCodecV3 narrows a device-wide audio claim to the active
-// delivery when the client supplies a scoped list. Empty scoped lists retain
-// the legacy fallback because older clients use them to mean "unspecified."
-func deliveryDecodesAudioCodecV3(request StartRequestV3, deliveryClass, codec string, fallback bool) bool {
+// deliverySupportsAudioClaimV3 narrows a device-wide audio claim to the active
+// delivery when the client supplies scoped decode or passthrough lists. Empty
+// scoped lists retain the legacy fallback because older clients use them to
+// mean "unspecified."
+func deliverySupportsAudioClaimV3(request StartRequestV3, deliveryClass, codec string, claim AudioClaimsV3, fallback bool) bool {
 	capability, ok := request.ClientPlaybackContext.Deliveries[deliveryClass]
-	if !ok || len(capability.AudioDecodeCodecs) == 0 {
+	if !ok || !capability.Enabled || !capability.SupportedOnDevice {
+		return false
+	}
+	hasAudioConstraints := len(capability.AudioDecodeCodecs) > 0 || len(capability.AudioPassthroughCodecs) > 0
+	if !hasAudioConstraints {
 		return fallback
 	}
-	return containsFoldV3(capability.AudioDecodeCodecs, codec)
+	supportedCodecs := capability.AudioDecodeCodecs
+	if claim.Passthrough {
+		supportedCodecs = capability.AudioPassthroughCodecs
+	}
+	return containsFoldV3(supportedCodecs, codec)
 }
 
 // deliverySupportsPlanV3 applies the capability limits scoped to the delivery
