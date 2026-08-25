@@ -336,7 +336,16 @@ describe("buildWatchPageProps", () => {
     });
   });
 
-  it("omits a selected PGS track from the initial playback request", () => {
+  it.each([
+    "pgs",
+    "pgssub",
+    "hdmv_pgs_subtitle",
+    "dvd_subtitle",
+    "dvdsub",
+    "vobsub",
+    "dvb_subtitle",
+    "dvbsub",
+  ])("omits a selected %s bitmap track from the initial playback request", (codec) => {
     const props = buildWatchPageProps({
       request: createWatchRouteRequest({
         contentId: "movie-1",
@@ -345,7 +354,7 @@ describe("buildWatchPageProps", () => {
         prePlaySubtitleSelection: {
           source: "embedded",
           language: "en",
-          codec: "hdmv_pgs_subtitle",
+          codec,
           label: "English PGS",
           track_index: 4,
         },
@@ -368,7 +377,7 @@ describe("buildWatchPageProps", () => {
               {
                 index: 4,
                 language: "en",
-                codec: "hdmv_pgs_subtitle",
+                codec,
                 title: "English PGS",
               },
             ],
@@ -378,7 +387,7 @@ describe("buildWatchPageProps", () => {
           {
             source: "embedded",
             language: "en",
-            codec: "hdmv_pgs_subtitle",
+            codec,
             forced: false,
             title: "English PGS",
           },
