@@ -129,7 +129,9 @@ func TestRequestExecutionFingerprintBindsRecipeButNotArtifactHandle(t *testing.T
 		ToneMapPreflightRequired: true, ToneMapSourceRevision: tonemap.SourceRevision{MediaFileID: 42, FileSize: 100},
 		ToneMapDVConfigPresent: true, ToneMapDVBLCompatIDPresent: true, ToneMapDVBLPresent: true, ToneMapDVRPUPresent: true,
 		TargetCodecVideo: "h264", TargetCodecAudio: "aac", TargetResolution: "1080p",
-		TargetBitrateKbps: 8000, AudioTrackIndex: 1, SourceAudioChannels: 6, TotalDuration: 7200,
+		TargetBitrateKbps: 8000, AudioTrackIndex: 1,
+		AudioRecipeVersion:  playback.TransformationAudioToAACRecipeVersionV3,
+		SourceAudioChannels: 6, TotalDuration: 7200,
 	}
 	want := base.ExecutionFingerprint()
 	if want == "" {
@@ -144,6 +146,11 @@ func TestRequestExecutionFingerprintBindsRecipeButNotArtifactHandle(t *testing.T
 	changed.SoftwareVideoDecode = false
 	if got := changed.ExecutionFingerprint(); got == want {
 		t.Fatal("byte-affecting software decode did not change execution fingerprint")
+	}
+	changed = base
+	changed.AudioRecipeVersion = "3"
+	if got := changed.ExecutionFingerprint(); got == want {
+		t.Fatal("byte-affecting audio recipe version did not change execution fingerprint")
 	}
 	changed = base
 	changed.SourceAudioChannels = 8
@@ -163,7 +170,9 @@ func TestRequestStereoDownmixBoostRequested(t *testing.T) {
 		req  Request
 		want bool
 	}{
-		{name: "surround AAC", req: Request{TargetCodecAudio: "aac", SourceAudioChannels: 6}, want: true},
+		{name: "surround AAC v2", req: Request{TargetCodecAudio: "aac", AudioRecipeVersion: playback.TransformationAudioToAACRecipeVersionV3, SourceAudioChannels: 6}, want: true},
+		{name: "surround AAC missing version", req: Request{TargetCodecAudio: "aac", SourceAudioChannels: 6}},
+		{name: "surround AAC wrong version", req: Request{TargetCodecAudio: "aac", AudioRecipeVersion: "1", SourceAudioChannels: 6}},
 		{name: "stereo AAC", req: Request{TargetCodecAudio: "aac", SourceAudioChannels: 2}},
 		{name: "unknown AAC", req: Request{TargetCodecAudio: "aac"}},
 		{name: "surround copy", req: Request{TargetCodecAudio: "copy", SourceAudioChannels: 6}},
@@ -173,6 +182,20 @@ func TestRequestStereoDownmixBoostRequested(t *testing.T) {
 				t.Fatalf("StereoDownmixBoostRequested() = %t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestNewRequestFreezesAudioRecipeVersion(t *testing.T) {
+	request := NewRequest("artifact-a", playback.TranscodeOpts{TargetCodecAudio: "aac", SourceAudioChannels: 6})
+	if request.AudioRecipeVersion != playback.TransformationAudioToAACRecipeVersionV3 || !request.StereoDownmixBoostRequested() {
+		t.Fatalf("audio recipe = version %q, requested=%t", request.AudioRecipeVersion, request.StereoDownmixBoostRequested())
+	}
+	if !request.AudioRecipeRequested() {
+		t.Fatal("complete v2 recipe was not recognized as an audio recipe")
+	}
+	partial := Request{TargetCodecAudio: "aac", SourceAudioChannels: 6}
+	if !partial.AudioRecipeRequested() || partial.StereoDownmixBoostRequested() {
+		t.Fatal("partial recipe was not detected and rejected")
 	}
 }
 

@@ -90,6 +90,10 @@ type Request struct {
 	TargetResolution           string                 `json:"target_resolution,omitempty"`
 	TargetBitrateKbps          int                    `json:"target_bitrate_kbps,omitempty"`
 	AudioTrackIndex            int                    `json:"audio_track_index"`
+	// AudioRecipeVersion makes the prepared-file executor contract explicit;
+	// older nodes ignore it and therefore cannot return the matching execution
+	// fingerprint required by the current caller.
+	AudioRecipeVersion string `json:"audio_recipe_version,omitempty"`
 	// SourceAudioChannels freezes the selected input stream's probed channel
 	// count. Zero is the mixed-version-safe unknown value and never enables gain.
 	SourceAudioChannels int     `json:"source_audio_channels,omitempty"`
@@ -174,11 +178,18 @@ func (r Request) ToneMapRequested() bool {
 		r.ToneMapDVConfigPresent || r.ToneMapDVBLCompatIDPresent || r.ToneMapDVBLPresent || r.ToneMapDVRPUPresent
 }
 
-// StereoDownmixBoostRequested reports whether this prepared-file recipe needs
-// the source-sensitive audio_to_aac v2 behavior. Prepared AAC output uses the
+// AudioRecipeRequested includes incomplete requests so the node can reject a
+// partial recipe instead of treating it as an ordinary encode.
+func (r Request) AudioRecipeRequested() bool {
+	return r.AudioRecipeVersion != "" || r.SourceAudioChannels != 0
+}
+
+// StereoDownmixBoostRequested reports whether this is the complete,
+// source-sensitive audio_to_aac v2 recipe. Prepared encoded audio uses the
 // historical stereo default, so only a known surround source qualifies.
 func (r Request) StereoDownmixBoostRequested() bool {
-	return r.SourceAudioChannels > 2 && playback.TranscodesAudio(r.TargetCodecAudio)
+	return r.AudioRecipeVersion == playback.TransformationAudioToAACRecipeVersionV3 &&
+		r.SourceAudioChannels > 2 && playback.TranscodesAudio(r.TargetCodecAudio)
 }
 
 // ValidToneMapAttestation reports whether a requested recipe carries every
@@ -205,7 +216,7 @@ func (r Request) ExecutionFingerprint() string {
 // NewRequest freezes the byte-affecting recipe while deliberately omitting
 // environment-specific execution settings.
 func NewRequest(artifactID string, opts playback.TranscodeOpts) Request {
-	return Request{
+	request := Request{
 		ArtifactID:                 artifactID,
 		InputPath:                  opts.InputPath,
 		SourceVideoCodec:           opts.SourceVideoCodec,
@@ -230,6 +241,10 @@ func NewRequest(artifactID string, opts playback.TranscodeOpts) Request {
 		SourceAudioChannels:        opts.SourceAudioChannels,
 		TotalDuration:              opts.TotalDuration,
 	}
+	if request.SourceAudioChannels > 2 && playback.TranscodesAudio(request.TargetCodecAudio) {
+		request.AudioRecipeVersion = playback.TransformationAudioToAACRecipeVersionV3
+	}
+	return request
 }
 
 // TranscodeOpts reconstructs the prepared-file options using the selected

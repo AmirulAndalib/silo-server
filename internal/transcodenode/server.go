@@ -38,6 +38,7 @@ type TranscodeStartRequest struct {
 	SourceVideoProfile         string                 `json:"source_video_profile,omitempty"`
 	SourceVideoBitDepth        int                    `json:"source_video_bit_depth,omitempty"`
 	SourceAudioChannels        int                    `json:"source_audio_channels,omitempty"`
+	AudioRecipeVersion         string                 `json:"audio_recipe_version,omitempty"`
 	SoftwareVideoDecode        bool                   `json:"software_video_decode,omitempty"`
 	ToneMapPolicy              tonemap.Policy         `json:"tone_map_policy,omitempty"`
 	ToneMapMode                tonemap.Mode           `json:"tone_map_mode,omitempty"`
@@ -77,6 +78,39 @@ type TranscodeStartResponse struct {
 	Status      string       `json:"status"`
 	HWAccel     string       `json:"hw_accel,omitempty"`
 	ToneMapMode tonemap.Mode `json:"tone_map_mode,omitempty"`
+	// AudioRecipeVersion attests the exact byte-affecting audio recipe the node
+	// understood. An old node omits it, allowing current callers to stop the job
+	// before publishing bytes from a silently ignored SourceAudioChannels field.
+	AudioRecipeVersion string `json:"audio_recipe_version,omitempty"`
+}
+
+var ErrAudioRecipeAttestationMismatch = errors.New("transcode node audio recipe attestation mismatch")
+
+func validateAudioRecipeRequest(req TranscodeStartRequest) error {
+	if req.SourceAudioChannels == 0 && req.AudioRecipeVersion == "" {
+		return nil
+	}
+	if req.SourceAudioChannels <= 2 ||
+		req.AudioRecipeVersion != playback.TransformationAudioToAACRecipeVersionV3 ||
+		!strings.EqualFold(strings.TrimSpace(req.TargetCodecAudio), "aac") ||
+		req.TargetAudioChannels != 2 {
+		return fmt.Errorf("%w: source_channels=%d target_codec=%q target_channels=%d recipe_version=%q",
+			ErrAudioRecipeAttestationMismatch, req.SourceAudioChannels, req.TargetCodecAudio, req.TargetAudioChannels, req.AudioRecipeVersion)
+	}
+	return nil
+}
+
+// ValidateAudioRecipeAttestation checks the start response only when the
+// request carries the v2 stereo-downmix recipe. Ordinary legacy starts keep
+// accepting the empty responses returned by older nodes.
+func ValidateAudioRecipeAttestation(req TranscodeStartRequest, response TranscodeStartResponse) error {
+	if err := validateAudioRecipeRequest(req); err != nil {
+		return err
+	}
+	if req.AudioRecipeVersion != "" && response.AudioRecipeVersion != req.AudioRecipeVersion {
+		return fmt.Errorf("%w: got %q, want %q", ErrAudioRecipeAttestationMismatch, response.AudioRecipeVersion, req.AudioRecipeVersion)
+	}
+	return nil
 }
 
 // HealthResponse is the JSON response for GET /api/v1/health.
@@ -522,6 +556,10 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "a valid artifact_id and input_path are required", http.StatusBadRequest)
 		return
 	}
+	if req.AudioRecipeRequested() && !req.StereoDownmixBoostRequested() {
+		http.Error(w, "invalid audio recipe", http.StatusBadRequest)
+		return
+	}
 
 	cfg := s.watcher.Config()
 	if cfg == nil {
@@ -629,12 +667,15 @@ func expectedDownloadPrepareResult(req downloadprepare.Request, fileSize int64) 
 		result.ToneMapMode = req.ToneMapMode
 		result.ToneMapSourceRevisionFingerprint = req.ToneMapSourceRevision.Fingerprint()
 	}
+	if req.AudioRecipeRequested() && !req.StereoDownmixBoostRequested() {
+		return downloadprepare.Result{}, false
+	}
 	result.ExecutionFingerprint = req.ExecutionFingerprint()
 	return result, result.ExecutionFingerprint != ""
 }
 
 func downloadPrepareReceiptRequested(req downloadprepare.Request) bool {
-	return req.ToneMapRequested() || req.StereoDownmixBoostRequested()
+	return req.ToneMapRequested() || req.AudioRecipeRequested()
 }
 
 func existingDownloadPrepareResult(outputPath string, req downloadprepare.Request) (downloadprepare.Result, bool) {
@@ -937,6 +978,10 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session_id and input_path are required", http.StatusBadRequest)
 		return
 	}
+	if err := validateAudioRecipeRequest(req); err != nil {
+		http.Error(w, "invalid audio recipe", http.StatusBadRequest)
+		return
+	}
 	if !s.requireApprovedInputPath(w, r, req.InputPath) {
 		return
 	}
@@ -1088,10 +1133,11 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(TranscodeStartResponse{
-		SessionID:   req.SessionID,
-		Status:      "started",
-		HWAccel:     effectiveHWAccel,
-		ToneMapMode: session.Opts().ToneMapMode,
+		SessionID:          req.SessionID,
+		Status:             "started",
+		HWAccel:            effectiveHWAccel,
+		ToneMapMode:        session.Opts().ToneMapMode,
+		AudioRecipeVersion: req.AudioRecipeVersion,
 	})
 }
 

@@ -30,7 +30,7 @@ func remoteTranscodeNodeStubV3(t *testing.T) *httptest.Server {
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Errorf("decode remote start: %v", err)
 			}
-			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: request.SessionID, Status: "started"})
+			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: request.SessionID, Status: "started", AudioRecipeVersion: request.AudioRecipeVersion})
 		default:
 			w.WriteHeader(http.StatusNoContent)
 		}
@@ -52,6 +52,50 @@ func remoteHLSPlanV3() *playback.PlanV3 {
 
 func remoteHLSResultV3() playback.PlannerResultV3 {
 	return playback.PlannerResultV3{Plan: remoteHLSPlanV3(), PlayMethod: playback.PlayTranscode, TranscodeAudio: true, TargetVideoCodec: "h264", TargetAudioCodec: "aac", SourceAudioChannels: 6, TargetAudioChannels: 2}
+}
+
+func TestPrepareRemoteTransportV3RejectsOldNodeAfterStaleAudioCapabilityProbe(t *testing.T) {
+	var startRequest transcodenode.TranscodeStartRequest
+	stopRequests := 0
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
+			// This is the cached answer from the v2 binary before it was replaced.
+			writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{
+				{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
+				{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
+			if err := json.NewDecoder(r.Body).Decode(&startRequest); err != nil {
+				t.Errorf("decode remote start: %v", err)
+			}
+			// A pre-v2 node ignores both new request fields and omits the receipt.
+			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: startRequest.SessionID, Status: "started"})
+		case r.Method == http.MethodDelete:
+			stopRequests++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer node.Close()
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{TranscodeNode: &nodepool.Node{URL: node.URL}}}
+	_, transportErr := handler.prepareTransportV3(
+		httptest.NewRequest(http.MethodPost, "/", nil),
+		&playback.Session{ID: "session-stale-audio-node", UserID: 7, ProfileID: "profile-1"},
+		v3HandlerFixtureFile(t), remoteHLSResultV3(), mediaAuthModeV3{})
+	if transportErr == nil || transportErr.reason != transcodeStartFailedReasonV3 {
+		t.Fatalf("transport error = %#v, want %q", transportErr, transcodeStartFailedReasonV3)
+	}
+	if startRequest.AudioRecipeVersion != playback.TransformationAudioToAACRecipeVersionV3 || startRequest.SourceAudioChannels != 6 {
+		t.Fatalf("remote request = %#v, want source channels plus audio recipe v2", startRequest)
+	}
+	if stopRequests != 1 {
+		t.Fatalf("stop requests = %d, want one cleanup for the unconfirmed job", stopRequests)
+	}
 }
 
 // A header-authenticated attempt publishes no stream token, so when the node

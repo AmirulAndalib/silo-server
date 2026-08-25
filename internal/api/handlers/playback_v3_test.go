@@ -4346,6 +4346,40 @@ func TestPrepareTransportV3RoutesProgressiveRemuxThroughProxyNodeWithSeekAndDV(t
 	}
 }
 
+func TestIdentityStreamURLV3VersionsOnlyBoostedRemuxRoutes(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	file := v3HandlerFixtureFile(t)
+	proxy := &nodepool.Node{URL: "http://proxy-1/"}
+
+	boosted := &playback.Session{
+		ID: "boosted", UserID: 7, ProfileID: "profile-1", MediaFileID: file.ID,
+		PlayMethod: playback.PlayRemux, TranscodeAudio: true,
+		SourceAudioChannels: 6, TargetAudioChannels: 2,
+	}
+	boostedURL, servedByProxy := handler.identityStreamURLV3(boosted, file, proxy)
+	boostedPrefix := "http://proxy-1/stream/remux/audio-v2/"
+	if !servedByProxy || !strings.HasPrefix(boostedURL, boostedPrefix) {
+		t.Fatalf("boosted remux URL = %q (proxy %v), want the audio-v2 route", boostedURL, servedByProxy)
+	}
+	claims, err := streamtoken.Verify(strings.TrimPrefix(boostedURL, boostedPrefix), handler.JWTSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.PlayMethod != streamtoken.PlayMethodAudioDownmixRemux || claims.SourceAudioChannels != 6 {
+		t.Fatalf("boosted claims = %#v", claims)
+	}
+
+	legacy := *boosted
+	legacy.ID = "legacy"
+	legacy.SourceAudioChannels = 0
+	legacyURL, servedByProxy := handler.identityStreamURLV3(&legacy, file, proxy)
+	legacyPrefix := "http://proxy-1/stream/remux/"
+	if !servedByProxy || !strings.HasPrefix(legacyURL, legacyPrefix) || strings.HasPrefix(legacyURL, boostedPrefix) {
+		t.Fatalf("ordinary remux URL = %q (proxy %v), want the legacy route", legacyURL, servedByProxy)
+	}
+}
+
 func TestPrepareTransportV3NegotiatesHeaderAuthenticatedProgressiveRemuxURL(t *testing.T) {
 	for _, test := range []struct {
 		name      string

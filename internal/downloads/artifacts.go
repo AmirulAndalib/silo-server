@@ -331,7 +331,10 @@ func (m *ArtifactManager) ensureResolved(ctx context.Context, file *models.Media
 		MaxAttempts:                artifactMaxAttempts,
 	}
 	request := downloadprepare.NewRequest(a.ID, m.buildOpts(file, a))
-	if a.ToneMapMode != "" || request.StereoDownmixBoostRequested() {
+	if request.StereoDownmixBoostRequested() {
+		a.AudioRecipeVersion = request.AudioRecipeVersion
+	}
+	if a.ToneMapMode != "" || a.AudioRecipeVersion != "" {
 		a.ParamsHash = request.ExecutionFingerprint()
 		a.OutputPath = artifactOutputPath(m.artifactDir(), file.ID, format, a.ParamsHash)
 	}
@@ -358,7 +361,7 @@ func (m *ArtifactManager) ensureResolved(ctx context.Context, file *models.Media
 		case err != nil:
 			return nil, err
 		default:
-			row.Status = queuedArtifactStatus(row.ToneMapMode)
+			row.Status = queuedArtifactStatus(row.ToneMapMode, row.AudioRecipeVersion)
 		}
 		m.triggerDrain()
 		return row, nil

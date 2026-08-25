@@ -132,12 +132,15 @@ func TestValidateArtifactToneMapRevisionRejectsCatalogProbeDrift(t *testing.T) {
 	}
 }
 
-func TestArtifactReadyStatusIncludesFencedToneMapRows(t *testing.T) {
+func TestArtifactReadyStatusIncludesFencedRecipeRows(t *testing.T) {
 	if !artifactReady(&Artifact{Status: ArtifactReady}) {
 		t.Fatal("ordinary ready artifact was not ready")
 	}
 	if !artifactReady(&Artifact{Status: ArtifactToneMapReady}) {
 		t.Fatal("fenced tone-map ready artifact was not ready")
+	}
+	if !artifactReady(&Artifact{Status: ArtifactAudioV2Ready}) {
+		t.Fatal("fenced audio-v2 ready artifact was not ready")
 	}
 	if artifactReady(&Artifact{Status: ArtifactToneMapRunning}) {
 		t.Fatal("running tone-map artifact was ready")
@@ -191,6 +194,7 @@ func TestPreparedAudioBoostFreezesSelectedSourceChannelsInExecutionFingerprint(t
 		t.Fatal("legacy parameter hash was misclassified as a frozen execution fingerprint")
 	}
 
+	artifact.AudioRecipeVersion = playback.TransformationAudioToAACRecipeVersionV3
 	artifact.ParamsHash = downloadprepare.NewRequest(artifact.ID, opts).ExecutionFingerprint()
 	if !artifactUsesExecutionFingerprint(artifact) || !artifactExecutionFingerprintMatches(artifact, opts) {
 		t.Fatal("source-sensitive audio recipe was not protected by its execution fingerprint")

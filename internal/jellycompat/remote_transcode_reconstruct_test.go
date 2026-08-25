@@ -472,18 +472,20 @@ func TestConcurrentRemoteStartsPublishOneTrackedRoute(t *testing.T) {
 func TestStartRemoteTranscodeDoesNotAdoptMismatchedAudioRecipe(t *testing.T) {
 	tests := []struct {
 		name               string
+		oldMediaFileID     int
 		oldAudioTrackIndex int
 		oldSourceChannels  int
 	}{
-		{name: "selected track changed channel layout", oldAudioTrackIndex: 1, oldSourceChannels: 6},
-		{name: "selected track changed at same channel layout", oldAudioTrackIndex: 0, oldSourceChannels: 0},
+		{name: "media file changed with same audio facts", oldMediaFileID: 41, oldAudioTrackIndex: 1, oldSourceChannels: 0},
+		{name: "selected track changed channel layout", oldMediaFileID: 42, oldAudioTrackIndex: 1, oldSourceChannels: 6},
+		{name: "selected track changed at same channel layout", oldMediaFileID: 42, oldAudioTrackIndex: 0, oldSourceChannels: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var received transcodenode.TranscodeStartRequest
 			node := fakeTranscodeNode(t, &received)
 			handler, _, playbackStore := newRemoteTranscodeHandler(t, node.URL, &stubRecipeNodeStore{})
-			oldRecipe := playback.NewRecipeCard(7, "profile-1", 42, node.URL, playback.TranscodeOpts{
+			oldRecipe := playback.NewRecipeCard(7, "profile-1", tt.oldMediaFileID, node.URL, playback.TranscodeOpts{
 				SessionID:           "upstream-1",
 				InputPath:           "/media/movie.mkv",
 				TargetCodecVideo:    compatTargetVideoCodec,
@@ -552,8 +554,10 @@ func TestMasterManifestGatesUnhealthyRemoteAdoption(t *testing.T) {
 				UpstreamSessionID: "upstream-1", UpstreamPlayMethod: "transcode",
 				TranscodeStarted: true,
 				Recipe: &playback.RecipeCard{
-					TranscodeNodeURL: adoptedURL,
-					AudioTrackIndex:  compatAudioTrackIndexOrDefault(source),
+					TranscodeNodeURL:    adoptedURL,
+					MediaFileID:         source.FileID,
+					AudioTrackIndex:     compatAudioTrackIndexOrDefault(source),
+					SourceAudioChannels: compatSourceAudioChannels(source),
 				},
 			})
 			request := httptest.NewRequest(http.MethodGet, "/Videos/item/master.m3u8?PlaySessionId=play-1&MediaSourceId="+source.ID, nil)

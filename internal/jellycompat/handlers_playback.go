@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -247,8 +248,12 @@ type PlaybackHandler struct {
 	// driven to refresh a stale token, so the node reconstructs from this
 	// server-authoritative store instead (see internal/noderecipe). Optional
 	// (nil disables it — integrated/no-node deployments need no handoff).
-	RecipeNodeStore    recipeNodePutter
-	compatToneMapProbe func(context.Context, string, string, string) (tonemap.Capabilities, error)
+	RecipeNodeStore          recipeNodePutter
+	compatToneMapProbe       func(context.Context, string, string, string) (tonemap.Capabilities, error)
+	compatAudioRegistryMu    sync.Mutex
+	compatAudioRegistry      *playback.TransformationRegistryV3
+	compatAudioRegistryPath  string
+	compatAudioRegistryProbe func(context.Context, string, tonemap.Capabilities) (*playback.TransformationRegistryV3, error)
 	// compatLocalTranscodeReady is a test seam invoked after manifest readiness
 	// and before lifecycle-locked publication. Production leaves it nil.
 	compatLocalTranscodeReady func(*playback.TranscodeSession)
@@ -951,6 +956,10 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 		DVProfile:           file.PrimaryDVProfile(),
 	}
 	if claims.SourceAudioChannels > 0 {
+		// Compatibility AAC output is stereo by default. Freeze that effective
+		// value so the proxy's versioned route can validate the whole downmix
+		// shape before starting FFmpeg.
+		claims.TargetAudioChannels = 2
 		switch method {
 		case string(playback.PlayTranscode):
 			claims.PlayMethod = streamtoken.PlayMethodAudioDownmixTranscode
@@ -981,7 +990,11 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 	case string(playback.PlayDirect):
 		return proxyNode.URL + "/stream/direct/" + token, nil
 	case string(playback.PlayRemux):
-		redirectURL := proxyNode.URL + "/stream/remux/" + token
+		remuxPath := "/stream/remux/"
+		if claims.SourceAudioChannels > 0 {
+			remuxPath = "/stream/remux/audio-v2/"
+		}
+		redirectURL := proxyNode.URL + remuxPath + token
 		if seekSeconds > 0 {
 			redirectURL += "?seek=" + strconv.FormatFloat(seekSeconds, 'f', -1, 64)
 		}
@@ -1055,6 +1068,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		expectedSourceAudioChannels := compatSourceAudioChannels(source)
 		expectedAudioTrackIndex := compatAudioTrackIndexOrDefault(source)
 		if current, ok := h.playbackStore.Get(playSessionID); ok && current.TranscodeStarted && current.Recipe != nil && current.Recipe.TranscodeNodeURL != "" &&
+			current.Recipe.MediaFileID == source.FileID &&
 			current.Recipe.SourceAudioChannels == expectedSourceAudioChannels &&
 			current.Recipe.AudioTrackIndex == expectedAudioTrackIndex {
 			if upstream, sessionErr := h.sessionMgr.GetSession(upstreamSessionID); sessionErr == nil && upstream != nil &&
@@ -1163,6 +1177,11 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		SourceAudioChannels: compatSourceAudioChannels(source),
 		TotalDuration:       float64(source.Version.Duration),
 		RequireReady:        toneMapRecipe.mode != "",
+	}
+	if reqBody.SourceAudioChannels > 0 {
+		reqBody.AudioRecipeVersion = playback.TransformationAudioToAACRecipeVersionV3
+		reqBody.TargetAudioChannels = 2
+		reqBody.RequireReady = true
 	}
 	if toneMapRecipe.mode != "" {
 		reqBody.ToneMapPolicy = toneMapRecipe.policy
@@ -1298,6 +1317,10 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		}
 		return startErr
 	}
+	if err := transcodenode.ValidateAudioRecipeAttestation(reqBody, nodeResponse); err != nil {
+		h.tm.StopRemoteTranscode(upstreamSessionID, transcodeNodeURL)
+		return err
+	}
 	if reqBody.ToneMapMode != "" && nodeResponse.ToneMapMode != reqBody.ToneMapMode {
 		h.tm.StopRemoteTranscode(upstreamSessionID, transcodeNodeURL)
 		err := errors.New("remote transcode node did not confirm tone-map mode")
@@ -1357,6 +1380,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		SegmentDuration:     reqBody.SegmentDuration,
 		AudioTrackIndex:     reqBody.AudioTrackIndex,
 		SourceAudioChannels: reqBody.SourceAudioChannels,
+		TargetAudioChannels: reqBody.TargetAudioChannels,
 		TotalDuration:       reqBody.TotalDuration,
 	}
 	toneMapRecipe.apply(&opts)
@@ -1366,16 +1390,16 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		opts.TargetCodecVideo = "copy"
 	}
 
-	// Same mirror as the local path: the node runs the encode, but the
-	// upstream session here is what session sync and admin views read.
-	reportedOpts := opts
-	h.recordTranscodeStreamDetails(ctx, upstreamSessionID, reportedOpts)
-
 	if err := h.persistTranscodeRecipe(ctx, playSessionID, upstreamSessionID, opts); err != nil {
 		// Roll back the already-started node ffmpeg so it isn't leaked.
 		h.tm.StopRemoteTranscode(upstreamSessionID, transcodeNodeURL)
 		return err
 	}
+
+	// Publish admin/session execution facts only after the durable recipe
+	// commits. A failed recipe write must not leave the upstream mirror claiming
+	// the rejected audio tuple after the selection transaction rolls back.
+	h.recordTranscodeStreamDetails(ctx, upstreamSessionID, opts)
 
 	return nil
 }
@@ -1430,9 +1454,13 @@ func (h *PlaybackHandler) persistTranscodeRecipe(
 	}
 
 	var previousRecipe *playback.RecipeCard
-	if previous, ok := h.playbackStore.Get(playSessionID); ok && previous != nil && previous.Recipe != nil {
-		copy := *previous.Recipe
-		previousRecipe = &copy
+	previousTranscodeStarted := false
+	if previous, ok := h.playbackStore.Get(playSessionID); ok && previous != nil {
+		previousTranscodeStarted = previous.TranscodeStarted
+		if previous.Recipe != nil {
+			copy := *previous.Recipe
+			previousRecipe = &copy
+		}
 	}
 	nodeRecipeCommitted := recipe != nil && recipe.TranscodeNodeURL != "" && h.RecipeNodeStore != nil
 	if nodeRecipeCommitted {
@@ -1477,9 +1505,19 @@ func (h *PlaybackHandler) persistTranscodeRecipe(
 				}
 			}
 		}
+		// Durable stores can surface a DB failure after updating their live
+		// cache. Compensate only the exact candidate this call published so a
+		// concurrent newer recipe remains authoritative.
+		compatRestoreErr := h.playbackStore.Update(playSessionID, func(current *PlaybackSession) error {
+			if current.TranscodeStarted && reflect.DeepEqual(current.Recipe, recipe) {
+				current.TranscodeStarted = previousTranscodeStarted
+				current.Recipe = previousRecipe
+			}
+			return nil
+		})
 		updateErr = fmt.Errorf("update playback session: %w", updateErr)
-		if restoreErr != nil {
-			return errors.Join(updateErr, restoreErr)
+		if restoreErr != nil || compatRestoreErr != nil {
+			return errors.Join(updateErr, restoreErr, compatRestoreErr)
 		}
 		return updateErr
 	}
@@ -1801,6 +1839,7 @@ func (h *PlaybackHandler) buildPlaybackSource(
 
 func (h *PlaybackHandler) mediaSourceDTO(routeItemID, playSessionID, compatToken string, source PlaybackMediaSource) mediaSourceDTO {
 	selectedAudioStreamIndex := effectiveCompatAudioStreamIndex(source)
+	hlsAudioV2 := compatHLSRequiresAudioV2(source)
 	dto := mediaSourceDTO{
 		Protocol:                            "File",
 		ID:                                  source.ID,
@@ -1836,9 +1875,12 @@ func (h *PlaybackHandler) mediaSourceDTO(routeItemID, playSessionID, compatToken
 		MediaStreams:                        buildMediaStreamsWithSelection(routeItemID, source.ID, source.Version, selectedAudioStreamIndex, source.SelectedSubtitleStreamIndex, compatToken, playSessionID),
 	}
 	if source.SupportsDirectPlay || source.SupportsDirectStream {
+		// This URL is explicitly static=true, so HandleVideoStream always serves
+		// the source file directly. It never executes the versioned audio recipe.
+		basePath := compatVideoPath(routeItemID, false)
 		dto.DirectStreamURL = fmt.Sprintf(
-			"/Videos/%s/stream?static=true&mediaSourceId=%s&api_key=%s&PlaySessionId=%s",
-			routeItemID,
+			"%s/stream?static=true&mediaSourceId=%s&api_key=%s&PlaySessionId=%s",
+			basePath,
 			url.QueryEscape(source.ID),
 			url.QueryEscape(compatToken),
 			url.QueryEscape(playSessionID),
@@ -1846,7 +1888,7 @@ func (h *PlaybackHandler) mediaSourceDTO(routeItemID, playSessionID, compatToken
 	}
 	dto.TranscodingSubProtocol = "hls"
 	if source.SupportsTranscoding {
-		dto.TranscodingURL = fmt.Sprintf("/Videos/%s/master.m3u8?PlaySessionId=%s&MediaSourceId=%s", routeItemID, playSessionID, source.ID)
+		dto.TranscodingURL = fmt.Sprintf("%s/master.m3u8?PlaySessionId=%s&MediaSourceId=%s", compatVideoPath(routeItemID, hlsAudioV2), playSessionID, source.ID)
 		if source.TranscodeAudio {
 			dto.TranscodingContainer = "mp4"
 		} else {
@@ -2610,6 +2652,14 @@ func downloadedSubtitlePath(version catalog.FileVersion, sub subtitles.Downloade
 	name = strings.ReplaceAll(name, "\\", "-")
 	filename := name + "." + subtitleRouteFormat(string(sub.Format))
 	return filepath.ToSlash(filepath.Join("/silo/subtitles", filename))
+}
+
+func compatVideoPath(routeItemID string, audioV2 bool) string {
+	base := "/Videos/" + routeItemID
+	if audioV2 {
+		base += "/" + compatAudioV2PathSegment
+	}
+	return base
 }
 
 func subtitleDeliveryURL(routeItemID, mediaSourceID string, streamIndex int, format, compatToken, playSessionID string) string {

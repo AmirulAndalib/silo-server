@@ -598,6 +598,7 @@ func TestHandleDownloadPreparePublishesStereoDownmixReceiptAndStatusAttestation(
 		TargetCodecVideo:    "copy",
 		TargetCodecAudio:    "aac",
 		AudioTrackIndex:     0,
+		AudioRecipeVersion:  playback.TransformationAudioToAACRecipeVersionV3,
 		SourceAudioChannels: 6,
 	}
 	body, err := json.Marshal(prepareRequest)
@@ -649,6 +650,23 @@ func TestHandleDownloadPreparePublishesStereoDownmixReceiptAndStatusAttestation(
 	}
 	if attestation.ExecutionFingerprint != want.ExecutionFingerprint || attestation.FileSize != want.FileSize {
 		t.Fatalf("HEAD attestation = %+v, want fingerprint %q and size %d", attestation, want.ExecutionFingerprint, want.FileSize)
+	}
+}
+
+func TestHandleDownloadPrepareRejectsPartialStereoDownmixRecipe(t *testing.T) {
+	server := newTestServer(t)
+	request := downloadprepare.Request{
+		ArtifactID: "artifact-unversioned-downmix", InputPath: "/media/movie.mkv",
+		TargetCodecAudio: "aac", SourceAudioChannels: 6,
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.handleDownloadPrepare(recorder, httptest.NewRequest(http.MethodPost, "/downloads/prepare", bytes.NewReader(body)))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -1071,6 +1089,104 @@ func TestSessionOutputDirKeepsStartupPathAcrossReload(t *testing.T) {
 	if got, want := server.sessionOutputDir("session-1"), filepath.Join(startupDir, "session-1"); got != want {
 		t.Fatalf("session output dir = %q, want startup path %q", got, want)
 	}
+}
+
+func TestAudioRecipeRequestAndStartAttestationFailClosed(t *testing.T) {
+	current := TranscodeStartRequest{
+		SessionID: "downmix", InputPath: "/media/movie.mkv",
+		SourceAudioChannels: 6,
+		TargetCodecAudio:    "aac",
+		TargetAudioChannels: 2,
+		AudioRecipeVersion:  playback.TransformationAudioToAACRecipeVersionV3,
+	}
+	if err := validateAudioRecipeRequest(current); err != nil {
+		t.Fatalf("current recipe rejected: %v", err)
+	}
+	if err := ValidateAudioRecipeAttestation(current, TranscodeStartResponse{AudioRecipeVersion: current.AudioRecipeVersion}); err != nil {
+		t.Fatalf("current attestation rejected: %v", err)
+	}
+	if err := ValidateAudioRecipeAttestation(current, TranscodeStartResponse{}); !errors.Is(err, ErrAudioRecipeAttestationMismatch) {
+		t.Fatalf("old-node response error = %v, want attestation mismatch", err)
+	}
+
+	legacy := TranscodeStartRequest{SessionID: "legacy", InputPath: "/media/movie.mkv"}
+	if err := ValidateAudioRecipeAttestation(legacy, TranscodeStartResponse{}); err != nil {
+		t.Fatalf("ordinary legacy response rejected: %v", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*TranscodeStartRequest)
+	}{
+		{name: "unversioned", mutate: func(r *TranscodeStartRequest) { r.AudioRecipeVersion = "" }},
+		{name: "stereo source", mutate: func(r *TranscodeStartRequest) { r.SourceAudioChannels = 2 }},
+		{name: "missing codec", mutate: func(r *TranscodeStartRequest) { r.TargetCodecAudio = "" }},
+		{name: "audio copy", mutate: func(r *TranscodeStartRequest) { r.TargetCodecAudio = "copy" }},
+		{name: "surround preserving codec", mutate: func(r *TranscodeStartRequest) { r.TargetCodecAudio = "eac3" }},
+		{name: "missing target channels", mutate: func(r *TranscodeStartRequest) { r.TargetAudioChannels = 0 }},
+		{name: "surround target", mutate: func(r *TranscodeStartRequest) { r.TargetAudioChannels = 6 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := current
+			test.mutate(&request)
+			if err := validateAudioRecipeRequest(request); !errors.Is(err, ErrAudioRecipeAttestationMismatch) {
+				t.Fatalf("validateAudioRecipeRequest() = %v, want attestation mismatch", err)
+			}
+		})
+	}
+}
+
+func TestHandleStartRejectsUnversionedSourceAudioRecipeBeforeExecution(t *testing.T) {
+	server := newTestServer(t)
+	body, err := json.Marshal(TranscodeStartRequest{
+		SessionID: "unversioned-downmix", InputPath: "/media/movie.mkv",
+		SourceAudioChannels: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.handleStart(recorder, httptest.NewRequest(http.MethodPost, "/transcode/start", bytes.NewReader(body)))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHandleStartAttestsStereoDownmixRecipe(t *testing.T) {
+	server := newTestServer(t)
+	server.tracker = nodesessions.NewTracker(nil, "http://node", "node", "transcode")
+	ffmpegPath := filepath.Join(t.TempDir(), "looping-ffmpeg.sh")
+	if err := os.WriteFile(ffmpegPath, []byte("#!/bin/sh\nwhile :; do sleep 0.1; done\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server.watcher.Config().Playback.FFmpegPath = ffmpegPath
+	body, err := json.Marshal(TranscodeStartRequest{
+		SessionID: "attested-downmix", InputPath: "/media/movie.mkv",
+		SourceAudioChannels: 6, AudioRecipeVersion: playback.TransformationAudioToAACRecipeVersionV3,
+		TargetCodecVideo: "h264", TargetCodecAudio: "aac", TargetAudioChannels: 2, SegmentDuration: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.handleStart(recorder, httptest.NewRequest(http.MethodPost, "/transcode/start", bytes.NewReader(body)))
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body %s)", recorder.Code, recorder.Body.String())
+	}
+	var response TranscodeStartResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.AudioRecipeVersion != playback.TransformationAudioToAACRecipeVersionV3 {
+		t.Fatalf("audio recipe receipt = %q, want %q", response.AudioRecipeVersion, playback.TransformationAudioToAACRecipeVersionV3)
+	}
+	server.mu.RLock()
+	session := server.sessions["attested-downmix"]
+	server.mu.RUnlock()
+	if session == nil {
+		t.Fatal("attested session was not registered")
+	}
+	_ = session.CloseProcess()
 }
 
 func TestHandleStartWaitsForForceReloadGate(t *testing.T) {

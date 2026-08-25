@@ -129,6 +129,38 @@ func TestToneMapRecipeEnvelopeFailsClosedOnLegacyReader(t *testing.T) {
 	}
 }
 
+func TestStereoDownmixRecipeEnvelopeFailsClosedOnLegacyReader(t *testing.T) {
+	for _, card := range []playback.RecipeCard{
+		{
+			SessionID: "sid", PlayMethod: playback.PlayTranscode,
+			InputPath: "/media/movie.mkv", SegmentDuration: 4, TargetCodecVideo: "h264",
+			SourceAudioChannels: 6,
+		},
+		{
+			SessionID: "sid", PlayMethod: playback.PlayTranscode,
+			InputPath: "/media/movie.mkv", SegmentDuration: 4, TargetCodecVideo: "h264",
+			SourceAudioChannels: 6, ToneMapMode: tonemap.ModeHardware,
+		},
+	} {
+		data, err := marshalCard(card)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var legacy playback.RecipeCard
+		if err := json.Unmarshal(data, &legacy); err != nil {
+			t.Fatal(err)
+		}
+		if legacy.SessionID != "" || legacy.SegmentDuration != 0 || legacy.TargetCodecVideo != "" {
+			t.Fatalf("legacy flat decode = %+v, want incomplete recipe", legacy)
+		}
+		decoded, ok := unmarshalCard(data)
+		if !ok || decoded != card {
+			t.Fatalf("current decode = (%+v, %v), want original card", decoded, ok)
+		}
+	}
+}
+
 func TestOrdinaryRecipeRemainsLegacyFlatJSON(t *testing.T) {
 	card := playback.RecipeCard{SessionID: "sid", PlayMethod: playback.PlayTranscode, InputPath: "/media/movie.mkv", SegmentDuration: 4, TargetCodecVideo: "h264"}
 	data, err := marshalCard(card)

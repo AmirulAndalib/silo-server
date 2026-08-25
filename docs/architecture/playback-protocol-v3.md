@@ -1163,6 +1163,26 @@ stereo, FFmpeg first rematrixes it to stereo, then applies up to 6 dB of input
 gain through a limiter with a -2 dBFS sample ceiling. Mono output, surround
 output, stereo sources, and copied audio do not use the boost.
 
+Recipe 2 is fenced at every byte-producing boundary during a rolling upgrade.
+Token-based proxy remuxes use `/stream/remux/audio-v2/{token}`; Jellyfin-compatible
+progressive and HLS media use the corresponding literal `audio-v2` path segment.
+Legacy handlers reject a recipe-2 session, current handlers reject an ordinary
+session on the versioned path, and old routers do not match the extra segment.
+Jellyfin HLS keeps the versioned URL whenever any selectable audio track is
+surround, because an in-player track switch does not request a new playlist URL.
+Direct-file and subtitle routes are unchanged because they never execute this
+audio recipe.
+
+A remote start carrying source-channel facts is valid only for the exact AAC
+stereo shape and must echo recipe version 2 after FFmpeg reaches readiness. The
+caller stops a job that omits or contradicts that receipt. Shared reconstruction
+cards use a versioned audio envelope that older readers reject, while live
+session updates preserve codec, source/target channels, bitrate, and the
+transcode decision as one recipe. A failed Jellyfin audio switch restores the
+prior durable selection and executor facts so the same client report can retry.
+Prepared downloads persist the audio recipe version and use `audio_v2_*` queue
+states that pre-v2 API workers cannot claim or publish as ready.
+
 They are advertised only if an eligible executor actually has the required
 capability. The ordinary FFmpeg feature probe is cached; the more expensive
 tone-map smoke probe is lazy and cached by binary, backend, and device:
