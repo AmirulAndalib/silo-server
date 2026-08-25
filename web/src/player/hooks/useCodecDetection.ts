@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { detectHLSSupport, type WebCapabilityProbe } from "../client-context-v3";
+import { isFirefoxUserAgent } from "../utils/browser";
 
 /** Maps our codec names to the MIME declarations browsers expose for them. */
 const VIDEO_CODEC_MAP: Record<string, string> = {
@@ -161,9 +162,17 @@ export function probeWebCapabilities(): WebCapabilityProbe {
   const codecsVideo: string[] = [];
   const codecsAudio: string[] = [];
   const containers: string[] = [];
+  const isFirefox =
+    typeof navigator !== "undefined" && isFirefoxUserAgent(navigator.userAgent ?? "");
 
   // Test containers.
   for (const [name, mimeTypes] of Object.entries(CONTAINER_MAP)) {
+    // Firefox 145+ reports native Matroska support, but its demuxer still
+    // requires the complete resource before starting common audio+video MKVs
+    // (Mozilla bug 2000420). Advertising that container turns direct play into
+    // a full-file download. Keep the codec claims so the planner can select a
+    // codec-copy remux instead.
+    if (name === "mkv" && isFirefox) continue;
     if (mimeTypes.some(testMediaType)) {
       containers.push(name);
     }

@@ -5,6 +5,12 @@
 ### Clear stale library troubleshooting entries after path changes
 Full library scans now reconcile troubleshooting entries across the whole library, so diagnostics for removed or replaced root paths disappear after the path-change scan completes. Subtree and single-file scans remain scoped and cannot clear diagnostics elsewhere in the library.
 
+### Start Firefox MKV playback without downloading the whole file first
+Firefox reports native Matroska support even though common MKV files with audio can still require
+the entire source to download before the first frame. The web player no longer advertises native
+MKV delivery on Firefox, so Silo selects a streaming-safe codec-copy remux instead. Other browsers
+that can stream MKV keep direct play, and Firefox keeps its video and audio codec capabilities.
+
 ## 2026-08-24
 
 ### Restore loudness when Silo downmixes surround audio to stereo
