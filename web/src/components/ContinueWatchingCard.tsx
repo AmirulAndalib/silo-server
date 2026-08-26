@@ -248,7 +248,7 @@ export default function ContinueWatchingCard(props: ContinueWatchingCardProps) {
             )}
 
             {/* Hover dim behind the play button */}
-            <div className="absolute inset-0 bg-black/0 transition-colors duration-150 pointer-fine:group-hover/media:bg-black/30" />
+            <div className="media-card-hover-dim absolute inset-0 bg-black/0 transition-colors duration-150" />
 
             {/* Progress bar */}
             {!isNextUp && progressPercent > 0 && (

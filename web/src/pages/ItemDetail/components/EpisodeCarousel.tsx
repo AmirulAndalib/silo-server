@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import { Play, ChevronLeft, ChevronRight } from "lucide-react";
 import type { EpisodeListItem } from "@/api/types";
 import { WatchedCheckIndicator } from "@/components/CardWatchedBadge";
+import { toEpisodeUserState } from "@/components/episodeUserState";
 import { decodeThumbhash } from "@/lib/thumbhash";
 import { cn } from "@/lib/utils";
 import MediaItemMenu from "@/components/MediaItemMenu";
@@ -131,11 +132,7 @@ export default function EpisodeCarousel({
                       <MediaItemMenu
                         contentId={ep.content_id}
                         mediaType="episode"
-                        userState={{
-                          played: ep.user_data?.played ?? false,
-                          is_favorite: false,
-                          in_watchlist: false,
-                        }}
+                        userState={toEpisodeUserState(ep.user_data)}
                         variant="wide"
                         showCollectionActions={false}
                         showWatchedShortcut

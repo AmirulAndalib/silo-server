@@ -7,15 +7,12 @@ import {
   Captions,
   Download,
   FolderPlus,
-  History,
   Info,
   Loader2,
   MoreVertical,
   Play,
   RefreshCw,
-  Pencil,
   Scissors,
-  Search,
   RotateCcw,
   Tags,
 } from "lucide-react";
@@ -45,6 +42,7 @@ import type {
 import RefreshMetadataDialog from "@/components/RefreshMetadataDialog";
 import { MarkerEditor } from "@/components/markers/MarkerEditor";
 import StarRating from "@/components/StarRating";
+import { MediaActionIcon } from "@/components/mediaActionIcons";
 import { useWatchPlaybackController } from "@/playback/watchPlaybackContext";
 import { parseWatchHref } from "@/pages/watchRouteHelpers";
 import VersionDropdown from "./VersionDropdown";
@@ -427,7 +425,7 @@ export default function ActionBar({
                       navigate(`/admin/history?media_item_id=${encodeURIComponent(contentId)}`)
                     }
                   >
-                    <History className="size-4" />
+                    <MediaActionIcon action="viewPlayHistory" />
                     View Play History
                   </DropdownMenuItem>
                 )}
@@ -438,7 +436,7 @@ export default function ActionBar({
                       setRefreshDialogOpen(true);
                     }}
                   >
-                    <RefreshCw className={`size-4 ${isRefreshing ? "animate-spin" : ""}`} />
+                    <MediaActionIcon action="refreshMetadata" isPending={isRefreshing} />
                     Refresh Metadata
                   </DropdownMenuItem>
                 )}
@@ -450,7 +448,7 @@ export default function ActionBar({
                 )}
                 {canCurateMetadata && onEditMetadata && (
                   <DropdownMenuItem onSelect={onEditMetadata}>
-                    <Pencil className="size-4" />
+                    <MediaActionIcon action="editMetadata" />
                     Edit Metadata
                   </DropdownMenuItem>
                 )}
@@ -462,7 +460,7 @@ export default function ActionBar({
                 )}
                 {canCurateMetadata && onMatchItem && (
                   <DropdownMenuItem onSelect={onMatchItem}>
-                    <Search className="size-4" />
+                    <MediaActionIcon action="matchItem" />
                     Match Item
                   </DropdownMenuItem>
                 )}

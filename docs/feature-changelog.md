@@ -2,6 +2,9 @@
 
 ## 2026-08-25
 
+### Put common media actions directly on cards
+Poster cards now provide quick favorite and watched controls plus a More actions menu for metadata actions. Episode cards now show watched state with a muted circle-check instead of the previous badge.
+
 ### Keep HDR playback playable when a bitmap subtitle is auto-selected
 The web player asks the server to burn PGS/DVD/DVB subtitles into the opening playback plan. On HDR titles that forces a transcode, and with tone mapping and 4K transcoding off (the defaults) the planner can refuse the start entirely. The player now retries a refused bitmap-subtitle start with subtitles off, keeping playback available while successful subtitle starts remain a single request with no visible transport reload.
 

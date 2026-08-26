@@ -1243,6 +1243,9 @@
     pointer-events: auto;
   }
   @media (any-hover: hover) and (any-pointer: fine) {
+    .group\/media:hover .media-card-hover-dim {
+      background-color: rgb(0 0 0 / 0.3);
+    }
     .media-card-action-trigger,
     .media-card-play-trigger {
       opacity: 0;
