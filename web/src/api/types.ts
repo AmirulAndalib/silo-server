@@ -2514,8 +2514,13 @@ export interface AdminSession {
   target_resolution?: string;
   target_video_codec?: string;
   target_audio_codec?: string;
+  /** Channel count the transcode actually encodes. Absent when the reporting
+   * node did not know it — render the target codec with no channel layout
+   * rather than falling back to `source_audio_channels`. */
+  target_audio_channels?: number | null;
   target_bitrate_kbps: number | null;
   transcode_hw_accel?: string;
+  tone_map_mode?: string;
   source_container?: string;
   source_bitrate_kbps: number | null;
   source_video_codec?: string;
