@@ -1,6 +1,9 @@
-import { render, screen, within } from "@testing-library/react";
+import { render as renderDOM, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { PluginInstallation } from "@/api/types";
 
 import WatchSyncSettings from "./WatchSyncSettings";
 
@@ -9,6 +12,16 @@ const mocks = vi.hoisted(() => ({
   toastSuccess: vi.fn(),
   updateSettings: vi.fn(),
 }));
+
+let pluginInstallations: Partial<PluginInstallation>[] = [];
+
+vi.mock("@/hooks/queries/admin/plugins", () => ({
+  useAdminPluginInstallations: () => ({ data: pluginInstallations }),
+}));
+
+function render(ui: React.ReactElement) {
+  return renderDOM(<MemoryRouter>{ui}</MemoryRouter>);
+}
 
 let sensitiveConfigured: string[] = ["watchsync.trakt.client_id", "watchsync.trakt.client_secret"];
 
@@ -55,6 +68,7 @@ describe("WatchSyncSettings", () => {
   beforeEach(() => {
     localStorage.clear();
     sensitiveConfigured = ["watchsync.trakt.client_id", "watchsync.trakt.client_secret"];
+    pluginInstallations = [];
     for (const mock of Object.values(mocks)) mock.mockReset();
     mocks.updateSettings.mockResolvedValue({ values: {}, restart_required: false });
   });
@@ -62,7 +76,7 @@ describe("WatchSyncSettings", () => {
   it("heads the page and lists both providers", () => {
     render(<WatchSyncSettings />);
 
-    expect(screen.getByRole("heading", { level: 1, name: "Watch sync" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Watch Providers" })).toBeInTheDocument();
     expect(
       screen.queryByText("Keep watch history in sync with Trakt and Simkl."),
     ).not.toBeInTheDocument();
@@ -139,6 +153,59 @@ describe("WatchSyncSettings", () => {
     await user.click(within(simkl).getByRole("button", { name: "Save" }));
 
     expect(mocks.updateSettings).toHaveBeenCalledWith({ "watchsync.simkl.client_id": "simkl-id" });
+  });
+
+  it("lists installed watch-provider plugins beside the built-ins", () => {
+    pluginInstallations = [
+      {
+        id: 7,
+        plugin_id: "silo-plugin-watchsync-anilist",
+        enabled: true,
+        capabilities: [
+          {
+            type: "watch_sync_provider.v1",
+            id: "anilist",
+            display_name: "AniList",
+          },
+        ],
+      },
+      {
+        id: 9,
+        plugin_id: "silo-plugin-watchsync-serializd",
+        enabled: false,
+        capabilities: [
+          {
+            type: "watch_sync_provider.v1",
+            id: "serializd",
+            display_name: "Serializd",
+          },
+        ],
+      },
+      {
+        // Not a watch provider; must not appear on this page.
+        id: 11,
+        plugin_id: "silo-plugin-metadata-tmdb",
+        enabled: true,
+        capabilities: [{ type: "metadata_provider.v1", id: "tmdb", display_name: "TMDB" }],
+      },
+    ];
+
+    render(<WatchSyncSettings />);
+
+    const anilist = screen.getByRole("group", { name: "AniList" });
+    expect(anilist).toHaveAttribute("data-state", "connected");
+    expect(within(anilist).getByText("Enabled")).toBeInTheDocument();
+    expect(within(anilist).getByRole("button", { name: "Configure" })).toBeInTheDocument();
+
+    const serializd = screen.getByRole("group", { name: "Serializd" });
+    expect(serializd).toHaveAttribute("data-state", "not_connected");
+    expect(within(serializd).getByText("Disabled")).toBeInTheDocument();
+
+    expect(screen.queryByRole("group", { name: "TMDB" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "plugin catalog" })).toHaveAttribute(
+      "href",
+      "/admin/plugins?tab=catalog",
+    );
   });
 
   it("clears a connected provider behind a confirmation", async () => {
