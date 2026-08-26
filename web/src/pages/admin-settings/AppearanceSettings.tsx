@@ -194,7 +194,7 @@ export default function AppearanceSettings() {
     <div className="flex h-full flex-col">
       <SettingsPageHeader title="Appearance" className="mb-8" />
 
-      <div className="flex-1 space-y-9">
+      <div className="flex-1 space-y-5">
         <FieldGroup label="Logos and icons">
           {!assetStorageAvailable && (
             <div className="mt-3 flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">

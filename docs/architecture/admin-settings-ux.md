@@ -4,11 +4,11 @@ Admin settings are organized by admin intent ("I want subtitles to download
 automatically"), not by subsystem. `/admin/settings` is the **Overview**:
 server health across the top and one live card per settings group. Eleven
 standalone pages hang off it: General, Appearance, Security & Access, Library &
-Metadata, Playback, Subtitles & Metadata, Watch sync, AI Services,
+Metadata, Playback, Subtitles & Metadata, Watch Providers, AI Services,
 Notifications, Compatibility, and Storage & Database. The global admin sidebar
 has one Settings destination; the Overview owns the settings information
 architecture. Old `?tab=` URLs and retired page ids from earlier layouts
-(including `integrations`, now split into Subtitles & Metadata, Watch sync, and
+(including `integrations`, now split into Subtitles & Metadata, Watch Providers, and
 AI Services) redirect to the page that absorbed them rather than 404ing.
 `⌘K` (`AdminSectionCommandDialog`) is mounted in `AdminLayout` so search works
 from every admin page, not just the Dashboard.
@@ -16,29 +16,41 @@ from every admin page, not just the Dashboard.
 ## Visual system
 
 One page is on screen at a time, and each thing on screen carries one signal.
-There is no secondary tab rail: the Overview is the category directory on
-desktop and mobile, and every category has its own `/admin/settings/:page`
-route plus an All settings link back to the directory. The Overview shows a
-health tile only for a tile in `warn` or `off`. The **Setup & health** section
-explains that it holds recommendations and configuration problems; an empty
-checklist reads "No action needed" and names the conditions that will appear
-there. Below it is one card per settings group. Each card explains the group's
-scope and names the sections inside it. Live state stays in the health area
-instead of reducing a multi-provider group to one misleading summary.
+The admin settings detail view deliberately mirrors the user settings page
+(`SettingsLayout`): one `surface-panel-lg` shell with a `SideNavItem` rail on
+the left and the page content on the right, so the two settings surfaces read
+as the same product. The Overview stays the category directory: it explains
+each group's scope, and every category has its own `/admin/settings/:page`
+route. The rail (`SettingsPageRail`, rendered by the settings shell) lists
+every settings page with the open one marked; an All settings link above the
+shell leads back to the directory. The rail is desktop-only — on smaller
+screens the Overview is the directory, exactly as on the user side. The
+Overview shows a health tile only for a tile in `warn` or `off`. The
+**Setup & health** section explains that it holds recommendations and
+configuration problems; an empty checklist reads "No action needed" and
+names the conditions that will appear there. Below it is one card per
+settings group. Each card explains the group's scope and names the sections
+inside it. Live state stays in the health area instead of reducing a
+multi-provider group to one misleading summary.
 
-A category page opens with `SettingsPageHeader`: the title, and page actions if it
-has any. No breadcrumb, no lede, no status strip. Below it, settings are rows
-in hairline-ruled `FieldGroup`s, not nested cards, with the Advanced tier
-inline as one disclosure row per group. A description under a field label is
-the exception, not the rule: one short sentence, and only when the label alone
-is ambiguous. Units live beside the control (`SettingField`'s `unit`), not in
-the label. When every field in a group needs a restart, the group says so once
-(`FieldGroup restartAll`) and the fields inside drop their chips. Provider
-credentials are `ProviderTile`s that expand in place to Test before saving;
-their border is neutral in every state and the state is a dot plus a word in
-the header. Staged edits raise one floating save pill (`SaveBar`); the restart
-prompt is a single `RestartBanner` rendered by the settings shell, never per
-page.
+A category page opens with `SettingsPageHeader`: the title, and page actions
+if it has any. No breadcrumb, no lede, no status strip. Below it, settings
+are hairline-ruled rows inside `FieldGroup`s — thin wrappers over the shared
+`SettingsGroup` panel the user settings pages use — one panel per group,
+never per field. The Advanced tier stays inline as one disclosure row per
+group. A row can carry its `server_settings` key as a mono caption under the
+label (`SettingField`'s `settingKey`) so an admin can match the UI to the
+API and environment overrides, and a violet dot marks unsaved edits on the
+row and on the group heading (`dirty`, driven from `form.isDirty`). A
+description under a field label is the exception, not the rule: one short
+sentence, and only when the label alone is ambiguous. Units live beside the
+control (`SettingField`'s `unit`), not in the label. When every field in a
+group needs a restart, the group says so once (`FieldGroup restartAll`) and
+the fields inside drop their chips. Provider credentials are `ProviderTile`s
+that expand in place to Test before saving; their border is neutral in every
+state and the state is a dot plus a word in the header. Staged edits raise
+one floating save pill (`SaveBar`); the restart prompt is a single
+`RestartBanner` rendered by the settings shell, never per page.
 
 ## Three tiers, and how to pick one for a new setting
 
@@ -79,10 +91,21 @@ Reuse these instead of adding a bespoke variant per page:
 - `SettingsPageHeader` (`web/src/components/settings/`) — the one way a
   section names itself. Live state belongs on the Overview, not repeated as a
   strip on every page.
+- `SettingsPageRail` (`web/src/components/settings/`) — the one sibling nav,
+  rendered once by the settings shell from `ADMIN_SETTINGS_NAV` using the
+  shared `SideNavSection`/`SideNavItem` primitives. Pages never render their
+  own nav or add entries directly to the rail.
+- `SettingsGroup` (`web/src/components/settings/`) — the one settings panel,
+  shared with the user settings pages; admin pages reach it through the
+  `FieldGroup` wrapper, which layers on the restart-all line, the
+  unsaved-edits dot, and the restart context.
 - `AdvancedSection` — the one collapsible-disclosure primitive for the
   Advanced tier. Do not add another `<details>`, another bespoke collapsible
   component, or a per-page expand/collapse toggle.
-- `SecretField` — the one "configured · Replace / Keep" credential control.
+- `SecretField` — the one credential control: an always-editable password
+  input whose masked placeholder stands in for the saved value. Typing stages
+  a replacement; emptying the input keeps the saved secret (never clears it —
+  clearing is a page-level action like Disconnect or Clear credentials).
 - `LimitField` — the one "Unlimited" checkbox pattern, replacing "0 = unlimited"
   hint text conventions.
 - A restart badge on `SettingField` itself, sourced from

@@ -1,14 +1,21 @@
-import { useEffect, useRef, type ComponentType } from "react";
+import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { ChevronLeft } from "lucide-react";
 import { Link, Navigate, useParams, useSearchParams } from "react-router";
 
 import {
+  ADMIN_SETTINGS_GROUPS,
   ADMIN_SETTINGS_NAV,
   resolveAdminSettingsPageID,
   type AdminSettingsSearchItem,
 } from "@/lib/adminSettingsSearch";
+import {
+  countSettingsSearchItems,
+  filterSettingsSearchGroups,
+} from "@/components/settings/settingsSearch";
+import { SettingsSearchInput } from "@/components/settings/SettingsSearchInput";
 import { useAdminServerStatus } from "@/hooks/queries/admin/settings";
 import { settingsPageHref } from "@/hooks/admin/useSettingsOverview";
+import { SettingsPageRail } from "@/components/settings/SettingsPageRail";
 
 import GeneralSettings from "./GeneralSettings";
 import AppearanceSettings from "./AppearanceSettings";
@@ -61,6 +68,15 @@ export default function AdminSettingsLayout() {
   const [searchParams] = useSearchParams();
   const activeContentRef = useRef<HTMLDivElement>(null);
   const { data: serverStatus } = useAdminServerStatus();
+  const [settingsSearch, setSettingsSearch] = useState("");
+  const filteredGroups = useMemo(
+    () => filterSettingsSearchGroups(ADMIN_SETTINGS_GROUPS, settingsSearch),
+    [settingsSearch],
+  );
+  const filteredItems = useMemo(
+    () => filteredGroups.flatMap((group) => group.items),
+    [filteredGroups],
+  );
   const rawPageId = params["*"]?.replace(/^\/+|\/+$/g, "") || null;
   const legacyTabId = searchParams.get("tab");
   const requestedId = rawPageId ?? legacyTabId;
@@ -96,23 +112,45 @@ export default function AdminSettingsLayout() {
       <RestartBanner restartRequired={serverStatus?.restart_required} />
 
       {active && ActiveComponent ? (
-        <div className="mx-auto w-full max-w-5xl space-y-7">
-          <Link
-            to="/admin/settings"
-            className="text-muted-foreground hover:text-foreground focus-visible:ring-ring inline-flex w-fit items-center gap-1.5 rounded-lg pr-2 text-sm font-medium transition-colors focus-visible:ring-2 focus-visible:outline-none"
-          >
-            <ChevronLeft className="h-4 w-4" aria-hidden="true" />
-            All settings
-          </Link>
+        <div className="w-full space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <Link
+              to="/admin/settings"
+              className="text-muted-foreground hover:text-foreground focus-visible:ring-ring inline-flex w-fit items-center gap-1.5 rounded-lg pr-2 text-sm font-medium transition-colors focus-visible:ring-2 focus-visible:outline-none"
+            >
+              <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+              All settings
+            </Link>
+            {/* Filters the rail; ⌘K stays with the admin command palette. */}
+            <SettingsSearchInput
+              value={settingsSearch}
+              onChange={setSettingsSearch}
+              resultCount={countSettingsSearchItems(filteredGroups)}
+              totalCount={ADMIN_SETTINGS_NAV.length}
+              itemLabel="settings pages"
+              className="hidden w-full sm:max-w-sm lg:block"
+              captureShortcut={false}
+            />
+          </div>
 
-          <div
-            ref={activeContentRef}
-            role="region"
-            aria-label={`${active.label} settings`}
-            tabIndex={-1}
-            className="min-w-0 focus:outline-none"
-          >
-            <ActiveComponent />
+          {/* Same shell as the user settings page (SettingsLayout): one panel,
+              nav rail on the left, content column on the right. */}
+          <div className="surface-panel-lg flex min-w-0 flex-col lg:min-h-[500px] lg:flex-row lg:overflow-hidden">
+            <aside className="border-border hidden lg:block lg:w-60 lg:flex-shrink-0 lg:border-r">
+              <SettingsPageRail activeId={active.id} items={filteredItems} />
+            </aside>
+
+            <div className="min-w-0 flex-1 p-4 sm:p-6">
+              <div
+                ref={activeContentRef}
+                role="region"
+                aria-label={`${active.label} settings`}
+                tabIndex={-1}
+                className="w-full max-w-3xl min-w-0 focus:outline-none"
+              >
+                <ActiveComponent />
+              </div>
+            </div>
           </div>
         </div>
       ) : (

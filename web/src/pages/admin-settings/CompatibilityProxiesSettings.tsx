@@ -177,7 +177,7 @@ export default function CompatibilityProxiesSettings() {
     <div className="flex h-full flex-col">
       <SettingsPageHeader title="Compatibility" className="mb-8" />
 
-      <div className="flex-1 space-y-8">
+      <div className="flex-1 space-y-5">
         <FieldGroup label="Jellyfin" restartAll={allRestart(JELLYFIN_KEYS)}>
           <SettingField
             label="Allow Jellyfin apps to connect"

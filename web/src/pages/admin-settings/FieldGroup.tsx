@@ -1,6 +1,8 @@
-import { createContext, useContext, useId, type ReactNode } from "react";
+import { createContext, useContext, type ReactNode } from "react";
 
+import { SettingsGroup } from "@/components/settings/SettingsGroup";
 import { cn } from "@/lib/utils";
+import "@/styles/admin-settings.css";
 
 const GroupRestartContext = createContext(false);
 
@@ -30,6 +32,8 @@ export interface FieldGroupProps {
    * so once and the fields inside drop their own chips.
    */
   restartAll?: boolean;
+  /** At least one field in the group has an unsaved edit. */
+  dirty?: boolean;
   /** Right-aligned controls on the heading line. */
   actions?: ReactNode;
   className?: string;
@@ -37,40 +41,52 @@ export interface FieldGroupProps {
 }
 
 /**
- * A settings group in the grouped-inset style: a plain heading above one quiet
- * panel that holds the rows. One container per group (never per field) keeps
- * groups visibly separate, especially on narrow screens, without reading as a
- * stack of cards.
+ * An admin settings group: the shared `SettingsGroup` panel (the same surface
+ * the user settings pages use) holding hairline-ruled `SettingFieldRow`s. The
+ * admin-only concerns layer on top: the restart-all line, the unsaved-edits
+ * dot, and the restart context the rows read to drop their own chips.
  */
 export function FieldGroup({
   label,
   restartAll = false,
+  dirty = false,
   actions,
   className,
   children,
 }: FieldGroupProps) {
-  const labelId = useId();
   // A page-level `RestartAllProvider` can already say every field in the page
   // restarts; a group nested under it inherits that without repeating its own
-  // "Changes apply after a restart" line (see `restartAll` above).
+  // line (see `restartAll` above).
   const inheritedRestartAll = useContext(GroupRestartContext);
   const effectiveRestartAll = restartAll || inheritedRestartAll;
+
+  const dirtyDot = dirty ? (
+    <span className="inline-flex items-center" title="Unsaved changes in this group">
+      <span aria-hidden="true" className="size-1.5 rounded-full bg-[var(--settings-accent)]" />
+      <span className="sr-only">Unsaved changes in this group</span>
+    </span>
+  ) : null;
+
   return (
-    <section role="group" aria-labelledby={labelId} className={cn("min-w-0", className)}>
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-1 pb-2">
-        <h3 id={labelId} className="flex-1 text-[15px] leading-6 font-semibold tracking-tight">
-          {label}
-        </h3>
-        {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
-      </div>
-      {restartAll ? (
-        <p className="text-muted-foreground px-1 pb-2 text-xs">Changes apply after a restart</p>
-      ) : null}
+    <SettingsGroup
+      title={label}
+      description={restartAll ? "Changes apply after a restart" : undefined}
+      actions={
+        actions || dirtyDot ? (
+          <>
+            {actions}
+            {dirtyDot}
+          </>
+        ) : undefined
+      }
+      flush
+      className={cn("min-w-0", className)}
+    >
       <GroupRestartContext.Provider value={effectiveRestartAll}>
-        <div className="border-border/60 bg-card/40 rounded-xl border px-4 [&>*]:border-b [&>*]:border-[color-mix(in_srgb,var(--border)_60%,transparent)] [&>*:last-child]:border-b-0">
+        <div className="[&>*]:border-b [&>*]:border-[color-mix(in_srgb,var(--border)_60%,transparent)] [&>*:last-child]:border-b-0">
           {children}
         </div>
       </GroupRestartContext.Provider>
-    </section>
+    </SettingsGroup>
   );
 }

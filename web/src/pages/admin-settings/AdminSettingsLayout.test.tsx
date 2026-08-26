@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -91,17 +92,25 @@ describe("AdminSettingsLayout", () => {
     expect(screen.queryByRole("link", { name: "All settings" })).not.toBeInTheDocument();
   });
 
-  it("renders a settings category as a standalone page without a tab rail", () => {
+  it("renders a settings category with the page rail beside it", () => {
     vi.stubGlobal("scrollTo", vi.fn());
     renderInteractiveLayout("/general");
 
     expect(screen.getByRole("region", { name: "General settings" })).toBeInTheDocument();
-    expect(
-      screen.queryByRole("navigation", { name: "Admin settings sections" }),
-    ).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "All settings" })).toHaveAttribute(
       "href",
       "/admin/settings",
+    );
+
+    // The rail lists every settings page and marks the open one.
+    const rail = screen.getByRole("navigation", { name: "Settings pages" });
+    for (const item of ADMIN_SETTINGS_NAV) {
+      const link = within(rail).getByRole("link", { name: item.label });
+      expect(link).toHaveAttribute("href", `/admin/settings/${item.id}`);
+    }
+    expect(within(rail).getByRole("link", { name: "General" })).toHaveAttribute(
+      "aria-current",
+      "page",
     );
   });
 
@@ -164,11 +173,19 @@ describe("AdminSettingsLayout", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();
   });
 
-  it("carries no search box of its own; the admin header owns search", () => {
+  it("filters the page rail from the settings search box", async () => {
     vi.stubGlobal("scrollTo", vi.fn());
     renderInteractiveLayout("/general");
 
-    expect(screen.queryByRole("searchbox", { name: "Search settings" })).not.toBeInTheDocument();
+    const box = screen.getByRole("searchbox", { name: "Search settings" });
+    await userEvent.type(box, "transcode");
+
+    const rail = screen.getByRole("navigation", { name: "Settings pages" });
+    expect(within(rail).getByRole("link", { name: "Playback" })).toBeInTheDocument();
+    expect(within(rail).queryByRole("link", { name: "General" })).not.toBeInTheDocument();
+
+    await userEvent.clear(box);
+    expect(within(rail).getByRole("link", { name: "General" })).toBeInTheDocument();
   });
 
   it("keeps `ai` pointing at the AI Services page rather than an alias", () => {

@@ -642,6 +642,7 @@
   }
   html[data-high-contrast="true"] .surface-panel-subtle,
   html[data-high-contrast="true"] .surface-panel,
+  html[data-high-contrast="true"] .surface-panel-raised,
   html[data-high-contrast="true"] .glass,
   html[data-high-contrast="true"] .glass-subtle {
     border-color: color-mix(in srgb, var(--border) 88%, white 12%);
@@ -1874,6 +1875,17 @@
     background: color-mix(in srgb, var(--surface) 72%, transparent);
     border: 1px solid color-mix(in srgb, var(--border) 62%, transparent);
     border-radius: calc(var(--radius-xl) + 0.25rem);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
+  }
+
+  /* One surface step above a surface-panel shell. Settings groups sit on
+     this so they read as defined panels inside the shell — in light themes
+     the shell and --surface are near-identical, so the raised fill plus the
+     hairline are what keep group boundaries visible. */
+  .surface-panel-raised {
+    background: color-mix(in srgb, var(--surface-raised) 65%, transparent);
+    border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+    border-radius: 1.7rem;
     box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
   }
 

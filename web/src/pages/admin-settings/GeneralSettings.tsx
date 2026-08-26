@@ -26,6 +26,7 @@ export default function GeneralSettings() {
   const restartKeys = useRestartKeys();
 
   const allRestart = (keys: string[]) => keys.every((key) => restartKeys.has(key));
+  const anyDirty = (keys: string[]) => keys.some((key) => form.isDirty(key));
 
   if (form.isLoading)
     return (
@@ -45,12 +46,18 @@ export default function GeneralSettings() {
 
   return (
     <div className="flex h-full flex-col">
-      <SettingsPageHeader title="General" className="mb-8" />
+      <SettingsPageHeader title="General" className="mb-7" />
 
-      <div className="flex-1 space-y-9">
-        <FieldGroup label="Identity" restartAll={allRestart(IDENTITY_KEYS)}>
+      <div className="flex-1 space-y-5">
+        <FieldGroup
+          label="Identity"
+          restartAll={allRestart(IDENTITY_KEYS)}
+          dirty={anyDirty(IDENTITY_KEYS)}
+        >
           <SettingField
             label="Server name"
+            settingKey="branding.server_name"
+            dirty={form.isDirty("branding.server_name")}
             hint="Silo"
             value={form.getValue("branding.server_name")}
             onChange={(v) => form.setValue("branding.server_name", v)}
@@ -58,6 +65,8 @@ export default function GeneralSettings() {
           />
           <SettingField
             label="Login subtitle"
+            settingKey="branding.login_subtitle"
+            dirty={form.isDirty("branding.login_subtitle")}
             hint="Sign in with an existing account."
             description="Shown under the server name on the sign-in page."
             value={form.getValue("branding.login_subtitle")}
@@ -69,6 +78,7 @@ export default function GeneralSettings() {
         <FieldGroup
           label="Access"
           restartAll={allRestart(ACCESS_KEYS)}
+          dirty={anyDirty(ACCESS_KEYS)}
           actions={
             <Link
               to="/admin/users"
@@ -81,6 +91,8 @@ export default function GeneralSettings() {
         >
           <SettingField
             label="Public signups"
+            settingKey="signup.enabled"
+            dirty={form.isDirty("signup.enabled")}
             type="toggle"
             description="Anyone with a valid invite code can create an account."
             value={form.getValue("signup.enabled")}
@@ -89,9 +101,15 @@ export default function GeneralSettings() {
           />
         </FieldGroup>
 
-        <FieldGroup label="Logging" restartAll={allRestart(LOGGING_KEYS)}>
+        <FieldGroup
+          label="Logging"
+          restartAll={allRestart(LOGGING_KEYS)}
+          dirty={anyDirty(LOGGING_KEYS)}
+        >
           <SettingField
             label="Log level"
+            settingKey="server.log_level"
+            dirty={form.isDirty("server.log_level")}
             type="select"
             description="Debug is loud; use it while chasing a problem."
             value={form.getValue("server.log_level")}
@@ -111,6 +129,8 @@ export default function GeneralSettings() {
           >
             <SettingField
               label="Quiet log prefixes"
+              settingKey="server.log_quiet"
+              dirty={form.isDirty("server.log_quiet")}
               hint="metadata, scanner"
               description="Drops log lines starting with any of these words."
               value={form.getValue("server.log_quiet")}

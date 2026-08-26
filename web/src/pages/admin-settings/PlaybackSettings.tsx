@@ -96,7 +96,7 @@ export default function PlaybackSettings() {
     <div className="flex h-full flex-col">
       <SettingsPageHeader title="Playback" className="mb-8" />
 
-      <div className="flex-1 space-y-9">
+      <div className="flex-1 space-y-5">
         <FieldGroup
           label="Transcoding"
           restartAll={allRestart([...TRANSCODING_ESSENTIAL_KEYS, ...TRANSCODING_ADVANCED_KEYS])}

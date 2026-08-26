@@ -15,6 +15,11 @@ interface SettingsSearchInputProps {
   className?: string;
   shortcutMediaQuery?: string;
   showShortcutHint?: boolean;
+  /**
+   * Focus the input on ⌘K / Ctrl-K. Turn off where another surface owns that
+   * shortcut (the admin area's command palette).
+   */
+  captureShortcut?: boolean;
 }
 
 export function SettingsSearchInput({
@@ -28,6 +33,7 @@ export function SettingsSearchInput({
   className,
   shortcutMediaQuery,
   showShortcutHint = false,
+  captureShortcut = true,
 }: SettingsSearchInputProps) {
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -43,6 +49,7 @@ export function SettingsSearchInput({
     : `${totalCount} ${itemLabel}`;
 
   useEffect(() => {
+    if (!captureShortcut) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || !(event.metaKey || event.ctrlKey)) return;
       if (event.key.toLowerCase() !== "k") return;
@@ -61,7 +68,7 @@ export function SettingsSearchInput({
       window.removeEventListener("keydown", onKeyDown, { capture: true });
       document.removeEventListener("keydown", onKeyDown, { capture: true });
     };
-  }, [shortcutMediaQuery]);
+  }, [captureShortcut, shortcutMediaQuery]);
 
   return (
     <div className={cn("w-full", className)}>

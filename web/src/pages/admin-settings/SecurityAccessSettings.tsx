@@ -290,7 +290,7 @@ export default function SecurityAccessSettings() {
     <div className="flex h-full flex-col">
       <SettingsPageHeader title="Security & Access" className="mb-8" />
 
-      <div className="flex-1 space-y-9">
+      <div className="flex-1 space-y-5">
         <FieldGroup label="Sign-in sessions" restartAll={allRestart(SESSION_KEYS)}>
           <SettingField
             label="Access token expiry"
