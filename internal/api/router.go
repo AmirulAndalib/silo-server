@@ -123,6 +123,7 @@ type Dependencies struct {
 	ProxyPool                 *nodepool.ProxyPool             // proxy node pool (may be nil)
 	TranscodePool             *nodepool.TranscodePool         // transcode node pool (may be nil)
 	NodePlanner               *nodepool.Planner               // group/cap-aware node selection (may be nil)
+	NodeHealthChecker         *nodepool.HealthChecker         // periodic node health/capability sweep (may be nil)
 	SessionSyncer             handlers.PlaybackSessionSyncer  // optional; immediate playback session sync trigger
 	EventBus                  cache.EventBus
 	AdminStatsProvider        handlers.AdminStatsSource
@@ -1032,6 +1033,10 @@ func NewRouter(deps Dependencies) chi.Router {
 			playbackHandler.SetProfileRefreshRequester(deps.RecWorker)
 		}
 		playbackHandler.StartCapabilityWarmupV3(deps.AppContext)
+		// The health sweep sees a node's capability hash change long before this
+		// cache would expire, so let it invalidate directly. Wired here rather
+		// than at checker construction because the handler does not exist yet.
+		deps.NodeHealthChecker.SetCapabilitiesChangedCallback(playbackHandler.RefreshNodeCapabilitiesV3)
 
 		realtimeHub := deps.PlaybackRealtimeHub
 		if realtimeHub == nil {

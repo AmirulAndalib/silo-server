@@ -62,3 +62,11 @@ func (p *ProxyPool) ApplyHealth(id int, healthy bool, activeJobs, egressKbps int
 	defer p.mu.Unlock()
 	applyNodeHealth(p.nodes, id, healthy, activeJobs, egressKbps, checkedAt)
 }
+
+// ApplyCapabilities records a freshly fetched capability report by swapping the
+// node for an updated copy, keeping published *Node values immutable.
+func (p *ProxyPool) ApplyCapabilities(id int, capabilities []byte, hash string, refreshedAt time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	applyNodeCapabilities(p.nodes, id, capabilities, hash, refreshedAt)
+}

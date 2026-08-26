@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -71,6 +72,21 @@ type checkNodeResult struct {
 	Healthy    bool `json:"healthy"`
 	ActiveJobs int  `json:"active_jobs"`
 	EgressKbps int  `json:"egress_kbps"`
+	// CapabilitiesHash is what the node advertised on this check. It is not the
+	// stored hash: an unequal pair means the background sweep has a refetch to
+	// do, which is exactly what an operator checking a node wants to see.
+	CapabilitiesHash string `json:"capabilities_hash,omitempty"`
+}
+
+// nodeListItem is a stored node plus the fields derived from its capability
+// payload. The row is embedded rather than copied so the response keeps every
+// existing field automatically as the node model grows.
+type nodeListItem struct {
+	*nodepool.Node
+	// PhysicalGPUKeys identifies the actual GPUs behind this node. Two nodes
+	// sharing a key are sharing hardware — the case that makes independent
+	// capacity accounting wrong — which no per-node field can express.
+	PhysicalGPUKeys []string `json:"physical_gpu_keys,omitempty"`
 }
 
 // HandleListNodes handles GET /admin/nodes.
@@ -82,7 +98,60 @@ func (h *NodeHandler) HandleListNodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, nodes)
+	items := make([]nodeListItem, 0, len(nodes))
+	for _, node := range nodes {
+		items = append(items, nodeListItem{
+			Node:            node,
+			PhysicalGPUKeys: physicalGPUKeys(node.Capabilities),
+		})
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+// nodeGPUIdentity is the minimal projection needed to identify a node's GPUs
+// out of its stored capability payload.
+type nodeGPUIdentity struct {
+	BootID              string `json:"boot_id"`
+	RenderDeviceDetails []struct {
+		PCIAddress string `json:"pci_address"`
+		GPUUUID    string `json:"gpu_uuid"`
+	} `json:"render_device_details"`
+}
+
+// physicalGPUKeys derives one stable key per GPU a node can see. An NVIDIA
+// uuid is preferred because it follows the card between slots and hosts; the
+// PCI address falls back to it, scoped by boot id because a device path and
+// slot only mean the same hardware within one boot of one kernel. A device with
+// neither is unidentifiable and contributes no key rather than a fake one.
+func physicalGPUKeys(capabilities []byte) []string {
+	if len(capabilities) == 0 {
+		return nil
+	}
+	var identity nodeGPUIdentity
+	if err := json.Unmarshal(capabilities, &identity); err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(identity.RenderDeviceDetails))
+	keys := make([]string, 0, len(identity.RenderDeviceDetails))
+	for _, device := range identity.RenderDeviceDetails {
+		key := device.GPUUUID
+		if key == "" {
+			if device.PCIAddress == "" {
+				continue
+			}
+			key = identity.BootID + "|" + device.PCIAddress
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 // HandleCreateNode handles POST /admin/nodes.
@@ -182,16 +251,17 @@ func (h *NodeHandler) HandleCheckNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	healthy, activeJobs, egressKbps := nodepool.CheckNode(r.Context(), node)
+	healthy, activeJobs, egressKbps, capabilitiesHash := nodepool.CheckNode(r.Context(), node)
 
 	if err := h.repo.UpdateHealth(r.Context(), id, healthy, activeJobs, egressKbps); err != nil {
 		slog.ErrorContext(r.Context(), "persisting health check result", "component", "api", "node_id", id, "error", err)
 	}
 
 	writeJSON(w, http.StatusOK, checkNodeResult{
-		Healthy:    healthy,
-		ActiveJobs: activeJobs,
-		EgressKbps: egressKbps,
+		Healthy:          healthy,
+		ActiveJobs:       activeJobs,
+		EgressKbps:       egressKbps,
+		CapabilitiesHash: capabilitiesHash,
 	})
 }
 

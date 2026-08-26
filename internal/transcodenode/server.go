@@ -116,6 +116,11 @@ func ValidateAudioRecipeAttestation(req TranscodeStartRequest, response Transcod
 type HealthResponse struct {
 	Status     string `json:"status"`
 	ActiveJobs int32  `json:"active_jobs"`
+	// CapabilitiesHash identifies this node's last computed hardware capability
+	// snapshot. It is read from the stored snapshot only — health must stay a
+	// cheap liveness answer, so it never triggers a probe — and is empty until
+	// the first background snapshot completes.
+	CapabilitiesHash string `json:"capabilities_hash,omitempty"`
 }
 
 // sessionIdleTTL is how long a job may go without a manifest or segment
@@ -193,6 +198,24 @@ type Server struct {
 	// recipeStore is the control-plane recipe store consulted when a forwarded
 	// token carries no recipe (the jellycompat node hop). Nil disables that path.
 	recipeStore recipeStore
+
+	// capabilityHash is the last computed capability snapshot's hash, published
+	// by /health without probing. Nil until the first snapshot or capability
+	// request completes.
+	capabilityHash atomic.Pointer[string]
+}
+
+// storedCapabilityHash returns the last published capability hash, or empty
+// when none has been computed yet.
+func (s *Server) storedCapabilityHash() string {
+	if hash := s.capabilityHash.Load(); hash != nil {
+		return *hash
+	}
+	return ""
+}
+
+func (s *Server) storeCapabilityHash(hash string) {
+	s.capabilityHash.Store(&hash)
 }
 
 func (s *Server) resolveToneMapRecipe(ctx context.Context, opts *playback.TranscodeOpts) error {
@@ -309,7 +332,7 @@ func NewServer(watcher *nodeconfig.Watcher, tracker *nodesessions.Tracker) *Serv
 }
 
 // StartOrphanSweeper runs the age-guarded orphan-transcode sweep immediately and
-// then hourly until ctx is cancelled. It never blocks (a slow network-filesystem
+// then hourly until ctx is canceled. It never blocks (a slow network-filesystem
 // delete runs in its own goroutine), so it is safe to call before the node binds
 // its listener. This is the node's only filesystem-level reclaimer of dirs left
 // behind by a session that was dropped without its output dir being removed — the
@@ -331,21 +354,29 @@ func (s *Server) StartOrphanSweeper(ctx context.Context) {
 }
 
 // StartHardwareEncoderWarmup primes the configured hardware encoder behind
-// node startup. It is best effort and never delays the health listener.
-func (s *Server) StartHardwareEncoderWarmup(ctx context.Context) {
+// node startup. It is best effort and never delays the health listener. The
+// returned channel closes once warmup has settled (including when there was
+// nothing to warm), so work that wants a primed encoder — the first capability
+// snapshot — can wait for it instead of racing it.
+func (s *Server) StartHardwareEncoderWarmup(ctx context.Context) <-chan struct{} {
+	done := make(chan struct{})
 	if s == nil || s.watcher == nil || ctx == nil {
-		return
+		close(done)
+		return done
 	}
 	cfg := s.watcher.Config()
 	if cfg == nil {
-		return
+		close(done)
+		return done
 	}
 	playbackCfg := cfg.Playback
 	go func() {
+		defer close(done)
 		if err := playback.WarmHardwareEncoder(ctx, playbackCfg.FFmpegPath, playbackCfg.HWAccel, playbackCfg.HWDevice); err != nil {
 			slog.DebugContext(ctx, "transcode node hardware encoder warmup failed", "component", "transcodenode", "error", err)
 		}
 	}()
+	return done
 }
 
 // activeSessionIDs snapshots the ids of currently registered jobs so the orphan
@@ -879,13 +910,21 @@ func (s *Server) trackDownloadPrepare(ctx context.Context, info nodesessions.Ses
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(HealthResponse{
-		Status:     "ok",
-		ActiveJobs: s.activeJobs.Load(),
+		Status:           "ok",
+		ActiveJobs:       s.activeJobs.Load(),
+		CapabilitiesHash: s.storedCapabilityHash(),
 	})
 }
 
-// handleHWCapabilities reports live smoke-tested node capabilities.
-func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
+// buildCapabilitySnapshot runs the node's full capability detection: hardware
+// walk, tone-map probe, and transformation registry, hashed into one identity.
+// It is the single assembly used by both the capability endpoint and the
+// background snapshot, so the hash a health response advertises always
+// describes the payload the endpoint would serve.
+//
+// The probes behind it are individually cached, so repeating this is cheap once
+// the first pass has run.
+func (s *Server) buildCapabilitySnapshot(ctx context.Context) (playback.HWAccelInfo, error) {
 	ffmpegPath := ""
 	configuredHWAccel := playback.HWAccelNone
 	hwDevice := ""
@@ -894,7 +933,7 @@ func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
 		configuredHWAccel = cfg.Playback.HWAccel
 		hwDevice = cfg.Playback.HWDevice
 	}
-	resolveCtx, cancel := context.WithTimeout(r.Context(), toneMapCapabilityResolveTimeout(configuredHWAccel, hwDevice))
+	resolveCtx, cancel := context.WithTimeout(ctx, toneMapCapabilityResolveTimeout(configuredHWAccel, hwDevice))
 	defer cancel()
 	// One detection walk answers both questions: Resolved honors the configured
 	// backend's pass-through contract, and DetectedBackends explains it.
@@ -902,18 +941,81 @@ func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
 	info.ProbeRequestTimeoutMillis = tonemap.ProbeRequestTimeout(configuredHWAccel, hwDevice).Milliseconds()
 	capabilities, err := tonemap.Probe(resolveCtx, playback.ResolveFFmpegPath(ffmpegPath), info.Resolved, hwDevice)
 	if err != nil {
-		http.Error(w, "capability probe unavailable", http.StatusServiceUnavailable)
-		return
+		return playback.HWAccelInfo{}, err
 	}
 	info.ToneMapCapabilities = capabilities
 	registry, err := playback.ProbeTransformationRegistryWithToneMapV3Result(resolveCtx, ffmpegPath, info.ToneMapCapabilities)
 	if err != nil {
+		return playback.HWAccelInfo{}, err
+	}
+	info.Transformations = registry.Advertised()
+	info.CapabilityHash = playback.ComputeCapabilityHash(info)
+	return info, nil
+}
+
+// handleHWCapabilities reports live smoke-tested node capabilities.
+func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
+	info, err := s.buildCapabilitySnapshot(r.Context())
+	if err != nil {
 		http.Error(w, "capability probe unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	info.Transformations = registry.Advertised()
+	// A served report is as authoritative as a scheduled snapshot, so health
+	// starts advertising this hash immediately rather than at the next tick.
+	s.storeCapabilityHash(info.CapabilityHash)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)
+}
+
+// capabilitySnapshotInterval is how often the node recomputes its capability
+// snapshot. The probes behind it are cached, so this mostly re-reads sysfs and
+// re-hashes; it exists to notice hardware or ffmpeg changing underneath a
+// long-running node without waiting for a restart.
+const capabilitySnapshotInterval = 15 * time.Minute
+
+// StartCapabilitySnapshots keeps the capability hash published by /health
+// current, in the background, until ctx is canceled. ready gates the first
+// snapshot so it observes a primed encoder rather than racing warmup; a nil
+// channel means snapshot immediately.
+func (s *Server) StartCapabilitySnapshots(ctx context.Context, ready <-chan struct{}) {
+	if s == nil || ctx == nil {
+		return
+	}
+	go func() {
+		if ready != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ready:
+			}
+		}
+		s.refreshCapabilitySnapshot(ctx)
+		ticker := time.NewTicker(capabilitySnapshotInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.refreshCapabilitySnapshot(ctx)
+			}
+		}
+	}()
+}
+
+func (s *Server) refreshCapabilitySnapshot(ctx context.Context) {
+	info, err := s.buildCapabilitySnapshot(ctx)
+	if err != nil {
+		// Keep the previous hash: a failed probe is not evidence the hardware
+		// changed, and clearing it would look like a downgrade to the API.
+		slog.DebugContext(ctx, "transcode node capability snapshot failed", "component", "transcodenode", "error", err)
+		return
+	}
+	if previous := s.storedCapabilityHash(); previous != "" && previous != info.CapabilityHash {
+		slog.InfoContext(ctx, "transcode node capabilities changed", "component", "transcodenode",
+			"previous_hash", previous, "hash", info.CapabilityHash, "resolved", info.Resolved)
+	}
+	s.storeCapabilityHash(info.CapabilityHash)
 }
 
 func toneMapCapabilityResolveTimeout(hardwareBackend, hardwareDevice string) time.Duration {

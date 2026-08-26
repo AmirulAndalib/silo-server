@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -53,6 +54,11 @@ type Server struct {
 	downloadBandwidth   *downloads.BandwidthManager
 	downloadServerBPS   int64
 	downloadUserBPS     int64
+
+	// capabilityHash is the last computed capability snapshot's hash, published
+	// by /health without probing. Nil until the first snapshot or capability
+	// request completes.
+	capabilityHash atomic.Pointer[string]
 }
 
 type remoteArtifactMissReporter interface {
@@ -199,6 +205,34 @@ func (s *Server) Handler() http.Handler {
 // a pool whose proxies carry a different ffmpeg build (a rolling upgrade, a
 // custom image) would fail at stream time rather than at selection time.
 func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
+	info, err := s.buildCapabilitySnapshot(r.Context())
+	if err != nil {
+		// An incomplete probe would hash differently from the same hardware
+		// probed successfully, so serving it would announce a hardware change
+		// that did not happen.
+		slog.WarnContext(r.Context(), "proxy capability probe incomplete", "component", "proxy", "error", err)
+		http.Error(w, "capability probe unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	// A served report is as authoritative as a scheduled snapshot, so health
+	// starts advertising this hash immediately rather than at the next tick.
+	s.storeCapabilityHash(info.CapabilityHash)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(info); err != nil {
+		slog.WarnContext(r.Context(), "encode proxy capabilities", "component", "proxy", "error", err)
+	}
+}
+
+// buildCapabilitySnapshot assembles this proxy's capability report and its
+// identity hash. It is the single assembly used by both the capability endpoint
+// and the background snapshot, so the hash a health response advertises always
+// describes the payload the endpoint would serve.
+//
+// An error means the probes did not finish — a caller that gave up, or an
+// ffmpeg slower than a probe deadline — not that the proxy lost hardware. The
+// caller must keep the previous hash rather than publish the partial report,
+// exactly as a transcode node does.
+func (s *Server) buildCapabilitySnapshot(ctx context.Context) (playback.HWAccelInfo, error) {
 	ffmpegPath := ""
 	hwAccel := playback.HWAccelNone
 	hwDevice := ""
@@ -207,18 +241,87 @@ func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
 		hwAccel = cfg.Playback.HWAccel
 		hwDevice = cfg.Playback.HWDevice
 	}
-	info := playback.DetectHWAccelWithFFmpeg(hwAccel, ffmpegPath, hwDevice)
-	info.Transformations = playback.ProbeTransformationRegistryV3(r.Context(), ffmpegPath).Advertised()
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(info); err != nil {
-		slog.WarnContext(r.Context(), "encode proxy capabilities", "component", "proxy", "error", err)
+	info := playback.DetectHWAccelWithFFmpegContext(ctx, hwAccel, ffmpegPath, hwDevice)
+	if err := ctx.Err(); err != nil {
+		// The hardware walk has no error return: it degrades to unverified
+		// backends when its context ends mid-probe.
+		return playback.HWAccelInfo{}, err
 	}
+	registry, err := playback.ProbeTransformationRegistryWithToneMapV3Result(ctx, ffmpegPath, nil)
+	if err != nil {
+		return playback.HWAccelInfo{}, err
+	}
+	info.Transformations = registry.Advertised()
+	info.CapabilityHash = playback.ComputeCapabilityHash(info)
+	return info, nil
+}
+
+// capabilitySnapshotInterval is how often the proxy recomputes its capability
+// snapshot. It exists to notice hardware or ffmpeg changing underneath a
+// long-running proxy without waiting for a restart. The hardware walk is
+// cached, but the transformation registry re-execs ffmpeg every time, which is
+// the other reason a snapshot that did not finish must not be published.
+const capabilitySnapshotInterval = 15 * time.Minute
+
+// StartCapabilitySnapshots keeps the capability hash published by /health
+// current, in the background, until ctx is canceled.
+func (s *Server) StartCapabilitySnapshots(ctx context.Context) {
+	if s == nil || ctx == nil {
+		return
+	}
+	go func() {
+		s.refreshCapabilitySnapshot(ctx)
+		ticker := time.NewTicker(capabilitySnapshotInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.refreshCapabilitySnapshot(ctx)
+			}
+		}
+	}()
+}
+
+func (s *Server) refreshCapabilitySnapshot(ctx context.Context) {
+	info, err := s.buildCapabilitySnapshot(ctx)
+	if err != nil {
+		// Keep the previous hash: a failed probe is not evidence the hardware
+		// changed, and republishing a degraded one would make the API refetch
+		// this proxy's inventory and store a report it did not lose anything to.
+		slog.WarnContext(ctx, "proxy capability snapshot incomplete", "component", "proxy", "error", err)
+		return
+	}
+	if previous := s.storedCapabilityHash(); previous != "" && previous != info.CapabilityHash {
+		slog.InfoContext(ctx, "proxy capabilities changed", "component", "proxy",
+			"previous_hash", previous, "hash", info.CapabilityHash, "resolved", info.Resolved)
+	}
+	s.storeCapabilityHash(info.CapabilityHash)
+}
+
+// storedCapabilityHash returns the last published capability hash, or empty
+// when none has been computed yet.
+func (s *Server) storedCapabilityHash() string {
+	if hash := s.capabilityHash.Load(); hash != nil {
+		return *hash
+	}
+	return ""
+}
+
+func (s *Server) storeCapabilityHash(hash string) {
+	s.capabilityHash.Store(&hash)
 }
 
 type healthResponse struct {
 	Status     string `json:"status"`
 	ActiveJobs int    `json:"active_jobs"`
 	EgressKbps int    `json:"egress_kbps"`
+	// CapabilitiesHash identifies this proxy's last computed capability
+	// snapshot. It is read from the stored snapshot only — health must stay a
+	// cheap liveness answer, so it never triggers a probe — and is empty until
+	// the first background snapshot completes.
+	CapabilitiesHash string `json:"capabilities_hash,omitempty"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -228,9 +331,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(healthResponse{
-		Status:     "ok",
-		ActiveJobs: activeJobs,
-		EgressKbps: s.egress.RateKbps(),
+		Status:           "ok",
+		ActiveJobs:       activeJobs,
+		EgressKbps:       s.egress.RateKbps(),
+		CapabilitiesHash: s.storedCapabilityHash(),
 	})
 }
 

@@ -1,6 +1,7 @@
 package nodepool
 
 import (
+	"encoding/json"
 	"strings"
 	"sync"
 	"time"
@@ -87,6 +88,14 @@ func (p *TranscodePool) ApplyHealth(id int, healthy bool, activeJobs, egressKbps
 	applyNodeHealth(p.nodes, id, healthy, activeJobs, egressKbps, checkedAt)
 }
 
+// ApplyCapabilities records a freshly fetched capability report by swapping the
+// node for an updated copy, keeping published *Node values immutable.
+func (p *TranscodePool) ApplyCapabilities(id int, capabilities []byte, hash string, refreshedAt time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	applyNodeCapabilities(p.nodes, id, capabilities, hash, refreshedAt)
+}
+
 // applyNodeHealth replaces the slice entry for id with an updated copy.
 func applyNodeHealth(nodes []*Node, id int, healthy bool, activeJobs, egressKbps int, checkedAt time.Time) {
 	for i, n := range nodes {
@@ -98,6 +107,23 @@ func applyNodeHealth(nodes []*Node, id int, healthy bool, activeJobs, egressKbps
 		clone.ActiveJobs = activeJobs
 		clone.EgressKbps = egressKbps
 		clone.LastHealthCheck = &checkedAt
+		nodes[i] = &clone
+		return
+	}
+}
+
+// applyNodeCapabilities replaces the slice entry for id with a copy carrying
+// the new capability report. The payload is cloned because the caller's buffer
+// (a decoded HTTP response) is not ours to publish.
+func applyNodeCapabilities(nodes []*Node, id int, capabilities []byte, hash string, refreshedAt time.Time) {
+	for i, n := range nodes {
+		if n.ID != id {
+			continue
+		}
+		clone := *n
+		clone.Capabilities = append(json.RawMessage(nil), capabilities...)
+		clone.CapabilitiesHash = &hash
+		clone.CapabilitiesRefreshedAt = &refreshedAt
 		nodes[i] = &clone
 		return
 	}

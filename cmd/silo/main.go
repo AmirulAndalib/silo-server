@@ -138,6 +138,37 @@ func resolveNodeIdentity() string {
 	return h
 }
 
+// nodeCapabilityFetcher adapts the authenticated node capability client to the
+// node health sweep, which stores capability reports opaquely. The stored
+// payload is this server's re-marshaling of the decoded report rather than the
+// node's bytes, so what is persisted is exactly what the API understood; the
+// hash comes out of the payload itself, because only the node knows what it
+// hashed. A report without one is refused rather than given a synthetic hash,
+// which would make an old node look like it had capability tracking.
+func nodeCapabilityFetcher(jwtSecret string) nodepool.CapabilityFetcher {
+	client := &http.Client{Timeout: nodeCapabilityRequestTimeout}
+	return func(ctx context.Context, nodeURL string) ([]byte, string, error) {
+		info, status, err := transcodenode.FetchHWCapabilities(ctx, client, nodeURL, jwtSecret)
+		if err != nil {
+			return nil, "", err
+		}
+		if status != http.StatusOK {
+			return nil, "", fmt.Errorf("node capability request returned status %d", status)
+		}
+		payload, err := json.Marshal(info)
+		if err != nil {
+			return nil, "", err
+		}
+		return payload, info.CapabilityHash, nil
+	}
+}
+
+// nodeCapabilityRequestTimeout bounds one capability request. A cold node runs
+// ffmpeg probes to answer and advertises a probe budget of up to ~2 minutes;
+// the fetch runs detached from the health sweep, so matching that budget is
+// safe and lets a cold node's first report land instead of timing out.
+const nodeCapabilityRequestTimeout = 2 * time.Minute
+
 func clientIPResolverFromConfig(cfg *config.Config) (*clientip.Resolver, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config is not loaded")
@@ -838,6 +869,9 @@ func main() {
 				watcher.Config,
 				nil,
 			))
+			// Keep the capability hash /health advertises current, so the API's
+			// sweep refetches this proxy's inventory only when it actually changed.
+			srv.StartCapabilitySnapshots(appCtx)
 			handler = srv.Handler()
 		} else {
 			srv := transcodenode.NewServer(watcher, tracker)
@@ -848,7 +882,9 @@ func main() {
 			// restart (the node hop token is recipe-less). Shares the offload Redis.
 			srv.SetRecipeStore(noderecipe.NewStore(redisClient, 0))
 			srv.SetStreamTelemetry(streamTelemetryRegistry)
-			srv.StartHardwareEncoderWarmup(appCtx)
+			// The first capability snapshot waits on warmup so it measures a
+			// primed encoder rather than racing it into a probe failure.
+			srv.StartCapabilitySnapshots(appCtx, srv.StartHardwareEncoderWarmup(appCtx))
 			// Reclaim orphaned transcode dirs at boot and hourly thereafter, bound
 			// to appCtx so it stops on shutdown.
 			srv.StartOrphanSweeper(appCtx)
@@ -1067,6 +1103,8 @@ func main() {
 		deps.NodePlanner = nodepool.NewPlanner(proxyPool, transcodePool)
 
 		healthChecker := nodepool.NewHealthChecker(proxyPool, transcodePool, nodeRepo)
+		healthChecker.SetCapabilityFetcher(nodeCapabilityFetcher(cfg.Auth.JWTSecret))
+		deps.NodeHealthChecker = healthChecker
 		healthChecker.Start(appCtx)
 		slog.Info("node pools initialized", "proxy_nodes", len(proxyNodes), "transcode_nodes", len(transcodeNodes))
 

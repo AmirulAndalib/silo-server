@@ -26,11 +26,60 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Plus, Pencil, Trash2, RefreshCw, Info, AlertTriangle } from "lucide-react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { formatDateTime } from "@/lib/datetime";
+import { describeNodeGPU } from "./adminNodesPresentation";
 
 type NodeType = "proxy" | "transcode";
 
 function formatMbps(kbps: number): string {
   return (Math.round(kbps / 100) / 10).toString();
+}
+
+function NodeGPUCell({ node }: { node: StreamNode }) {
+  const gpu = describeNodeGPU(node);
+  if (gpu.kind === "awaiting") {
+    return (
+      <span className="text-muted-foreground text-sm" title={gpu.title}>
+        {gpu.label}
+      </span>
+    );
+  }
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-1.5">
+        <Badge variant="outline" className={gpu.backend.badgeClass} title={gpu.backend.title}>
+          {gpu.backend.label}
+        </Badge>
+        {gpu.failures.length > 0 && (
+          <span
+            className="text-warning inline-flex"
+            title={gpu.failures.map((failure) => `${failure.label}: ${failure.reason}`).join("\n")}
+          >
+            <AlertTriangle
+              className="h-3.5 w-3.5"
+              aria-label={`${gpu.failures.length} hardware backend probe failure(s) on ${node.name}`}
+            />
+          </span>
+        )}
+        {gpu.stale && (
+          <span
+            className="text-muted-foreground text-xs"
+            title={
+              `No health check has confirmed this inventory since ${formatDateTime(node.last_health_check ?? "")}. ` +
+              `It was last refreshed ${formatDateTime(node.capabilities_refreshed_at ?? "")}.`
+            }
+          >
+            stale
+          </span>
+        )}
+      </div>
+      {gpu.deviceSummary && (
+        <div className="text-muted-foreground text-xs" title={gpu.deviceTitle ?? undefined}>
+          {gpu.deviceSummary}
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface NodeSectionProps {
@@ -59,7 +108,7 @@ function NodeSection({
   checkingHealthId,
 }: NodeSectionProps) {
   const label = type === "proxy" ? "Proxy" : "Transcode";
-  const colCount = (showJobs ? 8 : 7) + (type === "proxy" ? 1 : 0);
+  const colCount = (showJobs ? 9 : 8) + (type === "proxy" ? 1 : 0);
 
   return (
     <div className="space-y-3">
@@ -84,6 +133,7 @@ function NodeSection({
               <TableHead>Group</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Health</TableHead>
+              <TableHead>GPU</TableHead>
               {showJobs && <TableHead>{type === "proxy" ? "Streams" : "Jobs"}</TableHead>}
               {type === "proxy" && <TableHead>Egress</TableHead>}
               <TableHead>Last Check</TableHead>
@@ -138,6 +188,9 @@ function NodeSection({
                           {!node.enabled ? "Disabled" : node.healthy ? "Healthy" : "Unhealthy"}
                         </span>
                       </span>
+                    </TableCell>
+                    <TableCell>
+                      <NodeGPUCell node={node} />
                     </TableCell>
                     {showJobs && (
                       <TableCell>

@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -5253,6 +5254,62 @@ func TestLookupRemoteCapabilitiesStartsCacheTTLAfterRequestCompletes(t *testing.
 				t.Fatalf("cache lifetime from request start = %s, want at least %s", lifetime, minimumLifetime)
 			}
 		})
+	}
+}
+
+// waitForCachedNodeCapabilitiesV3 returns the first successful cache entry the
+// background refresh installs for nodeURL.
+func waitForCachedNodeCapabilitiesV3(t *testing.T, handler *PlaybackHandler, nodeURL string) v3NodeCapabilityCache {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		handler.v3NodeCapabilitiesMu.Lock()
+		entry, ok := handler.v3NodeCapabilities[nodeURL]
+		handler.v3NodeCapabilitiesMu.Unlock()
+		if ok && entry.err == nil {
+			return entry
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("no node capability report was cached before the deadline")
+	return v3NodeCapabilityCache{}
+}
+
+// A report fetched before the health sweep reported the node's hardware changed
+// must not be installed after the invalidation that change fired, and the
+// invalidation still owes a re-probe: a cache that outlives the hardware it
+// describes plans transcodes onto a GPU that is gone.
+func TestRefreshNodeCapabilitiesDropsReportFetchedBeforeInvalidation(t *testing.T) {
+	var requests atomic.Int64
+	firstRequest := make(chan struct{})
+	release := make(chan struct{})
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		transformation := "post_change"
+		if requests.Add(1) == 1 {
+			close(firstRequest)
+			<-release
+			transformation = "pre_change"
+		}
+		_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{
+			Transformations: []playback.TransformationV3{{Name: transformation}},
+		})
+	}))
+	defer remote.Close()
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.refreshRemoteCapabilitiesV3(remote.URL)
+	<-firstRequest
+
+	// The sweep's callback lands while the earlier probe is still outstanding.
+	handler.RefreshNodeCapabilitiesV3(remote.URL)
+	close(release)
+
+	entry := waitForCachedNodeCapabilitiesV3(t, handler, remote.URL)
+	if len(entry.transformations) != 1 || entry.transformations[0].Name != "post_change" {
+		t.Fatalf("cached transformations = %v, want the report fetched after the invalidation", entry.transformations)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("node was probed %d time(s), want the invalidation's own re-probe and no more", got)
 	}
 }
 

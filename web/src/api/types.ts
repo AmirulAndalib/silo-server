@@ -3784,6 +3784,49 @@ export interface UpdatePluginSettingsRequest {
 }
 
 // Stream Nodes
+
+/** One render device in a node's stored capability report. */
+export interface NodeRenderDevice {
+  path: string;
+  /** sysfs PCI slot (e.g. "0000:03:00.0"); absent for a non-PCI device. */
+  pci_address?: string;
+  /** NVIDIA's permanent GPU identity; only present with nvidia-smi installed. */
+  gpu_uuid?: string;
+  description: string;
+}
+
+/** One hardware backend with candidate devices, plus its probe outcome. */
+export interface NodeDetectedBackend {
+  backend: string;
+  /** A real single-frame encode passed, not just an FFmpeg build-flag listing. */
+  verified: boolean;
+  devices?: string[];
+  /** The candidate that passed. Empty for NVENC, which selects via CUDA. */
+  device?: string;
+  /** Why verification failed, attributed per device when several were tried. */
+  reason?: string;
+}
+
+/**
+ * A node's stored hardware capability report — the body its /hw-capabilities
+ * endpoint served. The payload also carries the node's transformation and
+ * tone-map advertisements, which no admin surface reads yet.
+ */
+export interface NodeCapabilities {
+  /** Backend that would actually be used: nvenc, qsv, vaapi, or none. */
+  resolved?: string;
+  render_devices?: string[] | null;
+  render_device_details?: NodeRenderDevice[] | null;
+  intel_detected?: boolean;
+  detected_backends?: NodeDetectedBackend[];
+  /** Kernel boot identity (Linux only); scopes pci_address to one boot. */
+  boot_id?: string;
+  /** "sha256:<hex>" over the report's hardware identity and capabilities. */
+  capability_hash?: string;
+  source?: string;
+  node_url?: string;
+}
+
 export interface StreamNode {
   id: number;
   name: string;
@@ -3798,6 +3841,14 @@ export interface StreamNode {
   egress_kbps: number;
   last_health_check: string | null;
   created_at: string;
+  // Capability fields are owned by the background health sweep and are absent
+  // until one report has been stored — and on every server predating them.
+  capabilities?: NodeCapabilities | null;
+  capabilities_hash?: string;
+  /** When `capabilities` was fetched: the age of the inventory, not the health check. */
+  capabilities_refreshed_at?: string;
+  /** Stable per-GPU identities; two nodes sharing one share hardware. */
+  physical_gpu_keys?: string[];
 }
 
 export interface CreateNodeRequest {

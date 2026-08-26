@@ -372,6 +372,9 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 		return entry, nil
 	}
 
+	// Snapshot the invalidation count before probing: anything this fetch
+	// learns describes the node as it was when the request left.
+	invalidations := h.nodeCapabilityInvalidationsV3(nodeURL)
 	requestCtx, cancel := context.WithTimeout(ctx, h.remoteToneMapProbeTimeoutV3(nodeURL))
 	defer cancel()
 	info, err := fetchRemoteTranscodeCapabilities(requestCtx, nodeURL, h.JWTSecret)
@@ -380,6 +383,10 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 		h.v3NodeCapabilitiesMu.Lock()
 		if h.v3NodeCapabilities == nil {
 			h.v3NodeCapabilities = make(map[string]v3NodeCapabilityCache)
+		}
+		if h.v3NodeCapabilityInvalidations[nodeURL] != invalidations {
+			h.v3NodeCapabilitiesMu.Unlock()
+			return v3NodeCapabilityCache{}, err
 		}
 		if current, currentOK := h.v3NodeCapabilities[nodeURL]; currentOK && current.err == nil && completedAt.Before(current.expiresAt) {
 			h.v3NodeCapabilitiesMu.Unlock()
@@ -396,6 +403,14 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 		probeRequestTimeout: playback.NormalizeProbeRequestTimeout(info.ProbeRequestTimeoutMillis, remoteNodeProbeFallbackTimeout),
 	}
 	h.v3NodeCapabilitiesMu.Lock()
+	if h.v3NodeCapabilityInvalidations[nodeURL] != invalidations {
+		// The node's hardware changed while this probe was in flight. Hand the
+		// result to this caller, which has nothing better, but leave the cache
+		// empty so the next lookup re-probes instead of serving it for a full
+		// TTL to everyone else.
+		h.v3NodeCapabilitiesMu.Unlock()
+		return entry, nil
+	}
 	if h.v3NodeCapabilities == nil {
 		h.v3NodeCapabilities = make(map[string]v3NodeCapabilityCache)
 	}
@@ -404,19 +419,87 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 	return entry, nil
 }
 
+func (h *PlaybackHandler) nodeCapabilityInvalidationsV3(nodeURL string) uint64 {
+	h.v3NodeCapabilitiesMu.Lock()
+	defer h.v3NodeCapabilitiesMu.Unlock()
+	return h.v3NodeCapabilityInvalidations[nodeURL]
+}
+
+// RefreshNodeCapabilitiesV3 discards one node's cached capability inventory and
+// re-probes it in the background. It exists for the node health sweep, which
+// learns from a node's advertised capability hash that its hardware changed
+// long before this cache's freshness window would expire — and a cache that
+// outlives the hardware it describes plans transcodes onto a GPU that is gone.
+func (h *PlaybackHandler) RefreshNodeCapabilitiesV3(nodeURL string) {
+	if h == nil || nodeURL == "" {
+		return
+	}
+	h.v3NodeCapabilitiesMu.Lock()
+	delete(h.v3NodeCapabilities, nodeURL)
+	if h.v3NodeCapabilityInvalidations == nil {
+		h.v3NodeCapabilityInvalidations = make(map[string]uint64)
+	}
+	// Bumping the count is what makes the delete stick. A refresh already in
+	// flight fetched this node before its hardware changed, so it must neither
+	// re-install its answer over this delete nor be mistaken for the re-probe
+	// this invalidation is owed.
+	h.v3NodeCapabilityInvalidations[nodeURL]++
+	claimed := h.claimCapabilityRefreshLockedV3(nodeURL)
+	h.v3NodeCapabilitiesMu.Unlock()
+	if claimed {
+		h.runCapabilityRefreshV3(nodeURL)
+	}
+}
+
 func (h *PlaybackHandler) refreshRemoteCapabilitiesV3(nodeURL string) {
 	if h == nil || nodeURL == "" {
 		return
 	}
-	if _, loaded := h.v3NodeCapabilityRefresh.LoadOrStore(nodeURL, struct{}{}); loaded {
-		return
+	h.v3NodeCapabilitiesMu.Lock()
+	claimed := h.claimCapabilityRefreshLockedV3(nodeURL)
+	h.v3NodeCapabilitiesMu.Unlock()
+	if claimed {
+		h.runCapabilityRefreshV3(nodeURL)
 	}
+}
+
+// claimCapabilityRefreshLockedV3 takes the node's single background-refresh
+// slot. The caller must hold v3NodeCapabilitiesMu: taking the slot under the
+// same lock as the invalidation counter is what guarantees that an invalidation
+// either starts a refresh or is seen by the one already running.
+func (h *PlaybackHandler) claimCapabilityRefreshLockedV3(nodeURL string) bool {
+	if _, inFlight := h.v3NodeCapabilityRefresh[nodeURL]; inFlight {
+		return false
+	}
+	if h.v3NodeCapabilityRefresh == nil {
+		h.v3NodeCapabilityRefresh = make(map[string]struct{})
+	}
+	h.v3NodeCapabilityRefresh[nodeURL] = struct{}{}
+	return true
+}
+
+// runCapabilityRefreshV3 probes one node in the background until its result is
+// current: a probe that an invalidation overtook was discarded, so it repeats
+// rather than leave the cache empty until the next viewer pays for a probe.
+func (h *PlaybackHandler) runCapabilityRefreshV3(nodeURL string) {
 	go func() {
-		defer h.v3NodeCapabilityRefresh.Delete(nodeURL)
-		ctx, cancel := context.WithTimeout(context.Background(), h.remoteToneMapProbeTimeoutV3(nodeURL))
-		defer cancel()
-		if _, err := h.lookupRemoteCapabilitiesV3(ctx, nodeURL, false); err != nil {
-			slog.Debug("protocol v3 background node capability refresh failed", "component", "api", "node", logredact.SanitizeURL(nodeURL), "error", err)
+		for {
+			invalidations := h.nodeCapabilityInvalidationsV3(nodeURL)
+			ctx, cancel := context.WithTimeout(context.Background(), h.remoteToneMapProbeTimeoutV3(nodeURL))
+			_, err := h.lookupRemoteCapabilitiesV3(ctx, nodeURL, false)
+			cancel()
+			if err != nil {
+				slog.Debug("protocol v3 background node capability refresh failed", "component", "api", "node", logredact.SanitizeURL(nodeURL), "error", err)
+			}
+			h.v3NodeCapabilitiesMu.Lock()
+			current := h.v3NodeCapabilityInvalidations[nodeURL] == invalidations
+			if current {
+				delete(h.v3NodeCapabilityRefresh, nodeURL)
+			}
+			h.v3NodeCapabilitiesMu.Unlock()
+			if current {
+				return
+			}
 		}
 	}()
 }

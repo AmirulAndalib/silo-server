@@ -2,6 +2,7 @@ package nodepool
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -33,6 +34,16 @@ type Node struct {
 	EgressKbps       int        `json:"egress_kbps"`        // health-reported rolling egress average
 	LastHealthCheck  *time.Time `json:"last_health_check"`
 	CreatedAt        time.Time  `json:"created_at"`
+	// Capabilities is the node's last stored capability report, verbatim as the
+	// node served it. Kept opaque here: nodepool must not depend on playback,
+	// and readers that need fields parse the ones they need.
+	Capabilities json.RawMessage `json:"capabilities,omitempty"`
+	// CapabilitiesHash identifies Capabilities. The health sweep compares it
+	// against the hash a node reports to decide whether to refetch.
+	CapabilitiesHash *string `json:"capabilities_hash,omitempty"`
+	// CapabilitiesRefreshedAt is when Capabilities was last fetched — the age of
+	// the inventory, not of the last health check.
+	CapabilitiesRefreshedAt *time.Time `json:"capabilities_refreshed_at,omitempty"`
 }
 
 // CreateNodeInput holds the fields for creating a new node.
@@ -99,19 +110,26 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
-const nodeColumns = `id, name, type, url, enabled, healthy, active_jobs, node_group, max_jobs, max_bandwidth_kbps, egress_kbps, last_health_check, created_at`
+const nodeColumns = `id, name, type, url, enabled, healthy, active_jobs, node_group, max_jobs, max_bandwidth_kbps, egress_kbps, last_health_check, created_at, capabilities, capabilities_hash, capabilities_refreshed_at`
 
 func scanNode(row pgx.Row) (*Node, error) {
 	var n Node
+	// jsonb is scanned as raw bytes rather than into json.RawMessage directly so
+	// a NULL column stays nil instead of decoding through the JSON codec.
+	var capabilities []byte
 	err := row.Scan(
 		&n.ID, &n.Name, &n.Type, &n.URL,
 		&n.Enabled, &n.Healthy, &n.ActiveJobs,
 		&n.Group, &n.MaxJobs,
 		&n.MaxBandwidthKbps, &n.EgressKbps,
 		&n.LastHealthCheck, &n.CreatedAt,
+		&capabilities, &n.CapabilitiesHash, &n.CapabilitiesRefreshedAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if len(capabilities) > 0 {
+		n.Capabilities = json.RawMessage(capabilities)
 	}
 	return &n, nil
 }
@@ -119,17 +137,12 @@ func scanNode(row pgx.Row) (*Node, error) {
 func scanNodes(rows pgx.Rows) ([]*Node, error) {
 	var nodes []*Node
 	for rows.Next() {
-		var n Node
-		if err := rows.Scan(
-			&n.ID, &n.Name, &n.Type, &n.URL,
-			&n.Enabled, &n.Healthy, &n.ActiveJobs,
-			&n.Group, &n.MaxJobs,
-			&n.MaxBandwidthKbps, &n.EgressKbps,
-			&n.LastHealthCheck, &n.CreatedAt,
-		); err != nil {
+		// pgx.Rows satisfies pgx.Row, so both paths share one column list.
+		n, err := scanNode(rows)
+		if err != nil {
 			return nil, err
 		}
-		nodes = append(nodes, &n)
+		nodes = append(nodes, n)
 	}
 	return nodes, rows.Err()
 }
@@ -245,6 +258,23 @@ func (r *Repository) UpdateHealth(ctx context.Context, id int, healthy bool, act
 		id, healthy, activeJobs, egressKbps)
 	if err != nil {
 		return fmt.Errorf("update node health: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNodeNotFound
+	}
+	return nil
+}
+
+// UpdateCapabilities persists a freshly fetched capability report together with
+// the hash that identifies it. The three columns are written in one statement
+// so a reader never sees a payload beside a hash from a different report.
+func (r *Repository) UpdateCapabilities(ctx context.Context, id int, capabilities []byte, hash string, refreshedAt time.Time) error {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE stream_nodes SET capabilities = $2, capabilities_hash = $3, capabilities_refreshed_at = $4
+		 WHERE id = $1`,
+		id, capabilities, hash, refreshedAt)
+	if err != nil {
+		return fmt.Errorf("update node capabilities: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNodeNotFound

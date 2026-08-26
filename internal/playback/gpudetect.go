@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ var (
 	defaultNVIDIAControlDevice = "/dev/nvidiactl"
 	defaultNVIDIADeviceGlob    = "/dev/nvidia[0-9]*"
 	sysClassDRMDir             = "/sys/class/drm"
+	procBootIDPath             = "/proc/sys/kernel/random/boot_id"
 	currentGOOS                = runtime.GOOS
 	hwProbeCommandTimeout      = 3 * time.Second
 	hwProbeNegativeTTL         = 15 * time.Second
@@ -75,6 +77,14 @@ type HWAccelInfo struct {
 	NodeURL             string               `json:"node_url,omitempty"`
 	Transformations     []TransformationV3   `json:"transformations,omitempty"`
 	ToneMapCapabilities tonemap.Capabilities `json:"tone_map_capabilities,omitempty"`
+	// BootID is this host's kernel boot identity (Linux only). Paired with a
+	// render device's PCI address it distinguishes "same GPU, same boot" from
+	// "same device path on a host that rebooted or was replaced".
+	BootID string `json:"boot_id,omitempty"`
+	// CapabilityHash summarizes every hardware-identity and capability field
+	// below, so a reader can detect change without diffing the whole report.
+	// Set by the node that serves the report; see ComputeCapabilityHash.
+	CapabilityHash string `json:"capability_hash,omitempty"`
 	// ProbeRequestTimeoutMillis is the caller-side budget for this node's
 	// effective tone-map probe matrix, including endpoint and transport slack.
 	ProbeRequestTimeoutMillis int64 `json:"probe_request_timeout_ms,omitempty"`
@@ -131,6 +141,7 @@ func DetectHWAccelWithFFmpegContext(ctx context.Context, hwAccel, ffmpegPath, hw
 		RenderDeviceDetails: renderDeviceDetails(candidates.renderDevices),
 		IntelDetected:       candidates.intelPresent,
 		DetectedBackends:    detected,
+		BootID:              detectBootID(),
 		Source:              "local",
 	}
 }
@@ -656,7 +667,15 @@ func detectRenderDevice(driDir string) string {
 
 // RenderDeviceInfo describes one render device for operator-facing surfaces.
 type RenderDeviceInfo struct {
-	Path        string `json:"path"`
+	Path string `json:"path"`
+	// PCIAddress is the device's sysfs PCI slot (e.g. 0000:03:00.0). It is
+	// stable across reboots for a card that stays in its slot, which /dev/dri
+	// paths are not, so it — not Path — identifies the hardware.
+	PCIAddress string `json:"pci_address,omitempty"`
+	// GPUUUID is NVIDIA's own permanent GPU identity, reported only when
+	// nvidia-smi is installed. It survives a card moving between slots and
+	// hosts, so it outranks PCIAddress wherever both are present.
+	GPUUUID     string `json:"gpu_uuid,omitempty"`
 	Description string `json:"description"`
 }
 
@@ -696,10 +715,132 @@ func readSysfsID(path string) string {
 func renderDeviceDetails(devices []string) []RenderDeviceInfo {
 	details := make([]RenderDeviceInfo, 0, len(devices))
 	for _, device := range devices {
+		pciAddress := renderDevicePCIAddress(device)
 		details = append(details, RenderDeviceInfo{
 			Path:        device,
+			PCIAddress:  pciAddress,
+			GPUUUID:     renderDeviceGPUUUID(device, pciAddress),
 			Description: describeRenderDevice(device),
 		})
 	}
 	return details
+}
+
+// renderDevicePCIAddress resolves the sysfs device symlink behind a render node
+// and returns its PCI slot. Best effort: an unresolvable link (a virtual or
+// non-PCI device, a restricted sysfs) yields an empty address rather than an
+// error, because a missing identity only weakens inventory, never breaks it.
+func renderDevicePCIAddress(renderDevPath string) string {
+	name := filepath.Base(renderDevPath)
+	devicePath := filepath.Join(sysClassDRMDir, name, "device")
+	// sysfs exposes this as a symlink into the PCI tree. Anything else is a
+	// device with no PCI identity, and its own directory name would be "device".
+	info, err := os.Lstat(devicePath)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(devicePath)
+	if err != nil {
+		return ""
+	}
+	return filepath.Base(resolved)
+}
+
+// renderDeviceGPUUUID returns NVIDIA's permanent GPU identity for a render
+// device. Only NVIDIA-vendor devices are looked up: no other vendor publishes
+// such an id, so querying for them would only cost a subprocess.
+func renderDeviceGPUUUID(renderDevPath, pciAddress string) string {
+	if pciAddress == "" || !isNVIDIADevice(renderDevPath) {
+		return ""
+	}
+	return nvidiaGPUUUIDsByPCIAddress()[normalizePCIAddress(pciAddress)]
+}
+
+// nvidiaSMIQueryTimeout bounds the single nvidia-smi invocation. A wedged
+// driver makes nvidia-smi hang, and hardware inventory must not inherit that.
+var nvidiaSMIQueryTimeout = 3 * time.Second
+
+// nvidiaSMIQuery is the execution seam for the GPU uuid listing; tests replace
+// it rather than installing a fake binary on PATH.
+var nvidiaSMIQuery = runNVIDIASMIQuery
+
+// nvidiaGPUUUIDs caches the one nvidia-smi listing this process makes. GPU
+// identities cannot change without a reboot, so a second query could only cost
+// a subprocess to learn the same answer.
+var nvidiaGPUUUIDs struct {
+	once  sync.Once
+	byPCI map[string]string
+}
+
+func runNVIDIASMIQuery(ctx context.Context) ([]byte, error) {
+	path, err := exec.LookPath("nvidia-smi")
+	if err != nil {
+		return nil, err
+	}
+	return exec.CommandContext(ctx, path, "--query-gpu=uuid,pci.bus_id", "--format=csv,noheader").Output()
+}
+
+func nvidiaGPUUUIDsByPCIAddress() map[string]string {
+	nvidiaGPUUUIDs.once.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), nvidiaSMIQueryTimeout)
+		defer cancel()
+		output, err := nvidiaSMIQuery(ctx)
+		if err != nil {
+			// Expected on every host without the NVIDIA toolkit installed, so
+			// this stays at debug: the report is complete without it.
+			slog.Debug("nvidia-smi gpu identity query unavailable", "component", "playback", "error", err)
+			return
+		}
+		nvidiaGPUUUIDs.byPCI = parseNVIDIAGPUUUIDs(output)
+	})
+	return nvidiaGPUUUIDs.byPCI
+}
+
+// parseNVIDIAGPUUUIDs reads "csv,noheader" rows of "<uuid>, <pci bus id>" and
+// keys them by normalized PCI address. Malformed rows are skipped.
+func parseNVIDIAGPUUUIDs(output []byte) map[string]string {
+	byPCI := make(map[string]string)
+	for line := range strings.Lines(string(output)) {
+		uuid, address, ok := strings.Cut(line, ",")
+		if !ok {
+			continue
+		}
+		uuid = strings.TrimSpace(uuid)
+		address = normalizePCIAddress(address)
+		if uuid == "" || address == "" {
+			continue
+		}
+		byPCI[address] = uuid
+	}
+	return byPCI
+}
+
+// normalizePCIAddress makes sysfs and nvidia-smi addresses comparable:
+// sysfs prints a 16-bit domain (0000:03:00.0) and nvidia-smi a 32-bit one
+// (00000000:03:00.0), and neither guarantees a case.
+func normalizePCIAddress(address string) string {
+	address = strings.ToLower(strings.TrimSpace(address))
+	domain, rest, ok := strings.Cut(address, ":")
+	if !ok {
+		return address
+	}
+	value, err := strconv.ParseUint(domain, 16, 64)
+	if err != nil {
+		return address
+	}
+	return fmt.Sprintf("%04x:%s", value, rest)
+}
+
+// detectBootID reads the kernel's per-boot identity. It is Linux-only and
+// best effort: an empty value simply means device identities cannot be scoped
+// to a boot on this host.
+func detectBootID() string {
+	if currentGOOS != "linux" {
+		return ""
+	}
+	data, err := os.ReadFile(procBootIDPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
