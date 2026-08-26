@@ -1903,8 +1903,12 @@ func (h *PlaybackHandler) maybeStartThrottler(ctx context.Context, session *play
 	session.StartThrottler(threshold)
 }
 
-// findAlternateFile finds a non-4K file version for the same content.
-// Prefers SDR over HDR, then highest resolution, then highest bitrate.
+// findAlternateFile finds another file version for the same content. It
+// prefers non-4K versions because they can escape a disabled-4K-transcode
+// terminal, but when none exist it returns a 4K candidate so the planner can
+// still accept one that direct-plays or remuxes without forbidden video
+// encoding.
+// Within each class it prefers SDR, then resolution, then bitrate.
 func (h *PlaybackHandler) findAlternateFile(ctx context.Context, source *models.MediaFile) (*models.MediaFile, error) {
 	if h.FileVersionFetcher == nil {
 		return nil, fmt.Errorf("file version fetcher not configured")
@@ -1921,14 +1925,9 @@ func (h *PlaybackHandler) findAlternateFile(ctx context.Context, source *models.
 		return nil, err
 	}
 
-	// Filter to non-4K candidates.
 	candidates := make([]*models.MediaFile, 0, len(files))
 	for _, f := range files {
-		// Share the planner's 4K test: a sibling labeled "4K" or "UHD" is just
-		// as refused by the 4K policy as one labeled "2160p", and offering it
-		// as the fallback only reproduces the terminal this picker exists to
-		// escape.
-		if f.ID == source.ID || playback.Is4KMediaFileV3(f) {
+		if f.ID == source.ID {
 			continue
 		}
 		if source.EditionKey != "" && f.EditionKey != source.EditionKey {
@@ -1949,9 +1948,17 @@ func (h *PlaybackHandler) findAlternateFile(ctx context.Context, source *models.
 		return nil, nil
 	}
 
-	// Sort: SDR before HDR, then highest resolution, then highest bitrate.
+	// Prefer non-4K before 4K so a lower-resolution sibling is tried first.
+	// Keep 4K siblings at the end: when no non-4K sibling exists, the planner
+	// may still direct-play or remux one because the policy only forbids video
+	// encoding.
 	sort.Slice(candidates, func(i, j int) bool {
 		a, b := candidates[i], candidates[j]
+		a4K := playback.Is4KMediaFileV3(a)
+		b4K := playback.Is4KMediaFileV3(b)
+		if a4K != b4K {
+			return !a4K
+		}
 		// Prefer SDR over HDR (SDR = !HDR, so !HDR < HDR means SDR first).
 		if a.HDR != b.HDR {
 			return !a.HDR

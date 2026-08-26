@@ -4405,7 +4405,7 @@ func (h *PlaybackHandler) clarifyOriginalQuality4KTerminalV3(ctx context.Context
 	if !alternateFilePinned || terminal == nil || terminal.Reason != terminalNoAlternateVersionV3 || terminal.Message != playback.TerminalMessage4KTranscodeDisabledV3 {
 		return
 	}
-	if alternate, err := h.findAlternateFile(ctx, requestedFile); err == nil && alternate != nil {
+	if alternate, err := h.findAlternateFile(ctx, requestedFile); err == nil && alternate != nil && !playback.Is4KMediaFileV3(alternate) {
 		terminal.Message = "4K transcoding is disabled and quality 'original' pins the 4K version; a compatible lower-resolution version of this title is available."
 	}
 }

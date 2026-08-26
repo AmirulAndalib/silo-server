@@ -977,15 +977,10 @@ const (
 	resolutionLabelUHD   = "uhd"
 )
 
-// Is4KMediaFileV3 reports whether a catalog file's own recorded resolution
-// label marks it as 4K. Scanners and imports write the label in several
-// spellings, so anything that has to agree with the planner's 4K policy — the
-// fallback-version picker included — must normalize the same way rather than
-// compare against a single literal.
-//
-// models.MediaFile carries no probed width/height of its own (those live on its
-// video tracks), so this is a label-only answer. Callers holding a
-// SourceDescriptorV3 should also consult its dimensions, as is4KSourceV3 does.
+// Is4KMediaFileV3 reports whether a catalog file is recorded as 4K. Scanners
+// and imports write the resolution label in several spellings, and the stored
+// primary video track can carry dimensions that disagree with that label, so
+// callers use both facts to stay aligned with the planner's 4K policy.
 func Is4KMediaFileV3(file *models.MediaFile) bool {
 	if file == nil {
 		return false
@@ -993,9 +988,8 @@ func Is4KMediaFileV3(file *models.MediaFile) bool {
 	switch strings.ToLower(strings.TrimSpace(file.Resolution)) {
 	case resolutionLabel2160p, resolutionLabel4K, resolutionLabelUHD:
 		return true
-	default:
-		return false
 	}
+	return len(file.VideoTracks) > 0 && (file.VideoTracks[0].Width >= 3840 || file.VideoTracks[0].Height >= 2160)
 }
 
 func is4KSourceV3(file *models.MediaFile, source SourceDescriptorV3) bool {

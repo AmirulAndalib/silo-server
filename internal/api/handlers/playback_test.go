@@ -1155,9 +1155,7 @@ func TestFindAlternateFile_DoesNotCrossEdition(t *testing.T) {
 	}
 }
 
-// The fallback exists to escape the 4K-transcode refusal, so it has to exclude
-// every spelling the planner treats as 4K — not only the "2160p" literal.
-func TestFindAlternateFile_ExcludesAll4KLabels(t *testing.T) {
+func TestFindAlternateFile_PrefersNon4KAcrossLabelsAndDimensions(t *testing.T) {
 	source := &models.MediaFile{
 		ID:         1,
 		ContentID:  "movie-1",
@@ -1173,7 +1171,8 @@ func TestFindAlternateFile_ExcludesAll4KLabels(t *testing.T) {
 					source,
 					{ID: 2, ContentID: "movie-1", Resolution: "4K", Bitrate: 28_000_000},
 					{ID: 3, ContentID: "movie-1", Resolution: " uhd ", Bitrate: 26_000_000},
-					{ID: 4, ContentID: "movie-1", Resolution: "1080p", Bitrate: 12_000_000},
+					{ID: 4, ContentID: "movie-1", Resolution: "1080p", Bitrate: 24_000_000, VideoTracks: []models.VideoTrack{{Width: 3840, Height: 1626}}},
+					{ID: 5, ContentID: "movie-1", Resolution: "1080p", Bitrate: 12_000_000, VideoTracks: []models.VideoTrack{{Width: 1920, Height: 1080}}},
 				},
 			},
 		},
@@ -1186,12 +1185,12 @@ func TestFindAlternateFile_ExcludesAll4KLabels(t *testing.T) {
 	if alternate == nil {
 		t.Fatal("expected alternate file")
 	}
-	if alternate.ID != 4 {
-		t.Fatalf("alternate.ID = %d (resolution %q), want 4", alternate.ID, alternate.Resolution)
+	if alternate.ID != 5 {
+		t.Fatalf("alternate.ID = %d (resolution %q), want 5", alternate.ID, alternate.Resolution)
 	}
 }
 
-func TestFindAlternateFile_NoNon4KVersion(t *testing.T) {
+func TestFindAlternateFile_Returns4KVersionWhenItIsTheOnlyAlternate(t *testing.T) {
 	source := &models.MediaFile{ID: 1, ContentID: "movie-1", Resolution: "2160p", Bitrate: 30_000_000}
 
 	handler := &PlaybackHandler{
@@ -1209,8 +1208,11 @@ func TestFindAlternateFile_NoNon4KVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("findAlternateFile: %v", err)
 	}
-	if alternate != nil {
-		t.Fatalf("alternate = %+v, want none", alternate)
+	if alternate == nil {
+		t.Fatal("expected 4K alternate to reach the planner")
+	}
+	if alternate.ID != 2 {
+		t.Fatalf("alternate.ID = %d, want 2", alternate.ID)
 	}
 }
 

@@ -263,11 +263,12 @@ func TestValidateAdvertisedTransformationsV3RejectsOldVideoRecipe(t *testing.T) 
 
 func TestHandleStartPlaybackV3ExplainsOriginalQuality4KPinWhenAlternateExists(t *testing.T) {
 	for _, test := range []struct {
-		name             string
-		includeAlternate bool
-		wantMessage      string
+		name                string
+		alternateResolution string
+		wantMessage         string
 	}{
-		{name: "alternate exists", includeAlternate: true, wantMessage: "compatible lower-resolution version of this title is available"},
+		{name: "lower-resolution alternate exists", alternateResolution: "1080p", wantMessage: "compatible lower-resolution version of this title is available"},
+		{name: "only 4K alternate exists", alternateResolution: "UHD", wantMessage: playback.TerminalMessage4KTranscodeDisabledV3},
 		{name: "no alternate", wantMessage: playback.TerminalMessage4KTranscodeDisabledV3},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -280,16 +281,18 @@ func TestHandleStartPlaybackV3ExplainsOriginalQuality4KPinWhenAlternateExists(t 
 			source.VideoTracks[0].Bitrate = 32_000
 
 			versions := []*models.MediaFile{source}
-			if test.includeAlternate {
+			if test.alternateResolution != "" {
 				alternateValue := *source
 				alternate := &alternateValue
 				alternate.ID = 84
-				alternate.Resolution = "1080p"
+				alternate.Resolution = test.alternateResolution
 				alternate.Bitrate = 8_000
 				alternate.VideoTracks = append([]models.VideoTrack(nil), source.VideoTracks...)
-				alternate.VideoTracks[0].Width = 1920
-				alternate.VideoTracks[0].Height = 1080
-				alternate.VideoTracks[0].Level = 41
+				if test.alternateResolution == "1080p" {
+					alternate.VideoTracks[0].Width = 1920
+					alternate.VideoTracks[0].Height = 1080
+					alternate.VideoTracks[0].Level = 41
+				}
 				alternate.VideoTracks[0].Bitrate = 8_000
 				versions = append(versions, alternate)
 			}
