@@ -6,6 +6,7 @@ import { toEpisodeUserState } from "@/components/episodeUserState";
 import MediaItemMenu from "@/components/MediaItemMenu";
 import CardOverlays from "@/components/overlays/CardOverlays";
 import { useOverlayPrefs } from "@/hooks/useOverlayPrefs";
+import { usePrefetchCatalogItemDetail } from "@/hooks/queries/catalogRead";
 import { overlayDataFromEpisodeListItem } from "@/lib/overlays";
 import { EpisodeGridSkeleton } from "./SectionSkeletons";
 import type { EpisodeNavigationState } from "../itemDetailLayout";
@@ -22,6 +23,7 @@ export default function SeasonEpisodeGrid({
   episodeLinkState,
 }: SeasonEpisodeGridProps) {
   const { prefs: overlayPrefs } = useOverlayPrefs();
+  const prefetchEpisodeDetail = usePrefetchCatalogItemDetail();
 
   if (isLoading) {
     return <EpisodeGridSkeleton />;
@@ -44,7 +46,13 @@ export default function SeasonEpisodeGrid({
           (episode.user_data?.duration_seconds ?? 0) > 0;
 
         return (
-          <div key={episode.content_id} className="group/card media-card">
+          <div
+            key={episode.content_id}
+            className="group/card media-card"
+            onMouseEnter={() => prefetchEpisodeDetail(episode.content_id)}
+            onFocus={() => prefetchEpisodeDetail(episode.content_id)}
+            onTouchStart={() => prefetchEpisodeDetail(episode.content_id)}
+          >
             <div className="relative">
               <Link
                 to={`/item/${episode.content_id}`}

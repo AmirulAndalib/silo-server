@@ -16,6 +16,10 @@ vi.mock("@/hooks/useOverlayPrefs", () => ({
   useOverlayPrefs: () => ({ prefs: null }),
 }));
 
+vi.mock("@/hooks/queries/catalogRead", () => ({
+  usePrefetchCatalogItemDetail: () => vi.fn(),
+}));
+
 describe("SeasonEpisodeGrid", () => {
   beforeEach(() => {
     capturedMenuProps.length = 0;
