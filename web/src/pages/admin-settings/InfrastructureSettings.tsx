@@ -101,13 +101,11 @@ function countDirty(form: SettingsForm, keys: string[]): number {
 }
 
 /**
- * Shared editing state for every credential on the page. A credential can only
- * be replaced through an explicit Replace click, and every editor is frozen
- * while a save is in flight so a late keystroke cannot ride along with it.
+ * Shared credential-draft helpers for every secret on the page. Every editor
+ * is frozen while a save is in flight so a late keystroke cannot ride along
+ * with it; emptying an input reverts to the saved value (`keepSaved`).
  */
 interface SecretEditors {
-  isEditing: (key: string) => boolean;
-  beginReplace: (key: string) => void;
   keepSaved: (key: string) => void;
   setSecret: (key: string, value: string) => void;
   disabled: boolean;
@@ -181,8 +179,6 @@ function RedisGroup({
             label="Connection URL"
             value={redisUrl}
             configured={configured}
-            editing={secrets.isEditing("redis.url")}
-            onReplace={() => secrets.beginReplace("redis.url")}
             onKeep={() => secrets.keepSaved("redis.url")}
             onChange={(v) => secrets.setSecret("redis.url", v)}
             hint={managedByEnv ? "Value supplied by REDIS_URL" : "redis://host:6379"}
@@ -293,8 +289,6 @@ function S3Group({
         label="Access Key"
         value={form.getValue(key("access_key"))}
         configured={form.sensitiveConfigured.includes(key("access_key"))}
-        editing={secrets.isEditing(key("access_key"))}
-        onReplace={() => secrets.beginReplace(key("access_key"))}
         onKeep={() => secrets.keepSaved(key("access_key"))}
         onChange={(v) => secrets.setSecret(key("access_key"), v)}
         disabled={secrets.disabled}
@@ -304,8 +298,6 @@ function S3Group({
         label="Secret Key"
         value={form.getValue(key("secret_key"))}
         configured={form.sensitiveConfigured.includes(key("secret_key"))}
-        editing={secrets.isEditing(key("secret_key"))}
-        onReplace={() => secrets.beginReplace(key("secret_key"))}
         onKeep={() => secrets.keepSaved(key("secret_key"))}
         onChange={(v) => secrets.setSecret(key("secret_key"), v)}
         disabled={secrets.disabled}
@@ -375,8 +367,6 @@ function S3Group({
                   label="Token Secret"
                   value={form.getValue("s3.public_token_secret")}
                   configured={form.sensitiveConfigured.includes("s3.public_token_secret")}
-                  editing={secrets.isEditing("s3.public_token_secret")}
-                  onReplace={() => secrets.beginReplace("s3.public_token_secret")}
                   onKeep={() => secrets.keepSaved("s3.public_token_secret")}
                   onChange={(v) => secrets.setSecret("s3.public_token_secret", v)}
                   hint="Signing key configured in Cloudflare"
@@ -697,24 +687,13 @@ function LogsGroup({ form, restartKeys }: { form: SettingsForm; restartKeys: Res
 export default function InfrastructureSettings() {
   const form = useSettingsForm({ keys: useMemo(() => KEYS, []) });
   const restartKeys = useRestartKeys();
-  const [editingSecretKeys, setEditingSecretKeys] = useState<Set<string>>(new Set());
   const [saveInProgress, setSaveInProgress] = useState(false);
   const saveInProgressRef = useRef(false);
 
   const secrets: SecretEditors = {
-    isEditing: (key) => editingSecretKeys.has(key),
-    beginReplace: (key) => {
-      if (saveInProgressRef.current) return;
-      setEditingSecretKeys((current) => new Set(current).add(key));
-    },
     keepSaved: (key) => {
       if (saveInProgressRef.current) return;
       form.resetValue(key);
-      setEditingSecretKeys((current) => {
-        const next = new Set(current);
-        next.delete(key);
-        return next;
-      });
     },
     setSecret: (key, value) => {
       if (saveInProgressRef.current) return;
@@ -729,9 +708,8 @@ export default function InfrastructureSettings() {
     setSaveInProgress(true);
     try {
       await form.save();
-      setEditingSecretKeys(new Set());
     } catch {
-      // The mutation reports the error; keep credential editors open for retry.
+      // The mutation reports the error; staged credential drafts stay for retry.
     } finally {
       saveInProgressRef.current = false;
       setSaveInProgress(false);
@@ -741,7 +719,6 @@ export default function InfrastructureSettings() {
   function handleDiscard() {
     if (saveInProgressRef.current) return;
     form.discard();
-    setEditingSecretKeys(new Set());
   }
 
   if (form.sensitiveStatusError) {
@@ -785,7 +762,7 @@ export default function InfrastructureSettings() {
       </p>
 
       <RestartAllProvider>
-        <div className="flex-1 space-y-8">
+        <div className="flex-1 space-y-5">
           <RedisGroup form={form} restartKeys={restartKeys} secrets={secrets} />
           <S3Group
             form={form}

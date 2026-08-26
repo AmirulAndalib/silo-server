@@ -216,7 +216,7 @@ describe("NotificationsAdminSettings", () => {
     expect(screen.getAllByLabelText("Takes effect after a server restart").length).toBe(1);
   });
 
-  it("keeps the saved SMTP password behind a Replace control", async () => {
+  it("shows the saved SMTP password as a masked, editable input", async () => {
     const form = makeForm();
     form.sensitiveConfigured = ["email.smtp_password"];
     useSettingsFormMock.mockReturnValue(form);
@@ -224,9 +224,11 @@ describe("NotificationsAdminSettings", () => {
     render(renderPage());
     await openChannel(EMAIL_CHANNEL);
 
-    expect(screen.getByText("Configured")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Replace Password" }));
-    expect(screen.getByRole("button", { name: "Keep saved Password" })).toBeInTheDocument();
+    // No Replace step: typing stages a replacement, blank keeps the saved one.
+    const input = screen.getByLabelText("Password");
+    expect(input).toHaveAttribute("type", "password");
+    expect(input).toHaveAttribute("placeholder", "••••••••••••");
+    expect(screen.queryByRole("button", { name: /Replace/ })).not.toBeInTheDocument();
   });
 
   it("configures the Discord application inside the Discord channel card", async () => {

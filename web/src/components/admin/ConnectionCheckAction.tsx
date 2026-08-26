@@ -19,7 +19,9 @@ export function ConnectionCheckAction({
   pendingLabel = "Checking...",
 }: Props) {
   return (
-    <div className="flex flex-wrap items-center gap-3 pt-1">
+    // py matches SettingFieldRow so the action reads as one more row in the
+    // group instead of hugging the hairline under the last field.
+    <div className="flex flex-wrap items-center gap-3 py-3.5">
       <Button
         type="button"
         size="sm"

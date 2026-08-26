@@ -287,13 +287,16 @@ describe("AISettings", () => {
     );
   });
 
-  it("keeping a saved AI key reverts the draft instead of staging an empty value", async () => {
+  it("emptying a saved AI key reverts the draft instead of staging an empty value", async () => {
     const user = userEvent.setup();
+    values["ai.api_key"] = "draft";
     render(<AISettings />);
     const tile = await openTile(user, "Text model");
 
-    await user.click(within(tile).getByRole("button", { name: "Replace API key" }));
-    await user.click(within(tile).getByRole("button", { name: "Keep saved API key" }));
+    // No Replace step: the saved key is a masked, always-editable input.
+    const input = within(tile).getByLabelText("API key");
+    expect(input).toHaveAttribute("placeholder", "••••••••••••");
+    await user.clear(input);
 
     // Staging "" would erase the stored key on the next save.
     expect(mocks.setValue).not.toHaveBeenCalledWith("ai.api_key", "");

@@ -1,24 +1,21 @@
-import { useId, useState } from "react";
+import { useId } from "react";
 
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SettingFieldRow } from "@/pages/admin-settings/SettingField";
 
 export interface SecretFieldProps {
   label: string;
-  /** Staged plaintext value; always empty while the saved secret is kept. */
+  /** Staged plaintext value; empty while the saved secret is kept. */
   value: string;
   /** Whether the server already stores a value for this key. */
   configured: boolean;
   onChange: (value: string) => void;
   /**
-   * Controlled replacement state. Leave undefined to let the field track it
-   * itself; pass it when the parent has to reset several secrets at once.
+   * Called when the input is emptied while a saved value exists, so a
+   * settings-form parent can revert the staged draft (`form.resetValue`)
+   * instead of staging `""` — a dirty `""` would clear the secret on save.
+   * Draft-based parents that already skip empty values may omit it.
    */
-  editing?: boolean;
-  /** Called when the admin starts replacing a saved secret. */
-  onReplace?: () => void;
-  /** Called when the admin abandons the replacement (revert the staged value). */
   onKeep?: () => void;
   hint?: string;
   disabled?: boolean;
@@ -26,17 +23,17 @@ export interface SecretFieldProps {
 }
 
 /**
- * The single credential control for admin settings. Three states:
- * saved (summary + Replace), replacing (password input + Keep saved value),
- * and unset (plain password input).
+ * The single credential control for admin settings: one always-editable
+ * password input. A saved secret shows as a masked placeholder, typing stages
+ * a replacement, and emptying the input keeps the saved value — clearing a
+ * secret for real is a page-level action (Disconnect, Clear credentials),
+ * never an empty save.
  */
 export function SecretField({
   label,
   value,
   configured,
   onChange,
-  editing,
-  onReplace,
   onKeep,
   hint,
   disabled = false,
@@ -44,50 +41,19 @@ export function SecretField({
 }: SecretFieldProps) {
   const controlId = useId();
   const hintId = useId();
-  const [internalEditing, setInternalEditing] = useState(false);
-  const isEditing = editing ?? internalEditing;
 
-  function beginReplace() {
-    if (disabled) return;
-    setInternalEditing(true);
-    onReplace?.();
+  const description =
+    hint ?? (configured ? "Type to replace the saved value; leave blank to keep it." : undefined);
+
+  function handleChange(next: string) {
+    if (next === "" && configured) {
+      // Emptying the field means "keep the saved secret", never "clear it".
+      if (onKeep) onKeep();
+      else onChange("");
+      return;
+    }
+    onChange(next);
   }
-
-  function keepSaved() {
-    if (disabled) return;
-    setInternalEditing(false);
-    // A parent that stages values (useSettingsForm) reverts the draft itself;
-    // clearing through onChange there would leave the key marked dirty.
-    if (onKeep) onKeep();
-    else onChange("");
-  }
-
-  if (configured && !isEditing) {
-    return (
-      <SettingFieldRow
-        label={label}
-        description={hint}
-        descriptionId={hintId}
-        restartRequired={restartRequired}
-      >
-        <div className="border-border/70 flex w-full items-center justify-between gap-3 rounded-md border px-3 py-1.5 sm:w-60">
-          <span className="text-muted-foreground text-sm">Configured</span>
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            aria-label={`Replace ${label}`}
-            onClick={beginReplace}
-            disabled={disabled}
-          >
-            Replace
-          </Button>
-        </div>
-      </SettingFieldRow>
-    );
-  }
-
-  const description = configured ? "Enter a replacement value." : hint;
 
   return (
     <SettingFieldRow
@@ -97,30 +63,16 @@ export function SecretField({
       descriptionId={hintId}
       restartRequired={restartRequired}
     >
-      <div className="flex w-full flex-col items-end gap-1 sm:w-60">
-        <Input
-          id={controlId}
-          type="password"
-          placeholder={configured ? "configured" : "Not configured"}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          disabled={disabled}
-          className="w-full"
-          aria-describedby={description ? hintId : undefined}
-        />
-        {configured && (
-          <Button
-            type="button"
-            size="xs"
-            variant="ghost"
-            aria-label={`Keep saved ${label}`}
-            onClick={keepSaved}
-            disabled={disabled}
-          >
-            Keep saved value
-          </Button>
-        )}
-      </div>
+      <Input
+        id={controlId}
+        type="password"
+        placeholder={configured ? "••••••••••••" : "Not configured"}
+        value={value}
+        onChange={(e) => handleChange(e.target.value)}
+        disabled={disabled}
+        className="border-muted-foreground/25 w-full sm:w-60"
+        aria-describedby={description ? hintId : undefined}
+      />
     </SettingFieldRow>
   );
 }

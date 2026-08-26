@@ -151,25 +151,29 @@ describe("InfrastructureSettings", () => {
     expect(markup).toContain("will not change artwork cache records");
   });
 
-  it("requires an explicit action before replacing a configured credential", async () => {
+  it("keeps a saved credential when its input is emptied", async () => {
     const form = mockForm({
       sensitiveConfigured: ["s3.public_access_key", "s3.public_secret_key"],
-      dirtyCount: 1,
+      getValue: (key: string) =>
+        key === "s3.public_access_key" ? "draft" : key === "s3.public_url_auth" ? "presigned" : "",
     });
 
     render(<InfrastructureSettings />);
 
+    // No Replace step: the saved credential is a masked, always-editable input.
     const publicGroup = within(screen.getByRole("group", { name: "Public storage" }));
-    expect(publicGroup.queryByLabelText("Access Key")).not.toBeInTheDocument();
-    await userEvent.click(publicGroup.getByRole("button", { name: "Replace Access Key" }));
-    expect(publicGroup.getByLabelText("Access Key")).toHaveAttribute("type", "password");
+    const input = publicGroup.getByLabelText("Access Key");
+    expect(input).toHaveAttribute("type", "password");
+    expect(input).toHaveAttribute("placeholder", "••••••••••••");
+    expect(publicGroup.queryByRole("button", { name: /Replace/ })).not.toBeInTheDocument();
 
-    await userEvent.click(publicGroup.getByRole("button", { name: "Keep saved Access Key" }));
+    // Deleting the draft means "keep the saved secret", never "clear it".
+    await userEvent.clear(input);
     expect(form.resetValue).toHaveBeenCalledWith("s3.public_access_key");
-    expect(publicGroup.queryByLabelText("Access Key")).not.toBeInTheDocument();
+    expect(form.setValue).not.toHaveBeenCalledWith("s3.public_access_key", "");
   });
 
-  it("keeps a credential replacement open when saving fails", async () => {
+  it("keeps the credential input editable when saving fails", async () => {
     mockForm({
       sensitiveConfigured: ["s3.private_access_key"],
       dirtyCount: 1,
@@ -179,7 +183,6 @@ describe("InfrastructureSettings", () => {
     render(<InfrastructureSettings />);
 
     const privateGroup = within(screen.getByRole("group", { name: "Private storage" }));
-    await userEvent.click(privateGroup.getByRole("button", { name: "Replace Access Key" }));
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() =>

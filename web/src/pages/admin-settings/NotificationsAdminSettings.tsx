@@ -889,9 +889,6 @@ export default function NotificationsAdminSettings() {
   const { data: serverChannels } = useServerNotificationChannels();
   // Local draft for the relay URL; null means "show the saved value".
   const [pushRelayURLDraft, setPushRelayURLDraft] = useState<string | null>(null);
-  // Replacing the saved SMTP password is a deliberate act, tracked here so a
-  // Discard also drops the field back to its "Configured" summary.
-  const [replacingSMTPPassword, setReplacingSMTPPassword] = useState(false);
 
   if (form.isLoading) {
     return (
@@ -984,7 +981,7 @@ export default function NotificationsAdminSettings() {
     <div className="flex h-full flex-col">
       <SettingsPageHeader className="mb-6" title="Notifications" />
 
-      <div className="flex-1 space-y-7">
+      <div className="flex-1 space-y-5">
         {/* ── Pipeline: the master switches, framed as the flow they gate ── */}
         <div className="surface-panel rounded-2xl border-0 p-4 sm:p-5">
           <div className="text-muted-foreground mb-4 text-xs font-semibold tracking-[0.22em] uppercase">
@@ -1204,12 +1201,7 @@ export default function NotificationsAdminSettings() {
                 label="Password"
                 value={form.getValue("email.smtp_password")}
                 configured={form.sensitiveConfigured.includes("email.smtp_password")}
-                editing={replacingSMTPPassword}
-                onReplace={() => setReplacingSMTPPassword(true)}
-                onKeep={() => {
-                  setReplacingSMTPPassword(false);
-                  form.resetValue("email.smtp_password");
-                }}
+                onKeep={() => form.resetValue("email.smtp_password")}
                 onChange={(v) => form.setValue("email.smtp_password", v)}
                 restartRequired={needsRestart("email.smtp_password")}
               />
@@ -1484,19 +1476,8 @@ export default function NotificationsAdminSettings() {
 
       <SaveBar
         dirtyCount={form.dirtyCount}
-        onSave={() => {
-          // A saved secret is dropped from the draft, so the field has to go
-          // back to its "Configured" summary; a failed save keeps the typed
-          // value visible (the mutation reports the error itself).
-          void form.save().then(
-            () => setReplacingSMTPPassword(false),
-            () => {},
-          );
-        }}
-        onDiscard={() => {
-          setReplacingSMTPPassword(false);
-          form.discard();
-        }}
+        onSave={form.save}
+        onDiscard={form.discard}
         isSaving={form.isSaving}
       />
     </div>
