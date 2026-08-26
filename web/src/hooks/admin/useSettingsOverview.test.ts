@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import { ADMIN_SETTINGS_NAV } from "@/lib/adminSettingsSearch";
 import {
   buildSettingsOverview,
-  formatDurationSetting,
   type OverviewCard,
   type OverviewTile,
   type SettingsOverviewInput,
@@ -21,24 +20,6 @@ function card(input: SettingsOverviewInput, id: string): OverviewCard {
   return found;
 }
 
-function summary(input: SettingsOverviewInput, id: string): string {
-  return card(input, id).summary;
-}
-
-describe("formatDurationSetting", () => {
-  it("reads whole days, hours, and minutes back in words", () => {
-    expect(formatDurationSetting("720h")).toBe("30 days");
-    expect(formatDurationSetting("24h")).toBe("1 day");
-    expect(formatDurationSetting("36h")).toBe("36 hours");
-    expect(formatDurationSetting("15m")).toBe("15 minutes");
-  });
-
-  it("passes anything it does not recognise through untouched", () => {
-    expect(formatDurationSetting("1h30m")).toBe("1h30m");
-    expect(formatDurationSetting("")).toBe("");
-  });
-});
-
 describe("buildSettingsOverview health tiles", () => {
   it("degrades to placeholders rather than throwing when nothing has loaded", () => {
     const model = buildSettingsOverview({});
@@ -46,7 +27,7 @@ describe("buildSettingsOverview health tiles", () => {
     expect(model.tiles).toHaveLength(5);
     expect(model.cards).toHaveLength(11);
     expect(tile({}, "storage").stateText).toBe("Not set up");
-    expect(summary({}, "general")).toBe("Silo");
+    expect(card({}, "general")).toEqual({ id: "general" });
   });
 
   it("names the bucket when only public storage is configured", () => {
@@ -158,7 +139,7 @@ describe("buildSettingsOverview health tiles", () => {
   });
 });
 
-describe("buildSettingsOverview section cards", () => {
+describe("buildSettingsOverview groups and rail status", () => {
   it("emits one card per settings tab id", () => {
     expect(buildSettingsOverview({}).cards.map((entry) => entry.id)).toEqual([
       "general",
@@ -175,147 +156,107 @@ describe("buildSettingsOverview section cards", () => {
     ]);
   });
 
-  it("titles every card exactly like its settings rail label", () => {
-    const railLabels = Object.fromEntries(ADMIN_SETTINGS_NAV.map((item) => [item.id, item.label]));
-
-    for (const card of buildSettingsOverview({}).cards) {
-      expect(card.title).toBe(railLabels[card.id]);
-    }
-  });
-
-  it("summarises playback in one phrase", () => {
-    const playback = card(
-      {
-        settings: {
-          "playback.transcode_enabled": "true",
-          "playback.hw_accel": "qsv",
-        },
-      },
-      "playback",
+  it("keeps the group manifest aligned with the overview ids", () => {
+    expect(buildSettingsOverview({}).cards.map((entry) => entry.id)).toEqual(
+      ADMIN_SETTINGS_NAV.map((item) => item.id),
     );
-
-    expect(playback.summary).toBe("Transcoding on · Quick Sync");
-    expect(playback.attention).toBe(false);
-    expect(summary({}, "playback")).toBe("Transcoding off");
   });
 
   it("flags a notifications email channel with no SMTP host", () => {
-    const notifications = card(
-      { settings: { "notifications.email_enabled": "true", "email.enabled": "false" } },
-      "notifications",
-    );
+    const model = buildSettingsOverview({
+      settings: { "notifications.email_enabled": "true", "email.enabled": "false" },
+    });
 
-    expect(notifications.summary).toBe("Email channel has no SMTP");
-    expect(notifications.attention).toBe(true);
+    expect(model.sectionStatus.notifications).toBe("warn");
+    expect(
+      buildSettingsOverview({
+        settings: { "notifications.email_enabled": "true", "email.enabled": "true" },
+      }).sectionStatus.notifications,
+    ).toBe("warn");
     // With nothing configured at all the section is merely dormant, not broken.
     expect(buildSettingsOverview({}).sectionStatus.notifications).toBe("off");
   });
 
-  it("counts connected subtitle providers and calls out the ones missing a key", () => {
-    const providers = card(
-      {
-        sensitiveConfigured: ["mdblist.api_key"],
-        subtitleProviders: [
-          {
-            provider_name: "opensubtitles",
-            enabled: true,
-            has_api_key: false,
-            has_credentials: true,
-            updated_at: "",
-          },
-          {
-            provider_name: "subdl",
-            enabled: true,
-            has_api_key: false,
-            has_credentials: false,
-            updated_at: "",
-          },
-          {
-            provider_name: "subsource",
-            enabled: false,
-            has_api_key: false,
-            has_credentials: false,
-            updated_at: "",
-          },
-        ],
-      },
-      "providers",
-    );
+  it("flags subtitle providers that are enabled without credentials", () => {
+    const model = buildSettingsOverview({
+      sensitiveConfigured: ["mdblist.api_key"],
+      subtitleProviders: [
+        {
+          provider_name: "opensubtitles",
+          enabled: true,
+          has_api_key: false,
+          has_credentials: true,
+          updated_at: "",
+        },
+        {
+          provider_name: "subdl",
+          enabled: true,
+          has_api_key: false,
+          has_credentials: false,
+          updated_at: "",
+        },
+        {
+          provider_name: "subsource",
+          enabled: false,
+          has_api_key: false,
+          has_credentials: false,
+          updated_at: "",
+        },
+      ],
+    });
 
-    expect(providers.summary).toBe("SubDL needs a key");
-    expect(providers.attention).toBe(true);
+    expect(model.sectionStatus.providers).toBe("warn");
   });
 
-  it("reads watch sync and AI state out of the sensitive-status list", () => {
-    const input: SettingsOverviewInput = {
+  it("reads watch sync and AI status out of the sensitive-status list", () => {
+    const model = buildSettingsOverview({
       sensitiveConfigured: ["watchsync.trakt.client_secret", "ai.api_key"],
       settings: {
         "ai.chat_model": "gpt-4o-mini",
         "subtitle_ai.enabled": "true",
         "metadata_ai.enabled": "true",
       },
-    };
+    });
 
-    expect(card(input, "watch-sync").summary).toBe("Trakt connected");
-
-    const ai = card(input, "ai");
-    expect(ai.summary).toBe("gpt-4o-mini · 2 of 4 features on");
-    expect(ai.attention).toBe(false);
+    expect(model.sectionStatus["watch-sync"]).toBe("ok");
+    expect(model.sectionStatus.ai).toBe("ok");
   });
 
   it("flags a text model saved without an API key", () => {
-    const ai = card({ settings: { "ai.chat_model": "gpt-4o-mini" } }, "ai");
+    const model = buildSettingsOverview({ settings: { "ai.chat_model": "gpt-4o-mini" } });
 
-    expect(ai.summary).toBe("Model set, no API key");
-    expect(ai.attention).toBe(true);
+    expect(model.sectionStatus.ai).toBe("warn");
   });
 
-  it("describes the Jellyfin surface from the compat status", () => {
-    const compatibility = card(
-      {
-        jellyfin: {
-          enabled: true,
-          api_state: "enabled",
-          public_url: "https://media.example.tv",
-          web_state: "installed",
-        } as SettingsOverviewInput["jellyfin"],
-        settings: { "audiobookshelf_compat.enabled": "false" },
-      },
-      "compatibility",
-    );
+  it("tracks compatibility health without putting it on the group card", () => {
+    const healthy = buildSettingsOverview({
+      jellyfin: {
+        enabled: true,
+        api_state: "enabled",
+        public_url: "https://media.example.tv",
+        web_state: "installed",
+      } as SettingsOverviewInput["jellyfin"],
+      settings: { "audiobookshelf_compat.enabled": "false" },
+    });
+    const broken = buildSettingsOverview({
+      jellyfin: {
+        enabled: true,
+        api_state: "error",
+        public_url: "https://media.example.tv",
+        web_state: "installed",
+      } as SettingsOverviewInput["jellyfin"],
+    });
 
-    expect(compatibility.summary).toBe("Jellyfin on · media.example.tv");
-    expect(compatibility.attention).toBe(false);
+    expect(healthy.sectionStatus.compatibility).toBe("ok");
+    expect(broken.sectionStatus.compatibility).toBe("warn");
   });
 
   it("warns when there is no public bucket at all", () => {
-    const infrastructure = card({ settings: { "opslog.retention_days": "30" } }, "infrastructure");
+    const model = buildSettingsOverview({
+      settings: { "opslog.retention_days": "30" },
+    });
 
-    expect(infrastructure.summary).toBe("No bucket configured");
-    expect(infrastructure.attention).toBe(true);
-  });
-
-  it("reports rate limiting and trusted proxies on the security card", () => {
-    const security = card(
-      {
-        settings: {
-          "auth.access_token_expiry": "720h",
-          "clientip.trusted_proxies": "10.0.0.0/8, 192.168.0.0/16",
-        },
-        rateLimits: { enabled: true, backend: "redis" } as SettingsOverviewInput["rateLimits"],
-      },
-      "security",
-    );
-
-    expect(security.summary).toBe("Sign-in 30 days · Rate limiting on");
-    expect(security.attention).toBe(false);
-  });
-
-  it("does not read a missing rate-limit config as rate limiting being off", () => {
-    const security = card({ settings: { "auth.access_token_expiry": "720h" } }, "security");
-
-    expect(security.summary).toBe("Sign-in 30 days");
-    expect(security.attention).toBe(false);
+    expect(model.sectionStatus.infrastructure).toBe("warn");
   });
 
   it("exposes a per-section status for the sidebar rail", () => {

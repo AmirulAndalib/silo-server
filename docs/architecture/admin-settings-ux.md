@@ -22,9 +22,9 @@ not-set-up sections get nothing. The open item is marked with a 2px accent bar
 and no fill; the rail collapses on mobile, where the Overview is the section
 list. The Overview itself shows a health tile only for a tile in `warn` or
 `off` — a server with nothing to fix reads "Everything is configured." — and
-one large card per settings group. Each card explains the group's scope, names
-the sections inside it, and keeps its live configuration summary in a separate
-Current row.
+one large card per settings group. Each card explains the group's scope and
+names the sections inside it. Live state stays in the health area and settings
+rail instead of reducing a multi-provider group to one misleading summary.
 
 A section opens with `SettingsPageHeader`: the title, and page actions if it
 has any. No breadcrumb, no lede, no status strip. Below it, settings are rows

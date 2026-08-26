@@ -42,29 +42,7 @@ function model(overrides: Partial<SettingsOverviewModel> = {}): SettingsOverview
         action: { label: "Set up", tab: "notifications" },
       },
     ],
-    cards: [
-      {
-        id: "playback",
-        title: "Playback",
-        summary: "Transcoding on · VA-API",
-        attention: false,
-        inactive: false,
-      },
-      {
-        id: "notifications",
-        title: "Notifications",
-        summary: "Email channel has no SMTP",
-        attention: true,
-        inactive: false,
-      },
-      {
-        id: "watch-sync",
-        title: "Watch sync",
-        summary: "Trakt connected",
-        attention: false,
-        inactive: false,
-      },
-    ],
+    cards: [{ id: "playback" }, { id: "notifications" }, { id: "watch-sync" }],
     sectionStatus: {} as SettingsOverviewModel["sectionStatus"],
     ...overrides,
   };
@@ -121,7 +99,7 @@ describe("SettingsOverview", () => {
     expect(screen.queryByTestId("overview-tile-storage")).not.toBeInTheDocument();
   });
 
-  it("renders one section card per entry with a single summary line", () => {
+  it("renders one group card per entry with its named subareas", () => {
     renderOverview();
 
     const playback = screen.getByTestId("overview-card-playback");
@@ -132,12 +110,10 @@ describe("SettingsOverview", () => {
         "Transcoding, hardware acceleration, watch thresholds, and downloads.",
       ),
     ).toBeInTheDocument();
-    expect(within(playback).getByText("Current")).toBeInTheDocument();
     expect(within(playback).getByText("Transcoding")).toBeInTheDocument();
     expect(within(playback).getByText("Watch behavior")).toBeInTheDocument();
     expect(within(playback).getByText("Downloads")).toBeInTheDocument();
-    expect(within(playback).getByText("Transcoding on · VA-API")).toBeInTheDocument();
-    expect(playback).not.toHaveAttribute("data-attention");
+    expect(within(playback).queryByText("Current")).not.toBeInTheDocument();
 
     expect(screen.getByTestId("overview-card-watch-sync")).toHaveAttribute(
       "href",
@@ -145,14 +121,11 @@ describe("SettingsOverview", () => {
     );
   });
 
-  it("marks a card that needs attention", () => {
+  it("does not reduce a multi-setting group to one configuration summary", () => {
     renderOverview();
 
     const notifications = screen.getByTestId("overview-card-notifications");
-    expect(notifications).toHaveAttribute("data-attention", "true");
-    expect(within(notifications).getByText("Email channel has no SMTP").className).toContain(
-      "amber",
-    );
+    expect(within(notifications).queryByText("Email channel has no SMTP")).not.toBeInTheDocument();
   });
 
   it("shows skeletons instead of tiles and cards on first load", () => {

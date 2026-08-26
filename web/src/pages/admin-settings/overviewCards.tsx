@@ -33,11 +33,11 @@ const TILE_ICONS: Record<string, LucideIcon> = {
 const CARD_METADATA = Object.fromEntries(
   ADMIN_SETTINGS_NAV.map((item) => [
     item.id,
-    { description: item.description, groups: item.groups, icon: item.icon },
+    { description: item.description, groups: item.groups, icon: item.icon, label: item.label },
   ]),
 ) as Record<
   SettingsOverviewTabID,
-  { description: string; groups: readonly string[]; icon: LucideIcon }
+  { description: string; groups: readonly string[]; icon: LucideIcon; label: string }
 >;
 
 const PANEL = "border-border/70 rounded-xl border";
@@ -86,7 +86,7 @@ export function HealthTile({ tile }: { tile: OverviewTile }) {
   );
 }
 
-/** One settings group: its named subareas first, then the current configuration. */
+/** One settings group and the named subareas the admin will find inside it. */
 export function SectionCard({ card }: { card: OverviewCard }) {
   const metadata = CARD_METADATA[card.id];
   const Icon = metadata?.icon ?? Settings2;
@@ -95,10 +95,9 @@ export function SectionCard({ card }: { card: OverviewCard }) {
     <Link
       to={settingsTabHref(card.id)}
       data-testid={`overview-card-${card.id}`}
-      data-attention={card.attention ? "true" : undefined}
       className={cn(
         PANEL,
-        "group hover:border-ring/40 bg-card/25 flex min-h-56 flex-col p-5 transition-all",
+        "group hover:border-ring/40 bg-card/25 flex min-h-48 flex-col p-5 transition-all",
         "hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/10",
         "focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none",
       )}
@@ -108,7 +107,7 @@ export function SectionCard({ card }: { card: OverviewCard }) {
           <Icon className="size-[18px]" aria-hidden="true" />
         </span>
         <div className="min-w-0 flex-1">
-          <h3 className="text-base leading-6 font-semibold tracking-tight">{card.title}</h3>
+          <h3 className="text-base leading-6 font-semibold tracking-tight">{metadata?.label}</h3>
           <p className="text-muted-foreground mt-1.5 max-w-2xl text-[13px] leading-relaxed">
             {metadata?.description}
           </p>
@@ -129,30 +128,6 @@ export function SectionCard({ card }: { card: OverviewCard }) {
           </li>
         ))}
       </ul>
-      <div className="border-border/50 mt-auto flex items-center gap-2 border-t pt-4">
-        <span
-          className={cn(
-            "size-1.5 shrink-0 rounded-full",
-            card.attention
-              ? "bg-amber-400"
-              : card.inactive
-                ? "bg-muted-foreground/45"
-                : "bg-emerald-500",
-          )}
-          aria-hidden="true"
-        />
-        <span className="text-muted-foreground text-[11px] font-semibold tracking-wide uppercase">
-          Current
-        </span>
-        <p
-          className={cn(
-            "min-w-0 truncate text-xs",
-            card.attention ? "text-amber-400" : "text-foreground/75",
-          )}
-        >
-          {card.summary}
-        </p>
-      </div>
     </Link>
   );
 }
@@ -171,7 +146,7 @@ export function HealthTileSkeleton() {
 /** Placeholder card shown while the settings map is still in flight. */
 export function SectionCardSkeleton() {
   return (
-    <div className={cn(PANEL, "flex min-h-56 flex-col p-5")}>
+    <div className={cn(PANEL, "flex min-h-48 flex-col p-5")}>
       <div className="flex items-start gap-3.5">
         <Skeleton className="size-10 rounded-xl" />
         <div className="flex-1 space-y-2">
@@ -185,7 +160,6 @@ export function SectionCardSkeleton() {
         <Skeleton className="h-3 w-24" />
         <Skeleton className="h-3 w-20" />
       </div>
-      <Skeleton className="mt-auto h-3 w-1/2" />
     </div>
   );
 }

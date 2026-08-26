@@ -1,12 +1,6 @@
 import { useMemo } from "react";
 
-import type {
-  AdminServerStatus,
-  JellyfinCompatStatus,
-  RateLimitConfig,
-  ServerNotificationChannel,
-  SubtitleProviderConfig,
-} from "@/api/types";
+import type { AdminServerStatus, JellyfinCompatStatus, SubtitleProviderConfig } from "@/api/types";
 import { useBranding } from "@/hooks/useBranding";
 import {
   useAdminSensitiveStatus,
@@ -16,11 +10,8 @@ import {
   useJellyfinCompatStatus,
   type CatalogSearchStatus,
 } from "@/hooks/queries/admin/settings";
-import { useRateLimitConfig } from "@/hooks/queries/admin/rateLimits";
-import { useServerNotificationChannels } from "@/hooks/queries/admin/serverNotificationChannels";
 import { useSubtitleProviders } from "@/hooks/queries/admin/subtitles";
 import { useHWAccelDetection, type HWAccelInfo } from "@/hooks/queries/admin/system";
-import { THEME_IDS, THEMES, type ThemeId } from "@/lib/themes";
 
 /**
  * The settings tabs the overview links to. These are URL state (`?tab=`), so
@@ -63,13 +54,6 @@ export interface OverviewTile {
 
 export interface OverviewCard {
   id: SettingsOverviewTabID;
-  title: string;
-  /** One phrase saying what the section is doing right now. */
-  summary: string;
-  /** True when something in the section needs the admin; reads amber. */
-  attention: boolean;
-  /** True when nothing in the section is set up yet. */
-  inactive: boolean;
 }
 
 export type SectionStatus = "ok" | "warn" | "off";
@@ -95,18 +79,13 @@ export interface SettingsOverviewInput {
   search?: CatalogSearchStatus;
   hwAccel?: HWAccelInfo;
   jellyfin?: JellyfinCompatStatus;
-  rateLimits?: RateLimitConfig;
   subtitleProviders?: readonly SubtitleProviderConfig[];
-  serverChannels?: readonly ServerNotificationChannel[];
 }
 
 /** Deep link to one settings tab. */
 export function settingsTabHref(tab: string): string {
   return `/admin/settings?tab=${encodeURIComponent(tab)}`;
 }
-
-/** Rendered wherever a value exists as a concept but not as data yet. */
-export const UNKNOWN_VALUE = "—";
 
 const TRUE_VALUES = new Set(["true", "1", "yes", "on"]);
 
@@ -130,30 +109,6 @@ function join(parts: Array<string | null | undefined>): string {
 function sentenceCase(value: string): string {
   if (!value) return "";
   return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-/**
- * Turns a Go duration string into something an admin reads at a glance.
- * Anything it does not recognise is passed through untouched rather than
- * guessed at.
- */
-export function formatDurationSetting(raw: string): string {
-  const value = raw.trim();
-  const match = /^(\d+(?:\.\d+)?)(h|m|s)$/.exec(value);
-  if (!match) return value;
-  const amount = Number(match[1]);
-  if (!Number.isFinite(amount)) return value;
-  if (match[2] === "h") {
-    if (amount >= 24 && amount % 24 === 0) return plural(amount / 24, "day");
-    return plural(amount, "hour");
-  }
-  if (match[2] === "m") return plural(amount, "minute");
-  return plural(amount, "second");
-}
-
-function plural(amount: number, unit: string): string {
-  const rounded = Number.isInteger(amount) ? amount : Number(amount.toFixed(1));
-  return `${rounded} ${unit}${rounded === 1 ? "" : "s"}`;
 }
 
 const HW_ACCEL_LABELS: Record<string, string> = {
@@ -191,12 +146,6 @@ function searchProviderLabel(value: string): string {
   return SEARCH_PROVIDER_LABELS[value] ?? sentenceCase(value);
 }
 
-const SUBTITLE_PROVIDER_LABELS: Record<string, string> = {
-  opensubtitles: "OpenSubtitles",
-  subdl: "SubDL",
-  subsource: "SubSource",
-};
-
 const AI_FEATURE_KEYS = [
   "subtitle_ai.enabled",
   "subtitle_ai.transcribe_enabled",
@@ -221,17 +170,6 @@ function settingsRestartPending(status: AdminServerStatus | undefined): boolean 
   if (!status?.restart_required) return false;
   const reason = (status.restart_required_reason ?? "").trim();
   return reason === "" || !NON_SETTINGS_RESTART_REASONS.has(reason);
-}
-
-/** Host portion of a configured URL, or the raw value when it will not parse. */
-function urlHost(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) return "";
-  try {
-    return new URL(trimmed).host;
-  } catch {
-    return trimmed;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -350,92 +288,22 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
 }
 
 // ---------------------------------------------------------------------------
-// Section cards
+// Settings groups and rail status
 // ---------------------------------------------------------------------------
 
-function themeLabel(id: string | null | undefined): string | null {
-  if (!id) return null;
-  return THEME_IDS.includes(id as ThemeId) ? THEMES[id as ThemeId].label : id;
+function buildCards(): OverviewCard[] {
+  return SETTINGS_OVERVIEW_TAB_IDS.map((id) => ({ id }));
 }
 
-function buildCards(input: SettingsOverviewInput): OverviewCard[] {
+function buildSectionStatus(
+  input: SettingsOverviewInput,
+): Record<SettingsOverviewTabID, SectionStatus> {
   const { settings } = input;
   const configured = new Set(input.sensitiveConfigured ?? []);
 
-  const cards: OverviewCard[] = [];
-  const push = (
-    id: SettingsOverviewTabID,
-    title: string,
-    summary: string,
-    flags: { attention?: boolean; inactive?: boolean } = {},
-  ) => {
-    cards.push({
-      id,
-      title,
-      summary: summary || UNKNOWN_VALUE,
-      attention: flags.attention ?? false,
-      inactive: flags.inactive ?? false,
-    });
-  };
-
-  // General ---------------------------------------------------------------
-  const serverName = readText(settings, "branding.server_name");
-  push(
-    "general",
-    "General",
-    join([serverName || "Silo", readBool(settings, "signup.enabled") ? "Signups on" : null]),
-  );
-
-  // Appearance ------------------------------------------------------------
-  const theme = themeLabel(readText(settings, "branding.default_theme"));
-  push(
-    "appearance",
-    "Appearance",
-    join([theme ?? "Viewer's choice", readBool(settings, "overlays.enabled") ? "Overlays" : null]),
-  );
-
-  // Security & access -----------------------------------------------------
-  const accessExpiry = readText(settings, "auth.access_token_expiry");
-  // A missing config is "not loaded", not "disabled": defaulting it to off used
-  // to paint an amber dot on the rail for every section while the page booted.
-  const rateLimits = input.rateLimits;
-  push(
-    "security",
-    "Security & Access",
-    join([
-      accessExpiry ? `Sign-in ${formatDurationSetting(accessExpiry)}` : null,
-      rateLimits ? (rateLimits.enabled ? "Rate limiting on" : "Rate limiting off") : null,
-    ]),
-  );
-
   // Library & metadata ----------------------------------------------------
   const cacheImages = readBool(settings, "metadata.cache_images");
-  // Caching to a bucket that is not there is the one library setting that
-  // fails silently, so it is called out rather than left as a fact.
   const cacheBroken = cacheImages && input.storageAvailable === false;
-  const searchProvider =
-    input.search?.active_provider || readText(settings, "catalog.search.provider") || "postgres";
-  push(
-    "library",
-    "Library & Metadata",
-    cacheBroken
-      ? "Image cache has no bucket"
-      : join([
-          `${searchProviderLabel(searchProvider)} search`,
-          cacheImages ? "Images cached" : null,
-        ]),
-    { attention: cacheBroken },
-  );
-
-  // Playback --------------------------------------------------------------
-  const transcodeEnabled = readBool(settings, "playback.transcode_enabled");
-  push(
-    "playback",
-    "Playback",
-    transcodeEnabled
-      ? `Transcoding on · ${transcodeModeLabel(readText(settings, "playback.hw_accel"), input.hwAccel)}`
-      : "Transcoding off",
-  );
 
   // Subtitles & Metadata ---------------------------------------------------
   const providers = input.subtitleProviders ?? [];
@@ -447,29 +315,6 @@ function buildCards(input: SettingsOverviewInput): OverviewCard[] {
   );
   const mdblistConfigured =
     configured.has("mdblist.api_key") || readText(settings, "mdblist.api_key") !== "";
-  push(
-    "providers",
-    "Subtitles & Metadata",
-    needsKey.length
-      ? `${needsKey
-          .map(
-            (provider) =>
-              SUBTITLE_PROVIDER_LABELS[provider.provider_name] ?? provider.provider_name,
-          )
-          .join(", ")} needs a key`
-      : providers.length
-        ? join([
-            `${connectedProviders.length} of ${providers.length} connected`,
-            mdblistConfigured ? "MDBList" : null,
-          ])
-        : mdblistConfigured
-          ? "MDBList connected"
-          : "Not set up",
-    {
-      attention: needsKey.length > 0,
-      inactive: connectedProviders.length === 0 && !mdblistConfigured,
-    },
-  );
 
   // Watch sync ------------------------------------------------------------
   const traktConfigured =
@@ -478,37 +323,14 @@ function buildCards(input: SettingsOverviewInput): OverviewCard[] {
   const simklConfigured =
     configured.has("watchsync.simkl.client_secret") ||
     readText(settings, "watchsync.simkl.client_id") !== "";
-  const watchSyncNames = [
-    traktConfigured ? "Trakt" : null,
-    simklConfigured ? "Simkl" : null,
-  ].filter((name): name is string => name !== null);
-  push(
-    "watch-sync",
-    "Watch sync",
-    watchSyncNames.length ? `${watchSyncNames.join(" and ")} connected` : "Not set up",
-    { inactive: watchSyncNames.length === 0 },
-  );
 
   // AI ------------------------------------------------------------------
   const textModel = readText(settings, "ai.chat_model");
   const textKeyConfigured = configured.has("ai.api_key") || configured.has("subtitle_ai.api_key");
   const speechConfigured =
     configured.has("ai.asr_api_key") || readText(settings, "ai.asr_base_url") !== "";
-  const featuresLive = AI_FEATURE_KEYS.filter((key) => readBool(settings, key)).length;
+  const hasAIFeatures = AI_FEATURE_KEYS.some((key) => readBool(settings, key));
   const aiKeyMissing = textModel !== "" && !textKeyConfigured;
-  push(
-    "ai",
-    "AI Services",
-    aiKeyMissing
-      ? "Model set, no API key"
-      : textModel
-        ? join([textModel, `${featuresLive} of ${AI_FEATURE_KEYS.length} features on`])
-        : "Not set up",
-    {
-      attention: aiKeyMissing,
-      inactive: textModel === "" && !speechConfigured && featuresLive === 0,
-    },
-  );
 
   // Notifications ---------------------------------------------------------
   const inApp = readBool(settings, "notifications.ui_enabled");
@@ -518,70 +340,41 @@ function buildCards(input: SettingsOverviewInput): OverviewCard[] {
     readBool(settings, "email.enabled") && readText(settings, "email.smtp_host") !== "";
   const discordChannel = readBool(settings, "notifications.discord_enabled");
   const emailBroken = emailChannel && !smtpReady;
-  const channels = [
-    inApp ? "In-app" : null,
-    webPush ? "Web push" : null,
-    emailChannel ? "Email" : null,
-    discordChannel ? "Discord" : null,
-  ].filter((name): name is string => name !== null);
-  push(
-    "notifications",
-    "Notifications",
-    emailBroken ? "Email channel has no SMTP" : channels.length ? join(channels) : "All off",
-    { attention: emailBroken, inactive: channels.length === 0 },
-  );
+  const hasNotificationChannels = inApp || webPush || emailChannel || discordChannel;
 
   // Compatibility ---------------------------------------------------------
   const jellyfinEnabled = input.jellyfin?.enabled ?? readBool(settings, "jellyfin_compat.enabled");
-  const jellyfinHost = urlHost(
-    input.jellyfin?.public_url ?? readText(settings, "jellyfin_compat.public_url"),
-  );
   const jellyfinBroken = jellyfinEnabled && input.jellyfin?.api_state === "error";
   const absEnabled = readBool(settings, "audiobookshelf_compat.enabled");
-  push(
-    "compatibility",
-    "Compatibility",
-    jellyfinBroken
-      ? "Jellyfin API not responding"
-      : join([
-          jellyfinEnabled ? join(["Jellyfin on", jellyfinHost || null]) : null,
-          absEnabled ? "Audiobookshelf on" : null,
-        ]) || "Off",
-    { attention: jellyfinBroken, inactive: !jellyfinEnabled && !absEnabled },
-  );
 
   // Storage & Database ---------------------------------------------------
-  const redisConfigured = configured.has("redis.url") || readText(settings, "redis.url") !== "";
   const publicBucket = readText(settings, "s3.public_bucket");
-  const privateBucket = readText(settings, "s3.private_bucket");
-  push(
-    "infrastructure",
-    "Storage & Database",
-    publicBucket
-      ? join([
-          privateBucket ? "Public and private buckets" : "Public bucket",
-          redisConfigured ? "Redis" : null,
-        ])
-      : "No bucket configured",
-    { attention: publicBucket === "" },
-  );
 
-  return cards;
-}
-
-function sectionStatusFor(card: OverviewCard): SectionStatus {
-  if (card.attention) return "warn";
-  return card.inactive ? "off" : "ok";
+  return {
+    general: "ok",
+    appearance: "ok",
+    security: "ok",
+    library: cacheBroken ? "warn" : "ok",
+    playback: "ok",
+    providers:
+      needsKey.length > 0
+        ? "warn"
+        : connectedProviders.length === 0 && !mdblistConfigured
+          ? "off"
+          : "ok",
+    "watch-sync": traktConfigured || simklConfigured ? "ok" : "off",
+    ai: aiKeyMissing ? "warn" : textModel || speechConfigured || hasAIFeatures ? "ok" : "off",
+    notifications: emailBroken ? "warn" : hasNotificationChannels ? "ok" : "off",
+    compatibility: jellyfinBroken ? "warn" : jellyfinEnabled || absEnabled ? "ok" : "off",
+    infrastructure: publicBucket ? "ok" : "warn",
+  };
 }
 
 /** Derives the whole overview model from already-fetched data. */
 export function buildSettingsOverview(input: SettingsOverviewInput): SettingsOverviewModel {
   const tiles = buildTiles(input);
-  const cards = buildCards(input);
-
-  const sectionStatus = Object.fromEntries(
-    cards.map((card) => [card.id, sectionStatusFor(card)]),
-  ) as Record<SettingsOverviewTabID, SectionStatus>;
+  const cards = buildCards();
+  const sectionStatus = buildSectionStatus(input);
 
   return { isLoading: false, tiles, cards, sectionStatus };
 }
@@ -597,9 +390,7 @@ export function useSettingsOverview(): SettingsOverviewModel {
   const { data: serverStatus } = useAdminServerStatus();
   const { data: search } = useCatalogSearchStatus();
   const { data: jellyfin } = useJellyfinCompatStatus();
-  const { data: rateLimits } = useRateLimitConfig();
   const { data: subtitleProviders } = useSubtitleProviders();
-  const { data: serverChannels } = useServerNotificationChannels();
   const branding = useBranding();
 
   // Hardware detection shells out to ffmpeg on the transcode host, so it is
@@ -621,19 +412,15 @@ export function useSettingsOverview(): SettingsOverviewModel {
       search,
       hwAccel,
       jellyfin,
-      rateLimits,
       subtitleProviders: subtitleProviders?.providers,
-      serverChannels,
     });
     return { ...model, isLoading: settingsLoading && settings == null };
   }, [
     branding.storageAvailable,
     hwAccel,
     jellyfin,
-    rateLimits,
     search,
     sensitive?.configured,
-    serverChannels,
     serverStatus,
     settings,
     settingsLoading,
