@@ -1,9 +1,16 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 import EpisodeCarousel from "./EpisodeCarousel";
 
 const capturedMenuProps: Record<string, unknown>[] = [];
+const prefetchEpisodeDetail = vi.hoisted(() => vi.fn());
+
+vi.mock("@/hooks/queries/catalogRead", () => ({
+  usePrefetchCatalogItemDetail: () => prefetchEpisodeDetail,
+}));
 
 vi.mock("@/components/MediaItemMenu", () => ({
   default: (props: Record<string, unknown>) => {
@@ -24,6 +31,36 @@ vi.mock("@/hooks/useCarouselEmbla", () => ({
 }));
 
 describe("EpisodeCarousel", () => {
+  it("prefetches episode details when a card shows navigation intent", async () => {
+    prefetchEpisodeDetail.mockClear();
+
+    render(
+      <MemoryRouter>
+        <EpisodeCarousel
+          currentEpisodeNumber={2}
+          episodes={[
+            {
+              content_id: "ep-1",
+              season_number: 1,
+              episode_number: 1,
+              title: "Pilot",
+              overview: "",
+              air_date: null,
+              runtime: 42,
+              still_url: "",
+              still_thumbhash: "",
+              files: [],
+            },
+          ]}
+        />
+      </MemoryRouter>,
+    );
+
+    await userEvent.hover(screen.getAllByRole("link", { name: /Pilot/ })[0]!);
+
+    expect(prefetchEpisodeDetail).toHaveBeenCalledWith("ep-1");
+  });
+
   it("passes partial-progress restart eligibility to episode menus", () => {
     capturedMenuProps.length = 0;
 

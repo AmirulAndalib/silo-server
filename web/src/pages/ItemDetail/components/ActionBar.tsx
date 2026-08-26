@@ -50,12 +50,12 @@ import VersionDropdown from "./VersionDropdown";
 import AudioTracksPopover from "./AudioTracksPopover";
 import SubtitlesPopover from "./SubtitlesPopover";
 
-// Keep hover feedback on the compositor: repainting these controls while the detail backdrop is
+// Keep hover feedback on the compositor. Repainting these controls while the detail backdrop is
 // animating can stall the main thread on image-heavy movie and series pages.
 const responsivePrimaryActionClass =
-  "transform-gpu transition-transform duration-150 motion-safe:hover:scale-[1.02] motion-safe:active:scale-[0.98] motion-reduce:transition-none";
-const responsivePlayActionClass = `${responsivePrimaryActionClass} hover:bg-primary`;
-const responsiveWatchedActionClass = `${responsivePrimaryActionClass} hover:bg-[color-mix(in_srgb,var(--surface)_40%,transparent)]`;
+  "transform-gpu transition-transform duration-150 motion-safe:hover:scale-[1.02] motion-safe:active:scale-[0.98]";
+const responsivePlayActionClass = `${responsivePrimaryActionClass} hover:bg-primary motion-reduce:hover:bg-primary/90`;
+const staticGlassActionClass = "transition-none";
 
 interface ActionBarProps {
   contentId?: string;
@@ -339,7 +339,7 @@ export default function ActionBar({
             variant="glass"
             onClick={onToggleWatched}
             disabled={isUpdatingWatched}
-            className={`${responsiveWatchedActionClass} h-11 rounded-full px-5 text-[14px] font-semibold enabled:cursor-pointer`}
+            className={`${responsivePrimaryActionClass} h-11 rounded-full px-5 text-[14px] font-semibold enabled:cursor-pointer`}
           >
             <Check className="size-[18px]" />
             {watchedLabel}
@@ -353,7 +353,7 @@ export default function ActionBar({
             size="icon-lg"
             onClick={onToggleFavorite}
             title={isFavorite ? "Unfavorite" : "Favorite"}
-            className="size-11 cursor-pointer rounded-full"
+            className={`${staticGlassActionClass} size-11 cursor-pointer rounded-full`}
           >
             <Heart
               className={`size-[18px] transition-colors ${isFavorite ? "fill-current text-red-400" : ""}`}
@@ -371,7 +371,7 @@ export default function ActionBar({
               variant="glass"
               size="icon-lg"
               title="More"
-              className="size-11 cursor-pointer rounded-full"
+              className={`${staticGlassActionClass} size-11 cursor-pointer rounded-full`}
             >
               <MoreVertical className="size-[18px]" />
             </Button>
