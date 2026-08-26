@@ -19,7 +19,7 @@ function plural(count: number, word: string) {
 
 /**
  * The floating save pill: the staged count and the two actions. Hidden while
- * the tab is clean, so a page with nothing staged has no permanent furniture at
+ * the page is clean, so a page with nothing staged has no permanent furniture at
  * the bottom of the viewport. It says nothing about restarts — the one restart
  * prompt is `RestartBanner`, rendered once by the settings shell.
  */
@@ -78,7 +78,7 @@ const DEFAULT_RESTART_DESCRIPTION =
 /**
  * The single restart prompt for admin settings: a persistent amber bar pinned
  * to the bottom of the viewport. Render it once from the settings shell — every
- * tab shares one server, so a per-tab copy just stacks the same warning.
+ * page shares one server, so a per-page copy just stacks the same warning.
  */
 export function RestartBanner({
   restartRequired = false,

@@ -123,7 +123,7 @@ export default function LibraryMetadataSettings() {
                   <>
                     Image caching needs a public S3 bucket, set in{" "}
                     <Link
-                      to="/admin/settings?tab=infrastructure"
+                      to="/admin/settings/infrastructure"
                       className="text-foreground font-medium underline-offset-2 hover:underline"
                     >
                       Infrastructure

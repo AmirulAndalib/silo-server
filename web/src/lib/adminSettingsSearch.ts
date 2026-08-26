@@ -37,13 +37,11 @@ export type AdminSettingsSearchGroup = SettingsSearchGroup<AdminSettingsSearchIt
 
 const settingIndex = (...labels: string[]) => labels.map((label) => ({ label }));
 
-// Tab ids are stable URL state (?tab=...). Old ids from the 20-tab layout are
-// kept working by LEGACY_ADMIN_SETTINGS_TAB_ALIASES below, not by keeping the
-// tabs themselves — regroup or reorder freely, but add an alias entry whenever
-// an id disappears.
+// Page ids are stable route segments. Old ids from the 20-tab layout are kept
+// working by LEGACY_ADMIN_SETTINGS_PAGE_ALIASES below — regroup or reorder
+// freely, but add an alias entry whenever an id disappears.
 //
-// One group: the rail is a flat list under a single "Settings" eyebrow, in the
-// order the sections are listed here.
+// One group keeps the Overview cards and command palette in the same order.
 export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
   {
     label: "Settings",
@@ -500,14 +498,14 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
 
 export const ADMIN_SETTINGS_NAV = ADMIN_SETTINGS_GROUPS.flatMap((group) => group.items);
 
-const ADMIN_SETTINGS_TAB_IDS = new Set(ADMIN_SETTINGS_NAV.map((item) => item.id));
+const ADMIN_SETTINGS_PAGE_IDS = new Set(ADMIN_SETTINGS_NAV.map((item) => item.id));
 
 /**
  * Deep links from earlier layouts. Bookmarks, docs, and older client builds
- * still point at these ids, so every one of them resolves to the tab that
+ * still point at these ids, so every one of them resolves to the page that
  * absorbed it rather than falling through to the settings overview.
  */
-export const LEGACY_ADMIN_SETTINGS_TAB_ALIASES: Readonly<Record<string, string>> = {
+export const LEGACY_ADMIN_SETTINGS_PAGE_ALIASES: Readonly<Record<string, string>> = {
   branding: "appearance",
   theming: "appearance",
   overlays: "appearance",
@@ -527,9 +525,9 @@ export const LEGACY_ADMIN_SETTINGS_TAB_ALIASES: Readonly<Record<string, string>>
   "log-retention": "infrastructure",
 };
 
-/** Resolves a `?tab=` value to a current tab id, or null when it names none. */
-export function resolveAdminSettingsTabID(value: string | null): string | null {
+/** Resolves a route segment or legacy `?tab=` value to a current page id. */
+export function resolveAdminSettingsPageID(value: string | null): string | null {
   if (!value) return null;
-  if (ADMIN_SETTINGS_TAB_IDS.has(value)) return value;
-  return LEGACY_ADMIN_SETTINGS_TAB_ALIASES[value] ?? null;
+  if (ADMIN_SETTINGS_PAGE_IDS.has(value)) return value;
+  return LEGACY_ADMIN_SETTINGS_PAGE_ALIASES[value] ?? null;
 }

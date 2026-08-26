@@ -100,7 +100,7 @@ describe("AISettings", () => {
   it("heads the page and groups models and features", () => {
     render(<AISettings />);
 
-    expect(screen.getByRole("heading", { level: 2, name: "AI Services" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "AI Services" })).toBeInTheDocument();
     expect(
       screen.queryByText(
         "Optional language models for subtitle translation, transcription, and descriptions.",

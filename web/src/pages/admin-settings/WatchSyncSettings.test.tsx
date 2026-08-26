@@ -62,7 +62,7 @@ describe("WatchSyncSettings", () => {
   it("heads the page and lists both providers", () => {
     render(<WatchSyncSettings />);
 
-    expect(screen.getByRole("heading", { level: 2, name: "Watch sync" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Watch sync" })).toBeInTheDocument();
     expect(
       screen.queryByText("Keep watch history in sync with Trakt and Simkl."),
     ).not.toBeInTheDocument();

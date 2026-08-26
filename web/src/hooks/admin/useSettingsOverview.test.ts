@@ -89,7 +89,7 @@ describe("buildSettingsOverview health tiles", () => {
 
     expect(transcoding.state).toBe("warn");
     expect(transcoding.stateText).toBe("Restart pending");
-    expect(transcoding.action).toEqual({ label: "Fix", tab: "playback" });
+    expect(transcoding.action).toEqual({ label: "Fix", page: "playback" });
   });
 
   it("leaves transcoding alone for a restart another subsystem asked for", () => {
@@ -128,6 +128,14 @@ describe("buildSettingsOverview health tiles", () => {
     expect(meili.stateText).toBe("Meilisearch");
   });
 
+  it("does not report Meilisearch as broken before its status resolves", () => {
+    const pending = tile({ settings: { "catalog.search.provider": "meilisearch" } }, "search");
+
+    expect(pending.state).toBe("info");
+    expect(pending.detail).toBe("Checking connection");
+    expect(pending.action).toBeUndefined();
+  });
+
   it("only calls email ready when it is on and has a host", () => {
     expect(tile({ settings: { "email.enabled": "true" } }, "email").stateText).toBe("Not set up");
     expect(
@@ -139,8 +147,8 @@ describe("buildSettingsOverview health tiles", () => {
   });
 });
 
-describe("buildSettingsOverview groups and rail status", () => {
-  it("emits one card per settings tab id", () => {
+describe("buildSettingsOverview groups", () => {
+  it("emits one card per settings page id", () => {
     expect(buildSettingsOverview({}).cards.map((entry) => entry.id)).toEqual([
       "general",
       "appearance",
@@ -160,112 +168,5 @@ describe("buildSettingsOverview groups and rail status", () => {
     expect(buildSettingsOverview({}).cards.map((entry) => entry.id)).toEqual(
       ADMIN_SETTINGS_NAV.map((item) => item.id),
     );
-  });
-
-  it("flags a notifications email channel with no SMTP host", () => {
-    const model = buildSettingsOverview({
-      settings: { "notifications.email_enabled": "true", "email.enabled": "false" },
-    });
-
-    expect(model.sectionStatus.notifications).toBe("warn");
-    expect(
-      buildSettingsOverview({
-        settings: { "notifications.email_enabled": "true", "email.enabled": "true" },
-      }).sectionStatus.notifications,
-    ).toBe("warn");
-    // With nothing configured at all the section is merely dormant, not broken.
-    expect(buildSettingsOverview({}).sectionStatus.notifications).toBe("off");
-  });
-
-  it("flags subtitle providers that are enabled without credentials", () => {
-    const model = buildSettingsOverview({
-      sensitiveConfigured: ["mdblist.api_key"],
-      subtitleProviders: [
-        {
-          provider_name: "opensubtitles",
-          enabled: true,
-          has_api_key: false,
-          has_credentials: true,
-          updated_at: "",
-        },
-        {
-          provider_name: "subdl",
-          enabled: true,
-          has_api_key: false,
-          has_credentials: false,
-          updated_at: "",
-        },
-        {
-          provider_name: "subsource",
-          enabled: false,
-          has_api_key: false,
-          has_credentials: false,
-          updated_at: "",
-        },
-      ],
-    });
-
-    expect(model.sectionStatus.providers).toBe("warn");
-  });
-
-  it("reads watch sync and AI status out of the sensitive-status list", () => {
-    const model = buildSettingsOverview({
-      sensitiveConfigured: ["watchsync.trakt.client_secret", "ai.api_key"],
-      settings: {
-        "ai.chat_model": "gpt-4o-mini",
-        "subtitle_ai.enabled": "true",
-        "metadata_ai.enabled": "true",
-      },
-    });
-
-    expect(model.sectionStatus["watch-sync"]).toBe("ok");
-    expect(model.sectionStatus.ai).toBe("ok");
-  });
-
-  it("flags a text model saved without an API key", () => {
-    const model = buildSettingsOverview({ settings: { "ai.chat_model": "gpt-4o-mini" } });
-
-    expect(model.sectionStatus.ai).toBe("warn");
-  });
-
-  it("tracks compatibility health without putting it on the group card", () => {
-    const healthy = buildSettingsOverview({
-      jellyfin: {
-        enabled: true,
-        api_state: "enabled",
-        public_url: "https://media.example.tv",
-        web_state: "installed",
-      } as SettingsOverviewInput["jellyfin"],
-      settings: { "audiobookshelf_compat.enabled": "false" },
-    });
-    const broken = buildSettingsOverview({
-      jellyfin: {
-        enabled: true,
-        api_state: "error",
-        public_url: "https://media.example.tv",
-        web_state: "installed",
-      } as SettingsOverviewInput["jellyfin"],
-    });
-
-    expect(healthy.sectionStatus.compatibility).toBe("ok");
-    expect(broken.sectionStatus.compatibility).toBe("warn");
-  });
-
-  it("warns when there is no public bucket at all", () => {
-    const model = buildSettingsOverview({
-      settings: { "opslog.retention_days": "30" },
-    });
-
-    expect(model.sectionStatus.infrastructure).toBe("warn");
-  });
-
-  it("exposes a per-section status for the sidebar rail", () => {
-    const model = buildSettingsOverview({
-      settings: { "s3.public_bucket": "silo-art", "notifications.email_enabled": "true" },
-    });
-
-    expect(model.sectionStatus.notifications).toBe("warn");
-    expect(model.sectionStatus.infrastructure).toBe("ok");
-    expect(model.sectionStatus["watch-sync"]).toBe("off");
   });
 });

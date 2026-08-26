@@ -36,9 +36,9 @@ import { FieldGroup } from "./FieldGroup";
 import { SettingField } from "./SettingField";
 
 /**
- * MDBList is the only provider on this tab whose credential is a server
+ * MDBList is the only provider on this page whose credential is a server
  * setting; the subtitle providers have their own endpoints. The form is still
- * mounted so the tab reads one sensitive-status list for every tile.
+ * mounted so the page reads one sensitive-status list for every tile.
  */
 const KEYS = ["mdblist.api_key"];
 

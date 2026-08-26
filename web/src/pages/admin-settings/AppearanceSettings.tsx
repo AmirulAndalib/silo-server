@@ -74,13 +74,13 @@ const THEME_KEYS = [ACCENT_KEY, DEFAULT_THEME_KEY, THEME_VARS_KEY, CUSTOM_CSS_KE
 const OVERLAY_KEYS = [OVERLAYS_ENABLED_KEY, OVERLAY_DEFAULTS_KEY];
 
 /**
- * Every appearance key the tab stages, saved as one batch by the shared
+ * Every appearance key the page stages, saved as one batch by the shared
  * SaveBar. Theming used to autosave each keystroke through
- * `useUpdateServerSetting`; it now shares this form so the whole tab has one
+ * `useUpdateServerSetting`; it now shares this form so the whole page has one
  * save model. Asset uploads keep their own upload/delete mutations because a
  * file picker has no draft to batch.
  *
- * Server name and login subtitle deliberately live on the General tab: they are
+ * Server name and login subtitle deliberately live on the General page: they are
  * server identity, not look and feel.
  */
 const KEYS = [...THEME_KEYS, ...OVERLAY_KEYS];

@@ -11,14 +11,13 @@ export interface SettingsPageHeaderProps {
 }
 
 /**
- * The heading every admin settings tab opens with: the tab's name and nothing
- * else. The tab owns its own heading (level 2, under the shell's "Settings")
- * so the page reads as a document rather than a panel inside a panel.
+ * The heading every admin settings page opens with: the page's name and
+ * nothing else.
  */
 export function SettingsPageHeader({ title, actions, className }: SettingsPageHeaderProps) {
   return (
     <header className={cn("flex min-w-0 flex-wrap items-start justify-between gap-3", className)}>
-      <h2 className="text-[28px] leading-tight font-semibold tracking-[-0.03em]">{title}</h2>
+      <h1 className="text-[28px] leading-tight font-semibold tracking-[-0.03em]">{title}</h1>
       {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
     </header>
   );

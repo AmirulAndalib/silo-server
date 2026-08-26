@@ -31,7 +31,7 @@ function model(overrides: Partial<SettingsOverviewModel> = {}): SettingsOverview
         state: "warn",
         stateText: "Restart pending",
         detail: "Saved changes apply after a restart",
-        action: { label: "Fix", tab: "playback" },
+        action: { label: "Fix", page: "playback" },
       },
       {
         id: "email",
@@ -39,11 +39,10 @@ function model(overrides: Partial<SettingsOverviewModel> = {}): SettingsOverview
         state: "off",
         stateText: "Not set up",
         detail: "Invites and resets can't send",
-        action: { label: "Set up", tab: "notifications" },
+        action: { label: "Set up", page: "notifications" },
       },
     ],
     cards: [{ id: "playback" }, { id: "notifications" }, { id: "watch-sync" }],
-    sectionStatus: {} as SettingsOverviewModel["sectionStatus"],
     ...overrides,
   };
 }
@@ -68,6 +67,8 @@ describe("SettingsOverview", () => {
     expect(
       screen.getByText(/Configure the server, media processing, integrations/),
     ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "Setup & health" })).toBeInTheDocument();
+    expect(screen.getByText(/Recommendations and configuration problems/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 2, name: "Settings groups" })).toBeInTheDocument();
     expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
   });
@@ -82,20 +83,21 @@ describe("SettingsOverview", () => {
     expect(within(transcoding).getByText("Restart pending")).toBeInTheDocument();
     expect(within(transcoding).getByRole("link")).toHaveAttribute(
       "href",
-      "/admin/settings?tab=playback",
+      "/admin/settings/playback",
     );
 
     const email = screen.getByTestId("overview-tile-email");
     expect(within(email).getByText("Set up")).toBeInTheDocument();
   });
 
-  it("says so in one line when nothing needs attention", () => {
+  it("explains the empty checklist when nothing needs attention", () => {
     mocks.useSettingsOverview.mockReturnValue(
       model({ tiles: model().tiles.filter((tile) => tile.state === "ok") }),
     );
     renderOverview();
 
-    expect(screen.getByText("Everything is configured.")).toBeInTheDocument();
+    expect(screen.getByText("No action needed")).toBeInTheDocument();
+    expect(screen.getByText(/restart-required changes will appear here/)).toBeInTheDocument();
     expect(screen.queryByTestId("overview-tile-storage")).not.toBeInTheDocument();
   });
 
@@ -103,7 +105,7 @@ describe("SettingsOverview", () => {
     renderOverview();
 
     const playback = screen.getByTestId("overview-card-playback");
-    expect(playback).toHaveAttribute("href", "/admin/settings?tab=playback");
+    expect(playback).toHaveAttribute("href", "/admin/settings/playback");
     expect(within(playback).getByText("Playback")).toBeInTheDocument();
     expect(
       within(playback).getByText(
@@ -117,7 +119,7 @@ describe("SettingsOverview", () => {
 
     expect(screen.getByTestId("overview-card-watch-sync")).toHaveAttribute(
       "href",
-      "/admin/settings?tab=watch-sync",
+      "/admin/settings/watch-sync",
     );
   });
 
@@ -134,6 +136,6 @@ describe("SettingsOverview", () => {
 
     expect(screen.queryByTestId("overview-tile-transcoding")).not.toBeInTheDocument();
     expect(screen.queryByTestId("overview-card-playback")).not.toBeInTheDocument();
-    expect(screen.queryByText("Everything is configured.")).not.toBeInTheDocument();
+    expect(screen.queryByText("No action needed")).not.toBeInTheDocument();
   });
 });

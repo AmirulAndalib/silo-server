@@ -103,7 +103,7 @@ describe("ProvidersSettings", () => {
     render(<ProvidersSettings />);
 
     expect(
-      screen.getByRole("heading", { level: 2, name: "Subtitles & Metadata" }),
+      screen.getByRole("heading", { level: 1, name: "Subtitles & Metadata" }),
     ).toBeInTheDocument();
     expect(
       screen.queryByText("Where Silo fetches subtitles, artwork, and descriptions."),

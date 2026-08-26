@@ -93,7 +93,7 @@ const EMAIL_KEYS = [
 /**
  * The Discord application. Saved by its own card inside the Discord channel
  * (a bot token has to be testable before it is committed), but listed here so
- * one form owns every value this tab reads.
+ * one form owns every value this page reads.
  */
 const DISCORD_APP_KEYS = ["discord.client_id", "discord.client_secret", "discord.bot_token"];
 

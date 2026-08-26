@@ -1,23 +1,21 @@
 import { useMemo } from "react";
 
-import type { AdminServerStatus, JellyfinCompatStatus, SubtitleProviderConfig } from "@/api/types";
+import type { AdminServerStatus } from "@/api/types";
 import { useBranding } from "@/hooks/useBranding";
 import {
   useAdminSensitiveStatus,
   useAdminServerSettings,
   useAdminServerStatus,
   useCatalogSearchStatus,
-  useJellyfinCompatStatus,
   type CatalogSearchStatus,
 } from "@/hooks/queries/admin/settings";
-import { useSubtitleProviders } from "@/hooks/queries/admin/subtitles";
 import { useHWAccelDetection, type HWAccelInfo } from "@/hooks/queries/admin/system";
 
 /**
- * The settings tabs the overview links to. These are URL state (`?tab=`), so
- * the ids here have to match the ones the settings layout mounts.
+ * The settings pages the overview links to. The ids here are stable route
+ * segments and have to match the pages the settings layout mounts.
  */
-export const SETTINGS_OVERVIEW_TAB_IDS = [
+export const ADMIN_SETTINGS_PAGE_IDS = [
   "general",
   "appearance",
   "security",
@@ -31,14 +29,14 @@ export const SETTINGS_OVERVIEW_TAB_IDS = [
   "infrastructure",
 ] as const;
 
-export type SettingsOverviewTabID = (typeof SETTINGS_OVERVIEW_TAB_IDS)[number];
+export type AdminSettingsPageID = (typeof ADMIN_SETTINGS_PAGE_IDS)[number];
 
 /** Colour band a health tile reads in: green, amber, dimmed, or neutral blue. */
 export type OverviewState = "ok" | "warn" | "off" | "info";
 
 export interface OverviewTileAction {
   label: string;
-  tab: SettingsOverviewTabID;
+  page: AdminSettingsPageID;
 }
 
 export interface OverviewTile {
@@ -53,17 +51,14 @@ export interface OverviewTile {
 }
 
 export interface OverviewCard {
-  id: SettingsOverviewTabID;
+  id: AdminSettingsPageID;
 }
-
-export type SectionStatus = "ok" | "warn" | "off";
 
 export interface SettingsOverviewModel {
   /** True until the settings map has arrived; the page shows skeletons. */
   isLoading: boolean;
   tiles: OverviewTile[];
   cards: OverviewCard[];
-  sectionStatus: Record<SettingsOverviewTabID, SectionStatus>;
 }
 
 /**
@@ -78,13 +73,11 @@ export interface SettingsOverviewInput {
   serverStatus?: AdminServerStatus;
   search?: CatalogSearchStatus;
   hwAccel?: HWAccelInfo;
-  jellyfin?: JellyfinCompatStatus;
-  subtitleProviders?: readonly SubtitleProviderConfig[];
 }
 
-/** Deep link to one settings tab. */
-export function settingsTabHref(tab: string): string {
-  return `/admin/settings?tab=${encodeURIComponent(tab)}`;
+/** Deep link to one settings page. */
+export function settingsPageHref(page: string): string {
+  return `/admin/settings/${encodeURIComponent(page)}`;
 }
 
 const TRUE_VALUES = new Set(["true", "1", "yes", "on"]);
@@ -146,13 +139,6 @@ function searchProviderLabel(value: string): string {
   return SEARCH_PROVIDER_LABELS[value] ?? sentenceCase(value);
 }
 
-const AI_FEATURE_KEYS = [
-  "subtitle_ai.enabled",
-  "subtitle_ai.transcribe_enabled",
-  "metadata_ai.enabled",
-  "metadata_ai.on_view",
-];
-
 /**
  * Restart reasons that name a subsystem other than the settings batch. The
  * tracker only records a coarse reason (`internal/api/handlers`), so a
@@ -182,10 +168,10 @@ function settingsRestartPending(status: AdminServerStatus | undefined): boolean 
  */
 function tileAction(
   state: OverviewState,
-  tab: SettingsOverviewTabID,
+  page: AdminSettingsPageID,
 ): OverviewTileAction | undefined {
-  if (state === "warn") return { label: "Fix", tab };
-  if (state === "off") return { label: "Set up", tab };
+  if (state === "warn") return { label: "Fix", page };
+  if (state === "off") return { label: "Set up", page };
   return undefined;
 }
 
@@ -214,13 +200,16 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
 
   const activeSearch =
     input.search?.active_provider || readText(settings, "catalog.search.provider") || "postgres";
+  const searchStatusResolved = input.search != null;
   const meiliConfigured = input.search?.meilisearch.configured ?? false;
   const meiliHealthy = input.search?.meilisearch.healthy ?? false;
   const searchState: OverviewState =
     activeSearch === "meilisearch"
-      ? meiliHealthy
-        ? "ok"
-        : "warn"
+      ? !searchStatusResolved
+        ? "info"
+        : meiliHealthy
+          ? "ok"
+          : "warn"
       : meiliConfigured
         ? "warn"
         : "info";
@@ -268,9 +257,11 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
       stateText: searchProviderLabel(activeSearch),
       detail:
         activeSearch === "meilisearch"
-          ? meiliHealthy
-            ? "Meilisearch connected"
-            : "Meilisearch not reachable"
+          ? !searchStatusResolved
+            ? "Checking connection"
+            : meiliHealthy
+              ? "Meilisearch connected"
+              : "Meilisearch not reachable"
           : meiliConfigured
             ? "Meilisearch configured but not active"
             : "Meilisearch not connected",
@@ -288,110 +279,38 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
 }
 
 // ---------------------------------------------------------------------------
-// Settings groups and rail status
+// Settings groups
 // ---------------------------------------------------------------------------
 
 function buildCards(): OverviewCard[] {
-  return SETTINGS_OVERVIEW_TAB_IDS.map((id) => ({ id }));
-}
-
-function buildSectionStatus(
-  input: SettingsOverviewInput,
-): Record<SettingsOverviewTabID, SectionStatus> {
-  const { settings } = input;
-  const configured = new Set(input.sensitiveConfigured ?? []);
-
-  // Library & metadata ----------------------------------------------------
-  const cacheImages = readBool(settings, "metadata.cache_images");
-  const cacheBroken = cacheImages && input.storageAvailable === false;
-
-  // Subtitles & Metadata ---------------------------------------------------
-  const providers = input.subtitleProviders ?? [];
-  const connectedProviders = providers.filter(
-    (provider) => provider.has_api_key || provider.has_credentials,
-  );
-  const needsKey = providers.filter(
-    (provider) => provider.enabled && !provider.has_api_key && !provider.has_credentials,
-  );
-  const mdblistConfigured =
-    configured.has("mdblist.api_key") || readText(settings, "mdblist.api_key") !== "";
-
-  // Watch sync ------------------------------------------------------------
-  const traktConfigured =
-    configured.has("watchsync.trakt.client_secret") ||
-    readText(settings, "watchsync.trakt.client_id") !== "";
-  const simklConfigured =
-    configured.has("watchsync.simkl.client_secret") ||
-    readText(settings, "watchsync.simkl.client_id") !== "";
-
-  // AI ------------------------------------------------------------------
-  const textModel = readText(settings, "ai.chat_model");
-  const textKeyConfigured = configured.has("ai.api_key") || configured.has("subtitle_ai.api_key");
-  const speechConfigured =
-    configured.has("ai.asr_api_key") || readText(settings, "ai.asr_base_url") !== "";
-  const hasAIFeatures = AI_FEATURE_KEYS.some((key) => readBool(settings, key));
-  const aiKeyMissing = textModel !== "" && !textKeyConfigured;
-
-  // Notifications ---------------------------------------------------------
-  const inApp = readBool(settings, "notifications.ui_enabled");
-  const webPush = readBool(settings, "notifications.web_push_enabled");
-  const emailChannel = readBool(settings, "notifications.email_enabled");
-  const smtpReady =
-    readBool(settings, "email.enabled") && readText(settings, "email.smtp_host") !== "";
-  const discordChannel = readBool(settings, "notifications.discord_enabled");
-  const emailBroken = emailChannel && !smtpReady;
-  const hasNotificationChannels = inApp || webPush || emailChannel || discordChannel;
-
-  // Compatibility ---------------------------------------------------------
-  const jellyfinEnabled = input.jellyfin?.enabled ?? readBool(settings, "jellyfin_compat.enabled");
-  const jellyfinBroken = jellyfinEnabled && input.jellyfin?.api_state === "error";
-  const absEnabled = readBool(settings, "audiobookshelf_compat.enabled");
-
-  // Storage & Database ---------------------------------------------------
-  const publicBucket = readText(settings, "s3.public_bucket");
-
-  return {
-    general: "ok",
-    appearance: "ok",
-    security: "ok",
-    library: cacheBroken ? "warn" : "ok",
-    playback: "ok",
-    providers:
-      needsKey.length > 0
-        ? "warn"
-        : connectedProviders.length === 0 && !mdblistConfigured
-          ? "off"
-          : "ok",
-    "watch-sync": traktConfigured || simklConfigured ? "ok" : "off",
-    ai: aiKeyMissing ? "warn" : textModel || speechConfigured || hasAIFeatures ? "ok" : "off",
-    notifications: emailBroken ? "warn" : hasNotificationChannels ? "ok" : "off",
-    compatibility: jellyfinBroken ? "warn" : jellyfinEnabled || absEnabled ? "ok" : "off",
-    infrastructure: publicBucket ? "ok" : "warn",
-  };
+  return ADMIN_SETTINGS_PAGE_IDS.map((id) => ({ id }));
 }
 
 /** Derives the whole overview model from already-fetched data. */
 export function buildSettingsOverview(input: SettingsOverviewInput): SettingsOverviewModel {
   const tiles = buildTiles(input);
   const cards = buildCards();
-  const sectionStatus = buildSectionStatus(input);
 
-  return { isLoading: false, tiles, cards, sectionStatus };
+  return { isLoading: false, tiles, cards };
 }
 
 /**
  * Live settings state for the admin settings landing page. Every query it
- * reads is one an individual tab already loads, so opening the overview warms
- * the caches the tabs go on to use.
+ * reads is one an individual page already loads, so opening the overview warms
+ * the caches those pages go on to use.
  */
 export function useSettingsOverview(): SettingsOverviewModel {
   const { data: settings, isLoading: settingsLoading } = useAdminServerSettings();
   const { data: sensitive } = useAdminSensitiveStatus();
   const { data: serverStatus } = useAdminServerStatus();
-  const { data: search } = useCatalogSearchStatus();
-  const { data: jellyfin } = useJellyfinCompatStatus();
-  const { data: subtitleProviders } = useSubtitleProviders();
   const branding = useBranding();
+
+  // Postgres search has no external service to check. Avoid paying for the
+  // Meilisearch status request unless this server actually selected it.
+  const searchProvider = (settings?.["catalog.search.provider"] ?? "").trim() || "postgres";
+  const { data: search } = useCatalogSearchStatus(
+    settings != null && searchProvider === "meilisearch",
+  );
 
   // Hardware detection shells out to ffmpeg on the transcode host, so it is
   // only asked for when transcoding could actually use it.
@@ -411,19 +330,15 @@ export function useSettingsOverview(): SettingsOverviewModel {
       serverStatus,
       search,
       hwAccel,
-      jellyfin,
-      subtitleProviders: subtitleProviders?.providers,
     });
     return { ...model, isLoading: settingsLoading && settings == null };
   }, [
     branding.storageAvailable,
     hwAccel,
-    jellyfin,
     search,
     sensitive?.configured,
     serverStatus,
     settings,
     settingsLoading,
-    subtitleProviders?.providers,
   ]);
 }

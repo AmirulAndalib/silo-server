@@ -78,7 +78,7 @@ describe("AdminSectionCommandDialog", () => {
     await userEvent.click(screen.getByRole("option", { name: /Storage & Database/ }));
 
     expect(screen.getByLabelText("Current path")).toHaveTextContent(
-      "/admin/settings?tab=infrastructure",
+      "/admin/settings/infrastructure",
     );
   });
 

@@ -27,7 +27,7 @@ import { SettingField, SettingFieldRow } from "./SettingField";
 
 // Sign-in lifetimes and proxy trust go through the batched settings endpoint.
 // Rate limits do not: they live behind /admin/rate-limits/config and the batch
-// endpoint rejects those keys, so this tab drives two writers behind one save
+// endpoint rejects those keys, so this page drives two writers behind one save
 // bar rather than showing the admin two different Save buttons.
 const SESSION_KEYS = ["auth.access_token_expiry", "auth.refresh_token_expiry"];
 const NETWORK_KEYS = ["clientip.trusted_proxies"];
@@ -119,7 +119,7 @@ function RateBox({
 /**
  * One labelled row of request budgets. The per-second box is optional because
  * the public auth endpoints are only budgeted per minute; everything else on
- * this tab uses the full requests/second · requests/minute · burst triad.
+ * this page uses the full requests/second · requests/minute · burst triad.
  */
 function RateTriadRow({
   label,

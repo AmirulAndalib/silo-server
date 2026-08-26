@@ -27,7 +27,7 @@ function formatRate(value: number) {
 
 /**
  * Per-provider marker settings. These save through the markers API rather than
- * the tab's SaveBar because each card writes one provider row, so it keeps its
+ * the page's SaveBar because each card writes one provider row, so it keeps its
  * own Save/Validate buttons.
  */
 export function MarkerProviderCards() {

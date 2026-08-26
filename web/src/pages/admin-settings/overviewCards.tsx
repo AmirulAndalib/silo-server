@@ -15,10 +15,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { ADMIN_SETTINGS_NAV } from "@/lib/adminSettingsSearch";
 import {
-  settingsTabHref,
+  settingsPageHref,
+  type AdminSettingsPageID,
   type OverviewCard,
   type OverviewTile,
-  type SettingsOverviewTabID,
 } from "@/hooks/admin/useSettingsOverview";
 
 /** Icon per health tile, keyed by the tile ids the hook emits. */
@@ -36,7 +36,7 @@ const CARD_METADATA = Object.fromEntries(
     { description: item.description, groups: item.groups, icon: item.icon, label: item.label },
   ]),
 ) as Record<
-  SettingsOverviewTabID,
+  AdminSettingsPageID,
   { description: string; groups: readonly string[]; icon: LucideIcon; label: string }
 >;
 
@@ -44,7 +44,7 @@ const PANEL = "border-border/70 rounded-xl border";
 
 /**
  * One health tile. Only tiles asking for something are rendered, so the tile
- * says what is wrong and links to the tab that fixes it.
+ * says what is wrong and links to the page that fixes it.
  */
 export function HealthTile({ tile }: { tile: OverviewTile }) {
   const Icon = TILE_ICONS[tile.id] ?? Server;
@@ -71,7 +71,7 @@ export function HealthTile({ tile }: { tile: OverviewTile }) {
       ) : null}
       {tile.action ? (
         <Link
-          to={settingsTabHref(tile.action.tab)}
+          to={settingsPageHref(tile.action.page)}
           aria-label={`${tile.action.label} — ${tile.label}`}
           className={cn(
             "text-foreground/80 hover:text-foreground mt-auto inline-flex items-center gap-1 pt-2.5",
@@ -93,11 +93,11 @@ export function SectionCard({ card }: { card: OverviewCard }) {
 
   return (
     <Link
-      to={settingsTabHref(card.id)}
+      to={settingsPageHref(card.id)}
       data-testid={`overview-card-${card.id}`}
       className={cn(
         PANEL,
-        "group hover:border-ring/40 bg-card/25 flex min-h-48 flex-col p-5 transition-all",
+        "group hover:border-ring/40 bg-card/25 flex min-h-40 flex-col p-4 transition-all",
         "hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/10",
         "focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none",
       )}
@@ -117,7 +117,7 @@ export function SectionCard({ card }: { card: OverviewCard }) {
           aria-hidden="true"
         />
       </div>
-      <ul className="mt-5 grid list-none grid-cols-1 gap-x-5 gap-y-2 sm:grid-cols-2">
+      <ul className="mt-4 grid list-none grid-cols-1 gap-x-5 gap-y-2 sm:grid-cols-2">
         {metadata?.groups.map((group) => (
           <li
             key={group}
@@ -146,7 +146,7 @@ export function HealthTileSkeleton() {
 /** Placeholder card shown while the settings map is still in flight. */
 export function SectionCardSkeleton() {
   return (
-    <div className={cn(PANEL, "flex min-h-48 flex-col p-5")}>
+    <div className={cn(PANEL, "flex min-h-40 flex-col p-4")}>
       <div className="flex items-start gap-3.5">
         <Skeleton className="size-10 rounded-xl" />
         <div className="flex-1 space-y-2">
@@ -155,7 +155,7 @@ export function SectionCardSkeleton() {
           <Skeleton className="h-3 w-3/5" />
         </div>
       </div>
-      <div className="mt-5 grid grid-cols-2 gap-2">
+      <div className="mt-4 grid grid-cols-2 gap-2">
         <Skeleton className="h-3 w-28" />
         <Skeleton className="h-3 w-24" />
         <Skeleton className="h-3 w-20" />

@@ -13,7 +13,7 @@ import { FieldGroup } from "./FieldGroup";
 
 // Identity (server name, login subtitle) used to live on the Branding tab and
 // public signups on the Invite Codes tab; both are plain server-wide switches an
-// admin looks for under General, so they save with everything else on this tab.
+// admin looks for under General, so they save with everything else on this page.
 const IDENTITY_KEYS = ["branding.server_name", "branding.login_subtitle"];
 const ACCESS_KEYS = ["signup.enabled"];
 const LOGGING_ADVANCED_KEYS = ["server.log_quiet"];

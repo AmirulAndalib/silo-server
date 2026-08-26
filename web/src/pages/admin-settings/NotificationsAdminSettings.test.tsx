@@ -75,7 +75,7 @@ function renderPage() {
 
   return (
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/admin/settings?tab=notifications"]}>
+      <MemoryRouter initialEntries={["/admin/settings/notifications"]}>
         <NotificationsAdminSettings />
       </MemoryRouter>
     </QueryClientProvider>
@@ -282,7 +282,7 @@ describe("NotificationsAdminSettings", () => {
 
     render(renderPage());
 
-    expect(screen.getByRole("heading", { level: 2, name: "Notifications" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Notifications" })).toBeInTheDocument();
     expect(screen.getByText("5/7 channels on")).toBeInTheDocument();
   });
 

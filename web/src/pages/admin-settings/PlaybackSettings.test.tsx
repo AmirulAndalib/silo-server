@@ -99,7 +99,7 @@ describe("PlaybackSettings layout", () => {
 
     const container = parse(renderToStaticMarkup(<PlaybackSettings />));
 
-    expect(container.querySelector("h2")?.textContent).toBe("Playback");
+    expect(container.querySelector("h1")?.textContent).toBe("Playback");
     expect(container.textContent).not.toContain("Settings ›");
     expect(container.textContent).not.toContain("Transcoding on");
     expect(container.textContent).not.toContain("Restart pending");

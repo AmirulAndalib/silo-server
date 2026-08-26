@@ -178,7 +178,7 @@ describe("LibraryMetadataSettings", () => {
     const rendered = render({});
 
     expect(text(rendered)).toContain("Image caching needs a public S3 bucket");
-    expect(rendered).toContain("/admin/settings?tab=infrastructure");
+    expect(rendered).toContain("/admin/settings/infrastructure");
     expect(toggleDisabled(rendered, "S3 image caching")).toBe(true);
   });
 

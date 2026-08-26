@@ -8,13 +8,13 @@ const SKELETON_CARDS = [0, 1, 2, 3, 4, 5];
 
 /**
  * The settings landing page: whatever needs the admin across the top, then one
- * directory of settings categories. Mounted when no `?tab=` is present.
+ * directory of settings categories. Mounted at the settings index route.
  */
 export default function SettingsOverview() {
   const { isLoading, tiles, cards } = useSettingsOverview();
 
-  // A healthy server has nothing to show here, and says so in one line rather
-  // than in a wall of green tiles.
+  // Keep this focused on actionable setup and health items rather than
+  // presenting every configured integration as a wall of green tiles.
   const attentionTiles = tiles.filter((tile) => tile.state === "warn" || tile.state === "off");
 
   return (
@@ -27,7 +27,15 @@ export default function SettingsOverview() {
         </p>
       </header>
 
-      <section aria-label="Server health">
+      <section aria-labelledby="setup-health-heading" className="space-y-4">
+        <div className="space-y-1.5">
+          <h2 id="setup-health-heading" className="text-xl font-semibold tracking-tight">
+            Setup &amp; health
+          </h2>
+          <p className="text-muted-foreground text-sm">
+            Recommendations and configuration problems that may limit server features.
+          </p>
+        </div>
         {isLoading ? (
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
             {SKELETON_TILES.map((index) => (
@@ -35,9 +43,14 @@ export default function SettingsOverview() {
             ))}
           </div>
         ) : attentionTiles.length === 0 ? (
-          <div className="border-border/60 bg-card/35 inline-flex items-center gap-2 rounded-xl border px-3.5 py-2.5">
-            <CircleCheck className="size-4 text-emerald-500" aria-hidden="true" />
-            <p className="text-sm font-medium">Everything is configured.</p>
+          <div className="border-border/60 bg-card/35 inline-flex max-w-xl items-start gap-3 rounded-xl border px-4 py-3">
+            <CircleCheck className="mt-0.5 size-4 shrink-0 text-emerald-500" aria-hidden="true" />
+            <div className="space-y-0.5">
+              <p className="text-sm font-medium">No action needed</p>
+              <p className="text-muted-foreground text-xs leading-relaxed">
+                Missing setup, unavailable services, and restart-required changes will appear here.
+              </p>
+            </div>
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">

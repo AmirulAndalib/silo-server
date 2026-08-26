@@ -67,7 +67,7 @@ describe("InfrastructureSettings", () => {
     render(<InfrastructureSettings />);
 
     expect(
-      screen.getByRole("heading", { level: 2, name: "Storage & Database" }),
+      screen.getByRole("heading", { level: 1, name: "Storage & Database" }),
     ).toBeInTheDocument();
     expect(
       screen.queryByText("Where Silo keeps its data. Changes here take effect after a restart."),

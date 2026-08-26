@@ -319,7 +319,7 @@ export function buildAdminCommandNavSections(
               keywords: ["settings", "configuration", ...(item.keywords ?? [])],
               settings: item.settings,
               icon: item.icon,
-              href: `/admin/settings?tab=${encodeURIComponent(item.id)}`,
+              href: `/admin/settings/${encodeURIComponent(item.id)}`,
             })),
           ],
         }

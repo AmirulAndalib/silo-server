@@ -101,7 +101,7 @@ function countDirty(form: SettingsForm, keys: string[]): number {
 }
 
 /**
- * Shared editing state for every credential on the tab. A credential can only
+ * Shared editing state for every credential on the page. A credential can only
  * be replaced through an explicit Replace click, and every editor is frozen
  * while a save is in flight so a late keystroke cannot ride along with it.
  */

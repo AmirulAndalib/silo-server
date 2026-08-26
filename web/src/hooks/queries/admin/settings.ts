@@ -245,10 +245,11 @@ export function useCheckAdminSettingsConnection() {
   });
 }
 
-export function useCatalogSearchStatus() {
+export function useCatalogSearchStatus(enabled = true) {
   return useQuery({
     queryKey: adminKeys.catalogSearchStatus(),
     queryFn: () => api<CatalogSearchStatus>("/admin/catalog/search/status"),
+    enabled,
     staleTime: 15_000,
   });
 }
