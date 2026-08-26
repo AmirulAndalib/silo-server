@@ -3,7 +3,6 @@ package usercollections
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -26,7 +25,7 @@ func TestFetchMDBListEntriesDoesNotDialPrivateHosts(t *testing.T) {
 	t.Parallel()
 
 	transport := &countingRoundTripper{}
-	svc := NewService(nil, nil, nil, &http.Client{Transport: transport}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	svc := NewService(nil, nil, nil, &http.Client{Transport: transport}, slog.New(slog.DiscardHandler))
 
 	_, err := svc.fetchMDBListEntries(context.Background(), "http://127.0.0.1:8096/")
 	if !errors.Is(err, collectionutil.ErrMDBListURL) {

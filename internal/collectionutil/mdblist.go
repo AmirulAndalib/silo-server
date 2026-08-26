@@ -53,7 +53,7 @@ func CanonicalMDBListURL(raw string) (string, error) {
 func ValidateMDBListURL(raw string) error {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrMDBListURL, err)
+		return fmt.Errorf("%w: %w", ErrMDBListURL, err)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return ErrMDBListURL
