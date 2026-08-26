@@ -504,12 +504,12 @@ export default function AISettings() {
 
   if (form.isLoading) {
     return (
-      <div className="max-w-5xl space-y-6" role="status" aria-label="Loading AI settings">
+      <div className="max-w-5xl space-y-6" role="status" aria-label="Loading AI Services settings">
         <Skeleton className="h-9 w-48" />
         <Skeleton className="h-12 w-full" />
         <Skeleton className="h-40 w-full" />
         <Skeleton className="h-64 w-full" />
-        <span className="sr-only">Loading AI settings</span>
+        <span className="sr-only">Loading AI Services settings</span>
       </div>
     );
   }
@@ -639,7 +639,7 @@ export default function AISettings() {
 
   return (
     <div className="flex h-full max-w-5xl flex-col gap-7">
-      <SettingsPageHeader title="AI" />
+      <SettingsPageHeader title="AI Services" />
 
       <FieldGroup label="Models">
         <div className="py-3.5">

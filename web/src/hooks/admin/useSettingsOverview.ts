@@ -498,7 +498,7 @@ function buildCards(input: SettingsOverviewInput): OverviewCard[] {
   const aiKeyMissing = textModel !== "" && !textKeyConfigured;
   push(
     "ai",
-    "AI",
+    "AI Services",
     aiKeyMissing
       ? "Model set, no API key"
       : textModel

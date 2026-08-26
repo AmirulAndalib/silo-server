@@ -48,13 +48,13 @@ export default function SettingsOverview() {
         )}
       </section>
 
-      <section aria-labelledby="settings-categories-heading" className="space-y-5">
+      <section aria-labelledby="settings-groups-heading" className="space-y-5">
         <div className="space-y-1.5">
-          <h2 id="settings-categories-heading" className="text-xl font-semibold tracking-tight">
-            Settings categories
+          <h2 id="settings-groups-heading" className="text-xl font-semibold tracking-tight">
+            Settings groups
           </h2>
           <p className="text-muted-foreground text-sm">
-            Choose an area to see its settings and advanced options.
+            Each group shows the sections you’ll find inside.
           </p>
         </div>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">

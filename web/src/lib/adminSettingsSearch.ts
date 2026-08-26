@@ -19,6 +19,8 @@ export interface AdminSettingsSearchItem extends SettingsSearchItem {
   id: string;
   label: string;
   description: string;
+  /** The named sections visible inside this settings destination. */
+  groups: readonly string[];
   keywords?: readonly string[];
   settings?: readonly { label: string; description?: string; keywords?: readonly string[] }[];
   icon: LucideIcon;
@@ -50,6 +52,7 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
         id: "general",
         label: "General",
         description: "Server identity, public signups, and logging.",
+        groups: ["Identity", "Access", "Logging"],
         keywords: [
           "server name",
           "login subtitle",
@@ -76,6 +79,7 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
         id: "appearance",
         label: "Appearance",
         description: "Logos, accent color, default theme, custom CSS, and poster badges.",
+        groups: ["Logos and icons", "Colors and theme", "Card overlays"],
         keywords: [
           "logo",
           "wordmark",
@@ -121,6 +125,7 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
         id: "security",
         label: "Security & Access",
         description: "Sign-in sessions, trusted proxies, and request rate limits.",
+        groups: ["Sign-in sessions", "Network", "Rate limiting"],
         keywords: [
           "access token",
           "refresh token",
@@ -156,6 +161,7 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
         id: "library",
         label: "Library & Metadata",
         description: "Artwork caching, scanning, intro and credits markers, and catalog search.",
+        groups: ["Metadata", "Scanning", "Intro and credits markers", "Search"],
         keywords: [
           "scanner workers",
           "matcher",
@@ -202,6 +208,7 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
         id: "playback",
         label: "Playback",
         description: "Transcoding, hardware acceleration, watch thresholds, and downloads.",
+        groups: ["Transcoding", "Watch behavior", "Downloads"],
         keywords: [
           "ffmpeg",
           "transcode",
@@ -250,6 +257,7 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
         id: "providers",
         label: "Subtitles & Metadata",
         description: "Subtitle provider accounts and the MDBList metadata key.",
+        groups: ["Subtitle providers", "Metadata providers"],
         keywords: [
           "opensubtitles",
           "subdl",
@@ -278,6 +286,7 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
         id: "watch-sync",
         label: "Watch sync",
         description: "Trakt and Simkl apps that profiles connect their own accounts to.",
+        groups: ["Watch providers"],
         keywords: [
           "trakt",
           "simkl",
@@ -293,8 +302,9 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
       },
       {
         id: "ai",
-        label: "AI",
+        label: "AI Services",
         description: "Text and speech-to-text models, and the features that spend them.",
+        groups: ["Models", "Features", "Usage and tuning"],
         keywords: [
           "openai",
           "ollama",
@@ -332,6 +342,7 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
         id: "notifications",
         label: "Notifications",
         description: "Release events, delivery channels, the mail server, and webhooks.",
+        groups: ["Release events", "Delivery channels", "Tuning", "Retention"],
         keywords: [
           "release events",
           "new episode",
@@ -400,6 +411,7 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
         label: "Compatibility",
         description:
           "Jellyfin and Audiobookshelf client compatibility and the Jellyfin web player.",
+        groups: ["Jellyfin", "Audiobookshelf"],
         keywords: [
           "jellyfin",
           "audiobookshelf",
@@ -431,6 +443,7 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
         id: "infrastructure",
         label: "Storage & Database",
         description: "Redis, S3 storage buckets, the database, and log retention.",
+        groups: ["Redis", "Public storage", "Private storage", "Database", "Logs"],
         keywords: [
           "redis",
           "s3",

@@ -90,9 +90,7 @@ describe("SettingsOverview", () => {
     expect(
       screen.getByText(/Configure the server, media processing, integrations/),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", { level: 2, name: "Settings categories" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "Settings groups" })).toBeInTheDocument();
     expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
   });
 
@@ -135,6 +133,9 @@ describe("SettingsOverview", () => {
       ),
     ).toBeInTheDocument();
     expect(within(playback).getByText("Current")).toBeInTheDocument();
+    expect(within(playback).getByText("Transcoding")).toBeInTheDocument();
+    expect(within(playback).getByText("Watch behavior")).toBeInTheDocument();
+    expect(within(playback).getByText("Downloads")).toBeInTheDocument();
     expect(within(playback).getByText("Transcoding on · VA-API")).toBeInTheDocument();
     expect(playback).not.toHaveAttribute("data-attention");
 

@@ -2,14 +2,14 @@
 
 Admin settings are organized by admin intent ("I want subtitles to download
 automatically"), not by subsystem. `/admin/settings` with no `?tab=` is the
-**Overview**: server health across the top and one live card per section.
-Eleven sections hang off it, in rail order: General, Appearance, Users &
-Access, Library, Playback, Subtitles & Metadata, Watch sync, AI,
+**Overview**: server health across the top and one live card per settings group.
+Eleven groups hang off it, in rail order: General, Appearance, Security &
+Access, Library & Metadata, Playback, Subtitles & Metadata, Watch sync, AI Services,
 Notifications, Compatibility, and Storage & Database. The global admin sidebar
 has one Settings destination; the Overview and its section rail own the
 settings information architecture. Old `?tab=` ids from earlier layouts
 (including `integrations`, now split into Subtitles & Metadata, Watch sync, and
-AI) redirect to the section that absorbed them rather than 404ing.
+AI Services) redirect to the section that absorbed them rather than 404ing.
 `⌘K` (`AdminSectionCommandDialog`) is mounted in `AdminLayout` so search works
 from every admin page, not just the Dashboard.
 
@@ -22,8 +22,9 @@ not-set-up sections get nothing. The open item is marked with a 2px accent bar
 and no fill; the rail collapses on mobile, where the Overview is the section
 list. The Overview itself shows a health tile only for a tile in `warn` or
 `off` — a server with nothing to fix reads "Everything is configured." — and
-one large card per section. Each card explains the category's scope first and
-keeps its live configuration summary in a separate Current row.
+one large card per settings group. Each card explains the group's scope, names
+the sections inside it, and keeps its live configuration summary in a separate
+Current row.
 
 A section opens with `SettingsPageHeader`: the title, and page actions if it
 has any. No breadcrumb, no lede, no status strip. Below it, settings are rows

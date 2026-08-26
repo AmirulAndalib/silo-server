@@ -228,6 +228,6 @@ describe("AdminSettingsLayout", () => {
     vi.stubGlobal("scrollTo", vi.fn());
     renderInteractiveLayout("?tab=ai");
 
-    expect(screen.getByRole("region", { name: "AI settings" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "AI Services settings" })).toBeInTheDocument();
   });
 });
