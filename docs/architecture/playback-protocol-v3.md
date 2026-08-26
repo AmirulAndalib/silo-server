@@ -1108,6 +1108,12 @@ capability validation during the quality-change replan. The published ladder
 uses compound labels so each menu selection pins both a resolution class and a
 bitrate:
 
+When a planner terminal permits media-version fallback, start and replan order
+same-edition candidates with non-4K versions first, then continue through the
+remaining candidates until one produces a plan. A refused lower-resolution
+candidate therefore does not hide a later 4K version that can direct-play or
+remux without video encoding.
+
 | label | display_name | height | kbps |
 | --- | --- | --- | --- |
 | `2160p-high` | 4K High | 2160 | 40000 |

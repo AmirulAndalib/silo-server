@@ -1910,6 +1910,18 @@ func (h *PlaybackHandler) maybeStartThrottler(ctx context.Context, session *play
 // encoding.
 // Within each class it prefers SDR, then resolution, then bitrate.
 func (h *PlaybackHandler) findAlternateFile(ctx context.Context, source *models.MediaFile) (*models.MediaFile, error) {
+	candidates, err := h.findAlternateFiles(ctx, source)
+	if err != nil || len(candidates) == 0 {
+		return nil, err
+	}
+	return candidates[0], nil
+}
+
+// findAlternateFiles returns every compatible edition/version candidate in
+// fallback order. Callers that plan candidates must keep trying after a
+// terminal: a lower-resolution candidate can still fail while a later 4K
+// candidate direct-plays or remuxes without forbidden video encoding.
+func (h *PlaybackHandler) findAlternateFiles(ctx context.Context, source *models.MediaFile) ([]*models.MediaFile, error) {
 	if h.FileVersionFetcher == nil {
 		return nil, fmt.Errorf("file version fetcher not configured")
 	}
@@ -1971,7 +1983,7 @@ func (h *PlaybackHandler) findAlternateFile(ctx context.Context, source *models.
 		return a.Bitrate > b.Bitrate
 	})
 
-	return candidates[0], nil
+	return candidates, nil
 }
 
 const (
