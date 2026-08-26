@@ -20,15 +20,21 @@ type SystemHandler struct {
 	transcodePool *nodepool.TranscodePool
 	jwtSecret     string
 	ffmpegPath    string
+	hwAccel       string
+	hwDevice      string
 	buildInfo     buildinfo.Info
 }
 
-// NewSystemHandler creates a SystemHandler.
-func NewSystemHandler(transcodePool *nodepool.TranscodePool, jwtSecret string, ffmpegPath string) *SystemHandler {
+// NewSystemHandler creates a SystemHandler. hwAccel and hwDevice are the
+// configured playback settings, so a local probe verifies the same backend and
+// devices this host would transcode on.
+func NewSystemHandler(transcodePool *nodepool.TranscodePool, jwtSecret, ffmpegPath, hwAccel, hwDevice string) *SystemHandler {
 	return &SystemHandler{
 		transcodePool: transcodePool,
 		jwtSecret:     jwtSecret,
 		ffmpegPath:    ffmpegPath,
+		hwAccel:       hwAccel,
+		hwDevice:      hwDevice,
 		buildInfo:     buildinfo.Current(),
 	}
 }
@@ -67,7 +73,7 @@ func (h *SystemHandler) HandleHWAccel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(healthy) == 0 {
-		writeJSON(w, http.StatusOK, HWAccelInventory{HWAccelInfo: playback.DetectHWAccelWithFFmpeg(h.ffmpegPath)})
+		writeJSON(w, http.StatusOK, HWAccelInventory{HWAccelInfo: h.localHWAccel()})
 		return
 	}
 
@@ -109,9 +115,14 @@ func (h *SystemHandler) HandleHWAccel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !primaried {
-		inventory.HWAccelInfo = playback.DetectHWAccelWithFFmpeg(h.ffmpegPath)
+		inventory.HWAccelInfo = h.localHWAccel()
 	}
 	writeJSON(w, http.StatusOK, inventory)
+}
+
+// localHWAccel probes this host against its configured playback settings.
+func (h *SystemHandler) localHWAccel() playback.HWAccelInfo {
+	return playback.DetectHWAccelWithFFmpeg(h.hwAccel, h.ffmpegPath, h.hwDevice)
 }
 
 // HandleBuildInfo handles GET /admin/system/build.

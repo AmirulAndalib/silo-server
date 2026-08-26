@@ -282,11 +282,11 @@ func (h *PlaybackHandler) transformationRegistryV3(ctx context.Context) *playbac
 func (h *PlaybackHandler) localToneMapCapabilitiesV3(ctx context.Context) (tonemap.Capabilities, error) {
 	cfg := h.playbackConfig()
 	ffmpegPath := playback.ResolveFFmpegPath(cfg.FFmpegPath)
-	resolved := playback.ResolveHWAccelWithFFmpegContext(ctx, cfg.HWAccel, cfg.FFmpegPath)
+	hwDevice := strings.TrimSpace(cfg.HWDevice)
+	resolved := playback.ResolveHWAccelWithFFmpegContext(ctx, cfg.HWAccel, cfg.FFmpegPath, hwDevice)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	hwDevice := strings.TrimSpace(cfg.HWDevice)
 	probe := tonemap.Probe
 	if h.v3ToneMapProbe != nil {
 		probe = h.v3ToneMapProbe

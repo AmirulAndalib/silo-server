@@ -896,10 +896,11 @@ func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
 	}
 	resolveCtx, cancel := context.WithTimeout(r.Context(), toneMapCapabilityResolveTimeout(configuredHWAccel, hwDevice))
 	defer cancel()
-	hwAccel := playback.ResolveHWAccelWithFFmpegContext(resolveCtx, configuredHWAccel, ffmpegPath)
-	info := playback.DetectHWAccelWithFFmpegContext(resolveCtx, ffmpegPath)
+	// One detection walk answers both questions: Resolved honors the configured
+	// backend's pass-through contract, and DetectedBackends explains it.
+	info := playback.DetectHWAccelWithFFmpegContext(resolveCtx, configuredHWAccel, ffmpegPath, hwDevice)
 	info.ProbeRequestTimeoutMillis = tonemap.ProbeRequestTimeout(configuredHWAccel, hwDevice).Milliseconds()
-	capabilities, err := tonemap.Probe(resolveCtx, playback.ResolveFFmpegPath(ffmpegPath), hwAccel, hwDevice)
+	capabilities, err := tonemap.Probe(resolveCtx, playback.ResolveFFmpegPath(ffmpegPath), info.Resolved, hwDevice)
 	if err != nil {
 		http.Error(w, "capability probe unavailable", http.StatusServiceUnavailable)
 		return

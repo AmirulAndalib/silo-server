@@ -53,14 +53,20 @@ func TestProbeTotalTimeoutCoversBoundedCommandMatrix(t *testing.T) {
 }
 
 func TestProbeEndpointTimeoutCoversDetectionAndProbeBudgets(t *testing.T) {
-	if got, want := ProbeEndpointTimeout(BackendQSV, "/dev/dri/renderD128"), 81*time.Second; got != want {
+	if got, want := ProbeEndpointTimeout(BackendQSV, "/dev/dri/renderD128"), 106*time.Second; got != want {
 		t.Fatalf("ProbeEndpointTimeout() = %s, want %s", got, want)
 	}
-	if got, want := ProbeEndpointTimeout("auto", "/dev/dri/renderD128,/dev/dri/renderD129"), 106*time.Second; got != want {
+	if got, want := ProbeEndpointTimeout("auto", "/dev/dri/renderD128,/dev/dri/renderD129"), 131*time.Second; got != want {
 		t.Fatalf("ProbeEndpointTimeout(auto) = %s, want %s", got, want)
 	}
-	if got, want := ProbeRequestTimeout(BackendQSV, "/dev/dri/renderD128"), 86*time.Second; got != want {
+	if got, want := ProbeRequestTimeout(BackendQSV, "/dev/dri/renderD128"), 111*time.Second; got != want {
 		t.Fatalf("ProbeRequestTimeout() = %s, want %s", got, want)
+	}
+	// The slack has to outlast a full hardware detection walk plus the
+	// transformation registry probe, or a node answers 503 while its own
+	// detection is still running.
+	if probeEndpointSlack < 30*time.Second+3*3*time.Second {
+		t.Fatalf("probeEndpointSlack = %s, too small for detection and registry probes", probeEndpointSlack)
 	}
 }
 

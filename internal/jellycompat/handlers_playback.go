@@ -443,13 +443,13 @@ func resolveCompatToneMapRecipeWithPolicy(file *models.MediaFile, capabilities t
 
 // localToneMapCapabilities probes the API host's live FFmpeg backend and device.
 func (h *PlaybackHandler) localToneMapCapabilities(ctx context.Context) (tonemap.Capabilities, error) {
-	backend := playback.ResolveHWAccelWithFFmpegContext(ctx, h.HWAccel, h.FFmpegPath)
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 	hwDevice := ""
 	if h.cfg != nil {
 		hwDevice = h.cfg.Playback.HWDevice
+	}
+	backend := playback.ResolveHWAccelWithFFmpegContext(ctx, h.HWAccel, h.FFmpegPath, hwDevice)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	probe := tonemap.Probe
 	if h.compatToneMapProbe != nil {

@@ -200,10 +200,14 @@ func (s *Server) Handler() http.Handler {
 // custom image) would fail at stream time rather than at selection time.
 func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
 	ffmpegPath := ""
+	hwAccel := playback.HWAccelNone
+	hwDevice := ""
 	if cfg := s.watcher.Config(); cfg != nil {
 		ffmpegPath = cfg.Playback.FFmpegPath
+		hwAccel = cfg.Playback.HWAccel
+		hwDevice = cfg.Playback.HWDevice
 	}
-	info := playback.DetectHWAccelWithFFmpeg(ffmpegPath)
+	info := playback.DetectHWAccelWithFFmpeg(hwAccel, ffmpegPath, hwDevice)
 	info.Transformations = playback.ProbeTransformationRegistryV3(r.Context(), ffmpegPath).Advertised()
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(info); err != nil {

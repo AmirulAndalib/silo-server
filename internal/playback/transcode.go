@@ -143,6 +143,9 @@ const (
 	transcodeHWQSV     = "qsv"
 	transcodeHWVAAPI   = "vaapi"
 	transcodeHWNVENC   = "nvenc"
+	// vaapiHWDeviceAlias names the VAAPI device every non-QSV hardware command
+	// line declares; filter graphs and probes reference it by this alias.
+	vaapiHWDeviceAlias = "hw"
 )
 
 // TranscodeSession manages a running ffmpeg HLS transcode process.
@@ -530,7 +533,7 @@ func ResolveToneMapExecutor(ctx context.Context, opts TranscodeOpts) (TranscodeO
 		opts.ToneMapSourceRevision.IsZero() {
 		return opts, fmt.Errorf("incomplete tone-map recipe")
 	}
-	backend := ResolveHWAccelWithFFmpegContext(ctx, opts.HWAccel, opts.FFmpegPath)
+	backend := ResolveHWAccelWithFFmpegContext(ctx, opts.HWAccel, opts.FFmpegPath, opts.HWDevice)
 	capabilities, err := tonemap.Probe(ctx, ResolveFFmpegPath(opts.FFmpegPath), backend, opts.HWDevice)
 	if err != nil {
 		return opts, fmt.Errorf("%w: probe tone-map executor: %w", ErrToneMapExecutorUnavailable, err)
@@ -736,7 +739,7 @@ func buildFFmpegArgs(opts TranscodeOpts) []string {
 
 // resolveEffectiveTranscodeHWAccel returns the backend that will actually execute the recipe.
 func resolveEffectiveTranscodeHWAccel(opts TranscodeOpts) string {
-	hwAccel := ResolveHWAccelWithFFmpeg(opts.HWAccel, opts.FFmpegPath)
+	hwAccel := ResolveHWAccelWithFFmpeg(opts.HWAccel, opts.FFmpegPath, opts.HWDevice)
 	if hwAccel == "" {
 		return ""
 	}
@@ -866,10 +869,7 @@ func appendHWAccelArgs(args []string, opts TranscodeOpts) []string {
 			hwDevice = "/dev/dri/renderD128" // last-resort fallback
 		}
 		// VAAPI→QSV hardware pipeline: derive QSV from VAAPI device.
-		args = append(args,
-			"-init_hw_device", qsvVAAPIInitDevice(hwDevice),
-			"-init_hw_device", "qsv=qs@va",
-		)
+		args = append(args, tonemap.QSVInitDeviceArgs(hwDevice)...)
 		if opts.ToneMapMode == tonemap.ModeHardware && opts.ToneMapFilter == tonemap.HardwareFilterOpenCL {
 			args = append(args, "-init_hw_device", "opencl=ocl@va")
 		}
@@ -883,10 +883,8 @@ func appendHWAccelArgs(args []string, opts TranscodeOpts) []string {
 		if vaapiDevice == "" {
 			vaapiDevice = "/dev/dri/renderD128" // last-resort fallback
 		}
-		args = append(args,
-			"-init_hw_device", fmt.Sprintf("vaapi=hw:%s", vaapiDevice),
-			"-filter_hw_device", "hw",
-		)
+		args = append(args, tonemap.VAAPIInitDeviceArgs(vaapiHWDeviceAlias, vaapiDevice)...)
+		args = append(args, "-filter_hw_device", vaapiHWDeviceAlias)
 		if !opts.SoftwareVideoDecode {
 			args = append(args, "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi")
 		}
@@ -901,10 +899,6 @@ func appendHWAccelArgs(args []string, opts TranscodeOpts) []string {
 		}
 	}
 	return args
-}
-
-func qsvVAAPIInitDevice(device string) string {
-	return fmt.Sprintf("vaapi=va:%s,driver=iHD,kernel_driver=i915,vendor_id=0x8086", device)
 }
 
 // videoPreset returns an encoder-compatible preset. CPU encoders use a faster

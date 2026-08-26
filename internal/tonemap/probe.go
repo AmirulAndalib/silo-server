@@ -18,8 +18,14 @@ const (
 	probeCommandTimeout = 5 * time.Second
 	probeNegativeTTL    = 15 * time.Second
 	probeTimeoutSlack   = time.Second
-	probeEndpointSlack  = 20 * time.Second
-	probeRequestSlack   = 5 * time.Second
+	// probeEndpointSlack covers what a capability endpoint spends around the
+	// tone-map matrix itself: one bounded hardware detection walk (30s in
+	// playback.hwAccelWalkTimeout), the transformation registry's three 3s
+	// commands, and response overhead. It cannot be derived from those
+	// constants — playback imports this package, not the other way round — so
+	// it is raised whenever either budget grows.
+	probeEndpointSlack = 45 * time.Second
+	probeRequestSlack  = 5 * time.Second
 )
 
 // One deterministic 64x64 Main 10 HEVC frame. Keeping the compressed fixture
@@ -365,15 +371,15 @@ func hardwareSmokeArgs(fixturePath, backend, hardwareDevice string, kind SourceK
 	base := []string{ffmpegHideBannerArg, ffmpegLogLevelArg, ffmpegErrorLogLevel}
 	switch backend {
 	case BackendQSV:
+		base = append(base, QSVInitDeviceArgs(device)...)
 		base = append(base,
-			"-init_hw_device", qsvVAAPIInitDevice(device),
-			"-init_hw_device", "qsv=qs@va",
 			"-init_hw_device", "opencl=ocl@va",
 			"-filter_hw_device", "va",
 			"-hwaccel", BackendVAAPI, "-hwaccel_output_format", BackendVAAPI,
 		)
 	case BackendVAAPI:
-		base = append(base, "-init_hw_device", "vaapi=va:"+device, "-filter_hw_device", "va", "-hwaccel", BackendVAAPI, "-hwaccel_output_format", BackendVAAPI)
+		base = append(base, VAAPIInitDeviceArgs("va", device)...)
+		base = append(base, "-filter_hw_device", "va", "-hwaccel", BackendVAAPI, "-hwaccel_output_format", BackendVAAPI)
 	case BackendNVENC:
 		cudaDevice := device
 		if cudaDevice == "" {

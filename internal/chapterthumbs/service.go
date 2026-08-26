@@ -665,7 +665,7 @@ func (s *Service) extractFrameLocal(
 
 func (s *Service) resolveHWConfig() (string, string) {
 	s.hwResolveOnce.Do(func() {
-		s.resolvedHWAccel = playback.ResolveHWAccelWithFFmpeg(s.hwAccel, s.ffmpegPath)
+		s.resolvedHWAccel = playback.ResolveHWAccelWithFFmpeg(s.hwAccel, s.ffmpegPath, s.hwDevice)
 	})
 	// The configured device value passes through raw: ExtractFrame resolves it
 	// (multi-device balancing, empty-value auto-detection) per extraction.
