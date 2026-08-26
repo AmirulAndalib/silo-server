@@ -191,7 +191,7 @@ func (r *fakeEpisodeRepo) BulkUpsert(_ context.Context, seriesID string, episode
 		if ep.SeriesID != seriesID {
 			return fmt.Errorf("episode %d belongs to series %q, want %q", i, ep.SeriesID, seriesID)
 		}
-		if !fitsPostgresInteger(ep.SeasonNumber) || !fitsPostgresInteger(ep.EpisodeNumber) || !fitsPostgresInteger(ep.Runtime) {
+		if !catalog.FitsPostgresInteger(ep.SeasonNumber) || !catalog.FitsPostgresInteger(ep.EpisodeNumber) || !catalog.FitsPostgresInteger(ep.Runtime) {
 			return fmt.Errorf("episode %d has a value outside the PostgreSQL integer range", i)
 		}
 	}

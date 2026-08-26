@@ -53,10 +53,9 @@ import SubtitlesPopover from "./SubtitlesPopover";
 // Keep hover feedback on the compositor. Repainting these controls while the detail backdrop is
 // animating can stall the main thread on image-heavy movie and series pages.
 const responsivePrimaryActionClass =
-  "transform-gpu transition-transform duration-150 motion-safe:hover:scale-[1.02] motion-safe:active:scale-[0.98] motion-reduce:transition-none";
-const responsivePlayActionClass = `${responsivePrimaryActionClass} hover:bg-primary`;
-const responsiveWatchedActionClass = responsivePrimaryActionClass;
-const compositedGlassHoverClass = "detail-action-hover detail-action-hover-surface transition-none";
+  "transform-gpu transition-transform duration-150 motion-safe:hover:scale-[1.02] motion-safe:active:scale-[0.98]";
+const responsivePlayActionClass = `${responsivePrimaryActionClass} hover:bg-primary motion-reduce:hover:bg-primary/90`;
+const staticGlassActionClass = "transition-none";
 
 interface ActionBarProps {
   contentId?: string;
@@ -337,10 +336,10 @@ export default function ActionBar({
         {/* ── Watched toggle ─────────────────────────────────── */}
         {watchedLabel && onToggleWatched && (
           <Button
-            variant="glass-static"
+            variant="glass"
             onClick={onToggleWatched}
             disabled={isUpdatingWatched}
-            className={`${compositedGlassHoverClass} ${responsiveWatchedActionClass} h-11 cursor-pointer rounded-full px-5 text-[14px] font-semibold`}
+            className={`${responsivePrimaryActionClass} h-11 cursor-pointer rounded-full px-5 text-[14px] font-semibold`}
           >
             <Check className="size-[18px]" />
             {watchedLabel}
@@ -350,11 +349,11 @@ export default function ActionBar({
         {/* ── Icon action buttons ────────────────────────────── */}
         {onToggleFavorite && (
           <Button
-            variant="glass-static"
+            variant="glass"
             size="icon-lg"
             onClick={onToggleFavorite}
             title={isFavorite ? "Unfavorite" : "Favorite"}
-            className={`${compositedGlassHoverClass} size-11 cursor-pointer rounded-full`}
+            className={`${staticGlassActionClass} size-11 cursor-pointer rounded-full`}
           >
             <Heart
               className={`size-[18px] transition-colors ${isFavorite ? "fill-current text-red-400" : ""}`}
@@ -369,10 +368,10 @@ export default function ActionBar({
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
-              variant="glass-static"
+              variant="glass"
               size="icon-lg"
               title="More"
-              className={`${compositedGlassHoverClass} size-11 cursor-pointer rounded-full`}
+              className={`${staticGlassActionClass} size-11 cursor-pointer rounded-full`}
             >
               <MoreVertical className="size-[18px]" />
             </Button>

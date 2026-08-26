@@ -94,8 +94,8 @@ describe("PageBack", () => {
     const button = screen.getByRole("button", { name: "Go back" });
     expect(button).toHaveClass(
       "glass",
-      "detail-action-hover",
-      "detail-action-hover-accent",
+      "glass-hover",
+      "glass-hover-accent",
       "absolute",
       "top-4",
       "left-2",

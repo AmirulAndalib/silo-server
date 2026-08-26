@@ -500,8 +500,8 @@ func NewMetadataService(
 ) *MetadataService {
 	var itemLocalizationRepo *catalog.MediaItemLocalizationRepository
 	var itemAliasRepo *catalog.ItemAliasRepository
-	var seasonLocalizationRepo *catalog.SeasonLocalizationRepository
-	var episodeLocalizationRepo *catalog.EpisodeLocalizationRepository
+	var seasonLocalizationRepo metadataSeasonLocalizationRepo
+	var episodeLocalizationRepo metadataEpisodeLocalizationRepo
 	var scannedRootRepo metadataScannedRootRepo
 	var scannedGroupRepo metadataScannedGroupRepo
 	var groupClaimRepo metadataGroupClaimRepo
@@ -4374,8 +4374,28 @@ func providerChainContentLevel(contentType string) string {
 	}
 }
 
-func fitsPostgresInteger(value int) bool {
-	return value >= -1<<31 && value <= 1<<31-1
+func bulkUpsertWithFallback[T any](
+	items []T,
+	bulk func([]T) error,
+	onBulkErr func(error),
+	single func(T) error,
+	onRowErr func(T, error),
+) []T {
+	if err := bulk(items); err == nil {
+		return items
+	} else {
+		onBulkErr(err)
+	}
+
+	succeeded := make([]T, 0, len(items))
+	for _, item := range items {
+		if err := single(item); err != nil {
+			onRowErr(item, err)
+			continue
+		}
+		succeeded = append(succeeded, item)
+	}
+	return succeeded
 }
 
 // persistSeasonsAndEpisodes creates/updates seasons and episodes in the DB.
@@ -4491,7 +4511,7 @@ func (s *MetadataService) persistSeasonsAndEpisodes(
 				return
 			}
 			seasonNumberSet[seasonNumber] = struct{}{}
-			if !fitsPostgresInteger(seasonNumber) {
+			if !catalog.FitsPostgresInteger(seasonNumber) {
 				seasonNumbersValid = false
 				return
 			}
@@ -4671,21 +4691,29 @@ func (s *MetadataService) persistSeasonsAndEpisodes(
 					mergeMode,
 				)
 			}
-			if err := s.seasonLocalizationRepo.BulkUpsert(ctx, localizations); err != nil {
-				slog.WarnContext(ctx, "metadata: failed to bulk upsert season localizations; falling back to single-row writes",
-					"component", "metadata", "series_id", seriesID, "count", len(localizations), "error", err)
-				for i, loc := range localizations {
-					if err := s.seasonLocalizationRepo.Upsert(ctx, loc); err != nil {
-						slog.WarnContext(ctx, "metadata: failed to upsert season localization", "component", "metadata",
-							"series_id", seriesID, "season", writes[i].model.SeasonNumber, "error", err)
-						continue
-					}
-					localizationPersisted[i] = true
-				}
-			} else {
-				for i := range localizationPersisted {
-					localizationPersisted[i] = true
-				}
+			localizationIndexes := make(map[*models.SeasonLocalization]int, len(localizations))
+			for i, loc := range localizations {
+				localizationIndexes[loc] = i
+			}
+			persistedLocalizations := bulkUpsertWithFallback(localizations,
+				func(items []*models.SeasonLocalization) error {
+					return s.seasonLocalizationRepo.BulkUpsert(ctx, items)
+				},
+				func(err error) {
+					slog.WarnContext(ctx, "metadata: failed to bulk upsert season localizations; falling back to single-row writes",
+						"component", "metadata", "series_id", seriesID, "count", len(localizations), "error", err)
+				},
+				func(loc *models.SeasonLocalization) error {
+					return s.seasonLocalizationRepo.Upsert(ctx, loc)
+				},
+				func(loc *models.SeasonLocalization, err error) {
+					i := localizationIndexes[loc]
+					slog.WarnContext(ctx, "metadata: failed to upsert season localization", "component", "metadata",
+						"series_id", seriesID, "season", writes[i].model.SeasonNumber, "error", err)
+				},
+			)
+			for _, loc := range persistedLocalizations {
+				localizationPersisted[localizationIndexes[loc]] = true
 			}
 		}
 
@@ -4729,19 +4757,23 @@ func (s *MetadataService) persistSeasonsAndEpisodes(
 				}
 			}
 			if len(modelsToPersist) > 0 {
-				if err := s.seasonRepo.BulkUpsert(ctx, modelsToPersist); err != nil {
-					slog.WarnContext(ctx, "metadata: failed to bulk upsert seasons; falling back to single-row writes",
-						"component", "metadata", "series_id", seriesID, "count", len(modelsToPersist), "error", err)
-					successfulWrites := make([]preparedSeasonWrite, 0, len(writes))
-					for _, write := range writes {
+				successfulWrites := bulkUpsertWithFallback(writes,
+					func([]preparedSeasonWrite) error {
+						return s.seasonRepo.BulkUpsert(ctx, modelsToPersist)
+					},
+					func(err error) {
+						slog.WarnContext(ctx, "metadata: failed to bulk upsert seasons; falling back to single-row writes",
+							"component", "metadata", "series_id", seriesID, "count", len(modelsToPersist), "error", err)
+					},
+					func(write preparedSeasonWrite) error {
 						if upsertExplicitModel(write) {
-							successfulWrites = append(successfulWrites, write)
+							return nil
 						}
-					}
-					finishExplicitSeasons(successfulWrites)
-				} else {
-					finishExplicitSeasons(writes)
-				}
+						return errors.New("explicit season upsert failed")
+					},
+					func(preparedSeasonWrite, error) {},
+				)
+				finishExplicitSeasons(successfulWrites)
 			}
 		}
 	}
@@ -4812,24 +4844,38 @@ func (s *MetadataService) persistSeasonsAndEpisodes(
 			seasonIDs[write.model.SeasonNumber] = write.model.ContentID
 			addSeasonImageJob(write.model)
 		}
-		upsertImplicitOne := func(write preparedSeasonWrite) {
+		upsertImplicitOne := func(write preparedSeasonWrite) error {
 			if err := s.seasonRepo.Upsert(ctx, write.model); err != nil {
-				slog.WarnContext(ctx, "metadata: failed to upsert implicit season", "component", "metadata",
-					"series_id", seriesID, "season", write.model.SeasonNumber, "error", err)
-				return
+				return err
 			}
-			finishImplicitSeason(write)
+			return nil
 		}
 
 		if len(modelsToPersist) > 0 {
-			if err := s.seasonRepo.BulkUpsert(ctx, modelsToPersist); err != nil {
-				slog.WarnContext(ctx, "metadata: failed to bulk upsert implicit seasons; falling back to single-row writes",
-					"component", "metadata", "series_id", seriesID, "count", len(modelsToPersist), "error", err)
-				for _, write := range writes {
-					upsertImplicitOne(write)
-				}
-			} else {
-				for _, write := range writes {
+			bulkFailed := false
+			successfulWrites := bulkUpsertWithFallback(writes,
+				func([]preparedSeasonWrite) error {
+					return s.seasonRepo.BulkUpsert(ctx, modelsToPersist)
+				},
+				func(err error) {
+					bulkFailed = true
+					slog.WarnContext(ctx, "metadata: failed to bulk upsert implicit seasons; falling back to single-row writes",
+						"component", "metadata", "series_id", seriesID, "count", len(modelsToPersist), "error", err)
+				},
+				func(write preparedSeasonWrite) error {
+					if err := upsertImplicitOne(write); err != nil {
+						return err
+					}
+					finishImplicitSeason(write)
+					return nil
+				},
+				func(write preparedSeasonWrite, err error) {
+					slog.WarnContext(ctx, "metadata: failed to upsert implicit season", "component", "metadata",
+						"series_id", seriesID, "season", write.model.SeasonNumber, "error", err)
+				},
+			)
+			if !bulkFailed {
+				for _, write := range successfulWrites {
 					finishImplicitSeason(write)
 				}
 			}
@@ -4852,7 +4898,7 @@ func (s *MetadataService) persistSeasonsAndEpisodes(
 				continue
 			}
 			seenEpisodeKeys[key] = struct{}{}
-			if !fitsPostgresInteger(ep.SeasonNumber) || !fitsPostgresInteger(ep.EpisodeNumber) {
+			if !catalog.FitsPostgresInteger(ep.SeasonNumber) || !catalog.FitsPostgresInteger(ep.EpisodeNumber) {
 				episodeNumbersValid = false
 				continue
 			}
@@ -5039,17 +5085,28 @@ func (s *MetadataService) persistSeasonsAndEpisodes(
 						mergeMode,
 					)
 				}
-				if err := s.episodeLocalizationRepo.BulkUpsert(ctx, localizations); err != nil {
-					slog.WarnContext(ctx, "metadata: failed to bulk upsert episode localizations; falling back to single-row writes",
-						"component", "metadata", "series_id", seriesID, "count", len(localizations), "error", err)
-					for i, loc := range localizations {
-						if err := s.episodeLocalizationRepo.Upsert(ctx, loc); err != nil {
-							slog.WarnContext(ctx, "metadata: failed to upsert episode localization", "component", "metadata",
-								"series_id", seriesID, "season", writes[i].model.SeasonNumber,
-								"episode", writes[i].model.EpisodeNumber, "error", err)
-						}
-					}
+				localizationIndexes := make(map[*models.EpisodeLocalization]int, len(localizations))
+				for i, loc := range localizations {
+					localizationIndexes[loc] = i
 				}
+				_ = bulkUpsertWithFallback(localizations,
+					func(items []*models.EpisodeLocalization) error {
+						return s.episodeLocalizationRepo.BulkUpsert(ctx, items)
+					},
+					func(err error) {
+						slog.WarnContext(ctx, "metadata: failed to bulk upsert episode localizations; falling back to single-row writes",
+							"component", "metadata", "series_id", seriesID, "count", len(localizations), "error", err)
+					},
+					func(loc *models.EpisodeLocalization) error {
+						return s.episodeLocalizationRepo.Upsert(ctx, loc)
+					},
+					func(loc *models.EpisodeLocalization, err error) {
+						i := localizationIndexes[loc]
+						slog.WarnContext(ctx, "metadata: failed to upsert episode localization", "component", "metadata",
+							"series_id", seriesID, "season", writes[i].model.SeasonNumber,
+							"episode", writes[i].model.EpisodeNumber, "error", err)
+					},
+				)
 			}
 			for _, write := range writes {
 				addEpisodeImageJob(write.model)
@@ -5074,19 +5131,23 @@ func (s *MetadataService) persistSeasonsAndEpisodes(
 				}
 			}
 			if len(modelsToPersist) > 0 {
-				if err := s.episodeRepo.BulkUpsert(ctx, seriesID, modelsToPersist); err != nil {
-					slog.WarnContext(ctx, "metadata: failed to bulk upsert episodes; falling back to single-row writes",
-						"component", "metadata", "series_id", seriesID, "count", len(modelsToPersist), "error", err)
-					successfulWrites := make([]preparedEpisodeWrite, 0, len(writes))
-					for _, write := range writes {
+				successfulWrites := bulkUpsertWithFallback(writes,
+					func([]preparedEpisodeWrite) error {
+						return s.episodeRepo.BulkUpsert(ctx, seriesID, modelsToPersist)
+					},
+					func(err error) {
+						slog.WarnContext(ctx, "metadata: failed to bulk upsert episodes; falling back to single-row writes",
+							"component", "metadata", "series_id", seriesID, "count", len(modelsToPersist), "error", err)
+					},
+					func(write preparedEpisodeWrite) error {
 						if upsertEpisodeModel(write) {
-							successfulWrites = append(successfulWrites, write)
+							return nil
 						}
-					}
-					finishEpisodes(successfulWrites)
-				} else {
-					finishEpisodes(writes)
-				}
+						return errors.New("episode upsert failed")
+					},
+					func(preparedEpisodeWrite, error) {},
+				)
+				finishEpisodes(successfulWrites)
 			}
 		}
 	}
