@@ -1,6 +1,8 @@
 import { Link } from "react-router";
-import { Check, Play } from "lucide-react";
+import { Play } from "lucide-react";
 import type { EpisodeListItem } from "@/api/types";
+import { WatchedCheckIndicator } from "@/components/CardWatchedBadge";
+import { toEpisodeUserState } from "@/components/episodeUserState";
 import MediaItemMenu from "@/components/MediaItemMenu";
 import CardOverlays from "@/components/overlays/CardOverlays";
 import { useOverlayPrefs } from "@/hooks/useOverlayPrefs";
@@ -77,11 +79,6 @@ export default function SeasonEpisodeGrid({
                       variant="wide"
                     />
                   )}
-                  {episode.user_data?.played && (
-                    <div className="watched-badge">
-                      <Check className="size-4" />
-                    </div>
-                  )}
                   {!episode.user_data?.played &&
                     (episode.user_data?.position_seconds ?? 0) > 0 &&
                     (episode.user_data?.duration_seconds ?? 0) > 0 && (
@@ -108,22 +105,18 @@ export default function SeasonEpisodeGrid({
               <MediaItemMenu
                 contentId={episode.content_id}
                 mediaType="episode"
-                userState={
-                  episode.user_data
-                    ? {
-                        played: episode.user_data.played,
-                        is_favorite: false,
-                        in_watchlist: false,
-                      }
-                    : undefined
-                }
+                userState={toEpisodeUserState(episode.user_data)}
                 variant="wide"
                 showCollectionActions={false}
+                showWatchedShortcut
                 hasPartialProgress={hasPartialProgress}
               />
             </div>
             <Link to={`/item/${episode.content_id}`} state={episodeLinkState} className="block">
-              <p className="text-muted-foreground mt-2 text-xs">Episode {episode.episode_number}</p>
+              <div className="text-muted-foreground mt-2 flex items-center gap-2 text-xs">
+                <span>Episode {episode.episode_number}</span>
+                {episode.user_data?.played && <WatchedCheckIndicator className="ml-auto" />}
+              </div>
               <p className="text-foreground truncate text-sm font-semibold">
                 {episode.title || `Episode ${episode.episode_number}`}
               </p>

@@ -248,7 +248,7 @@ export default function ContinueWatchingCard(props: ContinueWatchingCardProps) {
             )}
 
             {/* Hover dim behind the play button */}
-            <div className="absolute inset-0 bg-black/0 transition-colors duration-150 pointer-fine:group-hover/media:bg-black/30" />
+            <div className="media-card-hover-dim absolute inset-0 bg-black/0 transition-colors duration-150" />
 
             {/* Progress bar */}
             {!isNextUp && progressPercent > 0 && (
@@ -268,7 +268,7 @@ export default function ContinueWatchingCard(props: ContinueWatchingCardProps) {
           to={card.watchHref}
           onClick={handleWatchClick}
           aria-label={`${card.type === "ebook" ? "Read" : "Play"} ${heading}`}
-          className="bg-primary text-primary-foreground absolute top-1/2 left-1/2 flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full opacity-100 shadow-lg transition-all duration-200 hover:scale-110 hover:shadow-xl hover:brightness-110 active:scale-95 pointer-fine:pointer-events-none pointer-fine:opacity-0 pointer-fine:group-hover/media:pointer-events-auto pointer-fine:group-hover/media:opacity-100 pointer-fine:focus-visible:pointer-events-auto pointer-fine:focus-visible:opacity-100"
+          className="media-card-play-trigger bg-primary text-primary-foreground absolute top-1/2 left-1/2 flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full shadow-lg transition-all duration-200 hover:scale-110 hover:shadow-xl hover:brightness-110 active:scale-95"
         >
           {card.type === "ebook" ? (
             <BookOpen className="h-5 w-5" />
@@ -287,9 +287,13 @@ export default function ContinueWatchingCard(props: ContinueWatchingCardProps) {
           }
           libraryId={props.libraryId}
           userState={
-            "sectionItem" in props && props.sectionItem ? props.sectionItem.user_state : undefined
+            "sectionItem" in props && props.sectionItem
+              ? props.sectionItem.user_state
+              : props.detail.user_state
           }
           variant={variant}
+          showWatchedShortcut
+          showFavoriteShortcut={false}
           dismissAction={dismissAction}
           hasPartialProgress={hasPartialProgress}
         />

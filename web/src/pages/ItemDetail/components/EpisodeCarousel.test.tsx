@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import EpisodeCarousel from "./EpisodeCarousel";
 
 const capturedMenuProps: Record<string, unknown>[] = [];
@@ -31,9 +31,12 @@ vi.mock("@/hooks/useCarouselEmbla", () => ({
 }));
 
 describe("EpisodeCarousel", () => {
-  it("prefetches episode details when a card shows navigation intent", async () => {
+  beforeEach(() => {
+    capturedMenuProps.length = 0;
     prefetchEpisodeDetail.mockClear();
+  });
 
+  it("prefetches episode details when a card shows navigation intent", async () => {
     render(
       <MemoryRouter>
         <EpisodeCarousel
@@ -62,8 +65,6 @@ describe("EpisodeCarousel", () => {
   });
 
   it("passes partial-progress restart eligibility to episode menus", () => {
-    capturedMenuProps.length = 0;
-
     renderToStaticMarkup(
       <MemoryRouter>
         <EpisodeCarousel
@@ -94,6 +95,126 @@ describe("EpisodeCarousel", () => {
     expect(capturedMenuProps[0]).toMatchObject({
       contentId: "ep-1",
       mediaType: "episode",
+      hasPartialProgress: true,
+    });
+  });
+
+  it("places the watched circle-check beside the episode label instead of over the artwork", () => {
+    render(
+      <MemoryRouter>
+        <EpisodeCarousel
+          currentEpisodeNumber={2}
+          episodes={[
+            {
+              content_id: "ep-1",
+              season_number: 1,
+              episode_number: 1,
+              title: "Pilot",
+              overview: "",
+              air_date: null,
+              runtime: 42,
+              still_url: "",
+              still_thumbhash: "",
+              files: [],
+              user_data: {
+                played: true,
+                position_seconds: 1800,
+                duration_seconds: 1800,
+              },
+            },
+            {
+              content_id: "ep-2",
+              season_number: 1,
+              episode_number: 2,
+              title: "Next",
+              overview: "",
+              air_date: null,
+              runtime: 43,
+              still_url: "",
+              still_thumbhash: "",
+              files: [],
+              user_data: {
+                played: false,
+                position_seconds: 0,
+                duration_seconds: 1800,
+              },
+            },
+          ]}
+        />
+      </MemoryRouter>,
+    );
+
+    const episodeLabel = screen.getByText("Episode 1");
+    const watchedIndicator = screen.getByLabelText("Watched");
+
+    expect(episodeLabel.parentElement).toContainElement(watchedIndicator);
+    expect(watchedIndicator).toHaveAttribute("data-watched-indicator", "icon-only");
+    expect(watchedIndicator.querySelector(".lucide-circle-check")).toBeTruthy();
+    expect(watchedIndicator.closest(".surface-panel-subtle")).toBeNull();
+    expect(screen.getByText("Episode 2").parentElement).not.toContainElement(watchedIndicator);
+    expect(screen.getAllByLabelText("Watched")).toHaveLength(1);
+  });
+
+  it("enables unwatched shortcuts without losing partial-progress restart eligibility", () => {
+    renderToStaticMarkup(
+      <MemoryRouter>
+        <EpisodeCarousel
+          currentEpisodeNumber={1}
+          episodes={[
+            {
+              content_id: "ep-1",
+              season_number: 1,
+              episode_number: 1,
+              title: "Pilot",
+              overview: "",
+              air_date: null,
+              runtime: 42,
+              still_url: "",
+              still_thumbhash: "",
+              files: [],
+            },
+            {
+              content_id: "ep-2",
+              season_number: 1,
+              episode_number: 2,
+              title: "Next",
+              overview: "",
+              air_date: null,
+              runtime: 43,
+              still_url: "",
+              still_thumbhash: "",
+              files: [],
+              user_data: {
+                played: false,
+                position_seconds: 120,
+                duration_seconds: 1800,
+              },
+            },
+          ]}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(capturedMenuProps[0]).toMatchObject({
+      contentId: "ep-1",
+      mediaType: "episode",
+      userState: {
+        played: false,
+        is_favorite: false,
+        in_watchlist: false,
+      },
+      showCollectionActions: false,
+      showWatchedShortcut: true,
+      hasPartialProgress: false,
+    });
+    expect(capturedMenuProps[1]).toMatchObject({
+      contentId: "ep-2",
+      userState: {
+        played: false,
+        is_favorite: false,
+        in_watchlist: false,
+      },
+      showWatchedShortcut: true,
       hasPartialProgress: true,
     });
   });

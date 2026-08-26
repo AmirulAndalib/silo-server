@@ -335,15 +335,27 @@ describe("CardOverlays", () => {
     expect(vibrant?.style.boxShadow).toBe("0px 1px 2px 0px rgb(0 0 0 / 0.25)");
   });
 
-  it("lifts bottom-right badges above the card menu button", () => {
+  it("lifts bottom-corner badges above persistent card actions", () => {
     const prefs = prefsWithOnly("content_rating");
+    prefs.items.content_rating = { ...prefs.items.content_rating, position: "bottom-left" };
+    const left = render(<CardOverlays data={SAMPLE_MOVIE_DATA} prefs={prefs} />).container;
+    expect(left.querySelector("div.bottom-2 > div.items-start.mb-10")).toBeTruthy();
+    expect(left.querySelector("div.bottom-2")?.className).toContain("z-10");
+
     prefs.items.content_rating = { ...prefs.items.content_rating, position: "bottom-right" };
     const poster = render(<CardOverlays data={SAMPLE_MOVIE_DATA} prefs={prefs} />).container;
     expect(poster.querySelector("div.bottom-2 > div.items-end.mb-10")).toBeTruthy();
+
     const wide = render(
       <CardOverlays data={SAMPLE_MOVIE_DATA} prefs={prefs} variant="wide" />,
     ).container;
     expect(wide.querySelector("div.bottom-2 > div.items-end.mb-12")).toBeTruthy();
+
+    prefs.items.content_rating = { ...prefs.items.content_rating, position: "bottom-left" };
+    const wideLeft = render(
+      <CardOverlays data={SAMPLE_MOVIE_DATA} prefs={prefs} variant="wide" />,
+    ).container;
+    expect(wideLeft.querySelector("div.bottom-2 > div.items-start.mb-12")).toBeTruthy();
   });
 
   it("renders nothing when no enabled overlay has data", () => {
