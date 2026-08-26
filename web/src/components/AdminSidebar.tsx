@@ -77,20 +77,8 @@ export default function AdminSidebar({ onNavigate, embedded = false }: AdminSide
   }
 
   function isActive(item: SidebarItem) {
-    // Settings tabs are one path with a `?tab=` discriminator, so a plain
-    // pathname compare would light up all eleven (or none) at once.
-    const [itemPath, itemQuery] = item.href.split("?");
-    const current = new URLSearchParams(location.search);
-    // Settings Overview shares the tabs' path and is the state of having no
-    // tab, so any `?tab=` rules it out.
-    if (item.excludeQueryParams?.some((key) => current.has(key))) return false;
-    if (itemQuery) {
-      if (location.pathname !== itemPath) return false;
-      const wanted = new URLSearchParams(itemQuery);
-      return [...wanted.entries()].every(([key, value]) => current.get(key) === value);
-    }
-    if (item.exact) return location.pathname === itemPath;
-    return location.pathname === itemPath || location.pathname.startsWith(`${itemPath}/`);
+    if (item.exact) return location.pathname === item.href;
+    return location.pathname === item.href || location.pathname.startsWith(`${item.href}/`);
   }
 
   return (

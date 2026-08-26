@@ -87,6 +87,12 @@ describe("SettingsOverview", () => {
     renderOverview();
 
     expect(screen.getByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();
+    expect(
+      screen.getByText(/Configure the server, media processing, integrations/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { level: 2, name: "Settings categories" }),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
   });
 
@@ -123,6 +129,12 @@ describe("SettingsOverview", () => {
     const playback = screen.getByTestId("overview-card-playback");
     expect(playback).toHaveAttribute("href", "/admin/settings?tab=playback");
     expect(within(playback).getByText("Playback")).toBeInTheDocument();
+    expect(
+      within(playback).getByText(
+        "Transcoding, hardware acceleration, watch thresholds, and downloads.",
+      ),
+    ).toBeInTheDocument();
+    expect(within(playback).getByText("Current")).toBeInTheDocument();
     expect(within(playback).getByText("Transcoding on · VA-API")).toBeInTheDocument();
     expect(playback).not.toHaveAttribute("data-attention");
 
