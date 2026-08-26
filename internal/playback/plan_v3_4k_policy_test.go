@@ -16,6 +16,8 @@ func TestIs4KMediaFileV3(t *testing.T) {
 		{name: "uppercase 4K", file: &models.MediaFile{Resolution: "4K"}, want: true},
 		{name: "padded uhd", file: &models.MediaFile{Resolution: " uhd "}, want: true},
 		{name: "mixed case UHD", file: &models.MediaFile{Resolution: "Uhd"}, want: true},
+		{name: "4320p", file: &models.MediaFile{Resolution: "4320p"}, want: true},
+		{name: "uppercase 8K", file: &models.MediaFile{Resolution: "8K"}, want: true},
 		{name: "width from primary track", file: &models.MediaFile{Resolution: "1080p", VideoTracks: []models.VideoTrack{{Width: 3840, Height: 1626}}}, want: true},
 		{name: "height from primary track", file: &models.MediaFile{VideoTracks: []models.VideoTrack{{Width: 2880, Height: 2160}}}, want: true},
 		{name: "1080p", file: &models.MediaFile{Resolution: "1080p"}, want: false},

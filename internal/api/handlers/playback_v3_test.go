@@ -269,6 +269,7 @@ func TestHandleStartPlaybackV3ExplainsOriginalQuality4KPinWhenAlternateExists(t 
 	}{
 		{name: "lower-resolution alternate exists", alternateResolution: "1080p", wantMessage: "compatible lower-resolution version of this title is available"},
 		{name: "only 4K alternate exists", alternateResolution: "UHD", wantMessage: playback.TerminalMessage4KTranscodeDisabledV3},
+		{name: "only label-only 8K alternate exists", alternateResolution: "8K", wantMessage: playback.TerminalMessage4KTranscodeDisabledV3},
 		{name: "no alternate", wantMessage: playback.TerminalMessage4KTranscodeDisabledV3},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -288,10 +289,14 @@ func TestHandleStartPlaybackV3ExplainsOriginalQuality4KPinWhenAlternateExists(t 
 				alternate.Resolution = test.alternateResolution
 				alternate.Bitrate = 8_000
 				alternate.VideoTracks = append([]models.VideoTrack(nil), source.VideoTracks...)
-				if test.alternateResolution == "1080p" {
+				switch test.alternateResolution {
+				case "1080p":
 					alternate.VideoTracks[0].Width = 1920
 					alternate.VideoTracks[0].Height = 1080
 					alternate.VideoTracks[0].Level = 41
+				case "8K":
+					alternate.VideoTracks[0].Width = 0
+					alternate.VideoTracks[0].Height = 0
 				}
 				alternate.VideoTracks[0].Bitrate = 8_000
 				versions = append(versions, alternate)

@@ -1098,9 +1098,10 @@ The source rung is always present, labelled `original`, with
 `preserves_source: true`. Transcode rungs are added below the source resolution
 class, plus at the same class when they reduce bitrate, and only when HLS is
 available to the client, transcoding is enabled, and 4K transcoding is permitted
-for a 4K source. A source counts as 4K when its catalog resolution label reads
-`2160p`, `4k`, or `uhd` (case- and whitespace-insensitive) or its probed
-dimensions reach 3840x2160. HDR plans additionally require
+for a 4K-or-higher source. A source falls under that policy when its catalog
+resolution label reads `2160p`, `4k`, `uhd`, `4320p`, or `8k` (case- and
+whitespace-insensitive), its probed width is at least 3840, or its probed height
+is at least 2160. HDR plans additionally require
 at least one enabled tone-map policy. A source-preserving HDR plan advertises
 those lower rungs without probing an executor; selecting one performs the lazy
 capability validation during the quality-change replan. The published ladder

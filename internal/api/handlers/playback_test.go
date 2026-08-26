@@ -1169,6 +1169,7 @@ func TestFindAlternateFile_PrefersNon4KAcrossLabelsAndDimensions(t *testing.T) {
 			byContent: map[string][]*models.MediaFile{
 				"movie-1": {
 					source,
+					{ID: 6, ContentID: "movie-1", Resolution: "8K", Bitrate: 40_000_000},
 					{ID: 2, ContentID: "movie-1", Resolution: "4K", Bitrate: 28_000_000},
 					{ID: 3, ContentID: "movie-1", Resolution: " uhd ", Bitrate: 26_000_000},
 					{ID: 4, ContentID: "movie-1", Resolution: "1080p", Bitrate: 24_000_000, VideoTracks: []models.VideoTrack{{Width: 3840, Height: 1626}}},
