@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -192,29 +193,44 @@ func TestReprobeCapabilitiesRefusesWhileExtractingAThumbnail(t *testing.T) {
 // — bumping the invalidation generation is what makes it honest — so without a
 // lock the scheduled snapshot's ffmpeg matrix and the operator's would run at
 // once on the same GPU, which is the collision the 409 exists to prevent.
+//
+// Ordering is asserted from receipts rather than a timeout: the builder reports
+// when it has been admitted, and records on the far side of the lock whether
+// this test had already released it. A sleep here could only ever say "it had
+// not finished yet", which is also true when it never started.
 func TestCapabilityBuildsAreSerialized(t *testing.T) {
 	server := newTestServer(t)
 
+	admitted := make(chan struct{}, 1)
+	server.capabilityBuildAdmitted = func() { admitted <- struct{}{} }
+
+	var released, acquiredAfterRelease atomic.Bool
 	server.capabilityBuildMu.Lock()
+
 	building := make(chan struct{})
 	go func() {
 		defer close(building)
 		// Any builder: the scheduled snapshot takes the same lock the endpoint
 		// and the re-probe do.
 		server.refreshCapabilitySnapshot(context.Background())
+		acquiredAfterRelease.Store(released.Load())
 	}()
 
 	select {
-	case <-building:
-		t.Fatal("a capability build ran while another held the build lock")
-	case <-time.After(200 * time.Millisecond):
+	case <-admitted:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the capability build was never admitted")
 	}
 
+	released.Store(true)
 	server.capabilityBuildMu.Unlock()
 	select {
 	case <-building:
 	case <-time.After(30 * time.Second):
 		t.Fatal("the capability build never ran after the lock was released")
+	}
+	if !acquiredAfterRelease.Load() {
+		t.Fatal("a capability build ran while another held the build lock")
 	}
 }
 
@@ -256,6 +272,11 @@ func TestReloadConfigKeepsActiveSessions(t *testing.T) {
 func TestCapabilitySnapshotRegistersAsGPUWork(t *testing.T) {
 	server := newTestServer(t)
 
+	// The builder reports the moment it holds the work slot, which is the state
+	// under test — polling the gate on a timer could observe it before or after.
+	admitted := make(chan struct{}, 1)
+	server.capabilityBuildAdmitted = func() { admitted <- struct{}{} }
+
 	server.capabilityBuildMu.Lock()
 	building := make(chan struct{})
 	go func() {
@@ -263,18 +284,14 @@ func TestCapabilitySnapshotRegistersAsGPUWork(t *testing.T) {
 		server.refreshCapabilitySnapshot(context.Background())
 	}()
 
-	// Wait for the snapshot to have claimed the work slot but still be blocked
-	// on the build lock, which is the window a re-probe used to slip through.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, ok := server.gpu.beginReprobe(0); !ok {
-			break
-		}
+	select {
+	case <-admitted:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the capability snapshot was never admitted as GPU work")
+	}
+	if _, ok := server.gpu.beginReprobe(0); ok {
 		server.gpu.endReprobe()
-		if time.Now().After(deadline) {
-			t.Fatal("the capability snapshot never registered as GPU work")
-		}
-		time.Sleep(5 * time.Millisecond)
+		t.Fatal("a re-probe was admitted while a capability snapshot held the encoder")
 	}
 
 	server.capabilityBuildMu.Unlock()

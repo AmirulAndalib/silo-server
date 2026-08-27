@@ -255,7 +255,10 @@ func (h *NodeHandler) reloadNodeConfig(ctx context.Context, node *nodepool.Node)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode != http.StatusOK {
+	// The route answers 204; accepting the whole 2xx family keeps this from
+	// warning about a reload that in fact succeeded, and leaves room for the
+	// node's answer to gain a body later.
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		slog.WarnContext(ctx, "node refused the reload after an acceleration override change; it will pick it up on its next config poll",
 			"component", "api", "node_id", node.ID, "name", node.Name, "status", resp.StatusCode)
 	}

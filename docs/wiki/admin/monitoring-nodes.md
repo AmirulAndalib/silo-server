@@ -229,7 +229,7 @@ goes unavailable keeps its number rather than renumbering the ones after it.
 At most eight mounts are sampled per host, scratch first. The cap bounds
 probing, not just reporting — an unresponsive network mount parks a `statfs`
 call that cannot be interrupted — so roots past it are not sampled, and the
-process logs which ones (`component=nodemetrics`).
+process logs how many were left out (`component=nodemetrics`).
 
 A minimal scrape config, with one job per role:
 

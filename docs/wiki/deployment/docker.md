@@ -227,7 +227,7 @@ At most eight mounts are sampled per host — the transcode scratch directory
 first, then library roots in order. The cap bounds probing, not just reporting:
 each mount costs a `statfs` call per interval, and one on an unresponsive
 network mount cannot be interrupted. A deployment with more roots than that logs
-which ones go unsampled rather than quietly reporting a subset.
+how many go unsampled rather than quietly reporting a subset.
 
 Sampling is current-sample only. Silo stores no history — point Prometheus at
 `/metrics` if you want trends or alerts.

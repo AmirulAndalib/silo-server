@@ -261,6 +261,36 @@ func TestHandleUpdateNodeReloadsTheNodeAfterAnOverrideChange(t *testing.T) {
 	if destructive.Load() {
 		t.Fatal("a policy edit hit the destructive force-reload route")
 	}
+	// The route answers 204, so a client that accepted only 200 would warn on
+	// every successful reload — a standing false alarm on the ordinary path.
+	if logged := recorder.Body.String(); strings.Contains(logged, "refused") {
+		t.Fatalf("body mentions a refusal: %s", logged)
+	}
+}
+
+// The node reload route answers 204. Treating anything outside 2xx as a refusal
+// is what keeps a successful reload from logging a failure an operator would
+// then go looking for.
+func TestReloadNodeConfigAcceptsNoContent(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusNoContent, http.StatusAccepted} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			called := make(chan struct{}, 1)
+			node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called <- struct{}{}
+				w.WriteHeader(status)
+			}))
+			t.Cleanup(node.Close)
+
+			handler := NewNodeHandler(&stubNodeRepository{}, nil, nil, nil, nil, nil, "secret")
+			handler.reloadNodeConfig(context.Background(), &nodepool.Node{ID: 1, Name: "gpu-1", URL: node.URL})
+
+			select {
+			case <-called:
+			default:
+				t.Fatal("the node was never called")
+			}
+		})
+	}
 }
 
 // The admin form posts both override fields on every transcode-node save, so

@@ -703,23 +703,32 @@ function NodeForm({
                       : "Cluster default (auto-discover)"
                   }
                 />
+                {/*
+                  Each branch is a whole sentence rather than a shared tail: an
+                  NVENC node reaches the free-text field *with* a reported
+                  inventory (its render devices are real, they are just not what
+                  NVENC addresses), so "no inventory yet" is only true of the
+                  other branch — and splitting one sentence across the
+                  conditional also lets JSX drop the space before "empty".
+                */}
                 <p className="text-muted-foreground text-sm">
                   {usesCUDADevices ? (
                     <>
                       Optional. The CUDA device this node encodes on — an index or a GPU UUID (e.g.{" "}
                       <span className="font-mono">0</span> or{" "}
-                      <span className="font-mono">GPU-a1b2c3d4</span>). NVENC does not use{" "}
-                      <span className="font-mono">/dev/dri</span> render paths. Leave
+                      <span className="font-mono">GPU-a1b2c3d4</span>). NVENC addresses GPUs by CUDA
+                      identity, not by <span className="font-mono">/dev/dri</span> render path, so
+                      the device picker does not apply to it. Leave empty to use the cluster default
+                      (CUDA device 0).
                     </>
                   ) : (
                     <>
                       Optional. Comma-separated render device paths this node transcodes on (e.g.{" "}
                       <span className="font-mono">/dev/dri/renderD128,/dev/dri/renderD129</span>).
-                      Leave
+                      This node has reported no device inventory yet, so there is nothing to pick
+                      from. Leave empty to use the cluster default (auto-discover).
                     </>
                   )}
-                  empty to use the cluster default (auto-discover). This node has reported no device
-                  inventory yet, so there is nothing to pick from.
                 </p>
               </>
             )}

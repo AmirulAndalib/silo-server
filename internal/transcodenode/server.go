@@ -225,6 +225,12 @@ type Server struct {
 	// the encoder at the same time; see gpuGate.
 	gpu gpuGate
 
+	// capabilityBuildAdmitted, when set, is called once a capability build has
+	// claimed the GPU work slot and is about to wait for the build lock. It is
+	// the seam a test uses to observe that ordering rather than sleeping on it;
+	// production leaves it nil.
+	capabilityBuildAdmitted func()
+
 	// capabilityBuildMu serializes capability assemblies with each other.
 	//
 	// The gpuGate covers transcodes and downloads, not other capability
@@ -1014,6 +1020,9 @@ func (s *Server) buildCapabilitySnapshot(ctx context.Context) (playback.HWAccelI
 		return playback.HWAccelInfo{}, ErrCapabilityBuildBusy
 	}
 	defer s.gpu.endWork()
+	if s.capabilityBuildAdmitted != nil {
+		s.capabilityBuildAdmitted()
+	}
 	s.capabilityBuildMu.Lock()
 	defer s.capabilityBuildMu.Unlock()
 	return s.buildCapabilitySnapshotLocked(ctx)

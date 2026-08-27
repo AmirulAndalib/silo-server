@@ -433,6 +433,9 @@ func verifyHWAccelBackend(ctx context.Context, backend, ffmpegPath string, candi
 	reasons := make([]string, 0, len(devices))
 	probed := false
 	complete = true
+	// Captured before any probe runs: a verdict earned under this generation is
+	// only worth recording if no invalidation has landed by the time it lands.
+	generation := hwProbeGeneration()
 	for _, device := range devices {
 		if ctx.Err() != nil {
 			complete = false
@@ -450,7 +453,7 @@ func verifyHWAccelBackend(ctx context.Context, backend, ffmpegPath string, candi
 			// Execution has to land on this device and not on whatever sorts
 			// first under /dev/dri, or a report saying "qsv verified" is paired
 			// with a transcode initializing a GPU the probe never touched.
-			recordVerifiedHWDevice(backend, device)
+			recordVerifiedHWDevice(generation, backend, device)
 			return entry, complete
 		}
 		reasons = append(reasons, hwProbeFailureReason(len(devices), device, reason))
@@ -463,21 +466,35 @@ func verifyHWAccelBackend(ctx context.Context, backend, ffmpegPath string, candi
 	return entry, complete
 }
 
+// hwProbeGeneration reads the current invalidation generation.
+func hwProbeGeneration() uint64 {
+	hwProbeCache.Lock()
+	defer hwProbeCache.Unlock()
+	return hwProbeCache.generation
+}
+
 // recordVerifiedHWDevice remembers the candidate a backend's smoke encode
-// passed on, for the generation that probed it.
+// passed on, under the generation that was current when the probe began.
 //
-// It is scoped to the probe generation so an operator-triggered re-probe cannot
-// be answered with a device blessed by the verdicts it just discarded. NVENC
-// records the empty device — CUDA addresses its GPU without a render-node path
-// — which reads identically to "nothing verified" and is exactly right: there
-// is no path for execution to adopt.
-func recordVerifiedHWDevice(backend, device string) {
+// generation is passed in rather than read here because the write happens after
+// the probe: an invalidation that landed in between has already discarded this
+// verdict, and filing it under the new generation would hand execution a device
+// the re-probe was asked to re-verify. A stale generation is dropped instead,
+// which reads as "nothing verified yet" — the same state a cold process is in,
+// and the one the next walk repairs.
+//
+// NVENC with no configured device records nothing, because CUDA addresses its
+// GPU without a path: there is nothing for execution to adopt.
+func recordVerifiedHWDevice(generation uint64, backend, device string) {
 	if device == "" {
 		return
 	}
 	hwProbeCache.Lock()
 	defer hwProbeCache.Unlock()
-	hwProbeCache.verifiedDevices[verifiedHWDeviceKey(hwProbeCache.generation, backend)] = device
+	if hwProbeCache.generation != generation {
+		return
+	}
+	hwProbeCache.verifiedDevices[verifiedHWDeviceKey(generation, backend)] = device
 }
 
 // VerifiedHWDevice returns the render device this process most recently
