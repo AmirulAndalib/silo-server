@@ -1203,7 +1203,7 @@ func (h *SettingsHandler) resolveEffectiveSetting(
 
 const (
 	defaultCardQuickActionMode   = "both"
-	cardQuickActionModeFavorites = calendarFilterFavorites
+	cardQuickActionModeFavorites = "favorites"
 	cardQuickActionModeWatched   = "watched"
 )
 

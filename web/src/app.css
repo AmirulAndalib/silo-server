@@ -1242,6 +1242,7 @@
     justify-content: center;
     width: 2.5rem;
     height: 2.5rem;
+    flex-shrink: 0;
     border-radius: 9999px;
     color: rgb(255 255 255 / 0.78);
     background: transparent;
@@ -1339,10 +1340,19 @@
   /* Home/library pages can contain hundreds of cards across off-screen rows.
      Let supporting engines skip layout and paint for those rows until they
      approach the viewport. Browsers without content-visibility ignore this
-     and keep the existing rendering path. */
+     and keep the existing rendering path. The placeholder height is the row
+     header plus a 2:3 poster at the profile's configured card width plus the
+     tallest caption; underestimating makes the scrollbar jump as rows render
+     on approach. */
   .media-carousel {
     content-visibility: auto;
-    contain-intrinsic-size: auto 24rem;
+    contain-intrinsic-size: auto var(--carousel-intrinsic-h, 23rem);
+  }
+  .media-carousel[data-poster-size="compact"] {
+    --carousel-intrinsic-h: 21rem;
+  }
+  .media-carousel[data-poster-size="large"] {
+    --carousel-intrinsic-h: 27rem;
   }
 
   /* Card actions stay hidden at rest so touch devices get clean artwork; a

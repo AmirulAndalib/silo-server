@@ -174,7 +174,7 @@ export default function ItemCard({
   libraryId,
   sortField,
   overlayPrefs,
-  quickActionMode = "both",
+  quickActionMode = "none",
   narrowPosterActions = false,
   selectionMode = false,
   selected = false,

@@ -733,6 +733,67 @@
           "source": "default"
         }
       ]
+    },
+    {
+      "name": "card_quick_actions_profile_choice_wins",
+      "description": "A profile that picked favorites-only shortcuts resolves at profile scope instead of falling through to the server-wide default.",
+      "keys": ["ui.card_quick_actions"],
+      "context": { "profile_id": "p1" },
+      "stored": [
+        {
+          "key": "ui.card_quick_actions",
+          "scope": "profile",
+          "profile_id": "p1",
+          "value": "favorites"
+        }
+      ],
+      "expected": [
+        {
+          "key": "ui.card_quick_actions",
+          "value": "favorites",
+          "source": "profile"
+        }
+      ]
+    },
+    {
+      "name": "card_quick_actions_enabled_profile_opt_out",
+      "description": "A profile that turned its own quick actions off resolves false at profile scope; the server-wide switch is not part of settings resolution.",
+      "keys": ["ui.card_quick_actions_enabled"],
+      "context": { "profile_id": "p1" },
+      "stored": [
+        {
+          "key": "ui.card_quick_actions_enabled",
+          "scope": "profile",
+          "profile_id": "p1",
+          "value": false
+        }
+      ],
+      "expected": [
+        {
+          "key": "ui.card_quick_actions_enabled",
+          "value": false,
+          "source": "profile"
+        }
+      ]
+    },
+    {
+      "name": "card_quick_actions_absent_express_no_preference",
+      "description": "Nothing stored resolves both quick-action keys to null with source \"default\", which is what lets the server-wide admin defaults apply.",
+      "keys": ["ui.card_quick_actions", "ui.card_quick_actions_enabled"],
+      "context": { "profile_id": "p1" },
+      "stored": [],
+      "expected": [
+        {
+          "key": "ui.card_quick_actions",
+          "value": null,
+          "source": "default"
+        },
+        {
+          "key": "ui.card_quick_actions_enabled",
+          "value": null,
+          "source": "default"
+        }
+      ]
     }
   ]
 }

@@ -1,4 +1,4 @@
-import { useId, useMemo } from "react";
+import { useMemo } from "react";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
 import { SettingField } from "./SettingField";
 import { SaveBar } from "./SaveBar";
@@ -28,11 +28,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  CARD_QUICK_ACTION_OPTIONS,
-  normalizeCardQuickActionMode,
-  type EnabledCardQuickActionMode,
-} from "@/lib/cardQuickActions";
+import { CARD_QUICK_ACTION_OPTIONS, normalizeCardQuickActionMode } from "@/lib/cardQuickActions";
 
 const KEYS = [
   "defaults.card_quick_actions_enabled",
@@ -40,58 +36,6 @@ const KEYS = [
   "overlays.enabled",
   "defaults.card_overlays",
 ];
-
-function QuickActionsField({
-  enabled,
-  mode,
-  onEnabledChange,
-  onModeChange,
-}: {
-  enabled: boolean;
-  mode: EnabledCardQuickActionMode;
-  onEnabledChange: (enabled: boolean) => void;
-  onModeChange: (mode: EnabledCardQuickActionMode) => void;
-}) {
-  const selectId = useId();
-  const hintId = useId();
-
-  return (
-    <div className="flex flex-col justify-between gap-3 py-3 sm:flex-row sm:items-center">
-      <div className="space-y-0.5">
-        <Label htmlFor={selectId} className="text-sm font-medium">
-          Card quick actions
-        </Label>
-        <p id={hintId} className="text-muted-foreground text-xs">
-          Globally enable quick actions and set their default mode. When disabled, no profile can
-          show them.
-        </p>
-      </div>
-      <div className="flex items-center gap-2">
-        <Select
-          value={mode}
-          disabled={!enabled}
-          onValueChange={(value) => onModeChange(value as EnabledCardQuickActionMode)}
-        >
-          <SelectTrigger id={selectId} className="w-[190px]" aria-describedby={hintId}>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {CARD_QUICK_ACTION_OPTIONS.map((option) => (
-              <SelectItem key={option.value} value={option.value}>
-                {option.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Switch
-          checked={enabled}
-          onCheckedChange={onEnabledChange}
-          aria-label="Enable card quick actions"
-        />
-      </div>
-    </div>
-  );
-}
 
 interface DefaultsEditorProps {
   value: string;
@@ -221,13 +165,21 @@ export default function OverlaySettings() {
 
       <div className="flex-1 space-y-6">
         <FieldGroup label="General">
-          <QuickActionsField
-            enabled={quickActionsEnabled}
-            mode={quickActionMode}
-            onEnabledChange={(enabled) =>
-              form.setValue("defaults.card_quick_actions_enabled", enabled ? "true" : "false")
-            }
-            onModeChange={(mode) => form.setValue("defaults.card_quick_actions", mode)}
+          <SettingField
+            label="Card Quick Actions Enabled"
+            hint="When disabled, no profile can show them."
+            type="toggle"
+            value={form.getValue("defaults.card_quick_actions_enabled") || "true"}
+            onChange={(v) => form.setValue("defaults.card_quick_actions_enabled", v)}
+          />
+          <SettingField
+            label="Card quick actions"
+            hint="The mode applied to profiles that have not chosen their own."
+            type="select"
+            options={[...CARD_QUICK_ACTION_OPTIONS]}
+            disabled={!quickActionsEnabled}
+            value={quickActionMode}
+            onChange={(v) => form.setValue("defaults.card_quick_actions", v)}
           />
           <SettingField
             label="Card Overlays Enabled"

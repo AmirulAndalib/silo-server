@@ -30,7 +30,7 @@ export default function SectionItemCard({
   item,
   libraryId,
   overlayPrefs = null,
-  quickActionMode = "both",
+  quickActionMode = "none",
 }: SectionItemCardProps) {
   const { loaded, onLoad } = useImageLoaded(item.poster_url);
   const thumbhashUrl = item.poster_thumbhash ? decodeThumbhash(item.poster_thumbhash) : "";

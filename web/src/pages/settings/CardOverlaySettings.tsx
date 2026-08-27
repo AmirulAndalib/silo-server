@@ -227,6 +227,14 @@ function OverlayToggle({ overlayId, prefs, onUpdate }: OverlayToggleProps) {
   );
 }
 
+function AdminDisabledNotice({ feature }: { feature: string }) {
+  return (
+    <div className="surface-panel-subtle rounded-2xl border px-4 py-3 text-sm">
+      {feature} have been disabled by your server administrator.
+    </div>
+  );
+}
+
 interface PresetPickerProps {
   value: PresetId;
   onChange: (next: PresetId) => void;
@@ -346,17 +354,9 @@ export default function CardOverlaySettings() {
         />
       </SettingsGroup>
 
-      {!quickActionsGloballyEnabled && (
-        <div className="surface-panel-subtle rounded-2xl border px-4 py-3 text-sm">
-          Card quick actions have been disabled by your server administrator.
-        </div>
-      )}
+      {!quickActionsGloballyEnabled && <AdminDisabledNotice feature="Card quick actions" />}
 
-      {!enabled && (
-        <div className="surface-panel-subtle rounded-2xl border px-4 py-3 text-sm">
-          Card overlays have been disabled by your server administrator.
-        </div>
-      )}
+      {!enabled && <AdminDisabledNotice feature="Card overlays" />}
 
       <div className={enabled ? "" : "pointer-events-none opacity-50"}>
         <SettingsGroup
