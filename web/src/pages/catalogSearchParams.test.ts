@@ -91,7 +91,7 @@ describe("parseCatalogSearchParams", () => {
     expect(state.query_definition.sort).toEqual({ field: "title", order: "asc" });
   });
 
-  it("defaults the watchlist to source order until a sort is chosen", () => {
+  it("defaults personal saved lists to source order until a sort is chosen", () => {
     expect(parseCatalogSearchParams(params("source=watchlist")).uses_source_order).toBe(true);
     expect(parseCatalogSearchParams(params("source=watchlist&sort=title")).uses_source_order).toBe(
       false,
@@ -100,8 +100,7 @@ describe("parseCatalogSearchParams", () => {
       parseCatalogSearchParams(params("source=watchlist&sort=added_at&order=desc"))
         .uses_source_order,
     ).toBe(false);
-    // Other personal sources keep their existing behavior.
-    expect(parseCatalogSearchParams(params("source=favorites")).uses_source_order).toBe(false);
+    expect(parseCatalogSearchParams(params("source=favorites")).uses_source_order).toBe(true);
     expect(parseCatalogSearchParams(params("source=history")).uses_source_order).toBe(false);
   });
 

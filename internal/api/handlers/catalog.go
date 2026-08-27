@@ -59,10 +59,9 @@ type catalogResponse struct {
 	Items             []itemListResponse `json:"items"`
 	Snapshot          string             `json:"snapshot,omitempty"`
 	SearchDiagnostics *searchDiagnostics `json:"search_diagnostics,omitempty"`
-	// EffectiveSort reports the order a collection source actually resolved in
-	// once the viewer's saved override and the collection's configured default
-	// were applied. Omitted for non-collection sources and when the collection
-	// resolved in its own source order.
+	// EffectiveSort reports the order a collection or personal-list source
+	// actually resolved in after saved/default precedence was applied. Omitted
+	// for other sources and when the source kept its own order.
 	EffectiveSort *effectiveSortResponse `json:"effective_sort,omitempty"`
 }
 

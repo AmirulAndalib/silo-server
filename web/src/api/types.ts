@@ -865,10 +865,9 @@ export interface CatalogResponse extends BrowseResponse {
   title?: string;
   snapshot?: string;
   /**
-   * The order a collection source actually resolved in, after the viewer's
-   * saved override and the collection's configured default were applied.
-   * Absent for non-collection sources and when the collection kept its own
-   * source order.
+   * The order a collection or personal-list source actually resolved in after
+   * saved/default precedence was applied. Absent for other sources and when
+   * the source kept its own order.
    */
   effective_sort?: QuerySort;
 }
