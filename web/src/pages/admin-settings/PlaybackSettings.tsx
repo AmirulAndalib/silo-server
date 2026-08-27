@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { Link } from "react-router";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
 import { useHWAccelDetection } from "@/hooks/queries/admin/system";
 import { Label } from "@/components/ui/label";
@@ -124,7 +125,15 @@ export default function PlaybackSettings() {
                 {inventoriesDiverge && (
                   <p className="text-xs text-amber-500">
                     This setting applies to every transcode node, but the nodes report different
-                    devices. Only paths present on all nodes are safe to select.
+                    devices. Only paths present on all nodes are safe to select — for the rest, set
+                    per-node overrides on the{" "}
+                    <Link
+                      to="/admin/nodes"
+                      className="font-medium underline-offset-2 hover:underline"
+                    >
+                      Nodes page
+                    </Link>
+                    .
                   </p>
                 )}
               </div>

@@ -125,6 +125,21 @@ func (p *Planner) TranscodeNode(nodeID int) (*Node, bool) {
 	return nil, false
 }
 
+// TranscodeNodeByURL returns the pooled record for a transcode node URL. It
+// gives a dispatch path that node's own acceleration override, from the URL it
+// is about to send a job to. Enabled or not: a caller holding the URL has
+// already selected it.
+func (p *Planner) TranscodeNodeByURL(nodeURL string) (*Node, bool) {
+	if p == nil || p.transcodes == nil || nodeURL == "" {
+		return nil, false
+	}
+	node := p.transcodes.FindByURL(normalizeNodeURL(nodeURL))
+	if node == nil {
+		return nil, false
+	}
+	return node, true
+}
+
 // TranscodeNodeHealthy reports whether the pooled transcode node serving a URL
 // is currently healthy and enabled. Remote-start adoption gates its redirect
 // on this: a recipe another API server published is only trustworthy while

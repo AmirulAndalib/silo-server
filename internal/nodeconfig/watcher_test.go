@@ -1,6 +1,7 @@
 package nodeconfig
 
 import (
+	"context"
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/config"
@@ -20,7 +21,7 @@ func TestApplySettingsSkipsCallbacksOnNoopReload(t *testing.T) {
 	})
 
 	settings := map[string]string{"server.log_level": "debug"}
-	if err := w.applySettings(settings); err != nil {
+	if err := w.applySettings(context.Background(), settings); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
 	if calls != 1 {
@@ -28,7 +29,7 @@ func TestApplySettingsSkipsCallbacksOnNoopReload(t *testing.T) {
 	}
 
 	// Same settings again — pointer swaps, but callbacks must not fire.
-	if err := w.applySettings(settings); err != nil {
+	if err := w.applySettings(context.Background(), settings); err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
 	if calls != 1 {
@@ -36,7 +37,7 @@ func TestApplySettingsSkipsCallbacksOnNoopReload(t *testing.T) {
 	}
 
 	// A real change fires callbacks again.
-	if err := w.applySettings(map[string]string{"server.log_level": "warn"}); err != nil {
+	if err := w.applySettings(context.Background(), map[string]string{"server.log_level": "warn"}); err != nil {
 		t.Fatalf("third apply: %v", err)
 	}
 	if calls != 2 {
@@ -50,7 +51,7 @@ func TestApplySettingsReappliesBootstrapOverrides(t *testing.T) {
 		RedisURL: "redis://env-host:6379",
 	})
 
-	err := w.applySettings(map[string]string{
+	err := w.applySettings(context.Background(), map[string]string{
 		"server.listen": ":8080",
 		"redis.url":     "redis://db-host:6379",
 	})
@@ -84,7 +85,7 @@ func TestRequestReloadCoalesces(t *testing.T) {
 func TestOnChangeAfterFirstApplySeesLaterChanges(t *testing.T) {
 	w := newTestWatcher(t, BootstrapOverrides{})
 
-	if err := w.applySettings(map[string]string{"server.log_level": "info"}); err != nil {
+	if err := w.applySettings(context.Background(), map[string]string{"server.log_level": "info"}); err != nil {
 		t.Fatalf("initial apply: %v", err)
 	}
 
@@ -94,7 +95,7 @@ func TestOnChangeAfterFirstApplySeesLaterChanges(t *testing.T) {
 		gotNew = updated.Server.LogLevel
 	})
 
-	if err := w.applySettings(map[string]string{"server.log_level": "error"}); err != nil {
+	if err := w.applySettings(context.Background(), map[string]string{"server.log_level": "error"}); err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
 	if gotOld != "info" || gotNew != "error" {

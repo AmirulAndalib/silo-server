@@ -200,6 +200,10 @@ func (h *NodeHandler) HandleUpdateNode(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", "Node not found")
 			return
 		}
+		if errors.Is(err, nodepool.ErrInvalidNodeInput) {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
 		slog.ErrorContext(r.Context(), "updating node", "component", "api", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update node")
 		return

@@ -145,6 +145,14 @@ type compatTranscodeNodeHealth interface {
 	TranscodeNodeHealthy(nodeURL string) bool
 }
 
+// compatTranscodeNodeLookup resolves the pooled record behind a transcode node
+// URL, which carries that node's own acceleration override. Optional, like the
+// enumerators above: without it dispatch falls back to the cluster-wide
+// acceleration setting. *nodepool.Planner implements it.
+type compatTranscodeNodeLookup interface {
+	TranscodeNodeByURL(nodeURL string) (*nodepool.Node, bool)
+}
+
 // transcodeStreamDetailsSetter is implemented by the native SessionManager.
 // Optional (like sessionStarterContext) so lightweight test fakes don't have
 // to; without it the session keeps transport-level defaults only.
@@ -1032,6 +1040,26 @@ func clampSeekSeconds(seekSeconds float64, sources []PlaybackMediaSource) float6
 	return seekSeconds
 }
 
+// remoteDispatchHWAccel picks the acceleration backend to name in a start
+// request to one node: that node's own hw_accel_override when it carries one,
+// and otherwise the cluster-wide setting this host runs under. A node under an
+// override resolves to its own answer regardless, so naming it keeps the
+// request and what runs in agreement. The cluster value passes through
+// untouched otherwise — "auto" included, because the node honors a named
+// backend verbatim and must be left to resolve it against live hardware. This
+// mirrors the v1 dispatch path in internal/api/handlers/playback_v3.go.
+func (h *PlaybackHandler) remoteDispatchHWAccel(nodeURL string) string {
+	lookup, ok := h.NodePlanner.(compatTranscodeNodeLookup)
+	if !ok {
+		return h.HWAccel
+	}
+	node, found := lookup.TranscodeNodeByURL(nodeURL)
+	if !found {
+		return h.HWAccel
+	}
+	return node.EffectiveHWAccel(h.HWAccel)
+}
+
 // startRemoteTranscode submits a frozen compatibility recipe to a selected node.
 func (h *PlaybackHandler) startRemoteTranscode(
 	ctx context.Context,
@@ -1177,7 +1205,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		TargetCodecVideo:    compatTargetVideoCodec,
 		TargetCodecAudio:    compatTargetAudioCodec,
 		SegmentDuration:     segmentDuration,
-		HWAccel:             h.HWAccel,
+		HWAccel:             h.remoteDispatchHWAccel(transcodeNodeURL),
 		AudioTrackIndex:     compatAudioTrackIndexOrDefault(source),
 		SourceAudioChannels: compatSourceAudioChannels(source),
 		TotalDuration:       float64(source.Version.Duration),

@@ -3935,6 +3935,15 @@ export interface StreamNode {
   physical_gpu_keys?: string[];
   /** The node's resource sample from the last health check. */
   last_stats?: NodeLastStats | null;
+  /**
+   * This node's own acceleration policy. Absent or null is the normal case:
+   * the node inherits the cluster-wide playback.hw_accel / playback.hw_device
+   * settings. A value here is what the node resolves against from its next
+   * config reload, and what remote transcodes to it are dispatched with.
+   */
+  hw_accel_override?: string | null;
+  /** Comma-separated render device paths pinned to this node; null inherits. */
+  hw_device_override?: string | null;
 }
 
 export interface CreateNodeRequest {
@@ -3954,6 +3963,10 @@ export interface UpdateNodeRequest {
   group?: string;
   max_jobs?: number;
   max_bandwidth_kbps?: number;
+  // An omitted override leaves the stored value alone; an explicit null (or an
+  // empty string) restores inheritance of the cluster-wide playback setting.
+  hw_accel_override?: string | null;
+  hw_device_override?: string | null;
 }
 
 export interface CheckNodeResponse {

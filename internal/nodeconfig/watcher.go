@@ -2,6 +2,7 @@ package nodeconfig
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -24,7 +25,26 @@ type BootstrapOverrides struct {
 	DatabaseURL string // from DATABASE_URL env
 	JFListen    string // from JF_PORT env
 	RedisURL    string // from REDIS_URL env
+	// NodeURL is this process's own stream_nodes identity (from NODE_URL env),
+	// set only in proxy/transcode mode. It is what lets a node find its own row
+	// and overlay that row's acceleration overrides onto the cluster-wide
+	// playback settings. Empty on an API host, which has no stream_nodes row.
+	NodeURL string
 }
+
+// nodeHWOverrides is one node's own acceleration policy, as stored on its
+// stream_nodes row. A nil field means the node inherits the cluster-wide
+// playback setting.
+type nodeHWOverrides struct {
+	HWAccel  *string
+	HWDevice *string
+}
+
+// loadNodeHWOverrides reads one node's overrides by URL. found is false when
+// the node has no stream_nodes row at all — a legitimate deployment (a node
+// nobody registered yet), not an error. It is a field on the Watcher so the
+// overlay can be exercised without a database.
+type loadNodeHWOverrides func(ctx context.Context, nodeURL string) (overrides nodeHWOverrides, found bool, err error)
 
 // Watcher watches for configuration changes in the database and
 // automatically reloads the Config when changes are detected.
@@ -37,6 +57,18 @@ type Watcher struct {
 	bootstrap BootstrapOverrides
 	onChange  []func(old, updated *config.Config)
 	reloadCh  chan struct{} // buffered(1), event bus writes here
+
+	// loadOverrides reads this node's own acceleration overrides; see the
+	// overlay in applySettings.
+	loadOverrides loadNodeHWOverrides
+	// overrides is the last successfully read overlay, kept so a database
+	// hiccup during a reload cannot silently flip a node back onto the
+	// cluster-wide backend. overridesLoaded distinguishes "read, and there is
+	// nothing to overlay" from "never read".
+	overrides          nodeHWOverrides
+	overridesLoaded    bool
+	missingRowLogged   bool
+	duplicateRowLogged bool
 }
 
 // NewWatcher creates a new config watcher. Call Start to begin watching. The
@@ -44,13 +76,15 @@ type Watcher struct {
 // before they reach config.LoadFromDB, so a hot reload never feeds ciphertext
 // into the live config (which would, e.g., break JWT validation).
 func NewWatcher(pool *pgxpool.Pool, cipher *secret.Cipher, eventBus cache.EventBus, bootstrap BootstrapOverrides) *Watcher {
-	return &Watcher{
+	w := &Watcher{
 		pool:      pool,
 		cipher:    cipher,
 		eventBus:  eventBus,
 		bootstrap: bootstrap,
 		reloadCh:  make(chan struct{}, 1),
 	}
+	w.loadOverrides = w.queryNodeHWOverrides
+	return w
 }
 
 // Config returns the current config. Safe for concurrent use.
@@ -128,7 +162,7 @@ func (w *Watcher) reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return w.applySettings(m)
+	return w.applySettings(ctx, m)
 }
 
 // fetchSettings reads all server_settings rows and decrypts sensitive values.
@@ -161,9 +195,10 @@ func (w *Watcher) fetchSettings(ctx context.Context) (map[string]string, error) 
 }
 
 // applySettings builds a Config from a plaintext settings map, re-applies
-// bootstrap overrides, swaps the config pointer, and notifies OnChange
-// callbacks when the config actually changed.
-func (w *Watcher) applySettings(m map[string]string) error {
+// bootstrap overrides, overlays this node's own acceleration policy, swaps the
+// config pointer, and notifies OnChange callbacks when the config actually
+// changed.
+func (w *Watcher) applySettings(ctx context.Context, m map[string]string) error {
 	newCfg, err := config.LoadFromDB(m)
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
@@ -186,6 +221,10 @@ func (w *Watcher) applySettings(m map[string]string) error {
 		newCfg.Redis.URL = w.bootstrap.RedisURL
 	}
 
+	// Last word, after the bootstrap re-apply: the node's own row decides its
+	// acceleration policy, and nothing above may put the cluster value back.
+	w.applyNodeHWOverrides(ctx, newCfg)
+
 	w.mu.Lock()
 	old := w.cfg
 	w.cfg = newCfg
@@ -204,6 +243,130 @@ func (w *Watcher) applySettings(m map[string]string) error {
 	}
 
 	return nil
+}
+
+// applyNodeHWOverrides overlays this node's stored acceleration policy onto a
+// freshly built config, so everything downstream — probes, warmup, the node's
+// own fallback when a start request omits a backend — reads one effective
+// value rather than consulting the row separately.
+//
+// It is a no-op on a host with no node identity (the API server, which has no
+// stream_nodes row). Failure is deliberately conservative: a node that cannot
+// read its row keeps the overlay it last read, because a database hiccup is
+// not evidence that an operator cleared the override.
+func (w *Watcher) applyNodeHWOverrides(ctx context.Context, cfg *config.Config) {
+	if w.bootstrap.NodeURL == "" || w.loadOverrides == nil || cfg == nil {
+		return
+	}
+
+	overrides, found, err := w.loadOverrides(ctx, w.bootstrap.NodeURL)
+	switch {
+	case err != nil:
+		slog.WarnContext(ctx, "node acceleration override lookup failed; keeping the previous effective policy",
+			"component", "nodeconfig", "error", err)
+		var loaded bool
+		w.mu.RLock()
+		overrides, loaded = w.overrides, w.overridesLoaded
+		w.mu.RUnlock()
+		if !loaded {
+			// Never read one: the cluster-wide settings stand as they are.
+			return
+		}
+	case !found:
+		// Logged once rather than on every 60s reload: an unregistered node is
+		// a standing condition, not an event.
+		w.mu.Lock()
+		first := !w.missingRowLogged
+		w.missingRowLogged = true
+		w.overrides, w.overridesLoaded = nodeHWOverrides{}, true
+		w.mu.Unlock()
+		if first {
+			slog.InfoContext(ctx, "no stream_nodes row for this node; inheriting the cluster acceleration settings",
+				"component", "nodeconfig", "node_url", w.bootstrap.NodeURL)
+		}
+		return
+	default:
+		w.mu.Lock()
+		w.overrides, w.overridesLoaded = overrides, true
+		w.mu.Unlock()
+	}
+
+	if overrides.HWAccel != nil {
+		cfg.Playback.HWAccel = *overrides.HWAccel
+	}
+	if overrides.HWDevice != nil {
+		cfg.Playback.HWDevice = *overrides.HWDevice
+	}
+}
+
+// queryNodeHWOverrides reads this node's own stream_nodes row. The URL is
+// matched with trailing slashes ignored on both sides, because NODE_URL and
+// the registered URL are typed by different people; the scan this costs is
+// irrelevant next to getting the match wrong and silently inheriting the
+// cluster policy.
+//
+// That tolerance can match two rows, though: stream_nodes.url is unique on the
+// exact string, so "http://n1" and "http://n1/" are two legal registrations
+// that rtrim collapses into one key. Ordering by id makes the winner the same
+// on every reload — without it the seq scan returns whichever row it reached
+// first, and the 30-second health sweep rewriting those rows would silently
+// flip a node between two policies. The duplicate is reported rather than
+// quietly resolved, because only an operator can fix it.
+func (w *Watcher) queryNodeHWOverrides(ctx context.Context, nodeURL string) (nodeHWOverrides, bool, error) {
+	if w.pool == nil {
+		return nodeHWOverrides{}, false, errors.New("no database pool")
+	}
+	rows, err := w.pool.Query(ctx,
+		`SELECT url, hw_accel_override, hw_device_override FROM stream_nodes
+		 WHERE rtrim(url, '/') = rtrim($1, '/') ORDER BY id LIMIT 2`, nodeURL)
+	if err != nil {
+		return nodeHWOverrides{}, false, fmt.Errorf("query node acceleration overrides: %w", err)
+	}
+	defer rows.Close()
+
+	var (
+		overrides nodeHWOverrides
+		matched   []string
+	)
+	for rows.Next() {
+		var (
+			url string
+			row nodeHWOverrides
+		)
+		if err := rows.Scan(&url, &row.HWAccel, &row.HWDevice); err != nil {
+			return nodeHWOverrides{}, false, fmt.Errorf("scan node acceleration overrides: %w", err)
+		}
+		if len(matched) == 0 {
+			overrides = row
+		}
+		matched = append(matched, url)
+	}
+	if err := rows.Err(); err != nil {
+		return nodeHWOverrides{}, false, fmt.Errorf("read node acceleration overrides: %w", err)
+	}
+	if len(matched) == 0 {
+		return nodeHWOverrides{}, false, nil
+	}
+	if len(matched) > 1 {
+		w.logDuplicateNodeRows(ctx, nodeURL, matched)
+	}
+	return overrides, true, nil
+}
+
+// logDuplicateNodeRows warns, once per process, that more than one
+// stream_nodes row claims this node's URL. Once rather than every 60s: the
+// duplicate is a standing misconfiguration, and the lowest id keeps winning
+// until an operator removes the other row.
+func (w *Watcher) logDuplicateNodeRows(ctx context.Context, nodeURL string, matched []string) {
+	w.mu.Lock()
+	first := !w.duplicateRowLogged
+	w.duplicateRowLogged = true
+	w.mu.Unlock()
+	if !first {
+		return
+	}
+	slog.WarnContext(ctx, "several stream_nodes rows match this node's URL; using the lowest id",
+		"component", "nodeconfig", "node_url", nodeURL, "matched_urls", matched)
 }
 
 // poll runs the background loop that reloads config on timer or event.

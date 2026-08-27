@@ -347,6 +347,80 @@ function describeDeviceLine(device: NodeRenderDevice): string {
   return address ? `${line} (${address})` : line;
 }
 
+// --- Per-node acceleration overrides ---------------------------------------
+
+/**
+ * Select value standing in for "no override". Radix rejects an empty option
+ * value, and the wire form of "inherit" is null, so the picker needs a
+ * sentinel of its own.
+ */
+export const HW_ACCEL_INHERIT = "inherit";
+
+/**
+ * The acceleration choices a node may be pinned to, inherit first. The backend
+ * values mirror the playback.hw_accel enum: a per-node override may only name a
+ * backend the cluster-wide setting could also name.
+ */
+export const HW_ACCEL_OVERRIDE_OPTIONS: readonly { value: string; label: string }[] = [
+  { value: HW_ACCEL_INHERIT, label: "Inherit cluster setting" },
+  { value: "auto", label: "Auto" },
+  { value: "qsv", label: "Intel Quick Sync (QSV)" },
+  { value: "vaapi", label: "VA-API" },
+  { value: "nvenc", label: "NVIDIA NVENC" },
+  { value: "none", label: "Software" },
+];
+
+/** A node's own acceleration policy, as rendered beside its GPU inventory. */
+export interface NodeAccelerationOverride {
+  /** Compact row text, e.g. "override: qsv · /dev/dri/renderD129". */
+  label: string;
+  /** Hover text: both halves of the policy, and when a change lands. */
+  title: string;
+}
+
+/** Split a stored comma-separated device override into its paths. */
+export function parseHWDeviceOverride(value: string | null | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+}
+
+/**
+ * Describe how a node resolves hardware acceleration, or null when it resolves
+ * the cluster-wide way. Null is the normal case and renders nothing: the Nodes
+ * table would otherwise repeat the Playback settings page on every row, and the
+ * point of the line is to mark the rows that do *not* follow it.
+ */
+export function describeNodeAccelerationOverride(
+  node: StreamNode,
+): NodeAccelerationOverride | null {
+  const accel = node.hw_accel_override?.trim().toLowerCase() ?? "";
+  const devices = parseHWDeviceOverride(node.hw_device_override);
+  if (accel === "" && devices.length === 0) {
+    return null;
+  }
+
+  const accelLabel = accel === "none" ? "software" : accel;
+  const firstDevice = devices[0] ?? "";
+  const deviceLabel = devices.length === 1 ? firstDevice : `${devices.length} devices`;
+  const label = [accelLabel, devices.length > 0 ? deviceLabel : ""]
+    .filter((part) => part !== "")
+    .join(" · ");
+
+  const title = [
+    accel === ""
+      ? "Acceleration: inherited from the cluster-wide Hardware Acceleration setting."
+      : `Acceleration: ${accelLabel}, overriding the cluster-wide Hardware Acceleration setting.`,
+    devices.length === 0
+      ? "GPU devices: inherited from the cluster-wide setting."
+      : `GPU devices: ${devices.join(", ")}.`,
+    "A changed override applies to new transcodes within a minute; sessions already running keep the backend they started with.",
+  ].join("\n");
+
+  return { label: `override: ${label}`, title };
+}
+
 // --- Host resource samples -------------------------------------------------
 //
 // A node's last_stats and the API host's /admin/system/resources carry the same

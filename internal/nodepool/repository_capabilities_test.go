@@ -27,11 +27,14 @@ func newNodeTestPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("connect test database: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	var column *string
+	// Every read here selects the full column list, so the newest column is the
+	// one worth probing: a database missing it fails every test in the package.
+	var columns int
 	if err := pool.QueryRow(ctx,
-		`SELECT column_name FROM information_schema.columns
-		 WHERE table_name = 'stream_nodes' AND column_name = 'capabilities_hash'`).Scan(&column); err != nil {
-		t.Skip("test database has not applied the node capabilities migration")
+		`SELECT count(*) FROM information_schema.columns
+		 WHERE table_name = 'stream_nodes'
+		   AND column_name IN ('capabilities_hash', 'hw_accel_override')`).Scan(&columns); err != nil || columns < 2 {
+		t.Skip("test database has not applied the stream_nodes capability/override migrations")
 	}
 	return pool
 }

@@ -850,27 +850,36 @@ func main() {
 		streamTelemetryRegistry = newStreamTelemetryRegistry(appCtx, nodeID, redisClient)
 		streamTelemetryRegistry.Start(appCtx)
 
+		// Resolved before the watcher starts: NODE_URL is this process's
+		// stream_nodes identity, and the watcher needs it on its very first
+		// load to overlay the node's own acceleration overrides.
+		nodeURL := os.Getenv("NODE_URL")
+		nodeName := os.Getenv("NODE_NAME")
+		if nodeURL == "" {
+			nodeURL = "http://localhost" + cfg.Server.Listen
+			// The guess is this process's whole identity: it keys session
+			// bookkeeping *and* selects the stream_nodes row whose acceleration
+			// overrides this node adopts. Two nodes listening on the same port
+			// guess the same URL and would share both.
+			slog.Warn("NODE_URL not set, using listen address — session keys may collide across nodes, and this node adopts the acceleration overrides of whichever stream_nodes row carries that URL",
+				"node_url", nodeURL)
+		}
+		if nodeName == "" {
+			nodeName = mode
+		}
+
 		bootstrap := nodeconfig.BootstrapOverrides{
 			Listen:      cfg.Server.Listen,
 			Mode:        cfg.Server.Mode,
 			DatabaseURL: cfg.Database.URL,
 			JFListen:    cfg.JellyfinCompat.Listen,
 			RedisURL:    bc.RedisURL,
+			NodeURL:     nodeURL,
 		}
 		watcher := nodeconfig.NewWatcher(pool, dataCipher, eventBus, bootstrap)
 		if err := watcher.Start(appCtx); err != nil {
 			slog.Error("config watcher start failed", "error", err)
 			os.Exit(1)
-		}
-
-		nodeURL := os.Getenv("NODE_URL")
-		nodeName := os.Getenv("NODE_NAME")
-		if nodeURL == "" {
-			nodeURL = "http://localhost" + cfg.Server.Listen
-			slog.Warn("NODE_URL not set, using listen address — session keys may collide across nodes")
-		}
-		if nodeName == "" {
-			nodeName = mode
 		}
 
 		tracker := nodesessions.NewTracker(redisClient, nodeURL, nodeName, mode)
@@ -949,7 +958,9 @@ func main() {
 	// Hot-reload config watcher for integrated/api mode. Reloads on
 	// EventSettingsChanged (Redis) with a 60s poll fallback, so settings
 	// changes apply without restart even on Redis-less deployments. The
-	// watcher's config supersedes the startup snapshot from here on.
+	// watcher's config supersedes the startup snapshot from here on. No
+	// NodeURL: an API host is not a stream node and has no row whose
+	// acceleration overrides could apply to it.
 	configWatcher := nodeconfig.NewWatcher(pool, dataCipher, eventBus, nodeconfig.BootstrapOverrides{
 		Listen:      bc.Listen,
 		Mode:        bc.Mode,

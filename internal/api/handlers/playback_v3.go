@@ -2825,7 +2825,10 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 	}
 	sourceMetadata := sourceExecutionMetadataV3(file, result)
 	sourceProfile, sourceBitDepth := sourceVideoTranscodeFactsV3(file, result)
-	hwAccel := h.playbackConfig().HWAccel
+	// The node's own override wins over this host's cluster-wide setting; every
+	// other node gets the cluster value verbatim, "auto" included, so the node
+	// still resolves it against live hardware at session start.
+	hwAccel := node.EffectiveHWAccel(h.playbackConfig().HWAccel)
 	toneMapFilter := ""
 	if result.ToneMapMode != "" {
 		capabilities, err := h.remoteToneMapCapabilitiesV3(r.Context(), node.URL, false)

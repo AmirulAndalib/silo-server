@@ -4,10 +4,12 @@ import {
   CAPABILITY_STALE_AFTER_MS,
   DISK_FILL_WARNING_PCT,
   describeGPUBusy,
+  describeNodeAccelerationOverride,
   describeNodeGPU,
   describeNodeSystem,
   describeResourceSample,
   formatBitsPerSecond,
+  parseHWDeviceOverride,
 } from "./adminNodesPresentation";
 
 const NOW = Date.parse("2026-08-26T12:00:00Z");
@@ -711,5 +713,68 @@ describe("describeResourceSample", () => {
       gpu: { value: "30%", detail: "video engine · 1 session" },
       sampledAt: null,
     });
+  });
+});
+
+describe("describeNodeAccelerationOverride", () => {
+  it("renders nothing for a node that inherits the cluster-wide settings", () => {
+    expect(describeNodeAccelerationOverride(makeNode())).toBeNull();
+    expect(
+      describeNodeAccelerationOverride(
+        makeNode({ hw_accel_override: null, hw_device_override: null }),
+      ),
+    ).toBeNull();
+    // Whitespace is not an override.
+    expect(describeNodeAccelerationOverride(makeNode({ hw_device_override: " , " }))).toBeNull();
+  });
+
+  it("names the backend a node is pinned to", () => {
+    const override = describeNodeAccelerationOverride(makeNode({ hw_accel_override: "qsv" }));
+
+    expect(override?.label).toBe("override: qsv");
+    expect(override?.title).toContain("Acceleration: qsv");
+    expect(override?.title).toContain("GPU devices: inherited");
+  });
+
+  it("calls a software override software rather than none", () => {
+    expect(describeNodeAccelerationOverride(makeNode({ hw_accel_override: "none" }))?.label).toBe(
+      "override: software",
+    );
+  });
+
+  it("shows a single pinned device inline and counts several", () => {
+    expect(
+      describeNodeAccelerationOverride(
+        makeNode({ hw_accel_override: "vaapi", hw_device_override: "/dev/dri/renderD129" }),
+      )?.label,
+    ).toBe("override: vaapi · /dev/dri/renderD129");
+
+    const many = describeNodeAccelerationOverride(
+      makeNode({ hw_device_override: "/dev/dri/renderD128, /dev/dri/renderD129" }),
+    );
+    expect(many?.label).toBe("override: 2 devices");
+    expect(many?.title).toContain("GPU devices: /dev/dri/renderD128, /dev/dri/renderD129.");
+    expect(many?.title).toContain("Acceleration: inherited");
+  });
+
+  it("says when the override takes effect", () => {
+    const title = describeNodeAccelerationOverride(makeNode({ hw_accel_override: "nvenc" }))?.title;
+    expect(title).toContain("applies to new transcodes within a minute");
+    expect(title).toContain("sessions already running keep the backend they started with");
+  });
+});
+
+describe("parseHWDeviceOverride", () => {
+  it("splits, trims, and drops empty entries", () => {
+    expect(parseHWDeviceOverride(" /dev/dri/renderD128 ,, /dev/dri/renderD129,")).toEqual([
+      "/dev/dri/renderD128",
+      "/dev/dri/renderD129",
+    ]);
+  });
+
+  it("treats absent and empty values as no devices", () => {
+    expect(parseHWDeviceOverride(null)).toEqual([]);
+    expect(parseHWDeviceOverride(undefined)).toEqual([]);
+    expect(parseHWDeviceOverride("  ")).toEqual([]);
   });
 });

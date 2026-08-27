@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import type { StreamNode, CreateNodeRequest } from "@/api/types";
+import type { StreamNode, CreateNodeRequest, UpdateNodeRequest } from "@/api/types";
 import {
   useAdminNodes,
   useCreateNode,
@@ -23,12 +23,26 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Plus, Pencil, Trash2, RefreshCw, Info, AlertTriangle } from "lucide-react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { formatDateTime } from "@/lib/datetime";
 import { cn } from "@/lib/utils";
 import type { ResourceMetric } from "./adminNodesPresentation";
-import { describeNodeGPU, describeNodeSystem } from "./adminNodesPresentation";
+import {
+  HW_ACCEL_INHERIT,
+  HW_ACCEL_OVERRIDE_OPTIONS,
+  describeNodeAccelerationOverride,
+  describeNodeGPU,
+  describeNodeSystem,
+  parseHWDeviceOverride,
+} from "./adminNodesPresentation";
 
 type NodeType = "proxy" | "transcode";
 
@@ -78,13 +92,29 @@ function NodeSystemCell({ node }: { node: StreamNode }) {
   );
 }
 
+/** The "override: qsv" line, or nothing on a node that inherits the cluster. */
+function NodeOverrideLine({ node }: { node: StreamNode }) {
+  const override = describeNodeAccelerationOverride(node);
+  if (!override) {
+    return null;
+  }
+  return (
+    <div className="text-muted-foreground text-xs" title={override.title}>
+      {override.label}
+    </div>
+  );
+}
+
 function NodeGPUCell({ node }: { node: StreamNode }) {
   const gpu = describeNodeGPU(node);
   if (gpu.kind === "awaiting") {
     return (
-      <span className="text-muted-foreground text-sm" title={gpu.title}>
-        {gpu.label}
-      </span>
+      <div className="space-y-1">
+        <span className="text-muted-foreground text-sm" title={gpu.title}>
+          {gpu.label}
+        </span>
+        <NodeOverrideLine node={node} />
+      </div>
     );
   }
 
@@ -122,6 +152,7 @@ function NodeGPUCell({ node }: { node: StreamNode }) {
           {gpu.deviceSummary}
         </div>
       )}
+      <NodeOverrideLine node={node} />
       {gpu.live.map((device) => (
         <div
           key={device.key}
@@ -338,6 +369,10 @@ function NodeForm({
   const [maxBandwidthMbps, setMaxBandwidthMbps] = useState(
     node?.max_bandwidth_kbps ? (node.max_bandwidth_kbps / 1000).toString() : "",
   );
+  const [hwAccelOverride, setHwAccelOverride] = useState(
+    node?.hw_accel_override?.trim() || HW_ACCEL_INHERIT,
+  );
+  const [hwDeviceOverride, setHwDeviceOverride] = useState(node?.hw_device_override ?? "");
   const createMutation = useCreateNode();
   const updateMutation = useUpdateNode();
   const isPending = createMutation.isPending || updateMutation.isPending;
@@ -361,7 +396,16 @@ function NodeForm({
         : Math.round(parsedMaxBandwidthMbps * 1000),
     };
     if (node) {
-      updateMutation.mutate({ id: node.id, body: fields }, { onSuccess: onClose });
+      // null on either override is what restores inheritance of the
+      // cluster-wide playback setting; omitting the key would leave the stored
+      // value alone instead.
+      const overrideDevices = parseHWDeviceOverride(hwDeviceOverride);
+      const body: UpdateNodeRequest = {
+        ...fields,
+        hw_accel_override: hwAccelOverride === HW_ACCEL_INHERIT ? null : hwAccelOverride,
+        hw_device_override: overrideDevices.length > 0 ? overrideDevices.join(",") : null,
+      };
+      updateMutation.mutate({ id: node.id, body }, { onSuccess: onClose });
     } else {
       const body: CreateNodeRequest = { type: nodeType, ...fields };
       createMutation.mutate(body, { onSuccess: onClose });
@@ -448,6 +492,49 @@ function NodeForm({
             interrupted. Leave empty (or 0) for unlimited.
           </p>
         </div>
+      )}
+
+      {/* Overrides are edit-only: the create endpoint takes no acceleration
+          fields, so offering them here would silently drop what was typed. */}
+      {node && (
+        <>
+          <div className="space-y-2">
+            <Label htmlFor="node-hw-accel-override">Hardware Acceleration</Label>
+            <Select value={hwAccelOverride} onValueChange={setHwAccelOverride}>
+              <SelectTrigger id="node-hw-accel-override" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {HW_ACCEL_OVERRIDE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-muted-foreground text-sm">
+              Optional. Overrides the cluster-wide Hardware Acceleration setting for this node only
+              — use it when this node's hardware differs from the rest of the cluster. Applies to
+              new transcodes within a minute; restart the node to re-prime its encoder for the new
+              backend.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="node-hw-device-override">GPU Devices</Label>
+            <Input
+              id="node-hw-device-override"
+              value={hwDeviceOverride}
+              onChange={(e) => setHwDeviceOverride(e.target.value)}
+              placeholder="Inherit cluster setting"
+            />
+            <p className="text-muted-foreground text-sm">
+              Optional. Comma-separated render device paths this node transcodes on (e.g.{" "}
+              <span className="font-mono">/dev/dri/renderD128,/dev/dri/renderD129</span>). Leave
+              empty to inherit the cluster-wide device selection.
+            </p>
+          </div>
+        </>
       )}
 
       <Button type="submit" className="w-full" disabled={isPending}>

@@ -31,6 +31,45 @@ Always `200 OK` with a JSON array.
 | `capabilities_refreshed_at` | RFC3339 string | When the report was fetched. This is the age of the *inventory*, not of the health check: an unchanged node keeps a report from hours ago. |
 | `physical_gpu_keys` | string[] | Stable identities of the GPUs behind this node, derived from `capabilities` (see below). Omitted when the node reports no identifiable GPU. |
 | `last_stats` | object | The node's most recent host resource sample — `{"system": …, "gpu": […]}` in the shape below. Omitted when the node reported none. |
+| `hw_accel_override`, `hw_device_override` | string | This node's own acceleration policy (see below). Omitted when the node inherits the cluster-wide settings, which is the normal case. |
+
+### Acceleration overrides
+
+`hw_accel_override` and `hw_device_override` override the cluster-wide
+`playback.hw_accel` and `playback.hw_device` settings for one node.
+`hw_accel_override` takes the same values as the cluster setting — `auto`,
+`qsv`, `vaapi`, `nvenc`, `none`. Absent means inherit; there is no separate
+"inherit" value to set.
+
+They exist for a heterogeneous deployment: one CPU-only node in a QSV cluster
+sets `none` for itself instead of forcing every node onto the lowest common
+denominator. A homogeneous deployment should leave both unset and configure
+`playback.hw_accel` once.
+
+A node finds its own row by URL: `NODE_URL` on the node is matched against
+`stream_nodes.url`, ignoring a trailing slash on either side. Set `NODE_URL`
+explicitly on every node. Without it a node guesses `http://localhost:<port>`
+and adopts whatever row carries that URL, which on a multi-node deployment can
+be a different machine's policy.
+
+The node overlays its row onto the cluster-wide playback settings on every
+config reload, so the override is what that node probes with, advertises in
+`capabilities.resolved`, and falls back to when a start request names no
+backend. The API dispatches remote transcodes with the node's
+`hw_accel_override` in preference to its own cluster setting, so the request
+agrees with what the node would have run anyway. Dispatch reads the override
+column, not `capabilities.resolved`: a node inheriting `auto` is dispatched
+`auto` so it resolves against live hardware at session start rather than
+against a snapshot.
+
+**A changed override applies without a restart, but not all at once.** Dispatch
+picks it up as soon as the update returns, because the pools are reloaded. The
+node applies it to new transcodes on its next config reload (within 60 seconds)
+and re-advertises `capabilities.resolved` at its next capability snapshot
+(every 15 minutes). Two things do wait for a restart: the hardware encoder
+warmup that ran at boot, which stays primed for the old backend, and sessions
+already transcoding, which keep the backend they started with. Restart the node
+when you want all four in agreement immediately.
 
 ### `last_stats`
 
@@ -127,8 +166,19 @@ Updates a node's mutable fields. Every field is optional; an omitted field is
 left unchanged. An empty-string `group` clears the group, and a non-positive
 `max_jobs` or `max_bandwidth_kbps` clears that cap.
 
-`200 OK` with the updated node, `404 Not Found` for an unknown id. The node
-pools are reloaded afterwards.
+`hw_accel_override` and `hw_device_override` are writable here. Either `null`
+or an empty string clears one, restoring inheritance of the cluster-wide
+setting; an omitted field leaves it alone. Clearing an override is a real
+change with a real effect, so it is deliberately expressible rather than being
+indistinguishable from omission.
+
+`200 OK` with the updated node, `404 Not Found` for an unknown id,
+`400 Bad Request` when `hw_accel_override` is not one of `auto`, `qsv`,
+`vaapi`, `nvenc`, `none` (matched case-insensitively and stored lowercase, as
+`playback.hw_accel` is). The node pools are reloaded afterwards, so remote
+dispatch honors a new override immediately; the target node itself picks it up
+on its next config reload — see "Acceleration overrides" above for what waits
+for a restart.
 
 Capability fields are not writable here. They are owned by the health sweep,
 because only the node can say what hardware it has.

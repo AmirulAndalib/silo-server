@@ -1,6 +1,11 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
-import type { StreamNode, CreateNodeRequest, CheckNodeResponse } from "@/api/types";
+import type {
+  StreamNode,
+  CreateNodeRequest,
+  UpdateNodeRequest,
+  CheckNodeResponse,
+} from "@/api/types";
 import { adminKeys } from "../keys";
 import { toast } from "sonner";
 
@@ -35,7 +40,10 @@ export function useCreateNode() {
 export function useUpdateNode() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, body }: { id: number; body: Record<string, unknown> }) =>
+    // The body is typed rather than a loose record so a null acceleration
+    // override — the value that restores inheritance of the cluster-wide
+    // setting — survives to the wire instead of being dropped as a typo.
+    mutationFn: ({ id, body }: { id: number; body: UpdateNodeRequest }) =>
       api<StreamNode>(`/admin/nodes/${id}`, {
         method: "PUT",
         body: JSON.stringify(body),
