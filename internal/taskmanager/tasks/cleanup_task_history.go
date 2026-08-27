@@ -10,15 +10,15 @@ import (
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
 )
 
+// Batch geometry is a compile-time property of the delete strategy, not an
+// operator knob: it bounds how much of the table a single run may rewrite.
 const (
-	taskHistoryKeepPerTask       = 1000
-	taskHistoryMaxAge            = 30 * 24 * time.Hour
 	taskHistoryCleanupBatchSize  = 10000
 	taskHistoryCleanupMaxBatches = 100
 )
 
-// TaskHistoryPruner deletes a bounded amount of task execution history.
-type TaskHistoryPruner interface {
+// taskHistoryPruner deletes a bounded amount of task execution history.
+type taskHistoryPruner interface {
 	Prune(
 		ctx context.Context,
 		keepPerTask int,
@@ -30,18 +30,13 @@ type TaskHistoryPruner interface {
 
 // TaskHistoryCleanupTask prunes old task execution history.
 type TaskHistoryCleanupTask struct {
-	pruner TaskHistoryPruner
-}
-
-type taskHistoryCleanupResult struct {
-	Deleted      int64 `json:"deleted"`
-	LimitReached bool  `json:"limit_reached"`
-	Skipped      bool  `json:"skipped"`
+	pruner taskHistoryPruner
+	store  taskmanager.SettingsStore
 }
 
 // NewTaskHistoryCleanupTask creates a scheduled task for task history retention.
-func NewTaskHistoryCleanupTask(pruner TaskHistoryPruner) *TaskHistoryCleanupTask {
-	return &TaskHistoryCleanupTask{pruner: pruner}
+func NewTaskHistoryCleanupTask(pruner taskHistoryPruner, store taskmanager.SettingsStore) *TaskHistoryCleanupTask {
+	return &TaskHistoryCleanupTask{pruner: pruner, store: store}
 }
 
 func (t *TaskHistoryCleanupTask) Key() string  { return "cleanup_task_history" }
@@ -63,31 +58,32 @@ func (t *TaskHistoryCleanupTask) DefaultTriggers() []taskmanager.TriggerConfig {
 
 func (t *TaskHistoryCleanupTask) Execute(ctx context.Context, progress taskmanager.ProgressReporter) error {
 	progress.Report(0, "Pruning task execution history")
-	cutoff := time.Now().UTC().Add(-taskHistoryMaxAge)
+	retention := taskmanager.LoadHistoryRetention(ctx, t.store)
+	cutoff := time.Now().UTC().AddDate(0, 0, -retention.RetentionDays)
 	result, err := t.pruner.Prune(
 		ctx,
-		taskHistoryKeepPerTask,
+		retention.KeepPerTask,
 		cutoff,
 		taskHistoryCleanupBatchSize,
 		taskHistoryCleanupMaxBatches,
 	)
-	resultData := taskHistoryCleanupResult{
-		Deleted:      result.Deleted,
-		LimitReached: result.LimitReached,
-		Skipped:      result.Skipped,
+	if data, marshalErr := json.Marshal(result); marshalErr == nil {
+		progress.SetResultData(data)
 	}
-	setTaskHistoryCleanupResult(progress, resultData)
 	if err != nil {
-		slog.WarnContext(ctx, "task history cleanup failed", "component", "taskmanager", "deleted", result.Deleted, "error", err)
+		slog.WarnContext(ctx, "task history cleanup failed", "component", "taskmanager", "task", t.Key(), "deleted", result.Deleted, "error", err)
 		progress.Report(100, fmt.Sprintf("Task history cleanup failed after deleting %d executions", result.Deleted))
 		return err
 	}
 	if result.Skipped {
+		slog.InfoContext(ctx, "task history cleanup skipped; another node holds the cleanup lock",
+			"component", "taskmanager", "task", t.Key())
 		progress.Report(100, "Task history cleanup is already running on another node")
 		return nil
 	}
 	if result.LimitReached {
-		slog.WarnContext(ctx, "task history cleanup reached per-run limit", "component", "taskmanager", "deleted", result.Deleted)
+		slog.WarnContext(ctx, "task history cleanup reached per-run limit",
+			"component", "taskmanager", "task", t.Key(), "deleted", result.Deleted)
 		progress.Report(100, fmt.Sprintf(
 			"Pruned %d task executions; remaining history will be pruned on the next run",
 			result.Deleted,
@@ -95,19 +91,10 @@ func (t *TaskHistoryCleanupTask) Execute(ctx context.Context, progress taskmanag
 		return nil
 	}
 	if result.Deleted > 0 {
-		slog.InfoContext(ctx, "task history cleanup completed", "component", "taskmanager", "deleted", result.Deleted)
+		slog.InfoContext(ctx, "task history cleanup completed",
+			"component", "taskmanager", "task", t.Key(), "deleted", result.Deleted,
+			"retention_days", retention.RetentionDays, "keep_per_task", retention.KeepPerTask)
 	}
 	progress.Report(100, fmt.Sprintf("Pruned %d task executions", result.Deleted))
 	return nil
-}
-
-func setTaskHistoryCleanupResult(progress taskmanager.ProgressReporter, result taskHistoryCleanupResult) {
-	if progress == nil {
-		return
-	}
-	data, err := json.Marshal(result)
-	if err != nil {
-		return
-	}
-	progress.SetResultData(data)
 }

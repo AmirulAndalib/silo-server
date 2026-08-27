@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,11 +50,20 @@ func (p *taskHistoryCleanupProgress) SetResultData(data json.RawMessage) {
 	p.result = append(p.result[:0], data...)
 }
 
+func (p *taskHistoryCleanupProgress) decode(t *testing.T) taskmanager.HistoryPruneResult {
+	t.Helper()
+	var result taskmanager.HistoryPruneResult
+	if err := json.Unmarshal(p.result, &result); err != nil {
+		t.Fatalf("unmarshal result data: %v", err)
+	}
+	return result
+}
+
 func TestTaskHistoryCleanupTask(t *testing.T) {
 	pruner := &fakeTaskHistoryPruner{
 		result: taskmanager.HistoryPruneResult{Deleted: 10017},
 	}
-	task := NewTaskHistoryCleanupTask(pruner)
+	task := NewTaskHistoryCleanupTask(pruner, &fakeSettingsStore{})
 
 	if task.Key() != "cleanup_task_history" {
 		t.Fatalf("Key() = %q, want cleanup_task_history", task.Key())
@@ -73,17 +83,17 @@ func TestTaskHistoryCleanupTask(t *testing.T) {
 		t.Fatalf("DefaultTriggers() = %#v, want %#v", gotTriggers, wantTriggers)
 	}
 
-	before := time.Now().UTC().Add(-taskHistoryMaxAge)
+	before := time.Now().UTC().AddDate(0, 0, -taskmanager.DefaultHistoryRetentionDays)
 	progress := &taskHistoryCleanupProgress{}
 	if err := task.Execute(context.Background(), progress); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	after := time.Now().UTC().Add(-taskHistoryMaxAge)
+	after := time.Now().UTC().AddDate(0, 0, -taskmanager.DefaultHistoryRetentionDays)
 	if pruner.calls != 1 {
 		t.Fatalf("pruner calls = %d, want 1", pruner.calls)
 	}
-	if pruner.kept != taskHistoryKeepPerTask {
-		t.Fatalf("keepPerTask = %d, want %d", pruner.kept, taskHistoryKeepPerTask)
+	if pruner.kept != taskmanager.DefaultHistoryKeepPerTask {
+		t.Fatalf("keepPerTask = %d, want %d", pruner.kept, taskmanager.DefaultHistoryKeepPerTask)
 	}
 	if pruner.batchSize != taskHistoryCleanupBatchSize {
 		t.Fatalf("batchSize = %d, want %d", pruner.batchSize, taskHistoryCleanupBatchSize)
@@ -97,12 +107,74 @@ func TestTaskHistoryCleanupTask(t *testing.T) {
 	if got := progress.reports[len(progress.reports)-1]; got != "Pruned 10017 task executions" {
 		t.Fatalf("last progress report = %q", got)
 	}
-	var result taskHistoryCleanupResult
-	if err := json.Unmarshal(progress.result, &result); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-	if result.Deleted != 10017 || result.LimitReached {
+	if result := progress.decode(t); result.Deleted != 10017 || result.LimitReached || result.Skipped {
 		t.Fatalf("result = %#v, want 10017 deleted without limit", result)
+	}
+}
+
+func TestTaskHistoryCleanupTaskUsesConfiguredRetention(t *testing.T) {
+	store := &fakeSettingsStore{values: map[string]string{
+		taskmanager.SettingKeyHistoryRetentionDays: "7",
+		taskmanager.SettingKeyHistoryKeepPerTask:   "25",
+	}}
+	pruner := &fakeTaskHistoryPruner{}
+
+	before := time.Now().UTC().AddDate(0, 0, -7)
+	if err := NewTaskHistoryCleanupTask(pruner, store).Execute(context.Background(), &taskHistoryCleanupProgress{}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	after := time.Now().UTC().AddDate(0, 0, -7)
+	if pruner.kept != 25 {
+		t.Fatalf("keepPerTask = %d, want 25", pruner.kept)
+	}
+	if pruner.cutoff.Before(before) || pruner.cutoff.After(after) {
+		t.Fatalf("cutoff = %v, want a 7 day window between %v and %v", pruner.cutoff, before, after)
+	}
+}
+
+func TestTaskHistoryCleanupTaskRejectsUnusableRetention(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		retentionDays string
+		keepPerTask   string
+	}{
+		{"zero", "0", "0"},
+		{"negative", "-5", "-1"},
+		{"garbage", "soon", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeSettingsStore{values: map[string]string{
+				taskmanager.SettingKeyHistoryRetentionDays: tc.retentionDays,
+				taskmanager.SettingKeyHistoryKeepPerTask:   tc.keepPerTask,
+			}}
+			pruner := &fakeTaskHistoryPruner{}
+			if err := NewTaskHistoryCleanupTask(pruner, store).Execute(context.Background(), &taskHistoryCleanupProgress{}); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if pruner.kept != taskmanager.DefaultHistoryKeepPerTask {
+				t.Fatalf("keepPerTask = %d, want the default %d", pruner.kept, taskmanager.DefaultHistoryKeepPerTask)
+			}
+			floor := time.Now().UTC().AddDate(0, 0, -taskmanager.DefaultHistoryRetentionDays-1)
+			if pruner.cutoff.Before(floor) || pruner.cutoff.After(time.Now().UTC()) {
+				t.Fatalf("cutoff = %v, want the default retention window", pruner.cutoff)
+			}
+		})
+	}
+}
+
+func TestSeedHistoryRetentionDefaults(t *testing.T) {
+	store := &fakeSettingsStore{values: map[string]string{
+		taskmanager.SettingKeyHistoryKeepPerTask: "5",
+	}}
+	if err := taskmanager.SeedHistoryRetentionDefaults(context.Background(), store); err != nil {
+		t.Fatalf("SeedHistoryRetentionDefaults: %v", err)
+	}
+	if got := store.values[taskmanager.SettingKeyHistoryKeepPerTask]; got != "5" {
+		t.Fatalf("keep per task = %q, want the existing 5", got)
+	}
+	want := strconv.Itoa(taskmanager.DefaultHistoryRetentionDays)
+	if got := store.values[taskmanager.SettingKeyHistoryRetentionDays]; got != want {
+		t.Fatalf("retention days = %q, want %q", got, want)
 	}
 }
 
@@ -114,7 +186,7 @@ func TestTaskHistoryCleanupTaskReturnsPruneError(t *testing.T) {
 	}
 	progress := &taskHistoryCleanupProgress{}
 
-	err := NewTaskHistoryCleanupTask(pruner).Execute(context.Background(), progress)
+	err := NewTaskHistoryCleanupTask(pruner, &fakeSettingsStore{}).Execute(context.Background(), progress)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Execute error = %v, want %v", err, wantErr)
 	}
@@ -133,16 +205,13 @@ func TestTaskHistoryCleanupTaskCapsWorkPerRun(t *testing.T) {
 	}
 	progress := &taskHistoryCleanupProgress{}
 
-	if err := NewTaskHistoryCleanupTask(pruner).Execute(context.Background(), progress); err != nil {
+	if err := NewTaskHistoryCleanupTask(pruner, &fakeSettingsStore{}).Execute(context.Background(), progress); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if pruner.calls != 1 {
 		t.Fatalf("pruner calls = %d, want 1", pruner.calls)
 	}
-	var result taskHistoryCleanupResult
-	if err := json.Unmarshal(progress.result, &result); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
+	result := progress.decode(t)
 	if result.Deleted != wantDeleted || !result.LimitReached {
 		t.Fatalf("result = %#v, want %d deleted with limit reached", result, wantDeleted)
 	}
@@ -154,17 +223,13 @@ func TestTaskHistoryCleanupTaskReportsSkippedLock(t *testing.T) {
 	}
 	progress := &taskHistoryCleanupProgress{}
 
-	if err := NewTaskHistoryCleanupTask(pruner).Execute(context.Background(), progress); err != nil {
+	if err := NewTaskHistoryCleanupTask(pruner, &fakeSettingsStore{}).Execute(context.Background(), progress); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if got := progress.reports[len(progress.reports)-1]; got != "Task history cleanup is already running on another node" {
 		t.Fatalf("last progress report = %q", got)
 	}
-	var result taskHistoryCleanupResult
-	if err := json.Unmarshal(progress.result, &result); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-	if !result.Skipped {
+	if result := progress.decode(t); !result.Skipped || result.Deleted != 0 {
 		t.Fatalf("result = %#v, want skipped", result)
 	}
 }
