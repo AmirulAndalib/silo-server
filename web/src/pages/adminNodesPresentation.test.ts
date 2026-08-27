@@ -8,6 +8,7 @@ import {
   describeNodeGPU,
   describeNodeSystem,
   describeResourceSample,
+  describeSharedGPU,
   formatBitsPerSecond,
   parseHWDeviceOverride,
 } from "./adminNodesPresentation";
@@ -478,6 +479,62 @@ describe("describeNodeGPU", () => {
     expect(
       describeNodeGPU(makeNode({ capabilities, physical_gpu_keys: ["GPU-abc"] }), NOW),
     ).toEqual(describeNodeGPU(makeNode({ capabilities }), NOW));
+  });
+});
+
+describe("describeSharedGPU", () => {
+  const alone = makeNode({ id: 1, name: "transcode-1" });
+  const nvidiaA = makeNode({ id: 2, name: "transcode-a", physical_gpu_keys: ["GPU-aaa"] });
+  const nvidiaB = makeNode({ id: 3, name: "transcode-b", physical_gpu_keys: ["GPU-aaa"] });
+  const unique = makeNode({ id: 4, name: "transcode-c", physical_gpu_keys: ["GPU-ccc"] });
+
+  it("says nothing about a node that reports no identifiable GPU", () => {
+    expect(describeSharedGPU(alone, [alone, nvidiaA, nvidiaB])).toBeNull();
+  });
+
+  it("says nothing when a node's GPUs are its own", () => {
+    expect(describeSharedGPU(unique, [unique, nvidiaA, nvidiaB])).toBeNull();
+  });
+
+  it("names the other node on the same card, from either side", () => {
+    const nodes = [nvidiaA, nvidiaB, unique];
+    expect(describeSharedGPU(nvidiaA, nodes)).toEqual({
+      label: "Shared GPU",
+      title: "Shares a physical GPU with: transcode-b",
+    });
+    expect(describeSharedGPU(nvidiaB, nodes)).toEqual({
+      label: "Shared GPU",
+      title: "Shares a physical GPU with: transcode-a",
+    });
+  });
+
+  it("matches on one key of several, across node types", () => {
+    const dualGPU = makeNode({
+      id: 5,
+      name: "transcode-dual",
+      physical_gpu_keys: ["GPU-aaa", "boot-1|0000:04:00.0"],
+    });
+    const proxy = makeNode({
+      id: 6,
+      name: "proxy-same-host",
+      type: "proxy",
+      physical_gpu_keys: ["boot-1|0000:04:00.0"],
+    });
+
+    expect(describeSharedGPU(dualGPU, [dualGPU, nvidiaA, proxy])).toEqual({
+      label: "Shared GPU",
+      title: "Shares a physical GPU with: transcode-a, proxy-same-host",
+    });
+  });
+
+  it("reports nothing for a server that predates the field", () => {
+    const olderA = makeNode({ id: 7, name: "old-a" });
+    const olderB = makeNode({ id: 8, name: "old-b" });
+    expect(describeSharedGPU(olderA, [olderA, olderB])).toBeNull();
+  });
+
+  it("does not match a node against itself when the list repeats its id", () => {
+    expect(describeSharedGPU(nvidiaA, [nvidiaA, nvidiaA])).toBeNull();
   });
 });
 

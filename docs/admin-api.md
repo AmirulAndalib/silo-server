@@ -144,10 +144,31 @@ One key per render device in the stored report, deduplicated and sorted:
 - `<boot_id>|<pci_address>`, because a PCI slot only means the same hardware
   within one boot of one kernel.
 
-A device with neither contributes no key rather than a synthetic one. Two nodes
-sharing a key are backed by the same physical GPU — the case that makes
-per-node capacity accounting wrong, and which no single node's report can
-express.
+A device with neither contributes no key rather than a synthetic one, and so
+does a slot on a host that reported no `boot_id`: `boot_id` detection is
+best-effort, and an unscoped slot is not an identity, since every host with an
+Intel iGPU has one at `0000:00:02.0`. Two nodes sharing a key are backed by the
+same physical GPU — the case that makes per-node capacity accounting wrong, and
+which no single node's report can express. The keys are derived from the stored report on every read, so they are
+present as soon as a report is, including immediately after an API restart.
+
+Caveats on what a key can prove:
+
+- A key is only stable within one boot of the host it came from. `boot_id`
+  changes on reboot, so a fallback key does too, and the same card looks like a
+  different GPU until every node on that host has re-reported. An NVIDIA
+  `gpu_uuid` has no such limit.
+- Intel and AMD GPUs passed through to separate VMs cannot be correlated at
+  all: each guest reports its own `boot_id` and its own PCI topology, so two
+  guests on one card produce two unrelated keys. Sharing there is invisible to
+  the server, and stays a matter for how the host is partitioned.
+
+Node selection uses the same keys as a tie-breaker: among transcode nodes that
+are otherwise level on effective job count, the one whose physical GPU group —
+itself plus every pooled transcode node sharing a key with it — carries the
+fewest jobs wins. It never overrides the job count itself or the soft affinity
+that keeps a session on its current node, and it does not apply to proxy
+selection, which is round-robin and does no GPU work.
 
 ## `POST /api/v1/admin/nodes`
 

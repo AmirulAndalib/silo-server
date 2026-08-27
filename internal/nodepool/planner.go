@@ -221,17 +221,19 @@ func (p *Planner) PlanSessionWith(sessionID, currentTranscodeURL string, needsTr
 		estBitrateKbps = 0
 	}
 	proxies := p.proxies.Nodes()
-	transcodes := p.transcodes.Nodes()
+	pooledTranscodes := p.transcodes.Nodes()
+	transcodes := pooledTranscodes
 	// Group health is computed over the full pool before any narrowing:
 	// eligibility restricts what may be selected, not co-location semantics.
-	groupHealthy := groupHealth(proxies, transcodes)
+	// Shared-GPU load is summed over the same full pool, for the same reason.
+	groupHealthy := groupHealth(proxies, pooledTranscodes)
 
 	var plan Plan
 	if needsTranscode {
 		if eligible != nil {
 			transcodes = filterNodes(transcodes, eligible)
 		}
-		plan.TranscodeNode = p.pickTranscode(transcodes, proxies, groupHealthy, currentTranscodeURL, estBitrateKbps, now)
+		plan.TranscodeNode = p.pickTranscode(transcodes, pooledTranscodes, proxies, groupHealthy, currentTranscodeURL, estBitrateKbps, now)
 		if plan.TranscodeNode != nil {
 			plan.ProxyNode = p.pickProxy(proxies, groupHealthy, plan.TranscodeNode.Group, estBitrateKbps, now)
 		}
@@ -277,12 +279,13 @@ func (p *Planner) PlanTranscodeSessionWithLocalEgress(sessionID, currentTranscod
 	p.pruneReservations(now)
 	delete(p.reserved, sessionID)
 
-	transcodes := p.transcodes.Nodes()
-	groupHealthy := groupHealth(nil, transcodes)
+	pooledTranscodes := p.transcodes.Nodes()
+	transcodes := pooledTranscodes
+	groupHealthy := groupHealth(nil, pooledTranscodes)
 	if eligible != nil {
 		transcodes = filterNodes(transcodes, eligible)
 	}
-	node := p.pickLocalEgressTranscode(transcodes, groupHealthy, currentTranscodeURL, now)
+	node := p.pickLocalEgressTranscode(transcodes, pooledTranscodes, groupHealthy, currentTranscodeURL, now)
 	if node == nil {
 		return Plan{}
 	}
@@ -464,8 +467,13 @@ func groupHealth(proxies, transcodes []*Node) map[string]bool {
 // the session on currentURL unless a candidate has at least two fewer jobs
 // (the historical soft-affinity rule). Shared by pickTranscode and
 // pickLocalEgressTranscode, which differ only in their eligibility predicate.
-func (p *Planner) pickNode(nodes []*Node, currentURL string, now time.Time, eligible func(*Node) bool) *Node {
+//
+// tieBreak, when non-nil, scores candidates that are level on effective jobs;
+// the lower score wins. It never overrides the job count or the affinity rule,
+// so a caller that passes nil gets exactly the historical selection.
+func (p *Planner) pickNode(nodes []*Node, currentURL string, now time.Time, eligible func(*Node) bool, tieBreak func(*Node) int) *Node {
 	var best, current *Node
+	bestJobs := 0
 	for _, n := range nodes {
 		if !eligible(n) {
 			continue
@@ -473,7 +481,11 @@ func (p *Planner) pickNode(nodes []*Node, currentURL string, now time.Time, elig
 		if n.URL == currentURL {
 			current = n
 		}
-		if best == nil || p.effectiveJobs(n, now) < p.effectiveJobs(best, now) {
+		jobs := p.effectiveJobs(n, now)
+		switch {
+		case best == nil, jobs < bestJobs:
+			best, bestJobs = n, jobs
+		case jobs == bestJobs && tieBreak != nil && tieBreak(n) < tieBreak(best):
 			best = n
 		}
 	}
@@ -488,11 +500,75 @@ func (p *Planner) pickNode(nodes []*Node, currentURL string, now time.Time, elig
 
 // pickTranscode returns the eligible transcode node with the fewest effective
 // jobs, keeping the session on currentURL unless a candidate has at least two
-// fewer jobs (the historical soft-affinity rule).
-func (p *Planner) pickTranscode(transcodes, proxies []*Node, groupHealthy map[string]bool, currentURL string, estKbps int, now time.Time) *Node {
+// fewer jobs (the historical soft-affinity rule). Candidates level on job count
+// are separated by the load on the physical GPU behind them: two pooled nodes
+// can be two containers on one card, and spreading jobs across node records
+// that share silicon does not spread the work.
+//
+// pool is the full transcode pool the candidates were drawn from; shared-GPU
+// load is summed over all of it, since a job on a node this plan may not select
+// still occupies the same GPU.
+func (p *Planner) pickTranscode(transcodes, pool, proxies []*Node, groupHealthy map[string]bool, currentURL string, estKbps int, now time.Time) *Node {
 	return p.pickNode(transcodes, currentURL, now, func(n *Node) bool {
 		return p.transcodeEligible(n, proxies, groupHealthy, estKbps, now)
-	})
+	}, p.physicalGPULoadScore(pool, now))
+}
+
+// physicalGPULoadScore precomputes, once per pick, the total effective jobs
+// running on each pooled node's physical GPU group: itself plus every pooled
+// node sharing at least one GPU identity with it, healthy or not, because a job
+// occupies a card regardless of whether the node running it may take another. A
+// node with no derived identities is a group of one.
+//
+// Pools only hold enabled nodes, so a node disabled while its transcodes are
+// still running leaves the pool and stops counting against its group — the same
+// blind spot the primary least-jobs rule already has, since there is no drain
+// state between enabled and gone.
+//
+// Job counts only. Live GPU utilization is a richer signal but a much worse
+// tie-breaker: it lags a newly admitted job by a sampling interval, so a burst
+// of starts would all see the same idle card.
+func (p *Planner) physicalGPULoadScore(pool []*Node, now time.Time) func(*Node) int {
+	jobs := make(map[*Node]int, len(pool))
+	byKey := make(map[string][]*Node)
+	for _, n := range pool {
+		if n == nil {
+			continue
+		}
+		jobs[n] = p.effectiveJobs(n, now)
+		for _, key := range n.PhysicalGPUKeys {
+			byKey[key] = append(byKey[key], n)
+		}
+	}
+
+	loads := make(map[*Node]int, len(pool))
+	for _, n := range pool {
+		if n == nil {
+			continue
+		}
+		total := jobs[n]
+		counted := map[*Node]struct{}{n: {}}
+		for _, key := range n.PhysicalGPUKeys {
+			for _, peer := range byKey[key] {
+				// A peer sharing several keys with n must only be counted once.
+				if _, seen := counted[peer]; seen {
+					continue
+				}
+				counted[peer] = struct{}{}
+				total += jobs[peer]
+			}
+		}
+		loads[n] = total
+	}
+
+	return func(n *Node) int {
+		if load, ok := loads[n]; ok {
+			return load
+		}
+		// A candidate the pool snapshot does not contain (a concurrent pool
+		// swap) scores as its own load, which is the no-sharing answer.
+		return p.effectiveJobs(n, now)
+	}
 }
 
 // pickLocalEgressTranscode applies the transcode half of normal session
@@ -501,10 +577,10 @@ func (p *Planner) pickTranscode(transcodes, proxies []*Node, groupHealthy map[st
 // suppress an otherwise healthy transcode executor. Passing nil proxies to
 // transcodeEligible reduces it to exactly that: healthy, enabled, under cap,
 // and group-healthy, with no proxy partner required.
-func (p *Planner) pickLocalEgressTranscode(transcodes []*Node, groupHealthy map[string]bool, currentURL string, now time.Time) *Node {
+func (p *Planner) pickLocalEgressTranscode(transcodes, pool []*Node, groupHealthy map[string]bool, currentURL string, now time.Time) *Node {
 	return p.pickNode(transcodes, currentURL, now, func(n *Node) bool {
 		return p.transcodeEligible(n, nil, groupHealthy, 0, now)
-	})
+	}, p.physicalGPULoadScore(pool, now))
 }
 
 // transcodeEligible reports whether a transcode node may take a new session:

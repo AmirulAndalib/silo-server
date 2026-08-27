@@ -19,10 +19,16 @@ func NewProxyPool() *ProxyPool {
 	return &ProxyPool{}
 }
 
-// SetNodes replaces the node list. Called on startup and when admin changes nodes.
+// SetNodes replaces the node list. Called on startup and when admin changes
+// nodes. Physical GPU identities are derived from each node's stored capability
+// report here, so they exist from the first load rather than only after a
+// capability refetch.
 func (p *ProxyPool) SetNodes(nodes []*Node) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	for _, n := range nodes {
+		applyPhysicalGPUKeys(n)
+	}
 	p.nodes = nodes
 }
 

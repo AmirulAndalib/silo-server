@@ -347,6 +347,47 @@ function describeDeviceLine(device: NodeRenderDevice): string {
   return address ? `${line} (${address})` : line;
 }
 
+// --- Shared physical GPUs --------------------------------------------------
+
+/** The "Shared GPU" marker on a node backed by hardware another node also uses. */
+export interface SharedGPUBadge {
+  label: string;
+  /** Hover text naming the other nodes on the same card(s). */
+  title: string;
+}
+
+/**
+ * Describe whether a node shares a physical GPU with any other node, or null
+ * when it does not — which is the normal case and renders nothing.
+ *
+ * `physical_gpu_keys` is derived server-side from each node's capability
+ * report, so a node that reports no identifiable GPU (and every node from a
+ * server predating the field) carries none and can never match: an unknown GPU
+ * is not evidence of sharing in either direction.
+ */
+export function describeSharedGPU(
+  node: StreamNode,
+  allNodes: readonly StreamNode[],
+): SharedGPUBadge | null {
+  const keys = new Set(node.physical_gpu_keys ?? []);
+  if (keys.size === 0) {
+    return null;
+  }
+
+  const others = allNodes
+    .filter((candidate) => candidate.id !== node.id)
+    .filter((candidate) => (candidate.physical_gpu_keys ?? []).some((key) => keys.has(key)))
+    .map((candidate) => candidate.name);
+  if (others.length === 0) {
+    return null;
+  }
+
+  return {
+    label: "Shared GPU",
+    title: `Shares a physical GPU with: ${others.join(", ")}`,
+  };
+}
+
 // --- Per-node acceleration overrides ---------------------------------------
 
 /**

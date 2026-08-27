@@ -22,12 +22,16 @@ func NewTranscodePool() *TranscodePool {
 // SetNodes replaces the node list. Node URLs are normalized (trailing slashes
 // trimmed) at the storage boundary so every consumer compares them
 // consistently, including TranscodeNodeHealthy and remote-start adoption.
+// Physical GPU identities are derived here too, so the planner's shared-GPU
+// accounting works from the stored capability report immediately after a
+// restart, before any node has advertised a changed hash.
 func (p *TranscodePool) SetNodes(nodes []*Node) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, n := range nodes {
 		if n != nil {
 			n.URL = normalizeNodeURL(n.URL)
+			applyPhysicalGPUKeys(n)
 		}
 	}
 	p.nodes = nodes
@@ -133,6 +137,9 @@ func applyNodeCapabilities(nodes []*Node, id int, capabilities []byte, hash stri
 		clone.Capabilities = append(json.RawMessage(nil), capabilities...)
 		clone.CapabilitiesHash = &hash
 		clone.CapabilitiesRefreshedAt = &refreshedAt
+		// The GPU identities belong to the payload being replaced, so they are
+		// re-derived rather than carried over from the previous report.
+		applyPhysicalGPUKeys(&clone)
 		nodes[i] = &clone
 		return
 	}

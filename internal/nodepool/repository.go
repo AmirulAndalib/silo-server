@@ -58,6 +58,14 @@ type Node struct {
 	// what the node itself resolves against once it has reloaded its config.
 	HWAccelOverride  *string `json:"hw_accel_override,omitempty"`
 	HWDeviceOverride *string `json:"hw_device_override,omitempty"`
+	// PhysicalGPUKeys identifies the actual GPUs behind this node, derived from
+	// Capabilities rather than stored: it is a pure function of that payload, so
+	// a column would only be a second copy that can disagree with it. Two nodes
+	// sharing a key are backed by the same card — the case that makes
+	// independent per-node capacity accounting wrong, and which no single node's
+	// report can express. Last in the struct so it stays last on the wire, where
+	// the admin node list has always carried it.
+	PhysicalGPUKeys []string `json:"physical_gpu_keys,omitempty"`
 }
 
 // EffectiveHWAccel is the acceleration backend this node runs under: its own
@@ -260,6 +268,10 @@ func scanNode(row pgx.Row) (*Node, error) {
 	if len(lastStats) > 0 {
 		n.LastStats = json.RawMessage(lastStats)
 	}
+	// Derived here so every reader of a stored row — the admin listing as much
+	// as a pool load — sees the same identities without parsing the payload
+	// again for itself.
+	applyPhysicalGPUKeys(&n)
 	return &n, nil
 }
 

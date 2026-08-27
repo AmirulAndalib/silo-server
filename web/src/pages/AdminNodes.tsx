@@ -41,6 +41,7 @@ import {
   describeNodeAccelerationOverride,
   describeNodeGPU,
   describeNodeSystem,
+  describeSharedGPU,
   parseHWDeviceOverride,
 } from "./adminNodesPresentation";
 
@@ -105,7 +106,28 @@ function NodeOverrideLine({ node }: { node: StreamNode }) {
   );
 }
 
-function NodeGPUCell({ node }: { node: StreamNode }) {
+/**
+ * The "Shared GPU" marker, or nothing when this node's card is its own. Muted
+ * rather than tinted: sharing hardware is information an operator needs when
+ * reading job counts, not a fault.
+ */
+function NodeSharedGPUBadge({ node, allNodes }: { node: StreamNode; allNodes: StreamNode[] }) {
+  const shared = describeSharedGPU(node, allNodes);
+  if (!shared) {
+    return null;
+  }
+  return (
+    <Badge
+      variant="outline"
+      className="bg-surface text-muted-foreground border-border"
+      title={shared.title}
+    >
+      {shared.label}
+    </Badge>
+  );
+}
+
+function NodeGPUCell({ node, allNodes }: { node: StreamNode; allNodes: StreamNode[] }) {
   const gpu = describeNodeGPU(node);
   if (gpu.kind === "awaiting") {
     return (
@@ -120,10 +142,11 @@ function NodeGPUCell({ node }: { node: StreamNode }) {
 
   return (
     <div className="space-y-1">
-      <div className="flex items-center gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
         <Badge variant="outline" className={gpu.backend.badgeClass} title={gpu.backend.title}>
           {gpu.backend.label}
         </Badge>
+        <NodeSharedGPUBadge node={node} allNodes={allNodes} />
         {gpu.failures.length > 0 && (
           <span
             className="text-warning inline-flex"
@@ -173,6 +196,12 @@ function NodeGPUCell({ node }: { node: StreamNode }) {
 interface NodeSectionProps {
   type: NodeType;
   nodes: StreamNode[];
+  /**
+   * Every node of both types. Shared-GPU detection needs it: a proxy and a
+   * transcode node on one host share that host's card, and each table only
+   * holds half of that pair.
+   */
+  allNodes: StreamNode[];
   infoBanner: ReactNode;
   showJobs: boolean;
   onAdd: () => void;
@@ -186,6 +215,7 @@ interface NodeSectionProps {
 function NodeSection({
   type,
   nodes,
+  allNodes,
   infoBanner,
   showJobs,
   onAdd,
@@ -279,7 +309,7 @@ function NodeSection({
                       </span>
                     </TableCell>
                     <TableCell>
-                      <NodeGPUCell node={node} />
+                      <NodeGPUCell node={node} allNodes={allNodes} />
                     </TableCell>
                     <TableCell>
                       <NodeSystemCell node={node} />
@@ -622,6 +652,7 @@ export default function AdminNodes() {
       <NodeSection
         type="proxy"
         nodes={proxyNodes}
+        allNodes={nodes}
         showJobs={true}
         onAdd={() => handleAdd("proxy")}
         onEdit={handleEdit}
@@ -640,6 +671,7 @@ export default function AdminNodes() {
       <NodeSection
         type="transcode"
         nodes={transcodeNodes}
+        allNodes={nodes}
         showJobs={true}
         onAdd={() => handleAdd("transcode")}
         onEdit={handleEdit}

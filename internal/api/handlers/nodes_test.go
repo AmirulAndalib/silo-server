@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,55 +12,6 @@ import (
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/go-chi/chi/v5"
 )
-
-// An NVIDIA uuid identifies a card wherever it is plugged in; a PCI address
-// only identifies a slot, and only within one boot of one kernel. Deriving the
-// key this way is what lets an admin see that two nodes are sharing one GPU.
-func TestPhysicalGPUKeys(t *testing.T) {
-	tests := []struct {
-		name         string
-		capabilities string
-		want         []string
-	}{
-		{
-			name: "prefers gpu uuid over slot identity",
-			capabilities: `{"boot_id":"boot-1","render_device_details":[
-				{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0","gpu_uuid":"GPU-aaa"}]}`,
-			want: []string{"GPU-aaa"},
-		},
-		{
-			name: "falls back to boot-scoped pci address",
-			capabilities: `{"boot_id":"boot-1","render_device_details":[
-				{"path":"/dev/dri/renderD129","pci_address":"0000:04:00.0"}]}`,
-			want: []string{"boot-1|0000:04:00.0"},
-		},
-		{
-			name: "mixed devices are deduped and sorted",
-			capabilities: `{"boot_id":"boot-1","render_device_details":[
-				{"path":"/dev/dri/renderD130","pci_address":"0000:05:00.0"},
-				{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0","gpu_uuid":"GPU-bbb"},
-				{"path":"/dev/dri/renderD129","pci_address":"0000:03:00.0","gpu_uuid":"GPU-bbb"}]}`,
-			want: []string{"GPU-bbb", "boot-1|0000:05:00.0"},
-		},
-		{
-			name: "device with no identity contributes no key",
-			capabilities: `{"boot_id":"boot-1","render_device_details":[
-				{"path":"/dev/dri/renderD128"},{"path":"/dev/dri/renderD129","gpu_uuid":"GPU-ccc"}]}`,
-			want: []string{"GPU-ccc"},
-		},
-		{name: "no capabilities stored", capabilities: "", want: nil},
-		{name: "unparseable payload", capabilities: `not json`, want: nil},
-		{name: "no render devices", capabilities: `{"boot_id":"boot-1","render_device_details":[]}`, want: nil},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := physicalGPUKeys([]byte(tt.capabilities))
-			if !slices.Equal(got, tt.want) {
-				t.Fatalf("physicalGPUKeys() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
 
 type stubNodeRepository struct {
 	nodes []*nodepool.Node
@@ -113,6 +63,10 @@ func TestHandleListNodesIncludesCapabilities(t *testing.T) {
 				`{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0","gpu_uuid":"GPU-aaa"}]}`),
 			CapabilitiesHash:        &hash,
 			CapabilitiesRefreshedAt: &refreshedAt,
+			// Production derives this in the node store's row scanner (covered
+			// by TestScanNodeDerivesPhysicalGPUKeys); the stub stands in for it
+			// so this test can assert the handler passes the field through.
+			PhysicalGPUKeys: []string{"GPU-aaa"},
 		},
 		{ID: 2, Name: "old-node", Type: nodepool.NodeTypeProxy, URL: "http://old", Enabled: true},
 	}}
