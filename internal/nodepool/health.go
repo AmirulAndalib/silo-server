@@ -701,14 +701,28 @@ func computeCapabilityDrift(stored, payload []byte) (drift capabilityDrift, pars
 	}
 	drift.previousResolved = previous.Resolved
 	drift.resolved = current.Resolved
-	verifiedNow := make(map[string]bool, len(current.DetectedBackends))
+	// Skipped is carried, not flattened into "not verified": it means no probe
+	// ran because the node cannot open the backend's configured devices, which
+	// is a statement about access rather than about hardware. Treating it as a
+	// loss also contradicted hardwareProbesClean, which counts a skipped
+	// backend as clean — the note would be set by one rule and cleared by the
+	// other on the next hash change, flapping without anything having changed.
+	type probeOutcome struct{ verified, skipped bool }
+	now := make(map[string]probeOutcome, len(current.DetectedBackends))
 	for _, backend := range current.DetectedBackends {
-		verifiedNow[backend.Backend] = backend.Verified
+		now[backend.Backend] = probeOutcome{verified: backend.Verified, skipped: backend.Skipped}
 	}
 	for _, backend := range previous.DetectedBackends {
-		if backend.Verified && !verifiedNow[backend.Backend] {
-			drift.lostBackends = append(drift.lostBackends, backend.Backend)
+		if !backend.Verified {
+			continue
 		}
+		// A backend missing from the new report entirely had no candidate
+		// hardware left to probe, which is the GPU-disappeared case and is a
+		// genuine loss.
+		if outcome, reported := now[backend.Backend]; reported && (outcome.verified || outcome.skipped) {
+			continue
+		}
+		drift.lostBackends = append(drift.lostBackends, backend.Backend)
 	}
 	drift.lostDevices = lostRenderDevices(previous, current)
 	return drift, true

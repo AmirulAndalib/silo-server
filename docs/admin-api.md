@@ -239,9 +239,12 @@ Semantics worth knowing:
   that probed nothing at all does not clear it either: a GPU that disappeared
   completely leaves no candidate backend to fail, and the absence of anything to
   probe is not evidence of recovery.
-- A backend reported as `skipped` does not hold the note open. Skipping means
-  the node cannot open the devices, which is a statement about access rather
-  than about hardware.
+- A backend reported as `skipped` neither sets the note nor holds it open.
+  Skipping means no probe ran because the node cannot open the backend's
+  configured devices, which is a statement about access rather than about
+  hardware — the GPU column reports that state separately. A backend that was
+  probed and *failed* is a loss, as is one that stopped being reported at all,
+  which is what a card disappearing looks like.
 - Only a loss is reported. Added hardware is not drift.
 - A node's first stored report carries none — there is nothing to compare it
   against.

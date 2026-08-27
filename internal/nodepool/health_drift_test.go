@@ -421,3 +421,64 @@ func TestComputeCapabilityDriftReportsAReplacedCardInTheSameSlot(t *testing.T) {
 		t.Fatalf("lostDevices = %v, want the replaced card reported gone", drift.lostDevices)
 	}
 }
+
+// Skipped means no probe ran, because the node cannot open the backend's
+// configured devices — a statement about access, not about hardware. Counting
+// it as a loss also contradicted hardwareProbesClean, which treats a skipped
+// backend as clean: the note would be set by one rule and cleared by the other
+// on the next hash change, flapping with nothing having changed.
+func TestComputeCapabilityDriftDoesNotTreatASkippedBackendAsLost(t *testing.T) {
+	const before = `{"resolved":"qsv","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],` +
+		`"detected_backends":[{"backend":"qsv","verified":true}]}`
+	const after = `{"resolved":"none","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],` +
+		`"detected_backends":[{"backend":"qsv","verified":false,"skipped":true}]}`
+
+	drift, parsed := computeCapabilityDrift([]byte(before), []byte(after))
+	if !parsed {
+		t.Fatal("both reports should parse")
+	}
+	if len(drift.lostBackends) != 0 {
+		t.Fatalf("lostBackends = %v, want a skipped backend not counted as lost", drift.lostBackends)
+	}
+	// And the pair round-trips: what does not set the note must not be held
+	// open by it either.
+	standing := "verified hardware backends lost: qsv"
+	if got := resolveDriftNote(&standing, drift, parsed, []byte(after)); got == nil || *got != standing {
+		t.Fatalf("resolveDriftNote = %v, want a skipped report to leave a standing note alone", got)
+	}
+}
+
+// A backend that fails its probe outright is still a loss — the distinction is
+// "could not try" versus "tried and the driver said no".
+func TestComputeCapabilityDriftStillCatchesAFailedBackend(t *testing.T) {
+	const before = `{"resolved":"qsv","render_devices":["/dev/dri/renderD128"],` +
+		`"detected_backends":[{"backend":"qsv","verified":true}]}`
+	const after = `{"resolved":"none","render_devices":["/dev/dri/renderD128"],` +
+		`"detected_backends":[{"backend":"qsv","verified":false,"reason":"h264_qsv smoke encode failed"}]}`
+
+	drift, parsed := computeCapabilityDrift([]byte(before), []byte(after))
+	if !parsed {
+		t.Fatal("both reports should parse")
+	}
+	if len(drift.lostBackends) != 1 || drift.lostBackends[0] != "qsv" {
+		t.Fatalf("lostBackends = %v, want the failing backend reported", drift.lostBackends)
+	}
+}
+
+// A backend that vanishes from the report had no candidate hardware left to
+// probe at all, which is the GPU-disappeared case and a genuine loss.
+func TestComputeCapabilityDriftCatchesABackendThatStoppedBeingReported(t *testing.T) {
+	const before = `{"resolved":"qsv","render_devices":["/dev/dri/renderD128"],` +
+		`"detected_backends":[{"backend":"qsv","verified":true}]}`
+	const after = `{"resolved":"none","render_devices":[],"detected_backends":[]}`
+
+	drift, parsed := computeCapabilityDrift([]byte(before), []byte(after))
+	if !parsed {
+		t.Fatal("both reports should parse")
+	}
+	if len(drift.lostBackends) != 1 || drift.lostBackends[0] != "qsv" {
+		t.Fatalf("lostBackends = %v, want the vanished backend reported", drift.lostBackends)
+	}
+}
