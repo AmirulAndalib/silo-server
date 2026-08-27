@@ -147,6 +147,64 @@ func TestDiskStatsDeduplicatesByFilesystem(t *testing.T) {
 	}
 }
 
+// The API stores a node's sample opaquely and does not know its transcode
+// directory, so the scratch entry has to identify itself: the admission guard
+// and the Prometheus label both find it by this flag, not by matching a path.
+func TestDiskStatsFlagsTheScratchMount(t *testing.T) {
+	f := newDiskFixture(t, "/transcode", "/media", "/missing")
+	f.answer("/transcode", fsStats{UsedBytes: 96 << 30, TotalBytes: 100 << 30, FSID: "a:1"})
+	f.answer("/media", fsStats{UsedBytes: 10 << 30, TotalBytes: 100 << 30, FSID: "b:2"})
+
+	f.sampleAndSettle(t, 3)
+	disks := f.sampleAndSettle(t, 3)
+
+	if len(disks) != 3 {
+		t.Fatalf("disks = %+v, want three entries", disks)
+	}
+	if !disks[0].Scratch || disks[0].Path != "/transcode" {
+		t.Fatalf("disks[0] = %+v, want the scratch dir flagged and first", disks[0])
+	}
+	for _, disk := range disks[1:] {
+		if disk.Scratch {
+			t.Fatalf("non-scratch mount flagged as scratch: %+v", disk)
+		}
+	}
+}
+
+// A scratch dir that does not exist yet is still the scratch entry: an
+// unavailable reading has to be distinguishable from a media root's, and the
+// admission guard depends on telling "cannot measure" from "not the scratch".
+func TestDiskStatsFlagsAnUnavailableScratchMount(t *testing.T) {
+	f := newDiskFixture(t, "/transcode", "/media")
+	f.answer("/media", fsStats{UsedBytes: 10 << 30, TotalBytes: 100 << 30, FSID: "b:2"})
+
+	f.sampleAndSettle(t, 2)
+	disks := f.sampleAndSettle(t, 2)
+
+	if len(disks) == 0 || disks[0].Path != "/transcode" {
+		t.Fatalf("disks = %+v, want the scratch dir first", disks)
+	}
+	if !disks[0].Unavailable || !disks[0].Scratch {
+		t.Fatalf("disks[0] = %+v, want an unavailable scratch entry", disks[0])
+	}
+}
+
+// A sampler with no scratch dir — a proxy node — flags nothing, so a reader
+// never mistakes a media root for the transcode volume.
+func TestDiskStatsFlagsNoScratchWithoutAScratchDir(t *testing.T) {
+	f := newDiskFixture(t, "", "/media")
+	f.answer("/media", fsStats{UsedBytes: 10 << 30, TotalBytes: 100 << 30, FSID: "b:2"})
+
+	f.sampleAndSettle(t, 1)
+	disks := f.sampleAndSettle(t, 1)
+
+	for _, disk := range disks {
+		if disk.Scratch {
+			t.Fatalf("mount flagged as scratch with no scratch dir configured: %+v", disk)
+		}
+	}
+}
+
 // The contract that matters most: a mount whose server died reports its last
 // good numbers marked stale, and never delays a sample.
 func TestDiskStatsReportsHungMountAsStaleWithoutBlocking(t *testing.T) {

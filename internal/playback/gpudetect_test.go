@@ -1047,8 +1047,9 @@ func writeFakeFFmpeg(t *testing.T, probe fakeFFmpegProbe) fakeFFmpegBinary {
 	return fakeFFmpegBinary{path: path, logPath: logPath}
 }
 
+// resetHWProbeCacheForTest clears the probe cache between cases. It delegates
+// to the exported invalidation so tests exercise the same seam the re-probe
+// action uses rather than a second, drifting implementation.
 func resetHWProbeCacheForTest() {
-	hwProbeCache.Lock()
-	defer hwProbeCache.Unlock()
-	hwProbeCache.entries = make(map[string]hwProbeCacheEntry)
+	InvalidateHWProbeCache()
 }

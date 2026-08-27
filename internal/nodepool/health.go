@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // healthResponse is the JSON response from a node's /health endpoint.
@@ -145,6 +148,12 @@ type CapabilityFetcher func(ctx context.Context, nodeURL string) (payload []byte
 // abandoning it every sweep.
 const capabilityFetchTimeout = 2 * time.Minute
 
+// CapabilityRefreshTimeout is the bound RefreshNodeCapabilities puts on the
+// fetch it performs. It is exported for the one caller that has to hold an HTTP
+// connection open across that fetch and must therefore size its own write
+// deadline to include it.
+const CapabilityRefreshTimeout = capabilityFetchTimeout
+
 // HealthChecker runs periodic health checks on all nodes in both pools,
 // updating in-memory state and optionally persisting to the database.
 type HealthChecker struct {
@@ -231,7 +240,7 @@ func (hc *HealthChecker) Start(ctx context.Context) {
 type applyHealthFunc func(id int, healthy bool, activeJobs, egressKbps int, lastStats []byte, checkedAt time.Time)
 
 // applyCapabilitiesFunc is a pool's copy-on-write capability writer.
-type applyCapabilitiesFunc func(id int, capabilities []byte, hash string, refreshedAt time.Time)
+type applyCapabilitiesFunc func(id int, capabilities []byte, hash string, refreshedAt time.Time, drift *string)
 
 func (hc *HealthChecker) checkAll(ctx context.Context) {
 	var wg sync.WaitGroup
@@ -291,7 +300,8 @@ func (hc *HealthChecker) startCapabilityRefresh(ctx context.Context, n *Node, ap
 	go func() {
 		defer hc.capabilityRefreshes.Done()
 		defer hc.capabilityRefreshInFlight.Delete(n.ID)
-		hc.refreshCapabilities(ctx, n, applyCapabilities)
+		// Errors are already logged inside; the sweep has no caller to report to.
+		_ = hc.refreshCapabilities(ctx, n, applyCapabilities)
 	}()
 }
 
@@ -301,13 +311,66 @@ func (hc *HealthChecker) waitForCapabilityRefreshes() {
 	hc.capabilityRefreshes.Wait()
 }
 
+// RefreshNodeCapabilities fetches, stores, and publishes one node's capability
+// report immediately, on the caller's goroutine, using exactly the machinery the
+// background sweep uses.
+//
+// It exists for the operator-triggered re-probe: the node has just recomputed
+// its inventory, and waiting up to a sweep interval for the API to notice would
+// make the action look like it did nothing. Every rule the sweep applies still
+// applies here — drift is computed and persisted the same way, a report without
+// a hash is refused, a failed fetch leaves the stored row alone — so there is no
+// second, divergent persist path.
+//
+// It participates in the sweep's per-node in-flight guard, so a manual refresh
+// and a sweep refresh of the same node cannot run at once; the loser reports
+// ErrCapabilityRefreshInFlight rather than starting a duplicate fetch.
+func (hc *HealthChecker) RefreshNodeCapabilities(ctx context.Context, n *Node) error {
+	if hc == nil || n == nil {
+		return errors.New("no node health checker configured")
+	}
+	if fetch, _ := hc.hooks(); fetch == nil {
+		return errors.New("no node capability fetcher configured")
+	}
+	if _, loaded := hc.capabilityRefreshInFlight.LoadOrStore(n.ID, struct{}{}); loaded {
+		return ErrCapabilityRefreshInFlight
+	}
+	defer hc.capabilityRefreshInFlight.Delete(n.ID)
+	return hc.refreshCapabilities(ctx, n, hc.applyCapabilitiesFor(n))
+}
+
+// ErrCapabilityRefreshInFlight reports that a capability refresh for the node
+// was already running, so the caller's own refresh was not started. The report
+// in flight is at least as fresh as the one the caller wanted.
+var ErrCapabilityRefreshInFlight = errors.New("node capability refresh already in flight")
+
+// applyCapabilitiesFor returns the pool writer for a node's type, or nil when
+// this checker has no pool for it — which is the normal state for a node row
+// that is disabled and therefore in no pool.
+func (hc *HealthChecker) applyCapabilitiesFor(n *Node) applyCapabilitiesFunc {
+	switch n.Type {
+	case NodeTypeProxy:
+		if hc.proxyPool != nil {
+			return hc.proxyPool.ApplyCapabilities
+		}
+	case NodeTypeTranscode:
+		if hc.transcodePool != nil {
+			return hc.transcodePool.ApplyCapabilities
+		}
+	}
+	return nil
+}
+
 // refreshCapabilities fetches and stores one node's capability report. A
 // failure leaves the stored row alone and is retried on the next sweep, because
 // a fetch that failed is no evidence about what the node has.
-func (hc *HealthChecker) refreshCapabilities(ctx context.Context, n *Node, applyCapabilities applyCapabilitiesFunc) {
+//
+// The returned error is for a caller that asked for this refresh explicitly; the
+// sweep ignores it, since every failure is already logged here.
+func (hc *HealthChecker) refreshCapabilities(ctx context.Context, n *Node, applyCapabilities applyCapabilitiesFunc) error {
 	fetch, onChanged := hc.hooks()
 	if fetch == nil {
-		return
+		return nil
 	}
 	fetchCtx, cancel := context.WithTimeout(ctx, capabilityFetchTimeout)
 	defer cancel()
@@ -315,7 +378,7 @@ func (hc *HealthChecker) refreshCapabilities(ctx context.Context, n *Node, apply
 	if err != nil {
 		slog.WarnContext(ctx, "node capability fetch failed", "component", "nodepool",
 			"id", n.ID, "name", n.Name, "url", n.URL, "error", err)
-		return
+		return err
 	}
 	if hash == "" || len(payload) == 0 {
 		// A hash is what makes the payload trackable; storing one without it
@@ -323,24 +386,30 @@ func (hc *HealthChecker) refreshCapabilities(ctx context.Context, n *Node, apply
 		// node is the only thing that knows what it hashed.
 		slog.WarnContext(ctx, "node capability report carries no hash", "component", "nodepool",
 			"id", n.ID, "name", n.Name, "url", n.URL)
-		return
+		return errors.New("node capability report carries no hash")
 	}
 
+	// Computed before the write, because the comparison is against the report
+	// this one replaces, and stored with it so a reader never sees a note
+	// describing a different payload.
+	drift, parsed := computeCapabilityDrift(n.Capabilities, payload)
+	note := resolveDriftNote(n.CapabilityDrift, drift, parsed, payload)
 	refreshedAt := time.Now()
 	if hc.repo != nil {
-		if err := hc.repo.UpdateCapabilities(ctx, n.ID, payload, hash, refreshedAt); err != nil {
+		if err := hc.repo.UpdateCapabilities(ctx, n.ID, payload, hash, refreshedAt, note); err != nil {
 			slog.WarnContext(ctx, "failed to persist node capabilities", "component", "nodepool",
 				"id", n.ID, "name", n.Name, "error", err)
-			return
+			return err
 		}
 	}
-	logCapabilityChange(ctx, n, payload)
+	logCapabilityChange(ctx, n, drift, parsed)
 	if applyCapabilities != nil {
-		applyCapabilities(n.ID, payload, hash, refreshedAt)
+		applyCapabilities(n.ID, payload, hash, refreshedAt, note)
 	}
 	if onChanged != nil {
 		onChanged(n.URL)
 	}
+	return nil
 }
 
 func storedCapabilitiesHash(n *Node) string {
@@ -359,8 +428,163 @@ type capabilityDriftView struct {
 	DetectedBackends []struct {
 		Backend  string `json:"backend"`
 		Verified bool   `json:"verified"`
+		// Skipped reports that no probe was attempted because the node cannot
+		// open any of the backend's candidate devices. That is a statement
+		// about access, not about hardware, so it never counts as a failure.
+		Skipped bool `json:"skipped"`
 	} `json:"detected_backends"`
 	RenderDevices []string `json:"render_devices"`
+}
+
+// capabilityDrift is what a refetch lost relative to the report it replaces.
+// The zero value means nothing was lost, which is also what a node's very first
+// report produces.
+type capabilityDrift struct {
+	// first reports that there was no stored report to compare against.
+	first bool
+	// lostBackends are backends that used to pass their probe and no longer do.
+	lostBackends []string
+	// lostDevices are render devices present in the previous report and absent
+	// from this one.
+	lostDevices []string
+	// previousResolved and resolved are the backend each report resolved to;
+	// carried for the log line, which is where an operator reads the effect.
+	previousResolved string
+	resolved         string
+}
+
+// regressed reports whether this refetch lost something worth telling an
+// operator about.
+func (d capabilityDrift) regressed() bool {
+	return len(d.lostBackends) > 0 || len(d.lostDevices) > 0
+}
+
+// maxCapabilityDriftNoteBytes bounds the stored note. The inputs are a node's
+// own device and backend lists, so an honest note is a line long; the bound is
+// only there because the lists come from a worker that may run elsewhere, and a
+// text column echoed to every admin listing nodes is not the place to trust
+// them.
+const maxCapabilityDriftNoteBytes = 512
+
+// persistedNote renders this refetch's regression for the
+// stream_nodes.capability_drift column, or nil when this refetch lost nothing.
+// nil is not by itself a reason to clear a note the node already carries — see
+// resolveDriftNote, which owns that decision.
+func (d capabilityDrift) persistedNote() *string {
+	if !d.regressed() {
+		return nil
+	}
+	parts := make([]string, 0, 3)
+	if len(d.lostBackends) > 0 {
+		parts = append(parts, "verified hardware backends lost: "+strings.Join(d.lostBackends, ", "))
+	}
+	if len(d.lostDevices) > 0 {
+		parts = append(parts, "render devices gone: "+strings.Join(d.lostDevices, ", "))
+	}
+	if d.previousResolved != d.resolved {
+		parts = append(parts, "resolved backend "+d.previousResolved+" -> "+d.resolved)
+	}
+	note := truncateDriftNote(strings.Join(parts, "; "))
+	return &note
+}
+
+// truncateDriftNote bounds a note to maxCapabilityDriftNoteBytes without ever
+// cutting a rune in half.
+//
+// The column is Postgres text, which rejects invalid UTF-8 outright, and a
+// rejected UPDATE takes capabilities and capabilities_hash down with it — the
+// stored hash then never advances, so every later sweep refetches and fails
+// again. Slicing bytes is exactly how the untrusted device and backend names
+// this bound exists to contain would produce that.
+func truncateDriftNote(note string) string {
+	if len(note) <= maxCapabilityDriftNoteBytes {
+		return note
+	}
+	cut := note[:maxCapabilityDriftNoteBytes]
+	// A trailing partial sequence decodes as RuneError with size 1; a real
+	// U+FFFD in the input decodes with size 3 and is left alone.
+	for len(cut) > 0 {
+		r, size := utf8.DecodeLastRuneInString(cut)
+		if r != utf8.RuneError || size > 1 {
+			break
+		}
+		cut = cut[:len(cut)-1]
+	}
+	return cut + "..."
+}
+
+// resolveDriftNote decides what stream_nodes.capability_drift should say after
+// this refetch, given the note it already carries.
+//
+// Setting the note is a delta — a regression against the report being replaced.
+// Clearing it must not be, because a delta against an already-degraded report
+// finds nothing newly lost and would erase a standing regression on the next
+// unrelated hash change: a reboot moves boot_id, a reworded FFmpeg failure moves
+// the probe reason, and the operator-triggered re-probe refetches
+// unconditionally. That would tell an operator the node recovered while its
+// backend is still failing its probe, which is the one reading this column must
+// never produce. So the note is latched, and only a report whose probes all pass
+// clears it.
+func resolveDriftNote(stored *string, drift capabilityDrift, parsed bool, payload []byte) *string {
+	if note := drift.persistedNote(); note != nil {
+		return note
+	}
+	if stored == nil || strings.TrimSpace(*stored) == "" {
+		return nil
+	}
+	if !parsed || !hardwareProbesClean(payload) {
+		// Nothing new was lost, but this report is not evidence of recovery.
+		return stored
+	}
+	return nil
+}
+
+// hardwareProbesClean reports whether every backend the node actually probed
+// passed. A skipped backend is not a failure — it means the node cannot open the
+// devices, which is the normal reading for a proxy pointed at a cluster-wide
+// hw_device — and a report that cannot be parsed is not evidence of anything.
+func hardwareProbesClean(payload []byte) bool {
+	var current capabilityDriftView
+	if json.Unmarshal(payload, &current) != nil {
+		return false
+	}
+	for _, backend := range current.DetectedBackends {
+		if !backend.Verified && !backend.Skipped {
+			return false
+		}
+	}
+	return true
+}
+
+// computeCapabilityDrift compares the report a node just served against the one
+// it replaces. parsed is false when either payload cannot be read, in which case
+// the drift is unknown rather than empty and callers must not treat it as
+// evidence of recovery.
+func computeCapabilityDrift(stored, payload []byte) (drift capabilityDrift, parsed bool) {
+	if len(stored) == 0 {
+		return capabilityDrift{first: true}, true
+	}
+	var previous, current capabilityDriftView
+	if json.Unmarshal(stored, &previous) != nil || json.Unmarshal(payload, &current) != nil {
+		return capabilityDrift{}, false
+	}
+	drift.previousResolved = previous.Resolved
+	drift.resolved = current.Resolved
+	verifiedNow := make(map[string]bool, len(current.DetectedBackends))
+	for _, backend := range current.DetectedBackends {
+		verifiedNow[backend.Backend] = backend.Verified
+	}
+	for _, backend := range previous.DetectedBackends {
+		if backend.Verified && !verifiedNow[backend.Backend] {
+			drift.lostBackends = append(drift.lostBackends, backend.Backend)
+		}
+	}
+	for _, device := range previous.RenderDevices {
+		if !slices.Contains(current.RenderDevices, device) {
+			drift.lostDevices = append(drift.lostDevices, device)
+		}
+	}
+	return drift, true
 }
 
 // logCapabilityChange records what changed between the stored report and the
@@ -368,37 +592,20 @@ type capabilityDriftView struct {
 // waking an operator for: it means a node that was picked for hardware work
 // silently became less capable, which otherwise only shows up as slow or
 // failing transcodes.
-func logCapabilityChange(ctx context.Context, n *Node, payload []byte) {
-	if len(n.Capabilities) == 0 {
+func logCapabilityChange(ctx context.Context, n *Node, drift capabilityDrift, parsed bool) {
+	if !parsed {
+		return
+	}
+	if drift.first {
 		slog.InfoContext(ctx, "node capabilities stored", "component", "nodepool",
 			"id", n.ID, "name", n.Name, "url", n.URL)
 		return
 	}
-	var previous, current capabilityDriftView
-	if json.Unmarshal(n.Capabilities, &previous) != nil || json.Unmarshal(payload, &current) != nil {
-		return
-	}
-	verifiedNow := make(map[string]bool, len(current.DetectedBackends))
-	for _, backend := range current.DetectedBackends {
-		verifiedNow[backend.Backend] = backend.Verified
-	}
-	var lostBackends []string
-	for _, backend := range previous.DetectedBackends {
-		if backend.Verified && !verifiedNow[backend.Backend] {
-			lostBackends = append(lostBackends, backend.Backend)
-		}
-	}
-	var lostDevices []string
-	for _, device := range previous.RenderDevices {
-		if !slices.Contains(current.RenderDevices, device) {
-			lostDevices = append(lostDevices, device)
-		}
-	}
-	if len(lostBackends) == 0 && len(lostDevices) == 0 {
+	if !drift.regressed() {
 		return
 	}
 	slog.WarnContext(ctx, "node capability drift", "component", "nodepool",
 		"id", n.ID, "name", n.Name, "url", n.URL,
-		"lost_verified_backends", lostBackends, "lost_render_devices", lostDevices,
-		"previous_resolved", previous.Resolved, "resolved", current.Resolved)
+		"lost_verified_backends", drift.lostBackends, "lost_render_devices", drift.lostDevices,
+		"previous_resolved", drift.previousResolved, "resolved", drift.resolved)
 }

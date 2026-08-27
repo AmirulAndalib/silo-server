@@ -3161,6 +3161,13 @@ func NewRouter(deps Dependencies) chi.Router {
 									jwtSecret = deps.Config.Auth.JWTSecret
 								}
 								nodeHandler := handlers.NewNodeHandler(deps.NodeRepo, deps.ProxyPool, deps.TranscodePool, deps.NodeRepo, deps.EventBus, deps.RedisClient, jwtSecret)
+								// A re-probe stores the node's new inventory through the
+								// sweep's own refresh, so the drift and persist rules have
+								// one implementation. Without a health checker the node
+								// still re-probes and the row catches up on a later sweep.
+								if deps.NodeHealthChecker != nil {
+									nodeHandler.SetCapabilityRefresher(deps.NodeHealthChecker)
+								}
 								r.Route("/nodes", func(r chi.Router) {
 									r.Get("/", nodeHandler.HandleListNodes)
 									r.Post("/", nodeHandler.HandleCreateNode)
@@ -3169,6 +3176,7 @@ func NewRouter(deps Dependencies) chi.Router {
 									r.Post("/{id}/check", nodeHandler.HandleCheckNode)
 									r.Post("/force-reload", nodeHandler.HandleForceReloadNodes)
 									r.Post("/{id}/force-reload", nodeHandler.HandleForceReloadNode)
+									r.Post("/{id}/reprobe", nodeHandler.HandleReprobeNode)
 								})
 								// Live node sessions (reads from Redis)
 								// Note: /admin/sessions is already used for playback sessions from PostgreSQL.

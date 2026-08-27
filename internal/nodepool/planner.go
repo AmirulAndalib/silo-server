@@ -2,6 +2,7 @@ package nodepool
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -85,16 +86,31 @@ type Planner struct {
 	rr       map[string]int          // per-group round-robin cursor; "" = global
 	reserved map[string]*reservation // keyed by playback session ID
 	now      func() time.Time        // overridable for tests
+	// scratchPressed latches, by node id, which nodes were under scratch
+	// pressure the last time a transcode selection looked. It exists only to
+	// make the operator warning fire once per transition into pressure: the
+	// eligibility path runs on every session start and every quality switch, so
+	// logging there unlatched would produce a line per playback event for as
+	// long as a disk stays full. Guarded by mu, which every selection path
+	// already holds. Entries are pruned as nodes leave the pool.
+	scratchPressed map[int]bool
+	// scratchGuardDropped latches whether the last transcode selection had to
+	// ignore the scratch guard because every eligible candidate was pressured.
+	// Latched for the same reason as scratchPressed, and separately from it
+	// because a cluster reaches "no headroom anywhere" on its own schedule.
+	// Guarded by mu.
+	scratchGuardDropped bool
 }
 
 // NewPlanner creates a planner over the given pools.
 func NewPlanner(proxies *ProxyPool, transcodes *TranscodePool) *Planner {
 	return &Planner{
-		proxies:    proxies,
-		transcodes: transcodes,
-		rr:         make(map[string]int),
-		reserved:   make(map[string]*reservation),
-		now:        time.Now,
+		proxies:        proxies,
+		transcodes:     transcodes,
+		rr:             make(map[string]int),
+		reserved:       make(map[string]*reservation),
+		now:            time.Now,
+		scratchPressed: make(map[int]bool),
 	}
 }
 
@@ -509,9 +525,136 @@ func (p *Planner) pickNode(nodes []*Node, currentURL string, now time.Time, elig
 // load is summed over all of it, since a job on a node this plan may not select
 // still occupies the same GPU.
 func (p *Planner) pickTranscode(transcodes, pool, proxies []*Node, groupHealthy map[string]bool, currentURL string, estKbps int, now time.Time) *Node {
-	return p.pickNode(transcodes, currentURL, now, func(n *Node) bool {
+	return p.pickWithScratchGuard(transcodes, pool, currentURL, now, func(n *Node) bool {
 		return p.transcodeEligible(n, proxies, groupHealthy, estKbps, now)
 	}, p.physicalGPULoadScore(pool, now))
+}
+
+// pickWithScratchGuard is pickNode with the scratch-pressure exclusion applied
+// as a *soft* filter: a node whose transcode scratch volume is at or past
+// scratchPressureFillPercent is skipped, unless skipping leaves no candidate at
+// all, in which case the guard is ignored and the ordinary pick stands.
+//
+// Soft is the whole point. The guard's job is to steer sessions away from a node
+// that will die mid-stream while a healthy sibling exists; it is not a license
+// to refuse playback. A cluster whose scratch volumes have all filled — one shared
+// NFS export, a retention setting that is too generous everywhere — would
+// otherwise go from degraded to dark on a threshold nobody chose for that
+// purpose. Degraded service beats no service, and the WARN below is what tells
+// an operator which it is.
+//
+// pool is the full transcode pool the candidates were drawn from; it scopes the
+// warning latch, which tracks disks rather than the narrowed candidate set.
+//
+// Callers must hold mu.
+func (p *Planner) pickWithScratchGuard(nodes, pool []*Node, currentURL string, now time.Time, eligible func(*Node) bool, tieBreak func(*Node) int) *Node {
+	excluded := false
+	guarded := func(n *Node) bool {
+		if !eligible(n) {
+			return false
+		}
+		if scratchPressured(n) {
+			excluded = true
+			return false
+		}
+		return true
+	}
+	picked := p.pickNode(nodes, currentURL, now, guarded, tieBreak)
+	guardDropped := false
+	if picked == nil && excluded {
+		// Without an exclusion the unguarded pick would return the same nil:
+		// nothing was eligible in the first place.
+		picked = p.pickNode(nodes, currentURL, now, eligible, tieBreak)
+		guardDropped = picked != nil
+	}
+	// Logged after the fallback decides, because what an operator needs to know
+	// is whether the pressured node was actually kept out of selection.
+	p.noteScratchPressure(pool, guardDropped)
+	return picked
+}
+
+// noteScratchPressure logs each pooled node's transition into and out of
+// scratch pressure exactly once, and separately latches the cluster-wide state
+// where the guard had to give way.
+//
+// guardDropped reports that this pick found every eligible candidate pressured
+// and admitted one anyway. It has to reach the log, because the two states the
+// guard can be in are opposites for an operator: "sessions are being steered
+// away from this disk" is a warning, while "sessions are landing on a disk that
+// is about to fail mid-stream because nothing else is eligible" is an outage in
+// progress. One invariant message asserting an exclusion cannot say which, and
+// the pressure latch alone would keep asserting the exclusion long after the
+// fallback started ignoring it.
+//
+// There is no context to log against: selection is synchronous inside
+// PlanSession and friends, which take no ctx because they are called from
+// several request paths and from reservation code that has none. The latch,
+// not a context, is what keeps this out of the hot path's log volume — the
+// eligibility check runs on every session start and every quality switch.
+//
+// Callers must hold mu.
+func (p *Planner) noteScratchPressure(pool []*Node, guardDropped bool) {
+	seen := make(map[int]struct{}, len(pool))
+	for _, n := range pool {
+		if n == nil {
+			continue
+		}
+		seen[n.ID] = struct{}{}
+		pressured := scratchPressured(n)
+		if pressured == p.scratchPressed[n.ID] {
+			continue
+		}
+		if pressured {
+			pct, _ := scratchDiskFillPercent(n)
+			attrs := []any{
+				"component", "nodepool", "id", n.ID, "name", n.Name, "url", n.URL,
+				"scratch_fill_pct", pct, "threshold_pct", scratchPressureFillPercent,
+				"scratch_guard_dropped", guardDropped,
+			}
+			if guardDropped {
+				slog.Warn("transcode node scratch volume nearly full, still selected because no eligible node has scratch headroom", attrs...)
+			} else {
+				slog.Warn("transcode node scratch volume nearly full, excluded from selection", attrs...)
+			}
+			p.scratchPressed[n.ID] = true
+			continue
+		}
+		slog.Info("transcode node scratch volume recovered", "component", "nodepool",
+			"id", n.ID, "name", n.Name, "url", n.URL)
+		delete(p.scratchPressed, n.ID)
+	}
+	// A node that left the pool must not keep a latch entry: it would suppress
+	// the warning if the same id came back still full.
+	for id := range p.scratchPressed {
+		if _, ok := seen[id]; !ok {
+			delete(p.scratchPressed, id)
+		}
+	}
+	p.noteScratchGuardDropped(guardDropped)
+}
+
+// noteScratchGuardDropped reports the transition into and out of the state where
+// the scratch guard has nothing left to steer towards.
+//
+// It is latched separately from the per-node pressure warnings because the two
+// move independently: a cluster can cross into "no headroom anywhere" long after
+// its nodes' pressure transitions were logged, and without this the operator's
+// only signal would be an exclusion message written before the exclusion stopped
+// happening.
+//
+// Callers must hold mu.
+func (p *Planner) noteScratchGuardDropped(dropped bool) {
+	if dropped == p.scratchGuardDropped {
+		return
+	}
+	p.scratchGuardDropped = dropped
+	if dropped {
+		slog.Warn("transcode scratch guard ignored: every eligible node is over the scratch threshold",
+			"component", "nodepool", "threshold_pct", scratchPressureFillPercent)
+		return
+	}
+	slog.Info("transcode scratch guard back in force: an eligible node has scratch headroom again",
+		"component", "nodepool")
 }
 
 // physicalGPULoadScore precomputes, once per pick, the total effective jobs
@@ -578,7 +721,7 @@ func (p *Planner) physicalGPULoadScore(pool []*Node, now time.Time) func(*Node) 
 // transcodeEligible reduces it to exactly that: healthy, enabled, under cap,
 // and group-healthy, with no proxy partner required.
 func (p *Planner) pickLocalEgressTranscode(transcodes, pool []*Node, groupHealthy map[string]bool, currentURL string, now time.Time) *Node {
-	return p.pickNode(transcodes, currentURL, now, func(n *Node) bool {
+	return p.pickWithScratchGuard(transcodes, pool, currentURL, now, func(n *Node) bool {
 		return p.transcodeEligible(n, nil, groupHealthy, 0, now)
 	}, p.physicalGPULoadScore(pool, now))
 }
@@ -588,6 +731,12 @@ func (p *Planner) pickLocalEgressTranscode(transcodes, pool []*Node, groupHealth
 // its whole group healthy and — when the group contains proxies — at least
 // one of them with job and bandwidth headroom (a group's capacity is bounded
 // by its proxies).
+//
+// Scratch-volume pressure is deliberately *not* checked here. It is a soft
+// exclusion applied by pickWithScratchGuard, which can drop it when it would
+// empty the candidate set; a hard predicate could not. Callers that use this
+// directly (ReserveTranscodeWorkWith's non-streaming reservations) intentionally
+// keep the historical behavior.
 func (p *Planner) transcodeEligible(n *Node, proxies []*Node, groupHealthy map[string]bool, estKbps int, now time.Time) bool {
 	if !n.Healthy || !n.Enabled || !p.underCap(n, now) {
 		return false

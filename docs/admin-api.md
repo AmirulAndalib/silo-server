@@ -32,6 +32,7 @@ Always `200 OK` with a JSON array.
 | `physical_gpu_keys` | string[] | Stable identities of the GPUs behind this node, derived from `capabilities` (see below). Omitted when the node reports no identifiable GPU. |
 | `last_stats` | object | The node's most recent host resource sample — `{"system": …, "gpu": […]}` in the shape below. Omitted when the node reported none. |
 | `hw_accel_override`, `hw_device_override` | string | This node's own acceleration policy (see below). Omitted when the node inherits the cluster-wide settings, which is the normal case. |
+| `capability_drift` | string | Human-readable note describing how the node's hardware got worse at the last capability refetch. Omitted when the last refetch found no regression (see below). |
 
 ### Acceleration overrides
 
@@ -116,6 +117,39 @@ Each entry in `disks`:
 | `used_gb`, `total_gb` | float | Capacity in GiB. Used counts filesystem-reserved blocks, matching `df`. |
 | `stale` | bool | The numbers are real but carried over from an earlier pass because the current probe has not returned — the normal reading for a network mount whose server went away. Omitted when false. |
 | `unavailable` | bool | The path has never been measured on this node (it does not exist here, or the first probe is still hanging). `used_gb`/`total_gb` are meaningless. Omitted when false. |
+| `scratch` | bool | This is the node's transcode working directory. Set on at most one entry; a media root sharing that volume is deduplicated onto it. Omitted when false. |
+
+`scratch` exists because this server does not know a node's transcode directory —
+the node does. It is the one mount whose filling up breaks transcoding rather
+than browsing, so the entry has to identify itself. Node selection reads it:
+see "Scratch admission" below. It is also what labels the node's own
+`streamapp_node_disk_*` series `scratch` instead of `library-N`.
+
+### Scratch admission
+
+A transcode writes HLS segments to its node's scratch volume for the whole life
+of the session, so admitting one onto a nearly full node produces a stream that
+dies mid-playback — after the client has already committed to it. Transcode
+selection therefore skips a node whose `scratch` entry reports **95% or more**
+used, and prefers a node with headroom even when the full one carries fewer
+jobs.
+
+The exclusion is soft in two directions:
+
+- If it would leave no eligible candidate at all, it is ignored and the ordinary
+  least-jobs selection stands. Degraded service beats no service, and 95% was
+  not chosen to be a kill switch for a whole cluster.
+- A node whose fill cannot be read is never excluded: no sample, no `scratch`
+  entry (a node predating the flag), an unmeasurable path, or numbers the node
+  itself marked `stale`. Taking capacity away on a fill we cannot read would be
+  worse than the failure it prevents.
+
+Each transition into pressure is logged once per node (`component=nodepool`,
+"scratch volume nearly full"), not once per session start.
+
+Nothing else routes on `last_stats`, and the guard applies to playback and
+local-egress transcode selection only — not to proxy selection, and not to the
+non-streaming transcode reservations used by prepared downloads.
 
 Each entry in `last_stats.gpu`:
 
@@ -150,6 +184,48 @@ that its hardware changed. The refetch itself runs outside the sweep's own wait,
 one at a time per node, so a slow capability probe cannot delay the health
 cadence of the other nodes; a new report can therefore land shortly after the
 check that noticed the change rather than with it.
+
+An operator who cannot wait for the sweep — or whose node will never advertise a
+changed hash because its probe results are cached for its process lifetime — uses
+`POST /api/v1/admin/nodes/{id}/reprobe`, which stores the new report before it
+answers.
+
+### `capability_drift`
+
+Set when a capability refetch shows the node's hardware got **worse** than the
+report it replaced: a backend that used to pass its FFmpeg probe and now fails,
+or a render device that is gone. It reads like
+`verified hardware backends lost: qsv; render devices gone: /dev/dri/renderD128;
+resolved backend qsv -> none`, and is capped at 512 characters.
+
+It exists because that regression is otherwise only a log line, and the node
+stays `healthy` throughout: a driver that stopped working silently turns a GPU
+transcoder into a CPU one, which shows up to users as slow or failing playback
+long before anyone reads a log.
+
+Semantics worth knowing:
+
+- Setting it is a comparison; clearing it is not. The note appears when a refetch
+  loses something, and stays until a refetch produces a report whose probes all
+  pass. A refetch that finds nothing *newly* lost leaves it alone, because a
+  delta against an already-degraded report always finds nothing — a reboot moves
+  `boot_id`, a reworded FFmpeg failure moves the probe reason, and either would
+  otherwise erase a standing regression and report a broken node as repaired.
+- A backend reported as `skipped` does not hold the note open. Skipping means
+  the node cannot open the devices, which is a statement about access rather
+  than about hardware.
+- Only a loss is reported. Added hardware is not drift.
+- A node's first stored report carries none — there is nothing to compare it
+  against.
+- It is written in the same statement as `capabilities` and `capabilities_hash`,
+  so it always describes the report stored beside it.
+- Nothing routes on it. Node selection reads `healthy`, capacity, capability
+  eligibility, and the scratch guard above — never this field.
+
+Refetches only happen when a node advertises a changed `capabilities_hash`, so a
+node whose GPU broke while its process kept running may report nothing new: the
+probe results are cached for its process lifetime. `POST
+/api/v1/admin/nodes/{id}/reprobe` is what forces the question.
 
 ### `physical_gpu_keys`
 
@@ -246,6 +322,73 @@ response reflects this check immediately. The sample itself is not echoed here.
 This is the node's *current* hash, not the stored one. A value here that
 differs from the `capabilities_hash` in the list response means the background
 sweep has a refetch pending; this route does not fetch capabilities itself.
+
+## `POST /api/v1/admin/nodes/{id}/reprobe`
+
+Tells one node to discard its cached hardware-probe verdicts and re-verify
+against live hardware, then refetches and stores the resulting inventory
+immediately.
+
+This is the answer to hardware that stopped working underneath a running node. A
+node caches a **successful** probe for its whole process lifetime — re-verifying
+per request would put FFmpeg execs on the playback path — so a GPU that has since
+been removed, or whose driver was replaced with one that cannot encode, keeps
+reporting `verified: true` until the node restarts. That is not visible in a
+health check, because the node is healthy either way. Use it after installing or
+downgrading a GPU driver, after changing which devices a node's container can
+open, after replacing an FFmpeg build in place, and to confirm a
+`capability_drift` note is still true.
+
+The reverse needs no action: a **failed** GPU probe carries a 15-second negative
+TTL and is retried on its own, so a repaired driver flips `verified` to `true`,
+changes the node's `capabilities_hash`, and is refetched within one snapshot
+interval. The exception is the tone-map matrix, which caches any non-empty
+inventory for the process lifetime, so a node whose GPU was broken at start can
+stay software-only for tone mapping until it is re-probed or restarted.
+
+Body: none. Always `200 OK`; a node that refused or could not be reached is
+reported in the body rather than as an HTTP error status, matching
+`{id}/check` and `{id}/force-reload`. `404 Not Found` for an unknown id.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `node_id`, `node_name` | int, string | The node this action ran against. |
+| `status` | string | `ok` or `error`. |
+| `error` | string | Why the node failed. Omitted on success. |
+| `resolved` | string | The backend the node picked after re-probing. Omitted on failure. |
+| `capability_hash` | string | The snapshot the node published. Compare it against `capabilities_hash` from the list response taken *before* the call to see whether anything changed. Omitted on failure. |
+| `capabilities_refreshed` | bool | Whether this server also stored the node's new inventory before answering. |
+
+`capabilities_refreshed: false` with `status: ok` means the node re-probed but
+the stored row has not caught up yet — a refresh for that node was already
+running, or this deployment has no health sweep. The next sweep stores it.
+
+A node whose probe could not complete answers `status: error` and **keeps its
+previous capability report**: an unfinished probe is not evidence the hardware
+changed, and publishing a partial one would announce a change that did not
+happen. Nothing is stored in that case, so a failed re-probe never degrades what
+the list shows.
+
+A node that is **transcoding refuses**, also as `status: error`, and keeps its
+report. Every hardware probe ends in a real encode on the GPU; a card at its
+concurrent encoder-session limit fails that encode with an error nothing can
+distinguish from a missing device, and the resulting `verified: false` would be
+stored as a hardware regression for a GPU that is at that moment encoding.
+Disable the node or wait for it to drain, then re-probe.
+
+The call can take a while. The node is given the probe budget it advertises in
+its own report (`probe_request_timeout_ms`, up to five minutes); a node that has
+never been inventoried gets 150 seconds. The capability refetch that follows adds
+up to two minutes. The connection's write deadline is extended to cover both, so
+this route can legitimately outlive the API listener's ordinary 120-second
+`WriteTimeout`; a client should allow for that rather than treating a long wait
+as a hung request. This re-probes only — it does not reload configuration or tear
+anything down.
+
+Under the hood this is a bearer-authenticated `POST
+/admin/reprobe-capabilities` on the node's own listener, which both transcode
+nodes and proxy nodes serve. That route is internal to the cluster and is not
+part of any client contract.
 
 ## `GET /api/v1/admin/system/hw-accel`
 

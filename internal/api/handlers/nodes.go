@@ -7,14 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/cache"
+	"github.com/Silo-Server/silo-server/internal/logredact"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
+	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/go-chi/chi/v5"
 	"github.com/redis/go-redis/v9"
 )
@@ -34,6 +38,17 @@ type NodeListEnabled interface {
 	ListEnabled(ctx context.Context, nodeType string) ([]*nodepool.Node, error)
 }
 
+// NodeCapabilityRefresher fetches, persists, and publishes one node's
+// capability report immediately rather than waiting for the background sweep.
+//
+// It is an interface only so the re-probe handler can be tested without a live
+// sweep; *nodepool.HealthChecker is the single implementation, and the handler
+// deliberately does not reimplement any of the fetch, drift, or persist logic
+// that lives behind it.
+type NodeCapabilityRefresher interface {
+	RefreshNodeCapabilities(ctx context.Context, n *nodepool.Node) error
+}
+
 // NodeHandler handles CRUD operations and health checks for stream nodes.
 type NodeHandler struct {
 	repo          NodeRepository
@@ -43,6 +58,20 @@ type NodeHandler struct {
 	eventBus      cache.EventBus
 	redisClient   *redis.Client // for reading session keys
 	jwtSecret     string        // for bearer auth when calling force-reload on nodes
+	// capabilities refreshes a node's stored inventory on demand; nil in a
+	// deployment with no health checker, where a re-probe still runs on the node
+	// and the stored row catches up on the next sweep.
+	capabilities NodeCapabilityRefresher
+}
+
+// SetCapabilityRefresher wires the on-demand capability refresh used after a
+// re-probe. It is set after construction because the health checker is built
+// before the router and owned by the process, not by this handler.
+func (h *NodeHandler) SetCapabilityRefresher(refresher NodeCapabilityRefresher) {
+	if h == nil {
+		return
+	}
+	h.capabilities = refresher
 }
 
 // NewNodeHandler creates a new NodeHandler.
@@ -314,6 +343,216 @@ func (h *NodeHandler) HandleForceReloadNode(w http.ResponseWriter, r *http.Reque
 		NodeID: node.ID, NodeName: node.Name, Status: status,
 	}}})
 }
+
+// ReprobeNodeResult is the JSON response for an operator-triggered capability
+// re-probe of one node.
+type ReprobeNodeResult struct {
+	NodeID   int    `json:"node_id"`
+	NodeName string `json:"node_name"`
+	// Status is "ok" when the node re-probed successfully, "error" otherwise.
+	// A node that refused or could not be reached is reported here rather than
+	// as an HTTP error status, matching the per-node check and force-reload
+	// routes: the request to the API succeeded, the node is what failed.
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+	// Resolved is the backend the node picked after re-probing.
+	Resolved string `json:"resolved,omitempty"`
+	// CapabilityHash identifies the snapshot the node published. Comparing it
+	// against the hash in the node list before the call is what tells an
+	// operator whether the re-probe changed anything.
+	CapabilityHash string `json:"capability_hash,omitempty"`
+	// CapabilitiesRefreshed reports whether this server also refetched and
+	// stored the node's new inventory before answering. False means the stored
+	// row will catch up on a later health sweep instead.
+	CapabilitiesRefreshed bool `json:"capabilities_refreshed"`
+}
+
+// nodeReprobeFallbackTimeout bounds the re-probe request to a node whose stored
+// capability report does not advertise a probe budget — one that has never been
+// inventoried, or that runs a build predating the advertisement.
+//
+// A re-probe deliberately discards the node's probe caches, so it pays the full
+// cold cost: a hardware walk plus the whole tone-map matrix, each bounded by
+// several ffmpeg execs. This is the same order of magnitude as the health
+// sweep's own two-minute capability fetch bound, plus request slack, and is only
+// a fallback: a node that has been inventoried once advertises its real budget.
+const nodeReprobeFallbackTimeout = 150 * time.Second
+
+// nodeReprobeTimeout is how long the API waits for one node's re-probe.
+//
+// The node itself publishes the budget its probe matrix needs in every
+// capability report (probe_request_timeout_ms), which is exactly what a cold
+// capability fetch is given; a node with different hardware or a slower ffmpeg
+// therefore gets its own number rather than a cluster-wide guess. The stored
+// report is parsed minimally here for the same reason nodepool parses its own
+// narrow views: this layer has no business decoding the whole inventory.
+func nodeReprobeTimeout(n *nodepool.Node) time.Duration {
+	var advertised struct {
+		ProbeRequestTimeoutMillis int64 `json:"probe_request_timeout_ms"`
+	}
+	if n != nil && len(n.Capabilities) > 0 {
+		// A report that cannot be parsed leaves the zero value, which is the
+		// fallback; an unreadable report is not a reason to fail the action.
+		_ = json.Unmarshal(n.Capabilities, &advertised)
+	}
+	return playback.NormalizeProbeRequestTimeout(advertised.ProbeRequestTimeoutMillis, nodeReprobeFallbackTimeout)
+}
+
+// nodeReprobeWriteSlack covers the repository round trips and the JSON write
+// that bracket the two long calls this handler makes.
+const nodeReprobeWriteSlack = 15 * time.Second
+
+// extendReprobeWriteDeadline lifts this connection's write deadline to cover the
+// whole action: the node's own probe budget, then the capability refetch that
+// stores the result.
+//
+// The API listener's WriteTimeout is 120 seconds, and this route can legitimately
+// outlive it — a node with two render devices advertises a probe budget past two
+// minutes on its own, before the refetch adds its bound. Without this the
+// deadline expires after the node has already re-probed and this server has
+// already persisted the report: the operator's browser sees a torn connection,
+// the UI toasts a failure for an action that succeeded, and the obvious response
+// is to run the whole cold FFmpeg matrix again. The diagnostics upload route
+// extends its deadlines for exactly the same reason.
+func extendReprobeWriteDeadline(w http.ResponseWriter, r *http.Request, probeBudget time.Duration) {
+	budget := probeBudget + nodepool.CapabilityRefreshTimeout + nodeReprobeWriteSlack
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(budget)); err != nil {
+		// A ResponseWriter that cannot carry a deadline (a test recorder, a
+		// wrapper that does not unwrap) is not a reason to refuse the action.
+		slog.WarnContext(r.Context(), "node re-probe write deadline not extended", "component", "api",
+			"budget", budget, "error", err)
+	}
+}
+
+// HandleReprobeNode handles POST /admin/nodes/{id}/reprobe — asks one node to
+// discard its cached hardware-probe verdicts and re-verify against live
+// hardware, then stores the resulting inventory immediately.
+//
+// This is the operator's answer to hardware that stopped working underneath a
+// running node. A node caches a successful probe for its whole process lifetime
+// (re-verifying per request would put ffmpeg execs on the playback path), so a
+// GPU that has since been removed, or whose driver was replaced, keeps reading
+// "verified" until the node restarts. Nothing about that is visible in a health
+// check, because the node is perfectly healthy either way. The opposite
+// direction self-heals: a failed GPU probe is retried after a short negative
+// TTL, so a repaired driver reaches the list on the next capability snapshot
+// without this action.
+//
+// A node that is transcoding refuses: the probe smoke-encodes on the GPU, and a
+// busy encoder would report working hardware as failed.
+//
+// Both halves matter: the node recomputes, and this server then refetches and
+// persists the report so the admin list, the pools, and the planner's GPU
+// identities agree with it without waiting up to a sweep interval. The refresh
+// reuses the health checker's own machinery, so drift detection and persistence
+// have exactly one implementation.
+func (h *NodeHandler) HandleReprobeNode(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIDParam(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid node ID")
+		return
+	}
+
+	node, err := h.repo.GetByID(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, nodepool.ErrNodeNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "Node not found")
+			return
+		}
+		slog.ErrorContext(r.Context(), "fetching node for re-probe", "component", "api", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to fetch node")
+		return
+	}
+
+	extendReprobeWriteDeadline(w, r, nodeReprobeTimeout(node))
+
+	result := ReprobeNodeResult{NodeID: node.ID, NodeName: node.Name, Status: "ok"}
+	reprobed, err := h.reprobeNode(r.Context(), node)
+	if err != nil {
+		slog.WarnContext(r.Context(), "node capability re-probe failed", "component", "api",
+			"node_id", node.ID, "name", node.Name, "error", err)
+		result.Status = "error"
+		result.Error = err.Error()
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	result.Resolved = reprobed.Resolved
+	result.CapabilityHash = reprobed.CapabilityHash
+
+	// The node has already recomputed at this point, so a refresh failure is
+	// reported alongside a successful re-probe rather than turning it into one:
+	// the next sweep will store the report, and saying the re-probe failed
+	// would invite an operator to run it again for nothing.
+	if h.capabilities == nil {
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	if err := h.capabilities.RefreshNodeCapabilities(r.Context(), node); err != nil {
+		slog.WarnContext(r.Context(), "storing re-probed node capabilities failed", "component", "api",
+			"node_id", node.ID, "name", node.Name, "error", err)
+	} else {
+		result.CapabilitiesRefreshed = true
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// nodeReprobeResponse is the node's own answer to /admin/reprobe-capabilities.
+type nodeReprobeResponse struct {
+	Resolved       string `json:"resolved"`
+	CapabilityHash string `json:"capability_hash"`
+}
+
+// reprobeNode performs the bearer-authenticated re-probe call against one node,
+// mirroring the force-reload client.
+func (h *NodeHandler) reprobeNode(ctx context.Context, node *nodepool.Node) (nodeReprobeResponse, error) {
+	timeout := nodeReprobeTimeout(node)
+	client := &http.Client{Timeout: timeout}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, node.URL+"/admin/reprobe-capabilities", nil)
+	if err != nil {
+		return nodeReprobeResponse{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+h.jwtSecret)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nodeReprobeResponse{}, logredact.SanitizeURLError(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		// Read the small error body rather than discarding it: it carries the
+		// node's own explanation, and reading it also lets the transport reuse
+		// the connection.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		switch resp.StatusCode {
+		case http.StatusServiceUnavailable:
+			// The node's own degraded-snapshot answer: it kept its previous
+			// hash rather than publishing a partial probe.
+			return nodeReprobeResponse{}, errors.New("node could not complete its hardware probe; its previous capability report was kept")
+		case http.StatusConflict:
+			// The node refused because it is transcoding: a probe's smoke encode
+			// competes with live sessions for encoder slots, and losing that
+			// race would be published as failed hardware.
+			if message := strings.TrimSpace(string(body)); message != "" {
+				return nodeReprobeResponse{}, errors.New(message)
+			}
+			return nodeReprobeResponse{}, errors.New("node is busy transcoding; retry the re-probe when it is idle")
+		}
+		return nodeReprobeResponse{}, fmt.Errorf("node re-probe returned status %d", resp.StatusCode)
+	}
+	var decoded nodeReprobeResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxNodeReprobeResponseBytes)).Decode(&decoded); err != nil {
+		return nodeReprobeResponse{}, err
+	}
+	return decoded, nil
+}
+
+// maxNodeReprobeResponseBytes bounds the node's answer. It carries two short
+// strings; the bound is only there because a node is a worker that may run on
+// remote hardware.
+const maxNodeReprobeResponseBytes = 8 << 10
 
 // HandleListSessions handles GET /admin/nodes/sessions — lists active playback
 // sessions from Redis, optionally filtered by node_id query parameter.

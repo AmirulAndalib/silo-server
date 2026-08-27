@@ -80,6 +80,14 @@ type DiskStats struct {
 	// does not exist on this node, or the very first probe is still hanging).
 	// UsedGB/TotalGB are meaningless when it is set.
 	Unavailable bool `json:"unavailable,omitempty"`
+	// Scratch marks the transcode working directory's entry. It is the one mount
+	// whose filling up breaks transcoding rather than merely browsing, so a
+	// reader has to be able to find it without knowing the deployment's paths —
+	// which is exactly the position the API is in, since it stores a node's
+	// sample opaquely. Set on at most one entry per sample; a media root sharing
+	// the scratch volume is deduplicated onto the scratch entry, which is
+	// reported first.
+	Scratch bool `json:"scratch,omitempty"`
 }
 
 // vendorNVIDIA is the GPUStats.Vendor value nvidia-smi enrichment reports.

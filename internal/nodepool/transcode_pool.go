@@ -94,10 +94,10 @@ func (p *TranscodePool) ApplyHealth(id int, healthy bool, activeJobs, egressKbps
 
 // ApplyCapabilities records a freshly fetched capability report by swapping the
 // node for an updated copy, keeping published *Node values immutable.
-func (p *TranscodePool) ApplyCapabilities(id int, capabilities []byte, hash string, refreshedAt time.Time) {
+func (p *TranscodePool) ApplyCapabilities(id int, capabilities []byte, hash string, refreshedAt time.Time, drift *string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	applyNodeCapabilities(p.nodes, id, capabilities, hash, refreshedAt)
+	applyNodeCapabilities(p.nodes, id, capabilities, hash, refreshedAt, drift)
 }
 
 // applyNodeHealth replaces the slice entry for id with an updated copy.
@@ -128,7 +128,11 @@ func applyNodeHealth(nodes []*Node, id int, healthy bool, activeJobs, egressKbps
 // applyNodeCapabilities replaces the slice entry for id with a copy carrying
 // the new capability report. The payload is cloned because the caller's buffer
 // (a decoded HTTP response) is not ours to publish.
-func applyNodeCapabilities(nodes []*Node, id int, capabilities []byte, hash string, refreshedAt time.Time) {
+//
+// drift is set verbatim, nil included: the note describes the comparison that
+// produced this payload, so a node whose hardware recovered must lose the note
+// at the same moment it gains the clean report.
+func applyNodeCapabilities(nodes []*Node, id int, capabilities []byte, hash string, refreshedAt time.Time, drift *string) {
 	for i, n := range nodes {
 		if n.ID != id {
 			continue
@@ -137,6 +141,7 @@ func applyNodeCapabilities(nodes []*Node, id int, capabilities []byte, hash stri
 		clone.Capabilities = append(json.RawMessage(nil), capabilities...)
 		clone.CapabilitiesHash = &hash
 		clone.CapabilitiesRefreshedAt = &refreshedAt
+		clone.CapabilityDrift = drift
 		// The GPU identities belong to the payload being replaced, so they are
 		// re-derived rather than carried over from the previous report.
 		applyPhysicalGPUKeys(&clone)

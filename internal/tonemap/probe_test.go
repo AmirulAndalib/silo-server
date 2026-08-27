@@ -268,10 +268,10 @@ func TestProbeCallerCancellationDoesNotCancelSharedProbe(t *testing.T) {
 	}
 }
 
-// resetProbeCache clears shared probe state between tests.
+// resetProbeCache clears shared probe state between tests. It delegates to the
+// exported invalidation so tests exercise the same seam the operator-facing
+// re-probe action uses.
 func resetProbeCache(t *testing.T) {
 	t.Helper()
-	probeCache.Lock()
-	probeCache.entries = make(map[string]probeCacheEntry)
-	probeCache.Unlock()
+	InvalidateProbeCache()
 }

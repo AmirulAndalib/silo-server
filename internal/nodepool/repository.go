@@ -58,6 +58,14 @@ type Node struct {
 	// what the node itself resolves against once it has reloaded its config.
 	HWAccelOverride  *string `json:"hw_accel_override,omitempty"`
 	HWDeviceOverride *string `json:"hw_device_override,omitempty"`
+	// CapabilityDrift is an operator-facing note describing how this node's
+	// hardware got worse at the last capability refetch: a backend that used to
+	// pass its probe and now fails, or a render device that is gone. nil means
+	// the last refetch found no regression, which is also how a recovered node
+	// reads — the note is rewritten by every refetch and a clean report clears
+	// it. It is written beside Capabilities in one statement, so it always
+	// describes the report stored with it, and nothing routes on it.
+	CapabilityDrift *string `json:"capability_drift,omitempty"`
 	// PhysicalGPUKeys identifies the actual GPUs behind this node, derived from
 	// Capabilities rather than stored: it is a pure function of that payload, so
 	// a column would only be a second copy that can disagree with it. Two nodes
@@ -242,7 +250,7 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
-const nodeColumns = `id, name, type, url, enabled, healthy, active_jobs, node_group, max_jobs, max_bandwidth_kbps, egress_kbps, last_health_check, created_at, capabilities, capabilities_hash, capabilities_refreshed_at, last_stats, hw_accel_override, hw_device_override`
+const nodeColumns = `id, name, type, url, enabled, healthy, active_jobs, node_group, max_jobs, max_bandwidth_kbps, egress_kbps, last_health_check, created_at, capabilities, capabilities_hash, capabilities_refreshed_at, last_stats, hw_accel_override, hw_device_override, capability_drift`
 
 func scanNode(row pgx.Row) (*Node, error) {
 	var n Node
@@ -258,6 +266,7 @@ func scanNode(row pgx.Row) (*Node, error) {
 		&capabilities, &n.CapabilitiesHash, &n.CapabilitiesRefreshedAt,
 		&lastStats,
 		&n.HWAccelOverride, &n.HWDeviceOverride,
+		&n.CapabilityDrift,
 	)
 	if err != nil {
 		return nil, err
@@ -426,13 +435,19 @@ func (r *Repository) UpdateHealth(ctx context.Context, id int, healthy bool, act
 }
 
 // UpdateCapabilities persists a freshly fetched capability report together with
-// the hash that identifies it. The three columns are written in one statement
-// so a reader never sees a payload beside a hash from a different report.
-func (r *Repository) UpdateCapabilities(ctx context.Context, id int, capabilities []byte, hash string, refreshedAt time.Time) error {
+// the hash that identifies it and the drift note comparing it against the
+// previous one. The four columns are written in one statement so a reader never
+// sees a payload beside a hash — or a drift note — from a different report.
+//
+// A nil drift writes NULL, which is how a node that has recovered stops being
+// flagged: the note describes the last comparison, not a latched incident, so
+// carrying the previous value forward would keep a repaired driver on screen as
+// broken.
+func (r *Repository) UpdateCapabilities(ctx context.Context, id int, capabilities []byte, hash string, refreshedAt time.Time, drift *string) error {
 	tag, err := r.pool.Exec(ctx,
-		`UPDATE stream_nodes SET capabilities = $2, capabilities_hash = $3, capabilities_refreshed_at = $4
+		`UPDATE stream_nodes SET capabilities = $2, capabilities_hash = $3, capabilities_refreshed_at = $4, capability_drift = $5
 		 WHERE id = $1`,
-		id, capabilities, hash, refreshedAt)
+		id, capabilities, hash, refreshedAt, drift)
 	if err != nil {
 		return fmt.Errorf("update node capabilities: %w", err)
 	}

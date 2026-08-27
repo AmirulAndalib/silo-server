@@ -201,6 +201,7 @@ func (s *Server) Handler() http.Handler {
 		r.Use(s.requireBearer)
 		r.Get("/hw-capabilities", s.handleHWCapabilities)
 		r.Post("/admin/force-reload", s.handleForceReload)
+		r.Post("/admin/reprobe-capabilities", s.handleReprobeCapabilities)
 		r.Get("/status", s.handleStatus)
 	})
 	return r

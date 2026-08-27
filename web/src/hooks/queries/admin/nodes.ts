@@ -5,8 +5,10 @@ import type {
   CreateNodeRequest,
   UpdateNodeRequest,
   CheckNodeResponse,
+  ReprobeNodeResult,
 } from "@/api/types";
 import { adminKeys } from "../keys";
+import { describeReprobeOutcome } from "@/pages/adminNodesPresentation";
 import { toast } from "sonner";
 
 const ADMIN_STALE_TIME = 30_000;
@@ -84,6 +86,45 @@ export function useCheckNodeHealth() {
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Health check failed");
+    },
+  });
+}
+
+/**
+ * Ask one node to re-verify its hardware against live devices.
+ *
+ * The call always answers 200 — a node that refused or could not be reached is
+ * reported in the body — so the outcome is read from `status`, not from a
+ * thrown error. It can take a couple of minutes on a node with several devices,
+ * since the point is to pay the full cold probe cost the node otherwise caches
+ * away for its process lifetime; the server extends the connection's write
+ * deadline to cover that, so a long wait here is the action working, not a hung
+ * request. A node that is transcoding refuses, because the probe encodes on the
+ * GPU and a busy encoder would report working hardware as failed.
+ *
+ * The nodes list is invalidated either way: on success the server has already
+ * stored the fresh report, and on failure the row may still have moved.
+ */
+export function useReprobeNode() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (node: StreamNode) =>
+      api<ReprobeNodeResult>(`/admin/nodes/${node.id}/reprobe`, {
+        method: "POST",
+      }).then((result) => ({ node, result })),
+    onSuccess: ({ node, result }) => {
+      const outcome = describeReprobeOutcome(node, result);
+      if (outcome.ok) {
+        toast.success(outcome.message);
+      } else {
+        toast.error(outcome.message);
+      }
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Re-probe failed");
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: adminKeys.nodes() });
     },
   });
 }

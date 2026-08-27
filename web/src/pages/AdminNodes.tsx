@@ -7,6 +7,7 @@ import {
   useUpdateNode,
   useDeleteNode,
   useCheckNodeHealth,
+  useReprobeNode,
   useToggleNode,
 } from "@/hooks/queries/admin/nodes";
 import { Button } from "@/components/ui/button";
@@ -30,18 +31,23 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Plus, Pencil, Trash2, RefreshCw, Info, AlertTriangle } from "lucide-react";
+import { Plus, Pencil, Trash2, RefreshCw, ScanSearch, Info, AlertTriangle } from "lucide-react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { formatDateTime } from "@/lib/datetime";
+import { toggleHWDevice } from "@/lib/hwDevices";
 import { cn } from "@/lib/utils";
-import type { ResourceMetric } from "./adminNodesPresentation";
+import type { NodeHWDeviceRow, ResourceMetric } from "./adminNodesPresentation";
 import {
   HW_ACCEL_INHERIT,
   HW_ACCEL_OVERRIDE_OPTIONS,
+  buildNodeHWDeviceRows,
+  describeCapabilityDrift,
   describeNodeAccelerationOverride,
   describeNodeGPU,
   describeNodeSystem,
   describeSharedGPU,
+  nodeHWDevicePaths,
+  nodeHasHWDeviceInventory,
   parseHWDeviceOverride,
 } from "./adminNodesPresentation";
 
@@ -127,14 +133,38 @@ function NodeSharedGPUBadge({ node, allNodes }: { node: StreamNode; allNodes: St
   );
 }
 
+/**
+ * The "Drift" marker on a node whose last capability refetch found its hardware
+ * got worse. Tinted, unlike the shared-GPU marker: this one is a regression an
+ * operator has to act on, and the Health column will not show it.
+ */
+function NodeDriftBadge({ node }: { node: StreamNode }) {
+  const drift = describeCapabilityDrift(node);
+  if (!drift) {
+    return null;
+  }
+  return (
+    <Badge
+      variant="outline"
+      className="bg-warning/10 text-warning border-warning/15"
+      title={drift.title}
+    >
+      {drift.label}
+    </Badge>
+  );
+}
+
 function NodeGPUCell({ node, allNodes }: { node: StreamNode; allNodes: StreamNode[] }) {
   const gpu = describeNodeGPU(node);
   if (gpu.kind === "awaiting") {
     return (
       <div className="space-y-1">
-        <span className="text-muted-foreground text-sm" title={gpu.title}>
-          {gpu.label}
-        </span>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-muted-foreground text-sm" title={gpu.title}>
+            {gpu.label}
+          </span>
+          <NodeDriftBadge node={node} />
+        </div>
         <NodeOverrideLine node={node} />
       </div>
     );
@@ -146,6 +176,7 @@ function NodeGPUCell({ node, allNodes }: { node: StreamNode; allNodes: StreamNod
         <Badge variant="outline" className={gpu.backend.badgeClass} title={gpu.backend.title}>
           {gpu.backend.label}
         </Badge>
+        <NodeDriftBadge node={node} />
         <NodeSharedGPUBadge node={node} allNodes={allNodes} />
         {gpu.failures.length > 0 && (
           <span
@@ -210,6 +241,8 @@ interface NodeSectionProps {
   onToggle: (node: StreamNode) => void;
   onCheckHealth: (node: StreamNode) => void;
   checkingHealthId: number | null;
+  onReprobe: (node: StreamNode) => void;
+  reprobingId: number | null;
 }
 
 function NodeSection({
@@ -224,6 +257,8 @@ function NodeSection({
   onToggle,
   onCheckHealth,
   checkingHealthId,
+  onReprobe,
+  reprobingId,
 }: NodeSectionProps) {
   const label = type === "proxy" ? "Proxy" : "Transcode";
   const colCount = (showJobs ? 10 : 9) + (type === "proxy" ? 1 : 0);
@@ -256,7 +291,7 @@ function NodeSection({
               {showJobs && <TableHead>{type === "proxy" ? "Streams" : "Jobs"}</TableHead>}
               {type === "proxy" && <TableHead>Egress</TableHead>}
               <TableHead>Last Check</TableHead>
-              <TableHead className="w-32">Actions</TableHead>
+              <TableHead className="w-40">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -278,6 +313,7 @@ function NodeSection({
             ) : (
               nodes.map((node) => {
                 const isChecking = checkingHealthId === node.id;
+                const isReprobing = reprobingId === node.id;
                 return (
                   <TableRow key={node.id}>
                     <TableCell className="font-medium">{node.name}</TableCell>
@@ -356,6 +392,20 @@ function NodeSection({
                           variant="ghost"
                           size="icon"
                           className="h-7 w-7"
+                          disabled={isReprobing}
+                          aria-label={`Re-probe hardware on ${node.name}`}
+                          title="Re-verify this node's hardware against live devices. Use after a driver or device change; it can take a couple of minutes, and is refused while the node is transcoding."
+                          onClick={() => onReprobe(node)}
+                        >
+                          <ScanSearch
+                            className={`h-3 w-3 ${isReprobing ? "animate-pulse" : ""}`}
+                            aria-hidden="true"
+                          />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7"
                           aria-label={`Edit ${node.name}`}
                           onClick={() => onEdit(node)}
                         >
@@ -383,6 +433,63 @@ function NodeSection({
   );
 }
 
+/**
+ * Per-device toggles for one node's device override, mirroring the cluster-wide
+ * picker on the Playback settings page — same control, same "nothing selected
+ * means inherit" rule, so the two overrides read the same way.
+ *
+ * "Inherit" is spelled two ways on purpose: it is what an empty selection means,
+ * and it is a button, because clearing several toggles one at a time to get back
+ * to the default is not an obvious way to say "follow the cluster".
+ */
+function NodeDevicePicker({
+  rows,
+  onToggle,
+  onInherit,
+}: {
+  rows: NodeHWDeviceRow[];
+  onToggle: (path: string) => void;
+  onInherit: () => void;
+}) {
+  const selectedCount = rows.filter((row) => row.selected).length;
+
+  return (
+    <div className="space-y-2">
+      <div className="space-y-2">
+        {rows.map((row) => (
+          <div key={row.path} className="flex items-center justify-between gap-3">
+            <div className="min-w-0" title={row.title}>
+              <p className={cn("truncate text-sm", !row.reported && "text-muted-foreground")}>
+                {row.description}
+              </p>
+              <p className="text-muted-foreground truncate font-mono text-xs">{row.path}</p>
+            </div>
+            <Switch
+              checked={row.selected}
+              aria-label={`Transcode on ${row.path}`}
+              onCheckedChange={() => onToggle(row.path)}
+            />
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="text-muted-foreground text-sm">
+          {selectedCount === 0
+            ? "Inheriting the cluster-wide device selection."
+            : selectedCount === 1
+              ? "All transcodes on this node run on the selected device."
+              : "Transcodes on this node balance across the selected devices (least loaded first)."}
+        </p>
+        {selectedCount > 0 && (
+          <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={onInherit}>
+            Inherit cluster setting
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function NodeForm({
   node,
   nodeType,
@@ -403,6 +510,12 @@ function NodeForm({
     node?.hw_accel_override?.trim() || HW_ACCEL_INHERIT,
   );
   const [hwDeviceOverride, setHwDeviceOverride] = useState(node?.hw_device_override ?? "");
+  // The picker is driven by the node's own reported inventory; a node that has
+  // never reported one keeps the free-text field, since the override still has
+  // to be settable on a node this server has not heard from yet.
+  const hasDeviceInventory = nodeHasHWDeviceInventory(node);
+  const deviceRows = buildNodeHWDeviceRows(node, hwDeviceOverride);
+  const devicePaths = nodeHWDevicePaths(node);
   const createMutation = useCreateNode();
   const updateMutation = useUpdateNode();
   const isPending = createMutation.isPending || updateMutation.isPending;
@@ -551,18 +664,33 @@ function NodeForm({
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="node-hw-device-override">GPU Devices</Label>
-            <Input
-              id="node-hw-device-override"
-              value={hwDeviceOverride}
-              onChange={(e) => setHwDeviceOverride(e.target.value)}
-              placeholder="Inherit cluster setting"
-            />
-            <p className="text-muted-foreground text-sm">
-              Optional. Comma-separated render device paths this node transcodes on (e.g.{" "}
-              <span className="font-mono">/dev/dri/renderD128,/dev/dri/renderD129</span>). Leave
-              empty to inherit the cluster-wide device selection.
-            </p>
+            <Label htmlFor={hasDeviceInventory ? undefined : "node-hw-device-override"}>
+              GPU Devices
+            </Label>
+            {hasDeviceInventory ? (
+              <NodeDevicePicker
+                rows={deviceRows}
+                onToggle={(path) =>
+                  setHwDeviceOverride(toggleHWDevice(hwDeviceOverride, path, devicePaths))
+                }
+                onInherit={() => setHwDeviceOverride("")}
+              />
+            ) : (
+              <>
+                <Input
+                  id="node-hw-device-override"
+                  value={hwDeviceOverride}
+                  onChange={(e) => setHwDeviceOverride(e.target.value)}
+                  placeholder="Inherit cluster setting"
+                />
+                <p className="text-muted-foreground text-sm">
+                  Optional. Comma-separated render device paths this node transcodes on (e.g.{" "}
+                  <span className="font-mono">/dev/dri/renderD128,/dev/dri/renderD129</span>). Leave
+                  empty to inherit the cluster-wide device selection. This node has reported no
+                  device inventory yet, so there is nothing to pick from.
+                </p>
+              </>
+            )}
           </div>
         </>
       )}
@@ -582,6 +710,7 @@ export default function AdminNodes() {
   const [confirmDeleteNode, setConfirmDeleteNode] = useState<StreamNode | null>(null);
   const deleteMutation = useDeleteNode();
   const checkHealthMutation = useCheckNodeHealth();
+  const reprobeMutation = useReprobeNode();
   const toggleMutation = useToggleNode();
 
   const proxyNodes = nodes.filter((n) => n.type === "proxy");
@@ -591,6 +720,9 @@ export default function AdminNodes() {
     checkHealthMutation.isPending && checkHealthMutation.variables
       ? checkHealthMutation.variables.id
       : null;
+
+  const reprobingId =
+    reprobeMutation.isPending && reprobeMutation.variables ? reprobeMutation.variables.id : null;
 
   const resolvedNodeType: NodeType = editingNode
     ? (editingNode.type as NodeType)
@@ -660,6 +792,8 @@ export default function AdminNodes() {
         onToggle={(node) => toggleMutation.mutate(node)}
         onCheckHealth={(node) => checkHealthMutation.mutate(node)}
         checkingHealthId={checkingHealthId}
+        onReprobe={(node) => reprobeMutation.mutate(node)}
+        reprobingId={reprobingId}
         infoBanner={
           <div className="surface-panel-subtle text-info flex items-start gap-2 rounded-xl p-3 text-sm">
             <Info className="mt-0.5 h-4 w-4 shrink-0" />
@@ -679,6 +813,8 @@ export default function AdminNodes() {
         onToggle={(node) => toggleMutation.mutate(node)}
         onCheckHealth={(node) => checkHealthMutation.mutate(node)}
         checkingHealthId={checkingHealthId}
+        onReprobe={(node) => reprobeMutation.mutate(node)}
+        reprobingId={reprobingId}
         infoBanner={
           <div className="surface-panel-subtle text-warning flex items-start gap-2 rounded-xl p-3 text-sm">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />

@@ -4,9 +4,11 @@ import type {
   HostSystemStats,
   NodeCapabilities,
   NodeRenderDevice,
+  ReprobeNodeResult,
   StreamNode,
   SystemResources,
 } from "@/api/types";
+import { parseHWDeviceList } from "@/lib/hwDevices";
 import { formatFileSize } from "@/lib/mediaFormat";
 
 /**
@@ -388,6 +390,185 @@ export function describeSharedGPU(
   };
 }
 
+// --- Capability drift ------------------------------------------------------
+
+/** The "Drift" marker on a node whose hardware got worse at its last refetch. */
+export interface CapabilityDriftBadge {
+  label: string;
+  /** Hover text: the server's note, then what it means and how it clears. */
+  title: string;
+}
+
+/**
+ * Describe a node's capability drift, or null when the node carries no standing
+ * regression — which is the normal case and renders nothing, as it does on
+ * every server predating the field.
+ *
+ * The note is a warning, not a routing input: a node carrying one is still
+ * picked for work exactly as before. It is here because the regression it
+ * describes is invisible in the Health column — a node whose GPU driver broke
+ * answers health checks perfectly well while encoding in software.
+ */
+export function describeCapabilityDrift(node: StreamNode): CapabilityDriftBadge | null {
+  const note = node.capability_drift?.trim() ?? "";
+  if (note === "") {
+    return null;
+  }
+  return {
+    label: "Drift",
+    title: [
+      note,
+      "A capability refetch found this node's hardware got worse than the report it replaced.",
+      "It stays until a refetch finds every hardware probe passing — re-probe the node to check whether it is still true.",
+    ].join("\n"),
+  };
+}
+
+// --- Per-node device-override picker ---------------------------------------
+
+/** One render device in a node's own device-override picker. */
+export interface NodeHWDeviceRow {
+  /** Render node path, which is what the override stores. */
+  path: string;
+  /** The node's own label for the device, or why the path is not in its report. */
+  description: string;
+  /** Present in the node's stored capability report. */
+  reported: boolean;
+  /** Pinned by the override currently being edited. */
+  selected: boolean;
+  /** Hover text: the device's full identity as the node reported it. */
+  title: string;
+}
+
+interface ReportedDevice {
+  path: string;
+  description: string;
+  title: string;
+}
+
+/**
+ * The devices a node reported, in report order. Details win when the node sent
+ * them; a report carrying only paths (an older node) still yields rows, because
+ * the paths are what the override stores and the descriptions are decoration.
+ */
+function reportedDevices(node: StreamNode | null | undefined): ReportedDevice[] {
+  const details = (node?.capabilities?.render_device_details ?? []).filter(
+    (device) => (device.path?.trim() ?? "") !== "",
+  );
+  if (details.length > 0) {
+    return details.map((device) => ({
+      path: device.path.trim(),
+      description: deviceLabel(device),
+      title: describeDeviceLine(device),
+    }));
+  }
+  return (node?.capabilities?.render_devices ?? [])
+    .map((path) => path.trim())
+    .filter((path) => path !== "")
+    .map((path) => ({ path, description: "GPU", title: path }));
+}
+
+/**
+ * Whether this node has an inventory to pick from. False sends the editor back
+ * to a free-text field: a node that has never reported (or a server predating
+ * the inventory) must still be pinnable, and a picker with no rows would make
+ * the override look unavailable rather than unknown.
+ */
+export function nodeHasHWDeviceInventory(node: StreamNode | null | undefined): boolean {
+  return reportedDevices(node).length > 0;
+}
+
+/** Paths in report order — the order `toggleHWDevice` keeps the stored value in. */
+export function nodeHWDevicePaths(node: StreamNode | null | undefined): string[] {
+  return reportedDevices(node).map((device) => device.path);
+}
+
+/**
+ * Build the picker rows: the node's inventory, then any pinned path it does not
+ * report. The second group is what keeps a stale override deselectable instead
+ * of stranded — a device removed from the node would otherwise stay pinned with
+ * no control to clear it.
+ */
+export function buildNodeHWDeviceRows(
+  node: StreamNode | null | undefined,
+  override: string | null | undefined,
+): NodeHWDeviceRow[] {
+  const selected = parseHWDeviceOverride(override);
+  const rows: NodeHWDeviceRow[] = reportedDevices(node).map((device) => ({
+    ...device,
+    reported: true,
+    selected: selected.includes(device.path),
+  }));
+  for (const path of selected) {
+    if (rows.some((row) => row.path === path)) {
+      continue;
+    }
+    rows.push({
+      path,
+      description: "Pinned device this node does not report",
+      reported: false,
+      selected: true,
+      title: `${path} — not in this node's last capability report. A transcode pinned to a device the node cannot open falls back to software.`,
+    });
+  }
+  return rows;
+}
+
+// --- Re-probe action -------------------------------------------------------
+
+/** What to tell an operator once a re-probe returns. */
+export interface ReprobeOutcome {
+  /** The node re-probed. False covers both a refusal and an unreachable node. */
+  ok: boolean;
+  message: string;
+}
+
+/**
+ * Describe a re-probe result against the node as it was listed before the call.
+ *
+ * Comparing the returned hash against the stored one is the only thing that
+ * answers the question an operator actually asked — did the driver work land? —
+ * so "no change" is reported as plainly as a change. An absent hash on either
+ * side (an older node, or a node that never stored a report) leaves the
+ * comparison unstated rather than guessed at.
+ */
+export function describeReprobeOutcome(
+  node: StreamNode,
+  result: ReprobeNodeResult,
+): ReprobeOutcome {
+  const name = result.node_name?.trim() || node.name;
+  if (result.status !== "ok") {
+    const reason = result.error?.trim() || "the node reported no reason";
+    return { ok: false, message: `${name}: re-probe failed — ${reason}` };
+  }
+
+  const backend = reprobeBackendLabel(result.resolved);
+  const hash = result.capability_hash?.trim() ?? "";
+  const previous = node.capabilities_hash?.trim() ?? "";
+  let message: string;
+  if (hash !== "" && previous !== "" && hash === previous) {
+    message = `${name}: re-probed, no change${backend ? ` (${backend})` : ""}`;
+  } else if (hash !== "" && previous !== "") {
+    message = `${name}: re-probed, hardware report changed${backend ? ` — now ${backend}` : ""}`;
+  } else {
+    message = `${name}: re-probed${backend ? ` — ${backend}` : ""}`;
+  }
+  // The node has recomputed either way; only the stored row lags, and saying so
+  // stops an operator re-running the action to explain an unchanged table.
+  if (!result.capabilities_refreshed) {
+    message += ". The stored report will catch up on the next health check";
+  }
+  return { ok: true, message };
+}
+
+function reprobeBackendLabel(resolved: string | undefined): string {
+  const backend = resolved?.trim().toLowerCase() ?? "";
+  if (backend === "") {
+    return "";
+  }
+  return backend === "none" ? "software" : backend.toUpperCase();
+}
+
 // --- Per-node acceleration overrides ---------------------------------------
 
 /**
@@ -419,12 +600,12 @@ export interface NodeAccelerationOverride {
   title: string;
 }
 
-/** Split a stored comma-separated device override into its paths. */
+/**
+ * Split a stored comma-separated device override into its paths. Same rules as
+ * the cluster-wide picker's list, which is why they share an implementation.
+ */
 export function parseHWDeviceOverride(value: string | null | undefined): string[] {
-  return (value ?? "")
-    .split(",")
-    .map((part) => part.trim())
-    .filter((part) => part !== "");
+  return parseHWDeviceList(value);
 }
 
 /**

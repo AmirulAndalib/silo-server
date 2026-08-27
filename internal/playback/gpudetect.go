@@ -502,6 +502,29 @@ func hwProbeCacheEntryCurrent(entry hwProbeCacheEntry, now time.Time) bool {
 	return entry.result.available || now.Before(entry.expiresAt)
 }
 
+// InvalidateHWProbeCache drops every cached backend verdict so the next
+// detection walk re-runs its FFmpeg smoke encodes against live hardware.
+//
+// It exists because a positive verdict is cached for the whole process
+// lifetime, which is right for routing — a GPU that encoded a frame does not
+// stop being able to between two playback requests — but blind to the one event
+// that legitimately changes the answer: an operator replacing a driver, moving
+// a card, or changing device access underneath a running node. Without this the
+// only way to re-verify is a restart.
+//
+// A probe already in flight is neither canceled nor discarded: it completes and
+// writes its result, and a caller that re-probes while another goroutine is
+// mid-probe therefore joins that flight and can observe the pre-invalidation
+// verdict once. Canceling shared work would instead fail an unrelated playback
+// request that is waiting on it, which is the worse trade. The operator-facing
+// re-probe action runs the detection walk itself after invalidating, so in the
+// ordinary single-caller case the cache is repopulated from a cold start.
+func InvalidateHWProbeCache() {
+	hwProbeCache.Lock()
+	defer hwProbeCache.Unlock()
+	hwProbeCache.entries = make(map[string]hwProbeCacheEntry)
+}
+
 // hwProbeCacheKey separates results per backend and per candidate device on top
 // of the FFmpeg binary's identity.
 func hwProbeCacheKey(ffmpegPath, backend, device string) string {

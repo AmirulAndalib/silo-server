@@ -155,6 +155,26 @@ func probeCacheKey(ffmpegPath, hardwareBackend, hardwareDevice string) string {
 	return strings.Join([]string{binaryIdentity, backend, device, strings.Join(driverIdentities, ",")}, "\x00")
 }
 
+// InvalidateProbeCache drops every cached tone-map inventory so the next probe
+// re-runs its listings and single-frame conversions.
+//
+// A non-empty inventory is cached permanently (see probeCacheEntryCurrent),
+// which is right for playback and wrong for an operator who just upgraded a
+// driver or an FFmpeg build in place: the binary's identity key only changes
+// when the file does, and a driver has no key at all. This is the seam an
+// operator-triggered re-probe uses to force the matrix to run again.
+//
+// A probe already in flight is neither canceled nor discarded: it completes and
+// stores its result, so a caller that invalidates concurrently with another
+// probe of the same key joins that flight and can observe the pre-invalidation
+// inventory once. Canceling shared work would fail the unrelated playback
+// request waiting on it.
+func InvalidateProbeCache() {
+	probeCache.Lock()
+	defer probeCache.Unlock()
+	probeCache.entries = make(map[string]probeCacheEntry)
+}
+
 // probeCacheEntryCurrent reports whether a positive result or unexpired
 // negative result may be reused.
 func probeCacheEntryCurrent(entry probeCacheEntry, now time.Time) bool {

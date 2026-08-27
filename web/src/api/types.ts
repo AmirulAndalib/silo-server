@@ -3843,6 +3843,13 @@ export interface HostDiskStats {
   stale?: boolean;
   /** Never measured on this host: `used_gb`/`total_gb` are meaningless. */
   unavailable?: boolean;
+  /**
+   * The node's transcode working directory — the one mount whose filling up
+   * breaks transcoding rather than browsing. Set on at most one entry per
+   * sample; a media root sharing that volume is deduplicated onto it. Absent on
+   * every other mount, and on a node predating the flag.
+   */
+  scratch?: boolean;
 }
 
 /**
@@ -3944,6 +3951,14 @@ export interface StreamNode {
   hw_accel_override?: string | null;
   /** Comma-separated render device paths pinned to this node; null inherits. */
   hw_device_override?: string | null;
+  /**
+   * Human-readable note describing how this node's hardware got worse at the
+   * last capability refetch: a backend that used to pass its probe and now
+   * fails, or a render device that is gone. Absent means the last refetch found
+   * no regression — it is not a latched incident, and a repaired node loses the
+   * note on its next refetch. Nothing routes on it.
+   */
+  capability_drift?: string | null;
 }
 
 export interface CreateNodeRequest {
@@ -3973,6 +3988,27 @@ export interface CheckNodeResponse {
   healthy: boolean;
   active_jobs: number;
   egress_kbps: number;
+}
+
+/**
+ * Answer to POST /admin/nodes/{id}/reprobe. The call is always 200: a node that
+ * refused or could not be reached is reported as `status: "error"` here rather
+ * than as an HTTP status, matching the per-node check route.
+ */
+export interface ReprobeNodeResult {
+  node_id: number;
+  node_name: string;
+  status: "ok" | "error";
+  error?: string;
+  /** Backend the node picked after re-probing: nvenc, qsv, vaapi, or none. */
+  resolved?: string;
+  /** Hash of the snapshot the node published; compare against `capabilities_hash`. */
+  capability_hash?: string;
+  /**
+   * This server also refetched and stored the node's new inventory before
+   * answering. False means the stored row catches up on a later health sweep.
+   */
+  capabilities_refreshed: boolean;
 }
 
 // User-facing library (simplified, no admin fields)

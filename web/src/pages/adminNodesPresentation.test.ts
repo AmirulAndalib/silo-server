@@ -1,15 +1,20 @@
 import { describe, expect, it } from "vitest";
-import type { HostSystemStats, StreamNode } from "@/api/types";
+import type { HostSystemStats, ReprobeNodeResult, StreamNode } from "@/api/types";
 import {
   CAPABILITY_STALE_AFTER_MS,
   DISK_FILL_WARNING_PCT,
+  buildNodeHWDeviceRows,
+  describeCapabilityDrift,
   describeGPUBusy,
   describeNodeAccelerationOverride,
   describeNodeGPU,
   describeNodeSystem,
+  describeReprobeOutcome,
   describeResourceSample,
   describeSharedGPU,
   formatBitsPerSecond,
+  nodeHWDevicePaths,
+  nodeHasHWDeviceInventory,
   parseHWDeviceOverride,
 } from "./adminNodesPresentation";
 
@@ -818,6 +823,213 @@ describe("describeNodeAccelerationOverride", () => {
     const title = describeNodeAccelerationOverride(makeNode({ hw_accel_override: "nvenc" }))?.title;
     expect(title).toContain("applies to new transcodes within a minute");
     expect(title).toContain("sessions already running keep the backend they started with");
+  });
+});
+
+describe("describeCapabilityDrift", () => {
+  it("renders nothing for a node whose last refetch found no regression", () => {
+    expect(describeCapabilityDrift(makeNode())).toBeNull();
+    expect(describeCapabilityDrift(makeNode({ capability_drift: null }))).toBeNull();
+    expect(describeCapabilityDrift(makeNode({ capability_drift: "   " }))).toBeNull();
+  });
+
+  // A server predating the column sends no field at all, which must read as
+  // "no drift" rather than as an empty badge.
+  it("renders nothing for a server that predates the field", () => {
+    const olderServerNode = makeNode();
+    expect("capability_drift" in olderServerNode).toBe(false);
+    expect(describeCapabilityDrift(olderServerNode)).toBeNull();
+  });
+
+  it("shows the server's note verbatim and explains how it clears", () => {
+    const note = "verified hardware backends lost: qsv; resolved backend qsv -> none";
+    const drift = describeCapabilityDrift(makeNode({ capability_drift: note }));
+
+    expect(drift?.label).toBe("Drift");
+    expect(drift?.title.split("\n")[0]).toBe(note);
+    expect(drift?.title).toContain("got worse than the report it replaced");
+    expect(drift?.title).toContain("re-probe the node");
+  });
+
+  it("trims the stored note rather than rendering its whitespace", () => {
+    expect(
+      describeCapabilityDrift(
+        makeNode({ capability_drift: "  render devices gone: /dev/dri/renderD128  " }),
+      )?.title.split("\n")[0],
+    ).toBe("render devices gone: /dev/dri/renderD128");
+  });
+});
+
+describe("buildNodeHWDeviceRows", () => {
+  const inventoryNode = makeNode({
+    capabilities: {
+      resolved: "qsv",
+      render_device_details: [
+        { path: "/dev/dri/renderD128", description: "Intel GPU", pci_address: "0000:00:02.0" },
+        { path: "/dev/dri/renderD129", description: "Intel GPU" },
+      ],
+    },
+  });
+
+  it("has nothing to pick from on a node that never reported an inventory", () => {
+    expect(nodeHasHWDeviceInventory(makeNode())).toBe(false);
+    expect(nodeHasHWDeviceInventory(makeNode({ capabilities: { resolved: "qsv" } }))).toBe(false);
+    expect(nodeHasHWDeviceInventory(null)).toBe(false);
+    expect(buildNodeHWDeviceRows(makeNode(), "")).toEqual([]);
+  });
+
+  it("builds one row per reported device, in report order, none selected by default", () => {
+    expect(nodeHasHWDeviceInventory(inventoryNode)).toBe(true);
+    expect(nodeHWDevicePaths(inventoryNode)).toEqual([
+      "/dev/dri/renderD128",
+      "/dev/dri/renderD129",
+    ]);
+    expect(buildNodeHWDeviceRows(inventoryNode, null)).toEqual([
+      {
+        path: "/dev/dri/renderD128",
+        description: "Intel GPU",
+        reported: true,
+        selected: false,
+        title: "/dev/dri/renderD128 — Intel GPU (0000:00:02.0)",
+      },
+      {
+        path: "/dev/dri/renderD129",
+        description: "Intel GPU",
+        reported: true,
+        selected: false,
+        title: "/dev/dri/renderD129 — Intel GPU",
+      },
+    ]);
+  });
+
+  it("checks exactly the devices the override pins", () => {
+    const rows = buildNodeHWDeviceRows(inventoryNode, " /dev/dri/renderD129 ");
+
+    expect(rows.map((row) => row.selected)).toEqual([false, true]);
+  });
+
+  it("falls back to bare paths from a node that reports no device details", () => {
+    const rows = buildNodeHWDeviceRows(
+      makeNode({
+        capabilities: { resolved: "vaapi", render_devices: ["/dev/dri/renderD128", "  "] },
+      }),
+      "/dev/dri/renderD128",
+    );
+
+    expect(rows).toEqual([
+      {
+        path: "/dev/dri/renderD128",
+        description: "GPU",
+        reported: true,
+        selected: true,
+        title: "/dev/dri/renderD128",
+      },
+    ]);
+  });
+
+  // A pinned device the node stopped reporting would otherwise be stranded:
+  // checked in the stored value with no control to clear it.
+  it("keeps a pinned device the node no longer reports, and marks it unreported", () => {
+    const rows = buildNodeHWDeviceRows(inventoryNode, "/dev/dri/renderD129,/dev/dri/renderD200");
+
+    expect(rows).toHaveLength(3);
+    expect(rows[2]).toMatchObject({
+      path: "/dev/dri/renderD200",
+      reported: false,
+      selected: true,
+      description: "Pinned device this node does not report",
+    });
+    expect(rows[2]?.title).toContain("not in this node's last capability report");
+  });
+});
+
+describe("describeReprobeOutcome", () => {
+  function result(overrides: Partial<ReprobeNodeResult> = {}): ReprobeNodeResult {
+    return {
+      node_id: 1,
+      node_name: "transcode-1",
+      status: "ok",
+      capabilities_refreshed: true,
+      ...overrides,
+    };
+  }
+
+  it("surfaces the node's own reason when the re-probe failed", () => {
+    expect(
+      describeReprobeOutcome(
+        makeNode(),
+        result({ status: "error", error: "node could not complete its hardware probe" }),
+      ),
+    ).toEqual({
+      ok: false,
+      message: "transcode-1: re-probe failed — node could not complete its hardware probe",
+    });
+  });
+
+  it("still says which node failed when the server sent no reason", () => {
+    expect(describeReprobeOutcome(makeNode(), result({ status: "error" }))).toEqual({
+      ok: false,
+      message: "transcode-1: re-probe failed — the node reported no reason",
+    });
+  });
+
+  it("reports an unchanged hash as plainly as a change", () => {
+    const node = makeNode({ capabilities_hash: "sha256:aaa" });
+
+    expect(
+      describeReprobeOutcome(node, result({ capability_hash: "sha256:aaa", resolved: "qsv" })),
+    ).toEqual({ ok: true, message: "transcode-1: re-probed, no change (QSV)" });
+  });
+
+  it("calls out a changed report and the backend it resolved to", () => {
+    const node = makeNode({ capabilities_hash: "sha256:aaa" });
+
+    expect(
+      describeReprobeOutcome(node, result({ capability_hash: "sha256:bbb", resolved: "vaapi" })),
+    ).toEqual({ ok: true, message: "transcode-1: re-probed, hardware report changed — now VAAPI" });
+  });
+
+  it("names a software fallback rather than the wire value", () => {
+    expect(
+      describeReprobeOutcome(
+        makeNode({ capabilities_hash: "sha256:aaa" }),
+        result({ capability_hash: "sha256:bbb", resolved: "none" }),
+      ).message,
+    ).toBe("transcode-1: re-probed, hardware report changed — now software");
+  });
+
+  // Without a hash on both sides there is nothing to compare, and claiming
+  // either answer would be a guess.
+  it("leaves the comparison unstated when either hash is missing", () => {
+    expect(describeReprobeOutcome(makeNode(), result({ resolved: "qsv" })).message).toBe(
+      "transcode-1: re-probed — QSV",
+    );
+    expect(
+      describeReprobeOutcome(makeNode({ capabilities_hash: "sha256:aaa" }), result()).message,
+    ).toBe("transcode-1: re-probed");
+  });
+
+  it("says when the stored row has not caught up yet", () => {
+    expect(
+      describeReprobeOutcome(
+        makeNode({ capabilities_hash: "sha256:aaa" }),
+        result({ capability_hash: "sha256:aaa", capabilities_refreshed: false }),
+      ),
+    ).toEqual({
+      ok: true,
+      message:
+        "transcode-1: re-probed, no change. The stored report will catch up on the next health check",
+    });
+  });
+
+  it("prefers the name the server answered with, and falls back to the row's", () => {
+    expect(
+      describeReprobeOutcome(makeNode({ name: "stale-name" }), result({ node_name: "renamed" }))
+        .message,
+    ).toContain("renamed:");
+    expect(
+      describeReprobeOutcome(makeNode({ name: "row-name" }), result({ node_name: "  " })).message,
+    ).toContain("row-name:");
   });
 });
 

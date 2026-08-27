@@ -33,7 +33,7 @@ func newNodeTestPool(t *testing.T) *pgxpool.Pool {
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM information_schema.columns
 		 WHERE table_name = 'stream_nodes'
-		   AND column_name IN ('capabilities_hash', 'hw_accel_override')`).Scan(&columns); err != nil || columns < 2 {
+		   AND column_name IN ('capabilities_hash', 'hw_accel_override', 'capability_drift')`).Scan(&columns); err != nil || columns < 3 {
 		t.Skip("test database has not applied the stream_nodes capability/override migrations")
 	}
 	return pool
@@ -63,7 +63,7 @@ func TestRepositoryUpdateCapabilitiesRoundTrip(t *testing.T) {
 
 	payload := json.RawMessage(`{"resolved":"nvenc","render_devices":["/dev/dri/renderD128"]}`)
 	refreshedAt := time.Now().UTC().Truncate(time.Millisecond)
-	if err := repo.UpdateCapabilities(ctx, node.ID, payload, "sha256:abc", refreshedAt); err != nil {
+	if err := repo.UpdateCapabilities(ctx, node.ID, payload, "sha256:abc", refreshedAt, nil); err != nil {
 		t.Fatalf("update capabilities: %v", err)
 	}
 
@@ -89,9 +89,56 @@ func TestRepositoryUpdateCapabilitiesRoundTrip(t *testing.T) {
 	}
 }
 
+// The drift note is what puts a silent hardware regression on the node list, so
+// it has to survive a write and come back through an ordinary read — and a later
+// clean refetch has to clear it, or a repaired node stays flagged forever.
+func TestRepositoryUpdateCapabilitiesDriftRoundTripAndClear(t *testing.T) {
+	pool := newNodeTestPool(t)
+	ctx := context.Background()
+	repo := NewRepository(pool)
+
+	node, err := repo.Create(ctx, CreateNodeInput{
+		Name: fmt.Sprintf("drift-test-%d", time.Now().UnixNano()),
+		Type: NodeTypeTranscode,
+		URL:  fmt.Sprintf("http://drift-test-%d", time.Now().UnixNano()),
+	})
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Delete(ctx, node.ID) })
+	if node.CapabilityDrift != nil {
+		t.Fatalf("new node already carries drift: %q", *node.CapabilityDrift)
+	}
+
+	note := "verified hardware backends lost: nvenc; resolved backend nvenc -> none"
+	payload := json.RawMessage(`{"resolved":"none"}`)
+	if err := repo.UpdateCapabilities(ctx, node.ID, payload, "sha256:degraded", time.Now(), &note); err != nil {
+		t.Fatalf("update capabilities with drift: %v", err)
+	}
+	reloaded, err := repo.GetByID(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("reload node: %v", err)
+	}
+	if reloaded.CapabilityDrift == nil || *reloaded.CapabilityDrift != note {
+		t.Fatalf("stored drift = %v, want %q", reloaded.CapabilityDrift, note)
+	}
+
+	recovered := json.RawMessage(`{"resolved":"nvenc"}`)
+	if err := repo.UpdateCapabilities(ctx, node.ID, recovered, "sha256:recovered", time.Now(), nil); err != nil {
+		t.Fatalf("update capabilities without drift: %v", err)
+	}
+	reloaded, err = repo.GetByID(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("reload node: %v", err)
+	}
+	if reloaded.CapabilityDrift != nil {
+		t.Fatalf("drift = %q after recovery, want NULL", *reloaded.CapabilityDrift)
+	}
+}
+
 func TestRepositoryUpdateCapabilitiesUnknownNode(t *testing.T) {
 	repo := NewRepository(newNodeTestPool(t))
-	err := repo.UpdateCapabilities(context.Background(), -1, []byte(`{}`), "sha256:abc", time.Now())
+	err := repo.UpdateCapabilities(context.Background(), -1, []byte(`{}`), "sha256:abc", time.Now(), nil)
 	if !errors.Is(err, ErrNodeNotFound) {
 		t.Fatalf("err = %v, want ErrNodeNotFound", err)
 	}

@@ -166,11 +166,12 @@ func (s *Sampler) diskStats(paths []string, now time.Time) []DiskStats {
 		if entry == nil {
 			continue
 		}
+		scratch := s.scratchDir != "" && path == s.scratchDir
 		if !entry.haveGood {
 			// Report it rather than hiding it: a media root this node cannot
 			// see is a deployment fact an operator needs, and silently dropping
 			// it looks identical to the path not being configured.
-			out = append(out, DiskStats{Path: path, Unavailable: true})
+			out = append(out, DiskStats{Path: path, Unavailable: true, Scratch: scratch})
 		} else {
 			if entry.good.FSID != "" {
 				if seenFS[entry.good.FSID] {
@@ -183,6 +184,7 @@ func (s *Sampler) diskStats(paths []string, now time.Time) []DiskStats {
 				UsedGB:  bytesToGB(entry.good.UsedBytes),
 				TotalGB: bytesToGB(entry.good.TotalBytes),
 				Stale:   entry.stale(now, s.interval),
+				Scratch: scratch,
 			})
 		}
 		// The cap applies to every entry, measured or not. A host whose library

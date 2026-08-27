@@ -112,7 +112,7 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 				// zero would read as an empty disk in every alert rule.
 				continue
 			}
-			label := diskSeriesLabel(c.sampler.scratchPath(), disk, &libraries)
+			label := diskSeriesLabel(disk, &libraries)
 			gauge(descDiskUsed, disk.UsedGB*bytesPerGB, label)
 			gauge(descDiskTotal, disk.TotalGB*bytesPerGB, label)
 		}
@@ -143,8 +143,8 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 // paths themselves stay behind auth.
 //
 // libraries counts the non-scratch mounts already labeled in this scrape.
-func diskSeriesLabel(scratchDir string, disk DiskStats, libraries *int) string {
-	if scratchDir != "" && disk.Path == scratchDir {
+func diskSeriesLabel(disk DiskStats, libraries *int) string {
+	if disk.Scratch {
 		return "scratch"
 	}
 	*libraries++

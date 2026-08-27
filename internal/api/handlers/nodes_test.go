@@ -19,12 +19,17 @@ type stubNodeRepository struct {
 	// default "unknown node" answer.
 	updateResult *nodepool.Node
 	updated      *nodepool.UpdateNodeInput
+	// node is what GetByID returns; nil keeps the default "unknown node" answer.
+	node *nodepool.Node
 }
 
 func (s *stubNodeRepository) List(context.Context) ([]*nodepool.Node, error) { return s.nodes, nil }
 
 func (s *stubNodeRepository) GetByID(context.Context, int) (*nodepool.Node, error) {
-	return nil, nodepool.ErrNodeNotFound
+	if s.node == nil {
+		return nil, nodepool.ErrNodeNotFound
+	}
+	return s.node, nil
 }
 
 func (s *stubNodeRepository) Create(context.Context, nodepool.CreateNodeInput) (*nodepool.Node, error) {

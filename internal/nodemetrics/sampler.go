@@ -439,15 +439,6 @@ func deviceSessions(sessions map[string]int, aliases []string, claimed map[strin
 	return total
 }
 
-// scratchPath returns the transcode scratch dir this sampler was told about,
-// used to label its series without publishing the path itself.
-func (s *Sampler) scratchPath() string {
-	if s == nil {
-		return ""
-	}
-	return s.scratchDir
-}
-
 func (s *Sampler) identityList() []DeviceIdentity {
 	if s.identities == nil {
 		return nil
