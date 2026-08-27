@@ -33,7 +33,7 @@ Always `200 OK` with a JSON array.
 | `last_stats` | object | The node's most recent host resource sample — `{"system": …, "gpu": […]}` in the shape below. Omitted when the node reported none. |
 | `hw_accel_override`, `hw_device_override` | string | This node's own acceleration policy (see below). Omitted when the node inherits the cluster-wide settings, which is the normal case. |
 | `capability_drift` | string | Human-readable note describing how the node's hardware got worse at the last capability refetch. Omitted when the last refetch found no regression (see below). |
-| `capability_drift_baseline` | object | What that note is waiting on — `{"backends": [...], "devices": [[alias, ...], ...]}`. Present with `capability_drift`, absent without it. Each device is every stable name it answered to, so it is recognized if it returns renumbered. |
+| `capability_drift_baseline` | object | What that note is waiting on — `{"backends": [...], "devices": [[alias, ...], ...]}`. Never present without `capability_drift`; absent with it only for a note written before this field existed (see below). Each device is every stable name it answered to, so it is recognized if it returns renumbered. |
 
 ### Acceleration overrides
 

@@ -348,18 +348,29 @@ func TestCachedLibraryPathsCachesADeliberateEmptyResult(t *testing.T) {
 	}
 }
 
-// The caller must not be able to mutate the cache through the slice it is given.
+// The cache is what a failed read falls back to, so a caller scribbling on the
+// slice it was handed must not be able to corrupt it — in either direction: the
+// value returned from a successful read, or the one returned from the fallback
+// itself.
 func TestCachedLibraryPathsDoesNotShareItsCachedSlice(t *testing.T) {
+	failing := false
 	provider := cachedLibraryPaths(func(context.Context) ([]string, error) {
+		if failing {
+			return nil, errors.New("database is not answering")
+		}
 		return []string{"/mnt/movies"}, nil
 	})
-	first := provider(context.Background())
-	first[0] = "/tmp/clobbered"
 
-	failing := cachedLibraryPaths(func(context.Context) ([]string, error) {
-		return nil, errors.New("boom")
-	})
-	if got := failing(context.Background()); len(got) != 0 {
-		t.Fatalf("an empty cache returned %v", got)
+	provider(context.Background())[0] = "/tmp/clobbered"
+
+	failing = true
+	fallback := provider(context.Background())
+	if !slices.Equal(fallback, []string{"/mnt/movies"}) {
+		t.Fatalf("fallback = %v, want the cache untouched by the caller's mutation", fallback)
+	}
+
+	fallback[0] = "/tmp/clobbered-again"
+	if got := provider(context.Background()); !slices.Equal(got, []string{"/mnt/movies"}) {
+		t.Fatalf("fallback = %v, want the cache untouched by a mutation of an earlier fallback", got)
 	}
 }
