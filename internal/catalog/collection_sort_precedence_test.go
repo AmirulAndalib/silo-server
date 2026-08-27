@@ -17,11 +17,15 @@ type sortPrefStore struct {
 	err  error
 	// calls records the lookups made, so tests can assert the store is not
 	// consulted when there is no user scope to consult it with.
-	calls int
+	calls        int
+	lastKind     string
+	lastTargetID string
 }
 
-func (s *sortPrefStore) GetCollectionSortPreference(_ context.Context, _, _, _ string) (*userstore.CollectionSortPreference, error) {
+func (s *sortPrefStore) GetCollectionSortPreference(_ context.Context, _, kind, collectionID string) (*userstore.CollectionSortPreference, error) {
 	s.calls++
+	s.lastKind = kind
+	s.lastTargetID = collectionID
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -185,5 +189,77 @@ func TestEffectiveCollectionSortAllowsPersonalizedOnUserCollections(t *testing.T
 	}
 	if qs.Field != "progress" || qs.Order != "desc" {
 		t.Fatalf("got %q/%q, want progress/desc", qs.Field, qs.Order)
+	}
+}
+
+func TestPersonalSourceSortPreferencePrecedence(t *testing.T) {
+	access := AccessFilter{UserID: 7, ProfileID: "profile-1"}
+	for _, source := range []CatalogSource{CatalogSourceWatchlist, CatalogSourceFavorites} {
+		t.Run(string(source), func(t *testing.T) {
+			t.Run("saved metadata sort", func(t *testing.T) {
+				store := &sortPrefStore{pref: &userstore.CollectionSortPreference{SortField: "title", SortOrder: "asc"}}
+				resolver := &CatalogResolver{storeProvider: &sortPrefProvider{store: store}}
+				req := resolver.resolvePersonalSourceEffectiveSort(context.Background(), CatalogRequest{Source: source, UseSourceOrder: true}, access)
+				if req.UseSourceOrder || req.Query.Sort != (QuerySort{Field: "title", Order: "asc"}) {
+					t.Fatalf("resolved request = %+v, want title/asc query sort", req)
+				}
+				if store.lastKind != string(source) || store.lastTargetID != userstore.PersonalSortPreferenceCollectionID {
+					t.Fatalf("preference lookup = %q/%q, want %q/%q", store.lastKind, store.lastTargetID, source, userstore.PersonalSortPreferenceCollectionID)
+				}
+			})
+
+			t.Run("saved non-list metadata sort uses executor path", func(t *testing.T) {
+				store := &sortPrefStore{pref: &userstore.CollectionSortPreference{SortField: "release_date", SortOrder: "desc"}}
+				resolver := &CatalogResolver{storeProvider: &sortPrefProvider{store: store}}
+				req := resolver.resolvePersonalSourceEffectiveSort(context.Background(), CatalogRequest{Source: source, UseSourceOrder: true}, access)
+				if req.UseSourceOrder || req.Query.Sort != (QuerySort{Field: "release_date", Order: "desc"}) {
+					t.Fatalf("resolved request = %+v, want release_date/desc executor path", req)
+				}
+			})
+
+			t.Run("saved added_at sort keeps list path", func(t *testing.T) {
+				store := &sortPrefStore{pref: &userstore.CollectionSortPreference{SortField: "added_at", SortOrder: "asc"}}
+				resolver := &CatalogResolver{storeProvider: &sortPrefProvider{store: store}}
+				req := resolver.resolvePersonalSourceEffectiveSort(context.Background(), CatalogRequest{Source: source, UseSourceOrder: true}, access)
+				if !req.UseSourceOrder || req.Query.Sort != (QuerySort{Field: "added_at", Order: "asc"}) {
+					t.Fatalf("resolved request = %+v, want added_at/asc source path", req)
+				}
+			})
+
+			t.Run("explicit request wins without lookup", func(t *testing.T) {
+				store := &sortPrefStore{pref: &userstore.CollectionSortPreference{SortField: "title", SortOrder: "asc"}}
+				resolver := &CatalogResolver{storeProvider: &sortPrefProvider{store: store}}
+				want := QuerySort{Field: "year", Order: "desc"}
+				req := resolver.resolvePersonalSourceEffectiveSort(context.Background(), CatalogRequest{Source: source, Query: QueryDefinition{Sort: want}}, access)
+				if req.Query.Sort != want || store.calls != 0 {
+					t.Fatalf("resolved sort = %+v, lookups = %d; want explicit sort and zero lookups", req.Query.Sort, store.calls)
+				}
+			})
+
+			t.Run("explicit added_at wins on source path without lookup", func(t *testing.T) {
+				store := &sortPrefStore{pref: &userstore.CollectionSortPreference{SortField: "title", SortOrder: "asc"}}
+				resolver := &CatalogResolver{storeProvider: &sortPrefProvider{store: store}}
+				want := QuerySort{Field: "added_at", Order: "asc"}
+				req := resolver.resolvePersonalSourceEffectiveSort(context.Background(), CatalogRequest{
+					Source: source, Query: QueryDefinition{Sort: want}, UseSourceOrder: true,
+				}, access)
+				if req.Query.Sort != want || !req.UseSourceOrder || store.calls != 0 {
+					t.Fatalf("resolved request = %+v, lookups = %d; want explicit added_at source path", req, store.calls)
+				}
+			})
+
+			for _, pref := range []*userstore.CollectionSortPreference{
+				{SortField: "", SortOrder: ""},
+				{SortField: "retired", SortOrder: "desc"},
+				{SortField: "title", SortOrder: "sideways"},
+			} {
+				store := &sortPrefStore{pref: pref}
+				resolver := &CatalogResolver{storeProvider: &sortPrefProvider{store: store}}
+				req := resolver.resolvePersonalSourceEffectiveSort(context.Background(), CatalogRequest{Source: source, UseSourceOrder: true}, access)
+				if !req.UseSourceOrder || req.Query.Sort.Field != "" {
+					t.Fatalf("preference %+v resolved to %+v, want source order", pref, req)
+				}
+			}
+		})
 	}
 }

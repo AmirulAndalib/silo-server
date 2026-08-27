@@ -104,6 +104,8 @@ function CatalogResults({
   const isHistorySource = state.source === "history";
   const isCollectionSource =
     state.source === "library_collection" || state.source === "user_collection";
+  const hasSavedSortPreference =
+    isCollectionSource || state.source === "watchlist" || state.source === "favorites";
   const allowPersonalizedOverlayControls = catalogSourceAllowsOverlay(state.source);
   const removeHistory = useRemoveHistory();
   const [selectionMode, setSelectionMode] = useState(false);
@@ -160,14 +162,14 @@ function CatalogResults({
     visibleRange,
     includeTotal: showExactResultCount,
   });
-  // The server resolves a collection's effective order (viewer override, then
-  // the collection's default, then source order) when the URL carries no sort.
+  // The server resolves a collection or personal list's effective order when
+  // the URL carries no sort.
   // Reflect that back into the filter bar so the menu shows what is actually
   // applied, without writing it into the URL — leaving it out of the URL is what
   // lets a later change to the saved preference take effect on the next visit.
   const effectiveSort = catalogQuery.data?.effectiveSort;
   const sortedState = useMemo(() => {
-    if (!isCollectionSource || !effectiveState.uses_source_order || !effectiveSort?.field) {
+    if (!hasSavedSortPreference || !effectiveState.uses_source_order || !effectiveSort?.field) {
       return effectiveState;
     }
     return {
@@ -179,13 +181,24 @@ function CatalogResults({
         sort: { field: effectiveSort.field, order: effectiveSort.order },
       },
     };
-  }, [effectiveSort, effectiveState, isCollectionSource]);
+  }, [effectiveSort, effectiveState, hasSavedSortPreference]);
 
   const setCollectionSortPreference = useSetCollectionSortPreference();
   const rememberCollectionSort = useCallback(
     (nextState: CatalogSearchState) => {
       const collectionId = nextState.collection_id?.trim();
-      if (!isCollectionSource || !collectionId) return;
+      let collectionKind: "library" | "user" | "watchlist" | "favorites";
+      if (nextState.source === "library_collection") {
+        if (!collectionId) return;
+        collectionKind = "library";
+      } else if (nextState.source === "user_collection") {
+        if (!collectionId) return;
+        collectionKind = "user";
+      } else if (nextState.source === "watchlist" || nextState.source === "favorites") {
+        collectionKind = nextState.source;
+      } else {
+        return;
+      }
       const nextValue = nextState.uses_source_order
         ? ""
         : querySortToSelectValue(nextState.query_definition.sort);
@@ -195,13 +208,13 @@ function CatalogResults({
       if (nextValue === currentValue) return;
       const [field, order] = nextValue ? nextValue.split(":") : ["", ""];
       setCollectionSortPreference.mutate({
-        collection_kind: nextState.source === "library_collection" ? "library" : "user",
+        collection_kind: collectionKind,
         collection_id: collectionId,
         field: field ?? "",
         order: order === "asc" || order === "desc" ? order : "",
       });
     },
-    [isCollectionSource, setCollectionSortPreference, sortedState],
+    [setCollectionSortPreference, sortedState],
   );
 
   const canRequest = useCanRequest();

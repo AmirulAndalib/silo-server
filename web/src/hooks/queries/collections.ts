@@ -378,10 +378,9 @@ export function useDeleteUserCollectionImage() {
 }
 
 /**
- * Persists the sort a viewer picked while browsing a collection, so the choice
- * survives leaving and re-entering it. Sending an empty field pins the viewer
- * to the collection's own source order — distinct from clearing the preference,
- * which returns them to whatever default the collection's creator configured.
+ * Persists the sort a viewer picked while browsing a collection, watchlist, or
+ * favorites. Sending an empty field pins the viewer to source order — distinct
+ * from clearing a collection preference, which restores its configured default.
  *
  * Failures are deliberately silent: the sort is already applied to the current
  * view through the URL, and a toast for a preference that will be re-sent on
@@ -395,8 +394,8 @@ export function useSetCollectionSortPreference() {
     // overwriting the preference the viewer actually selected last.
     scope: { id: "collection-sort-preference" },
     mutationFn: (body: {
-      collection_kind: "library" | "user";
-      collection_id: string;
+      collection_kind: "library" | "user" | "watchlist" | "favorites";
+      collection_id?: string;
       field: string;
       order: NonNullable<CollectionSortConfig["order"]> | "";
     }) =>
