@@ -698,7 +698,9 @@ function NodeForm({
                   value={hwDeviceOverride}
                   onChange={(e) => setHwDeviceOverride(e.target.value)}
                   placeholder={
-                    usesCUDADevices ? "Cluster default (CUDA device 0)" : "Cluster default (auto-discover)"
+                    usesCUDADevices
+                      ? "Cluster default (CUDA device 0)"
+                      : "Cluster default (auto-discover)"
                   }
                 />
                 <p className="text-muted-foreground text-sm">
