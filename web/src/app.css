@@ -369,12 +369,14 @@
     --input: #1c1c20;
     --ring: #e8e8ec;
 
-    /* Charts: desaturated pastels that fit the cinema aesthetic */
-    --chart-1: #8b9cf7;
-    --chart-2: #7ec8e3;
-    --chart-3: #81c995;
-    --chart-4: #e8a87c;
-    --chart-5: #c78dbd;
+    /* Charts: categorical set validated on this theme's card surface —
+       lightness band, chroma floor, adjacent-pair CVD separation, and
+       contrast all pass. Assigned in fixed entity order, never cycled. */
+    --chart-1: #5f74ee;
+    --chart-2: #169e88;
+    --chart-3: #bf7f22;
+    --chart-4: #c2578f;
+    --chart-5: #3f97cf;
 
     /* Sidebar: darkest surface, creating depth */
     --sidebar: #0f0f12;
@@ -431,12 +433,13 @@
     --input: #e8e8ec;
     --ring: #1a1a1e;
 
-    /* Charts: richer tones for light backgrounds */
-    --chart-1: #6366f1;
-    --chart-2: #0ea5e9;
-    --chart-3: #22c55e;
-    --chart-4: #f59e0b;
-    --chart-5: #a855f7;
+    /* Charts: light-mode steps of the same categorical set, validated against
+       the #ffffff card surface (dark mode is selected, never an auto flip). */
+    --chart-1: #4c60dd;
+    --chart-2: #0b8a75;
+    --chart-3: #9c6410;
+    --chart-4: #a63f75;
+    --chart-5: #2b78ab;
 
     /* Sidebar: slightly darker than background for depth */
     --sidebar: #eaeaee;
@@ -485,11 +488,12 @@
     --border: #28384d;
     --input: #182231;
     --ring: #78aefc;
-    --chart-1: #78aefc;
-    --chart-2: #87d2ff;
-    --chart-3: #6ec7ba;
-    --chart-4: #b9c7ff;
-    --chart-5: #f18d8d;
+    /* Shared dark categorical set (see midnight-cinema). */
+    --chart-1: #5f74ee;
+    --chart-2: #169e88;
+    --chart-3: #bf7f22;
+    --chart-4: #c2578f;
+    --chart-5: #3f97cf;
     --sidebar: #0c131d;
     --sidebar-foreground: #f4f8ff;
     --sidebar-primary: #78aefc;
@@ -529,11 +533,12 @@
     --border: #3b2830;
     --input: #251a1f;
     --ring: #d16a78;
-    --chart-1: #d16a78;
-    --chart-2: #f08e7a;
-    --chart-3: #c8a0b8;
-    --chart-4: #8aa0c6;
-    --chart-5: #e1b86e;
+    /* Shared dark categorical set (see midnight-cinema). */
+    --chart-1: #5f74ee;
+    --chart-2: #169e88;
+    --chart-3: #bf7f22;
+    --chart-4: #c2578f;
+    --chart-5: #3f97cf;
     --sidebar: #120d0f;
     --sidebar-foreground: #f8f2f3;
     --sidebar-primary: #d16a78;
@@ -573,11 +578,12 @@
     --border: #284038;
     --input: #182420;
     --ring: #5bc39d;
-    --chart-1: #5bc39d;
-    --chart-2: #7dd8bd;
-    --chart-3: #7eb7a4;
-    --chart-4: #88a9cf;
-    --chart-5: #e0b66b;
+    /* Shared dark categorical set (see midnight-cinema). */
+    --chart-1: #5f74ee;
+    --chart-2: #169e88;
+    --chart-3: #bf7f22;
+    --chart-4: #c2578f;
+    --chart-5: #3f97cf;
     --sidebar: #0c1210;
     --sidebar-foreground: #f2f8f5;
     --sidebar-primary: #5bc39d;
@@ -1907,11 +1913,20 @@
 
   /* Admin dashboard widget grid: single column on small screens, two columns
      on tablets (where .admin-widget-wide keeps the full row), and a 12-column
-     grid from lg up where each widget spans var(--widget-span) columns. */
+     grid from lg up where each widget spans var(--widget-span) columns and
+     var(--widget-rows) fixed-height rows.
+
+     Rows are only fixed from lg up. Below that the grid is one or two
+     content-sized columns, so a widget is already as narrow as it gets and a
+     row span picked for the wide layout would clip it — the same reason column
+     spans stop applying there. */
   .admin-widget-grid {
     display: grid;
     grid-template-columns: 1fr;
     gap: 0.875rem;
+    /* Height of one widget row. Declared here rather than in the media query so
+       DashboardGrid can read it back for a drag; it only takes effect at lg. */
+    --admin-row-h: 6.25rem;
   }
 
   .admin-widget {
@@ -1937,10 +1952,12 @@
   @media (min-width: 1024px) {
     .admin-widget-grid {
       grid-template-columns: repeat(12, 1fr);
+      grid-auto-rows: var(--admin-row-h);
     }
 
     .admin-widget {
       grid-column: span var(--widget-span) / span var(--widget-span);
+      grid-row: span var(--widget-rows) / span var(--widget-rows);
     }
   }
 

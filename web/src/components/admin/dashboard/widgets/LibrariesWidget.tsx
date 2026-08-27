@@ -42,7 +42,7 @@ export function LibrariesWidget() {
 
   return (
     <Card className="h-full">
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+      <CardHeader className="flex shrink-0 flex-row items-center justify-between space-y-0 pb-3">
         <CardTitle className="text-sm font-bold">Libraries</CardTitle>
         <Link
           to="/admin/libraries"
@@ -51,7 +51,7 @@ export function LibrariesWidget() {
           Manage ›
         </Link>
       </CardHeader>
-      <CardContent className="space-y-2">
+      <CardContent className="min-h-0 flex-1 space-y-2 overflow-y-auto">
         {librariesQuery.isLoading ? (
           <LibrarySkeletonRows />
         ) : librariesQuery.error ? (

@@ -9,17 +9,30 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import type { AdminUser } from "@/api/types";
+import { formatRelativeTime } from "@/lib/date";
 import { useAdminUsers } from "@/hooks/queries/admin/users";
 import { SectionError, UserSkeletonRows } from "../feedback";
+
+// Most recently active first; users with no recorded activity sink to the
+// bottom. The list endpoint itself returns account-creation order.
+function byLastActive(a: AdminUser, b: AdminUser): number {
+  const at = a.last_active_at ? Date.parse(a.last_active_at) : 0;
+  const bt = b.last_active_at ? Date.parse(b.last_active_at) : 0;
+  if (at !== bt) {
+    return bt - at;
+  }
+  return a.username.localeCompare(b.username);
+}
 
 export function UsersWidget() {
   const navigate = useNavigate();
   const usersQuery = useAdminUsers();
-  const users = usersQuery.data ?? [];
+  const users = [...(usersQuery.data ?? [])].sort(byLastActive);
 
   return (
     <Card className="h-full">
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+      <CardHeader className="flex shrink-0 flex-row items-center justify-between space-y-0 pb-3">
         <CardTitle className="text-sm font-bold">Users</CardTitle>
         <Link
           to="/admin/users"
@@ -28,7 +41,7 @@ export function UsersWidget() {
           Manage ›
         </Link>
       </CardHeader>
-      <CardContent>
+      <CardContent className="min-h-0 flex-1 overflow-y-auto">
         {usersQuery.isLoading ? (
           <UserSkeletonRows />
         ) : usersQuery.error ? (
@@ -40,7 +53,7 @@ export function UsersWidget() {
             <TableHeader>
               <TableRow>
                 <TableHead>User</TableHead>
-                <TableHead className="hidden sm:table-cell">Role</TableHead>
+                <TableHead className="hidden sm:table-cell">Last active</TableHead>
                 <TableHead>Status</TableHead>
               </TableRow>
             </TableHeader>
@@ -59,16 +72,26 @@ export function UsersWidget() {
                       >
                         {u.username.charAt(0).toUpperCase()}
                       </div>
-                      <div>
-                        <div className="text-[13px] font-semibold">{u.username}</div>
-                        <div className="text-muted-foreground hidden text-[10px] sm:block">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="truncate text-[13px] font-semibold">{u.username}</span>
+                          {u.role === "admin" && (
+                            <Badge variant="default" className="px-1.5 py-0 text-[9px]">
+                              admin
+                            </Badge>
+                          )}
+                        </div>
+                        <div className="text-muted-foreground hidden truncate text-[10px] sm:block">
                           {u.email}
                         </div>
                       </div>
                     </div>
                   </TableCell>
-                  <TableCell className="hidden sm:table-cell">
-                    <Badge variant={u.role === "admin" ? "default" : "secondary"}>{u.role}</Badge>
+                  <TableCell className="text-muted-foreground hidden text-xs whitespace-nowrap sm:table-cell">
+                    {formatRelativeTime(u.last_active_at ?? null, {
+                      rounding: "floor",
+                      justNowLabel: "Just now",
+                    }) ?? "—"}
                   </TableCell>
                   <TableCell>
                     <Badge variant={u.enabled ? "outline" : "destructive"}>

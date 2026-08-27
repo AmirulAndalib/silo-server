@@ -4372,6 +4372,47 @@ export interface AdminSettingsUpdateResponse {
   restart_required_keys?: string[];
 }
 
+// Admin dashboard layout (per admin account, server-persisted).
+//
+// The server stores the document verbatim and validates only its size and that
+// it is a JSON object: widget ids, column spans and row heights are the web
+// client's vocabulary. `layout` is therefore typed as `unknown` on the read
+// side so callers must sanitize it before use — a layout written by a newer or
+// older build can name widgets this one does not have, or omit `rows`, which
+// predates two-axis resizing.
+export interface AdminDashboardLayoutEntry {
+  id: string;
+  span: number;
+  rows: number;
+}
+
+export interface AdminDashboardLayoutDocument {
+  version: number;
+  entries: AdminDashboardLayoutEntry[];
+}
+
+export interface AdminDashboardLayoutResponse {
+  layout: unknown;
+  updated_at: string | null;
+}
+
+// One backing service on the admin health strip. `configured: false` means the
+// deployment runs without it — a supported single-node shape for Redis — and
+// `ok` is then absent rather than false, so "not present" and "present but
+// broken" stay distinguishable.
+export interface AdminHealthComponent {
+  configured: boolean;
+  ok?: boolean;
+  latency_ms?: number;
+}
+
+export interface AdminServerHealth {
+  postgres: AdminHealthComponent;
+  redis: AdminHealthComponent;
+  errors_24h: number;
+  warnings_24h: number;
+}
+
 export interface AdminServerStatus {
   started_at: string;
   restart_required: boolean;
@@ -4379,6 +4420,87 @@ export interface AdminServerStatus {
   restart_required_reason?: string;
   restart_requested: boolean;
   restart_requested_at?: string;
+  health: AdminServerHealth;
+}
+
+// GET /admin/stats/playback-activity. `buckets` carries only hours that saw a
+// session, so the client zero-fills the window before charting it.
+export interface AdminPlaybackActivityBucket {
+  hour: string;
+  direct: number;
+  remux: number;
+  transcode: number;
+}
+
+// Time-to-first-frame and failed-start counts are deliberately absent: nothing
+// records playback start events yet. See docs/admin-api.md.
+export interface AdminPlaybackReliability {
+  sessions_started: number;
+  transcode_starts: number;
+  finalized_sessions: number;
+  completed_sessions: number;
+  completion_rate: number;
+  unique_profiles: number;
+}
+
+// `bucket_seconds` is 3600 up to a two-day window and 86400 beyond it; the
+// client zero-fills the window on that grid. `hour` on a bucket is its start
+// instant at either width.
+export interface AdminPlaybackActivity {
+  hours: number;
+  bucket_seconds: number;
+  buckets: AdminPlaybackActivityBucket[];
+  reliability: AdminPlaybackReliability;
+  profiles_active_24h: number;
+}
+
+// GET /admin/stats/top-activity. Episodes are rolled up to their series, so a
+// title's media_item_id is a series content id for TV.
+export interface AdminTopTitle {
+  media_item_id: string;
+  title: string;
+  media_type: string;
+  plays: number;
+  total_seconds: number;
+}
+
+export interface AdminTopProfile {
+  user_id: number;
+  username: string;
+  profile_id: string;
+  profile_name: string;
+  plays: number;
+  total_seconds: number;
+}
+
+export interface AdminTopActivity {
+  days: number;
+  limit: number;
+  titles: AdminTopTitle[];
+  profiles: AdminTopProfile[];
+}
+
+// GET /admin/stats/timeseries. One point per sampled minute; minutes the
+// sampler missed are absent rather than zero, so charts draw them as gaps.
+export interface AdminTimeseriesPoint {
+  t: string;
+  streams: number;
+  direct: number;
+  remux: number;
+  transcode: number;
+  egress_kbps: number;
+}
+
+// `oldest_sample_at` is null until the sampler has written anything, which is
+// what the "collecting data" chart state keys off. `resolution_seconds` is the
+// bucket the server aggregated into, which widens with the requested window —
+// read it rather than assuming the sampler's minute.
+export interface AdminTimeseries {
+  resolution_seconds: number;
+  from: string;
+  to: string;
+  oldest_sample_at: string | null;
+  points: AdminTimeseriesPoint[];
 }
 
 // IP visibility

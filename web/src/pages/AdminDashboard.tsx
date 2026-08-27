@@ -14,6 +14,20 @@ import { adminKeys } from "@/hooks/queries/keys";
 import { usePageActivity } from "@/hooks/usePageActivity";
 import { buildAdminCommandNavSections } from "@/lib/adminNavigation";
 
+// Query prefixes the dashboard's stats/sessions/libraries/users refetch does
+// not already cover. Widgets fetch these themselves, so Refresh only has to
+// mark them stale; mounted widgets refetch, hidden ones stay cheap.
+const DASHBOARD_WIDGET_QUERY_PREFIXES = [
+  adminKeys.dashboardTimeseriesRoot(),
+  adminKeys.playbackActivityRoot(),
+  adminKeys.topActivityRoot(),
+  adminKeys.serverStatus(),
+  adminKeys.nodes(),
+  adminKeys.autoscanStatus(),
+  adminKeys.autoscanScansRoot(),
+  adminKeys.operationalLogsRoot(),
+];
+
 const REFRESH_SPINNER_MIN_VISIBLE_MS = 1_000;
 const DASHBOARD_AUTO_REFRESH_MS = 60_000;
 const RELATIVE_UPDATED_LABEL_TICK_MS = 30_000;
@@ -96,6 +110,13 @@ export default function AdminDashboard() {
           queryClient.invalidateQueries({ queryKey: adminKeys.sessions(), refetchType: "none" }),
           queryClient.invalidateQueries({ queryKey: adminKeys.libraries(), refetchType: "none" }),
           queryClient.invalidateQueries({ queryKey: adminKeys.users(), refetchType: "none" }),
+          // Widgets that own their own data: invalidate by prefix so every
+          // window variant is covered, and let the default refetchType refetch
+          // the ones actually mounted. Nothing here is refetched by hand — the
+          // widget's own hook does that when its query goes stale.
+          ...DASHBOARD_WIDGET_QUERY_PREFIXES.map((queryKey) =>
+            queryClient.invalidateQueries({ queryKey }),
+          ),
         ]);
         const nextStats = await fetchAdminStats({ refresh: true });
         queryClient.setQueryData(adminKeys.stats(), nextStats);
@@ -246,7 +267,7 @@ export default function AdminDashboard() {
             Add widget
           </Button>
           <span className="text-muted-foreground text-xs">
-            Drag a widget to move it · drag its right edge to resize · × removes it
+            Drag a widget to move it · drag its corner to resize · × removes it
           </span>
           <button
             type="button"

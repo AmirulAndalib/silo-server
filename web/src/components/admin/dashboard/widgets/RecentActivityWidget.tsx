@@ -14,7 +14,7 @@ export function RecentActivityWidget() {
 
   return (
     <Card className="h-full">
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+      <CardHeader className="flex shrink-0 flex-row items-center justify-between space-y-0 pb-3">
         <CardTitle className="text-sm font-bold">Recent Activity</CardTitle>
         <Link
           to="/admin/activity"
@@ -23,7 +23,7 @@ export function RecentActivityWidget() {
           View all ›
         </Link>
       </CardHeader>
-      <CardContent>
+      <CardContent className="min-h-0 flex-1 overflow-y-auto">
         {sessionsQuery.isLoading ? (
           <ActivitySkeletonRows />
         ) : sessionsQuery.error ? (

@@ -17,10 +17,40 @@ import { cn } from "@/lib/utils";
 import { getDashboardWidget } from "./registry";
 import type { WidgetId } from "./types";
 import type { DashboardLayout } from "./useDashboardLayout";
+import { WidgetChromeProvider } from "./widgetChrome";
 
 /** Must match the `gap` of `.admin-widget-grid` in app.css (0.875rem). */
 const GRID_GAP_PX = 14;
+/** Must match `--admin-row-h` on `.admin-widget-grid` in app.css (6.25rem). */
+const GRID_ROW_HEIGHT_PX = 100;
 const GRID_COLUMNS = 12;
+
+/**
+ * Row height in CSS pixels.
+ *
+ * Read back from `--admin-row-h` so a drag follows the stylesheet instead of a
+ * second copy of the number; `GRID_ROW_HEIGHT_PX` is the fallback for anything
+ * that cannot resolve the variable (jsdom, a grid that is not mounted yet).
+ */
+function readRowHeightPx(grid: HTMLElement | null): number {
+  if (!grid) {
+    return GRID_ROW_HEIGHT_PX;
+  }
+  const raw = window.getComputedStyle(grid).getPropertyValue("--admin-row-h").trim();
+  const value = Number.parseFloat(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    return GRID_ROW_HEIGHT_PX;
+  }
+  if (raw.endsWith("rem")) {
+    const root = Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize);
+    return Number.isFinite(root) && root > 0 ? value * root : GRID_ROW_HEIGHT_PX;
+  }
+  return value;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
 
 interface DropIndicator {
   id: WidgetId;
@@ -30,6 +60,7 @@ interface DropIndicator {
 interface ResizePreview {
   id: WidgetId;
   span: number;
+  rows: number;
 }
 
 export function DashboardGrid({
@@ -47,6 +78,7 @@ export function DashboardGrid({
     isCustomizing,
     moveWidget,
     resizeWidget,
+    setWidgetRange,
     removeWidget,
     addWidget,
   } = layout;
@@ -58,12 +90,19 @@ export function DashboardGrid({
   const [liveMessage, setLiveMessage] = useState("");
   const resizeSessionRef = useRef<{
     id: WidgetId;
+    title: string;
     startX: number;
+    startY: number;
     startSpan: number;
-    unit: number;
+    startRows: number;
+    columnUnit: number;
+    rowUnit: number;
     minSpan: number;
     maxSpan: number;
+    minRows: number;
+    maxRows: number;
     latestSpan: number;
+    latestRows: number;
   } | null>(null);
 
   const findWidgetIdFromEvent = useCallback((event: DragEvent<HTMLElement>): WidgetId | null => {
@@ -137,7 +176,12 @@ export function DashboardGrid({
   );
 
   const handleResizePointerDown = useCallback(
-    (event: ReactPointerEvent<HTMLButtonElement>, id: WidgetId, currentSpan: number) => {
+    (
+      event: ReactPointerEvent<HTMLButtonElement>,
+      id: WidgetId,
+      currentSpan: number,
+      currentRows: number,
+    ) => {
       if (!isCustomizing) return;
       // Only start on a primary-button press: a right-click opens the context
       // menu and never delivers the matching pointerup, which would leave the
@@ -148,17 +192,24 @@ export function DashboardGrid({
       event.stopPropagation();
       event.currentTarget.setPointerCapture(event.pointerId);
       const gridWidth = gridRef.current?.getBoundingClientRect().width ?? 0;
-      const unit = gridWidth > 0 ? (gridWidth + GRID_GAP_PX) / GRID_COLUMNS : 1;
+      const columnUnit = gridWidth > 0 ? (gridWidth + GRID_GAP_PX) / GRID_COLUMNS : 1;
       resizeSessionRef.current = {
         id,
+        title: widget.title,
         startX: event.clientX,
+        startY: event.clientY,
         startSpan: currentSpan,
-        unit,
+        startRows: currentRows,
+        columnUnit,
+        rowUnit: readRowHeightPx(gridRef.current) + GRID_GAP_PX,
         minSpan: widget.minSpan,
         maxSpan: widget.maxSpan,
+        minRows: widget.minRows,
+        maxRows: widget.maxRows,
         latestSpan: currentSpan,
+        latestRows: currentRows,
       };
-      setResizePreview({ id, span: currentSpan });
+      setResizePreview({ id, span: currentSpan, rows: currentRows });
     },
     [isCustomizing],
   );
@@ -166,12 +217,24 @@ export function DashboardGrid({
   const handleResizePointerMove = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
     const session = resizeSessionRef.current;
     if (!session) return;
-    const raw = session.startSpan + (event.clientX - session.startX) / session.unit;
-    const next = Math.min(session.maxSpan, Math.max(session.minSpan, Math.round(raw)));
-    if (next !== session.latestSpan) {
-      session.latestSpan = next;
-      setResizePreview({ id: session.id, span: next });
+    // Each axis is clamped to its own range, so a widget with a pinned width
+    // still grows in height and never drifts sideways under the pointer.
+    const nextSpan = clamp(
+      Math.round(session.startSpan + (event.clientX - session.startX) / session.columnUnit),
+      session.minSpan,
+      session.maxSpan,
+    );
+    const nextRows = clamp(
+      Math.round(session.startRows + (event.clientY - session.startY) / session.rowUnit),
+      session.minRows,
+      session.maxRows,
+    );
+    if (nextSpan === session.latestSpan && nextRows === session.latestRows) {
+      return;
     }
+    session.latestSpan = nextSpan;
+    session.latestRows = nextRows;
+    setResizePreview({ id: session.id, span: nextSpan, rows: nextRows });
   }, []);
 
   const handleResizePointerEnd = useCallback(
@@ -183,7 +246,10 @@ export function DashboardGrid({
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
-      resizeWidget(session.id, session.latestSpan);
+      resizeWidget(session.id, { span: session.latestSpan, rows: session.latestRows });
+      setLiveMessage(
+        `${session.title} resized to ${session.latestSpan} of ${GRID_COLUMNS} columns × ${session.latestRows} ${session.latestRows === 1 ? "row" : "rows"}`,
+      );
     },
     [resizeWidget],
   );
@@ -213,19 +279,27 @@ export function DashboardGrid({
   );
 
   const handleResizeKeyDown = useCallback(
-    (event: ReactKeyboardEvent<HTMLButtonElement>, id: WidgetId, currentSpan: number) => {
-      const shrink = event.key === "ArrowLeft" || event.key === "ArrowDown";
-      const grow = event.key === "ArrowRight" || event.key === "ArrowUp";
-      if (!shrink && !grow) return;
+    (
+      event: ReactKeyboardEvent<HTMLButtonElement>,
+      id: WidgetId,
+      currentSpan: number,
+      currentRows: number,
+    ) => {
+      // The corner handle owns both axes: left/right walk columns, up/down walk
+      // rows, matching the direction the same drag would take.
+      const columnStep =
+        event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : undefined;
+      const rowStep = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : undefined;
+      if (columnStep === undefined && rowStep === undefined) return;
       event.preventDefault();
       const widget = getDashboardWidget(id);
-      const next = Math.min(
-        widget.maxSpan,
-        Math.max(widget.minSpan, currentSpan + (grow ? 1 : -1)),
+      const nextSpan = clamp(currentSpan + (columnStep ?? 0), widget.minSpan, widget.maxSpan);
+      const nextRows = clamp(currentRows + (rowStep ?? 0), widget.minRows, widget.maxRows);
+      if (nextSpan === currentSpan && nextRows === currentRows) return;
+      resizeWidget(id, { span: nextSpan, rows: nextRows });
+      setLiveMessage(
+        `${widget.title} resized to ${nextSpan} of ${GRID_COLUMNS} columns × ${nextRows} ${nextRows === 1 ? "row" : "rows"}`,
       );
-      if (next === currentSpan) return;
-      resizeWidget(id, next);
-      setLiveMessage(`${widget.title} resized to ${next} of ${GRID_COLUMNS} columns`);
     },
     [resizeWidget],
   );
@@ -247,9 +321,10 @@ export function DashboardGrid({
       >
         {entries.map((entry) => {
           const widget = getDashboardWidget(entry.id);
-          const span = resizePreview?.id === entry.id ? resizePreview.span : entry.span;
-          const canResize = widget.minSpan !== widget.maxSpan;
           const isWidgetResizing = resizePreview?.id === entry.id;
+          const span = isWidgetResizing ? resizePreview.span : entry.span;
+          const rows = isWidgetResizing ? resizePreview.rows : entry.rows;
+          const canResize = widget.minSpan !== widget.maxSpan || widget.minRows !== widget.maxRows;
           const WidgetComponent = widget.Component;
 
           return (
@@ -262,10 +337,19 @@ export function DashboardGrid({
                 isCustomizing && "rounded-2xl",
                 draggedId === entry.id && "opacity-40",
               )}
-              style={{ "--widget-span": span } as CSSProperties}
+              style={{ "--widget-span": span, "--widget-rows": rows } as CSSProperties}
               draggable={isCustomizing && !isResizing}
             >
-              <WidgetComponent />
+              {/* The window is resolved here rather than in the widget: the
+                  entry may predate the widget gaining ranges, in which case the
+                  registry's default is what it has always been showing. */}
+              <WidgetChromeProvider
+                id={entry.id}
+                range={entry.range ?? widget.ranges?.default}
+                setRange={setWidgetRange}
+              >
+                <WidgetComponent />
+              </WidgetChromeProvider>
 
               {isCustomizing && (
                 <>
@@ -308,20 +392,28 @@ export function DashboardGrid({
                     </button>
                   </div>
 
+                  {/* One handle for both axes, straddling the bottom-right
+                      corner. Column spans (and row heights) only apply from lg
+                      up, so the handle is hidden below that. */}
                   {canResize && (
                     <button
                       type="button"
                       aria-label={`Resize ${widget.title} (drag, or arrow keys)`}
                       title="Drag or use arrow keys to resize"
-                      className="border-border bg-background/95 hover:border-primary hover:bg-primary/30 focus-visible:ring-ring absolute top-1/2 -right-2 z-20 hidden h-10 w-2.5 -translate-y-1/2 cursor-ew-resize touch-none rounded-full border shadow-md focus-visible:ring-2 focus-visible:outline-none lg:block"
+                      className={cn(
+                        "border-border bg-background/95 hover:border-primary hover:bg-primary/30 focus-visible:ring-ring absolute -right-1.5 -bottom-1.5 z-20 hidden h-3.5 w-3.5 cursor-nwse-resize touch-none rounded-[4px] border shadow-md focus-visible:ring-2 focus-visible:outline-none lg:block",
+                        isWidgetResizing && "border-primary bg-primary/30",
+                      )}
                       onPointerDown={(event) =>
-                        handleResizePointerDown(event, entry.id, entry.span)
+                        handleResizePointerDown(event, entry.id, entry.span, entry.rows)
                       }
                       onPointerMove={handleResizePointerMove}
                       onPointerUp={handleResizePointerEnd}
                       onPointerCancel={handleResizePointerEnd}
                       onLostPointerCapture={handleResizePointerEnd}
-                      onKeyDown={(event) => handleResizeKeyDown(event, entry.id, entry.span)}
+                      onKeyDown={(event) =>
+                        handleResizeKeyDown(event, entry.id, entry.span, entry.rows)
+                      }
                     />
                   )}
 
@@ -330,7 +422,7 @@ export function DashboardGrid({
                       aria-hidden="true"
                       className="bg-primary text-primary-foreground absolute -top-3 left-1/2 z-30 -translate-x-1/2 rounded-full px-2 py-0.5 text-[10px] font-bold whitespace-nowrap tabular-nums shadow-md"
                     >
-                      {span} / {GRID_COLUMNS}
+                      {span} × {rows}
                     </span>
                   )}
                 </>

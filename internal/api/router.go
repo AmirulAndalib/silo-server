@@ -194,6 +194,12 @@ type Dependencies struct {
 	// that case rather than failing.
 	MDBListClient *mdblist.Client
 
+	// Admin dashboard aggregates, cached like AdminStatsProvider. Each is
+	// optional: without one, the matching route queries Postgres per request.
+	AdminPlaybackActivityProvider handlers.AdminPlaybackActivitySource
+	AdminTopActivityProvider      handlers.AdminTopActivitySource
+	AdminTimeseriesProvider       handlers.AdminTimeseriesSource
+
 	// ABSHandler is the Audiobookshelf-compatible HTTP handler. When non-nil
 	// it is mounted at the root router level (not under /api/v1/) so that ABS
 	// clients hitting /login, /api/*, /abs/api/*, and /abs/socket.io/* all
@@ -1150,6 +1156,10 @@ func NewRouter(deps Dependencies) chi.Router {
 		adminHandler.EventsHub = deps.EventsHub
 		adminHandler.ImpersonationService = authService
 		adminHandler.StatsSource = deps.AdminStatsProvider
+		adminHandler.PlaybackActivitySource = deps.AdminPlaybackActivityProvider
+		adminHandler.TopActivitySource = deps.AdminTopActivityProvider
+		adminHandler.TimeseriesSource = deps.AdminTimeseriesProvider
+		adminHandler.RedisClient = deps.RedisClient
 		adminHandler.RealtimeHub = deps.RealtimeHub
 		adminHandler.AccessGroups = accessGroupStore
 		adminHandler.BootstrapSensitiveConfigured = deps.BootstrapSensitiveConfigured
@@ -2905,7 +2915,22 @@ func NewRouter(deps Dependencies) chi.Router {
 							r.Get("/playback-history", adminHandler.HandleListPlaybackHistory)
 							r.Get("/unmatched", adminHandler.HandleListUnmatched)
 							r.Get("/stats", adminHandler.HandleGetStats)
+							// Dashboard aggregates. Both are cached reads over the
+							// same catalog/playback tables /stats uses, split out
+							// because their windows and refresh rates differ.
+							r.Get("/stats/playback-activity", adminHandler.HandleGetPlaybackActivity)
+							r.Get("/stats/top-activity", adminHandler.HandleGetTopActivity)
+							// Minute-resolution samples written by the dashboard
+							// metrics sampler (internal/dashmetrics); the only
+							// history for concurrent streams and egress.
+							r.Get("/stats/timeseries", adminHandler.HandleGetTimeseries)
 							r.Get("/server/status", adminHandler.HandleGetServerStatus)
+							// Per-admin-account dashboard arrangement. The server
+							// stores it as an opaque JSON object; the web client
+							// owns widget-id and span validation.
+							r.Get("/dashboard/layout", adminHandler.HandleGetDashboardLayout)
+							r.Put("/dashboard/layout", adminHandler.HandlePutDashboardLayout)
+							r.Delete("/dashboard/layout", adminHandler.HandleDeleteDashboardLayout)
 							r.Get("/catalog/search/status", adminHandler.HandleGetCatalogSearchStatus)
 							if policyHandler != nil {
 								r.Route("/policy", func(r chi.Router) {

@@ -1,9 +1,30 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import type { AdminDashboardLayoutDocument } from "@/api/types";
+import {
+  useAdminDashboardLayout,
+  useResetAdminDashboardLayout,
+  useSaveAdminDashboardLayout,
+} from "@/hooks/queries/admin/dashboardLayout";
 import { DASHBOARD_WIDGETS, DEFAULT_LAYOUT, findDashboardWidget } from "./registry";
-import type { DashboardLayoutEntry, DashboardWidgetDefinition, WidgetId } from "./types";
+import type {
+  DashboardLayoutEntry,
+  DashboardWidgetDefinition,
+  WidgetId,
+  WidgetRange,
+} from "./types";
 
 export const DASHBOARD_LAYOUT_STORAGE_KEY = "silo.admin-dashboard-layout.v1";
 
+// Edits are bursty — a drag emits several moves, a resize several spans — so
+// the server write waits for the burst to settle. Local state and localStorage
+// are updated synchronously, so the delay is never visible.
+export const DASHBOARD_LAYOUT_SAVE_DEBOUNCE_MS = 800;
+
+// Version 1 is still version 1 with row heights and per-widget windows in it:
+// `rows` and `range` are additive fields that older documents simply omit, and
+// sanitizing fills them from the widget's defaults. A bump would only be needed
+// for a change that makes an existing field mean something new.
 interface StoredLayout {
   version: 1;
   entries: DashboardLayoutEntry[];
@@ -16,38 +37,100 @@ function clampSpan(span: unknown, widget: DashboardWidgetDefinition): number {
   return Math.min(widget.maxSpan, Math.max(widget.minSpan, Math.round(span)));
 }
 
-function loadStoredLayout(): DashboardLayoutEntry[] {
+/**
+ * Row heights were added after the first layouts were saved, so an entry
+ * without them is the common case rather than a corrupt one: it predates the
+ * field and takes the widget's default height.
+ */
+function clampRows(rows: unknown, widget: DashboardWidgetDefinition): number {
+  if (typeof rows !== "number" || !Number.isFinite(rows)) {
+    return widget.defaultRows;
+  }
+  return Math.min(widget.maxRows, Math.max(widget.minRows, Math.round(rows)));
+}
+
+/**
+ * The window a stored entry asks for, or the widget's default.
+ *
+ * A widget that offers no ranges never carries one, so a value stored while it
+ * did — or a range removed from its allowed list since — is dropped rather than
+ * requested from an endpoint that would clamp it into something else.
+ */
+function sanitizeRange(range: unknown, widget: DashboardWidgetDefinition): WidgetRange | undefined {
+  const ranges = widget.ranges;
+  if (!ranges) {
+    return undefined;
+  }
+  if (typeof range === "string" && (ranges.allowed as readonly string[]).includes(range)) {
+    return range as WidgetRange;
+  }
+  return ranges.default;
+}
+
+/**
+ * Validates a layout document from any source — localStorage or the server —
+ * and drops what this build cannot render. Returns null when the value is not
+ * a v1 layout document at all, which callers read as "there is no layout here"
+ * rather than "the layout is empty".
+ */
+function sanitizeLayoutDocument(value: unknown): DashboardLayoutEntry[] | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const parsed = value as Partial<StoredLayout>;
+  if (parsed.version !== 1 || !Array.isArray(parsed.entries)) {
+    return null;
+  }
+  const seen = new Set<WidgetId>();
+  const entries: DashboardLayoutEntry[] = [];
+  for (const entry of parsed.entries) {
+    if (!entry || typeof entry !== "object" || typeof entry.id !== "string") {
+      continue;
+    }
+    const widget = findDashboardWidget(entry.id);
+    if (!widget || seen.has(widget.id)) {
+      continue;
+    }
+    seen.add(widget.id);
+    const sanitized: DashboardLayoutEntry = {
+      id: widget.id,
+      span: clampSpan(entry.span, widget),
+      rows: clampRows(entry.rows, widget),
+    };
+    // Written only when the widget has ranges, so a layout document never
+    // carries `"range": undefined` for the widgets that do not.
+    const range = sanitizeRange(entry.range, widget);
+    if (range) {
+      sanitized.range = range;
+    }
+    entries.push(sanitized);
+  }
+  return entries;
+}
+
+function readStoredLayout(): DashboardLayoutEntry[] | null {
   let raw: string | null = null;
   try {
     raw = window.localStorage.getItem(DASHBOARD_LAYOUT_STORAGE_KEY);
   } catch {
-    return [...DEFAULT_LAYOUT];
+    return null;
   }
   if (!raw) {
-    return [...DEFAULT_LAYOUT];
+    return null;
   }
   try {
-    const parsed = JSON.parse(raw) as Partial<StoredLayout> | null;
-    if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.entries)) {
-      return [...DEFAULT_LAYOUT];
-    }
-    const seen = new Set<WidgetId>();
-    const entries: DashboardLayoutEntry[] = [];
-    for (const entry of parsed.entries) {
-      if (!entry || typeof entry !== "object" || typeof entry.id !== "string") {
-        continue;
-      }
-      const widget = findDashboardWidget(entry.id);
-      if (!widget || seen.has(widget.id)) {
-        continue;
-      }
-      seen.add(widget.id);
-      entries.push({ id: widget.id, span: clampSpan(entry.span, widget) });
-    }
-    return entries;
+    return sanitizeLayoutDocument(JSON.parse(raw));
   } catch {
-    return [...DEFAULT_LAYOUT];
+    return null;
   }
+}
+
+function loadStoredLayout(): DashboardLayoutEntry[] {
+  return readStoredLayout() ?? [...DEFAULT_LAYOUT];
+}
+
+function toLayoutDocument(entries: DashboardLayoutEntry[]): AdminDashboardLayoutDocument {
+  return { version: 1, entries };
 }
 
 function persistLayout(entries: DashboardLayoutEntry[]) {
@@ -59,21 +142,127 @@ function persistLayout(entries: DashboardLayoutEntry[]) {
   }
 }
 
+function clearStoredLayout() {
+  try {
+    window.localStorage.removeItem(DASHBOARD_LAYOUT_STORAGE_KEY);
+  } catch {
+    // Ignore storage failures; in-memory state still resets.
+  }
+}
+
+/** A resize of one or both axes; an omitted axis keeps its current value. */
+export interface DashboardWidgetSize {
+  span?: number;
+  rows?: number;
+}
+
 export interface DashboardLayout {
   entries: DashboardLayoutEntry[];
   hiddenWidgets: DashboardWidgetDefinition[];
   isCustomizing: boolean;
   setCustomizing: (customizing: boolean) => void;
   moveWidget: (id: WidgetId, beforeId: WidgetId | null) => void;
-  resizeWidget: (id: WidgetId, span: number) => void;
+  resizeWidget: (id: WidgetId, size: DashboardWidgetSize) => void;
+  /**
+   * Change a widget's window. Unlike moving and resizing this is an everyday
+   * viewing action, not an arrangement one, so it works outside customize mode
+   * — and rides the same debounced save, because where an admin left a chart is
+   * part of the layout they expect to find again.
+   */
+  setWidgetRange: (id: WidgetId, range: WidgetRange) => void;
   removeWidget: (id: WidgetId) => void;
   addWidget: (id: WidgetId) => void;
   resetLayout: () => void;
 }
 
+/**
+ * Owns the admin's widget arrangement.
+ *
+ * localStorage is the instant-paint and offline copy; the server row is the
+ * source of truth across browsers. The hook paints from localStorage, adopts
+ * the server layout once it arrives, migrates a local-only layout up to the
+ * server the first time it finds none there, and debounces subsequent writes.
+ * A failed write never rolls back local state — the arrangement the admin sees
+ * is the one they just made.
+ */
 export function useDashboardLayout(): DashboardLayout {
   const [entries, setEntries] = useState<DashboardLayoutEntry[]>(loadStoredLayout);
   const [isCustomizing, setCustomizing] = useState(false);
+
+  const remote = useAdminDashboardLayout();
+  const saveLayout = useSaveAdminDashboardLayout();
+  const resetRemoteLayout = useResetAdminDashboardLayout();
+
+  const saveMutate = saveLayout.mutate;
+  const resetMutate = resetRemoteLayout.mutate;
+
+  // The server response is adopted at most once per mount, and never over an
+  // edit the admin already made in this session.
+  const settledRef = useRef(false);
+  const editedRef = useRef(false);
+  const pendingRef = useRef<DashboardLayoutEntry[] | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushSave = useCallback(() => {
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    const pending = pendingRef.current;
+    pendingRef.current = null;
+    if (pending) {
+      saveMutate(toLayoutDocument(pending));
+    }
+  }, [saveMutate]);
+
+  const scheduleSave = useCallback(
+    (next: DashboardLayoutEntry[]) => {
+      pendingRef.current = next;
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+      }
+      timerRef.current = setTimeout(flushSave, DASHBOARD_LAYOUT_SAVE_DEBOUNCE_MS);
+    },
+    [flushSave],
+  );
+
+  const cancelPendingSave = useCallback(() => {
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    pendingRef.current = null;
+  }, []);
+
+  // Send a queued write before this page goes away rather than dropping it.
+  useEffect(() => flushSave, [flushSave]);
+
+  const remoteData = remote.data;
+  const remoteSettled = remote.isSuccess;
+
+  useEffect(() => {
+    if (!remoteSettled || settledRef.current) {
+      return;
+    }
+    settledRef.current = true;
+    // An edit made while the query was in flight is newer than the response;
+    // its own debounced save carries it to the server.
+    if (editedRef.current) {
+      return;
+    }
+    const serverEntries = sanitizeLayoutDocument(remoteData?.layout);
+    if (serverEntries) {
+      setEntries(serverEntries);
+      persistLayout(serverEntries);
+      return;
+    }
+    // No server layout yet: hand this browser's arrangement up once so the
+    // admin's other browsers inherit it instead of starting from defaults.
+    const local = readStoredLayout();
+    if (local) {
+      saveMutate(toLayoutDocument(local));
+    }
+  }, [remoteSettled, remoteData, saveMutate]);
 
   const update = useCallback(
     (updater: (prev: DashboardLayoutEntry[]) => DashboardLayoutEntry[]) => {
@@ -82,11 +271,13 @@ export function useDashboardLayout(): DashboardLayout {
         if (next === prev) {
           return prev;
         }
+        editedRef.current = true;
         persistLayout(next);
+        scheduleSave(next);
         return next;
       });
     },
-    [],
+    [scheduleSave],
   );
 
   const moveWidget = useCallback(
@@ -114,20 +305,51 @@ export function useDashboardLayout(): DashboardLayout {
   );
 
   const resizeWidget = useCallback(
-    (id: WidgetId, span: number) => {
+    (id: WidgetId, size: DashboardWidgetSize) => {
       update((prev) => {
         const widget = findDashboardWidget(id);
         if (!widget) {
           return prev;
         }
-        const nextSpan = clampSpan(span, widget);
         let changed = false;
         const next = prev.map((entry) => {
-          if (entry.id !== id || entry.span === nextSpan) {
+          if (entry.id !== id) {
+            return entry;
+          }
+          // Each axis is clamped to its own range, and an axis the caller left
+          // out keeps the value it already had rather than snapping to a
+          // default — a column drag must not silently restore a row height.
+          const nextSpan = size.span === undefined ? entry.span : clampSpan(size.span, widget);
+          const nextRows = size.rows === undefined ? entry.rows : clampRows(size.rows, widget);
+          if (nextSpan === entry.span && nextRows === entry.rows) {
             return entry;
           }
           changed = true;
-          return { ...entry, span: nextSpan };
+          return { ...entry, span: nextSpan, rows: nextRows };
+        });
+        return changed ? next : prev;
+      });
+    },
+    [update],
+  );
+
+  const setWidgetRange = useCallback(
+    (id: WidgetId, range: WidgetRange) => {
+      update((prev) => {
+        const widget = findDashboardWidget(id);
+        // A range the widget does not offer is ignored rather than stored: the
+        // endpoints clamp their windows, so the chart would silently disagree
+        // with the picker.
+        if (!widget?.ranges || !widget.ranges.allowed.includes(range)) {
+          return prev;
+        }
+        let changed = false;
+        const next = prev.map((entry) => {
+          if (entry.id !== id || entry.range === range) {
+            return entry;
+          }
+          changed = true;
+          return { ...entry, range };
         });
         return changed ? next : prev;
       });
@@ -151,20 +373,30 @@ export function useDashboardLayout(): DashboardLayout {
         if (!widget || prev.some((entry) => entry.id === id)) {
           return prev;
         }
-        return [...prev, { id: widget.id, span: widget.defaultSpan }];
+        const added: DashboardLayoutEntry = {
+          id: widget.id,
+          span: widget.defaultSpan,
+          rows: widget.defaultRows,
+        };
+        if (widget.ranges) {
+          added.range = widget.ranges.default;
+        }
+        return [...prev, added];
       });
     },
     [update],
   );
 
   const resetLayout = useCallback(() => {
-    try {
-      window.localStorage.removeItem(DASHBOARD_LAYOUT_STORAGE_KEY);
-    } catch {
-      // Ignore storage failures; state still resets below.
-    }
+    // Drop the queued write first: saving the arrangement the admin just threw
+    // away would resurrect it on the next load.
+    cancelPendingSave();
+    clearStoredLayout();
+    editedRef.current = true;
+    settledRef.current = true;
     setEntries([...DEFAULT_LAYOUT]);
-  }, []);
+    resetMutate();
+  }, [cancelPendingSave, resetMutate]);
 
   const hiddenWidgets = useMemo(() => {
     const visible = new Set(entries.map((entry) => entry.id));
@@ -178,6 +410,7 @@ export function useDashboardLayout(): DashboardLayout {
     setCustomizing,
     moveWidget,
     resizeWidget,
+    setWidgetRange,
     removeWidget,
     addWidget,
     resetLayout,

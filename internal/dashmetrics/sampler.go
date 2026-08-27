@@ -1,0 +1,226 @@
+// Package dashmetrics records the admin dashboard time series that cannot be
+// reconstructed after the fact: how many streams were running (split by play
+// method) and how much egress the deployment served. Live sessions leave no
+// per-minute trace once they end, and node egress is a rolling average that is
+// overwritten on every health check, so both have to be sampled as they happen.
+//
+// One row per minute per source lands in dashboard_metric_samples, and rows
+// older than the retention window below are pruned once an hour:
+//
+//   - "shared" is the cluster-wide snapshot. Every replica writes it with
+//     INSERT ... ON CONFLICT DO NOTHING, so the first writer for a minute wins
+//     and the others collapse. Replica snapshots differ only by sub-second
+//     timing, which is below the resolution a dashboard chart can show, so this
+//     is deliberately cheaper than coordinating with an advisory lock.
+//   - "proc:<node_id>" carries the viewer egress served by one API process,
+//     measured from the local stream-telemetry registry. stream_nodes only
+//     describes external stream nodes, so without these rows a single-server
+//     deployment would chart zero egress forever.
+//
+// Sampling is best-effort: every failure is logged and swallowed. A missed
+// minute is a gap in the chart, never a failed request or a dead server.
+package dashmetrics
+
+import (
+	"context"
+	"log/slog"
+	"math"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
+)
+
+const (
+	// component is the slog component key every line from this package carries.
+	component = "dashmetrics"
+
+	// sampleInterval matches the minute resolution of the samples table.
+	sampleInterval = time.Minute
+
+	// retentionDays is how much history the charts can show — a month, so the
+	// dashboard's widest range has samples to draw. 1440 minutes a day times 31
+	// days is ~45k rows per source, and sources are (1 + replicas), so the table
+	// stays in the low hundreds of thousands of rows at most. Reads bucket the
+	// minutes down before returning them (internal/api/handlers), so a wide
+	// window costs the same on the wire as a narrow one.
+	retentionDays = 31
+)
+
+// Sampler writes one dashboard_metric_samples row per minute for as long as it
+// runs. Its state is owned by the single goroutine Start launches; nothing else
+// reads or mutates it.
+type Sampler struct {
+	pool      *pgxpool.Pool
+	telemetry *streamtelemetry.Registry // nil when stream telemetry is disabled
+	source    string                    // "proc:<node_id>"
+	interval  time.Duration
+
+	// lastBucket is the minute the last tick wrote, so a ticker that fires
+	// twice inside one minute does not spend an INSERT that ON CONFLICT would
+	// only discard — which would silently drop the egress bytes it carried.
+	lastBucket time.Time
+
+	// prevBytes holds the cumulative viewer bytes per telemetry session and
+	// transfer at the previous tick; lastEgressAt is when it was taken.
+	prevBytes    map[string]int64
+	lastEgressAt time.Time
+
+	stopOnce sync.Once
+	stop     chan struct{}
+}
+
+// NewSampler builds a sampler for this process. telemetry may be nil, in which
+// case only the shared cluster row is written. nodeID identifies this process
+// among the replicas; it falls back to the hostname when empty.
+func NewSampler(pool *pgxpool.Pool, telemetry *streamtelemetry.Registry, nodeID string) *Sampler {
+	if nodeID == "" {
+		nodeID, _ = os.Hostname()
+	}
+	if nodeID == "" {
+		nodeID = "unknown"
+	}
+	return &Sampler{
+		pool:      pool,
+		telemetry: telemetry,
+		source:    "proc:" + nodeID,
+		interval:  sampleInterval,
+		stop:      make(chan struct{}),
+	}
+}
+
+// Start samples once immediately — which also establishes the egress baseline —
+// and then every minute until ctx is canceled or Stop is called.
+func (s *Sampler) Start(ctx context.Context) {
+	if s == nil || s.pool == nil {
+		return
+	}
+	go func() {
+		s.sampleOnce(ctx, time.Now())
+
+		ticker := time.NewTicker(s.interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.stop:
+				return
+			case at := <-ticker.C:
+				s.sampleOnce(ctx, at)
+			}
+		}
+	}()
+}
+
+// Stop ends the sampling goroutine. It is safe to call more than once.
+func (s *Sampler) Stop() {
+	if s == nil {
+		return
+	}
+	s.stopOnce.Do(func() {
+		close(s.stop)
+	})
+}
+
+// sampleOnce writes this minute's rows and, once an hour, prunes expired ones.
+func (s *Sampler) sampleOnce(ctx context.Context, at time.Time) {
+	bucket := sampleBucket(at)
+	if bucket.Equal(s.lastBucket) {
+		return
+	}
+	s.lastBucket = bucket
+
+	s.sampleShared(ctx)
+	s.sampleProcessEgress(ctx, at, bucket)
+
+	// Retention runs in-band rather than as its own timer: the table is tiny
+	// and one DELETE an hour costs less than another goroutine.
+	if at.Minute() == 0 {
+		s.pruneExpired(ctx)
+	}
+}
+
+// sampleShared records the cluster-wide stream counts and node egress. Counting
+// and inserting happen in one statement so no replica can read one minute's
+// state and write it into another's bucket.
+func (s *Sampler) sampleShared(ctx context.Context) {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO dashboard_metric_samples
+			(bucket, source, streams_total, streams_direct, streams_remux, streams_transcode, egress_kbps)
+		SELECT date_trunc('minute', now()), 'shared',
+			(SELECT COUNT(*) FROM playback_sessions_sync),
+			(SELECT COUNT(*) FROM playback_sessions_sync WHERE play_method = 'direct'),
+			(SELECT COUNT(*) FROM playback_sessions_sync WHERE play_method = 'remux'),
+			(SELECT COUNT(*) FROM playback_sessions_sync WHERE play_method = 'transcode'),
+			(SELECT COALESCE(SUM(egress_kbps), 0) FROM stream_nodes WHERE enabled AND healthy)
+		ON CONFLICT (bucket, source) DO NOTHING
+	`)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to sample shared dashboard metrics", "component", component, "error", err)
+	}
+}
+
+// sampleProcessEgress records the viewer egress this process served since the
+// previous tick. The row is keyed on the same locally-computed bucket the
+// dedup guard in sampleOnce uses — keying on the DB clock instead could map
+// two guard-distinct ticks onto one DB minute under clock skew, and the
+// ON CONFLICT discard would silently drop the egress delta the second tick
+// carried. The proc source is written only by this process, so the DB clock
+// buys nothing here (unlike the shared row, where it arbitrates replicas).
+func (s *Sampler) sampleProcessEgress(ctx context.Context, at time.Time, bucket time.Time) {
+	if s.telemetry == nil {
+		return
+	}
+
+	delta, next := computeEgressDelta(s.prevBytes, s.telemetry.Snapshot())
+	previous, previousAt := s.prevBytes, s.lastEgressAt
+	s.prevBytes, s.lastEgressAt = next, at
+
+	// The very first snapshot carries every byte served since the process
+	// started. Charting that as one minute of egress would draw a spike that
+	// never happened, so the first tick only establishes the baseline.
+	if previous == nil || previousAt.IsZero() {
+		return
+	}
+
+	// Zero minutes are written too: an idle server should draw a line along the
+	// baseline, not a gap that reads as "no data".
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO dashboard_metric_samples (bucket, source, egress_kbps)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (bucket, source) DO NOTHING
+	`, bucket, s.source, egressKbps(delta, at.Sub(previousAt)))
+	if err != nil {
+		slog.WarnContext(ctx, "failed to sample process egress", "component", component, "source", s.source, "error", err)
+	}
+}
+
+// pruneExpired drops samples older than the retention window.
+func (s *Sampler) pruneExpired(ctx context.Context) {
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM dashboard_metric_samples
+		WHERE bucket < now() - make_interval(days => $1)
+	`, retentionDays)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to prune dashboard metric samples", "component", component, "error", err)
+	}
+}
+
+// sampleBucket truncates a sample time to the minute it belongs to, in UTC.
+func sampleBucket(at time.Time) time.Time {
+	return at.UTC().Truncate(time.Minute)
+}
+
+// egressKbps converts a byte delta over an elapsed period into kilobits per
+// second. A non-positive delta or elapsed period is reported as zero rather
+// than as a negative rate.
+func egressKbps(deltaBytes int64, elapsed time.Duration) int64 {
+	if deltaBytes <= 0 || elapsed <= 0 {
+		return 0
+	}
+	return int64(math.Round(float64(deltaBytes) * 8 / 1000 / elapsed.Seconds()))
+}

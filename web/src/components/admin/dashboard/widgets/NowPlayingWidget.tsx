@@ -18,8 +18,8 @@ export function NowPlayingWidget() {
   const sessions = sessionsQuery.data ?? [];
 
   return (
-    <div>
-      <div className="mb-3 flex items-center justify-between">
+    <div className="flex h-full flex-col">
+      <div className="mb-3 flex shrink-0 items-center justify-between">
         <div className="text-base font-bold">Now Playing</div>
         {sessions.length > 0 && (
           <Link
@@ -30,33 +30,37 @@ export function NowPlayingWidget() {
           </Link>
         )}
       </div>
-      {sessionsQuery.isLoading ? (
-        <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-2">
-          {Array.from({ length: 2 }).map((_, i) => (
-            <Skeleton key={i} className="h-[120px] rounded-2xl" />
-          ))}
-        </div>
-      ) : sessionsQuery.error ? (
-        <SectionError message="Failed to load streams." />
-      ) : sessions.length === 0 ? (
-        <div className="text-muted-foreground py-4 text-sm">No active streams.</div>
-      ) : (
-        <>
+      {/* The stream cards scroll inside the widget: a short widget shows two of
+          them rather than spilling out of its row. */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {sessionsQuery.isLoading ? (
           <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-2">
-            {sessions.slice(0, 4).map((session) => (
-              <StreamCard key={session.session_id} session={session} />
+            {Array.from({ length: 2 }).map((_, i) => (
+              <Skeleton key={i} className="h-[120px] rounded-2xl" />
             ))}
           </div>
-          {sessions.length > 4 && (
-            <Link
-              to="/admin/activity"
-              className="text-muted-foreground hover:text-primary mt-2 block text-center text-[12px] transition-colors"
-            >
-              +{sessions.length - 4} more active streams
-            </Link>
-          )}
-        </>
-      )}
+        ) : sessionsQuery.error ? (
+          <SectionError message="Failed to load streams." />
+        ) : sessions.length === 0 ? (
+          <div className="text-muted-foreground py-4 text-sm">No active streams.</div>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-2">
+              {sessions.slice(0, 4).map((session) => (
+                <StreamCard key={session.session_id} session={session} />
+              ))}
+            </div>
+            {sessions.length > 4 && (
+              <Link
+                to="/admin/activity"
+                className="text-muted-foreground hover:text-primary mt-2 block text-center text-[12px] transition-colors"
+              >
+                +{sessions.length - 4} more active streams
+              </Link>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }

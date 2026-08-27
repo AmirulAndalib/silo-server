@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/Silo-Server/silo-server/internal/access"
@@ -123,6 +124,10 @@ type AdminHandler struct {
 	accountProvisioner           *auth.AccountProvisioner
 	DetailSvc                    *catalog.DetailService
 	StatsSource                  AdminStatsSource
+	PlaybackActivitySource       AdminPlaybackActivitySource
+	TopActivitySource            AdminTopActivitySource
+	TimeseriesSource             AdminTimeseriesSource
+	RedisClient                  *redis.Client // health reporting only; nil means this deployment runs without Redis
 	Config                       *config.Config
 	EventBus                     cache.EventBus
 	EventsHub                    *evt.Hub
@@ -140,6 +145,12 @@ type AdminHandler struct {
 	OnServerSettingUpdated       func(ctx context.Context, key, value string)
 	RestartStatus                *ServerRestartStatusTracker
 	CatalogSearchStatus          catalog.CatalogSearchStatusProvider
+	// logLevelCounts caches the 24h error/warning tallies served on
+	// /admin/server/status. The dashboard polls that route every 15s, and the
+	// counts are only ever read as a rough signal, so re-counting per request
+	// would be pure waste. Nil when the handler was built without the
+	// constructor (tests): the counts are then simply uncached.
+	logLevelCounts *cache.TTLCache[adminLogLevelCounts]
 }
 
 // NewAdminHandler creates a new AdminHandler backed by the given
@@ -154,6 +165,7 @@ func NewAdminHandler(
 		pool:               pool,
 		storeProv:          storeProv,
 		accountProvisioner: auth.NewAccountProvisioner(userRepo, storeProv),
+		logLevelCounts:     cache.NewTTLCache[adminLogLevelCounts](),
 	}
 }
 
