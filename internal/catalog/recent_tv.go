@@ -230,19 +230,157 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 	offsetIdx := argIdx + 1
 	args = append(args, fetchLimit, q.Offset)
 
-	totalsCTE := `,
-		totals AS (
-			SELECT COUNT(*)::int AS total_count FROM filtered
-		)`
 	fromClause := "FROM totals\n\t\tLEFT JOIN page ON true"
 	totalColumn := ", totals.total_count"
 	if q.SkipTotal {
-		totalsCTE = ""
 		fromClause = "FROM page"
 		totalColumn = ""
 	}
 
-	sql := fmt.Sprintf(`
+	// Two query shapes with identical results. The hot no-prefix path finds
+	// and ranks every event with a narrow MAX-only aggregate that PostgreSQL
+	// fuses into a parallel hash aggregate, then computes the expensive
+	// per-event columns (episode counts, anchor episodes) for the requested
+	// page only. A name prefix filters events by per-episode title, which
+	// changes which rows belong to each event and cannot move past the
+	// aggregation, so that path keeps the single-pass shape.
+	var sqlText string
+	if strings.TrimSpace(q.NamePrefix) == "" {
+		totalsCTE := `,
+		totals AS (
+			SELECT ((SELECT COUNT(*) FROM event_keys) + (SELECT COUNT(*) FROM series_without_episode_events))::int AS total_count
+		)`
+		if q.SkipTotal {
+			totalsCTE = ""
+		}
+		sqlText = fmt.Sprintf(`
+		WITH raw_event_keys AS MATERIALIZED (
+			-- Narrow first pass: one row per (series, scan run) availability
+			-- event carrying only its added_at. It deliberately applies only
+			-- folder/snapshot/file conditions: the
+			-- series_without_episode_events anti-join must see every series
+			-- with any present episode file, not only series the caller may
+			-- surface. Series-level access conditions apply in event_keys.
+			SELECT e.series_id,
+			       el.first_seen_scan_run_id AS scan_run_id,
+			       MAX(el.first_seen_at) AS added_at
+			FROM episode_libraries el
+			JOIN episodes e ON e.content_id = el.episode_id
+			WHERE %[1]s
+			GROUP BY e.series_id, el.first_seen_scan_run_id
+		),
+		event_keys AS (
+			SELECT rek.series_id, rek.scan_run_id, rek.added_at
+			FROM raw_event_keys rek
+			JOIN media_items si ON si.content_id = rek.series_id
+			WHERE %[2]s
+		),
+		series_without_episode_events AS MATERIALIZED (
+			SELECT mi.content_id AS series_id,
+			       MAX(mil.first_seen_at) AS added_at
+			FROM media_item_libraries mil
+			JOIN media_items mi ON mi.content_id = mil.content_id
+			WHERE %[3]s
+			  AND NOT EXISTS (
+				SELECT 1 FROM raw_event_keys rek WHERE rek.series_id = mi.content_id
+			  )
+			GROUP BY mi.content_id
+		),
+		page_keys AS MATERIALIZED (
+			-- rank() (not row_number) keeps added_at ties together, so the
+			-- fully tiebroken ORDER BY on the page below still sees every
+			-- event that could land on it.
+			SELECT series_id, scan_run_id, added_at
+			FROM (
+				SELECT series_id, scan_run_id, added_at,
+				       rank() OVER (ORDER BY added_at DESC) AS added_rank
+				FROM (
+					SELECT series_id, scan_run_id, added_at FROM event_keys
+					UNION ALL
+					SELECT series_id, NULL::text, added_at FROM series_without_episode_events
+				) keys
+			) ranked
+			WHERE added_rank <= $%[4]d + $%[5]d
+		),
+		episode_events AS (
+			SELECT pk.series_id, pk.scan_run_id, agg.added_at, agg.episode_count, agg.episode_id, agg.anchor_season_number
+			FROM page_keys pk
+			CROSS JOIN LATERAL (
+				SELECT MAX(el.first_seen_at) AS added_at,
+				       COUNT(DISTINCT el.episode_id) AS episode_count,
+				       (array_agg(el.episode_id ORDER BY el.first_seen_at DESC, e.season_number DESC, e.episode_number DESC, el.episode_id ASC))[1] AS episode_id,
+				       (array_agg(e.season_number ORDER BY el.first_seen_at DESC, e.season_number DESC, e.episode_number DESC, el.episode_id ASC))[1] AS anchor_season_number
+				FROM episodes e
+				JOIN episode_libraries el
+				  ON el.episode_id = e.content_id
+				 AND el.first_seen_scan_run_id IS NOT DISTINCT FROM pk.scan_run_id
+				WHERE e.series_id = pk.series_id
+				  AND %[1]s
+			) agg
+			-- An aggregate over zero rows still returns one row; this keeps
+			-- the series_without_episode_events keys (no availability rows)
+			-- out of the episode-event branch.
+			WHERE agg.episode_count > 0
+		),
+		all_events AS (
+			SELECT CASE WHEN scan_run_id IS NOT NULL AND episode_count = 1 THEN episode_id ELSE series_id END AS target_id,
+			       CASE WHEN scan_run_id IS NOT NULL AND episode_count = 1 THEN 'episode'::text ELSE 'series'::text END AS target_type,
+			       added_at,
+			       COALESCE(scan_run_id, '') AS event_id,
+			       series_id,
+			       anchor_season_number,
+			       CASE WHEN scan_run_id IS NOT NULL AND episode_count = 1 THEN episode_id END AS single_episode_id
+			FROM episode_events
+			UNION ALL
+			SELECT swe.series_id, 'series'::text, swe.added_at, ''::text, swe.series_id, NULL::integer, NULL::text
+			FROM series_without_episode_events swe
+			JOIN page_keys pk ON pk.series_id = swe.series_id AND pk.scan_run_id IS NULL
+		)%[6]s,
+		page AS (
+			SELECT target_id, target_type, added_at, event_id, series_id, anchor_season_number, single_episode_id
+			FROM all_events
+			ORDER BY added_at DESC, target_type ASC, target_id ASC, event_id ASC
+			LIMIT $%[4]d OFFSET $%[5]d
+		)
+		SELECT page.target_id, page.target_type, page.added_at,
+		       COALESCE(page.single_episode_id, play_target.content_id) AS play_content_id%[7]s
+		%[8]s
+		-- Anchor hint only: profile-independent by design, so this page can be
+		-- shared through the process-global resolved-list cache. Playback
+		-- quality is enforced later by PlayableTargetResolver, which re-checks
+		-- this hint before using it (see RecentTVTarget.PlayContentID).
+		LEFT JOIN LATERAL (
+			SELECT e_play.content_id
+			FROM episodes e_play
+			WHERE page.target_type = 'series'
+			  AND e_play.series_id = page.series_id
+			  AND e_play.season_number = page.anchor_season_number
+			  AND EXISTS (
+				SELECT 1
+				FROM episode_libraries el_play
+				WHERE el_play.episode_id = e_play.content_id
+				  AND el_play.media_folder_id = ANY($1)
+				  AND EXISTS (
+					SELECT 1 FROM media_files mf_play
+					WHERE mf_play.episode_id = el_play.episode_id
+					  AND mf_play.media_folder_id = el_play.media_folder_id
+					  AND mf_play.missing_since IS NULL
+				  )
+			  )
+			ORDER BY e_play.episode_number ASC, e_play.content_id ASC
+			LIMIT 1
+		) play_target ON true
+		ORDER BY page.added_at DESC, page.target_type ASC, page.target_id ASC, page.event_id ASC
+	`, strings.Join(episodeRowConditions, " AND "), eventWhere, strings.Join(seriesConditions, " AND "), limitIdx, offsetIdx, totalsCTE, totalColumn, fromClause)
+	} else {
+		totalsCTE := `,
+		totals AS (
+			SELECT COUNT(*)::int AS total_count FROM filtered
+		)`
+		if q.SkipTotal {
+			totalsCTE = ""
+		}
+		sqlText = fmt.Sprintf(`
 		WITH available_episode_rows AS MATERIALIZED (
 			-- One shared pass over the availability rows for the requested
 			-- libraries. It deliberately carries only folder/snapshot/file
@@ -351,8 +489,9 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 		) play_target ON true
 		ORDER BY page.added_at DESC, page.target_type ASC, page.target_id ASC, page.event_id ASC
 	`, strings.Join(episodeRowConditions, " AND "), eventWhere, strings.Join(seriesConditions, " AND "), totalsCTE, limitIdx, offsetIdx, totalColumn, fromClause)
+	}
 
-	rows, err := r.pool.Query(ctx, sql, args...)
+	rows, err := r.pool.Query(ctx, sqlText, args...)
 	if err != nil {
 		return nil, 0, false, fmt.Errorf("listing recently-added TV events: %w", err)
 	}
