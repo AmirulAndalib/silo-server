@@ -686,3 +686,59 @@ func itoa(v int) string {
 	}
 	return digits
 }
+
+// A container with no memory limit still publishes a readable memory.current.
+// Taking it unconditionally paired this process's working set with the host's
+// RAM — "1 GiB of 64 GiB" on a machine that is nearly out of memory, because
+// the two numbers come from different domains.
+func TestMemoryStatsDoesNotMixCgroupUsageWithHostTotal(t *testing.T) {
+	tree := newProcTree(t)
+	tree.write("meminfo", "MemTotal: 65536 kB\nMemAvailable: 1024 kB\n")
+	s := newTestSampler(t, tree, newFakeClock(), Options{})
+
+	// No limit file resolves, which is what an unconstrained container looks
+	// like, but the usage file is readable.
+	usage := filepath.Join(t.TempDir(), "memory.current")
+	if err := os.WriteFile(usage, []byte("1048576\n"), 0o600); err != nil {
+		t.Fatalf("write cgroup usage: %v", err)
+	}
+	s.cgroupLimitPaths = []string{filepath.Join(t.TempDir(), "absent")}
+	s.cgroupUsagePaths = []cgroupUsagePath{{usage: usage}}
+
+	used, total := s.memoryStats()
+	if total != 65536*1024 {
+		t.Fatalf("total = %d, want the host's MemTotal", total)
+	}
+	// MemTotal - MemAvailable, from the same file as total.
+	if want := int64(64512 * 1024); used != want {
+		t.Fatalf("used = %d, want the host's used figure %d rather than the cgroup working set", used, want)
+	}
+}
+
+// With a concrete limit both numbers come from the cgroup, which is the whole
+// point of the correction.
+func TestMemoryStatsUsesCgroupUsageBesideACgroupLimit(t *testing.T) {
+	tree := newProcTree(t)
+	tree.write("meminfo", "MemTotal: 65536 kB\nMemAvailable: 1024 kB\n")
+	s := newTestSampler(t, tree, newFakeClock(), Options{})
+
+	dir := t.TempDir()
+	limit := filepath.Join(dir, "memory.max")
+	if err := os.WriteFile(limit, []byte("8388608\n"), 0o600); err != nil {
+		t.Fatalf("write cgroup limit: %v", err)
+	}
+	usage := filepath.Join(dir, "memory.current")
+	if err := os.WriteFile(usage, []byte("1048576\n"), 0o600); err != nil {
+		t.Fatalf("write cgroup usage: %v", err)
+	}
+	s.cgroupLimitPaths = []string{limit}
+	s.cgroupUsagePaths = []cgroupUsagePath{{usage: usage}}
+
+	used, total := s.memoryStats()
+	if total != 8388608 {
+		t.Fatalf("total = %d, want the cgroup limit", total)
+	}
+	if used != 1048576 {
+		t.Fatalf("used = %d, want the cgroup working set", used)
+	}
+}

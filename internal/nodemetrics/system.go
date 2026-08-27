@@ -205,6 +205,7 @@ func (s *Sampler) memoryStats() (usedBytes, totalBytes int64) {
 		}
 	}
 
+	capped := false
 	for _, path := range s.cgroupLimitPaths {
 		limit, err := ReadCgroupMemoryLimit(path)
 		if err != nil || limit <= 0 {
@@ -215,12 +216,21 @@ func (s *Sampler) memoryStats() (usedBytes, totalBytes int64) {
 		// give it.
 		if totalBytes == 0 || limit < totalBytes {
 			totalBytes = limit
+			capped = true
 		}
 		break
 	}
 
-	if usage, ok := s.cgroupMemoryUsage(); ok {
-		usedBytes = usage
+	// Only when the total above is the cgroup's. A container with no memory
+	// limit still publishes a readable memory.current, so taking it
+	// unconditionally would pair this process's working set with the host's RAM
+	// — "1 GiB of 64 GiB" on a machine that is nearly out of memory, because the
+	// two numbers describe different domains. Whichever domain total came from,
+	// used has to come from the same one.
+	if capped {
+		if usage, ok := s.cgroupMemoryUsage(); ok {
+			usedBytes = usage
+		}
 	}
 	if totalBytes > 0 && usedBytes > totalBytes {
 		usedBytes = totalBytes

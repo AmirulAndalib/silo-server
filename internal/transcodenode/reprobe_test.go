@@ -216,3 +216,35 @@ func TestCapabilityBuildsAreSerialized(t *testing.T) {
 		t.Fatal("the capability build never ran after the lock was released")
 	}
 }
+
+// /admin/force-reload deliberately tears down every live session so a config
+// change cannot leave a running ffmpeg on stale settings. The control plane's
+// own housekeeping must not do that: the API nudges a node after its
+// acceleration overrides change, and the documented contract is that sessions
+// already transcoding keep the backend they started with.
+func TestReloadConfigKeepsActiveSessions(t *testing.T) {
+	server := newTestServer(t)
+	server.sessions["live-1"] = &playback.TranscodeSession{}
+	server.activeJobs.Store(1)
+
+	request := httptest.NewRequest(http.MethodPost, "/admin/reload-config", nil)
+	request.Header.Set("Authorization", "Bearer "+testSecret)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+
+	// This fixture has no database, so the reload itself cannot succeed. What
+	// is under test is the route's blast radius, not its happy path: either
+	// outcome must leave the live session running.
+	if recorder.Code != http.StatusNoContent && recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	server.mu.RLock()
+	_, alive := server.sessions["live-1"]
+	server.mu.RUnlock()
+	if !alive {
+		t.Fatal("a configuration reload tore down a live playback session")
+	}
+	if got := server.activeJobs.Load(); got != 1 {
+		t.Fatalf("active jobs = %d, want the session still counted", got)
+	}
+}

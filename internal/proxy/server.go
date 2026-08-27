@@ -209,6 +209,7 @@ func (s *Server) Handler() http.Handler {
 		r.Use(s.requireBearer)
 		r.Get("/hw-capabilities", s.handleHWCapabilities)
 		r.Post("/admin/force-reload", s.handleForceReload)
+		r.Post("/admin/reload-config", s.handleReloadConfig)
 		r.Post("/admin/reprobe-capabilities", s.handleReprobeCapabilities)
 		r.Get("/status", s.handleStatus)
 	})
@@ -885,6 +886,14 @@ func (s *Server) proxyToTranscodeNode(w http.ResponseWriter, r *http.Request, cl
 	}
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+// handleReloadConfig re-reads this proxy's configuration. A proxy's force
+// reload is already config-only — it holds no transcode sessions to tear down —
+// so this is the same work under the name the control plane uses on both node
+// types, which saves the API branching on node type for its own housekeeping.
+func (s *Server) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
+	s.handleForceReload(w, r)
 }
 
 func (s *Server) handleForceReload(w http.ResponseWriter, r *http.Request) {

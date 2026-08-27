@@ -624,6 +624,7 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/transcode/{session_id}/master.m3u8", observeNode(s.telemetry, http.MethodGet, "/transcode/{session_id}/master.m3u8", s.handleManifest))
 		r.Get("/transcode/{session_id}/segment/{name}", observeNode(s.telemetry, http.MethodGet, "/transcode/{session_id}/segment/{name}", s.handleSegment))
 		r.Post("/admin/force-reload", s.handleForceReload)
+		r.Post("/admin/reload-config", s.handleReloadConfig)
 		r.Post("/admin/reprobe-capabilities", s.handleReprobeCapabilities)
 		r.Get("/status", s.handleStatus)
 	})
@@ -1887,6 +1888,29 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store, max-age=0")
 	w.Header().Set("Pragma", "no-cache")
 	http.ServeFile(w, r, segPath)
+}
+
+// handleReloadConfig re-reads this node's configuration and nothing else.
+//
+// It exists because /admin/force-reload is destructive: it tears down every
+// live playback session so a configuration change cannot leave a running ffmpeg
+// on stale settings. That is the right answer when an operator asks for it
+// explicitly, and the wrong one for the control plane's own housekeeping — the
+// API nudges a node after its acceleration overrides change, and a policy edit
+// that says it applies to new transcodes must not interrupt the ones already
+// playing. Sessions keep the settings they started with, which is exactly what
+// the override documentation promises.
+func (s *Server) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
+	// The same lock the destructive route takes, so a start cannot be admitted
+	// against a config this reload is in the middle of replacing.
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+	if err := s.watcher.ForceReload(r.Context()); err != nil {
+		http.Error(w, "reload failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	slog.InfoContext(r.Context(), "transcode node configuration reloaded", "component", "transcodenode")
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleForceReload(w http.ResponseWriter, r *http.Request) {

@@ -138,6 +138,13 @@ func (w *Watcher) Start(ctx context.Context) error {
 
 // ForceReload triggers an immediate config reload from the database.
 func (w *Watcher) ForceReload(ctx context.Context) error {
+	if w == nil || w.pool == nil {
+		// A watcher with no database is one a test constructed, or a mode that
+		// runs entirely off bootstrap overrides. Either way there is nothing to
+		// re-read, and an error is a far better answer than the nil dereference
+		// this used to be for a route that an operator can reach.
+		return errors.New("no database pool")
+	}
 	return w.reload(ctx)
 }
 

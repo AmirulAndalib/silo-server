@@ -456,39 +456,75 @@ type capabilityDriftView struct {
 	} `json:"render_device_details"`
 }
 
-// renderDeviceIdentities maps each device in a report to the strongest identity
-// it published, and back to the path an operator recognizes it by.
+// renderDeviceAliases lists every stable name each device in a report answers
+// to, alongside the path an operator recognizes it by.
 //
-// An NVIDIA uuid follows the card anywhere; a PCI slot survives re-enumeration
-// within a host; the path is the last resort and is all an older node reports.
-// Matching on the strongest available identity is what keeps a renumbered
-// renderD node from reading as a card that disappeared.
-func renderDeviceIdentities(view capabilityDriftView) map[string]string {
-	identities := make(map[string]string, len(view.RenderDevices))
+// All of them, not just the strongest: a report's identity strength is not
+// constant. nvidia-smi is queried behind a circuit breaker and may be missing
+// on one pass and present on the next, so the same NVIDIA card alternates
+// between publishing a PCI address alone and publishing a uuid as well. Keeping
+// only the strongest name would make those two reports describe different
+// devices and persist a "render device gone" note for a card that never moved —
+// the same false positive as comparing enumeration paths, one level up. Two
+// reports describe the same device when they share any alias.
+type renderDeviceAliases struct {
+	// path is what the note names the device by; it is the least stable of the
+	// aliases, which is why it is display only.
+	path    string
+	aliases []string
+}
+
+func renderDeviceAliasSets(view capabilityDriftView) []renderDeviceAliases {
+	devices := make([]renderDeviceAliases, 0, len(view.RenderDevices))
 	covered := make(map[string]bool, len(view.RenderDeviceDetails))
 	for _, device := range view.RenderDeviceDetails {
-		identity := device.GPUUUID
-		if identity == "" {
-			identity = device.PCIAddress
+		entry := renderDeviceAliases{path: device.Path}
+		for _, alias := range []string{device.GPUUUID, device.PCIAddress, device.Path} {
+			if alias != "" && !slices.Contains(entry.aliases, alias) {
+				entry.aliases = append(entry.aliases, alias)
+			}
 		}
-		if identity == "" {
-			identity = device.Path
-		}
-		if identity == "" {
+		if len(entry.aliases) == 0 {
 			continue
 		}
-		identities[identity] = device.Path
 		covered[device.Path] = true
+		devices = append(devices, entry)
 	}
 	// A report that lists paths without details (a node predating them) still
-	// has to be comparable, so any uncovered path is its own identity.
+	// has to be comparable, so any uncovered path stands for itself.
 	for _, path := range view.RenderDevices {
 		if path == "" || covered[path] {
 			continue
 		}
-		identities[path] = path
+		devices = append(devices, renderDeviceAliases{path: path, aliases: []string{path}})
 	}
-	return identities
+	return devices
+}
+
+// lostRenderDevices names the devices in previous that nothing in current
+// answers to.
+func lostRenderDevices(previous, current capabilityDriftView) []string {
+	present := make(map[string]bool)
+	for _, device := range renderDeviceAliasSets(current) {
+		for _, alias := range device.aliases {
+			present[alias] = true
+		}
+	}
+	var lost []string
+	for _, device := range renderDeviceAliasSets(previous) {
+		if slices.ContainsFunc(device.aliases, func(alias string) bool { return present[alias] }) {
+			continue
+		}
+		name := device.path
+		if name == "" {
+			name = device.aliases[0]
+		}
+		lost = append(lost, name)
+	}
+	// The order devices are reported in is incidental, and this note is
+	// persisted and compared against the one it replaces.
+	slices.Sort(lost)
+	return slices.Compact(lost)
 }
 
 // capabilityDrift is what a refetch lost relative to the report it replaces.
@@ -648,18 +684,7 @@ func computeCapabilityDrift(stored, payload []byte) (drift capabilityDrift, pars
 			drift.lostBackends = append(drift.lostBackends, backend.Backend)
 		}
 	}
-	currentDevices := renderDeviceIdentities(current)
-	for identity, path := range renderDeviceIdentities(previous) {
-		if _, present := currentDevices[identity]; present {
-			continue
-		}
-		if path == "" {
-			path = identity
-		}
-		drift.lostDevices = append(drift.lostDevices, path)
-	}
-	// Map iteration is unordered, and this note is persisted and compared.
-	slices.Sort(drift.lostDevices)
+	drift.lostDevices = lostRenderDevices(previous, current)
 	return drift, true
 }
 

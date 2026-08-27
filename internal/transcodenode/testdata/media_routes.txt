@@ -1,5 +1,6 @@
 # fixture 1
 POST /admin/force-reload	non-media
+POST /admin/reload-config	non-media
 POST /admin/reprobe-capabilities	non-media
 GET /api/v1/health	non-media
 POST /chapter-thumbnails/extract	non-media

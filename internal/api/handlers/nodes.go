@@ -164,6 +164,14 @@ func (h *NodeHandler) HandleUpdateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read the row before the write so the nudge below can tell a real policy
+	// change from a resubmit: the admin form posts both override fields on
+	// every save, so the fields being present says nothing about them moving.
+	var previous *nodepool.Node
+	if input.HWAccelOverride != nil || input.HWDeviceOverride != nil {
+		previous, _ = h.repo.GetByID(r.Context(), id)
+	}
+
 	node, err := h.repo.Update(r.Context(), id, input)
 	if err != nil {
 		if errors.Is(err, nodepool.ErrNodeNotFound) {
@@ -187,13 +195,41 @@ func (h *NodeHandler) HandleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	// 60s poll. Without the nudge, an operator switching both overlays at once
 	// (QSV on a render node to NVENC on a CUDA index, say) gets up to a minute
 	// of requests pairing the new backend with the old device.
-	if input.HWAccelOverride != nil || input.HWDeviceOverride != nil {
+	if nodeAccelerationChanged(previous, node) {
 		h.reloadNodeConfig(r.Context(), node)
 	}
 	h.reloadPools(r.Context())
 }
 
+// nodeAccelerationChanged reports whether this update actually moved either
+// acceleration override.
+//
+// The admin form submits both fields on every transcode-node save, so their
+// presence in the body is not evidence of a change — without this, renaming a
+// node or editing its capacity would nudge it too. An unreadable previous row
+// reports no change: the nudge is an optimization over the node's own config
+// poll, and skipping it costs at most that interval.
+func nodeAccelerationChanged(before, after *nodepool.Node) bool {
+	if before == nil || after == nil {
+		return false
+	}
+	return !sameOptionalString(before.HWAccelOverride, after.HWAccelOverride) ||
+		!sameOptionalString(before.HWDeviceOverride, after.HWDeviceOverride)
+}
+
+func sameOptionalString(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 // reloadNodeConfig asks one node to re-read its configuration now.
+//
+// It targets /admin/reload-config, never /admin/force-reload: the latter tears
+// down every live playback session on a transcode node, which is a reasonable
+// thing for an operator to ask for explicitly and an unacceptable side effect
+// of saving a policy edit that the UI says applies to new transcodes.
 //
 // Best effort by design: the override is already stored, and the node's own
 // watcher poll is the backstop, so a node that is unreachable or predates the
@@ -206,7 +242,7 @@ func (h *NodeHandler) reloadNodeConfig(ctx context.Context, node *nodepool.Node)
 	}
 	ctx, cancel := context.WithTimeout(ctx, nodeConfigReloadTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, node.URL+"/admin/force-reload", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, node.URL+"/admin/reload-config", nil)
 	if err != nil {
 		return
 	}

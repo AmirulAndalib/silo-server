@@ -373,3 +373,31 @@ func TestComputeCapabilityDriftFallsBackToPathsWithoutDetails(t *testing.T) {
 		t.Fatalf("lostDevices = %v, want the path-only device reported gone", drift.lostDevices)
 	}
 }
+
+// nvidia-smi is queried behind a circuit breaker, so the same NVIDIA card
+// publishes a uuid on one pass and only its PCI address on another. Keeping
+// just the strongest identity made those two reports describe different
+// devices, persisting a "render device gone" note for a card that never moved.
+func TestComputeCapabilityDriftMatchesAcrossIdentityStrength(t *testing.T) {
+	const withUUID = `{"resolved":"nvenc","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0","gpu_uuid":"GPU-abc"}],` +
+		`"detected_backends":[{"backend":"nvenc","verified":true}]}`
+	const withoutUUID = `{"resolved":"nvenc","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],` +
+		`"detected_backends":[{"backend":"nvenc","verified":true}]}`
+
+	for _, test := range []struct{ name, before, after string }{
+		{"uuid disappears", withUUID, withoutUUID},
+		{"uuid appears", withoutUUID, withUUID},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			drift, parsed := computeCapabilityDrift([]byte(test.before), []byte(test.after))
+			if !parsed {
+				t.Fatal("both reports should parse")
+			}
+			if drift.regressed() {
+				t.Fatalf("drift = %+v, want a shared PCI alias to identify the same card", drift)
+			}
+		})
+	}
+}

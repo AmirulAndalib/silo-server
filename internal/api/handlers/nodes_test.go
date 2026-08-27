@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -219,27 +220,32 @@ func equalStringPointer(a, b *string) bool {
 // node from QSV on a render node to NVENC on a CUDA index would otherwise get
 // up to a minute of start requests pairing the new backend with the old device,
 // so the node is nudged to reload before the updated policy is published.
+//
+// The nudge targets /admin/reload-config, never /admin/force-reload: the latter
+// tears down every live playback session on a transcode node.
 func TestHandleUpdateNodeReloadsTheNodeAfterAnOverrideChange(t *testing.T) {
 	reloaded := make(chan string, 4)
+	var destructive atomic.Bool
 	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/admin/force-reload" && r.Method == http.MethodPost {
+		switch r.URL.Path {
+		case "/admin/reload-config":
 			reloaded <- r.Header.Get("Authorization")
+		case "/admin/force-reload":
+			destructive.Store(true)
 		}
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(node.Close)
 
-	stored := &nodepool.Node{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL}
-	repo := &stubNodeRepository{updateResult: stored, node: stored}
+	qsv := "qsv"
+	before := &nodepool.Node{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL, HWAccelOverride: &qsv}
+	nvenc := "nvenc"
+	after := &nodepool.Node{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL, HWAccelOverride: &nvenc}
+	repo := &stubNodeRepository{updateResult: after, node: before}
 	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
 
-	body := `{"hw_accel_override":"nvenc","hw_device_override":"0"}`
-	request := httptest.NewRequest(http.MethodPut, "/admin/nodes/1", strings.NewReader(body))
-	routeCtx := chi.NewRouteContext()
-	routeCtx.URLParams.Add("id", "1")
-	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeCtx))
 	recorder := httptest.NewRecorder()
-	handler.HandleUpdateNode(recorder, request)
+	handler.HandleUpdateNode(recorder, updateNodeRequest(t, `{"hw_accel_override":"nvenc"}`))
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
@@ -252,6 +258,45 @@ func TestHandleUpdateNodeReloadsTheNodeAfterAnOverrideChange(t *testing.T) {
 	default:
 		t.Fatal("the node was not asked to reload after its overrides changed")
 	}
+	if destructive.Load() {
+		t.Fatal("a policy edit hit the destructive force-reload route")
+	}
+}
+
+// The admin form posts both override fields on every transcode-node save, so
+// their presence says nothing about them moving. Nudging on presence alone made
+// an unrelated edit — a rename, a capacity change, or a plain resubmit — ask the
+// node to re-read its config for nothing.
+func TestHandleUpdateNodeDoesNotReloadWhenOverridesAreUnchanged(t *testing.T) {
+	reloaded := make(chan struct{}, 4)
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/admin/reload") || strings.HasPrefix(r.URL.Path, "/admin/force") {
+			reloaded <- struct{}{}
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(node.Close)
+
+	qsv := "qsv"
+	device := "/dev/dri/renderD128"
+	unchanged := func() *nodepool.Node {
+		accel, path := qsv, device
+		return &nodepool.Node{
+			ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL,
+			HWAccelOverride: &accel, HWDeviceOverride: &path,
+		}
+	}
+	repo := &stubNodeRepository{updateResult: unchanged(), node: unchanged()}
+	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
+
+	body := `{"name":"gpu-1","hw_accel_override":"qsv","hw_device_override":"/dev/dri/renderD128"}`
+	handler.HandleUpdateNode(httptest.NewRecorder(), updateNodeRequest(t, body))
+
+	select {
+	case <-reloaded:
+		t.Fatal("an edit that moved neither override still asked the node to reload")
+	default:
+	}
 }
 
 // An edit that touches no acceleration field must not cost a round trip to the
@@ -259,10 +304,10 @@ func TestHandleUpdateNodeReloadsTheNodeAfterAnOverrideChange(t *testing.T) {
 func TestHandleUpdateNodeDoesNotReloadWithoutAnOverrideChange(t *testing.T) {
 	reloaded := make(chan struct{}, 4)
 	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/admin/force-reload" {
+		if strings.HasPrefix(r.URL.Path, "/admin/") {
 			reloaded <- struct{}{}
 		}
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(node.Close)
 
@@ -270,11 +315,7 @@ func TestHandleUpdateNodeDoesNotReloadWithoutAnOverrideChange(t *testing.T) {
 	repo := &stubNodeRepository{updateResult: stored, node: stored}
 	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
 
-	request := httptest.NewRequest(http.MethodPut, "/admin/nodes/1", strings.NewReader(`{"name":"gpu-one"}`))
-	routeCtx := chi.NewRouteContext()
-	routeCtx.URLParams.Add("id", "1")
-	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeCtx))
-	handler.HandleUpdateNode(httptest.NewRecorder(), request)
+	handler.HandleUpdateNode(httptest.NewRecorder(), updateNodeRequest(t, `{"name":"gpu-one"}`))
 
 	select {
 	case <-reloaded:
