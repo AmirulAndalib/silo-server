@@ -30,6 +30,10 @@ type BootstrapOverrides struct {
 	// and overlay that row's acceleration overrides onto the cluster-wide
 	// playback settings. Empty on an API host, which has no stream_nodes row.
 	NodeURL string
+	// NodeName is this process's own registered node name (from NODE_NAME
+	// env). It is the override-row fallback identity when the registered url
+	// and NODE_URL differ, as they do on split-horizon topologies.
+	NodeName string
 }
 
 // nodeHWOverrides is one node's own acceleration policy, as stored on its
@@ -40,11 +44,12 @@ type nodeHWOverrides struct {
 	HWDevice *string
 }
 
-// loadNodeHWOverrides reads one node's overrides by URL. found is false when
-// the node has no stream_nodes row at all — a legitimate deployment (a node
-// nobody registered yet), not an error. It is a field on the Watcher so the
-// overlay can be exercised without a database.
-type loadNodeHWOverrides func(ctx context.Context, nodeURL string) (overrides nodeHWOverrides, found bool, err error)
+// loadNodeHWOverrides reads one node's overrides, matching its registered row
+// by URL first and by NODE_NAME as the fallback. found is false when the node
+// has no stream_nodes row at all — a legitimate deployment (a node nobody
+// registered yet), not an error. It is a field on the Watcher so the overlay
+// can be exercised without a database.
+type loadNodeHWOverrides func(ctx context.Context, nodeURL, nodeName string) (overrides nodeHWOverrides, found bool, err error)
 
 // Watcher watches for configuration changes in the database and
 // automatically reloads the Config when changes are detected.
@@ -65,10 +70,11 @@ type Watcher struct {
 	// hiccup during a reload cannot silently flip a node back onto the
 	// cluster-wide backend. overridesLoaded distinguishes "read, and there is
 	// nothing to overlay" from "never read".
-	overrides          nodeHWOverrides
-	overridesLoaded    bool
-	missingRowLogged   bool
-	duplicateRowLogged bool
+	overrides           nodeHWOverrides
+	overridesLoaded     bool
+	missingRowLogged    bool
+	duplicateRowLogged  bool
+	ambiguousNameLogged bool
 }
 
 // NewWatcher creates a new config watcher. Call Start to begin watching. The
@@ -255,11 +261,11 @@ func (w *Watcher) applySettings(ctx context.Context, m map[string]string) error 
 // read its row keeps the overlay it last read, because a database hiccup is
 // not evidence that an operator cleared the override.
 func (w *Watcher) applyNodeHWOverrides(ctx context.Context, cfg *config.Config) {
-	if w.bootstrap.NodeURL == "" || w.loadOverrides == nil || cfg == nil {
+	if (w.bootstrap.NodeURL == "" && w.bootstrap.NodeName == "") || w.loadOverrides == nil || cfg == nil {
 		return
 	}
 
-	overrides, found, err := w.loadOverrides(ctx, w.bootstrap.NodeURL)
+	overrides, found, err := w.loadOverrides(ctx, w.bootstrap.NodeURL, w.bootstrap.NodeName)
 	switch {
 	case err != nil:
 		slog.WarnContext(ctx, "node acceleration override lookup failed; keeping the previous effective policy",
@@ -282,7 +288,7 @@ func (w *Watcher) applyNodeHWOverrides(ctx context.Context, cfg *config.Config) 
 		w.mu.Unlock()
 		if first {
 			slog.InfoContext(ctx, "no stream_nodes row for this node; inheriting the cluster acceleration settings",
-				"component", "nodeconfig", "node_url", w.bootstrap.NodeURL)
+				"component", "nodeconfig", "node_url", w.bootstrap.NodeURL, "node_name", w.bootstrap.NodeName)
 		}
 		return
 	default:
@@ -312,15 +318,54 @@ func (w *Watcher) applyNodeHWOverrides(ctx context.Context, cfg *config.Config) 
 // first, and the 30-second health sweep rewriting those rows would silently
 // flip a node between two policies. The duplicate is reported rather than
 // quietly resolved, because only an operator can fix it.
-func (w *Watcher) queryNodeHWOverrides(ctx context.Context, nodeURL string) (nodeHWOverrides, bool, error) {
+func (w *Watcher) queryNodeHWOverrides(ctx context.Context, nodeURL, nodeName string) (nodeHWOverrides, bool, error) {
 	if w.pool == nil {
 		return nodeHWOverrides{}, false, errors.New("no database pool")
 	}
-	rows, err := w.pool.Query(ctx,
+	overrides, matched, err := w.queryOverrideRows(ctx,
 		`SELECT url, hw_accel_override, hw_device_override FROM stream_nodes
 		 WHERE rtrim(url, '/') = rtrim($1, '/') ORDER BY id LIMIT 2`, nodeURL)
 	if err != nil {
-		return nodeHWOverrides{}, false, fmt.Errorf("query node acceleration overrides: %w", err)
+		return nodeHWOverrides{}, false, err
+	}
+	if len(matched) > 1 {
+		w.logDuplicateNodeRows(ctx, nodeURL, matched)
+	}
+	if len(matched) > 0 {
+		return overrides, true, nil
+	}
+
+	// The registered url is how the API reaches the node, which on a
+	// split-horizon topology (public CDN url registered, internal NODE_URL on
+	// the node) never equals the node's own address. The name is the identity
+	// an operator controls on both sides, so it is the fallback — but names
+	// carry no unique constraint, so an ambiguous match identifies nothing.
+	if nodeName == "" {
+		return nodeHWOverrides{}, false, nil
+	}
+	overrides, matched, err = w.queryOverrideRows(ctx,
+		`SELECT url, hw_accel_override, hw_device_override FROM stream_nodes
+		 WHERE name = $1 ORDER BY id LIMIT 2`, nodeName)
+	if err != nil {
+		return nodeHWOverrides{}, false, err
+	}
+	switch len(matched) {
+	case 0:
+		return nodeHWOverrides{}, false, nil
+	case 1:
+		return overrides, true, nil
+	default:
+		w.logAmbiguousNodeName(ctx, nodeName, matched)
+		return nodeHWOverrides{}, false, nil
+	}
+}
+
+// queryOverrideRows runs one identity query and returns the first row plus the
+// urls of every row it matched, so callers can act on ambiguity.
+func (w *Watcher) queryOverrideRows(ctx context.Context, query, arg string) (nodeHWOverrides, []string, error) {
+	rows, err := w.pool.Query(ctx, query, arg)
+	if err != nil {
+		return nodeHWOverrides{}, nil, fmt.Errorf("query node acceleration overrides: %w", err)
 	}
 	defer rows.Close()
 
@@ -334,7 +379,7 @@ func (w *Watcher) queryNodeHWOverrides(ctx context.Context, nodeURL string) (nod
 			row nodeHWOverrides
 		)
 		if err := rows.Scan(&url, &row.HWAccel, &row.HWDevice); err != nil {
-			return nodeHWOverrides{}, false, fmt.Errorf("scan node acceleration overrides: %w", err)
+			return nodeHWOverrides{}, nil, fmt.Errorf("scan node acceleration overrides: %w", err)
 		}
 		if len(matched) == 0 {
 			overrides = row
@@ -342,15 +387,23 @@ func (w *Watcher) queryNodeHWOverrides(ctx context.Context, nodeURL string) (nod
 		matched = append(matched, url)
 	}
 	if err := rows.Err(); err != nil {
-		return nodeHWOverrides{}, false, fmt.Errorf("read node acceleration overrides: %w", err)
+		return nodeHWOverrides{}, nil, fmt.Errorf("read node acceleration overrides: %w", err)
 	}
-	if len(matched) == 0 {
-		return nodeHWOverrides{}, false, nil
+	return overrides, matched, nil
+}
+
+// logAmbiguousNodeName warns once per process: several registered nodes share
+// this node's NODE_NAME, so the name identifies nothing and the overrides of
+// none of them are adopted.
+func (w *Watcher) logAmbiguousNodeName(ctx context.Context, nodeName string, matched []string) {
+	w.mu.Lock()
+	first := !w.ambiguousNameLogged
+	w.ambiguousNameLogged = true
+	w.mu.Unlock()
+	if first {
+		slog.WarnContext(ctx, "several stream_nodes rows share this node's name; ignoring their acceleration overrides",
+			"component", "nodeconfig", "node_name", nodeName, "matched_urls", matched)
 	}
-	if len(matched) > 1 {
-		w.logDuplicateNodeRows(ctx, nodeURL, matched)
-	}
-	return overrides, true, nil
 }
 
 // logDuplicateNodeRows warns, once per process, that more than one

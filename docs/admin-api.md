@@ -46,11 +46,20 @@ sets `none` for itself instead of forcing every node onto the lowest common
 denominator. A homogeneous deployment should leave both unset and configure
 `playback.hw_accel` once.
 
-A node finds its own row by URL: `NODE_URL` on the node is matched against
-`stream_nodes.url`, ignoring a trailing slash on either side. Set `NODE_URL`
-explicitly on every node. Without it a node guesses `http://localhost:<port>`
-and adopts whatever row carries that URL, which on a multi-node deployment can
-be a different machine's policy.
+A node finds its own row by URL first: `NODE_URL` on the node is matched
+against `stream_nodes.url`, ignoring a trailing slash on either side. Set
+`NODE_URL` explicitly on every node. Without it a node guesses
+`http://localhost:<port>` and adopts whatever row carries that URL, which on a
+multi-node deployment can be a different machine's policy.
+
+If the URL does not match, the node falls back to `NODE_NAME` against the
+registered name. This covers split-horizon topologies, where the API reaches
+a node at a public URL that is registered in `stream_nodes.url`, but the
+node's own `NODE_URL` is an internal address that never equals it. `name`
+carries no unique constraint, so an ambiguous match — more than one row
+sharing that name — identifies nothing and adopts neither row's overrides;
+registered names should be unique per node, and `NODE_NAME` should equal the
+registered name.
 
 The node overlays its row onto the cluster-wide playback settings on every
 config reload, so the override is what that node probes with, advertises in

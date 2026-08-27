@@ -58,7 +58,7 @@ func TestApplySettingsOverlaysNodeHWOverrides(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			w := newOverrideWatcher(t, "http://node-1", func(context.Context, string) (nodeHWOverrides, bool, error) {
+			w := newOverrideWatcher(t, "http://node-1", func(context.Context, string, string) (nodeHWOverrides, bool, error) {
 				return test.overrides, true, nil
 			})
 			if err := w.applySettings(context.Background(), clusterSettings()); err != nil {
@@ -76,7 +76,7 @@ func TestApplySettingsOverlaysNodeHWOverrides(t *testing.T) {
 // The API host has no stream_nodes row and must never pay for a lookup.
 func TestApplySettingsSkipsOverlayWithoutNodeIdentity(t *testing.T) {
 	looked := false
-	w := newOverrideWatcher(t, "", func(context.Context, string) (nodeHWOverrides, bool, error) {
+	w := newOverrideWatcher(t, "", func(context.Context, string, string) (nodeHWOverrides, bool, error) {
 		looked = true
 		return nodeHWOverrides{}, true, nil
 	})
@@ -84,10 +84,67 @@ func TestApplySettingsSkipsOverlayWithoutNodeIdentity(t *testing.T) {
 		t.Fatalf("apply: %v", err)
 	}
 	if looked {
-		t.Fatal("a host with no NodeURL queried stream_nodes")
+		t.Fatal("a host with no NodeURL or NodeName queried stream_nodes")
 	}
 	if got := w.Config().Playback.HWAccel; got != "qsv" {
 		t.Fatalf("HWAccel = %q, want the cluster value", got)
+	}
+}
+
+// A split-horizon node whose registered url differs from its own NODE_URL
+// still finds its row by NODE_NAME — the fallback identity an operator
+// controls on both sides. The fake models the DB-level fallback behavior:
+// it only reports a hit when the name matches, and this test asserts the
+// overlay guard passes both bootstrap values through to the loader.
+func TestApplySettingsOverlaysNodeHWOverridesByName(t *testing.T) {
+	accel := "vaapi"
+	var gotURL, gotName string
+	w := NewWatcher(nil, nil, nil, BootstrapOverrides{
+		NodeURL:  "http://10.0.4.7:8082",
+		NodeName: "silo-dev-transcode-ns17",
+	})
+	w.loadOverrides = func(_ context.Context, nodeURL, nodeName string) (nodeHWOverrides, bool, error) {
+		gotURL, gotName = nodeURL, nodeName
+		if nodeName == "silo-dev-transcode-ns17" {
+			return nodeHWOverrides{HWAccel: &accel}, true, nil
+		}
+		return nodeHWOverrides{}, false, nil
+	}
+	if err := w.applySettings(context.Background(), clusterSettings()); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if gotURL != "http://10.0.4.7:8082" || gotName != "silo-dev-transcode-ns17" {
+		t.Fatalf("loader received url %q name %q, want both bootstrap values", gotURL, gotName)
+	}
+	if got := w.Config().Playback.HWAccel; got != "vaapi" {
+		t.Fatalf("HWAccel = %q, want the name-matched override", got)
+	}
+}
+
+// A node with only NODE_NAME set (no NODE_URL at all) still runs the
+// overlay: the guard fires when either identity is present, not just the url.
+func TestApplySettingsOverlayRunsWithNodeNameOnly(t *testing.T) {
+	accel := "none"
+	looked := false
+	w := NewWatcher(nil, nil, nil, BootstrapOverrides{NodeName: "silo-dev-transcode-ns17"})
+	w.loadOverrides = func(_ context.Context, nodeURL, nodeName string) (nodeHWOverrides, bool, error) {
+		looked = true
+		if nodeURL != "" {
+			t.Fatalf("nodeURL = %q, want empty", nodeURL)
+		}
+		if nodeName != "silo-dev-transcode-ns17" {
+			t.Fatalf("nodeName = %q, want the bootstrap value", nodeName)
+		}
+		return nodeHWOverrides{HWAccel: &accel}, true, nil
+	}
+	if err := w.applySettings(context.Background(), clusterSettings()); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if !looked {
+		t.Fatal("a host with NodeName set skipped the overlay lookup")
+	}
+	if got := w.Config().Playback.HWAccel; got != "none" {
+		t.Fatalf("HWAccel = %q, want the overlay applied", got)
 	}
 }
 
@@ -95,7 +152,7 @@ func TestApplySettingsSkipsOverlayWithoutNodeIdentity(t *testing.T) {
 // than on every 60-second reload.
 func TestApplySettingsMissingRowInheritsAndLogsOnce(t *testing.T) {
 	calls := 0
-	w := newOverrideWatcher(t, "http://node-unregistered", func(context.Context, string) (nodeHWOverrides, bool, error) {
+	w := newOverrideWatcher(t, "http://node-unregistered", func(context.Context, string, string) (nodeHWOverrides, bool, error) {
 		calls++
 		return nodeHWOverrides{}, false, nil
 	})
@@ -124,7 +181,7 @@ func TestApplySettingsMissingRowInheritsAndLogsOnce(t *testing.T) {
 func TestApplySettingsKeepsPreviousOverrideWhenTheLookupFails(t *testing.T) {
 	accel := "nvenc"
 	fail := false
-	w := newOverrideWatcher(t, "http://node-1", func(context.Context, string) (nodeHWOverrides, bool, error) {
+	w := newOverrideWatcher(t, "http://node-1", func(context.Context, string, string) (nodeHWOverrides, bool, error) {
 		if fail {
 			return nodeHWOverrides{}, false, errors.New("connection refused")
 		}
@@ -149,7 +206,7 @@ func TestApplySettingsKeepsPreviousOverrideWhenTheLookupFails(t *testing.T) {
 // Before any successful read there is nothing to keep, so the cluster settings
 // stand rather than an invented value.
 func TestApplySettingsFallsBackToClusterWhenNoOverrideWasEverRead(t *testing.T) {
-	w := newOverrideWatcher(t, "http://node-1", func(context.Context, string) (nodeHWOverrides, bool, error) {
+	w := newOverrideWatcher(t, "http://node-1", func(context.Context, string, string) (nodeHWOverrides, bool, error) {
 		return nodeHWOverrides{}, false, errors.New("connection refused")
 	})
 	if err := w.applySettings(context.Background(), clusterSettings()); err != nil {
@@ -170,7 +227,7 @@ func TestApplySettingsOverlayOutlivesBootstrapReapply(t *testing.T) {
 		Listen:  ":9999",
 		Mode:    "transcode",
 	})
-	w.loadOverrides = func(context.Context, string) (nodeHWOverrides, bool, error) {
+	w.loadOverrides = func(context.Context, string, string) (nodeHWOverrides, bool, error) {
 		return nodeHWOverrides{HWAccel: &accel}, true, nil
 	}
 	settings := clusterSettings()

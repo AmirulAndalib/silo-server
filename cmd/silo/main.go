@@ -875,6 +875,7 @@ func main() {
 			JFListen:    cfg.JellyfinCompat.Listen,
 			RedisURL:    bc.RedisURL,
 			NodeURL:     nodeURL,
+			NodeName:    nodeName,
 		}
 		watcher := nodeconfig.NewWatcher(pool, dataCipher, eventBus, bootstrap)
 		if err := watcher.Start(appCtx); err != nil {
