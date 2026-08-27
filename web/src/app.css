@@ -1905,10 +1905,43 @@
     padding-inline: 0;
   }
 
-  .admin-dashboard-stats {
+  /* Admin dashboard widget grid: single column on small screens, two columns
+     on tablets (where .admin-widget-wide keeps the full row), and a 12-column
+     grid from lg up where each widget spans var(--widget-span) columns. */
+  .admin-widget-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 10.5rem), 1fr));
+    grid-template-columns: 1fr;
     gap: 0.875rem;
+  }
+
+  .admin-widget {
+    grid-column: 1 / -1;
+    position: relative;
+    min-width: 0;
+  }
+
+  @media (min-width: 640px) and (max-width: 1023px) {
+    .admin-widget-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+
+    .admin-widget {
+      grid-column: span 1;
+    }
+
+    .admin-widget-wide {
+      grid-column: 1 / -1;
+    }
+  }
+
+  @media (min-width: 1024px) {
+    .admin-widget-grid {
+      grid-template-columns: repeat(12, 1fr);
+    }
+
+    .admin-widget {
+      grid-column: span var(--widget-span) / span var(--widget-span);
+    }
   }
 
   @media (max-width: 639px) {
