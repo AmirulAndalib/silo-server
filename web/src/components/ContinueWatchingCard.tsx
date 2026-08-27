@@ -1,6 +1,6 @@
 import ViewTransitionLink from "@/components/ViewTransitionLink";
 import { BookOpen, Play } from "lucide-react";
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import { useLocation } from "react-router";
 import type { ItemDetail, SectionItem } from "@/api/types";
 import type { ProgressEntry } from "@/api/types";
@@ -37,6 +37,7 @@ export default function ContinueWatchingCard(props: ContinueWatchingCardProps) {
   const location = useLocation();
   const playbackController = useWatchPlaybackController();
   const { cardPresentation } = useUICustomization();
+  const cardRef = useRef<HTMLDivElement>(null);
   const card =
     "sectionItem" in props && props.sectionItem
       ? {
@@ -227,7 +228,7 @@ export default function ContinueWatchingCard(props: ContinueWatchingCardProps) {
   const imageSrc = imagePrimary || imageFallback;
 
   return (
-    <div className={`group/card ${containerWidth}`}>
+    <div ref={cardRef} className={`media-card-longpress group/card ${containerWidth}`}>
       <div className="group/media relative">
         <ViewTransitionLink to={detailHref} className="block">
           <div className={`media-card-image relative ${imageAspect} overflow-hidden rounded-xl`}>
@@ -253,13 +254,14 @@ export default function ContinueWatchingCard(props: ContinueWatchingCardProps) {
             )}
 
             {/* Hover dim behind the play button */}
-            <div className="absolute inset-0 bg-black/0 transition-colors duration-150 pointer-fine:group-hover/media:bg-black/30" />
+            <div className="media-card-hover-dim absolute inset-0 bg-black/0 transition-colors duration-150" />
 
-            {/* Progress bar */}
+            {/* Progress bar — inset pill so a full bar doesn't read as a
+                stray edge along the artwork */}
             {!isNextUp && progressPercent > 0 && (
-              <div className="bg-background/40 absolute inset-x-0 bottom-0 h-[3px]">
+              <div className="absolute inset-x-2.5 bottom-2 h-[3px] overflow-hidden rounded-full bg-black/40">
                 <div
-                  className="h-full transition-all duration-300"
+                  className="h-full rounded-full transition-all duration-300"
                   style={{
                     width: `${Math.min(progressPercent, 100)}%`,
                     background: "var(--primary)",
@@ -281,7 +283,7 @@ export default function ContinueWatchingCard(props: ContinueWatchingCardProps) {
             to={card.watchHref}
             onClick={handleWatchClick}
             aria-label={`${card.type === "ebook" ? "Read" : "Play"} ${heading}`}
-            className="bg-primary text-primary-foreground absolute top-1/2 left-1/2 flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full opacity-100 shadow-lg transition-all duration-200 hover:scale-110 hover:shadow-xl hover:brightness-110 active:scale-95 pointer-fine:pointer-events-none pointer-fine:opacity-0 pointer-fine:group-hover/media:pointer-events-auto pointer-fine:group-hover/media:opacity-100 pointer-fine:focus-visible:pointer-events-auto pointer-fine:focus-visible:opacity-100"
+            className="media-card-play-trigger bg-primary text-primary-foreground absolute top-1/2 left-1/2 flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full shadow-lg transition-all duration-200 hover:scale-110 hover:shadow-xl hover:brightness-110 active:scale-95"
           >
             {card.type === "ebook" ? (
               <BookOpen className="h-5 w-5" />
@@ -301,11 +303,17 @@ export default function ContinueWatchingCard(props: ContinueWatchingCardProps) {
           }
           libraryId={props.libraryId}
           userState={
-            "sectionItem" in props && props.sectionItem ? props.sectionItem.user_state : undefined
+            "sectionItem" in props && props.sectionItem
+              ? props.sectionItem.user_state
+              : props.detail.user_state
           }
           variant={variant}
+          showWatchedShortcut
+          showFavoriteShortcut={false}
           dismissAction={dismissAction}
           hasPartialProgress={hasPartialProgress}
+          longPressRef={cardRef}
+          itemTitle={heading}
         />
       </div>
 

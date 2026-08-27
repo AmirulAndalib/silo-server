@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,7 +17,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/catalog"
@@ -33,8 +31,10 @@ import (
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
 	"github.com/Silo-Server/silo-server/internal/settingskeys"
 	"github.com/Silo-Server/silo-server/internal/settingsresolve"
+	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchstate"
@@ -46,12 +46,23 @@ import (
 type SessionManagerInterface interface {
 	StartSession(userID int, profileID string, fileID int, method playback.PlayMethod, transcodeAudio bool) (*playback.Session, error)
 	StartSessionWithFiles(userID int, profileID string, effectiveFileID int, requestedFileID int, method playback.PlayMethod, transcodeAudio bool) (*playback.Session, error)
+	// StartSessionWithFilesContext is required rather than probed for at run
+	// time: the context is how the reporting client's identity reaches the new
+	// session, so an implementation without it would start sessions that
+	// silently carry no client name, version, build or channel.
+	StartSessionWithFilesContext(ctx context.Context, userID int, profileID string, effectiveFileID int, requestedFileID int, method playback.PlayMethod, transcodeAudio bool) (*playback.Session, error)
 	UpdateProgress(sessionID string, position float64, isPaused bool) error
 	UpdateAudioTrack(sessionID string, audioTrackIndex int, method playback.PlayMethod) error
 	UpdateStreamState(sessionID string, state playback.SessionStreamState) error
 	TouchActivity(sessionID string) error
 	BeginTransport(sessionID string) error
 	EndTransport(sessionID string) error
+	// WatchTransportStop is required rather than probed for at run time: it is
+	// the only thing that can interrupt a single-response transport, so an
+	// implementation without it would serve progressive remuxes that no session
+	// stop can withdraw.
+	WatchTransportStop(sessionID string) (<-chan struct{}, func())
+	SetRemoteTransport(sessionID string, remote bool) error
 	SetEffectiveMediaFileID(sessionID string, fileID int) error
 	SetTranscodeNodeURL(sessionID, url string) error
 	SetTranscodeRoute(sessionID string, route playback.TranscodeRoute) error
@@ -63,10 +74,6 @@ type SessionManagerInterface interface {
 	SetProgressPersistenceDisabled(sessionID string, disabled bool) error
 	StopSession(sessionID string) error
 	GetSession(sessionID string) (*playback.Session, error)
-}
-
-type sessionStarterWithFilesContext interface {
-	StartSessionWithFilesContext(ctx context.Context, userID int, profileID string, effectiveFileID int, requestedFileID int, method playback.PlayMethod, transcodeAudio bool) (*playback.Session, error)
 }
 
 type transcodePermissionChecker interface {
@@ -123,8 +130,35 @@ type PlaybackFileVersionFetcher interface {
 	GetByEpisodeID(ctx context.Context, episodeID string) ([]*models.MediaFile, error)
 }
 
+// PlaybackProbeEnsurer repairs probe metadata and stamps the H.264 copy-safety
+// verdict when it is already known.
+//
+// It deliberately exposes no blocking variant: a play must never wait on the
+// multi-second bitstream scan, so an unknown verdict is planned optimistically
+// and resolved behind the play (see PlaybackCopySafetyRacer).
+//
+// EnsureProbeOnly is declared because this interface is also the type the
+// router carries the shared ensurer in when handing it to the catalog and
+// chapter-thumbnail services, which repair probe metadata and nothing else.
 type PlaybackProbeEnsurer interface {
-	Ensure(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error)
+	EnsureProbeOnly(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error)
+	EnsureCopySafetyCached(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error)
+}
+
+// PlaybackCopySafetyRacer resolves an unknown H.264 copy-safety verdict out of
+// band, after a plan that stream-copies video has already been issued.
+// *playback.CopySafetyRace implements it.
+type PlaybackCopySafetyRacer interface {
+	RaceScanForPlan(fileID int, plan *playback.PlanV3)
+	// RaceScan re-engages the race for a file whose verdict is still open. The
+	// serve paths use it when they revive a stream-copy transport: the replica
+	// that planned it may be gone, and only a race running *here* can withdraw
+	// the route from the session this replica just rebuilt.
+	RaceScan(fileID int)
+	// VideoCopyUnsafeKnown answers, without ffmpeg and without waiting, whether
+	// this replica can already condemn a video stream-copy of the file —
+	// including from a verdict whose write to the row failed.
+	VideoCopyUnsafeKnown(ctx context.Context, file *models.MediaFile) bool
 }
 
 type PlaybackChapterThumbnailQueuer interface {
@@ -160,26 +194,43 @@ type PlaybackHandler struct {
 	MissingMarker           MissingFileMarker
 	NodePlanner             nodepool.SessionPlanner   // optional; enables proxy/transcode node selection
 	JWTSecret               string                    // needed for signing stream tokens
-	ItemAccess              PlaybackItemAccessChecker // optional; enables file authorization checks
-	EpisodeLookup           PlaybackEpisodeLookup     // optional; resolves episode files to their series
-	ExtraLookup             PlaybackExtraLookup       // optional; resolves extras files to their parent item
-	OriginalLangLookup      PlaybackOriginalLanguageLookup
-	SettingsRepo            PlaybackSettingsReader     // optional; reads server settings (e.g., allow_4k_transcode)
-	FileVersionFetcher      PlaybackFileVersionFetcher // optional; queries sibling file versions for 4K guard
-	ProbeEnsurer            PlaybackProbeEnsurer       // optional; repairs missing probe metadata on demand
-	ChapterThumbnailQueuer  PlaybackChapterThumbnailQueuer
-	IntroAnalyzer           IntroEpisodeAnalyzer
-	IntroRepository         PlaybackIntroEligibilityChecker
-	MarkerRegistry          *markers.Registry
-	MarkerResolver          markers.ExternalIDResolver
-	MarkerUpserter          PlaybackMarkerUpserter
-	MarkerUpdateNotifier    PlaybackMarkerUpdateNotifier
-	MarkerLazyContext       context.Context
-	MarkerLazyInFlight      sync.Map
-	SubtitleRepo            subtitles.Repository // optional; enables downloaded subtitles in playback
-	RealtimeHub             *playback.RealtimeHub
-	CommandTracker          *playback.CommandTracker
-	CommandDispatcher       *playback.CommandDispatcher
+	StreamTelemetry         *streamtelemetry.Registry // local observation-only telemetry
+	// ProxyGrantStore hands a proxy the recipe it serves a header-authenticated
+	// session from. Optional: without it (or without Redis behind it) an attempt
+	// that negotiated authorized_media_origins_v1 simply stays on the API origin.
+	ProxyGrantStore recipeCardStoreV3
+	// NodeRecipeStore hands a transcode node the recipe it rebuilds a
+	// header-authenticated remote transcode from after its own restart, keyed by
+	// the transport id the node serves it under. A legacy attempt needs none —
+	// its client URL carries the recipe in a stream token — but a tokenless
+	// relayed request has nothing to reconstruct from. Optional and best effort:
+	// without it (or without Redis behind it) such a session replans instead of
+	// recovering, exactly as before.
+	NodeRecipeStore    recipeCardStoreV3
+	ItemAccess         PlaybackItemAccessChecker // optional; enables file authorization checks
+	EpisodeLookup      PlaybackEpisodeLookup     // optional; resolves episode files to their series
+	ExtraLookup        PlaybackExtraLookup       // optional; resolves extras files to their parent item
+	OriginalLangLookup PlaybackOriginalLanguageLookup
+	SettingsRepo       PlaybackSettingsReader     // optional; reads server settings (e.g., allow_4k_transcode)
+	FileVersionFetcher PlaybackFileVersionFetcher // optional; queries sibling file versions for 4K guard
+	ProbeEnsurer       PlaybackProbeEnsurer       // optional; repairs missing probe metadata on demand
+	// CopySafetyRacer resolves an unknown H.264 copy-safety verdict behind an
+	// already-issued stream-copy plan. Optional: without it an unknown verdict
+	// simply stays unknown and the copy route is never withdrawn.
+	CopySafetyRacer        PlaybackCopySafetyRacer
+	ChapterThumbnailQueuer PlaybackChapterThumbnailQueuer
+	IntroAnalyzer          IntroEpisodeAnalyzer
+	IntroRepository        PlaybackIntroEligibilityChecker
+	MarkerRegistry         *markers.Registry
+	MarkerResolver         markers.ExternalIDResolver
+	MarkerUpserter         PlaybackMarkerUpserter
+	MarkerUpdateNotifier   PlaybackMarkerUpdateNotifier
+	MarkerLazyContext      context.Context
+	MarkerLazyInFlight     sync.Map
+	SubtitleRepo           subtitles.Repository // optional; enables downloaded subtitles in playback
+	RealtimeHub            *playback.RealtimeHub
+	CommandTracker         *playback.CommandTracker
+	CommandDispatcher      *playback.CommandDispatcher
 	// PlaybackConfig returns the current playback config (ffmpeg path,
 	// hwaccel, transcode dir). Wired to the live config in integrated mode
 	// so admin changes apply to newly started transcodes. Read it through
@@ -195,21 +246,27 @@ type PlaybackHandler struct {
 	tm *playback.TranscodeManager
 	// PlanStoreV3 owns the short-lived protocol-v3 control-plane state. Router
 	// wiring replaces the in-memory default with PostgreSQL in integrated mode.
-	PlanStoreV3          playback.PlanStoreV3
-	v3RegistryOnce       sync.Once
-	v3Registry           *playback.TransformationRegistryV3
-	v3NodeCapabilitiesMu sync.Mutex
-	v3NodeCapabilities   map[string]v3NodeCapabilityCache
-	v3EventOnce          sync.Once
-	v3EventQueue         chan playback.RouteEventRecordV3
-	v3ReplanMu           sync.Mutex
-	v3ReplanLocks        map[string]*v3ReplanLock
-	v3ReplanSlotsOnce    sync.Once
-	v3ReplanSlots        chan struct{}
-	v3EventRateMu        sync.Mutex
-	v3EventRates         map[string]v3EventRate
-	v3FlagMu             sync.Mutex
-	v3Flags              map[string]v3FlagCacheEntry
+	PlanStoreV3             playback.PlanStoreV3
+	v3RegistryMu            sync.Mutex
+	v3Registry              *playback.TransformationRegistryV3
+	v3RegistryProbe         func(context.Context, string, tonemap.Capabilities) (*playback.TransformationRegistryV3, error)
+	v3ToneMapProbe          func(context.Context, string, string, string) (tonemap.Capabilities, error)
+	v3NodeCapabilitiesMu    sync.Mutex
+	v3NodeCapabilities      map[string]v3NodeCapabilityCache
+	v3NodeCapabilityRefresh sync.Map
+	v3EventOnce             sync.Once
+	v3EventQueue            chan playback.RouteEventRecordV3
+	v3StartEffectsOnce      sync.Once
+	v3StartEffectsQueue     chan playbackStartSideEffectsV3
+	v3StartEffectsMu        sync.Mutex
+	v3StartEffectsPending   map[string]*playbackStartSideEffectsStateV3
+	v3AudioPreferenceMu     sync.Mutex
+	v3ReplanMu              sync.Mutex
+	v3ReplanLocks           map[string]*v3ReplanLock
+	v3ReplanSlotsOnce       sync.Once
+	v3ReplanSlots           chan struct{}
+	v3EventRateMu           sync.Mutex
+	v3EventRates            map[string]v3EventRate
 }
 
 type PlaybackWatchScrobbler interface {
@@ -356,159 +413,10 @@ func (h *PlaybackHandler) playbackThresholds(ctx context.Context) userstore.Prog
 
 // --- Request/Response types ---
 
-// hdrDetails describes granular HDR support advertised by the client.
-// Optional — absent means the resolver falls back to the boolean HDR flag.
-// Dolby Vision profile numbers follow MediaCodec:
-//
-//	5 = DvheStn / DvheSt (single-layer)
-//	7 = DvheDtb / DvheDtr / DvheDth (dual-layer BL+EL — needs multi-instance)
-//	8 = DvheSt4k / DvavSe
-type hdrDetails struct {
-	HDR10               bool  `json:"hdr10"`
-	HDR10Plus           bool  `json:"hdr10_plus"`
-	HLG                 bool  `json:"hlg"`
-	DolbyVisionProfiles []int `json:"dolby_vision_profiles"`
-}
-
-// audioPassthroughCapabilities describes what the connected audio sink can
-// decode bit-exact. Distinct from `codecs_audio`, which describes what the
-// client can decode itself. Passthrough codecs come from `AudioCapabilities`
-// (HDMI EDID / Bluetooth / USB DAC capability probing on Android; equivalent
-// on iOS/tvOS).
-type audioPassthroughCapabilities struct {
-	PassthroughCodecs  []string `json:"passthrough_codecs"`
-	SpatializerEnabled bool     `json:"spatializer_enabled"`
-	MaxChannels        int      `json:"max_channels"`
-}
-
-// startPlaybackRequest represents the JSON body for POST /playback/start.
-type startPlaybackRequest struct {
-	FileID                       int                           `json:"file_id"`
-	ProfileID                    string                        `json:"profile_id"`
-	PlayMethod                   string                        `json:"play_method"`
-	StartPosition                *float64                      `json:"start_position,omitempty"`
-	AudioTrackIndex              *int                          `json:"audio_track_index,omitempty"`
-	PreserveDirectAudioSelection bool                          `json:"preserve_direct_audio_selection,omitempty"`
-	DisableProgressPersistence   bool                          `json:"disable_progress_persistence,omitempty"`
-	CodecsVideo                  []string                      `json:"codecs_video"`
-	CodecsAudio                  []string                      `json:"codecs_audio"`
-	Containers                   []string                      `json:"containers"`
-	MaxResolution                string                        `json:"max_resolution"`
-	HDR                          bool                          `json:"hdr"`
-	HdrDetails                   *hdrDetails                   `json:"hdr_details,omitempty"`
-	AudioPassthrough             *audioPassthroughCapabilities `json:"audio_passthrough,omitempty"`
-	SupportsBitmapSubtitleBurnIn bool                          `json:"supports_bitmap_subtitle_burn_in,omitempty"`
-}
-
 // progressRequest represents the JSON body for POST /playback/{session_id}/progress.
 type progressRequest struct {
 	Position float64 `json:"position"`
 	IsPaused bool    `json:"is_paused"`
-}
-
-// playbackSessionResponse represents a playback session in JSON responses.
-type playbackSessionResponse struct {
-	SessionID       string              `json:"session_id"`
-	UserID          int                 `json:"user_id"`
-	ProfileID       string              `json:"profile_id"`
-	MediaFileID     int                 `json:"media_file_id"`
-	PlayMethod      string              `json:"play_method"`
-	Position        float64             `json:"position"`
-	IsPaused        bool                `json:"is_paused"`
-	StreamURL       string              `json:"stream_url"`
-	AudioTrackIndex int                 `json:"audio_track_index"`
-	DurationSeconds *float64            `json:"duration_seconds"`
-	SubtitleURLs    []subtitleURL       `json:"subtitle_urls,omitempty"`
-	PlaybackInfo    *playbackInfoResult `json:"playback_info,omitempty"`
-}
-
-type playbackInfoResult struct {
-	StreamType     string `json:"stream_type"`
-	TranscodeAudio bool   `json:"transcode_audio"`
-	VideoCodec     string `json:"video_codec"`
-	AudioCodec     string `json:"audio_codec"`
-}
-
-// subtitleURL represents a subtitle track URL in a playback response.
-type subtitleURL struct {
-	Index           int    `json:"index"`
-	MediaFileID     int    `json:"media_file_id,omitempty"`
-	Language        string `json:"language"`
-	Codec           string `json:"codec,omitempty"`
-	Label           string `json:"label"`
-	Source          string `json:"source"`
-	Forced          bool   `json:"forced"`
-	HearingImpaired bool   `json:"hearing_impaired"`
-	URL             string `json:"url"`
-	FontBundleURL   string `json:"font_bundle_url,omitempty"`
-}
-
-// changeAudioRequest represents the JSON body for PATCH /playback/{session_id}/audio.
-type changeAudioRequest struct {
-	AudioTrackIndex int     `json:"audio_track_index"`
-	Position        float64 `json:"position"`
-}
-
-// changeAudioResponse represents the JSON response for PATCH /playback/{session_id}/audio.
-type changeAudioResponse struct {
-	AudioTrackIndex       int                 `json:"audio_track_index"`
-	PlayMethod            string              `json:"play_method"`
-	StreamURL             string              `json:"stream_url"`
-	SwitchMode            string              `json:"switch_mode"`
-	PlayerStartSeconds    *float64            `json:"player_start_seconds,omitempty"`
-	StreamOriginSeconds   *float64            `json:"stream_origin_seconds,omitempty"`
-	TimelineOffsetSeconds *float64            `json:"timeline_offset_seconds,omitempty"`
-	CanSeekAnywhere       *bool               `json:"can_seek_anywhere,omitempty"`
-	PlaybackInfo          *playbackInfoResult `json:"playback_info,omitempty"`
-}
-
-func (resp *changeAudioResponse) setWindowedTimeline(position, origin float64) {
-	playerStart := max(0, position-origin)
-	canSeekAnywhere := false
-	resp.PlayerStartSeconds = &playerStart
-	resp.StreamOriginSeconds = &origin
-	resp.TimelineOffsetSeconds = &origin
-	resp.CanSeekAnywhere = &canSeekAnywhere
-}
-
-type transcodeStartRequest struct {
-	SessionID           string  `json:"session_id"`
-	SeekSeconds         float64 `json:"seek_seconds"`
-	TargetResolution    string  `json:"target_resolution"`
-	TargetCodecVideo    string  `json:"target_codec_video"`
-	TargetCodecAudio    string  `json:"target_codec_audio"`
-	TargetBitrateKbps   int     `json:"target_bitrate_kbps"`
-	SegmentDuration     int     `json:"segment_duration"`
-	SubtitleTrackIndex  int     `json:"subtitle_track_index"`
-	SubtitleMediaFileID int     `json:"subtitle_media_file_id,omitempty"`
-	SubtitleBurnIn      bool    `json:"subtitle_burn_in"`
-}
-
-type transcodeStartResponse struct {
-	SessionID             string   `json:"session_id"`
-	Status                string   `json:"status"`
-	SwitchedFileID        *int     `json:"switched_file_id,omitempty"`
-	ManifestURL           string   `json:"manifest_url"`
-	DurationSeconds       *float64 `json:"duration_seconds"`
-	PlayerStartSeconds    float64  `json:"player_start_seconds"`
-	StreamOriginSeconds   float64  `json:"stream_origin_seconds"`
-	TimelineOffsetSeconds float64  `json:"timeline_offset_seconds"`
-	CanSeekAnywhere       bool     `json:"can_seek_anywhere"`
-}
-
-// toPlaybackSessionResponse converts a playback.Session to an API response.
-func (h *PlaybackHandler) toPlaybackSessionResponse(s *playback.Session) playbackSessionResponse {
-	return playbackSessionResponse{
-		SessionID:       s.ID,
-		UserID:          s.UserID,
-		ProfileID:       s.ProfileID,
-		MediaFileID:     s.MediaFileID,
-		PlayMethod:      string(semanticPlayMethod(s)),
-		Position:        s.Position,
-		IsPaused:        s.IsPaused,
-		StreamURL:       h.playbackStreamURL(s),
-		AudioTrackIndex: s.AudioTrackIndex,
-	}
 }
 
 func semanticPlayMethod(s *playback.Session) playback.PlayMethod {
@@ -521,83 +429,16 @@ func semanticPlayMethod(s *playback.Session) playback.PlayMethod {
 	return s.PlayMethod
 }
 
-func fileDurationSeconds(file *models.MediaFile) *float64 {
-	if file == nil || file.Duration <= 0 {
-		return nil
-	}
-	duration := float64(file.Duration)
-	return &duration
-}
-
-func canSeekAnywhere(req transcodeStartRequest, file *models.MediaFile) bool {
-	if file == nil || file.Duration <= 0 {
-		return false
-	}
-	return !usesRealTranscodeManifest(req, file)
-}
-
-func usesRealTranscodeManifest(req transcodeStartRequest, file *models.MediaFile) bool {
-	durationSeconds := 0.0
-	if file != nil {
-		durationSeconds = float64(file.Duration)
-	}
-	// Copy-video, unknown-duration, and oversized HLS sessions use FFmpeg's
-	// real manifest so the player only seeks within the currently exposed
-	// window. Out-of-window seeks should restart explicitly instead of relying
-	// on segment 404s to move FFmpeg.
-	return strings.EqualFold(req.TargetCodecVideo, "copy") ||
-		!playback.CanGenerateSyntheticManifest(durationSeconds, req.SegmentDuration)
-}
-
-func buildTranscodeStartResponse(
-	req transcodeStartRequest,
-	file *models.MediaFile,
-	switchedFileID *int,
-	manifestURL string,
-	streamOriginSeconds float64,
-) transcodeStartResponse {
-	resp := transcodeStartResponse{
-		SessionID:       req.SessionID,
-		Status:          "started",
-		SwitchedFileID:  switchedFileID,
-		ManifestURL:     manifestURL,
-		DurationSeconds: fileDurationSeconds(file),
-	}
-	if canSeekAnywhere(req, file) {
-		resp.PlayerStartSeconds = req.SeekSeconds
-		resp.StreamOriginSeconds = 0
-		resp.TimelineOffsetSeconds = 0
-		resp.CanSeekAnywhere = true
-		return resp
-	}
-	resp.PlayerStartSeconds = max(0, req.SeekSeconds-streamOriginSeconds)
-	resp.StreamOriginSeconds = streamOriginSeconds
-	resp.TimelineOffsetSeconds = streamOriginSeconds
-	resp.CanSeekAnywhere = false
-	return resp
-}
-
-func (h *PlaybackHandler) resolveLegacyCopySeekAnchor(
-	ctx context.Context,
-	ffmpegPath string,
-	inputPath string,
-	requestedSeekSeconds float64,
-	segmentDuration int,
-) (float64, int, error) {
-	resolver := h.copySeekAnchor
-	if resolver == nil {
-		resolver = playback.ResolveCopySeekAnchor
-	}
-	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	return resolver(probeCtx, ffmpegPath, inputPath, requestedSeekSeconds, segmentDuration)
-}
-
+// ensurePlaybackProbe repairs probe metadata and stamps the H.264 copy-safety
+// verdict when it is already known. It never runs the bitstream scan: an
+// unknown verdict plans optimistically (the planner reads nil MultiplePPS as
+// "copy is allowed") and is resolved asynchronously once the plan is issued, so
+// starting playback never waits on a multi-second read of the source.
 func (h *PlaybackHandler) ensurePlaybackProbe(ctx context.Context, file *models.MediaFile) *models.MediaFile {
 	if h == nil || h.ProbeEnsurer == nil || file == nil {
 		return file
 	}
-	repaired, err := h.ProbeEnsurer.Ensure(ctx, file)
+	repaired, err := h.ProbeEnsurer.EnsureCopySafetyCached(ctx, file)
 	if err != nil {
 		slog.WarnContext(ctx, "playback probe repair failed", "component", "api", "file_id", file.ID, "path", file.FilePath, "error", err)
 		return file
@@ -620,73 +461,160 @@ const streamTokenParam = "st"
 
 // signSessionToken mints a stream token carrying the session's full
 // reconstruction recipe. Returns "" when no signing secret is configured
-// (reconstruct effectively disabled, e.g. in tests).
-func (h *PlaybackHandler) signSessionToken(card playback.RecipeCard) string {
+// (reconstruct effectively disabled, e.g. in tests), or when the attempt
+// negotiated header-authenticated media.
+//
+// requireMediaAuth is the attempt's negotiated media-auth mode, threaded from
+// the session/recipe state the caller holds. It is refused here, at the mint,
+// rather than only at the call sites that build URLs: a token that is never
+// signed cannot leak into a client-visible URL by way of a builder that forgot
+// to ask. Call sites keep their own checks as defense in depth.
+func (h *PlaybackHandler) signSessionToken(card playback.RecipeCard, requireMediaAuth bool) string {
+	if requireMediaAuth {
+		return ""
+	}
+	return h.signStreamClaims(card.ToClaims())
+}
+
+// signStreamClaims mints a stream token from claims that are already assembled.
+// Callers serving a session from another node use it to add the claims a
+// RecipeCard does not model (the file's Dolby Vision profile, audio-only flag),
+// which a remote executor cannot look up for itself.
+func (h *PlaybackHandler) signStreamClaims(claims streamtoken.Claims) string {
 	if h.JWTSecret == "" {
 		return ""
 	}
-	token, err := streamtoken.Sign(card.ToClaims(), h.JWTSecret, playback.MaxTokenTTL)
+	token, err := streamtoken.Sign(claims, h.JWTSecret, playback.MaxTokenTTL)
 	if err != nil {
-		slog.Warn("sign stream token failed", "error", err, "session", card.SessionID, "playback_session_id", card.SessionID)
+		slog.Warn("sign stream token failed", "error", err, "session", claims.SessionID, "playback_session_id", claims.SessionID)
 		return ""
 	}
 	return token
 }
 
-// streamCardFromQuery verifies the stream token in the request's ?st= parameter
-// and returns the decoded reconstruction recipe, or nil when the token is
-// absent, invalid/expired, or bound to a different session. A live session needs
-// no token (the result is simply nil); the recipe is consumed only on
-// reconstruct.
-func (h *PlaybackHandler) streamCardFromQuery(r *http.Request, sessionID string) *playback.RecipeCard {
-	return streamCardFromToken(r.URL.Query().Get(streamTokenParam), sessionID, h.JWTSecret)
-}
-
 // loadTranscodeServeSession resolves the playback Session for the transcode
 // manifest/segment serve routes while keeping stream-token verification off the
-// hot path. The overwhelmingly common case is a live in-memory session, which
-// needs no token at all, so the cheap GetSession lookup runs first and the
-// (HMAC + JSON) token decode is performed only on a not-found miss where a
-// reconstruct is actually required. On that miss it delegates to the shared
-// LoadOrReconstructSession front door so reconstruct/ownership semantics stay
-// identical. The returned card (nil on the live-session path) is the decoded
-// recipe the caller's own reconstruct branch consumes.
-func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID string) (*playback.Session, playback.SessionLoadStatus, *playback.RecipeCard) {
+// hot path. A V3 session that negotiated header-authenticated media requires a
+// live authenticated owner on every request; a legacy session retains its UUID
+// bearer behavior. The overwhelmingly common case is a live in-memory session,
+// which needs no token at all, so the cheap GetSession lookup runs first and the
+// (HMAC + JSON) token decode is performed only when the session cannot serve by
+// itself: on a not-found miss where a reconstruct is required, and on a live
+// session with no runtime, where any valid recipe card (plain or tone-mapped)
+// joins the manager's atomic playback+runtime reconstruction operation. On the
+// miss it delegates to the shared LoadOrReconstructSession front door so
+// reconstruct/ownership semantics stay identical. The returned card (nil on the
+// live-session path when no token is presented) is the decoded recipe the
+// caller's own reconstruct branch consumes.
+func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID string, requestedSegment int) (*playback.Session, playback.SessionLoadStatus, *playback.RecipeCard, *streamtoken.Claims, error) {
 	requestUserID := apimw.GetUserID(r.Context())
 	session, err := h.sessionMgr.GetSession(sessionID)
 	if err == nil {
-		// Live session: enforce the same ownership rule as LoadOrReconstructSession
-		// (a zero caller is allowed; a non-zero mismatch is refused). No token
-		// verification on this hot path.
-		if requestUserID != 0 && session.UserID != requestUserID {
-			return nil, playback.SessionForbidden, nil
+		// Defense in depth: LoadOrReconstructSession enforces the same rule for
+		// every serve handler, but this fast path never reaches it.
+		if session.RequireMediaAuthorization && requestUserID == 0 {
+			return nil, playback.SessionUnauthorized, nil, nil, nil
 		}
-		return session, playback.SessionLoaded, nil
+		// Live session: secure transports require a user above; legacy bearer
+		// routes allow zero. Either way, a present but mismatched identity is
+		// forbidden. No token verification on this hot path.
+		if requestUserID != 0 && session.UserID != requestUserID {
+			return nil, playback.SessionForbidden, nil, nil, nil
+		}
+		if session.TranscodeNodeURL == "" && h.tm.GetTranscodeSession(sessionID) == nil {
+			// A live session whose runtime died can recover from the client's
+			// recipe token. Tone-mapped cards may back a provisional capability
+			// reconstruction; plain cards just respawn the encode. Either way the
+			// atomic playback+runtime operation is the same front door.
+			card, claims := verifiedStreamCardFromToken(r.URL.Query().Get(streamTokenParam), sessionID, h.JWTSecret)
+			if card != nil {
+				if videoCopyReconstructRefused(r.Context(), h.fileResolver, h.CopySafetyRacer, card) {
+					return nil, playback.SessionMissing, nil, nil, nil
+				}
+				session, _, status, reconstructErr := h.tm.LoadOrReconstructTranscodeWithError(r.Context(), h.sessionMgr.GetSession, sessionID, requestUserID, requestedSegment, card)
+				return session, status, card, claims, reconstructErr
+			}
+		}
+		return session, playback.SessionLoaded, nil, nil, nil
 	}
 	if !errors.Is(err, playback.ErrSessionNotFound) {
-		return nil, playback.SessionLoadFailed, nil
+		return nil, playback.SessionLoadFailed, nil, nil, nil
 	}
 	// Genuine miss (e.g. after a restart): now — and only now — pay for the token
 	// decode so the recipe is available for reconstruction.
-	card := h.streamCardFromQuery(r, sessionID)
+	card, claims := verifiedStreamCardFromToken(r.URL.Query().Get(streamTokenParam), sessionID, h.JWTSecret)
+	// The copy-safety verdict gates the revival before it happens, not after.
+	// Reconstruction registers the playback session against the user's stream
+	// caps, so a refusal that ran later would leave a session nobody serves
+	// holding an admission slot the client's fresh attempt needs — and a
+	// remote-node recipe never reaches the local transport reconstruct at all
+	// (the serve handlers proxy to the node instead), so a gate down there would
+	// miss it entirely. A revival the verdict does not condemn re-engages the
+	// race here, so the session about to be rebuilt is covered by a race this
+	// replica owns. See playback_copy_safety.go.
+	if videoCopyReconstructRefused(r.Context(), h.fileResolver, h.CopySafetyRacer, card) {
+		return nil, playback.SessionMissing, nil, nil, nil
+	}
+	if card != nil && card.ToneMapMode != "" {
+		session, _, status, reconstructErr := h.tm.LoadOrReconstructTranscodeWithError(r.Context(), h.sessionMgr.GetSession, sessionID, requestUserID, requestedSegment, card)
+		return session, status, card, claims, reconstructErr
+	}
 	session, status := h.tm.LoadOrReconstructSession(r.Context(), h.sessionMgr.GetSession, sessionID, requestUserID, card)
-	return session, status, card
+	return session, status, card, claims, nil
 }
 
 // streamCardFromToken verifies a stream token and decodes its reconstruction
 // recipe, returning nil when the token is absent, unparseable/expired, or bound
 // to a different session id. Shared by the native serve handlers (PlaybackHandler
 // and StreamHandler).
-func streamCardFromToken(tokenStr, sessionID, secret string) *playback.RecipeCard {
+func verifiedStreamCardFromToken(tokenStr, sessionID, secret string) (*playback.RecipeCard, *streamtoken.Claims) {
 	if tokenStr == "" || secret == "" {
-		return nil
+		return nil, nil
 	}
 	claims, err := streamtoken.Verify(tokenStr, secret)
 	if err != nil || claims.SessionID != sessionID {
-		return nil
+		return nil, nil
 	}
 	card := playback.RecipeCardFromClaims(claims)
-	return &card
+	return &card, claims
+}
+
+func attachPlaybackSession(ctx context.Context, session *playback.Session, claims *streamtoken.Claims) {
+	if session == nil {
+		return
+	}
+	startedAt := session.StartedAt
+	startedSource := streamtelemetry.StartedAtSourceSession
+	tokenIssuedAt := time.Time{}
+	tokenSource := streamtelemetry.TokenIssuedAtSourceNone
+	if claims != nil {
+		if resolved, source := claims.StartedAt(); !resolved.IsZero() {
+			switch source {
+			case streamtoken.StartedAtSourceClaim:
+				startedAt = resolved
+				startedSource = streamtelemetry.StartedAtSourceClaim
+			case streamtoken.StartedAtSourceIssuedAt:
+				if startedAt.IsZero() {
+					startedAt = resolved
+					startedSource = streamtelemetry.StartedAtSourceIssuedAt
+				}
+			}
+		}
+		if claims.IssuedAt != nil {
+			tokenIssuedAt = claims.IssuedAt.Time
+			tokenSource = streamtelemetry.TokenIssuedAtSourceVerified
+		}
+	}
+	streamtelemetry.Attach(ctx, streamtelemetry.Attachment{Subject: streamtelemetry.UserSubject(session.UserID),
+		ProfileID: session.ProfileID, SessionID: session.ID, MediaFileID: session.MediaFileID,
+		PlayMethod: string(session.PlayMethod), StartedAt: startedAt, StartedAtSource: startedSource,
+		TokenIssuedAt: tokenIssuedAt, TokenIssuedAtSource: tokenSource})
+}
+
+func attachTransfer(ctx context.Context, userID int, profileID string, mediaFileID int) {
+	streamtelemetry.Attach(ctx, streamtelemetry.Attachment{Subject: streamtelemetry.UserSubject(userID),
+		ProfileID: profileID, MediaFileID: mediaFileID, StartedAtSource: streamtelemetry.StartedAtSourceFirstSeen,
+		TokenIssuedAtSource: streamtelemetry.TokenIssuedAtSourceNone})
 }
 
 // appendStreamToken adds the ?st=<token> parameter to a native serve URL.
@@ -703,9 +631,15 @@ func appendStreamToken(rawURL, token string) string {
 
 // playbackStreamURL builds the native serve URL for a session and appends an
 // identity stream token so a direct-play/remux session survives a restart (the
-// client re-supplies its byte position). Transcode sessions receive their
-// full-recipe manifest URL from HandleStartTranscode instead; the URL here is an
-// informational placeholder the client replaces with that manifest.
+// client re-supplies its byte position). Transcode sessions are told which URL
+// to play by their v3 plan; the URL here is an informational placeholder that
+// the plan's delivery URL supersedes.
+//
+// A session that requires media authorization gets the bare relative URL: it
+// authenticates every media request with the caller's own access token, so no
+// client-visible URL may carry a playback credential. Losing the token also
+// means losing transparent reconstruction after a restart, which is the
+// documented trade of that mode.
 func (h *PlaybackHandler) playbackStreamURL(s *playback.Session) string {
 	if s == nil {
 		return ""
@@ -713,8 +647,12 @@ func (h *PlaybackHandler) playbackStreamURL(s *playback.Session) string {
 	if s.PlayMethod == playback.PlayTranscode {
 		return fmt.Sprintf("/playback/transcode/%s/master.m3u8", s.ID)
 	}
+	streamURL := fmt.Sprintf("/stream/%s", s.ID)
+	if s.RequireMediaAuthorization {
+		return streamURL
+	}
 	card := identityRecipeCard(s)
-	return appendStreamToken(fmt.Sprintf("/stream/%s", s.ID), h.signSessionToken(card))
+	return appendStreamToken(streamURL, h.signSessionToken(card, s.RequireMediaAuthorization))
 }
 
 // identityRecipeCard builds the identity-only recipe for a direct-play or remux
@@ -722,12 +660,21 @@ func (h *PlaybackHandler) playbackStreamURL(s *playback.Session) string {
 // the bytes are served by HTTP Range / a re-spawned remux pipe at the
 // client-supplied position.
 func identityRecipeCard(s *playback.Session) playback.RecipeCard {
+	var card playback.RecipeCard
 	switch s.PlayMethod {
 	case playback.PlayRemux:
-		return playback.NewRemuxRecipeCard(s.ID, s.UserID, s.ProfileID, s.MediaFileID, s.TranscodeAudio, s.AudioTrackIndex, s.RemuxDVMode)
+		card = playback.NewRemuxRecipeCard(s.ID, s.UserID, s.ProfileID, s.MediaFileID, s.TranscodeAudio, s.AudioTrackIndex, s.RemuxDVMode)
+		card.TargetCodecAudio = s.TargetAudioCodec
+		card.TargetAudioChannels = s.TargetAudioChannels
+		card.TargetAudioBitrateKbps = s.TargetAudioBitrateKbps
+		if s.TranscodeAudio && playback.IsAudioToAACStereoDownmixV3(s.SourceAudioChannels, s.TargetAudioCodec, s.TargetAudioChannels) {
+			card.SourceAudioChannels = s.SourceAudioChannels
+		}
 	default:
-		return playback.NewDirectRecipeCard(s.ID, s.UserID, s.ProfileID, s.MediaFileID)
+		card = playback.NewDirectRecipeCard(s.ID, s.UserID, s.ProfileID, s.MediaFileID)
 	}
+	card.OriginalStartedAt = s.StartedAt
+	return card
 }
 
 func fileBitrateKbps(file *models.MediaFile) int {
@@ -735,47 +682,6 @@ func fileBitrateKbps(file *models.MediaFile) int {
 		return 0
 	}
 	return file.Bitrate
-}
-
-func buildPlaybackInfo(session *playback.Session, file *models.MediaFile) *playbackInfoResult {
-	if session == nil {
-		return nil
-	}
-
-	info := &playbackInfoResult{
-		TranscodeAudio: session.TranscodeAudio,
-	}
-
-	switch session.PlayMethod {
-	case playback.PlayTranscode:
-		info.StreamType = "hls"
-		if strings.EqualFold(session.TargetVideoCodec, "copy") || session.TargetVideoCodec == "" {
-			info.VideoCodec = sourceVideoCodec(file)
-		} else {
-			info.VideoCodec = session.TargetVideoCodec
-		}
-		if session.TranscodeAudio {
-			info.AudioCodec = "aac"
-		} else if strings.EqualFold(session.TargetAudioCodec, "copy") || session.TargetAudioCodec == "" {
-			info.AudioCodec = sourceAudioCodec(file)
-		} else {
-			info.AudioCodec = session.TargetAudioCodec
-		}
-	case playback.PlayRemux, playback.PlayDirect:
-		info.StreamType = "progressive"
-		info.VideoCodec = sourceVideoCodec(file)
-		if session.TranscodeAudio {
-			info.AudioCodec = "aac"
-		} else {
-			info.AudioCodec = sourceAudioCodec(file)
-		}
-	default:
-		info.StreamType = "progressive"
-		info.VideoCodec = sourceVideoCodec(file)
-		info.AudioCodec = sourceAudioCodec(file)
-	}
-
-	return info
 }
 
 func requestedMediaFileID(session *playback.Session) int {
@@ -796,186 +702,6 @@ func remoteTransportID(session *playback.Session) string {
 		return ""
 	}
 	return session.ID
-}
-
-func sessionTranscodeRoute(session *playback.Session) playback.TranscodeRoute {
-	if session == nil {
-		return playback.TranscodeRoute{}
-	}
-	return playback.TranscodeRoute{
-		NodeURL:     session.TranscodeNodeURL,
-		TransportID: session.TranscodeTransportID,
-	}
-}
-
-const legacyTransportMarker = "-legacy-"
-
-func isLegacyTransportSession(session *playback.Session) bool {
-	if session == nil {
-		return false
-	}
-	if session.TranscodeTransportID == "" {
-		return true
-	}
-	return strings.HasPrefix(session.TranscodeTransportID, session.ID+legacyTransportMarker)
-}
-
-func newLegacyTransportID(sessionID string) string {
-	return sessionID + legacyTransportMarker + uuid.NewString()
-}
-
-func (h *PlaybackHandler) transcodeRouteMatches(
-	sessionID string,
-	expectedLocal *playback.TranscodeSession,
-	route playback.TranscodeRoute,
-) bool {
-	unlock := h.tm.LockSessionLifecycle(sessionID)
-	defer unlock()
-	session, err := h.sessionMgr.GetSession(sessionID)
-	if err != nil || session == nil {
-		return false
-	}
-	return h.tm.GetTranscodeSession(sessionID) == expectedLocal &&
-		sessionTranscodeRoute(session) == route
-}
-
-func (h *PlaybackHandler) commitLegacyRemoteReplacement(
-	sessionID string,
-	previousLocal *playback.TranscodeSession,
-	previousRoute playback.TranscodeRoute,
-	replacement playback.SessionReplacement,
-) error {
-	unlock := h.tm.LockSessionLifecycle(sessionID)
-	if h.tm.GetTranscodeSession(sessionID) != previousLocal {
-		unlock()
-		return playback.ErrSessionSuperseded
-	}
-
-	_, published, err := h.sessionMgr.ApplyReplacementIfRoute(sessionID, previousRoute, replacement)
-	if err != nil {
-		unlock()
-		return err
-	}
-	if !published {
-		unlock()
-		return playback.ErrSessionSuperseded
-	}
-	if previousLocal != nil {
-		// A crash monitor can remove the predecessor while the remote successor is
-		// preparing. A false result is harmless: the new route is already complete,
-		// and CloseTranscodeSessionIf never touches a different local successor.
-		h.tm.CloseTranscodeSessionIf(sessionID, previousLocal, "")
-	}
-	unlock()
-
-	if previousRoute.NodeURL != "" {
-		previousProcessID := previousRoute.TransportID
-		if previousProcessID == "" {
-			previousProcessID = sessionID
-		}
-		h.tm.StopRemoteTranscode(previousProcessID, previousRoute.NodeURL)
-	}
-	return nil
-}
-
-func (h *PlaybackHandler) commitLegacyRemoteLastWriter(
-	sessionID string,
-	successorRoute playback.TranscodeRoute,
-	replacement playback.SessionReplacement,
-) error {
-	unlock := h.tm.LockSessionLifecycle(sessionID)
-	current, err := h.sessionMgr.GetSession(sessionID)
-	if err != nil {
-		unlock()
-		return err
-	}
-	previousRoute := sessionTranscodeRoute(current)
-	previousLocal := h.tm.GetTranscodeSession(sessionID)
-	if _, err := h.sessionMgr.ApplyReplacement(sessionID, replacement); err != nil {
-		unlock()
-		return err
-	}
-	if previousLocal != nil {
-		h.tm.CloseTranscodeSessionIf(sessionID, previousLocal, "")
-	}
-	unlock()
-
-	if previousRoute.NodeURL != "" && previousRoute != successorRoute {
-		previousProcessID := previousRoute.TransportID
-		if previousProcessID == "" {
-			previousProcessID = sessionID
-		}
-		h.tm.StopRemoteTranscode(previousProcessID, previousRoute.NodeURL)
-	}
-	return nil
-}
-
-func (h *PlaybackHandler) commitLegacyLocalReplacement(
-	ctx context.Context,
-	sessionID string,
-	previousLocal *playback.TranscodeSession,
-	previousRoute playback.TranscodeRoute,
-	opts playback.TranscodeOpts,
-	replacement func(*playback.TranscodeSession) playback.SessionReplacement,
-) (*playback.TranscodeSession, error) {
-	if opts.OutputSubdir == "" {
-		return nil, errors.New("transactional local replacement requires a generation output directory")
-	}
-
-	unlock := h.tm.LockSessionLifecycle(sessionID)
-	if h.tm.GetTranscodeSession(sessionID) != previousLocal {
-		unlock()
-		return nil, playback.ErrSessionSuperseded
-	}
-	current, err := h.sessionMgr.GetSession(sessionID)
-	if err != nil {
-		unlock()
-		return nil, err
-	}
-	if sessionTranscodeRoute(current) != previousRoute {
-		unlock()
-		return nil, playback.ErrSessionSuperseded
-	}
-
-	successor, err := h.startLocalPlaybackTransport(ctx, opts)
-	if err != nil {
-		unlock()
-		return nil, err
-	}
-	if _, err := successor.WaitForManifest(8 * time.Second); err != nil {
-		_ = successor.Close()
-		unlock()
-		return nil, fmt.Errorf("local successor not ready: %w", err)
-	}
-
-	rollback, published, err := h.sessionMgr.ApplyReplacementIfRoute(sessionID, previousRoute, replacement(successor))
-	if err != nil || !published {
-		_ = successor.Close()
-		unlock()
-		if err != nil {
-			return nil, err
-		}
-		return nil, playback.ErrSessionSuperseded
-	}
-	if !h.tm.SwapTranscodeSessionIf(sessionID, previousLocal, successor) {
-		rollbackErr := h.sessionMgr.RollbackReplacement(sessionID, rollback)
-		_ = successor.Close()
-		unlock()
-		return nil, errors.Join(playback.ErrSessionSuperseded, rollbackErr)
-	}
-	unlock()
-
-	if previousLocal != nil {
-		_ = previousLocal.Close()
-	}
-	if previousRoute.NodeURL != "" {
-		previousProcessID := previousRoute.TransportID
-		if previousProcessID == "" {
-			previousProcessID = sessionID
-		}
-		h.tm.StopRemoteTranscode(previousProcessID, previousRoute.NodeURL)
-	}
-	return successor, nil
 }
 
 func (h *PlaybackHandler) closeTranscodeForSession(session *playback.Session) {
@@ -1014,26 +740,6 @@ func (h *PlaybackHandler) loadFileByPreferredID(
 	return nil, nil
 }
 
-func sourceVideoCodec(file *models.MediaFile) string {
-	if file == nil {
-		return ""
-	}
-	if len(file.VideoTracks) > 0 && file.VideoTracks[0].Codec != "" {
-		return file.VideoTracks[0].Codec
-	}
-	return file.CodecVideo
-}
-
-func sourceAudioCodec(file *models.MediaFile) string {
-	if file == nil {
-		return ""
-	}
-	if len(file.AudioTracks) > 0 && file.AudioTracks[0].Codec != "" {
-		return file.AudioTracks[0].Codec
-	}
-	return file.CodecAudio
-}
-
 func directPlayAudioTrackIndex(file *models.MediaFile) int {
 	if file == nil || len(file.AudioTracks) == 0 {
 		return 0
@@ -1046,64 +752,6 @@ func directPlayAudioTrackIndex(file *models.MediaFile) int {
 	return 0
 }
 
-func clientSupportsAudioCodec(req startPlaybackRequest, codec string) bool {
-	if codec == "" {
-		return true
-	}
-	if len(req.CodecsAudio) == 0 {
-		return playback.BrowserSupportsAudioCodec(codec)
-	}
-	for _, supported := range req.CodecsAudio {
-		if strings.EqualFold(supported, codec) {
-			return true
-		}
-	}
-	if req.AudioPassthrough != nil {
-		for _, supported := range req.AudioPassthrough.PassthroughCodecs {
-			if strings.EqualFold(supported, codec) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func adjustPlaybackForSelectedAudio(
-	file *models.MediaFile,
-	req startPlaybackRequest,
-	method playback.PlayMethod,
-	transcodeAudio bool,
-	audioTrackIndex int,
-	preserveDirectAudioSelection bool,
-) (playback.PlayMethod, bool) {
-	if file == nil || len(file.AudioTracks) == 0 || audioTrackIndex < 0 || audioTrackIndex >= len(file.AudioTracks) {
-		return method, transcodeAudio
-	}
-
-	selectedTrack := file.AudioTracks[audioTrackIndex]
-	audioSupported := clientSupportsAudioCodec(req, selectedTrack.Codec)
-
-	switch method {
-	case playback.PlayDirect:
-		if preserveDirectAudioSelection {
-			return playback.PlayDirect, false
-		}
-		// Direct play cannot force the browser onto a non-default audio stream.
-		// Promote to remux so ffmpeg can map the selected track explicitly.
-		if audioTrackIndex != directPlayAudioTrackIndex(file) {
-			return playback.PlayRemux, !audioSupported
-		}
-		if !audioSupported {
-			return playback.PlayRemux, true
-		}
-		return method, false
-	case playback.PlayRemux:
-		return method, !audioSupported
-	default:
-		return method, transcodeAudio
-	}
-}
-
 func normalizeAudioTrackIndex(file *models.MediaFile, audioTrackIndex int) int {
 	if file == nil || len(file.AudioTracks) == 0 {
 		return 0
@@ -1112,85 +760,6 @@ func normalizeAudioTrackIndex(file *models.MediaFile, audioTrackIndex int) int {
 		return audioTrackIndex
 	}
 	return directPlayAudioTrackIndex(file)
-}
-
-func playbackAdminSettingsFromRequest(ctx context.Context, repo PlaybackSettingsReader, transcodeEnabled bool) playback.AdminSettings {
-	settings := playback.AdminSettings{
-		TranscodeEnabled: transcodeEnabled,
-	}
-	if repo != nil {
-		if v, _ := repo.Get(ctx, "allow_4k_transcode"); v == "true" {
-			settings.Allow4KTranscode = true
-		}
-	}
-	return settings
-}
-
-func resolvePlaybackMethodForFile(
-	file *models.MediaFile,
-	req startPlaybackRequest,
-	audioTrackIndex int,
-	adminSettings playback.AdminSettings,
-) (playback.PlayMethod, bool) {
-	if file == nil {
-		return "", false
-	}
-
-	caps := playback.ClientCapabilities{
-		CodecsVideo:   req.CodecsVideo,
-		CodecsAudio:   req.CodecsAudio,
-		Containers:    req.Containers,
-		MaxResolution: req.MaxResolution,
-		HDR:           req.HDR,
-	}
-	if req.AudioPassthrough != nil {
-		caps.AudioPassthroughCodecs = req.AudioPassthrough.PassthroughCodecs
-	}
-	decision := playback.Resolve(file, caps, adminSettings)
-	return adjustPlaybackForSelectedAudio(file, req, decision.Method, decision.TranscodeAudio, audioTrackIndex, false)
-}
-
-func (h *PlaybackHandler) resolveCapabilityPlaybackSelection(
-	ctx context.Context,
-	req startPlaybackRequest,
-	requestedFile *models.MediaFile,
-	audioTrackIndex int,
-) (*models.MediaFile, playback.PlayMethod, bool, int) {
-	if requestedFile == nil {
-		return requestedFile, "", false, 0
-	}
-
-	audioTrackIndex = normalizeAudioTrackIndex(requestedFile, audioTrackIndex)
-	adminSettings := playbackAdminSettingsFromRequest(ctx, h.SettingsRepo, h.playbackConfig().TranscodeEnabled)
-	method, transcodeAudio := resolvePlaybackMethodForFile(requestedFile, req, audioTrackIndex, adminSettings)
-
-	if requestedFile.Resolution == "2160p" &&
-		method == playback.PlayTranscode &&
-		!adminSettings.Allow4KTranscode &&
-		h.FileVersionFetcher != nil {
-		alt, err := h.findAlternateFile(ctx, requestedFile)
-		if err == nil && alt != nil {
-			effectiveFile := h.ensurePlaybackProbe(ctx, alt)
-			effectiveAudioTrackIndex := playback.MatchAudioTrackAcrossVersions(
-				requestedFile.AudioTracks,
-				effectiveFile.AudioTracks,
-				audioTrackIndex,
-			)
-			if effectiveAudioTrackIndex != audioTrackIndex {
-				slog.InfoContext(ctx, "remapped audio track for alternate file",
-					"requested_file_id", requestedFile.ID,
-					"effective_file_id", effectiveFile.ID,
-					"requested_audio_track_index", audioTrackIndex,
-					"effective_audio_track_index", effectiveAudioTrackIndex,
-				)
-			}
-			audioTrackIndex = effectiveAudioTrackIndex
-			method, transcodeAudio = resolvePlaybackMethodForFile(effectiveFile, req, audioTrackIndex, adminSettings)
-			return effectiveFile, method, transcodeAudio, audioTrackIndex
-		}
-	}
-
-	return requestedFile, method, transcodeAudio, audioTrackIndex
 }
 
 func (h *PlaybackHandler) resolveSeriesID(ctx context.Context, file *models.MediaFile) string {
@@ -1224,71 +793,33 @@ func (h *PlaybackHandler) resolveOriginalLanguage(ctx context.Context, file *mod
 	return lang
 }
 
-// resolvedProfileAudioLanguage returns the effective playback.audio_language
-// for the profile with no content context, resolved through the settings
-// contract — the canonical replacement for reading the legacy
-// user_profiles.language column, matching catalog's detail resolution. It may
-// return playback.OriginalLanguageSentinel, which the caller resolves to a
-// concrete language. Returns "" when nothing is stored: the contract default
-// is null, "no preference".
-func resolvedProfileAudioLanguage(ctx context.Context, store userstore.UserStore, profileID string) string {
-	if store == nil || profileID == "" {
-		return ""
+// resolvedPlaybackAudioLanguage returns the effective playback.audio_language
+// for one canonical settings context. It may return
+// playback.OriginalLanguageSentinel, which the caller resolves to a concrete
+// language. Returns "" when nothing is stored: the contract default is null,
+// "no preference". Resolution and decoding failures are returned so playback
+// does not silently substitute a different track.
+func resolvedPlaybackAudioLanguage(ctx context.Context, store userstore.UserStore, rc settingsresolve.Context) (string, error) {
+	if store == nil || rc.ProfileID == "" {
+		return "", nil
 	}
 	contract, err := settingscontract.Load()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("loading settings contract: %w", err)
 	}
-	resolved, err := settingsresolve.New(contract).Resolve(ctx, store,
-		settingsresolve.Context{ProfileID: profileID},
+	resolved, err := settingsresolve.New(contract).Resolve(ctx, store, rc,
 		[]string{settingskeys.PlaybackAudioLanguage}, nil)
-	if err != nil || len(resolved) == 0 {
-		return ""
+	if err != nil {
+		return "", fmt.Errorf("resolving playback audio language: %w", err)
+	}
+	if len(resolved) == 0 {
+		return "", nil
 	}
 	var language string
-	if json.Unmarshal(resolved[0].Value, &language) != nil {
-		return ""
+	if err := json.Unmarshal(resolved[0].Value, &language); err != nil {
+		return "", fmt.Errorf("decoding playback audio language: %w", err)
 	}
-	return strings.TrimSpace(language)
-}
-
-func (h *PlaybackHandler) restoreSessionProgress(
-	ctx context.Context,
-	session *playback.Session,
-	file *models.MediaFile,
-) {
-	if h.StoreProvider == nil || session == nil || file == nil {
-		return
-	}
-
-	targetID := playbackProgressTarget(file)
-	if targetID == "" {
-		return
-	}
-
-	store, err := h.StoreProvider.ForUser(ctx, session.UserID)
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to get user store", "component", "api", "user_id", session.UserID, "error", err)
-		return
-	}
-
-	progress, err := store.GetProgress(ctx, session.ProfileID, targetID)
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to load progress", "component", "api", "target", targetID, "error", err)
-		return
-	}
-
-	if progress == nil || progress.Completed || progress.PositionSeconds <= 0 {
-		return
-	}
-
-	if err := h.sessionMgr.UpdateProgress(session.ID, progress.PositionSeconds, false); err != nil {
-		slog.ErrorContext(ctx, "failed to restore progress", "component", "api", "session", session.ID, "error", err)
-		return
-	}
-
-	session.Position = progress.PositionSeconds
-	session.IsPaused = false
+	return strings.TrimSpace(language), nil
 }
 
 // --- Persistence helpers ---
@@ -1508,6 +1039,7 @@ func (h *PlaybackHandler) finalizeSessionStop(ctx context.Context, session *play
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	h.cancelPlaybackStartSideEffectsV3(ctx, session.ID)
 
 	stopResult := h.persistStopAndHistory(ctx, session)
 	if h.WatchScrobbler != nil {
@@ -1536,6 +1068,15 @@ func (h *PlaybackHandler) finalizeSessionStop(ctx context.Context, session *play
 	}
 
 	h.closeTranscodeForSession(session)
+	// A session that ends must stop egressing everywhere, not just here: the
+	// grant is a proxy's whole authority to serve these bytes, and unlike the
+	// recipe card it is never a reconstruction aid, so it is revoked on every
+	// stop and abort.
+	h.deleteProxyGrantV3(ctx, session.ID)
+	// The teardown above stopped the remote job, so its stored recipe must not
+	// outlive it: a buffered or retrying request would otherwise rebuild ffmpeg on
+	// the node for a transport that no longer exists.
+	h.deleteNodeRecipeV3(ctx, session.TranscodeTransportID)
 	if syncNow {
 		h.syncSessionsNow(ctx, syncReason)
 	}
@@ -1548,6 +1089,7 @@ func (h *PlaybackHandler) finalizeSessionAbort(ctx context.Context, session *pla
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	h.cancelPlaybackStartSideEffectsV3(ctx, session.ID)
 
 	if h.WatchScrobbler != nil && h.fileResolver != nil {
 		if file, err := h.loadFileByPreferredID(ctx, requestedMediaFileID(session), session.MediaFileID); err == nil && file != nil {
@@ -1570,6 +1112,15 @@ func (h *PlaybackHandler) finalizeSessionAbort(ctx context.Context, session *pla
 	// Abort is a connection drop / non-terminal teardown — keep the recipe card
 	// so the client can reconstruct on reconnect.
 	h.closeTranscodeForSession(session)
+	// A session that ends must stop egressing everywhere, not just here: the
+	// grant is a proxy's whole authority to serve these bytes, and unlike the
+	// recipe card it is never a reconstruction aid, so it is revoked on every
+	// stop and abort.
+	h.deleteProxyGrantV3(ctx, session.ID)
+	// The teardown above stopped the remote job, so its stored recipe must not
+	// outlive it: a buffered or retrying request would otherwise rebuild ffmpeg on
+	// the node for a transport that no longer exists.
+	h.deleteNodeRecipeV3(ctx, session.TranscodeTransportID)
 	if syncNow {
 		h.syncSessionsNow(ctx, syncReason)
 	}
@@ -1581,7 +1132,9 @@ func (h *PlaybackHandler) handleExpiredSession(session *playback.Session) {
 	}
 	sessionCopy := *session
 	go func() {
-		slog.Info("expired inactive playback session", "session", sessionCopy.ID, "playback_session_id", sessionCopy.ID)
+		slog.Info("expired inactive playback session", append([]any{
+			"session", sessionCopy.ID, "playback_session_id", sessionCopy.ID,
+		}, sessionCopy.ClientInfo().LogAttrs()...)...)
 		// Expiry is a liveness reap, not a user stop — keep the recipe card so a
 		// resume reconstructs under the same id (the card's own TTL reaps it if
 		// the session is truly abandoned).
@@ -1667,8 +1220,10 @@ func (h *PlaybackHandler) persistAudioPreference(
 
 // --- Handler methods ---
 
-// HandleStartPlayback dispatches the shared start endpoint by protocol
-// envelope while preserving the exact legacy request decoder and behavior.
+// HandleStartPlayback starts playback. Protocol v3 is the only protocol this
+// endpoint speaks: a start that does not declare it comes from a build that
+// predates the contract and cannot interpret a plan, so it is refused with
+// 426 rather than served something it would misread.
 func (h *PlaybackHandler) HandleStartPlayback(w http.ResponseWriter, r *http.Request) {
 	if apimw.GetUserID(r.Context()) == 0 {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
@@ -1681,491 +1236,22 @@ func (h *PlaybackHandler) HandleStartPlayback(w http.ResponseWriter, r *http.Req
 	}
 	var envelope struct {
 		ProtocolVersion *int `json:"protocol_version"`
+		Capabilities    *struct {
+			VideoEvidence *string `json:"video_evidence"`
+			AudioEvidence *string `json:"audio_evidence"`
+		} `json:"client_capabilities"`
 	}
-	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&envelope); err != nil {
+	if err := json.Unmarshal(body, &envelope); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
 		return
 	}
-	if envelope.ProtocolVersion != nil && *envelope.ProtocolVersion == playback.ProtocolV3 {
-		h.handleStartPlaybackV3(w, r, body)
+	if envelope.ProtocolVersion == nil || *envelope.ProtocolVersion != playback.ProtocolV3 ||
+		envelope.Capabilities == nil || envelope.Capabilities.VideoEvidence == nil || envelope.Capabilities.AudioEvidence == nil {
+		upgrade := playback.LegacyUpgradeErrorV3()
+		writeError(w, http.StatusUpgradeRequired, upgrade.Error, upgrade.Message)
 		return
 	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	h.handleStartPlaybackLegacy(w, r)
-}
-
-// handleStartPlaybackLegacy is the pre-v3 start implementation. Keep changes
-// to this function independent from protocol-v3 routing.
-func (h *PlaybackHandler) handleStartPlaybackLegacy(w http.ResponseWriter, r *http.Request) {
-	userID := apimw.GetUserID(r.Context())
-	if userID == 0 {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
-		return
-	}
-
-	var req startPlaybackRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
-		return
-	}
-
-	if req.FileID == 0 {
-		writeError(w, http.StatusBadRequest, "bad_request", "File ID is required")
-		return
-	}
-	profileID := apimw.GetProfileID(r.Context())
-	if profileID == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "X-Profile-Id header is required")
-		return
-	}
-	if req.ProfileID != "" && req.ProfileID != profileID {
-		writeError(w, http.StatusBadRequest, "bad_request", "profile_id must match X-Profile-Id")
-		return
-	}
-	file, err := h.loadAuthorizedFile(r, req.FileID)
-	if err != nil {
-		switch {
-		case errors.Is(err, catalog.ErrItemNotFound), errors.Is(err, catalog.ErrEpisodeNotFound):
-			writeError(w, http.StatusNotFound, "not_found", "Media file not found")
-		default:
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to authorize media file")
-		}
-		return
-	}
-	file = h.ensurePlaybackProbe(r.Context(), file)
-
-	// Determine audio track.
-	audioTrackIndex := 0
-	if req.AudioTrackIndex != nil && *req.AudioTrackIndex >= 0 {
-		audioTrackIndex = *req.AudioTrackIndex
-	} else if file != nil && len(file.AudioTracks) > 0 && h.StoreProvider != nil {
-		var seriesPref *playback.AudioTrackPreference
-		var preferredLang string
-		store, storeErr := h.StoreProvider.ForUser(r.Context(), userID)
-		if storeErr == nil {
-			seriesID := h.resolveSeriesID(r.Context(), file)
-			if seriesID != "" {
-				if ap, apErr := store.GetAudioPreference(r.Context(), profileID, seriesID); apErr == nil && ap != nil {
-					seriesPref = &playback.AudioTrackPreference{
-						AudioTrackIndex: ap.AudioTrackIndex,
-						AudioLanguage:   ap.AudioLanguage,
-						TrackSignature:  ap.TrackSignature,
-					}
-				}
-			}
-			if seriesPref != nil && seriesPref.AudioLanguage == playback.OriginalLanguageSentinel {
-				seriesPref.AudioLanguage = h.resolveOriginalLanguage(r.Context(), file)
-			}
-			preferredLang = resolvedProfileAudioLanguage(r.Context(), store, profileID)
-
-			// Resolve library override (if no series sticky pref exists).
-			var libraryAudioLang string
-			if seriesPref == nil {
-				if lp, lpErr := store.GetLibraryPlaybackPreference(r.Context(), profileID, file.MediaFolderID); lpErr == nil && lp != nil && lp.AudioLanguage != "" {
-					libraryAudioLang = lp.AudioLanguage
-				}
-			}
-
-			// Resolve "original" sentinel at each preference level.
-			needsOriginalLang := preferredLang == playback.OriginalLanguageSentinel ||
-				libraryAudioLang == playback.OriginalLanguageSentinel
-			if needsOriginalLang {
-				originalLang := h.resolveOriginalLanguage(r.Context(), file)
-				if preferredLang == playback.OriginalLanguageSentinel {
-					preferredLang = originalLang
-				}
-				if libraryAudioLang == playback.OriginalLanguageSentinel {
-					libraryAudioLang = originalLang
-				}
-			}
-
-			// Apply library language override (skip if resolved to empty).
-			if libraryAudioLang != "" {
-				preferredLang = libraryAudioLang
-			}
-		}
-		audioTrackIndex = playback.SelectAudioTrack(file.AudioTracks, preferredLang, seriesPref)
-	}
-
-	requestedFile := file
-	effectiveFile := requestedFile
-	method := playback.PlayMethod(req.PlayMethod)
-	transcodeAudio := false
-
-	// If the client sent codec capabilities and no explicit play method,
-	// use the resolver to determine the best play strategy.
-	if method == "" && h.fileResolver != nil && len(req.CodecsVideo) > 0 {
-		effectiveFile, method, transcodeAudio, audioTrackIndex = h.resolveCapabilityPlaybackSelection(
-			r.Context(),
-			req,
-			requestedFile,
-			audioTrackIndex,
-		)
-	}
-
-	if method == "" {
-		method = playback.PlayDirect
-	}
-	audioTrackIndex = normalizeAudioTrackIndex(effectiveFile, audioTrackIndex)
-	preserveDirectAudioSelection := method == playback.PlayDirect &&
-		strings.EqualFold(req.PlayMethod, string(playback.PlayDirect)) &&
-		req.PreserveDirectAudioSelection
-	method, transcodeAudio = adjustPlaybackForSelectedAudio(
-		effectiveFile,
-		req,
-		method,
-		transcodeAudio,
-		audioTrackIndex,
-		preserveDirectAudioSelection,
-	)
-	if requestedFile != nil && effectiveFile != nil && requestedFile.ID != effectiveFile.ID {
-		if err := preflightPlaybackFile(r.Context(), requestedFile, h.MissingMarker, h.EventsHub); err != nil && !isPlaybackFileMissing(err) {
-			slog.WarnContext(r.Context(), "requested playback file preflight failed; continuing with alternate file", "component", "api",
-				"requested_file_id", requestedFile.ID,
-				"effective_file_id", effectiveFile.ID,
-				"error", err,
-			)
-		}
-	}
-	if err := preflightPlaybackFile(r.Context(), effectiveFile, h.MissingMarker, h.EventsHub); err != nil {
-		writePlaybackFilePreflightError(w, err)
-		return
-	}
-
-	clientInfo := playbackClientInfoFromRequest(r)
-	sessionCtx := playback.WithClientInfo(r.Context(), clientInfo)
-	var session *playback.Session
-	if starter, ok := h.sessionMgr.(sessionStarterWithFilesContext); ok {
-		session, err = starter.StartSessionWithFilesContext(
-			sessionCtx,
-			userID,
-			profileID,
-			effectiveFile.ID,
-			req.FileID,
-			method,
-			transcodeAudio,
-		)
-	} else {
-		session, err = h.sessionMgr.StartSessionWithFiles(
-			userID,
-			profileID,
-			effectiveFile.ID,
-			req.FileID,
-			method,
-			transcodeAudio,
-		)
-	}
-	if err != nil {
-		if errors.Is(err, playback.ErrTooManyStreams) {
-			writeError(w, http.StatusTooManyRequests, "too_many_streams", "Too many concurrent streams")
-			return
-		}
-		if errors.Is(err, playback.ErrTooManyTranscodes) {
-			writeError(w, http.StatusTooManyRequests, "too_many_transcodes", "Too many concurrent transcodes")
-			return
-		}
-		if errors.Is(err, playback.ErrTranscodingDisabled) {
-			writeError(w, http.StatusForbidden, "transcoding_disabled", "Transcoding is disabled for your user")
-			return
-		}
-		if errors.Is(err, playback.ErrAudioTranscodingDisabled) {
-			writeError(w, http.StatusForbidden, "audio_transcoding_disabled", "Audio transcoding is disabled for your user")
-			return
-		}
-		if errors.Is(err, playback.ErrPlaybackNotAllowed) {
-			writeError(w, http.StatusForbidden, "playback_not_allowed", "Playback denied by server policy")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to start playback session")
-		return
-	}
-	setPlaybackSessionLogContext(r, session.ID)
-	if req.DisableProgressPersistence {
-		if err := h.sessionMgr.SetProgressPersistenceDisabled(session.ID, true); err != nil {
-			slog.ErrorContext(r.Context(), "failed to disable progress persistence", "component", "api", "session", session.ID, "error", err)
-		} else {
-			session.DisableProgressPersistence = true
-		}
-	}
-
-	if err := h.sessionMgr.UpdateAudioTrack(session.ID, audioTrackIndex, session.PlayMethod); err != nil {
-		slog.ErrorContext(r.Context(), "failed to set audio track", "component", "api", "session", session.ID, "error", err)
-	}
-	targetAudioCodec := ""
-	if session.TranscodeAudio {
-		targetAudioCodec = "aac"
-	}
-	streamBitrateKbps := 0
-	if effectiveFile != nil {
-		streamBitrateKbps = effectiveFile.Bitrate
-	}
-	if err := h.sessionMgr.UpdateStreamState(session.ID, playback.SessionStreamState{
-		PlayMethod:        session.PlayMethod,
-		BasePlayMethod:    session.BasePlayMethod,
-		AudioTrackIndex:   audioTrackIndex,
-		TranscodeAudio:    session.TranscodeAudio,
-		ClientIP:          clientip.FromContext(r.Context()),
-		ClientName:        clientInfo.Name,
-		ClientVersion:     clientInfo.Version,
-		ClientUserAgent:   clientInfo.UserAgent,
-		StreamBitrateKbps: streamBitrateKbps,
-		TargetAudioCodec:  targetAudioCodec,
-	}); err != nil {
-		slog.ErrorContext(r.Context(), "failed to set stream state", "component", "api", "session", session.ID, "error", err)
-	}
-	session.AudioTrackIndex = audioTrackIndex
-	session.ClientIP = clientip.FromContext(r.Context())
-	session.StreamBitrateKbps = streamBitrateKbps
-	session.TargetAudioCodec = targetAudioCodec
-	h.persistSeriesPlaybackPreference(r.Context(), userID, profileID, effectiveFile)
-
-	if req.StartPosition != nil {
-		if err := h.sessionMgr.UpdateProgress(session.ID, *req.StartPosition, false); err != nil {
-			slog.ErrorContext(r.Context(), "failed to set explicit start position", "component", "api", "session", session.ID, "error", err)
-		} else {
-			session.Position = *req.StartPosition
-			session.IsPaused = false
-		}
-	} else {
-		h.restoreSessionProgress(r.Context(), session, file)
-	}
-	if !session.DisableProgressPersistence && h.WatchScrobbler != nil && effectiveFile != nil {
-		targetID := playbackProgressTarget(effectiveFile)
-		if targetID != "" {
-			event := h.scrobbleEventForSession(r.Context(), session, targetID, float64(effectiveFile.Duration), session.Position)
-			if err := h.WatchScrobbler.ScrobbleStart(r.Context(), event); err != nil {
-				slog.WarnContext(r.Context(), "failed to queue watch provider start scrobble", "component", "api", "session", session.ID, "error", err)
-			}
-		}
-	}
-	if h.ChapterThumbnailQueuer != nil && effectiveFile != nil {
-		slog.InfoContext(r.Context(),
-			"queueing chapter thumbnails", "component", "api",
-			"source",
-			"playback_start",
-			"content_id",
-			effectiveFile.ContentID,
-			"file_id",
-			effectiveFile.ID,
-			"target_seconds",
-			session.Position,
-		)
-		h.ChapterThumbnailQueuer.QueuePriorityFileAtPosition(
-			r.Context(),
-			effectiveFile.ID,
-			session.Position,
-		)
-	}
-	h.maybeQueueLazyPlaybackMarkers(r.Context(), session, effectiveFile)
-
-	// Direct-play and remux sessions reconstruct from the identity stream token
-	// carried on their serve URL (see playbackStreamURL); there is no server-side
-	// card to persist. Transcode sessions receive their full-recipe token from
-	// HandleStartTranscode.
-	resp := h.toPlaybackSessionResponse(session)
-	resp.DurationSeconds = fileDurationSeconds(effectiveFile)
-	resp.PlaybackInfo = buildPlaybackInfo(session, effectiveFile)
-
-	var downloadedSubs []subtitles.DownloadedSubtitle
-	if h.SubtitleRepo != nil && effectiveFile != nil {
-		downloadedSubs, _ = h.SubtitleRepo.ListDownloadedSubtitles(r.Context(), effectiveFile.ID)
-	}
-	resp.SubtitleURLs = buildSubtitleURLs(
-		session.ID,
-		effectiveFile,
-		downloadedSubs,
-		req.SupportsBitmapSubtitleBurnIn,
-	)
-
-	// If stream nodes are available, generate proxy-based stream URLs.
-	// Remux and transcode both use HLS via a transcode node, so the planner
-	// picks the transcode node and its group's proxy together.
-	if h.NodePlanner != nil && h.JWTSecret != "" {
-		needsTranscode := session.PlayMethod == playback.PlayTranscode || session.PlayMethod == playback.PlayRemux
-		plan := h.NodePlanner.PlanSession(session.ID, "", needsTranscode, fileBitrateKbps(effectiveFile))
-		proxyNode := plan.ProxyNode
-		if proxyNode != nil && (!needsTranscode || plan.TranscodeNode != nil) {
-			tokenClaims := streamtoken.Claims{
-				SessionID:   session.ID,
-				PlayMethod:  string(session.PlayMethod),
-				UserID:      session.UserID,
-				ProfileID:   session.ProfileID,
-				MediaFileID: session.MediaFileID,
-			}
-
-			// Resolve media path if possible.
-			if effectiveFile != nil {
-				tokenClaims.MediaPath = effectiveFile.FilePath
-				tokenClaims.DVProfile = effectiveFile.PrimaryDVProfile()
-			}
-
-			tokenClaims.TranscodeAudio = session.TranscodeAudio
-			tokenClaims.AudioTrackIndex = session.AudioTrackIndex
-
-			if plan.TranscodeNode != nil {
-				tokenClaims.TranscodeNode = plan.TranscodeNode.URL
-				_ = h.sessionMgr.SetTranscodeNodeURL(session.ID, plan.TranscodeNode.URL)
-			}
-
-			token, signErr := streamtoken.Sign(tokenClaims, h.JWTSecret, playback.MaxTokenTTL)
-			if signErr == nil {
-				switch session.PlayMethod {
-				case playback.PlayDirect:
-					resp.StreamURL = proxyNode.URL + "/stream/direct/" + token
-				case playback.PlayRemux, playback.PlayTranscode:
-					resp.StreamURL = proxyNode.URL + "/stream/transcode/" + token + "/master.m3u8"
-				}
-
-				// Update subtitle URLs to use proxy for embedded subs only.
-				// External and downloaded subs stay on the API server since
-				// the proxy doesn't have access to those files.
-				embeddedOffset := 0
-				if file != nil {
-					embeddedOffset = len(file.ExternalSubtitles)
-				}
-				for i := range resp.SubtitleURLs {
-					if resp.SubtitleURLs[i].Source == "embedded" {
-						// Pass the ffmpeg-relative subtitle stream index to the proxy.
-						embeddedIdx := resp.SubtitleURLs[i].Index - embeddedOffset
-						proxySubtitleURL := proxyNode.URL + "/stream/subtitles/" + token + "/" + strconv.Itoa(embeddedIdx)
-						resp.SubtitleURLs[i].URL = proxySubtitleURL + subtitleURLExt(resp.SubtitleURLs[i].Codec)
-						if resp.SubtitleURLs[i].FontBundleURL != "" {
-							resp.SubtitleURLs[i].FontBundleURL = proxySubtitleURL + "/fonts"
-						}
-					}
-				}
-			}
-		}
-	}
-
-	if h.protocolV3ShadowEnabled(r.Context()) {
-		shadowReq := req
-		shadowReq.ProfileID = profileID
-		go h.shadowLegacyPlaybackV3(context.WithoutCancel(r.Context()), shadowReq, requestedFile, effectiveFile, audioTrackIndex, session.PlayMethod, session.TranscodeAudio, session.ID)
-	}
-	h.syncSessionsNow(r.Context(), "start")
-	writeJSON(w, http.StatusCreated, resp)
-}
-
-func playbackClientInfoFromRequest(r *http.Request) playback.ClientInfo {
-	if r == nil {
-		return playback.ClientInfo{}
-	}
-	return playback.ClientInfo{
-		Name:      strings.TrimSpace(r.Header.Get("X-Silo-Client")),
-		Version:   strings.TrimSpace(r.Header.Get("X-Silo-Client-Version")),
-		UserAgent: r.UserAgent(),
-	}
-}
-
-// subtitleURLExt returns the URL file extension for a subtitle codec.
-// ASS/SSA tracks get ".ass" so the frontend can request raw ASS data for
-// client-side rendering (JASSUB); PGS tracks get ".sup" for native clients
-// capable of rendering bitmap sidecars; all other text formats get ".vtt".
-func subtitleURLExt(codec string) string {
-	switch {
-	case playback.IsASS(codec):
-		return ".ass"
-	case playback.IsPGS(codec):
-		return ".sup"
-	}
-	return ".vtt"
-}
-
-func buildSubtitleURLs(
-	sessionID string,
-	file *models.MediaFile,
-	downloaded []subtitles.DownloadedSubtitle,
-	includeBurnInOnly bool,
-) []subtitleURL {
-	if file == nil {
-		return nil
-	}
-
-	urls := make([]subtitleURL, 0, len(file.ExternalSubtitles)+len(file.SubtitleTracks)+len(downloaded))
-
-	for i, sub := range file.ExternalSubtitles {
-		urls = append(urls, subtitleURL{
-			Index:           i,
-			MediaFileID:     file.ID,
-			Language:        sub.Language,
-			Codec:           sub.Format,
-			Label:           firstNonEmptyString(sub.Title, sub.EmbeddedTitle, filepath.Base(sub.Path), sub.Language),
-			Source:          "external",
-			Forced:          sub.Forced,
-			HearingImpaired: sub.HearingImpaired,
-			URL:             subtitleStreamURL(sessionID, i, sub.Format, file.ID),
-		})
-	}
-
-	embeddedOffset := len(file.ExternalSubtitles)
-	for i, track := range file.SubtitleTracks {
-		// PGS remains universally deliverable as a .sup sidecar. DVD/DVB
-		// bitmap tracks have no usable sidecar representation, so advertise
-		// them only to clients that explicitly declare server-side burn-in
-		// support. Older Apple/Android clients otherwise expose a text URL
-		// that ffmpeg cannot serve.
-		if playback.NeedsBurnIn(track.Codec) && !playback.IsPGS(track.Codec) && !includeBurnInOnly {
-			continue
-		}
-		urls = append(urls, subtitleURL{
-			Index:           embeddedOffset + i,
-			MediaFileID:     file.ID,
-			Language:        track.Language,
-			Codec:           track.Codec,
-			Label:           firstNonEmptyString(track.Title, track.EmbeddedTitle, track.Language),
-			Source:          "embedded",
-			Forced:          track.Forced,
-			HearingImpaired: track.HearingImpaired,
-			URL:             subtitleStreamURL(sessionID, embeddedOffset+i, track.Codec, file.ID),
-			FontBundleURL:   subtitleFontBundleURL(sessionID, embeddedOffset+i, track.Codec, file.ID),
-		})
-	}
-
-	downloadedOffset := embeddedOffset + len(file.SubtitleTracks)
-	for i, dl := range downloaded {
-		urls = append(urls, subtitleURL{
-			Index:           downloadedOffset + i,
-			MediaFileID:     file.ID,
-			Language:        dl.Language,
-			Codec:           string(dl.Format),
-			Label:           dl.ReleaseName + " (" + dl.Provider + ")",
-			Source:          "downloaded",
-			HearingImpaired: dl.HearingImpaired,
-			URL:             downloadedSubtitleStreamURL(sessionID, downloadedOffset+i, string(dl.Format), file.ID, dl.ID),
-		})
-	}
-
-	return urls
-}
-
-const downloadedSubtitleIDParam = "downloaded_subtitle_id"
-
-func subtitleStreamURL(sessionID string, trackIndex int, codec string, fileID int) string {
-	return fmt.Sprintf("/stream/%s/subtitles/%d%s?file_id=%d", sessionID, trackIndex, subtitleURLExt(codec), fileID)
-}
-
-// downloadedSubtitleStreamURL binds a downloaded subtitle URL to its stable
-// database identity while preserving the combined track index for clients.
-func downloadedSubtitleStreamURL(sessionID string, trackIndex int, codec string, fileID, downloadedID int) string {
-	return subtitleStreamURL(sessionID, trackIndex, codec, fileID) +
-		"&" + downloadedSubtitleIDParam + "=" + strconv.Itoa(downloadedID)
-}
-
-func subtitleFontBundleURL(sessionID string, trackIndex int, codec string, fileID int) string {
-	if !playback.IsASS(codec) {
-		return ""
-	}
-	return fmt.Sprintf("/stream/%s/subtitles/%d/fonts?file_id=%d", sessionID, trackIndex, fileID)
-}
-
-func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
+	h.handleStartPlaybackV3(w, r, body)
 }
 
 // HandleUpdateProgress handles POST /playback/{session_id}/progress.
@@ -2279,541 +1365,6 @@ func (h *PlaybackHandler) HandleStopPlayback(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// HandleChangeAudioTrack handles PATCH /playback/{session_id}/audio.
-func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.Request) {
-	userID := apimw.GetUserID(r.Context())
-	if userID == 0 {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
-		return
-	}
-
-	sessionID := chi.URLParam(r, "session_id")
-	if sessionID == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "Session ID is required")
-		return
-	}
-	setPlaybackSessionLogContext(r, sessionID)
-
-	session, err := h.sessionMgr.GetSession(sessionID)
-	if err != nil {
-		if errors.Is(err, playback.ErrSessionNotFound) {
-			writePlaybackSessionNotFound(w)
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load playback session")
-		return
-	}
-	if session.UserID != userID {
-		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
-		return
-	}
-	previousRoute := sessionTranscodeRoute(session)
-
-	var req changeAudioRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
-		return
-	}
-
-	// Load file to validate track index.
-	if h.fileResolver == nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "File resolver not configured")
-		return
-	}
-	file, err := h.fileResolver.GetByID(r.Context(), session.MediaFileID)
-	if err != nil || file == nil {
-		writeError(w, http.StatusNotFound, "not_found", "Media file not found")
-		return
-	}
-	if req.AudioTrackIndex < 0 || req.AudioTrackIndex >= len(file.AudioTracks) {
-		writeError(w, http.StatusBadRequest, "bad_request", "Audio track index out of range")
-		return
-	}
-
-	baseMethod := semanticPlayMethod(session)
-	newMethod := baseMethod
-	transcodeAudio := session.TranscodeAudio
-
-	newTrack := file.AudioTracks[req.AudioTrackIndex]
-	audioCodecNeedsTranscode := !playback.BrowserSupportsAudioCodec(newTrack.Codec)
-
-	if baseMethod == playback.PlayDirect {
-		newMethod = playback.PlayRemux
-		transcodeAudio = audioCodecNeedsTranscode
-	} else if baseMethod == playback.PlayRemux {
-		transcodeAudio = audioCodecNeedsTranscode
-	} else if baseMethod == playback.PlayTranscode {
-		transcodeAudio = true
-	}
-
-	requiresVideoTranscode := baseMethod == playback.PlayTranscode ||
-		(session.PlayMethod == playback.PlayTranscode &&
-			!strings.EqualFold(session.TargetVideoCodec, "copy"))
-	if (requiresVideoTranscode || transcodeAudio) &&
-		!h.ensureUserTranscodingAllowed(w, r, userID, requiresVideoTranscode) {
-		return
-	}
-
-	targetResolution := ""
-	targetVideoCodec := ""
-	targetAudioCodec := ""
-	targetBitrateKbps := 0
-	streamBitrateKbps := session.StreamBitrateKbps
-	if session.PlayMethod == playback.PlayTranscode {
-		targetResolution = session.TargetResolution
-		targetVideoCodec = session.TargetVideoCodec
-		targetBitrateKbps = session.TargetBitrateKbps
-		if newMethod == playback.PlayTranscode || transcodeAudio {
-			targetAudioCodec = "aac"
-		} else {
-			targetAudioCodec = "copy"
-		}
-	} else if transcodeAudio {
-		targetAudioCodec = "aac"
-	}
-
-	// A legacy copy-video restart needs a fresh keyframe origin for the new
-	// position. Resolve it before mutating the durable session or stopping the
-	// current transport so a probe failure leaves the active stream intact.
-	restartSegmentDuration := session.SegmentDuration
-	if restartSegmentDuration <= 0 {
-		restartSegmentDuration = playback.DefaultSegmentDuration
-	}
-	if ts := h.tm.GetTranscodeSession(sessionID); ts != nil {
-		if liveDuration := ts.Opts().SegmentDuration; liveDuration > 0 {
-			restartSegmentDuration = liveDuration
-		}
-	}
-	restartSeekSeconds := alignedSeekSeconds(req.Position, restartSegmentDuration, targetVideoCodec)
-	restartStartSegment := computeStartSegment(restartSeekSeconds, restartSegmentDuration)
-	restartStreamOriginSeconds := 0.0
-	restartCopyAnchorResolved := false
-	restartManifestRequest := transcodeStartRequest{
-		TargetCodecVideo: targetVideoCodec,
-		SegmentDuration:  restartSegmentDuration,
-	}
-	legacyWindowedRestart := session.PlayMethod == playback.PlayTranscode &&
-		isLegacyTransportSession(session) && usesRealTranscodeManifest(restartManifestRequest, file)
-	if legacyWindowedRestart {
-		restartStreamOriginSeconds = restartSeekSeconds
-	}
-	legacyCopyRestart := legacyWindowedRestart && strings.EqualFold(targetVideoCodec, "copy")
-	if legacyCopyRestart {
-		restartCopyAnchorResolved = true
-		if req.Position > 0 {
-			anchor, anchorSegment, anchorErr := h.resolveLegacyCopySeekAnchor(
-				r.Context(),
-				h.playbackConfig().FFmpegPath,
-				file.FilePath,
-				req.Position,
-				restartSegmentDuration,
-			)
-			if anchorErr != nil {
-				slog.ErrorContext(r.Context(), "failed to resolve copy-video audio-switch seek anchor", "component", "api",
-					"playback_session_id", sessionID,
-					"requested_seek_seconds", req.Position,
-					"error", anchorErr,
-				)
-				writeError(w, http.StatusInternalServerError, "remux_seek_anchor_failed", "Failed to resolve remux seek position")
-				return
-			}
-			restartStreamOriginSeconds = anchor
-			restartStartSegment = anchorSegment
-		}
-	}
-	var deferredRemoteCopyPlan *nodepool.Plan
-	if legacyCopyRestart && strings.TrimSpace(session.TranscodeNodeURL) != "" &&
-		h.NodePlanner != nil && h.JWTSecret != "" {
-		estKbps := targetBitrateKbps
-		if estKbps <= 0 {
-			estKbps = fileBitrateKbps(file)
-		}
-		plan := h.NodePlanner.PlanSession(sessionID, session.TranscodeNodeURL, true, estKbps)
-		if plan.ProxyNode != nil && plan.TranscodeNode != nil {
-			deferredRemoteCopyPlan = &plan
-		}
-	}
-	slog.InfoContext(r.Context(), "audio switch computed playback state", "component", "api",
-		"playback_session_id", sessionID,
-		"previous_base_play_method", baseMethod,
-		"new_base_play_method", newMethod,
-		"transport_play_method", session.PlayMethod,
-		"audio_track_index", req.AudioTrackIndex,
-		"audio_codec", newTrack.Codec,
-		"transcode_audio", transcodeAudio,
-	)
-	updatedSession := *session
-	updatedSession.AudioTrackIndex = req.AudioTrackIndex
-	updatedSession.BasePlayMethod = newMethod
-	if session.PlayMethod != playback.PlayTranscode || newMethod == playback.PlayTranscode {
-		updatedSession.PlayMethod = newMethod
-	}
-	updatedSession.TranscodeAudio = transcodeAudio
-	updatedSession.TargetResolution = targetResolution
-	updatedSession.TargetVideoCodec = targetVideoCodec
-	updatedSession.TargetAudioCodec = targetAudioCodec
-	updatedSession.TargetBitrateKbps = targetBitrateKbps
-	updatedSession.SegmentDuration = restartSegmentDuration
-
-	audioSwitchReplacement := func(route playback.TranscodeRoute) playback.SessionReplacement {
-		return playback.SessionReplacement{
-			EffectiveMediaFileID: session.MediaFileID,
-			StreamState: playback.SessionStreamState{
-				PlayMethod:           updatedSession.PlayMethod,
-				BasePlayMethod:       newMethod,
-				AudioTrackIndex:      req.AudioTrackIndex,
-				TranscodeAudio:       transcodeAudio,
-				RemuxDVMode:          session.RemuxDVMode,
-				ClientIP:             session.ClientIP,
-				ClientName:           session.ClientName,
-				ClientVersion:        session.ClientVersion,
-				ClientUserAgent:      session.ClientUserAgent,
-				StreamBitrateKbps:    streamBitrateKbps,
-				TargetResolution:     targetResolution,
-				TargetVideoCodec:     targetVideoCodec,
-				TargetAudioCodec:     targetAudioCodec,
-				TargetBitrateKbps:    targetBitrateKbps,
-				TranscodeHWAccel:     updatedSession.TranscodeHWAccel,
-				TranscodeNodeURL:     route.NodeURL,
-				TranscodeTransportID: route.TransportID,
-				TranscodeRouteSet:    true,
-				SubtitleTrackIndex:   session.SubtitleTrackIndex,
-				SubtitleBurnIn:       session.SubtitleBurnIn,
-				SegmentDuration:      restartSegmentDuration,
-			},
-		}
-	}
-	audioStatePublished := false
-	publishAudioSwitch := func(route playback.TranscodeRoute) error {
-		if _, err := h.sessionMgr.ApplyReplacement(sessionID, audioSwitchReplacement(route)); err != nil {
-			return err
-		}
-		audioStatePublished = true
-		updatedSession.TranscodeNodeURL = route.NodeURL
-		updatedSession.TranscodeTransportID = route.TransportID
-		return nil
-	}
-
-	// Local audio switches stage a successor in a generation-scoped directory.
-	// The predecessor keeps serving until the successor has a manifest and the
-	// full session replacement has been published atomically.
-	if session.PlayMethod == playback.PlayTranscode && deferredRemoteCopyPlan == nil {
-		if previousLocal := h.tm.GetTranscodeSession(sessionID); previousLocal != nil {
-			opts := previousLocal.Opts()
-			outputSubdir := newLegacyTransportID(sessionID)
-			opts.OutputSubdir = outputSubdir
-			opts.OutputDir = filepath.Join(h.playbackConfig().TranscodeDir, outputSubdir)
-			opts.TranscodeTransportID = ""
-			opts.AudioTrackIndex = req.AudioTrackIndex
-			opts.SeekSeconds = restartSeekSeconds
-			opts.StartSegmentNumber = restartStartSegment
-			opts.StreamOriginSeconds = restartStreamOriginSeconds
-			opts.CopySeekAnchorResolved = restartCopyAnchorResolved
-			opts.FastStart = true
-			successor, restartErr := h.commitLegacyLocalReplacement(
-				context.WithoutCancel(r.Context()),
-				sessionID,
-				previousLocal,
-				previousRoute,
-				opts,
-				func(successor *playback.TranscodeSession) playback.SessionReplacement {
-					updatedSession.TranscodeHWAccel = successor.Opts().HWAccel
-					return audioSwitchReplacement(playback.TranscodeRoute{})
-				},
-			)
-			if restartErr != nil {
-				if errors.Is(restartErr, playback.ErrSessionSuperseded) {
-					writeError(w, http.StatusConflict, "transcode_replaced", "A newer playback transport replaced this request")
-					return
-				}
-				slog.ErrorContext(r.Context(), "failed to prepare transcode for audio switch", "component", "api", "session", sessionID, "error", restartErr)
-				writeError(w, http.StatusInternalServerError, "transcode_start_failed", "Failed to restart transcode session")
-				return
-			}
-			audioStatePublished = true
-			updatedSession.TranscodeNodeURL = ""
-			updatedSession.TranscodeTransportID = ""
-			successor.SetRestartHook(func(ctx context.Context) {
-				h.maybeStartThrottler(ctx, successor)
-				h.tm.MonitorLocalTranscodeExit(sessionID, successor)
-			})
-			h.maybeStartThrottler(r.Context(), successor)
-			h.tm.MonitorLocalTranscodeExit(sessionID, successor)
-		}
-	}
-
-	if session.PlayMethod != playback.PlayTranscode {
-		if err := publishAudioSwitch(playback.TranscodeRoute{}); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update audio track")
-			return
-		}
-	}
-
-	// The switched recipe travels in the freshly minted stream token on the new
-	// serve URL below, so a post-restart reconstruct resumes with the switched
-	// audio/method. For transcode the full-recipe manifest URL is rebuilt further
-	// down (proxy or local); for direct/remux the identity token on StreamURL
-	// carries the new audio selection.
-	if audioStatePublished {
-		h.persistAudioPreference(r.Context(), userID, session.ProfileID, file, req.AudioTrackIndex)
-	}
-
-	// For a local transcode, playbackStreamURL returns the bare manifest URL
-	// without the full-recipe ?st= token, so a post-restart reconstruct would
-	// fall back to the stale pre-switch token. Rebuild the signed manifest URL
-	// from the live transcode opts, mirroring HandleStartTranscode. The proxy
-	// branch below overrides this when a node plan picks a proxy/transcode node.
-	streamURL := h.playbackStreamURL(&updatedSession)
-	if updatedSession.PlayMethod == playback.PlayTranscode {
-		if ts := h.tm.GetTranscodeSession(sessionID); ts != nil {
-			card := playback.NewRecipeCard(updatedSession.UserID, updatedSession.ProfileID, updatedSession.MediaFileID, updatedSession.TranscodeNodeURL, ts.Opts())
-			streamURL = appendStreamToken(
-				fmt.Sprintf("/playback/transcode/%s/master.m3u8", sessionID),
-				h.signSessionToken(card),
-			)
-		}
-	}
-
-	resp := changeAudioResponse{
-		AudioTrackIndex: req.AudioTrackIndex,
-		PlayMethod:      string(newMethod),
-		StreamURL:       streamURL,
-		SwitchMode:      "reload",
-		PlaybackInfo:    buildPlaybackInfo(&updatedSession, file),
-	}
-
-	if h.NodePlanner != nil && h.JWTSecret != "" {
-		needsTranscode := updatedSession.PlayMethod == playback.PlayTranscode
-		estKbps := updatedSession.TargetBitrateKbps
-		if estKbps <= 0 {
-			estKbps = fileBitrateKbps(file)
-		}
-		var plan nodepool.Plan
-		if deferredRemoteCopyPlan != nil {
-			plan = *deferredRemoteCopyPlan
-		} else {
-			plan = h.NodePlanner.PlanSession(sessionID, session.TranscodeNodeURL, needsTranscode, estKbps)
-		}
-		if proxyNode := plan.ProxyNode; proxyNode != nil && (!needsTranscode || plan.TranscodeNode != nil) {
-			// Remote (offloaded) transcode: the API server owns no local
-			// TranscodeSession (the LOCAL restart block above was a no-op), so
-			// the node's ffmpeg is still serving the OLD audio track. POST a
-			// fresh /transcode/start with the new AudioTrackIndex. Encoded legacy
-			// streams retain the node's same-ID replacement behavior; copy-video
-			// streams prepare a distinct successor and retire the predecessor only
-			// after readiness and route publication. Then mint the proxy URL
-			// from a FULL recipe card so a later node restart reconstructs with
-			// the switched audio (the lean identity-only claims used for remux
-			// below omit the byte-affecting encode fields and would 404).
-			isOffloaded := strings.TrimSpace(session.TranscodeNodeURL) != ""
-			if needsTranscode && plan.TranscodeNode != nil && isOffloaded {
-				nodeURL := plan.TranscodeNode.URL
-				atomicLegacyReplacement := legacyCopyRestart
-				previousLocalTranscode := h.tm.GetTranscodeSession(sessionID)
-
-				// Restart from the FULL live recipe, not a partial re-derivation.
-				// An audio switch alters only audio selection — subtitle burn-in and
-				// the segment cadence must be preserved, or the node re-encodes a
-				// different byte stream (subtitles silently dropped, wrong cadence)
-				// and signs that altered recipe into the new token. The session
-				// retains these from the original start (finalizeTranscodeStart) or a
-				// post-restart reconstruct, so recover them here. Embed a concrete
-				// segment duration (not 0): the node's recipe token treats
-				// SegmentDuration<=0 as "incomplete" and would 404 on a node restart.
-				segmentDuration := restartSegmentDuration
-				subtitleTrackIndex := session.SubtitleTrackIndex
-				subtitleBurnIn := session.SubtitleBurnIn
-				subtitleCodec := ""
-				if subtitleBurnIn && subtitleTrackIndex >= 0 {
-					subtitleCodec = embeddedSubtitleCodec(file, subtitleTrackIndex)
-				}
-				// Derive the encode recipe the same way HandleStartTranscode
-				// does — from the durable session target fields plus the file —
-				// changing only the audio track. SourceVideoCodec/TotalDuration
-				// come from the file; the resolution/codec/bitrate targets and
-				// hwaccel come from the session's persisted stream state.
-				// A v3 session's node job runs under its generation-scoped
-				// transport ID; restarting under the bare session ID would
-				// spawn a duplicate job beside it.
-				restartTransportID := remoteTransportID(&updatedSession)
-				if atomicLegacyReplacement {
-					restartTransportID = newLegacyTransportID(sessionID)
-				}
-				nodeReq := transcodenode.TranscodeStartRequest{
-					SessionID:              restartTransportID,
-					InputPath:              file.FilePath,
-					SourceVideoCodec:       file.CodecVideo,
-					SeekSeconds:            restartSeekSeconds,
-					StreamOriginSeconds:    restartStreamOriginSeconds,
-					CopySeekAnchorResolved: restartCopyAnchorResolved,
-					StartSegmentNumber:     restartStartSegment,
-					TargetResolution:       updatedSession.TargetResolution,
-					TargetCodecVideo:       updatedSession.TargetVideoCodec,
-					TargetCodecAudio:       updatedSession.TargetAudioCodec,
-					TargetBitrateKbps:      updatedSession.TargetBitrateKbps,
-					SegmentDuration:        segmentDuration,
-					HWAccel:                session.TranscodeHWAccel,
-					AudioTrackIndex:        req.AudioTrackIndex,
-					SubtitleTrackIndex:     subtitleTrackIndex,
-					SubtitleBurnIn:         subtitleBurnIn,
-					SubtitleCodec:          subtitleCodec,
-					TotalDuration:          float64(file.Duration),
-					RequireReady:           atomicLegacyReplacement,
-				}
-				if strings.TrimSpace(nodeReq.HWAccel) == "" {
-					nodeReq.HWAccel = h.playbackConfig().HWAccel
-				}
-				// A v3 DV strip remux carries its bitstream filter in the
-				// durable session route; dropping it here would hand the node
-				// a DV7 copy recipe that leaves dangling RPUs. Sources that
-				// fail the RPU probe are the exception — for them the filter
-				// rejects every packet, so re-adding it on an audio switch
-				// would hang a session that was playing a moment ago.
-				if updatedSession.RemuxDVMode == playback.RemuxDVStripToHDR10V3 && strings.EqualFold(nodeReq.TargetCodecVideo, "copy") &&
-					playback.DVRPUStrippable(r.Context(), h.playbackConfig().FFmpegPath, file.FilePath) {
-					nodeReq.VideoBitstreamFilter = playback.DV7ToHDR10BitstreamFilter
-				}
-
-				startResp, status, startErr := h.startRemotePlaybackTransport(
-					context.WithoutCancel(r.Context()),
-					nodeURL,
-					nodeReq,
-				)
-				if startErr != nil {
-					if atomicLegacyReplacement {
-						h.tm.StopRemoteTranscode(restartTransportID, nodeURL)
-					}
-					slog.ErrorContext(r.Context(), "remote transcode restart for audio switch failed", "component", "api", "session", sessionID, "node", nodeURL, "error", startErr)
-					writeError(w, http.StatusBadGateway, "transcode_node_unavailable", "Transcode node is unavailable")
-					return
-				}
-				if status != http.StatusAccepted {
-					if atomicLegacyReplacement {
-						h.tm.StopRemoteTranscode(restartTransportID, nodeURL)
-					}
-					slog.ErrorContext(r.Context(), "remote transcode restart for audio switch rejected", "component", "api", "session", sessionID, "node", nodeURL, "status", status)
-					writeError(w, http.StatusBadGateway, "transcode_start_failed", "Transcode node rejected the request")
-					return
-				}
-				effectiveHWAccel := effectiveRemoteHWAccel(startResp, nodeReq)
-				updatedSession.TranscodeHWAccel = effectiveHWAccel
-				successorTransportID := restartTransportID
-				if !atomicLegacyReplacement {
-					// Empty is the durable legacy representation for a node process
-					// running under the public playback session ID.
-					successorTransportID = session.TranscodeTransportID
-				}
-				successorRoute := playback.TranscodeRoute{NodeURL: nodeURL, TransportID: successorTransportID}
-				if atomicLegacyReplacement {
-					if routeErr := h.commitLegacyRemoteReplacement(
-						sessionID,
-						previousLocalTranscode,
-						previousRoute,
-						audioSwitchReplacement(successorRoute),
-					); routeErr != nil {
-						h.tm.StopRemoteTranscode(restartTransportID, nodeURL)
-						if errors.Is(routeErr, playback.ErrSessionSuperseded) {
-							writeError(w, http.StatusConflict, "transcode_replaced", "A newer playback transport replaced this request")
-							return
-						}
-						slog.ErrorContext(r.Context(), "publish remote audio-switch transcode route", "component", "api", "session", sessionID, "node", nodeURL, "error", routeErr)
-						writeError(w, http.StatusInternalServerError, "internal_error", "Failed to publish transcode session")
-						return
-					}
-					audioStatePublished = true
-					if !h.transcodeRouteMatches(sessionID, nil, successorRoute) {
-						writeError(w, http.StatusConflict, "transcode_replaced", "A newer playback transport replaced this request")
-						return
-					}
-				} else {
-					if routeErr := h.commitLegacyRemoteLastWriter(
-						sessionID,
-						successorRoute,
-						audioSwitchReplacement(successorRoute),
-					); routeErr != nil {
-						slog.ErrorContext(r.Context(), "publish remote audio-switch transcode route", "component", "api", "session", sessionID, "node", nodeURL, "error", routeErr)
-						writeError(w, http.StatusInternalServerError, "internal_error", "Failed to publish transcode session")
-						return
-					}
-					audioStatePublished = true
-				}
-				updatedSession.TranscodeNodeURL = successorRoute.NodeURL
-				updatedSession.TranscodeTransportID = successorRoute.TransportID
-				h.persistAudioPreference(r.Context(), userID, session.ProfileID, file, req.AudioTrackIndex)
-
-				card := playback.NewRecipeCard(updatedSession.UserID, updatedSession.ProfileID, updatedSession.MediaFileID, nodeURL, playback.TranscodeOpts{
-					InputPath:              nodeReq.InputPath,
-					SessionID:              sessionID,
-					TranscodeTransportID:   restartTransportID,
-					VideoBitstreamFilter:   nodeReq.VideoBitstreamFilter,
-					SourceVideoCodec:       nodeReq.SourceVideoCodec,
-					SeekSeconds:            nodeReq.SeekSeconds,
-					StreamOriginSeconds:    nodeReq.StreamOriginSeconds,
-					CopySeekAnchorResolved: nodeReq.CopySeekAnchorResolved,
-					StartSegmentNumber:     nodeReq.StartSegmentNumber,
-					TargetResolution:       nodeReq.TargetResolution,
-					TargetCodecVideo:       nodeReq.TargetCodecVideo,
-					TargetCodecAudio:       nodeReq.TargetCodecAudio,
-					TargetBitrateKbps:      nodeReq.TargetBitrateKbps,
-					SegmentDuration:        nodeReq.SegmentDuration,
-					HWAccel:                effectiveHWAccel,
-					AudioTrackIndex:        nodeReq.AudioTrackIndex,
-					SubtitleTrackIndex:     nodeReq.SubtitleTrackIndex,
-					SubtitleBurnIn:         nodeReq.SubtitleBurnIn,
-					SubtitleCodec:          nodeReq.SubtitleCodec,
-					TotalDuration:          nodeReq.TotalDuration,
-				})
-				resp.StreamURL = h.buildProxyManifestURL(card, proxyNode)
-			} else {
-				// Remux, or a non-offloaded (locally served) transcode: no remote
-				// node ffmpeg to restart, so carry the new audio selection on the
-				// identity claims of the proxy serve URL, exactly as before. A
-				// local transcode reconstructs from the API server's own state, so
-				// the lean token is sufficient here.
-				tokenClaims := streamtoken.Claims{
-					SessionID:       sessionID,
-					PlayMethod:      string(updatedSession.PlayMethod),
-					MediaPath:       file.FilePath,
-					TranscodeAudio:  updatedSession.TranscodeAudio,
-					AudioTrackIndex: req.AudioTrackIndex,
-					DVProfile:       file.PrimaryDVProfile(),
-					UserID:          updatedSession.UserID,
-					ProfileID:       updatedSession.ProfileID,
-					MediaFileID:     updatedSession.MediaFileID,
-					// v3 sessions route by transport ID and pin an explicit DV
-					// mode; a re-minted token must not silently shed either.
-					TranscodeTransportID: updatedSession.TranscodeTransportID,
-					RemuxDVMode:          string(updatedSession.RemuxDVMode),
-				}
-				if plan.TranscodeNode != nil {
-					tokenClaims.TranscodeNode = plan.TranscodeNode.URL
-				}
-				if token, signErr := streamtoken.Sign(tokenClaims, h.JWTSecret, playback.MaxTokenTTL); signErr == nil {
-					switch updatedSession.PlayMethod {
-					case playback.PlayRemux:
-						resp.StreamURL = proxyNode.URL + "/stream/remux/" + token
-					case playback.PlayTranscode:
-						resp.StreamURL = proxyNode.URL + "/stream/transcode/" + token + "/master.m3u8"
-					}
-				}
-			}
-		}
-	}
-	if !audioStatePublished {
-		if err := publishAudioSwitch(previousRoute); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update audio track")
-			return
-		}
-		h.persistAudioPreference(r.Context(), userID, session.ProfileID, file, req.AudioTrackIndex)
-	}
-	if legacyWindowedRestart {
-		resp.setWindowedTimeline(req.Position, restartStreamOriginSeconds)
-	}
-
-	h.syncSessionsNow(r.Context(), "audio_change")
-	writeJSON(w, http.StatusOK, resp)
-}
-
 func (h *PlaybackHandler) loadAuthorizedFile(r *http.Request, fileID int) (*models.MediaFile, error) {
 	if h.fileResolver == nil || h.ItemAccess == nil {
 		return nil, fmt.Errorf("playback authorization dependencies not configured")
@@ -2874,49 +1425,6 @@ func (h *PlaybackHandler) loadAuthorizedFile(r *http.Request, fileID int) (*mode
 	return file, nil
 }
 
-// embeddedSubtitleCodec returns the probed codec of the embedded subtitle
-// track at the given ffmpeg-relative subtitle ordinal (the same index the
-// subtitles=si=N / [0:s:N] filters use), or "" when out of range.
-func embeddedSubtitleCodec(file *models.MediaFile, ffmpegSubtitleIndex int) string {
-	if file == nil || ffmpegSubtitleIndex < 0 || ffmpegSubtitleIndex >= len(file.SubtitleTracks) {
-		return ""
-	}
-	return file.SubtitleTracks[ffmpegSubtitleIndex].Codec
-}
-
-// resolveBurnInSubtitle maps a subtitle selection made against requestedFile
-// onto effectiveFile. The 4K guard may replace the requested file with a
-// lower-resolution version whose subtitle streams have a different order; a
-// raw ordinal carried across that switch can burn the wrong language.
-func resolveBurnInSubtitle(requestedFile, effectiveFile *models.MediaFile, requestedIndex int) (int, string, bool) {
-	if requestedFile == nil || effectiveFile == nil || requestedIndex < 0 || requestedIndex >= len(requestedFile.SubtitleTracks) {
-		return -1, "", false
-	}
-	if requestedFile.ID == effectiveFile.ID {
-		track := effectiveFile.SubtitleTracks[requestedIndex]
-		return requestedIndex, track.Codec, true
-	}
-
-	selected := requestedFile.SubtitleTracks[requestedIndex]
-	for i, candidate := range effectiveFile.SubtitleTracks {
-		if subtitleTracksMatch(selected, candidate) {
-			return i, candidate.Codec, true
-		}
-	}
-	return -1, "", false
-}
-
-func subtitleTracksMatch(a, b models.SubtitleTrack) bool {
-	return strings.EqualFold(strings.TrimSpace(a.Language), strings.TrimSpace(b.Language)) &&
-		strings.EqualFold(strings.TrimSpace(a.Codec), strings.TrimSpace(b.Codec)) &&
-		strings.EqualFold(
-			strings.TrimSpace(firstNonEmptyString(a.Title, a.EmbeddedTitle)),
-			strings.TrimSpace(firstNonEmptyString(b.Title, b.EmbeddedTitle)),
-		) &&
-		a.Forced == b.Forced &&
-		a.HearingImpaired == b.HearingImpaired
-}
-
 // computeStartSegment returns the HLS segment number corresponding to a seek
 // position given the segment duration. Both remote and local transcode paths
 // use this to align ffmpeg output filenames with the VOD manifest.
@@ -2949,641 +1457,26 @@ func alignedSeekSeconds(seekSeconds float64, segmentDuration int, targetVideoCod
 	return float64(computeStartSegment(seekSeconds, segmentDuration) * segmentDuration)
 }
 
-// transcodeStartState holds the common parameters needed to finalize a
-// transcode start (update session state, log, and sync) for both remote
-// and local paths.
-type transcodeStartState struct {
-	req            transcodeStartRequest
-	file           *models.MediaFile
-	session        *playback.Session
-	switchedFileID *int
-	hwAccel        string
-}
-
-func effectiveRemoteHWAccel(
-	response transcodenode.TranscodeStartResponse,
-	request transcodenode.TranscodeStartRequest,
-) string {
-	hwAccel := strings.TrimSpace(response.HWAccel)
-	if hwAccel == "" {
-		hwAccel = strings.TrimSpace(request.HWAccel)
-	}
-	return hwAccel
-}
-
-func transcodeStartReplacement(st transcodeStartState, route playback.TranscodeRoute) playback.SessionReplacement {
-	streamBitrateKbps := st.req.TargetBitrateKbps
-	if streamBitrateKbps <= 0 {
-		streamBitrateKbps = st.file.Bitrate
-	}
-	transcodeAudio := playback.TranscodesAudio(st.req.TargetCodecAudio)
-	baseMethod := semanticPlayMethod(st.session)
-	// Persist the byte-affecting recipe (subtitles + segment cadence) so a later
-	// offloaded audio switch can rebuild the exact same stream. The session is the
-	// only recovery source for offloaded transcodes (no local ts.Opts()). Normalize
-	// the cadence to a concrete value so the restart never falls back to 0.
-	segmentDuration := st.req.SegmentDuration
-	if segmentDuration <= 0 {
-		segmentDuration = playback.DefaultSegmentDuration
-	}
-
-	effectiveFileID := st.file.ID
-	if st.switchedFileID != nil {
-		effectiveFileID = *st.switchedFileID
-	}
-	return playback.SessionReplacement{
-		EffectiveMediaFileID: effectiveFileID,
-		StreamState: playback.SessionStreamState{
-			PlayMethod:           playback.PlayTranscode,
-			BasePlayMethod:       baseMethod,
-			AudioTrackIndex:      st.session.AudioTrackIndex,
-			TranscodeAudio:       transcodeAudio,
-			RemuxDVMode:          st.session.RemuxDVMode,
-			ClientIP:             st.session.ClientIP,
-			ClientName:           st.session.ClientName,
-			ClientVersion:        st.session.ClientVersion,
-			ClientUserAgent:      st.session.ClientUserAgent,
-			StreamBitrateKbps:    streamBitrateKbps,
-			TargetResolution:     st.req.TargetResolution,
-			TargetVideoCodec:     st.req.TargetCodecVideo,
-			TargetAudioCodec:     st.req.TargetCodecAudio,
-			TargetBitrateKbps:    st.req.TargetBitrateKbps,
-			TranscodeHWAccel:     st.hwAccel,
-			TranscodeNodeURL:     route.NodeURL,
-			TranscodeTransportID: route.TransportID,
-			TranscodeRouteSet:    true,
-			SubtitleTrackIndex:   st.req.SubtitleTrackIndex,
-			SubtitleBurnIn:       st.req.SubtitleBurnIn,
-			SegmentDuration:      segmentDuration,
-		},
-	}
-}
-
-func logTranscodeStartState(r *http.Request, st transcodeStartState) {
-	slog.InfoContext(r.Context(), "transcode start preserved base playback state", "component", "api",
-		"playback_session_id", st.req.SessionID,
-		"base_play_method", semanticPlayMethod(st.session),
-		"transport_play_method", playback.PlayTranscode,
-		"audio_track_index", st.session.AudioTrackIndex,
-		"target_codec_video", st.req.TargetCodecVideo,
-		"target_codec_audio", st.req.TargetCodecAudio,
-		"copy_video_original", strings.EqualFold(st.req.TargetCodecVideo, "copy"),
-		"transcode_audio", st.req.TargetCodecAudio != "" && !strings.EqualFold(st.req.TargetCodecAudio, "copy"),
-	)
-}
-
-// HandleStartTranscode handles POST /playback/transcode/start.
-func (h *PlaybackHandler) HandleStartTranscode(w http.ResponseWriter, r *http.Request) {
-	userID := apimw.GetUserID(r.Context())
-	if userID == 0 {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
-		return
-	}
-
-	var req transcodeStartRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
-		return
-	}
-	if req.SessionID == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "session_id is required")
-		return
-	}
-	setPlaybackSessionLogContext(r, req.SessionID)
-
-	session, err := h.sessionMgr.GetSession(req.SessionID)
-	if err != nil {
-		if errors.Is(err, playback.ErrSessionNotFound) {
-			writePlaybackSessionNotFound(w)
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load playback session")
-		return
-	}
-	if session.UserID != userID {
-		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
-		return
-	}
-	requiresVideoTranscode := !strings.EqualFold(req.TargetCodecVideo, "copy")
-	if !h.ensureUserTranscodingAllowed(w, r, userID, requiresVideoTranscode) {
-		return
-	}
-	// Keep the active transport alive through every fallible preflight. A local
-	// replacement is retired under the lifecycle lock immediately before spawn;
-	// a legacy remote replacement is prepared under a distinct process identity
-	// and retired only after the node accepts and the session publishes its successor.
-	previousLocalTranscode := h.tm.GetTranscodeSession(req.SessionID)
-	previousRoute := sessionTranscodeRoute(session)
-	abortCurrentSession := func(reason string, cause error) {
-		if abortErr := h.abortPlaybackSession(r.Context(), session); abortErr != nil && !errors.Is(abortErr, playback.ErrSessionNotFound) {
-			slog.ErrorContext(r.Context(), "failed to abort playback session", "component", "api",
-				"session", req.SessionID,
-				"reason", reason,
-				"cause", cause,
-				"error", abortErr,
-				"playback_session_id", req.SessionID,
-			)
-		}
-	}
-
-	file, err := h.fileResolver.GetByID(r.Context(), session.MediaFileID)
-	if err != nil {
-		if isPlaybackFileLookupMissing(err) {
-			abortCurrentSession("load_media_file", err)
-			writeError(w, http.StatusNotFound, "not_found", "Media file not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load media file")
-		return
-	}
-	if file == nil {
-		abortCurrentSession("load_media_file", nil)
-		writeError(w, http.StatusNotFound, "not_found", "Media file not found")
-		return
-	}
-	file = h.ensurePlaybackProbe(r.Context(), file)
-	requestedFile := file
-	if originalFileID := requestedMediaFileID(session); originalFileID > 0 && originalFileID != file.ID {
-		originalFile, loadErr := h.loadFileByPreferredID(r.Context(), originalFileID, 0)
-		if loadErr != nil || originalFile == nil {
-			requestedFile = nil
-		} else {
-			requestedFile = h.ensurePlaybackProbe(r.Context(), originalFile)
-		}
-	}
-
-	// Subtitle ordinals are meaningful only within the file inventory that
-	// produced them. New clients echo the media_file_id advertised beside the
-	// selected subtitle URL. Clients that omit it retain the legacy behavior of
-	// selecting against RequestedMediaFileID so existing restart flows continue
-	// to remap original-file ordinals after the 4K guard switches versions.
-	subtitleSourceFile := requestedFile
-	if req.SubtitleBurnIn && req.SubtitleTrackIndex >= 0 {
-		switch {
-		case req.SubtitleMediaFileID <= 0:
-			// Legacy request: requestedFile is the historical source inventory.
-		case file != nil && req.SubtitleMediaFileID == file.ID:
-			subtitleSourceFile = file
-		case requestedFile != nil && req.SubtitleMediaFileID == requestedFile.ID:
-			subtitleSourceFile = requestedFile
-		default:
-			subtitleSourceFile = nil
-		}
-		if subtitleSourceFile == nil {
-			writeError(w, http.StatusUnprocessableEntity, "subtitle_source_unavailable",
-				"Media file inventory for the selected subtitle is unavailable")
-			return
-		}
-	}
-
-	// Subtitle burn-in composites subtitles into the video frames, which is
-	// impossible with -c:v copy. If the requested recipe would stream-copy
-	// video (e.g. a remux "original" restart that adds burn-in), force an
-	// encoding transcode so the burned frames are actually produced instead of
-	// the subtitle selection being silently dropped by the filter stage.
-	if req.SubtitleBurnIn && req.SubtitleTrackIndex >= 0 && strings.EqualFold(req.TargetCodecVideo, "copy") {
-		slog.Info("forcing video transcode for subtitle burn-in request",
-			"playback_session_id", req.SessionID,
-			"subtitle_track_index", req.SubtitleTrackIndex,
-			"requested_target_codec_video", req.TargetCodecVideo,
-			"effective_target_codec_video", "h264",
-		)
-		req.TargetCodecVideo = "h264"
-	}
-
-	// A copy-video HLS output of a Dolby Vision Profile 7 source must strip the
-	// RPU metadata (the enhancement layer is dropped by stream mapping): raw P7
-	// NALs presented as plain HEVC stall hardware decoders. The V3 start path
-	// derives this from the plan (videoBitstreamFilterForPlanV3) and the
-	// audio-switch restart derives it from the durable session route, but this
-	// client-driven restart endpoint historically dropped it — the client asking
-	// for "copy" has no way to know the source needs the strip. Derived after
-	// the burn-in guard above so a copy request it rewrites to h264 never carries
-	// a copy-only bitstream filter.
-	//
-	// Gated on the per-source probe for the same reason the planner is: a
-	// source whose RPU ffmpeg cannot parse turns the filter into a per-packet
-	// rejection that never produces a segment, and this endpoint would
-	// otherwise put it back on every quality change, seek and burn-in restart
-	// of a session the planner had already routed away from it.
-	videoBitstreamFilter := ""
-	if strings.EqualFold(req.TargetCodecVideo, "copy") &&
-		(session.RemuxDVMode == playback.RemuxDVStripToHDR10V3 || file.PrimaryDVProfile() == 7) {
-		if playback.DVRPUStrippable(r.Context(), h.playbackConfig().FFmpegPath, file.FilePath) {
-			videoBitstreamFilter = playback.DV7ToHDR10BitstreamFilter
-		} else {
-			slog.WarnContext(r.Context(), "restart dropped the dolby vision rpu strip: source cannot be stripped",
-				"component", "api", "playback_session_id", req.SessionID, "file_id", file.ID)
-		}
-	}
-
-	// The request-level permission check above intentionally runs before the
-	// existing transcode is closed. Recheck when subtitle burn-in normalization
-	// has upgraded an allowed copy-video request into actual video encoding.
-	if !requiresVideoTranscode && !strings.EqualFold(req.TargetCodecVideo, "copy") &&
-		!h.ensureUserTranscodingAllowed(w, r, userID, true) {
-		return
-	}
-
-	// 4K transcode guard: if source is 4K and allow_4k_transcode is disabled,
-	// switch to an alternate non-4K file version for transcoding.
-	// Skip the guard when target_codec_video is "copy" — no actual video
-	// encoding happens, so the 4K cost concern doesn't apply.
-	var switchedFileID *int
-	videoCopy := strings.EqualFold(req.TargetCodecVideo, "copy")
-	if file.Resolution == "2160p" && h.SettingsRepo != nil && !videoCopy {
-		allow4K, _ := h.SettingsRepo.Get(r.Context(), "allow_4k_transcode")
-		if allow4K != "true" {
-			alt, altErr := h.findAlternateFile(r.Context(), file)
-			if altErr != nil || alt == nil {
-				writeError(w, http.StatusUnprocessableEntity, "no_alternate_version",
-					"No lower resolution version available for transcoding")
-				return
-			}
-			file = alt
-			file = h.ensurePlaybackProbe(r.Context(), file)
-			switchedFileID = &alt.ID
-		}
-	}
-	if !videoCopy {
-		req.TargetResolution = clampEncodedTargetResolution(req.TargetResolution, file.Resolution)
-	}
-	if requestedFile != nil && file != nil && requestedFile.ID != file.ID {
-		if err := preflightPlaybackFile(r.Context(), requestedFile, h.MissingMarker, h.EventsHub); err != nil && !isPlaybackFileMissing(err) {
-			slog.WarnContext(r.Context(), "requested transcode file preflight failed; continuing with alternate file", "component", "api",
-				"requested_file_id", requestedFile.ID,
-				"effective_file_id", file.ID,
-				"error", err,
-			)
-		}
-	}
-	if err := preflightPlaybackFile(r.Context(), file, h.MissingMarker, h.EventsHub); err != nil {
-		if isPlaybackFileMissing(err) {
-			abortCurrentSession("preflight_file", err)
-		}
-		writePlaybackFilePreflightError(w, err)
-		return
-	}
-
-	// Resolve the burn-in track's probed codec so the ffmpeg arg builder can
-	// route bitmap codecs (PGS/DVD/DVB) to the overlay filter_complex pipeline
-	// instead of the text-only libass subtitles filter. Derived server-side
-	// from the effective file rather than trusted from the client.
-	subtitleCodec := ""
-	if req.SubtitleBurnIn && req.SubtitleTrackIndex >= 0 {
-		resolvedIndex, resolvedCodec, ok := resolveBurnInSubtitle(subtitleSourceFile, file, req.SubtitleTrackIndex)
-		if !ok {
-			writeError(w, http.StatusUnprocessableEntity, "subtitle_unavailable_in_version",
-				"Selected subtitle track is unavailable in the effective file version")
-			return
-		}
-		if resolvedIndex != req.SubtitleTrackIndex {
-			slog.Info("remapped subtitle burn-in track for alternate file",
-				"playback_session_id", req.SessionID,
-				"subtitle_source_file_id", subtitleSourceFile.ID,
-				"effective_file_id", file.ID,
-				"requested_subtitle_track_index", req.SubtitleTrackIndex,
-				"effective_subtitle_track_index", resolvedIndex,
-			)
-		}
-		req.SubtitleTrackIndex = resolvedIndex
-		subtitleCodec = resolvedCodec
-	}
-
-	// A copy-video input seek starts at the demuxer's preceding keyframe. Keep
-	// the requested position as FFmpeg's -ss input, but resolve that keyframe
-	// before selecting local/offloaded transport so filenames, reconstruction,
-	// and the client timeline all describe the media that is actually emitted.
-	playbackCfg := h.playbackConfig()
-	transportSeekSeconds := alignedSeekSeconds(req.SeekSeconds, req.SegmentDuration, req.TargetCodecVideo)
-	startSegmentNumber := computeStartSegment(transportSeekSeconds, req.SegmentDuration)
-	streamOriginSeconds := 0.0
-	if usesRealTranscodeManifest(req, file) {
-		streamOriginSeconds = transportSeekSeconds
-	}
-	if videoCopy {
-		streamOriginSeconds = req.SeekSeconds
-		if req.SeekSeconds > 0 {
-			anchor, anchorSegment, anchorErr := h.resolveLegacyCopySeekAnchor(
-				r.Context(),
-				playbackCfg.FFmpegPath,
-				file.FilePath,
-				req.SeekSeconds,
-				req.SegmentDuration,
-			)
-			if anchorErr != nil {
-				slog.ErrorContext(r.Context(), "failed to resolve copy-video seek anchor", "component", "api",
-					"playback_session_id", req.SessionID,
-					"requested_seek_seconds", req.SeekSeconds,
-					"error", anchorErr,
-				)
-				writeError(w, http.StatusInternalServerError, "remux_seek_anchor_failed", "Failed to resolve remux seek position")
-				return
-			}
-			streamOriginSeconds = anchor
-			startSegmentNumber = anchorSegment
-			slog.DebugContext(r.Context(), "resolved copy-video seek anchor", "component", "api",
-				"playback_session_id", req.SessionID,
-				"requested_seek_seconds", req.SeekSeconds,
-				"stream_origin_seconds", streamOriginSeconds,
-				"start_segment_number", startSegmentNumber,
-			)
-		}
-	}
-
-	// Determine whether to run locally or forward to a remote transcode node.
-	var plan nodepool.Plan
-	if h.NodePlanner != nil {
-		estKbps := req.TargetBitrateKbps
-		if estKbps <= 0 {
-			estKbps = fileBitrateKbps(file)
-		}
-		plan = h.NodePlanner.PlanSession(req.SessionID, session.TranscodeNodeURL, true, estKbps)
-	}
-	tcNode := plan.TranscodeNode
-
-	if tcNode != nil {
-		// Remote transcode: forward to the assigned node.
-		replacementTransportID := req.SessionID
-		reconstructionTransportID := ""
-		atomicLegacyReplacement := videoCopy && isLegacyTransportSession(session)
-		if atomicLegacyReplacement {
-			replacementTransportID = newLegacyTransportID(req.SessionID)
-			reconstructionTransportID = replacementTransportID
-		}
-		nodeReq := transcodenode.TranscodeStartRequest{
-			SessionID:              replacementTransportID,
-			InputPath:              file.FilePath,
-			SourceVideoCodec:       file.CodecVideo,
-			VideoBitstreamFilter:   videoBitstreamFilter,
-			SeekSeconds:            transportSeekSeconds,
-			StreamOriginSeconds:    streamOriginSeconds,
-			CopySeekAnchorResolved: videoCopy,
-			StartSegmentNumber:     startSegmentNumber,
-			TargetResolution:       req.TargetResolution,
-			TargetCodecVideo:       req.TargetCodecVideo,
-			TargetCodecAudio:       req.TargetCodecAudio,
-			TargetBitrateKbps:      req.TargetBitrateKbps,
-			SegmentDuration:        req.SegmentDuration,
-			HWAccel:                playbackCfg.HWAccel,
-			AudioTrackIndex:        session.AudioTrackIndex,
-			SubtitleTrackIndex:     req.SubtitleTrackIndex,
-			SubtitleBurnIn:         req.SubtitleBurnIn,
-			SubtitleCodec:          subtitleCodec,
-			TotalDuration:          float64(file.Duration),
-			RequireReady:           atomicLegacyReplacement,
-		}
-
-		nodeResp, status, err := h.startRemotePlaybackTransport(context.Background(), tcNode.URL, nodeReq)
-		if err != nil {
-			if atomicLegacyReplacement {
-				h.tm.StopRemoteTranscode(replacementTransportID, tcNode.URL)
-			}
-			slog.ErrorContext(r.Context(), "remote transcode start failed", "component", "api", "error", err, "node", tcNode.URL, "session", req.SessionID, "playback_session_id", req.SessionID)
-			writeError(w, http.StatusBadGateway, "transcode_node_unavailable", "Transcode node is unavailable")
-			return
-		}
-		if status != http.StatusAccepted {
-			if atomicLegacyReplacement {
-				h.tm.StopRemoteTranscode(replacementTransportID, tcNode.URL)
-			}
-			slog.ErrorContext(r.Context(), "remote transcode start rejected", "component", "api", "status", status, "node", tcNode.URL)
-			writeError(w, http.StatusBadGateway, "transcode_start_failed", "Transcode node rejected the request")
-			return
-		}
-		effectiveHWAccel := effectiveRemoteHWAccel(nodeResp, nodeReq)
-		startState := transcodeStartState{
-			req:            req,
-			file:           file,
-			session:        session,
-			switchedFileID: switchedFileID,
-			hwAccel:        effectiveHWAccel,
-		}
-		successorRoute := playback.TranscodeRoute{
-			NodeURL:     tcNode.URL,
-			TransportID: reconstructionTransportID,
-		}
-		if atomicLegacyReplacement {
-			if err := h.commitLegacyRemoteReplacement(
-				req.SessionID,
-				previousLocalTranscode,
-				previousRoute,
-				transcodeStartReplacement(startState, successorRoute),
-			); err != nil {
-				h.tm.StopRemoteTranscode(replacementTransportID, tcNode.URL)
-				if errors.Is(err, playback.ErrSessionSuperseded) {
-					writeError(w, http.StatusConflict, "transcode_replaced", "A newer playback transport replaced this request")
-					return
-				}
-				slog.ErrorContext(r.Context(), "publish legacy transcode route", "component", "api", "error", err, "session", req.SessionID, "playback_session_id", req.SessionID)
-				writeError(w, http.StatusInternalServerError, "internal_error", "Failed to publish transcode session")
-				return
-			}
-			if !h.transcodeRouteMatches(req.SessionID, nil, successorRoute) {
-				writeError(w, http.StatusConflict, "transcode_replaced", "A newer playback transport replaced this request")
-				return
-			}
-			logTranscodeStartState(r, startState)
-			h.syncSessionsNow(r.Context(), "transcode_start")
-		} else {
-			if err := h.commitLegacyRemoteLastWriter(
-				req.SessionID,
-				successorRoute,
-				transcodeStartReplacement(startState, successorRoute),
-			); err != nil {
-				slog.ErrorContext(r.Context(), "publish remote transcode route", "component", "api", "error", err, "session", req.SessionID, "playback_session_id", req.SessionID)
-				writeError(w, http.StatusInternalServerError, "internal_error", "Failed to publish transcode session")
-				return
-			}
-			logTranscodeStartState(r, startState)
-			h.syncSessionsNow(r.Context(), "transcode_start")
-		}
-
-		// The remote transcode's full recipe rides the proxy manifest token so the
-		// integrated server can re-bind and re-proxy the session after a restart
-		// (and a node could someday self-reconstruct from it). Node-side segment
-		// reconstruction is a follow-up (see spec multi-node section).
-		card := playback.NewRecipeCard(session.UserID, session.ProfileID, session.MediaFileID, tcNode.URL, playback.TranscodeOpts{
-			InputPath:              nodeReq.InputPath,
-			SessionID:              req.SessionID,
-			TranscodeTransportID:   reconstructionTransportID,
-			SourceVideoCodec:       nodeReq.SourceVideoCodec,
-			VideoBitstreamFilter:   nodeReq.VideoBitstreamFilter,
-			SeekSeconds:            nodeReq.SeekSeconds,
-			StreamOriginSeconds:    nodeReq.StreamOriginSeconds,
-			CopySeekAnchorResolved: nodeReq.CopySeekAnchorResolved,
-			StartSegmentNumber:     nodeReq.StartSegmentNumber,
-			TargetResolution:       nodeReq.TargetResolution,
-			TargetCodecVideo:       nodeReq.TargetCodecVideo,
-			TargetCodecAudio:       nodeReq.TargetCodecAudio,
-			TargetBitrateKbps:      nodeReq.TargetBitrateKbps,
-			SegmentDuration:        nodeReq.SegmentDuration,
-			HWAccel:                effectiveHWAccel,
-			AudioTrackIndex:        nodeReq.AudioTrackIndex,
-			SubtitleTrackIndex:     nodeReq.SubtitleTrackIndex,
-			SubtitleBurnIn:         nodeReq.SubtitleBurnIn,
-			SubtitleCodec:          nodeReq.SubtitleCodec,
-			TotalDuration:          nodeReq.TotalDuration,
-		})
-		manifestURL := h.buildProxyManifestURL(card, plan.ProxyNode)
-		writeJSON(w, http.StatusAccepted, buildTranscodeStartResponse(req, file, switchedFileID, manifestURL, streamOriginSeconds))
-		return
-	}
-
-	// Local transcode (integrated mode — no transcode nodes available).
-	// In distributed mode admins can disable this fallback so the API server
-	// never transcodes when no eligible node exists.
-	if h.NodePlanner != nil && !nodepool.LocalTranscodeFallbackAllowed(r.Context(), h.SettingsRepo) {
-		writeError(w, http.StatusServiceUnavailable, "no_transcode_node",
-			"No transcode node is available and local transcode fallback is disabled")
-		return
-	}
-	// Snapshot once so the directory, ffmpeg path, and hwaccel of this
-	// session stay consistent even if the config reloads mid-start.
-	if err := os.MkdirAll(playbackCfg.TranscodeDir, 0o755); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to prepare transcode directory")
-		return
-	}
-
-	localOpts := playback.TranscodeOpts{
-		InputPath:              file.FilePath,
-		OutputDir:              filepath.Join(playbackCfg.TranscodeDir, req.SessionID),
-		SessionID:              req.SessionID,
-		SourceVideoCodec:       file.CodecVideo,
-		VideoBitstreamFilter:   videoBitstreamFilter,
-		SeekSeconds:            transportSeekSeconds,
-		StreamOriginSeconds:    streamOriginSeconds,
-		CopySeekAnchorResolved: videoCopy,
-		StartSegmentNumber:     startSegmentNumber,
-		TargetResolution:       req.TargetResolution,
-		TargetCodecVideo:       req.TargetCodecVideo,
-		TargetCodecAudio:       req.TargetCodecAudio,
-		TargetBitrateKbps:      req.TargetBitrateKbps,
-		SegmentDuration:        req.SegmentDuration,
-		FFmpegPath:             playbackCfg.FFmpegPath,
-		HWAccel:                playbackCfg.HWAccel,
-		HWDevice:               playbackCfg.HWDevice,
-		AudioTrackIndex:        session.AudioTrackIndex,
-		SubtitleTrackIndex:     req.SubtitleTrackIndex,
-		SubtitleBurnIn:         req.SubtitleBurnIn,
-		SubtitleCodec:          subtitleCodec,
-		TotalDuration:          float64(file.Duration),
-		FastStart:              true,
-		NodeType:               "integrated",
-		ExecutionMode:          "integrated",
-		FFmpegLogSink:          h.FFmpegLogSink,
-	}
-	startState := transcodeStartState{
-		req:            req,
-		file:           file,
-		session:        session,
-		switchedFileID: switchedFileID,
-	}
-	localRoute := playback.TranscodeRoute{}
-	var transcodeSession *playback.TranscodeSession
-	if videoCopy {
-		// Copy-mode successors must coexist with the predecessor until readiness.
-		// A generation-scoped directory prevents two ffmpeg processes from writing
-		// the same manifest and segments during that overlap.
-		outputSubdir := newLegacyTransportID(req.SessionID)
-		localOpts.OutputSubdir = outputSubdir
-		localOpts.OutputDir = filepath.Join(playbackCfg.TranscodeDir, outputSubdir)
-		transcodeSession, err = h.commitLegacyLocalReplacement(
-			context.WithoutCancel(r.Context()),
-			req.SessionID,
-			previousLocalTranscode,
-			previousRoute,
-			localOpts,
-			func(successor *playback.TranscodeSession) playback.SessionReplacement {
-				startState.hwAccel = successor.Opts().HWAccel
-				return transcodeStartReplacement(startState, localRoute)
-			},
-		)
-		if err != nil {
-			if errors.Is(err, playback.ErrSessionSuperseded) {
-				writeError(w, http.StatusConflict, "transcode_replaced", "A newer playback transport replaced this request")
-				return
-			}
-			slog.ErrorContext(r.Context(), "prepare local copy transcode replacement", "component", "api", "error", err, "session", req.SessionID, "playback_session_id", req.SessionID)
-			writeError(w, http.StatusInternalServerError, "transcode_start_failed", "Failed to start transcode session")
-			return
-		}
-		if !h.transcodeRouteMatches(req.SessionID, transcodeSession, localRoute) {
-			writeError(w, http.StatusConflict, "transcode_replaced", "A newer playback transport replaced this request")
-			return
-		}
-	} else {
-		// Encoded legacy starts keep their historical serialized last-writer-wins
-		// behavior. Re-read the predecessor under the lifecycle lock instead of
-		// rejecting this request because another overlapping start finished first.
-		unlock := h.tm.LockSessionLifecycle(req.SessionID)
-		currentSession, currentErr := h.sessionMgr.GetSession(req.SessionID)
-		if currentErr != nil {
-			unlock()
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to verify playback transport")
-			return
-		}
-		currentRoute := sessionTranscodeRoute(currentSession)
-		currentProcessID := remoteTransportID(currentSession)
-		h.tm.CloseTranscodeSession(req.SessionID, "")
-		transcodeSession, err = h.startLocalPlaybackTransport(r.Context(), localOpts)
-		if err != nil {
-			unlock()
-			writeError(w, http.StatusInternalServerError, "transcode_start_failed", "Failed to start transcode session")
-			return
-		}
-		h.tm.RegisterTranscodeSession(req.SessionID, transcodeSession)
-		startState.hwAccel = transcodeSession.Opts().HWAccel
-		if _, err := h.sessionMgr.ApplyReplacement(req.SessionID, transcodeStartReplacement(startState, localRoute)); err != nil {
-			h.tm.CloseTranscodeSessionIf(req.SessionID, transcodeSession, "")
-			unlock()
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to publish transcode session")
-			return
-		}
-		unlock()
-		if currentRoute.NodeURL != "" {
-			h.tm.StopRemoteTranscode(currentProcessID, currentRoute.NodeURL)
-		}
-	}
-	logTranscodeStartState(r, startState)
-
-	// Re-arm the throttler and exit monitor after every Restart of this
-	// handler-created session, regardless of which code path triggers it
-	// (web segment recovery or an audio switch). Sessions created by
-	// jellycompat's own StartTranscode path never had throttler/exit-monitor
-	// wiring, so they are unaffected.
-	transcodeSession.SetRestartHook(func(ctx context.Context) {
-		h.maybeStartThrottler(ctx, transcodeSession)
-		h.tm.MonitorLocalTranscodeExit(req.SessionID, transcodeSession)
-	})
-
-	h.maybeStartThrottler(r.Context(), transcodeSession)
-	h.tm.MonitorLocalTranscodeExit(req.SessionID, transcodeSession)
-
-	// The full reconstruction recipe rides the manifest token so this local
-	// transcode can be rebuilt after a server restart (the client re-presents the
-	// token on its next manifest/segment request). The token is carried as a
-	// query parameter; the manifest rewriter propagates it onto every segment URI.
-	card := playback.NewRecipeCard(session.UserID, session.ProfileID, session.MediaFileID, "", transcodeSession.Opts())
-	manifestURL := appendStreamToken(
-		fmt.Sprintf("/playback/transcode/%s/master.m3u8", req.SessionID),
-		h.signSessionToken(card),
-	)
-	h.syncSessionsNow(r.Context(), "transcode_start")
-	writeJSON(w, http.StatusAccepted, buildTranscodeStartResponse(req, file, switchedFileID, manifestURL, streamOriginSeconds))
-}
-
 // HandleGetTranscodeManifest handles GET /playback/transcode/{session_id}/master.m3u8.
-// Auth is optional — the session UUID serves as an access token (same pattern
-// as /stream/{session_id}). When auth context is present, ownership is verified.
+// Legacy transports allow the session UUID to act as the access capability.
+// Header-authenticated V3 transports require the live session owner on every
+// request; their UUID is only a route identifier.
 //
 // Known-duration encoded sessions expose a synthetic full VOD manifest so the
 // player can seek immediately. Copy-video sessions expose FFmpeg's real
-// keyframe-aligned manifest and use the resolved stream origin returned by
-// HandleStartTranscode.
+// keyframe-aligned manifest and use the resolved stream origin the v3 plan
+// reports as the timeline's stream_origin_seconds.
+//
+// Errors: 404 (playback_session_not_found / not_found) when the session is
+// missing or cannot be reconstructed, 503 (unavailable) while the transcode is
+// temporarily unavailable, and — for tone-map execution failures — 422
+// (unsupported) with an X-Silo-Tone-Map-Execution-Error header of
+// source_revision_changed or source_preflight_rejected. The 422 responses are
+// additive to the existing 404 and 503 cases; the Jellyfin-compatible 415
+// mapping is a separate surface and unchanged.
 func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
-	session, status, card := h.loadTranscodeServeSession(r, sessionID)
+	session, status, card, claims, reconstructErr := h.loadTranscodeServeSession(r, sessionID, -1)
 	switch status {
 	case playback.SessionMissing:
 		writePlaybackSessionNotFound(w)
@@ -3594,7 +1487,25 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 	case playback.SessionForbidden:
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
 		return
+	case playback.SessionUnauthorized:
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+		return
+	case playback.SessionUnavailable:
+		if writePlaybackToneMapExecutionError(w, reconstructErr) {
+			return
+		}
+		if card == nil || card.ToneMapMode == "" {
+			// A plain (non-tone-mapped) transcode whose token recipe cannot be
+			// rebuilt is served the same 404 the second-chance reconstruct
+			// branch produces: the session is effectively gone, and the client
+			// re-plans rather than retrying a dead encode.
+			writeError(w, http.StatusNotFound, "not_found", "Transcode session not found")
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode session is temporarily unavailable")
+		return
 	}
+	attachPlaybackSession(r.Context(), session, claims)
 
 	transcodeSession := h.tm.GetTranscodeSession(sessionID)
 	if transcodeSession == nil {
@@ -3608,11 +1519,11 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 		// Local transcode whose process state was lost: reconstruct it from the
 		// token recipe. The manifest path has no segment context, so pass -1 (use
 		// the token's seek position).
-		if card == nil {
-			writeError(w, http.StatusNotFound, "not_found", "Transcode session not found")
+		var secondChanceErr error
+		transcodeSession, secondChanceErr = h.reconstructTransportForServe(r.Context(), sessionID, -1, card)
+		if secondChanceErr != nil && writePlaybackToneMapExecutionError(w, secondChanceErr) {
 			return
 		}
-		transcodeSession = h.tm.ReconstructTranscode(r.Context(), sessionID, -1, *card)
 		if transcodeSession == nil {
 			writeError(w, http.StatusNotFound, "not_found", "Transcode session not found")
 			return
@@ -3634,11 +1545,44 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 	_, _ = w.Write(manifest)
 }
 
+func writePlaybackToneMapExecutionError(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, tonemap.ErrSourceRevisionChanged) {
+		w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, transcodenode.ToneMapSourceRevisionChangedCode)
+		writeError(w, http.StatusUnprocessableEntity, "unsupported", "Tone-map source changed")
+		return true
+	}
+	if errors.Is(err, playback.ErrToneMapSourceValidationUnavailable) {
+		w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, transcodenode.ToneMapSourceValidationUnavailableCode)
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode session is temporarily unavailable")
+		return true
+	}
+	if errors.Is(err, tonemap.ErrSourcePreflightRejected) {
+		w.Header().Set(transcodenode.ToneMapExecutionErrorHeader, transcodenode.ToneMapSourcePreflightRejectedCode)
+		writeError(w, http.StatusUnprocessableEntity, "unsupported", "Tone-map source is unsupported by the selected executor")
+		return true
+	}
+	return false
+}
+
 // HandleGetTranscodeSegment handles GET /playback/transcode/{session_id}/segment/{name}.
-// Auth is optional — the session UUID serves as an access token.
+// Authorization follows the same negotiated legacy-versus-header-authenticated
+// rule as the manifest endpoint above.
+//
+// Errors: 404 (playback_session_not_found / not_found) when the session is
+// missing or cannot be reconstructed, or the segment does not exist; 503
+// (unavailable) while the transcode is temporarily unavailable; and — for
+// tone-map execution failures — 422 (unsupported) with an
+// X-Silo-Tone-Map-Execution-Error header of source_revision_changed or
+// source_preflight_rejected. The 422 responses are additive to the existing
+// 404 and 503 cases; the Jellyfin-compatible 415 mapping is a separate surface
+// and unchanged.
 func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
-	session, status, card := h.loadTranscodeServeSession(r, sessionID)
+	requestedSegment := -1
+	if segNum, parseErr := playback.ParseSegmentNumber(chi.URLParam(r, "name")); parseErr == nil {
+		requestedSegment = segNum
+	}
+	session, status, card, claims, reconstructErr := h.loadTranscodeServeSession(r, sessionID, requestedSegment)
 	switch status {
 	case playback.SessionMissing:
 		writePlaybackSessionNotFound(w)
@@ -3649,7 +1593,25 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 	case playback.SessionForbidden:
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
 		return
+	case playback.SessionUnauthorized:
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+		return
+	case playback.SessionUnavailable:
+		if writePlaybackToneMapExecutionError(w, reconstructErr) {
+			return
+		}
+		if card == nil || card.ToneMapMode == "" {
+			// A plain (non-tone-mapped) transcode whose token recipe cannot be
+			// rebuilt is served the same 404 the second-chance reconstruct
+			// branch produces: the session is effectively gone, and the client
+			// re-plans rather than retrying a dead encode.
+			writeError(w, http.StatusNotFound, "not_found", "Transcode session not found")
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode session is temporarily unavailable")
+		return
 	}
+	attachPlaybackSession(r.Context(), session, claims)
 
 	transcodeSession := h.tm.GetTranscodeSession(sessionID)
 	if transcodeSession == nil {
@@ -3663,15 +1625,11 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 		// Resume near the segment the client is fetching so reconstruct does not
 		// restart from the original seek point and stall. A non-segment name
 		// (e.g. init.mp4) parses as negative and falls back to the token position.
-		requestedSegment := -1
-		if segNum, parseErr := playback.ParseSegmentNumber(chi.URLParam(r, "name")); parseErr == nil {
-			requestedSegment = segNum
-		}
-		if card == nil {
-			writeError(w, http.StatusNotFound, "not_found", "Transcode session not found")
+		var secondChanceErr error
+		transcodeSession, secondChanceErr = h.reconstructTransportForServe(r.Context(), sessionID, requestedSegment, card)
+		if secondChanceErr != nil && writePlaybackToneMapExecutionError(w, secondChanceErr) {
 			return
 		}
-		transcodeSession = h.tm.ReconstructTranscode(r.Context(), sessionID, requestedSegment, *card)
 		if transcodeSession == nil {
 			writeError(w, http.StatusNotFound, "not_found", "Transcode session not found")
 			return
@@ -3771,7 +1729,7 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 						"playback_session_id", sessionID,
 					)
 					if restartErr := h.tm.RestartSessionLocked(
-						context.WithoutCancel(r.Context()),
+						r.Context(),
 						sessionID,
 						transcodeSession,
 						seekSeconds,
@@ -3789,6 +1747,8 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 							nextSegmentName := fmt.Sprintf("seg_%05d.m4s", segNum+1)
 							_, _ = transcodeSession.WaitForSegment(nextSegmentName, 1200*time.Millisecond)
 						}
+					} else {
+						err = restartErr
 					}
 				}
 			}
@@ -3799,6 +1759,9 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 		}
 	}
 	if err != nil {
+		if writePlaybackToneMapExecutionError(w, err) {
+			return
+		}
 		if errors.Is(err, playback.ErrSegmentNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "Segment not found")
 			return
@@ -3821,14 +1784,16 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 // reconstruction recipe and builds the manifest URL. proxyNode is the planner's
 // pick; when nil the URL falls back to the API-local path, where the token rides
 // the ?st= query parameter so the integrated server can reconstruct from it.
-func (h *PlaybackHandler) buildProxyManifestURL(card playback.RecipeCard, proxyNode *nodepool.Node) string {
-	token := h.signSessionToken(card)
+//
+// requireMediaAuth is the attempt's negotiated media-auth mode: such a session
+// never receives a token, and therefore never a proxy origin either, since a
+// proxy authenticates from the token in the URL path alone. It gets the
+// API-local manifest path, which the client fetches with its own credential.
+func (h *PlaybackHandler) buildProxyManifestURL(card playback.RecipeCard, proxyNode *nodepool.Node, requireMediaAuth bool) string {
+	token := h.signSessionToken(card, requireMediaAuth)
 	localURL := fmt.Sprintf("/playback/transcode/%s/master.m3u8", card.SessionID)
-	if proxyNode == nil {
+	if proxyNode == nil || token == "" {
 		return appendStreamToken(localURL, token)
-	}
-	if token == "" {
-		return localURL
 	}
 	return proxyNode.URL + "/stream/transcode/" + token + "/master.m3u8"
 }
@@ -3938,9 +1903,25 @@ func (h *PlaybackHandler) maybeStartThrottler(ctx context.Context, session *play
 	session.StartThrottler(threshold)
 }
 
-// findAlternateFile finds a non-4K file version for the same content.
-// Prefers SDR over HDR, then highest resolution, then highest bitrate.
+// findAlternateFile finds another file version for the same content. It
+// prefers non-4K versions because they can escape a disabled-4K-transcode
+// terminal, but when none exist it returns a 4K candidate so the planner can
+// still accept one that direct-plays or remuxes without forbidden video
+// encoding.
+// Within each class it prefers SDR, then resolution, then bitrate.
 func (h *PlaybackHandler) findAlternateFile(ctx context.Context, source *models.MediaFile) (*models.MediaFile, error) {
+	candidates, err := h.findAlternateFiles(ctx, source)
+	if err != nil || len(candidates) == 0 {
+		return nil, err
+	}
+	return candidates[0], nil
+}
+
+// findAlternateFiles returns every compatible edition/version candidate in
+// fallback order. Callers that plan candidates must keep trying after a
+// terminal: a lower-resolution candidate can still fail while a later 4K
+// candidate direct-plays or remuxes without forbidden video encoding.
+func (h *PlaybackHandler) findAlternateFiles(ctx context.Context, source *models.MediaFile) ([]*models.MediaFile, error) {
 	if h.FileVersionFetcher == nil {
 		return nil, fmt.Errorf("file version fetcher not configured")
 	}
@@ -3956,10 +1937,9 @@ func (h *PlaybackHandler) findAlternateFile(ctx context.Context, source *models.
 		return nil, err
 	}
 
-	// Filter to non-4K candidates.
 	candidates := make([]*models.MediaFile, 0, len(files))
 	for _, f := range files {
-		if f.ID == source.ID || f.Resolution == "2160p" {
+		if f.ID == source.ID {
 			continue
 		}
 		if source.EditionKey != "" && f.EditionKey != source.EditionKey {
@@ -3980,9 +1960,17 @@ func (h *PlaybackHandler) findAlternateFile(ctx context.Context, source *models.
 		return nil, nil
 	}
 
-	// Sort: SDR before HDR, then highest resolution, then highest bitrate.
+	// Prefer non-4K before 4K so a lower-resolution sibling is tried first.
+	// Keep 4K siblings at the end: when no non-4K sibling exists, the planner
+	// may still direct-play or remux one because the policy only forbids video
+	// encoding.
 	sort.Slice(candidates, func(i, j int) bool {
 		a, b := candidates[i], candidates[j]
+		a4K := playback.Is4KMediaFileV3(a)
+		b4K := playback.Is4KMediaFileV3(b)
+		if a4K != b4K {
+			return !a4K
+		}
 		// Prefer SDR over HDR (SDR = !HDR, so !HDR < HDR means SDR first).
 		if a.HDR != b.HDR {
 			return !a.HDR
@@ -3995,7 +1983,7 @@ func (h *PlaybackHandler) findAlternateFile(ctx context.Context, source *models.
 		return a.Bitrate > b.Bitrate
 	})
 
-	return candidates[0], nil
+	return candidates, nil
 }
 
 const (
@@ -4026,15 +2014,6 @@ func resolutionRank(res string) int {
 	default:
 		return 0
 	}
-}
-
-func clampEncodedTargetResolution(requestedResolution, sourceResolution string) string {
-	requestedHeight, requestedKnown := transcodeResolutionHeight(requestedResolution)
-	sourceHeight, sourceKnown := transcodeResolutionHeight(sourceResolution)
-	if !requestedKnown || !sourceKnown || requestedHeight <= sourceHeight {
-		return requestedResolution
-	}
-	return sourceResolution
 }
 
 func transcodeResolutionHeight(resolution string) (int, bool) {

@@ -6,6 +6,7 @@ import {
   favoriteKeys,
   historyKeys,
   itemKeys,
+  libraryCollectionKeys,
   personKeys,
   progressKeys,
   recKeys,
@@ -84,7 +85,9 @@ export function removeItemFromHomeSectionCaches(
   );
 }
 
-function isItemDetailQueryKey(queryKey: unknown, itemId: string) {
+/** Matches both item-detail cache key shapes for one item, so optimistic
+ * updates and their rollback snapshot cover exactly the same queries. */
+export function isItemDetailQueryKey(queryKey: unknown, itemId: string) {
   return (
     Array.isArray(queryKey) &&
     ((queryKey[0] === "catalog" &&
@@ -113,6 +116,11 @@ export async function invalidateMediaSurfaceQueries(
     queryClient.invalidateQueries({ queryKey: historyKeys.all }),
     queryClient.invalidateQueries({ queryKey: favoriteKeys.all }),
     queryClient.invalidateQueries({ queryKey: watchlistKeys.all }),
+    queryClient.invalidateQueries({
+      queryKey: libraryCollectionKeys.all,
+      predicate: (query) =>
+        options.libraryId === undefined || query.queryKey[2] === options.libraryId,
+    }),
     queryClient.invalidateQueries({ queryKey: recKeys.all }),
     queryClient.invalidateQueries({ queryKey: personKeys.all }),
     queryClient.invalidateQueries({

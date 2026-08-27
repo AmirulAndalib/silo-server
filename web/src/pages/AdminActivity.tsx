@@ -27,12 +27,15 @@ import {
   formatDecisionLabel,
   formatSessionBitrate,
   formatSourceContainerSummary,
+  formatToneMapSummary,
   formatTranscodeModeSummary,
   getSessionClientLabel,
+  getSessionClientLabelFull,
   formatVideoDetail,
   formatVideoSummary,
   normalizeContainerDecision,
   normalizeStreamDecision,
+  type ToneMapSummary,
 } from "@/pages/adminActivityPresentation";
 import {
   Table,
@@ -149,7 +152,10 @@ export default function AdminActivity() {
           s.media_title?.toLowerCase().includes(q) ||
           s.series_name?.toLowerCase().includes(q) ||
           s.episode_name?.toLowerCase().includes(q) ||
-          getSessionClientLabel(s).toLowerCase().includes(q) ||
+          // Search the exact label, not the compact one: "which sessions are on
+          // build 5?" is the question this identity exists to answer, and the
+          // compact label deliberately omits the build.
+          getSessionClientLabelFull(s).toLowerCase().includes(q) ||
           s.client_user_agent?.toLowerCase().includes(q) ||
           s.client_ip?.toLowerCase().includes(q),
       );
@@ -528,8 +534,16 @@ function StreamRow({
   const streamMeta = [sourceContainer, streamBitrate].filter(Boolean).join(" · ");
   const clientIP = session.client_ip?.trim() || "";
   const clientLabel = getSessionClientLabel(session);
+  // The row stays compact; the exact version, build, and channel live in the
+  // tooltip and in the expanded panel's Client card.
+  const clientLabelFull = getSessionClientLabelFull(session);
+  const clientUserAgent = session.client_user_agent?.trim() || "";
+  const clientTitle = clientUserAgent
+    ? `${clientLabelFull || clientLabel} — ${clientUserAgent}`
+    : clientLabelFull || clientLabel;
   const playbackPosition = formatPlaybackPosition(session);
   const transcodeMode = formatTranscodeModeSummary(session);
+  const toneMap = formatToneMapSummary(session);
   const activityMethod = classifyActivityMethod(session);
   const containerDecision = normalizeContainerDecision(session.play_method);
   const videoDecision = normalizeStreamDecision(session.video_decision || session.play_method);
@@ -602,10 +616,7 @@ function StreamRow({
               <div className="text-muted-foreground mt-1 flex min-w-0 items-center gap-1.5 text-[10px]">
                 <JellyfinSessionPill session={session} />
                 {clientLabel ? (
-                  <span
-                    title={session.client_user_agent || clientLabel}
-                    className="max-w-[8rem] min-w-0 truncate"
-                  >
+                  <span title={clientTitle} className="max-w-[8rem] min-w-0 truncate">
                     {clientLabel}
                   </span>
                 ) : null}
@@ -657,6 +668,7 @@ function StreamRow({
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-1.5">
             {transcodeMode ? <TranscodeModeBadge label={transcodeMode} /> : null}
+            {toneMap ? <ToneMapModeBadge summary={toneMap} /> : null}
             <button
               type="button"
               onClick={toggleDetails}
@@ -801,10 +813,7 @@ function StreamRow({
           {(clientLabel || clientIP || streamMeta) && (
             <div className="text-muted-foreground mt-1 flex min-w-0 gap-1.5 text-[10px]">
               {clientLabel ? (
-                <span
-                  title={session.client_user_agent || clientLabel}
-                  className="max-w-[9rem] shrink-0 truncate"
-                >
+                <span title={clientTitle} className="max-w-[9rem] shrink-0 truncate">
                   {clientLabel}
                 </span>
               ) : null}
@@ -850,6 +859,7 @@ function StreamRow({
           <div className="mt-2 rounded-md border border-white/6 bg-white/[0.03] px-2 py-1.5">
             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               {transcodeMode ? <TranscodeModeBadge label={transcodeMode} /> : null}
+              {toneMap ? <ToneMapModeBadge summary={toneMap} /> : null}
               <button
                 type="button"
                 onClick={toggleDetails}
@@ -928,6 +938,7 @@ function StreamRow({
           videoDecision={videoDecision}
           audioDecision={audioDecision}
           transcodeMode={transcodeMode}
+          toneMapping={toneMap?.detail ?? null}
           showFFmpeg={ffmpegOpen}
           rows={ffmpegRows}
           isLoading={ffmpegLogs.isLoading}
@@ -981,6 +992,24 @@ function transcodeModeBadgeColor(label: string): string {
   return "border-cyan-400/20 bg-cyan-400/10 text-cyan-200";
 }
 
+/** Render the compact indicator for the confirmed tone-mapping executor. */
+function ToneMapModeBadge({ summary }: { summary: ToneMapSummary }) {
+  return (
+    <span
+      className={`inline-flex rounded border px-1.5 py-0.5 text-[9px] font-semibold ${toneMapModeBadgeColor(summary.mode)}`}
+    >
+      {summary.badge}
+    </span>
+  );
+}
+
+function toneMapModeBadgeColor(mode: ToneMapSummary["mode"]): string {
+  if (mode === "software") {
+    return "border-destructive/30 bg-destructive/10 text-destructive";
+  }
+  return "border-violet-400/25 bg-violet-400/10 text-violet-200";
+}
+
 function PlaybackExpandedPanel({
   session,
   sessionID,
@@ -988,6 +1017,7 @@ function PlaybackExpandedPanel({
   videoDecision,
   audioDecision,
   transcodeMode,
+  toneMapping,
   showFFmpeg,
   rows,
   isLoading,
@@ -1000,6 +1030,7 @@ function PlaybackExpandedPanel({
   videoDecision: string;
   audioDecision: string;
   transcodeMode: string | null;
+  toneMapping: string | null;
   showFFmpeg: boolean;
   rows: OperationalLogEntry[];
   isLoading: boolean;
@@ -1040,6 +1071,7 @@ function PlaybackExpandedPanel({
           delivered={formatDeliveredVideoSummary(session)}
           detail={formatVideoDetail(session)}
           mode={videoDecision === "transcode" ? transcodeMode : null}
+          toneMapping={videoDecision === "transcode" ? toneMapping : null}
         />
         <PlaybackDetailCard
           label="Audio"
@@ -1051,6 +1083,7 @@ function PlaybackExpandedPanel({
             audioDecision === "transcode" && videoDecision !== "transcode" ? transcodeMode : null
           }
         />
+        <PlaybackClientCard session={session} />
       </div>
 
       {showFFmpeg ? (
@@ -1123,6 +1156,7 @@ function PlaybackDetailCard({
   delivered,
   detail,
   mode,
+  toneMapping,
 }: {
   label: string;
   decision: string;
@@ -1130,6 +1164,52 @@ function PlaybackDetailCard({
   delivered: string;
   detail: string;
   mode?: string | null;
+  toneMapping?: string | null;
+}) {
+  return (
+    <PlaybackDetailCardShell
+      label={label}
+      badge={
+        <span
+          className={`inline-flex rounded border px-1.5 py-0.5 text-[9px] font-semibold ${decisionBadgeClass(decision)}`}
+        >
+          {formatDecisionLabel(decision)}
+        </span>
+      }
+    >
+      <PlaybackDetailLine label="Source" value={source} />
+      <PlaybackDetailLine label="Delivered" value={delivered} />
+      {mode ? <PlaybackDetailLine label="Mode" value={mode} /> : null}
+      {toneMapping ? <PlaybackDetailLine label="Tone mapping" value={toneMapping} /> : null}
+      <PlaybackDetailLine label="Detail" value={detail} muted />
+    </PlaybackDetailCardShell>
+  );
+}
+
+/**
+ * The exact streaming client: app name, version, build, and channel, with the
+ * raw user agent underneath. This is the surface that answers "which build is
+ * this?" — the session rows only have room for the compact label.
+ */
+function PlaybackClientCard({ session }: { session: AdminSession }) {
+  const label = getSessionClientLabelFull(session) || "Unknown client";
+  const userAgent = session.client_user_agent?.trim() || "";
+  return (
+    <PlaybackDetailCardShell label="Client">
+      <PlaybackDetailLine label="App" value={label} />
+      {userAgent ? <PlaybackDetailLine label="Agent" value={userAgent} muted /> : null}
+    </PlaybackDetailCardShell>
+  );
+}
+
+function PlaybackDetailCardShell({
+  label,
+  badge,
+  children,
+}: {
+  label: string;
+  badge?: ReactNode;
+  children: ReactNode;
 }) {
   return (
     <div className="rounded-lg border border-[var(--terminal-border)]/60 bg-[var(--terminal-bg)]/60 px-3 py-2">
@@ -1137,18 +1217,9 @@ function PlaybackDetailCard({
         <span className="text-[10px] font-semibold tracking-[0.18em] text-[var(--terminal-muted)] uppercase">
           {label}
         </span>
-        <span
-          className={`inline-flex rounded border px-1.5 py-0.5 text-[9px] font-semibold ${decisionBadgeClass(decision)}`}
-        >
-          {formatDecisionLabel(decision)}
-        </span>
+        {badge}
       </div>
-      <div className="grid gap-1 text-[11px]">
-        <PlaybackDetailLine label="Source" value={source} />
-        <PlaybackDetailLine label="Delivered" value={delivered} />
-        {mode ? <PlaybackDetailLine label="Mode" value={mode} /> : null}
-        <PlaybackDetailLine label="Detail" value={detail} muted />
-      </div>
+      <div className="grid gap-1 text-[11px]">{children}</div>
     </div>
   );
 }

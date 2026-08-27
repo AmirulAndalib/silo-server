@@ -867,6 +867,12 @@ export interface CatalogResponse extends BrowseResponse {
   source?: CatalogSource;
   title?: string;
   snapshot?: string;
+  /**
+   * The order a collection or personal-list source actually resolved in after
+   * saved/default precedence was applied. Absent for other sources and when
+   * the source kept its own order.
+   */
+  effective_sort?: QuerySort;
 }
 
 export interface ItemFiltersResponse {
@@ -1378,6 +1384,15 @@ export interface CollectionCapabilitiesResponse {
     watched: UserCollectionWatchFilter[];
     media: UserCollectionMediaFilter[];
   };
+  collection_default_sort?: boolean;
+  collection_sort_preferences?: boolean;
+  effective_collection_sort?: boolean;
+  /**
+   * The collection_kind values this server accepts on the sort-preference
+   * endpoints. Absent on servers predating the personal-list kinds, where only
+   * "library" and "user" may be assumed.
+   */
+  sort_preference_kinds?: string[];
 }
 
 export interface QueryRule {
@@ -1394,6 +1409,18 @@ export interface QueryGroup {
 export interface DisplayQueryDefinition {
   match: "all" | "any";
   groups: QueryGroup[];
+}
+
+/**
+ * A collection's default sort. An empty object (or an absent field) means the
+ * collection keeps the order its source supplied.
+ */
+export interface CollectionSortConfig {
+  field?: string;
+  order?: "asc" | "desc";
+  // Index signature keeps this assignable to the `Record<string, unknown>`
+  // sort_config fields on the collection request types, which predate it.
+  [key: string]: unknown;
 }
 
 export interface QuerySort {
@@ -1647,6 +1674,8 @@ export interface ImportMDBListCollectionRequest {
   management_mode?: LibraryCollectionManagementMode;
   management_source?: string;
   management_key?: string;
+  /** Default order viewers land on; `{}` keeps the source list's own order. */
+  sort_config?: CollectionSortConfig;
 }
 
 export interface ImportMDBListCollectionResponse {
@@ -1678,6 +1707,8 @@ export interface ImportTMDBCollectionRequest {
   management_mode?: LibraryCollectionManagementMode;
   management_source?: string;
   management_key?: string;
+  /** Default order viewers land on; `{}` keeps the source list's own order. */
+  sort_config?: CollectionSortConfig;
 }
 
 export interface ImportTMDBCollectionResponse {
@@ -1705,6 +1736,8 @@ export interface ImportTraktCollectionRequest {
   management_mode?: LibraryCollectionManagementMode;
   management_source?: string;
   management_key?: string;
+  /** Default order viewers land on; `{}` keeps the source list's own order. */
+  sort_config?: CollectionSortConfig;
 }
 
 export interface ImportTraktCollectionResponse {
@@ -1728,6 +1761,8 @@ export interface UserImportSharedFields {
   display_query_definition?: DisplayQueryDefinition;
   /** Restrict resolution to these libraries; omitted/empty = entire catalog the user can see. */
   library_ids?: number[];
+  /** Default order viewers land on; `{}` keeps the source list's own order. */
+  sort_config?: CollectionSortConfig;
 }
 
 export interface ImportUserMDBListCollectionRequest extends UserImportSharedFields {
@@ -2307,6 +2342,8 @@ export interface AccessGroup {
   max_playback_quality: string;
   download_allowed: boolean;
   download_transcode_allowed: boolean;
+  transcode_allowed: boolean;
+  audio_transcode_allowed: boolean;
   max_streams: number;
   max_transcodes: number;
   allowed_permissions: string[] | null;
@@ -2324,11 +2361,29 @@ export interface AccessGroupInput {
   max_playback_quality?: string;
   download_allowed?: boolean;
   download_transcode_allowed?: boolean;
+  transcode_allowed?: boolean;
+  audio_transcode_allowed?: boolean;
   max_streams?: number;
   max_transcodes?: number;
   allowed_permissions?: string[] | null;
   requests_allowed?: boolean;
   is_default?: boolean;
+}
+
+// Stored per-user policy overrides are nullable: null means the field is
+// inherited from the access group. effective_policy carries the resolved
+// values the server enforces.
+export interface AdminUserEffectivePolicy {
+  library_ids: number[] | null;
+  max_playback_quality: string;
+  max_streams: number;
+  max_transcodes: number;
+  transcode_allowed: boolean;
+  audio_transcode_allowed: boolean;
+  download_allowed: boolean;
+  download_transcode_allowed: boolean;
+  requests_allowed: boolean;
+  permissions: string[];
 }
 
 export interface AdminUser {
@@ -2340,19 +2395,22 @@ export interface AdminUser {
   enabled: boolean;
   library_ids: number[] | null;
   access_group_id: number | null;
-  max_playback_quality: string;
-  max_streams: number;
-  max_transcodes: number;
-  transcode_allowed: boolean;
-  audio_transcode_allowed: boolean;
+  max_playback_quality: string | null;
+  max_streams: number | null;
+  max_transcodes: number | null;
+  transcode_allowed: boolean | null;
+  audio_transcode_allowed: boolean | null;
   max_profiles: number;
-  download_allowed: boolean;
-  download_transcode_allowed: boolean;
+  download_allowed: boolean | null;
+  download_transcode_allowed: boolean | null;
+  requests_allowed: boolean | null;
+  effective_policy: AdminUserEffectivePolicy;
   created_at: string;
   updated_at: string;
   last_active_at?: string;
 }
 
+// Policy fields left undefined at create inherit from the access group.
 export interface CreateUserRequest {
   username: string;
   email: string;
@@ -2370,8 +2428,12 @@ export interface CreateUserRequest {
   max_profiles?: number;
   download_allowed?: boolean;
   download_transcode_allowed?: boolean;
+  requests_allowed?: boolean;
 }
 
+// Policy fields are tri-state on update: absent leaves the stored value
+// alone, an explicit null clears the override back to inherit, and a value
+// stores an explicit override.
 export interface UpdateUserRequest {
   username?: string;
   email?: string;
@@ -2381,14 +2443,15 @@ export interface UpdateUserRequest {
   enabled?: boolean;
   library_ids?: number[] | null;
   access_group_id?: number | null;
-  max_playback_quality?: string;
-  max_streams?: number;
-  max_transcodes?: number;
-  transcode_allowed?: boolean;
-  audio_transcode_allowed?: boolean;
+  max_playback_quality?: string | null;
+  max_streams?: number | null;
+  max_transcodes?: number | null;
+  transcode_allowed?: boolean | null;
+  audio_transcode_allowed?: boolean | null;
   max_profiles?: number;
-  download_allowed?: boolean;
-  download_transcode_allowed?: boolean;
+  download_allowed?: boolean | null;
+  download_transcode_allowed?: boolean | null;
+  requests_allowed?: boolean | null;
 }
 
 export interface AdminStats {
@@ -2449,7 +2512,10 @@ export interface AdminSession {
   client_ip?: string;
   client_name?: string;
   client_version?: string;
+  client_build?: string;
+  client_channel?: string;
   client_label?: string;
+  client_label_full?: string;
   client_user_agent?: string;
   audio_track_index: number;
   transcode_audio: boolean;
@@ -2457,8 +2523,13 @@ export interface AdminSession {
   target_resolution?: string;
   target_video_codec?: string;
   target_audio_codec?: string;
+  /** Channel count the transcode actually encodes. Absent when the reporting
+   * node did not know it — render the target codec with no channel layout
+   * rather than falling back to `source_audio_channels`. */
+  target_audio_channels?: number | null;
   target_bitrate_kbps: number | null;
   transcode_hw_accel?: string;
+  tone_map_mode?: string;
   source_container?: string;
   source_bitrate_kbps: number | null;
   source_video_codec?: string;
@@ -4555,6 +4626,7 @@ export interface TaskInfo {
   state: TaskState;
   progress: number;
   progress_message?: string;
+  manual_only?: boolean;
   last_execution?: ExecutionResult;
   triggers: TriggerConfig[];
   next_run_at?: string;

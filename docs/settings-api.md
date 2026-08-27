@@ -48,6 +48,38 @@ the other. Send the exact lower-case family:
 | macOS                   | `desktop` |
 | Browser                 | `web`     |
 
+### App identity headers
+
+Separately from the family, every first-party client should send its own app
+identity on playback requests. These are server-wide contextual headers, not
+settings-specific: the playback session stores them, the admin Activity page
+renders them ("Silo Android TV 1.0.0 (build 5)"), and playback decision logs
+carry them so a report can be tied to an exact build.
+
+| Header                  | Clamp | Meaning                                                                                                       |
+| ----------------------- | ----- | ------------------------------------------------------------------------------------------------------------- |
+| `X-Silo-Client`         | 128   | Product name, e.g. `Silo Android TV`, `Silo iOS`.                                                             |
+| `X-Silo-Client-Version` | 64    | Marketing version, e.g. `1.0.0`. Sent verbatim and displayed verbatim — do not pre-shorten it.                 |
+| `X-Silo-Client-Build`   | 64    | Opaque per-platform build identifier (Android `versionCode`, Apple `CFBundleVersion`). Never parsed or compared. |
+| `X-Silo-Client-Channel` | 32    | Opaque distribution channel: `release`, `beta`, `sideload`, `dev`. Stored verbatim; `release` is not displayed.  |
+
+Values are trimmed and truncated to the clamp above — never rejected, on either
+route, because an identity label must not be able to fail a playback start. The
+clamp counts characters, not bytes, matching `maxLength` in the v3 request
+schemas, and is applied where the request is read rather than where the session
+is created so the decision logs and `playback_route_events` observe it too.
+Nothing is validated against an enum either, so a client may introduce a new
+channel without a server change.
+
+Protocol-v3 `POST /playback/start` accepts `client_playback_context.app_version`,
+`.app_build`, and `.app_channel` as a body-level fallback for clients that cannot
+set the headers on every request. The headers win field by field when both are
+present, and the fallback applies **only to a client that sent `X-Silo-Client`**:
+`client_playback_context` carries no app name, so nothing in the body can
+identify a client that did not name itself — such a session is labeled from its
+user agent, and its `app_version` is a free-form platform string rather than the
+marketing version `client_version` promises.
+
 ## Remote scopes
 
 Every stored value has exactly one identity. Context fields not named by the
@@ -98,6 +130,62 @@ Content-Type: application/json
 
 Stored-value responses include `client_family` when the source or explicit row
 is at `profile_client`.
+
+### Superseded keys and the write mirror
+
+A definition may be marked `deprecated: true` in the manifest. It is still
+served, still readable and still writable — old clients depend on it — but new
+clients should read and write its replacement. The generated bindings carry the
+flag (`deprecated` on the TypeScript `SettingDefinition`, a `Deprecated` /
+`DEPRECATED` list in the Go, Kotlin and Swift bindings), so a client can hide a
+superseded control without a hand-kept list of key names. A client that offers
+both spellings as separate controls gives one preference two homes, and the
+mirror below means editing either silently rewrites the other.
+
+Revision 7 deprecates `playback.auto_skip_intro` in favor of
+`playback.intro_skip_mode`, whose three members say what the boolean could not:
+`never` (no prompt at all), `ask` (offer a Skip Intro button, what the boolean's
+`false` always did) and `always` (skip it and offer an undo). The default is
+`ask`, so an untouched profile behaves identically across the cutover.
+
+For one release the server keeps the pair in step, so a preference set on any
+client shows up correctly on the others:
+
+| Request                                | Server also does                                              |
+| -------------------------------------- | ------------------------------------------------------------- |
+| `PUT` of `playback.auto_skip_intro`    | writes `playback.intro_skip_mode` at the same identity: `true → "always"`, `false → "ask"` |
+| `PUT` of `playback.intro_skip_mode`    | writes `playback.auto_skip_intro` at the same identity: `"always" → true`, otherwise `false` |
+| `DELETE` of either                     | removes the other at the same identity                         |
+| `PUT`/`POST /profiles` with `auto_skip_intro` | writes both keys at `profile` scope                     |
+| `PUT`/`DELETE` of the legacy `/settings/{key}` or `/settings/device/{key}` for `playback.auto_skip_intro` | writes or clears both keys at the scope that route owns |
+| `PUT` or `DELETE` of either key at `profile` scope | sets `user_profiles.auto_skip_intro` to what the pair now resolves to — the written value, or the contract default once the row is cleared — so the profile DTO stays truthful for clients that read it |
+
+Everything in that table commits as one transaction — both rows, the legacy
+profile column, and the idempotency receipt when the request carries an
+`X-Silo-Mutation-Id` — on the keyed and unkeyed paths alike, and on `DELETE` as
+well as `PUT`. A request that fails changes nothing, and a replayed mutation id
+re-serves its receipt without writing anything again. The response is always the
+stored value of the key the request addressed; the companion row is not
+reported. Only the addressed key raises a `user_settings.changed` event and an
+audit record.
+
+`DELETE` still answers `404 not_found` when the key it names has no value at
+that scope. If a companion is nonetheless found there — a state only a partial
+failure predating the transactional path could produce — it is cleared anyway,
+because a stray companion goes on resolving as an explicit choice that no retry
+can reach.
+
+Surfaces that count stored overrides — the device list's `changed_count`, the
+admin device summaries' `override_count` — count the pair once. It is one
+preference held in two spellings, so counting rows would both overstate a
+device's customization and drop by one, fleet-wide, on the day the mirror is
+retired.
+
+The boolean direction is lossy on purpose: a client that only understands the
+switch sees `never` as `false` and shows the button. Such a client that then
+flips the switch overwrites `never`, which is accepted for the overlap window
+and is why the mirror is temporary. Once every client reads the enum, a
+follow-up removes the mirror. Design: `docs/design/2026-08-16-intro-skip-mode.md`.
 
 ### Atomic navigation shortcuts
 

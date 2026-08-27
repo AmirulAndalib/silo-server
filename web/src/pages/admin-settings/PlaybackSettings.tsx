@@ -20,6 +20,8 @@ const KEYS = [
   "playback.hw_device",
   "playback.transcode_enabled",
   "playback.local_transcode_fallback",
+  "playback.transcode_hardware_tone_map_enabled",
+  "playback.transcode_software_tone_map_enabled",
   "allow_4k_transcode",
   "enable_transcode_throttle",
   "transcode_throttle_seconds",
@@ -27,6 +29,7 @@ const KEYS = [
   "playback.chapter_thumbnail_execution",
   "playback.chapter_thumbnail_node_capacity",
   "playback.chapter_thumbnail_hdr_policy",
+  "playback.chapter_thumbnail_software_tone_map_enabled",
   "playback.watched_threshold",
   "playback.min_resume_threshold",
 ];
@@ -173,6 +176,20 @@ export default function PlaybackSettings() {
             onChange={(v) => form.setValue("playback.local_transcode_fallback", v)}
           />
           <SettingField
+            label="Enable Hardware HDR Tone Mapping"
+            type="toggle"
+            hint="Allows validated local or remote GPU executors to convert HDR video to SDR when transcoding."
+            value={form.getValue("playback.transcode_hardware_tone_map_enabled") || "false"}
+            onChange={(v) => form.setValue("playback.transcode_hardware_tone_map_enabled", v)}
+          />
+          <SettingField
+            label="Enable Software HDR Tone Mapping"
+            type="toggle"
+            hint="Allows the CPU to convert HDR video to SDR when transcoding. This can be very CPU-intensive."
+            value={form.getValue("playback.transcode_software_tone_map_enabled") || "false"}
+            onChange={(v) => form.setValue("playback.transcode_software_tone_map_enabled", v)}
+          />
+          <SettingField
             label="Allow 4K Transcoding"
             type="toggle"
             value={form.getValue("allow_4k_transcode")}
@@ -232,6 +249,16 @@ export default function PlaybackSettings() {
             hint="Controls whether chapter thumbnails are generated for HDR or Dolby Vision sources. SDR files are unaffected."
             value={form.getValue("playback.chapter_thumbnail_hdr_policy") || "best_effort"}
             onChange={(v) => form.setValue("playback.chapter_thumbnail_hdr_policy", v)}
+          />
+          <SettingField
+            label="Enable CPU Tone Mapping"
+            type="toggle"
+            hint="Allows CPU/software tone mapping when hardware HDR chapter-thumbnail extraction is unavailable or fails. Disabled by default because it can be CPU-intensive."
+            value={form.getValue("playback.chapter_thumbnail_software_tone_map_enabled") || "false"}
+            onChange={(v) =>
+              form.setValue("playback.chapter_thumbnail_software_tone_map_enabled", v)
+            }
+            disabled={form.getValue("playback.chapter_thumbnail_hdr_policy") === "disabled"}
           />
         </FieldGroup>
 

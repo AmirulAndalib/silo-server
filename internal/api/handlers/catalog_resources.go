@@ -31,7 +31,12 @@ func (h *CatalogResourceHandler) HandleGetItemDetail(w http.ResponseWriter, r *h
 		return
 	}
 
-	detail, err := h.items.detailSvc.GetItemDetail(r.Context(), id, h.items.accessFilter(r))
+	filter, ok := h.items.accessFilterOrError(w, r)
+	if !ok {
+		return
+	}
+
+	detail, err := h.items.detailSvc.GetItemDetail(r.Context(), id, filter)
 	if err != nil {
 		if isNotFound(err) {
 			syntheticDetail, syntheticErr := h.syntheticSeasonDetail(r, id)
@@ -64,7 +69,12 @@ func (h *CatalogResourceHandler) HandleGetItemVersions(w http.ResponseWriter, r 
 		return
 	}
 
-	detail, err := h.items.detailSvc.GetItemDetail(r.Context(), id, h.items.accessFilter(r))
+	filter, ok := h.items.accessFilterOrError(w, r)
+	if !ok {
+		return
+	}
+
+	detail, err := h.items.detailSvc.GetItemDetail(r.Context(), id, filter)
 	if err != nil {
 		if isNotFound(err) {
 			if _, _, ok := parseSyntheticSeasonID(id); ok {
@@ -98,7 +108,12 @@ func (h *CatalogResourceHandler) HandleGetMangaFiles(w http.ResponseWriter, r *h
 		return
 	}
 
-	files, err := h.items.detailSvc.GetMangaChapterFiles(r.Context(), id, h.items.accessFilter(r))
+	filter, ok := h.items.accessFilterOrError(w, r)
+	if !ok {
+		return
+	}
+
+	files, err := h.items.detailSvc.GetMangaChapterFiles(r.Context(), id, filter)
 	if err != nil {
 		if isNotFound(err) {
 			writeError(w, http.StatusNotFound, "not_found", "Item not found")
@@ -119,7 +134,10 @@ func (h *CatalogResourceHandler) HandleGetMangaFiles(w http.ResponseWriter, r *h
 }
 
 func (h *CatalogResourceHandler) HandleGetItemEpisodes(w http.ResponseWriter, r *http.Request) {
-	filter := h.items.accessFilter(r)
+	filter, ok := h.items.accessFilterOrError(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "Item ID is required")
@@ -196,7 +214,10 @@ func (h *CatalogResourceHandler) HandleGetItemEpisodes(w http.ResponseWriter, r 
 }
 
 func (h *CatalogResourceHandler) HandleGetSeasons(w http.ResponseWriter, r *http.Request) {
-	filter := h.items.accessFilter(r)
+	filter, ok := h.items.accessFilterOrError(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "Series ID is required")
@@ -250,7 +271,7 @@ func (h *CatalogResourceHandler) HandleGetSeasons(w http.ResponseWriter, r *http
 				if hasProgressMap {
 					userData = catalog.EpisodeRollupUserData(episodes, progressMap)
 				}
-				sr := h.items.seasonResponseFromEpisodes(r, s, episodes, userData)
+				sr := h.items.seasonResponseFromEpisodes(r, s, episodes, userData, filter.ImageSize)
 				resp = append(resp, sr)
 			}
 
@@ -289,7 +310,10 @@ func (h *CatalogResourceHandler) HandleGetSeasons(w http.ResponseWriter, r *http
 }
 
 func (h *CatalogResourceHandler) HandleGetSeason(w http.ResponseWriter, r *http.Request) {
-	filter := h.items.accessFilter(r)
+	filter, ok := h.items.accessFilterOrError(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	numStr := chi.URLParam(r, "num")
 	if id == "" || numStr == "" {
@@ -343,6 +367,7 @@ func (h *CatalogResourceHandler) HandleGetSeason(w http.ResponseWriter, r *http.
 				season,
 				episodes,
 				h.items.getAggregateUserData(r, episodes),
+				filter.ImageSize,
 			)
 			h.items.resolveSeasonPlayTarget(r, id, &resp)
 			writeJSON(w, http.StatusOK, seasonDetailResponse{Season: resp})
@@ -381,7 +406,10 @@ func (h *CatalogResourceHandler) HandleGetSeason(w http.ResponseWriter, r *http.
 }
 
 func (h *CatalogResourceHandler) HandleGetEpisodes(w http.ResponseWriter, r *http.Request) {
-	filter := h.items.accessFilter(r)
+	filter, ok := h.items.accessFilterOrError(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	numStr := chi.URLParam(r, "num")
 	if id == "" || numStr == "" {
@@ -434,7 +462,15 @@ func (h *CatalogResourceHandler) syntheticSeasonDetail(r *http.Request, seasonID
 		return nil, catalog.ErrItemNotFound
 	}
 
-	seriesDetail, err := h.items.detailSvc.GetItemDetail(r.Context(), seriesID, h.items.accessFilter(r))
+	filter, err := h.items.accessFilter(r)
+	if err != nil {
+		return nil, err
+	}
+	// The entrypoint has already rejected an unparseable size; this only carries
+	// the validated one down to the detail service and the season response.
+	filter.ImageSize = requestImageSize(r)
+
+	seriesDetail, err := h.items.detailSvc.GetItemDetail(r.Context(), seriesID, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -463,6 +499,7 @@ func (h *CatalogResourceHandler) syntheticSeasonDetail(r *http.Request, seasonID
 		season,
 		episodes,
 		h.items.getAggregateUserData(r, episodes),
+		filter.ImageSize,
 	)
 	return &catalog.ItemDetail{
 		ContentID:         seasonID,
@@ -505,14 +542,16 @@ func (h *CatalogResourceHandler) enrichItemDetail(r *http.Request, detail *catal
 	if detail == nil {
 		return
 	}
-	input := catalog.PlayableTargetInput{
-		ContentID:    detail.ContentID,
-		Type:         detail.Type,
-		SeriesID:     detail.SeriesID,
-		SeasonNumber: detail.SeasonNumber,
+	if filter, err := h.items.accessFilter(r); err == nil {
+		input := catalog.PlayableTargetInput{
+			ContentID:    detail.ContentID,
+			Type:         detail.Type,
+			SeriesID:     detail.SeriesID,
+			SeasonNumber: detail.SeasonNumber,
+		}
+		playTargets := h.items.resolvePlayableTargetInputs(r, []catalog.PlayableTargetInput{input}, nil, filter)
+		detail.PlayContentID = playTargets[input.Key()]
 	}
-	playTargets := h.items.resolvePlayableTargetInputs(r, []catalog.PlayableTargetInput{input}, nil, h.items.accessFilter(r))
-	detail.PlayContentID = playTargets[input.Key()]
 
 	switch detail.Type {
 	case "season":

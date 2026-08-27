@@ -66,7 +66,11 @@ export default function CardPlayOverlay({
       onClick={handleClick}
       aria-label={`Play ${title}`}
       className={cn(
-        "bg-primary text-primary-foreground pointer-events-auto absolute top-1/2 left-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full opacity-100 shadow-lg transition-all duration-200 hover:scale-110 hover:shadow-xl hover:brightness-110 active:scale-95 pointer-fine:pointer-events-none pointer-fine:opacity-0 pointer-fine:group-hover/media:pointer-events-auto pointer-fine:group-hover/media:opacity-100 pointer-fine:focus-visible:pointer-events-auto pointer-fine:focus-visible:opacity-100",
+        // media-card-play-trigger owns the hover/focus reveal so every card
+        // surface shares one rule (app.css): a direct :hover selector gated on
+        // any-hover/any-pointer, which Tailwind's group-hover variant cannot
+        // express correctly on hybrid devices.
+        "media-card-play-trigger bg-primary text-primary-foreground absolute top-1/2 left-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full shadow-lg transition-all duration-200 hover:scale-110 hover:shadow-xl hover:brightness-110 active:scale-95",
         size === "compact" ? "h-6 w-6" : "h-9 w-9",
       )}
     >

@@ -55,6 +55,61 @@ func TestBuildPrepareFileArgsEmitsFaststartMP4(t *testing.T) {
 	}
 }
 
+func TestBuildPrepareFileArgsSharesHigh10DecodeFallback(t *testing.T) {
+	tests := []struct {
+		name      string
+		hwAccel   string
+		want      []string
+		forbidden []string
+	}{
+		{
+			name:      "qsv keeps hardware encode with software decode upload",
+			hwAccel:   "qsv",
+			want:      []string{"-c:v h264_qsv", "format=nv12,hwupload,hwmap=derive_device=qsv"},
+			forbidden: []string{"-hwaccel qsv", "-hwaccel vaapi"},
+		},
+		{
+			name:      "vaapi keeps hardware encode with software decode upload",
+			hwAccel:   "vaapi",
+			want:      []string{"-c:v h264_vaapi", "scale=-2:720,format=nv12,hwupload"},
+			forbidden: []string{"-hwaccel vaapi"},
+		},
+		{
+			name:      "nvenc falls back to software encode",
+			hwAccel:   "nvenc",
+			want:      []string{"-c:v libx264", "-vf scale=-2:720"},
+			forbidden: []string{"-hwaccel cuda", "h264_nvenc", "scale_cuda"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := buildPrepareFileArgs(TranscodeOpts{
+				InputPath:           "/media/high10.mkv",
+				SourceVideoCodec:    "h264",
+				SourceVideoProfile:  "High 10",
+				SourceVideoBitDepth: 10,
+				TargetCodecVideo:    "h264",
+				TargetCodecAudio:    "aac",
+				TargetResolution:    "720p",
+				HWAccel:             tt.hwAccel,
+				AudioTrackIndex:     -1,
+			}, "/artifacts/out.mp4")
+			joined := strings.Join(args, " ")
+			for _, want := range tt.want {
+				if !strings.Contains(joined, want) {
+					t.Fatalf("args missing %q: %s", want, joined)
+				}
+			}
+			for _, forbidden := range tt.forbidden {
+				if strings.Contains(joined, forbidden) {
+					t.Fatalf("args unexpectedly contain %q: %s", forbidden, joined)
+				}
+			}
+		})
+	}
+}
+
 func TestResolvePrepareTarget(t *testing.T) {
 	settings := AdminSettings{TranscodeEnabled: true, Allow4KTranscode: true}
 	file := &models.MediaFile{CodecVideo: "h264", CodecAudio: "dts", Container: "mkv", Resolution: "1080p"}
@@ -125,5 +180,50 @@ func TestPrepareFileResolvesOneDeviceAndReleasesAfterExit(t *testing.T) {
 	}
 	if count := hwDeviceActiveCount(devA); count != 0 {
 		t.Fatalf("active count after PrepareFile returned = %d, want 0", count)
+	}
+}
+
+// TestPrepareFileRemovesFailedPartialOutput verifies that a failed encode
+// publishes neither its temporary bytes nor a final artifact.
+func TestPrepareFileRemovesFailedPartialOutput(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "ffmpeg")
+	writtenPathMarker := filepath.Join(dir, "written-path.txt")
+	partialExistedMarker := filepath.Join(dir, "partial-existed")
+	scriptBody := "#!/bin/sh\n" +
+		"eval \"output=\\\"\\${$#}\\\"\"\n" +
+		"printf '%s\\n' \"$output\" > " + writtenPathMarker + "\n" +
+		"printf partial > \"$output\"\n" +
+		"test -f \"$output\" && touch " + partialExistedMarker + "\n" +
+		"exit 1\n"
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatalf("write failing FFmpeg: %v", err)
+	}
+	outputPath := filepath.Join(dir, "artifact.mp4")
+	err := PrepareFile(context.Background(), TranscodeOpts{
+		InputPath:        "/nonexistent/input.mkv",
+		TargetCodecVideo: "h264",
+		TargetCodecAudio: "aac",
+		FFmpegPath:       script,
+		HWAccel:          HWAccelNone,
+	}, outputPath)
+	if err == nil {
+		t.Fatal("PrepareFile succeeded with a failing FFmpeg process")
+	}
+	writtenPath, readErr := os.ReadFile(writtenPathMarker)
+	if readErr != nil {
+		t.Fatalf("read fake FFmpeg output marker: %v", readErr)
+	}
+	if got, want := strings.TrimSpace(string(writtenPath)), outputPath+".part"; got != want {
+		t.Fatalf("fake FFmpeg wrote %q, want %q", got, want)
+	}
+	if _, statErr := os.Stat(partialExistedMarker); statErr != nil {
+		t.Fatalf("fake FFmpeg did not observe its partial output before cleanup: %v", statErr)
+	}
+	if _, statErr := os.Stat(outputPath); !os.IsNotExist(statErr) {
+		t.Fatalf("failed prepared output appeared at final path: %v", statErr)
+	}
+	if _, statErr := os.Stat(outputPath + ".part"); !os.IsNotExist(statErr) {
+		t.Fatalf("failed prepared output left a partial file: %v", statErr)
 	}
 }

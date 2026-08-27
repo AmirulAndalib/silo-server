@@ -24,8 +24,10 @@ describe("CardPlayOverlay", () => {
 
     const link = screen.getByRole("link", { name: "Play Running Show" });
     expect(link).toHaveAttribute("href", "/watch/episode%201?libraryId=12");
-    expect(link.className).toContain("pointer-fine:group-hover/media:opacity-100");
-    expect(link.className).toContain("pointer-fine:focus-visible:opacity-100");
+    // Hover/focus reveal lives in the shared media-card-play-trigger rule
+    // (app.css) rather than inline pointer-fine variants, so every card
+    // surface reveals its play control the same way.
+    expect(link.className).toContain("media-card-play-trigger");
 
     fireEvent.click(link);
     expect(mocks.startPlayback).toHaveBeenCalledWith({

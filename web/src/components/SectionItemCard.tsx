@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { useImageLoaded } from "@/hooks/useImageLoaded";
 import ViewTransitionLink from "@/components/ViewTransitionLink";
 import MediaItemMenu from "@/components/MediaItemMenu";
@@ -40,9 +41,11 @@ export default function SectionItemCard({ item, libraryId }: SectionItemCardProp
   const { cardPresentation } = useUICustomization();
   const showCaption = cardPresentation.caption !== "artwork";
   const showMetadata = cardPresentation.caption === "title_metadata";
+  const cardRef = useRef<HTMLDivElement>(null);
+  const displayTitle = episodeLabels ? episodeLabels.seriesTitle : item.title;
 
   return (
-    <div className="media-card group/card">
+    <div ref={cardRef} className="media-card media-card-longpress group/card">
       <div className="group/media relative">
         <ViewTransitionLink to={itemHref} className="block overflow-hidden rounded-xl">
           <div
@@ -111,6 +114,8 @@ export default function SectionItemCard({ item, libraryId }: SectionItemCardProp
           libraryId={libraryId}
           userState={item.user_state}
           variant="poster"
+          longPressRef={cardRef}
+          itemTitle={displayTitle}
         />
       </div>
       {showCaption ? (
@@ -119,7 +124,7 @@ export default function SectionItemCard({ item, libraryId }: SectionItemCardProp
             to={headingHref}
             className="block truncate text-[14px] font-semibold tracking-tight hover:underline"
           >
-            {episodeLabels ? episodeLabels.seriesTitle : item.title}
+            {displayTitle}
           </ViewTransitionLink>
           {showMetadata && upcomingEvent ? (
             <ViewTransitionLink to={itemHref} className="block hover:underline">
@@ -128,9 +133,11 @@ export default function SectionItemCard({ item, libraryId }: SectionItemCardProp
                   {subtitle}
                 </div>
               )}
-              <div className="mt-1.5 flex items-center gap-1.5 text-[11px] font-medium">
-                <span className="text-foreground">{airDateLabel}</span>
-                {airTimeLabel && <span className="text-muted-foreground">{airTimeLabel}</span>}
+              <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-[11px] font-medium">
+                <span className="text-foreground shrink-0">{airDateLabel}</span>
+                {airTimeLabel && (
+                  <span className="text-muted-foreground min-w-0 truncate">{airTimeLabel}</span>
+                )}
               </div>
             </ViewTransitionLink>
           ) : showMetadata && episodeLabels ? (
@@ -156,7 +163,7 @@ export default function SectionItemCard({ item, libraryId }: SectionItemCardProp
           ) : showMetadata ? (
             <ViewTransitionLink
               to={itemHref}
-              className="text-muted-foreground mt-1 block text-[11px] font-medium tracking-[0.14em] uppercase hover:underline"
+              className="text-muted-foreground mt-1 block truncate text-[11px] font-medium tracking-[0.14em] uppercase hover:underline"
             >
               {item.year ? `${item.year}` : ""} {item.type === "series" ? "Series" : ""}
             </ViewTransitionLink>

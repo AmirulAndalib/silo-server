@@ -20,6 +20,12 @@ import (
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 )
 
+const (
+	subtitleFormatASS = "ass"
+	subtitleFormatSSA = "ssa"
+	subtitleFormatSUP = "sup"
+)
+
 // FilePathResolver looks up a media file by its ID.
 type FilePathResolver interface {
 	GetByID(ctx context.Context, id int) (*models.MediaFile, error)
@@ -45,6 +51,12 @@ type StreamHandler struct {
 	// PlaybackConfig returns the current playback config; read it through
 	// ffmpegPath(). May be nil (tests).
 	PlaybackConfig func() config.PlaybackConfig
+	// CopySafetyRacer gates and covers a revived progressive remux: it answers
+	// whether this replica already condemns a video stream-copy of the source,
+	// and re-engages the copy-safety race for one whose verdict is still open.
+	// Optional — without it a revived remux is gated on the persisted row alone
+	// and no race is started here.
+	CopySafetyRacer PlaybackCopySafetyRacer
 	// SubtitleCache stores full-track PGS (.sup) extracts under the transcode
 	// dir so repeat selections skip the whole-file ffmpeg demux. May be nil
 	// (tests / minimal setups) — extraction then always streams uncached.
@@ -99,8 +111,8 @@ func (h *StreamHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 	// ?seek= query for remux), so no runtime beyond the Session needs rebuilding.
 	// Without a token (or signing secret) reconstruct is off, collapsing to a
 	// plain GetSession + ownership check.
-	card := streamCardFromToken(r.URL.Query().Get(streamTokenParam), sessionID, h.JWTSecret)
-	session, status := h.TM.LoadOrReconstructSession(r.Context(), h.sessionMgr.GetSession, sessionID, userID, card)
+	card, claims := verifiedStreamCardFromToken(r.URL.Query().Get(streamTokenParam), sessionID, h.JWTSecret)
+	session, status, reconstructed := h.TM.LoadOrReconstructSessionDetail(r.Context(), h.sessionMgr.GetSession, sessionID, userID, card)
 	switch status {
 	case playback.SessionMissing:
 		writePlaybackSessionNotFound(w)
@@ -110,6 +122,12 @@ func (h *StreamHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	case playback.SessionForbidden:
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
+		return
+	case playback.SessionUnauthorized:
+		// Defensive against invariant drift, not a reachable path: this caller
+		// resolves a non-zero user before loading. Falling through would
+		// dereference the nil session the status carries.
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
 		return
 	}
 
@@ -135,6 +153,23 @@ func (h *StreamHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		writePlaybackFilePreflightError(w, err)
 		return
 	}
+	attachPlaybackSession(r.Context(), session, claims)
+
+	// A reconstructed remux replays a recipe committed before the copy-safety
+	// verdict existed, and no notifier can reach it — see playback_copy_safety.go.
+	// One that the verdict does not condemn re-engages the race here, which is
+	// what gives the single long response below something able to withdraw it.
+	// Starting that race before the abort watcher is registered is safe: a
+	// verdict fast enough to stop the session first leaves WatchTransportStop
+	// with no session to watch, and it reports the stop it missed.
+	if reconstructed && session.PlayMethod == playback.PlayRemux &&
+		videoCopyRevivalRefused(r.Context(), h.CopySafetyRacer, file, sessionID) {
+		// The reconstruct already registered the session; tear it down again so
+		// the refusal leaves no half-live session behind the client's replan.
+		h.abortPlaybackSession(r.Context(), session)
+		writePlaybackSessionNotFound(w)
+		return
+	}
 
 	switch session.PlayMethod {
 	case playback.PlayDirect:
@@ -153,13 +188,32 @@ func (h *StreamHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 				_ = h.sessionMgr.EndTransport(sessionID)
 			}()
 		}
+		// A progressive remux runs for the length of the title behind a single
+		// response, so a stop decided while it is playing — a copy-safety
+		// verdict withdrawing the route, an admin kill — has to reach the
+		// stream itself. Nothing else can: the ffmpeg belongs to this request.
+		abort, releaseAbort := h.sessionMgr.WatchTransportStop(sessionID)
+		defer releaseAbort()
 		seekSeconds := 0.0
 		if seekStr := r.URL.Query().Get("seek"); seekStr != "" {
 			if s, err := strconv.ParseFloat(seekStr, 64); err == nil && s >= 0 {
 				seekSeconds = s
 			}
 		}
-		if err := playback.ServeRemuxWithDVMode(w, r, file.FilePath, "mp4", seekSeconds, session.TranscodeAudio, session.AudioTrackIndex, file.PrimaryDVProfile(), session.RemuxDVMode, h.ffmpegPath()); err != nil {
+		// An audio-only source muxes an audio-only fMP4. The v3 plan promises
+		// audio/mp4 for it, and a declared-tier client refuses to attach a
+		// source buffer whose advertised type its probe rejected — so the
+		// response has to keep the same promise the plan made.
+		if err := playback.ServeRemuxWithOptions(w, r, file.FilePath, "mp4", seekSeconds, session.TranscodeAudio, session.AudioTrackIndex, file.PrimaryDVProfile(), playback.RemuxServeOptions{
+			DVMode:                 session.RemuxDVMode,
+			FFmpegPath:             h.ffmpegPath(),
+			ContentType:            playback.RemuxContentType(file.IsAudioOnly()),
+			AudioOnly:              file.IsAudioOnly(),
+			SourceAudioChannels:    session.SourceAudioChannels,
+			TargetAudioChannels:    session.TargetAudioChannels,
+			TargetAudioBitrateKbps: session.TargetAudioBitrateKbps,
+			Abort:                  abort,
+		}); err != nil {
 			h.handleTransportStartFailure(r.Context(), session, file, err)
 		}
 
@@ -207,6 +261,7 @@ func (h *StreamHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
 		return
 	}
+	attachPlaybackSession(r.Context(), session, nil)
 
 	fileID, err := subtitleSourceFileID(r, session)
 	if err != nil {
@@ -219,10 +274,16 @@ func (h *StreamHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// New subtitle artifact URLs bind downloaded subtitles by their stable row
+	// trackIndex is a combined ordinal, resolved through the same three
+	// consecutive ranges playback.BuildSubtitleInventoryV3 assigns them from:
+	// externals, then embedded container tracks, then downloaded ones. The
+	// ranges cover the full track arrays — including bitmap tracks that have no
+	// sidecar shape — so an ordinal always names the same track here as it does
+	// in the published inventory.
+	// Downloaded subtitle URLs additionally bind that ordinal to a stable row
 	// identity. The path ordinal remains for compatibility and display, but it
 	// must not be re-resolved against a mutable inventory after a seek reanchor.
-	if rawID := strings.TrimSpace(r.URL.Query().Get(downloadedSubtitleIDParam)); rawID != "" {
+	if rawID := strings.TrimSpace(r.URL.Query().Get(playback.DownloadedSubtitleIDParamV3)); rawID != "" {
 		downloadedID, parseErr := strconv.Atoi(rawID)
 		if parseErr != nil || downloadedID <= 0 {
 			writeError(w, http.StatusBadRequest, "bad_request", "Invalid downloaded subtitle identity")
@@ -246,13 +307,25 @@ func (h *StreamHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", "Subtitle track not found")
 			return
 		}
+		if r.Method == http.MethodHead {
+			writeSubtitleRepresentationHead(w, requestedFormat)
+			return
+		}
 		h.serveDownloadedSubtitle(w, r, *downloaded, requestedFormat)
 		return
 	}
-
 	externalCount := len(file.ExternalSubtitles)
 	if trackIndex < externalCount {
 		sub := file.ExternalSubtitles[trackIndex]
+		if !subtitleSidecarFormatSupported(sub.Format, requestedFormat, false) {
+			writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type",
+				"Requested subtitle extension does not match the selected track")
+			return
+		}
+		if r.Method == http.MethodHead {
+			writeSubtitleRepresentationHead(w, requestedFormat)
+			return
+		}
 
 		// Serve ASS/SSA external subtitles as raw data for client-side rendering.
 		if playback.IsASS(sub.Format) && requestedFormat != "vtt" {
@@ -262,7 +335,7 @@ func (h *StreamHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request) {
 					"Failed to load external subtitle")
 				return
 			}
-			playback.ServeSubtitle(w, data, "ass")
+			playback.ServeSubtitle(w, data, subtitleFormatASS)
 			return
 		}
 
@@ -287,6 +360,15 @@ func (h *StreamHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request) {
 		if playback.NeedsBurnIn(track.Codec) && !playback.IsPGS(track.Codec) {
 			writeError(w, http.StatusBadRequest, "bad_request",
 				"Bitmap subtitle tracks cannot be extracted as text")
+			return
+		}
+		if !subtitleSidecarFormatSupported(track.Codec, requestedFormat, true) {
+			writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type",
+				"Requested subtitle extension does not match the selected track")
+			return
+		}
+		if r.Method == http.MethodHead && requestedFormat != subtitleFormatSUP {
+			writeSubtitleRepresentationHead(w, requestedFormat)
 			return
 		}
 
@@ -318,6 +400,10 @@ func (h *StreamHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request) {
 
 		downloadedIndex := embeddedIndex - len(file.SubtitleTracks)
 		if downloadedIndex >= 0 && downloadedIndex < len(downloaded) {
+			if r.Method == http.MethodHead {
+				writeSubtitleRepresentationHead(w, requestedFormat)
+				return
+			}
 			h.serveDownloadedSubtitle(w, r, downloaded[downloadedIndex], requestedFormat)
 			return
 		}
@@ -327,6 +413,11 @@ func (h *StreamHandler) HandleSubtitle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *StreamHandler) serveDownloadedSubtitle(w http.ResponseWriter, r *http.Request, subtitle subtitles.DownloadedSubtitle, requestedFormat string) {
+	if !subtitleSidecarFormatSupported(string(subtitle.Format), requestedFormat, false) {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type",
+			"Requested subtitle extension does not match the selected track")
+		return
+	}
 	data, err := h.S3Client.GetObject(r.Context(), h.S3Bucket, subtitle.S3Key)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "s3_error", "Failed to load subtitle from storage")
@@ -335,7 +426,7 @@ func (h *StreamHandler) serveDownloadedSubtitle(w http.ResponseWriter, r *http.R
 
 	// Serve ASS/SSA downloaded subtitles as raw data.
 	if playback.IsASS(string(subtitle.Format)) && requestedFormat != "vtt" {
-		playback.ServeSubtitle(w, data, "ass")
+		playback.ServeSubtitle(w, data, subtitleFormatASS)
 		return
 	}
 
@@ -352,6 +443,40 @@ func (h *StreamHandler) serveDownloadedSubtitle(w http.ResponseWriter, r *http.R
 		return
 	}
 	playback.ServeSubtitle(w, vttData, "vtt")
+}
+
+// subtitleSidecarFormatSupported keeps bitmap and styled-text requests within
+// the representations the server can produce. Plain text tracks preserve the
+// v1 endpoint's permissive extension behavior and are always returned as VTT;
+// ASS/SSA may also be served losslessly, and only an embedded PGS track has a
+// binary .sup representation.
+func subtitleSidecarFormatSupported(codec, requestedFormat string, embeddedPGS bool) bool {
+	requestedFormat = strings.ToLower(strings.TrimSpace(requestedFormat))
+	if requestedFormat == "" {
+		return true
+	}
+	if playback.IsPGS(codec) {
+		return embeddedPGS && requestedFormat == subtitleFormatSUP
+	}
+	if playback.NeedsBurnIn(codec) {
+		return false
+	}
+	if playback.IsASS(codec) {
+		return requestedFormat == subtitleFormatASS || requestedFormat == subtitleFormatSSA || requestedFormat == "vtt"
+	}
+	return true
+}
+
+func writeSubtitleRepresentationHead(w http.ResponseWriter, requestedFormat string) {
+	switch strings.ToLower(strings.TrimSpace(requestedFormat)) {
+	case subtitleFormatASS, subtitleFormatSSA:
+		w.Header().Set("Content-Type", "text/x-ssa; charset=utf-8")
+	case subtitleFormatSUP:
+		w.Header().Set("Content-Type", "application/octet-stream")
+	default:
+		w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // subtitleSourceFileID pins a subtitle URL to the file whose track list was
@@ -403,6 +528,7 @@ func (h *StreamHandler) HandleSubtitleFonts(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
 		return
 	}
+	attachPlaybackSession(r.Context(), session, nil)
 
 	fileID, err := subtitleSourceFileID(r, session)
 	if err != nil {
@@ -527,9 +653,9 @@ func (h *StreamHandler) streamEmbeddedSubtitle(w http.ResponseWriter, r *http.Re
 	outFormat := "vtt"
 	switch {
 	case playback.IsASS(track.Codec):
-		outFormat = "ass"
+		outFormat = subtitleFormatASS
 	case playback.IsPGS(track.Codec):
-		outFormat = "sup"
+		outFormat = subtitleFormatSUP
 	}
 
 	// ASS is fetched exactly once and consumed whole by its client-side
@@ -549,7 +675,7 @@ func (h *StreamHandler) streamEmbeddedSubtitle(w http.ResponseWriter, r *http.Re
 	case "vtt":
 		seek = subtitleSeekPosition(r, session)
 		duration = subtitleWindowDuration(r)
-	case "sup":
+	case subtitleFormatSUP:
 		allowWindow, seek, duration = playback.PGSWindowRequest(r.URL.Query())
 	}
 	slog.InfoContext(r.Context(), "subtitle stream requested", "component", "api",
@@ -594,14 +720,14 @@ func (h *StreamHandler) streamEmbeddedSubtitle(w http.ResponseWriter, r *http.Re
 	// cached full track when present (warming it in the background when
 	// not). All other formats stream uncached: VTT is already windowed
 	// and fast, ASS is small.
-	if outFormat == "sup" {
+	if outFormat == subtitleFormatSUP {
 		err := h.SubtitleCache.ServeSUPExtract(w, r, opts, playback.StreamExtractSubtitle)
 		playback.LogSubtitleStreamError(r.Context(), err, file.ID, embeddedIndex)
 		return
 	}
 
 	switch outFormat {
-	case "ass":
+	case subtitleFormatASS:
 		w.Header().Set("Content-Type", "text/x-ssa; charset=utf-8")
 	default:
 		w.Header().Set("Content-Type", "text/vtt; charset=utf-8")

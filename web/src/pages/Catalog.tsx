@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { CheckSquare, Search, Trash2, X } from "lucide-react";
 
+import { captureProfileRequestContext } from "@/api/client";
 import type { BrowseItem } from "@/api/types";
 import ItemGrid from "@/components/ItemGrid";
 import { RequestToAddSection } from "@/components/RequestToAddSection";
@@ -9,6 +10,8 @@ import { Button } from "@/components/ui/button";
 import CatalogFiltersPanel from "@/components/catalog/CatalogFiltersPanel";
 import SearchScopeChips from "@/components/catalog/SearchScopeChips";
 import { useCatalogWindow } from "@/hooks/queries/catalog";
+import { useSetCollectionSortPreference } from "@/hooks/queries/collections";
+import { querySortToSelectValue } from "@/lib/collectionSortConfig";
 import { useSearchMediaScope, type SearchMediaScope } from "@/hooks/useSearchMediaScope";
 import { useRemoveHistory } from "@/hooks/queries/history";
 import { useRequestSearch } from "@/hooks/queries/useRequests";
@@ -29,6 +32,7 @@ import {
   catalogSourceAllowsOverlay,
   parseCatalogSearchParams,
 } from "./catalogSearchParams";
+import type { CatalogSearchState } from "./catalogSearchParams";
 
 const REQUEST_SEARCH_DEBOUNCE_MS = 100;
 
@@ -101,6 +105,8 @@ function CatalogResults({
   const isHistorySource = state.source === "history";
   const isCollectionSource =
     state.source === "library_collection" || state.source === "user_collection";
+  const hasSavedSortPreference =
+    isCollectionSource || state.source === "watchlist" || state.source === "favorites";
   const allowPersonalizedOverlayControls = catalogSourceAllowsOverlay(state.source);
   const removeHistory = useRemoveHistory();
   const [selectionMode, setSelectionMode] = useState(false);
@@ -157,6 +163,67 @@ function CatalogResults({
     visibleRange,
     includeTotal: showExactResultCount,
   });
+  // The server resolves a collection or personal list's effective order when
+  // the URL carries no sort.
+  // Reflect that back into the filter bar so the menu shows what is actually
+  // applied, without writing it into the URL — leaving it out of the URL is what
+  // lets a later change to the saved preference take effect on the next visit.
+  const effectiveSort = catalogQuery.data?.effectiveSort;
+  const sortedState = useMemo(() => {
+    if (!hasSavedSortPreference || !effectiveState.uses_source_order || !effectiveSort?.field) {
+      return effectiveState;
+    }
+    return {
+      ...effectiveState,
+      uses_source_order: false,
+      sort_from_server: true,
+      query_definition: {
+        ...effectiveState.query_definition,
+        sort: { field: effectiveSort.field, order: effectiveSort.order },
+      },
+    };
+  }, [effectiveSort, effectiveState, hasSavedSortPreference]);
+
+  const saveCollectionSortPreference = useSetCollectionSortPreference();
+  const rememberCollectionSort = useCallback(
+    (nextState: CatalogSearchState) => {
+      const collectionId = nextState.collection_id?.trim();
+      let collectionKind: "library" | "user" | "watchlist" | "favorites";
+      if (nextState.source === "library_collection") {
+        if (!collectionId) return;
+        collectionKind = "library";
+      } else if (nextState.source === "user_collection") {
+        if (!collectionId) return;
+        collectionKind = "user";
+      } else if (nextState.source === "watchlist" || nextState.source === "favorites") {
+        collectionKind = nextState.source;
+      } else {
+        return;
+      }
+      const nextValue = nextState.uses_source_order
+        ? ""
+        : querySortToSelectValue(nextState.query_definition.sort);
+      const currentValue = sortedState.uses_source_order
+        ? ""
+        : querySortToSelectValue(sortedState.query_definition.sort);
+      if (nextValue === currentValue) return;
+      // Captured here, at the moment of the pick, rather than inside the
+      // mutation: these writes are serialized, so one that runs later must
+      // still land on the profile that actually chose the sort.
+      const profileAuth = captureProfileRequestContext();
+      if (!profileAuth) return;
+      const [field, order] = nextValue ? nextValue.split(":") : ["", ""];
+      void saveCollectionSortPreference({
+        collection_kind: collectionKind,
+        collection_id: collectionId,
+        field: field ?? "",
+        order: order === "asc" || order === "desc" ? order : "",
+        profileAuth,
+      });
+    },
+    [saveCollectionSortPreference, sortedState],
+  );
+
   const canRequest = useCanRequest();
   // Add a short TMDB debounce on top of SearchBar's input debounce so the
   // TMDB plugin isn't hit at the same cadence as the local library query.
@@ -273,9 +340,17 @@ function CatalogResults({
       ) : null}
 
       <CatalogFiltersPanel
-        state={effectiveState}
+        state={sortedState}
         onStateChange={(nextState) => {
-          const nextSearchParams = buildCatalogFilterSearchParams(nextState);
+          const sortChanged =
+            nextState.uses_source_order !== sortedState.uses_source_order ||
+            querySortToSelectValue(nextState.query_definition.sort) !==
+              querySortToSelectValue(sortedState.query_definition.sort);
+          const stateForNavigation = sortChanged
+            ? { ...nextState, sort_from_server: false }
+            : nextState;
+          rememberCollectionSort(stateForNavigation);
+          const nextSearchParams = buildCatalogFilterSearchParams(stateForNavigation);
           if (nextSearchParams.toString() !== searchParams.toString()) {
             setSearchParams(nextSearchParams);
           }
@@ -348,6 +423,7 @@ function CatalogResults({
           pageSize={limit}
           loading={catalogQuery.isLoading}
           onVisibleRangeChange={handleVisibleRangeChange}
+          narrowPosterActions={state.source === "favorites" || state.source === "watchlist"}
           selectionMode={isHistorySource && selectionMode}
           selectedIds={selectedIds}
           onToggleSelect={toggleHistorySelection}

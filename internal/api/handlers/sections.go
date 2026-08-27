@@ -13,8 +13,10 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/access"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/artworkkey"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/imagesize"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/sections/recipes"
@@ -23,19 +25,21 @@ import (
 
 // SectionHandler handles section management and batch section endpoints.
 type SectionHandler struct {
-	repo            *sections.Repository
-	fetcher         *sections.Fetcher
-	previewFetcher  sectionPreviewFetcher // set to fetcher at construction; separate for test injection
-	episodeFetcher  sectionEpisodeFetcher
-	playableTargets sectionPlayableTargetResolver // set to fetcher at construction; separate for test injection
-	FolderRepo      *catalog.FolderRepository
-	EpisodeRepo     *catalog.EpisodeRepository
-	StoreProvider   userstore.UserStoreProvider
-	UserRepo        *auth.UserRepository
-	DetailSvc       *catalog.DetailService
-	Settings        catalog.SettingsStore
-	CollectionRepo  *catalog.LibraryCollectionRepository
-	EbookProgress   EbookReaderProgressLister
+	repo                  *sections.Repository
+	fetcher               *sections.Fetcher
+	previewFetcher        sectionPreviewFetcher // set to fetcher at construction; separate for test injection
+	episodeFetcher        sectionEpisodeFetcher
+	playableTargets       sectionPlayableTargetResolver // set to fetcher at construction; separate for test injection
+	FolderRepo            *catalog.FolderRepository
+	EpisodeRepo           *catalog.EpisodeRepository
+	StoreProvider         userstore.UserStoreProvider
+	UserRepo              *auth.UserRepository
+	AccessGroups          access.GroupPolicyProvider // optional; resolves inherited library access when no scope is in context
+	DetailSvc             *catalog.DetailService
+	Settings              catalog.SettingsStore
+	CollectionRepo        *catalog.LibraryCollectionRepository
+	SortPreferenceCleaner *userstore.CollectionSortPreferenceCleaner
+	EbookProgress         EbookReaderProgressLister
 }
 
 // NewSectionHandler creates a new SectionHandler.
@@ -410,6 +414,8 @@ func (h *SectionHandler) deleteUnreferencedSectionManagedCollection(ctx context.
 	}
 	if err := h.CollectionRepo.Delete(ctx, collectionID); err != nil && !errors.Is(err, catalog.ErrLibraryCollectionNotFound) {
 		slog.WarnContext(ctx, "failed to delete unreferenced section-managed collection", "component", "api", "collection_id", collectionID, "error", err)
+	} else if err == nil && h.SortPreferenceCleaner != nil {
+		h.SortPreferenceCleaner.DeleteForCollection(ctx, userstore.CollectionKindLibrary, collectionID)
 	}
 }
 
@@ -577,6 +583,9 @@ func (h *SectionHandler) HandleLibraryLayout(w http.ResponseWriter, r *http.Requ
 
 // HandleHomeSections handles GET /home/sections
 func (h *SectionHandler) HandleHomeSections(w http.ResponseWriter, r *http.Request) {
+	if !rejectInvalidImageSize(w, r) {
+		return
+	}
 	resolved, libraryIDs, accessFilter, profileID, err := h.loadResolvedHomeSections(r)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load sections")
@@ -593,6 +602,9 @@ func (h *SectionHandler) HandleHomeSections(w http.ResponseWriter, r *http.Reque
 
 // HandleHomeSectionItems handles GET /home/sections/{id}/items
 func (h *SectionHandler) HandleHomeSectionItems(w http.ResponseWriter, r *http.Request) {
+	if !rejectInvalidImageSize(w, r) {
+		return
+	}
 	sectionID := chi.URLParam(r, "id")
 	if sectionID == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "Section ID is required")
@@ -647,6 +659,9 @@ func (h *SectionHandler) HandleHomeSectionItems(w http.ResponseWriter, r *http.R
 
 // HandleLibrarySections handles GET /library/{id}/sections
 func (h *SectionHandler) HandleLibrarySections(w http.ResponseWriter, r *http.Request) {
+	if !rejectInvalidImageSize(w, r) {
+		return
+	}
 	idStr := chi.URLParam(r, "id")
 	libraryID, err := strconv.Atoi(idStr)
 	if err != nil {
@@ -669,6 +684,9 @@ func (h *SectionHandler) HandleLibrarySections(w http.ResponseWriter, r *http.Re
 
 // HandleLibrarySectionItems handles GET /library/{id}/sections/{sectionId}/items
 func (h *SectionHandler) HandleLibrarySectionItems(w http.ResponseWriter, r *http.Request) {
+	if !rejectInvalidImageSize(w, r) {
+		return
+	}
 	idStr := chi.URLParam(r, "id")
 	libraryID, err := strconv.Atoi(idStr)
 	if err != nil {
@@ -763,10 +781,24 @@ func (h *SectionHandler) loadResolvedHomeSections(r *http.Request) ([]sections.R
 		accessFilter.DisabledLibraryIDs = scope.DisabledLibraryIDs
 		accessFilter.MaxContentRating = scope.MaxContentRating
 	} else if h.UserRepo != nil {
-		user, _ := h.UserRepo.GetByID(r.Context(), userID)
-		if user != nil && user.LibraryIDs != nil {
-			libraryIDs = user.LibraryIDs
-			accessFilter.AllowedLibraryIDs = user.LibraryIDs
+		// Fail closed: an unresolved policy must not serve unrestricted
+		// sections, so a lookup failure becomes an error for the caller
+		// rather than a silently permissive filter.
+		user, userErr := h.UserRepo.GetByID(r.Context(), userID)
+		if userErr != nil {
+			slog.ErrorContext(r.Context(), "looking up user for section access", "component", "api", "error", userErr)
+			return nil, nil, catalog.AccessFilter{}, profileID, userErr
+		}
+		if user != nil {
+			effective, policyErr := access.EffectivePolicyForUser(r.Context(), user, h.AccessGroups)
+			if policyErr != nil {
+				slog.ErrorContext(r.Context(), "resolving user policy for section access", "component", "api", "error", policyErr)
+				return nil, nil, catalog.AccessFilter{}, profileID, policyErr
+			}
+			if effective.LibraryIDs != nil {
+				libraryIDs = effective.LibraryIDs
+				accessFilter.AllowedLibraryIDs = effective.LibraryIDs
+			}
 		}
 	}
 
@@ -1277,7 +1309,7 @@ func (h *SectionHandler) buildSectionsResponse(r *http.Request, withItems []sect
 		}
 	}
 	userStates := h.listSectionItemUserStates(r, allItems)
-	imageURLs := h.resolveSectionItemImageURLs(r.Context(), withItems)
+	imageURLs := h.resolveSectionItemImageURLs(r.Context(), withItems, requestImageSize(r))
 	episodeMeta := h.listSectionEpisodeItemMeta(r.Context(), withItems, requestAccessFilter(r))
 	mangaChapterMeta := h.listSectionMangaChapterItemMeta(r.Context(), allItems)
 	for _, s := range withItems {
@@ -1405,7 +1437,7 @@ func (h *SectionHandler) listSectionEpisodeItemMeta(ctx context.Context, withIte
 	return meta
 }
 
-func (h *SectionHandler) resolveSectionItemImageURLs(ctx context.Context, withItems []sections.SectionWithItems) map[sectionItemImageKey]sectionItemImageURLs {
+func (h *SectionHandler) resolveSectionItemImageURLs(ctx context.Context, withItems []sections.SectionWithItems, size imagesize.Size) map[sectionItemImageKey]sectionItemImageURLs {
 	result := make(map[sectionItemImageKey]sectionItemImageURLs)
 	if h.DetailSvc == nil {
 		return result
@@ -1442,9 +1474,9 @@ func (h *SectionHandler) resolveSectionItemImageURLs(ctx context.Context, withIt
 					sectionID: section.ID,
 					contentID: item.ContentID,
 				},
-				posterPath:   featuredPosterPath(item.PosterPath),
-				backdropPath: sectionBackdropPath(section.SectionType, item.BackdropPath),
-				logoPath:     item.LogoPath,
+				posterPath:   sizedPosterPath(item.PosterPath, size),
+				backdropPath: sizedSectionBackdropPath(section.SectionType, item.BackdropPath, size),
+				logoPath:     sizedImagePath(item.LogoPath, artworkkey.ImageLogo, size, item.LogoPath),
 			}
 			pending = append(pending, images)
 			addPath(images.posterPath)
@@ -1453,7 +1485,7 @@ func (h *SectionHandler) resolveSectionItemImageURLs(ctx context.Context, withIt
 		}
 	}
 
-	resolved := h.DetailSvc.PresignURLsWithExpiry(ctx, paths, "featured")
+	resolved := h.DetailSvc.PresignURLsWithExpiry(ctx, paths, requestVariantHint("featured", size))
 	for _, images := range pending {
 		result[images.key] = sectionItemImageURLs{
 			posterURL:   resolved[images.posterPath].URL,
@@ -1518,6 +1550,14 @@ func (h *SectionHandler) toSectionItemResponse(sectionType sections.SectionType,
 	resp.LogoURL = imageURLs.logoURL
 
 	return resp
+}
+
+// sizedSectionBackdropPath applies the request's image size to a section
+// backdrop. An explicit size wins over the per-section default, including the
+// Continue Watching / Next Up special case below: a client that asked for one
+// size gets that size in every row.
+func sizedSectionBackdropPath(sectionType sections.SectionType, path string, size imagesize.Size) string {
+	return sizedImagePath(path, imageTypeForBackdropPath(path), size, sectionBackdropPath(sectionType, path))
 }
 
 // sectionBackdropPath keeps featured-style backdrops for most sections, but

@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { useImageLoaded } from "@/hooks/useImageLoaded";
 import { Check, Layers } from "lucide-react";
 import ViewTransitionLink from "@/components/ViewTransitionLink";
@@ -172,6 +173,7 @@ export default function ItemCard({
   libraryId,
   sortField,
   overlayPrefs,
+  narrowPosterActions = false,
   selectionMode = false,
   selected = false,
   onToggleSelect,
@@ -180,6 +182,7 @@ export default function ItemCard({
   libraryId?: number;
   sortField?: string;
   overlayPrefs?: CardOverlayPrefs | null;
+  narrowPosterActions?: boolean;
   selectionMode?: boolean;
   selected?: boolean;
   onToggleSelect?: (item: BrowseItem) => void;
@@ -198,9 +201,10 @@ export default function ItemCard({
   const { cardPresentation } = useUICustomization();
   const showCaption = cardPresentation.caption !== "artwork";
   const showMetadata = cardPresentation.caption === "title_metadata";
+  const cardRef = useRef<HTMLDivElement>(null);
 
   return (
-    <div className="media-card group/card">
+    <div ref={cardRef} className="media-card media-card-longpress group/card">
       <div className="group/media relative">
         <ViewTransitionLink
           to={itemHref}
@@ -316,6 +320,9 @@ export default function ItemCard({
           libraryId={libraryId}
           userState={item.user_state}
           variant="poster"
+          narrowPosterActions={narrowPosterActions}
+          longPressRef={cardRef}
+          itemTitle={displayTitle}
         />
       </div>
       {showCaption ? (
@@ -337,7 +344,7 @@ export default function ItemCard({
           {showMetadata ? (
             <ViewTransitionLink
               to={itemHref}
-              className="text-muted-foreground mt-1 block text-[11px] font-medium tracking-[0.14em] uppercase hover:underline"
+              className="text-muted-foreground mt-1 block truncate text-[11px] font-medium tracking-[0.14em] uppercase hover:underline"
             >
               <SortMeta item={item} sortField={sortField} />
             </ViewTransitionLink>

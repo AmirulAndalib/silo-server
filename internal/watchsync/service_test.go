@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +47,8 @@ type serviceFakeRepo struct {
 	settings               map[string]string
 	syncRuns               []SyncRun
 	historyExports         []HistoryExport
+	historyLookupIDs       []string
+	historyLookupLimit     int
 	listItemStates         []ListItemState
 	scrobbleConnections    []Connection
 	scrobbleSessions       []ScrobbleSession
@@ -336,6 +340,27 @@ func (r *serviceFakeRepo) ListPendingHistoryExports(_ context.Context, connectio
 	var exports []HistoryExport
 	for _, export := range r.historyExports {
 		if export.ConnectionID == connectionID &&
+			(export.Status == historyExportStatusPending || export.Status == historyExportStatusFailed) && export.AttemptCount < 5 {
+			exports = append(exports, export)
+			if limit > 0 && len(exports) >= limit {
+				break
+			}
+		}
+	}
+	return exports, nil
+}
+
+func (r *serviceFakeRepo) ListPendingHistoryExportsByHistoryIDs(_ context.Context, connectionID string, historyIDs []string, limit int) ([]HistoryExport, error) {
+	r.historyLookupIDs = append([]string(nil), historyIDs...)
+	r.historyLookupLimit = limit
+	wanted := make(map[string]struct{}, len(historyIDs))
+	for _, historyID := range historyIDs {
+		wanted[historyID] = struct{}{}
+	}
+	var exports []HistoryExport
+	for _, export := range r.historyExports {
+		_, matches := wanted[export.HistoryID]
+		if export.ConnectionID == connectionID && matches &&
 			(export.Status == historyExportStatusPending || export.Status == historyExportStatusFailed) && export.AttemptCount < 5 {
 			exports = append(exports, export)
 			if limit > 0 && len(exports) >= limit {
@@ -789,8 +814,18 @@ func (p progressBatchImporterStub) FetchProgressBatch(context.Context, ServerCon
 type watchedExporterStub struct {
 	exportErr    error
 	exportResult ExportResult
+	exported     *[]LocalPlay
 	key          string
 	source       userstore.WatchHistorySource
+}
+
+type singleBatchWatchedExporterStub struct {
+	watchedExporterStub
+	batchSize int
+}
+
+func (p singleBatchWatchedExporterStub) ExportBatchSize() int {
+	return p.batchSize
 }
 
 func (p watchedExporterStub) Key() string {
@@ -812,7 +847,10 @@ func (p watchedExporterStub) FetchHistory(context.Context, ServerConfig, Connect
 	return nil, nil
 }
 
-func (p watchedExporterStub) ExportHistory(context.Context, ServerConfig, Connection, []LocalPlay) (ExportResult, error) {
+func (p watchedExporterStub) ExportHistory(_ context.Context, _ ServerConfig, _ Connection, plays []LocalPlay) (ExportResult, error) {
+	if p.exported != nil {
+		*p.exported = append(*p.exported, plays...)
+	}
 	return p.exportResult, p.exportErr
 }
 
@@ -1058,6 +1096,18 @@ type matchedMatcherStub struct {
 
 func (m matchedMatcherStub) Match(context.Context, historyimport.Record) (*historyimport.Match, string, error) {
 	return &historyimport.Match{MediaItemID: m.mediaItemID}, "", nil
+}
+
+type watchedLeafMatcherStub struct {
+	matches []historyimport.Match
+}
+
+func (m watchedLeafMatcherStub) Match(context.Context, historyimport.Record) (*historyimport.Match, string, error) {
+	return nil, "unexpected single-item match", nil
+}
+
+func (m watchedLeafMatcherStub) MatchLeaves(context.Context, historyimport.Record) ([]historyimport.Match, string, error) {
+	return m.matches, "", nil
 }
 
 type noOpWatchState struct{}
@@ -1679,6 +1729,78 @@ func TestServiceImportWatchedUsesProviderHistorySource(t *testing.T) {
 	}
 	if len(watchState.watchedAt) != 1 || watchState.watchedAt[0] == nil || !watchState.watchedAt[0].Equal(watchedAt) {
 		t.Fatalf("recorded watched_at = %+v, want %v", watchState.watchedAt, watchedAt)
+	}
+}
+
+func TestServiceImportWatchedExpandsAggregateMarkerToEpisodeLeaves(t *testing.T) {
+	repo := newServiceFakeRepo()
+	watchedAt := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	provider := watchedImporterStub{
+		key:    "mdblist",
+		source: userstore.WatchHistorySourceMDBList,
+		rows: []RemoteWatch{{
+			Provider: "mdblist", Kind: historyimport.KindSeries, Title: "Breaking Bad", LastWatchedAt: &watchedAt,
+		}},
+	}
+	watchState := &recordingWatchState{}
+	service := NewService(repo, NewRegistry()).
+		WithMatcher(watchedLeafMatcherStub{matches: []historyimport.Match{
+			{MediaItemID: "episode-1", Kind: historyimport.KindEpisode},
+			{MediaItemID: "episode-2", Kind: historyimport.KindEpisode},
+		}}).
+		WithWatchState(watchState)
+
+	result, err := service.ImportWatched(context.Background(), Connection{
+		ID: "conn-1", Provider: "mdblist", UserID: 7, ProfileID: "profile-1",
+	}, ServerConfig{}, provider)
+	if err != nil {
+		t.Fatalf("ImportWatched: %v", err)
+	}
+	if result.Found != 1 || result.Imported != 2 || result.Unmatched != 0 {
+		t.Fatalf("result = %+v, want one aggregate found and two leaves imported", result)
+	}
+	if !reflect.DeepEqual(watchState.targetIDs, []string{"episode-1", "episode-2"}) {
+		t.Fatalf("recorded target ids = %+v", watchState.targetIDs)
+	}
+	if !reflect.DeepEqual(watchState.sources, []userstore.WatchHistorySource{
+		userstore.WatchHistorySourceMDBList,
+		userstore.WatchHistorySourceMDBList,
+	}) {
+		t.Fatalf("recorded sources = %+v", watchState.sources)
+	}
+}
+
+func TestServiceImportWatchedDeduplicatesResolvedLeavesAtNewestTimestamp(t *testing.T) {
+	repo := newServiceFakeRepo()
+	olderWatchedAt := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	newerWatchedAt := olderWatchedAt.Add(24 * time.Hour)
+	provider := watchedImporterStub{
+		key:    "mdblist",
+		source: userstore.WatchHistorySourceMDBList,
+		rows: []RemoteWatch{
+			{Provider: "mdblist", Kind: historyimport.KindMovie, Title: "Inception", LastWatchedAt: &olderWatchedAt},
+			{Provider: "mdblist", Kind: historyimport.KindMovie, Title: "Inception", LastWatchedAt: &newerWatchedAt},
+		},
+	}
+	watchState := &recordingWatchState{}
+	service := NewService(repo, NewRegistry()).
+		WithMatcher(matchedMatcherStub{mediaItemID: testMovieMediaID}).
+		WithWatchState(watchState)
+
+	result, err := service.ImportWatched(context.Background(), Connection{
+		ID: "conn-1", Provider: "mdblist", UserID: 7, ProfileID: "profile-1",
+	}, ServerConfig{}, provider)
+	if err != nil {
+		t.Fatalf("ImportWatched: %v", err)
+	}
+	if result.Found != 2 || result.Imported != 1 || result.Unmatched != 0 {
+		t.Fatalf("result = %+v, want two provider markers and one imported leaf", result)
+	}
+	if !reflect.DeepEqual(watchState.targetIDs, []string{testMovieMediaID}) {
+		t.Fatalf("recorded target ids = %+v", watchState.targetIDs)
+	}
+	if len(watchState.watchedAt) != 1 || watchState.watchedAt[0] == nil || !watchState.watchedAt[0].Equal(newerWatchedAt) {
+		t.Fatalf("recorded watched_at = %+v, want %v", watchState.watchedAt, newerWatchedAt)
 	}
 }
 
@@ -2587,6 +2709,12 @@ func TestServiceConfirmedStopSerializesConcurrentConfirmation(t *testing.T) {
 	}
 }
 
+func TestConfirmedStopLeaseExceedsDispatchTimeout(t *testing.T) {
+	if confirmedStopLease <= confirmedStopDispatchTimeout {
+		t.Fatalf("confirmed stop lease %s must exceed dispatch timeout %s", confirmedStopLease, confirmedStopDispatchTimeout)
+	}
+}
+
 func TestServiceConfirmedStopCannotCompleteReclaimedLease(t *testing.T) {
 	repo := newServiceFakeRepo()
 	repo.scrobbleConnections = []Connection{{
@@ -3127,6 +3255,74 @@ func TestServicePluginTransportFailureLeavesExportPending(t *testing.T) {
 	}
 	if len(repo.historyExports) != 1 || repo.historyExports[0].Status != historyExportStatusPending || repo.historyExports[0].AttemptCount != 0 {
 		t.Fatalf("history exports = %#v", repo.historyExports)
+	}
+}
+
+func TestServiceLocalWatchEventBypassesHistoricalExportBacklog(t *testing.T) {
+	repo := newServiceFakeRepo()
+	for i := 0; i < 100; i++ {
+		repo.historyExports = append(repo.historyExports, HistoryExport{
+			ID:           fmt.Sprintf("old-export-%d", i),
+			ConnectionID: "conn-1",
+			HistoryID:    fmt.Sprintf("old-history-%d", i),
+			Status:       historyExportStatusPending,
+			WatchedAt:    time.Date(2025, time.January, 1, 0, i, 0, 0, time.UTC),
+		})
+	}
+	var exported []LocalPlay
+	service := NewService(repo, NewRegistry())
+	play := LocalPlay{
+		HistoryID:       "new-history",
+		MediaItemID:     testMovieMediaID,
+		ProviderItemKey: testMovieProviderItemKey,
+		WatchedAt:       time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC),
+	}
+	err := service.exportLocalPlays(context.Background(), Connection{ID: "conn-1"}, ServerConfig{}, watchedExporterStub{
+		exported:     &exported,
+		exportResult: ExportResult{Sent: []string{play.HistoryID}},
+	}, []LocalPlay{play})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exported) != 1 || exported[0].HistoryID != play.HistoryID {
+		t.Fatalf("exported = %#v, want only the live event", exported)
+	}
+	if got := repo.historyExports[len(repo.historyExports)-1].Status; got != historyExportStatusSent {
+		t.Fatalf("new export status = %q, want %q", got, historyExportStatusSent)
+	}
+}
+
+func TestServiceLocalWatchEventBoundsHistoryLookupToProviderBatch(t *testing.T) {
+	repo := newServiceFakeRepo()
+	var exported []LocalPlay
+	plays := make([]LocalPlay, 0, 25)
+	for i := 0; i < 25; i++ {
+		plays = append(plays, LocalPlay{
+			HistoryID:       fmt.Sprintf("history-%d", i),
+			MediaItemID:     testMovieMediaID,
+			ProviderItemKey: testMovieProviderItemKey,
+			WatchedAt:       time.Date(2026, time.August, 6, 12, i, 0, 0, time.UTC),
+		})
+	}
+	service := NewService(repo, NewRegistry())
+	err := service.exportLocalPlays(
+		context.Background(),
+		Connection{ID: "conn-1"},
+		ServerConfig{},
+		singleBatchWatchedExporterStub{
+			watchedExporterStub: watchedExporterStub{exported: &exported},
+			batchSize:           1,
+		},
+		plays,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repo.historyLookupLimit != 1 {
+		t.Fatalf("history lookup limit = %d, want 1", repo.historyLookupLimit)
+	}
+	if len(exported) != 1 {
+		t.Fatalf("exported %d plays, want 1", len(exported))
 	}
 }
 

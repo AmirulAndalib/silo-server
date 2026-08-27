@@ -23,6 +23,9 @@ export interface CatalogSearchState {
   person_id?: string;
   type_override?: string;
   uses_source_order?: boolean;
+  // True when the UI is displaying a collection sort resolved by the server,
+  // rather than an explicit sort read from the URL or chosen by the viewer.
+  sort_from_server?: boolean;
   query_definition: QueryDefinition;
 }
 
@@ -69,9 +72,9 @@ function isCollectionSource(source: CatalogSource): boolean {
 
 // Sources whose default ordering is the stored list order rather than a sort
 // field. The watchlist's stored order can mirror a watch provider's list
-// order (e.g. MDBList) via sort_index.
+// order (e.g. MDBList) via sort_index; favorites use their entry order.
 export function catalogSourceSupportsSourceOrder(source: CatalogSource): boolean {
-  return isCollectionSource(source) || source === "watchlist";
+  return isCollectionSource(source) || source === "watchlist" || source === "favorites";
 }
 
 export function catalogSourceAllowsOverlay(source: CatalogSource): boolean {
@@ -385,14 +388,15 @@ export function buildCatalogApiSearchParams(state: CatalogSearchState): URLSearc
     params.set("order", state.query_definition.sort.order);
   } else if (
     !state.uses_source_order &&
+    !state.sort_from_server &&
     state.query_definition.sort.field &&
     (state.query_definition.sort.field !== "added_at" ||
       (state.source === "query" && effectiveLibraryID != null) ||
-      // Watchlist defaults to source order, so an explicit Date Added pick
+      // These sources default to source order, so an explicit Date Added pick
       // must be sent to distinguish it (the server maps it to list added-at).
-      state.source === "watchlist" ||
-      state.source === "library_collection" ||
-      state.source === "user_collection")
+      // Dropping it would round-trip back through parse as source order and
+      // save the wrong browse preference.
+      catalogSourceSupportsSourceOrder(state.source))
   ) {
     params.set("sort", state.query_definition.sort.field);
     if (state.query_definition.sort.order) {
