@@ -831,10 +831,18 @@ func computeCapabilityDrift(stored, payload []byte) (drift capabilityDrift, pars
 		if !backend.Verified {
 			continue
 		}
-		// A backend missing from the new report entirely had no candidate
-		// hardware left to probe, which is the GPU-disappeared case and is a
-		// genuine loss.
-		if outcome, reported := now[backend.Backend]; reported && (outcome.verified || outcome.skipped) {
+		outcome, reported := now[backend.Backend]
+		// Absent is not lost. Detection only probes the backends the configured
+		// hw_device gives it candidates for, so a backend vanishes from the
+		// report both when its hardware went away *and* when an operator simply
+		// pointed the node at something else — moving hw_device from a QSV
+		// render path to an NVENC index legitimately stops QSV being reported.
+		// Latching drift on that demands a backend verify again that the node is
+		// deliberately no longer configured for, which nothing can ever satisfy.
+		// Hardware actually disappearing shows up in render_devices, which is
+		// the host's own inventory and owes nothing to the configuration, and is
+		// compared separately below.
+		if !reported || outcome.verified || outcome.skipped {
 			continue
 		}
 		drift.lostBackends = append(drift.lostBackends, backend.Backend)

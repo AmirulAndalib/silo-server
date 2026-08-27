@@ -584,9 +584,10 @@ func TestComputeCapabilityDriftStillCatchesAFailedBackend(t *testing.T) {
 	}
 }
 
-// A backend that vanishes from the report had no candidate hardware left to
-// probe at all, which is the GPU-disappeared case and a genuine loss.
-func TestComputeCapabilityDriftCatchesABackendThatStoppedBeingReported(t *testing.T) {
+// A GPU that actually disappears is caught by the device comparison, which reads
+// the host's own inventory and owes nothing to the configuration. The backend
+// going unreported alongside it is a consequence, not separate evidence.
+func TestComputeCapabilityDriftCatchesAVanishedGPUAsADeviceLoss(t *testing.T) {
 	const before = `{"resolved":"qsv","render_devices":["/dev/dri/renderD128"],` +
 		`"detected_backends":[{"backend":"qsv","verified":true}]}`
 	const after = `{"resolved":"none","render_devices":[],"detected_backends":[]}`
@@ -595,8 +596,35 @@ func TestComputeCapabilityDriftCatchesABackendThatStoppedBeingReported(t *testin
 	if !parsed {
 		t.Fatal("both reports should parse")
 	}
-	if len(drift.lostBackends) != 1 || drift.lostBackends[0] != "qsv" {
-		t.Fatalf("lostBackends = %v, want the vanished backend reported", drift.lostBackends)
+	if !drift.regressed() {
+		t.Fatalf("drift = %+v, want a vanished GPU recorded", drift)
+	}
+	if len(drift.lostDevices) != 1 || drift.lostDevices[0] != "/dev/dri/renderD128" {
+		t.Fatalf("lostDevices = %v, want the vanished card reported", drift.lostDevices)
+	}
+}
+
+// Detection only probes the backends the configured hw_device gives it
+// candidates for, so repointing a node from a QSV render path to an NVENC index
+// legitimately stops QSV being reported. Treating that as a disappeared backend
+// latched a warning demanding QSV verify again on a node deliberately configured
+// for NVENC — which nothing could ever satisfy, so the false incident could
+// never clear.
+func TestComputeCapabilityDriftIgnoresABackendThePolicyStoppedProbing(t *testing.T) {
+	// The host's inventory is unchanged; only what was probed moved.
+	const before = `{"resolved":"qsv","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],` +
+		`"detected_backends":[{"backend":"qsv","verified":true}]}`
+	const after = `{"resolved":"nvenc","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],` +
+		`"detected_backends":[{"backend":"nvenc","verified":true}]}`
+
+	drift, parsed := computeCapabilityDrift([]byte(before), []byte(after))
+	if !parsed {
+		t.Fatal("both reports should parse")
+	}
+	if drift.regressed() {
+		t.Fatalf("drift = %+v, want a policy change not recorded as hardware loss", drift)
 	}
 }
 

@@ -21,27 +21,34 @@ type resourceSampler interface {
 	Snapshot() nodemetrics.Snapshot
 }
 
+// playbackSettings reports the playback configuration a local probe should run
+// under. It is a function rather than three strings because these settings hot
+// reload: frozen at construction, /admin/system/hw-accel would keep probing the
+// backend and devices the process started with, and the Playback settings page
+// would show an operator a verification result for the configuration they just
+// replaced.
+type playbackSettings func() (ffmpegPath, hwAccel, hwDevice string)
+
 // SystemHandler serves read-only system inspection endpoints.
 type SystemHandler struct {
 	transcodePool *nodepool.TranscodePool
 	jwtSecret     string
-	ffmpegPath    string
-	hwAccel       string
-	hwDevice      string
+	playback      playbackSettings
 	buildInfo     buildinfo.Info
 	resources     resourceSampler
 }
 
-// NewSystemHandler creates a SystemHandler. hwAccel and hwDevice are the
-// configured playback settings, so a local probe verifies the same backend and
-// devices this host would transcode on.
-func NewSystemHandler(transcodePool *nodepool.TranscodePool, jwtSecret, ffmpegPath, hwAccel, hwDevice string) *SystemHandler {
+// NewSystemHandler creates a SystemHandler. playback supplies the current
+// playback settings on each call, so a local probe verifies the backend and
+// devices this host would transcode on right now.
+func NewSystemHandler(transcodePool *nodepool.TranscodePool, jwtSecret string, playback playbackSettings) *SystemHandler {
+	if playback == nil {
+		playback = func() (string, string, string) { return "", "", "" }
+	}
 	return &SystemHandler{
 		transcodePool: transcodePool,
 		jwtSecret:     jwtSecret,
-		ffmpegPath:    ffmpegPath,
-		hwAccel:       hwAccel,
-		hwDevice:      hwDevice,
+		playback:      playback,
 		buildInfo:     buildinfo.Current(),
 	}
 }
@@ -171,9 +178,17 @@ func (h *SystemHandler) HandleHWAccel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, inventory)
 }
 
-// localHWAccel probes this host against its configured playback settings.
+// localHWAccel probes this host against its current playback settings.
+//
+// A zero-value handler answers with the ffmpeg on PATH and auto-detection
+// rather than panicking: tests build one directly, and the accessor is wiring
+// this method should not depend on having received.
 func (h *SystemHandler) localHWAccel() playback.HWAccelInfo {
-	return playback.DetectHWAccelWithFFmpeg(h.hwAccel, h.ffmpegPath, h.hwDevice)
+	var ffmpegPath, hwAccel, hwDevice string
+	if h.playback != nil {
+		ffmpegPath, hwAccel, hwDevice = h.playback()
+	}
+	return playback.DetectHWAccelWithFFmpeg(hwAccel, ffmpegPath, hwDevice)
 }
 
 // HandleBuildInfo handles GET /admin/system/build.

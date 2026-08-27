@@ -202,3 +202,86 @@ func TestRepositoryUpdateCapabilitiesIgnoresATrailingSlash(t *testing.T) {
 		t.Fatalf("UpdateCapabilities with a normalized URL: %v", err)
 	}
 }
+
+// Everything a capability report and a health sample describe belongs to the
+// worker the URL addressed. Repointing the row at a different machine has to
+// drop it: the caller publishes the returned row to the pools immediately, and
+// these are the fields placement reads — the GPU identities behind
+// physical_gpu_keys and the scratch fill behind admission.
+func TestRepositoryUpdateClearsWorkerStateWhenTheURLMoves(t *testing.T) {
+	ctx := context.Background()
+	repo := NewRepository(newNodeTestPool(t))
+	node, err := repo.Create(ctx, CreateNodeInput{
+		Name: fmt.Sprintf("repoint-%d", time.Now().UnixNano()),
+		Type: NodeTypeTranscode,
+		URL:  fmt.Sprintf("http://repoint-%d", time.Now().UnixNano()),
+	})
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Delete(ctx, node.ID) })
+
+	note := "verified hardware backends lost: qsv"
+	payload := []byte(`{"resolved":"qsv","render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],"boot_id":"boot-1"}`)
+	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:old", time.Now(), &note, []byte(`{"backends":["qsv"]}`)); err != nil {
+		t.Fatalf("store capabilities: %v", err)
+	}
+	if err := repo.UpdateHealth(ctx, node.ID, node.URL, true, 2, 0, []byte(`{"system":{"cpu_pct":41}}`)); err != nil {
+		t.Fatalf("store health: %v", err)
+	}
+
+	moved := node.URL + "-elsewhere"
+	updated, err := repo.Update(ctx, node.ID, UpdateNodeInput{URL: &moved})
+	if err != nil {
+		t.Fatalf("repoint node: %v", err)
+	}
+
+	if len(updated.Capabilities) != 0 || updated.CapabilitiesHash != nil || updated.CapabilitiesRefreshedAt != nil {
+		t.Fatalf("capabilities survived a repoint: %+v", updated)
+	}
+	if len(updated.LastStats) != 0 {
+		t.Fatalf("last_stats survived a repoint: %s", updated.LastStats)
+	}
+	if updated.CapabilityDrift != nil || len(updated.CapabilityDriftBaseline) != 0 {
+		t.Fatalf("drift survived a repoint: %v / %s", updated.CapabilityDrift, updated.CapabilityDriftBaseline)
+	}
+	if len(updated.PhysicalGPUKeys) != 0 {
+		t.Fatalf("GPU identities survived a repoint: %v", updated.PhysicalGPUKeys)
+	}
+}
+
+// An edit that leaves the row on the same worker keeps its state — including
+// when only a trailing slash differs, which the pools normalize away and the
+// column does not.
+func TestRepositoryUpdateKeepsWorkerStateWithoutAMove(t *testing.T) {
+	ctx := context.Background()
+	repo := NewRepository(newNodeTestPool(t))
+	node, err := repo.Create(ctx, CreateNodeInput{
+		Name: fmt.Sprintf("stay-%d", time.Now().UnixNano()),
+		Type: NodeTypeTranscode,
+		URL:  fmt.Sprintf("http://stay-%d", time.Now().UnixNano()),
+	})
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Delete(ctx, node.ID) })
+
+	payload := []byte(`{"resolved":"qsv","render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],"boot_id":"boot-1"}`)
+	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:keep", time.Now(), nil, nil); err != nil {
+		t.Fatalf("store capabilities: %v", err)
+	}
+
+	renamed := "renamed-" + node.Name
+	if updated, err := repo.Update(ctx, node.ID, UpdateNodeInput{Name: &renamed}); err != nil {
+		t.Fatalf("rename node: %v", err)
+	} else if len(updated.Capabilities) == 0 || updated.CapabilitiesHash == nil {
+		t.Fatalf("a rename dropped the worker's capabilities: %+v", updated)
+	}
+
+	slashed := node.URL + "/"
+	if updated, err := repo.Update(ctx, node.ID, UpdateNodeInput{URL: &slashed}); err != nil {
+		t.Fatalf("re-save url: %v", err)
+	} else if len(updated.Capabilities) == 0 {
+		t.Fatal("a trailing-slash change was treated as a different worker")
+	}
+}

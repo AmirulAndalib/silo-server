@@ -3191,16 +3191,22 @@ func NewRouter(deps Dependencies) chi.Router {
 							// System inspection.
 							{
 								sysJWTSecret := ""
-								sysFFmpegPath := ""
-								sysHWAccel := ""
-								sysHWDevice := ""
 								if deps.Config != nil {
 									sysJWTSecret = deps.Config.Auth.JWTSecret
-									sysFFmpegPath = deps.Config.Playback.FFmpegPath
-									sysHWAccel = deps.Config.Playback.HWAccel
-									sysHWDevice = deps.Config.Playback.HWDevice
 								}
-								systemHandler := handlers.NewSystemHandler(deps.TranscodePool, sysJWTSecret, sysFFmpegPath, sysHWAccel, sysHWDevice)
+								// Read per request, not captured: playback
+								// settings hot reload, and a probe against the
+								// values this process started with would show an
+								// operator a result for the configuration they
+								// just replaced.
+								systemHandler := handlers.NewSystemHandler(deps.TranscodePool, sysJWTSecret,
+									func() (string, string, string) {
+										cfg := deps.CurrentConfig()
+										if cfg == nil {
+											return "", "", ""
+										}
+										return cfg.Playback.FFmpegPath, cfg.Playback.HWAccel, cfg.Playback.HWDevice
+									})
 								if deps.ResourceSampler != nil {
 									systemHandler.SetResourceSampler(deps.ResourceSampler)
 								}

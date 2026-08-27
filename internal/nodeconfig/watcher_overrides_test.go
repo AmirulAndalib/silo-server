@@ -243,3 +243,48 @@ func TestApplySettingsOverlayOutlivesBootstrapReapply(t *testing.T) {
 		t.Fatalf("HWAccel = %q, want the node override", cfg.Playback.HWAccel)
 	}
 }
+
+// On a split-horizon deployment the row is matched by NODE_NAME, and renaming
+// the node through the admin form leaves this worker's environment pointing at a
+// name nothing carries. "No row" then arrives while the API is still dispatching
+// that row's overridden backend, so reverting to the cluster device here would
+// pair the two wrongly for as long as the names disagree. A row that has gone is
+// not evidence an operator cleared the override.
+func TestApplySettingsKeepsOverrideWhenTheRowStopsMatching(t *testing.T) {
+	accel, device := "nvenc", "0"
+	found := true
+	w := newOverrideWatcher(t, "http://node-1", func(context.Context, string, string) (nodeHWOverrides, bool, error) {
+		if !found {
+			return nodeHWOverrides{}, false, nil
+		}
+		return nodeHWOverrides{HWAccel: &accel, HWDevice: &device}, true, nil
+	})
+	if err := w.applySettings(context.Background(), clusterSettings()); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+
+	found = false
+	if err := w.applySettings(context.Background(), clusterSettings()); err != nil {
+		t.Fatalf("apply after the rename: %v", err)
+	}
+	cfg := w.Config()
+	if cfg.Playback.HWAccel != "nvenc" || cfg.Playback.HWDevice != "0" {
+		t.Fatalf("effective policy = %q / %q, want the last override read from the row",
+			cfg.Playback.HWAccel, cfg.Playback.HWDevice)
+	}
+}
+
+// A node that never had a row is a different case: there is nothing to keep, so
+// the cluster settings stand rather than an invented value.
+func TestApplySettingsInheritsClusterWhenNoRowWasEverFound(t *testing.T) {
+	w := newOverrideWatcher(t, "http://node-1", func(context.Context, string, string) (nodeHWOverrides, bool, error) {
+		return nodeHWOverrides{}, false, nil
+	})
+	if err := w.applySettings(context.Background(), clusterSettings()); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	cfg := w.Config()
+	if cfg.Playback.HWAccel != "qsv" || cfg.Playback.HWDevice != "/dev/dri/renderD128" {
+		t.Fatalf("effective policy = %q / %q, want the cluster values", cfg.Playback.HWAccel, cfg.Playback.HWDevice)
+	}
+}

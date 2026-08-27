@@ -48,6 +48,13 @@ sets `none` for itself instead of forcing every node onto the lowest common
 denominator. A homogeneous deployment should leave both unset and configure
 `playback.hw_accel` once.
 
+Repointing a node's `url` to a different machine clears the identity-bound
+state on that row — `capabilities`, `capabilities_hash`,
+`capabilities_refreshed_at`, `last_stats`, and the drift note with its baseline
+— because all of it describes the worker the old address reached, and the pools
+are reloaded from the row immediately. The replacement is treated as newly
+registered until its first health check and capability fetch.
+
 A node finds its own row by URL first: `NODE_URL` on the node is matched
 against `stream_nodes.url`, ignoring a trailing slash on either side. Set
 `NODE_URL` explicitly on every node. Without it a node guesses
@@ -61,7 +68,12 @@ node's own `NODE_URL` is an internal address that never equals it. `name`
 carries no unique constraint, so an ambiguous match — more than one row
 sharing that name — identifies nothing and adopts neither row's overrides;
 registered names should be unique per node, and `NODE_NAME` should equal the
-registered name.
+registered name. A node whose row *stops* matching — renaming it in the admin
+form while the worker's `NODE_NAME` still holds the old value — keeps the last
+overrides it read rather than reverting to the cluster settings, since the API
+goes on dispatching that row's backend and a row that has gone is not evidence
+an operator cleared the override. Fix the mismatch: the node adopts whatever it
+finds on its next poll.
 
 The node overlays its row onto the cluster-wide playback settings on every
 config reload, so the override is what that node probes with, advertises in
@@ -246,6 +258,12 @@ Semantics worth knowing:
   cards going one at a time must both return.
 - A note carried over from before the baseline existed has nothing recorded to
   wait for, and a clean report clears it.
+- Only a backend that was *probed and failed* counts as lost. A backend simply
+  absent from the report was not asked about — detection probes the backends the
+  configured `hw_device` gives it candidates for — so repointing a node from a
+  QSV render path to an NVENC index is not a regression. Hardware actually
+  disappearing shows up in `render_devices`, which is the host's own inventory
+  and owes nothing to the configuration.
 - A backend reported as `skipped` neither sets the note nor holds it open.
   Skipping means no probe ran because the node cannot open the backend's
   configured devices, which is a statement about access rather than about

@@ -210,6 +210,11 @@ const (
 	hwAccelNone  = "none"
 )
 
+// sameURL is true when an update leaves the row addressing the same worker.
+// Trailing slashes are ignored on both sides because the pools normalize URLs
+// and the column does not, so "http://n1/" becoming "http://n1" is not a move.
+const sameURL = `rtrim(COALESCE($3, url), '/') = rtrim(url, '/')`
+
 // normalizeGroup trims a group label and converts empty to NULL.
 func normalizeGroup(group string) *string {
 	g := strings.TrimSpace(group)
@@ -392,7 +397,22 @@ func (r *Repository) Update(ctx context.Context, id int, input UpdateNodeInput) 
 			max_jobs = CASE WHEN $7::boolean THEN $8::integer ELSE max_jobs END,
 			max_bandwidth_kbps = CASE WHEN $9::boolean THEN $10::integer ELSE max_bandwidth_kbps END,
 			hw_accel_override = CASE WHEN $11::boolean THEN $12::text ELSE hw_accel_override END,
-			hw_device_override = CASE WHEN $13::boolean THEN $14::text ELSE hw_device_override END
+			hw_device_override = CASE WHEN $13::boolean THEN $14::text ELSE hw_device_override END,
+			-- Everything below describes the worker the old URL addressed, so
+			-- repointing the row at a different machine has to drop it. The
+			-- caller publishes the returned row to the pools immediately, and
+			-- these are exactly the fields placement reads: the GPU identities
+			-- behind physical_gpu_keys and the scratch fill behind admission.
+			-- Keeping them would route work onto the replacement using its
+			-- predecessor's hardware until a health check and a capability
+			-- fetch caught up. NULL is the same state a freshly registered node
+			-- is in, which is the truth here.
+			capabilities = CASE WHEN `+sameURL+` THEN capabilities END,
+			capabilities_hash = CASE WHEN `+sameURL+` THEN capabilities_hash END,
+			capabilities_refreshed_at = CASE WHEN `+sameURL+` THEN capabilities_refreshed_at END,
+			last_stats = CASE WHEN `+sameURL+` THEN last_stats END,
+			capability_drift = CASE WHEN `+sameURL+` THEN capability_drift END,
+			capability_drift_baseline = CASE WHEN `+sameURL+` THEN capability_drift_baseline END
 		 WHERE id = $1
 		 RETURNING `+nodeColumns,
 		id, input.Name, input.URL, input.Enabled,

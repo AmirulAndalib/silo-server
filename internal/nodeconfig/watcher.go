@@ -291,13 +291,29 @@ func (w *Watcher) applyNodeHWOverrides(ctx context.Context, cfg *config.Config) 
 		w.mu.Lock()
 		first := !w.missingRowLogged
 		w.missingRowLogged = true
-		w.overrides, w.overridesLoaded = nodeHWOverrides{}, true
+		previous, hadOverrides := w.overrides, w.overridesLoaded
+		if !hadOverrides {
+			w.overrides, w.overridesLoaded = nodeHWOverrides{}, true
+		}
 		w.mu.Unlock()
 		if first {
 			slog.InfoContext(ctx, "no stream_nodes row for this node; inheriting the cluster acceleration settings",
 				"component", "nodeconfig", "node_url", w.bootstrap.NodeURL, "node_name", w.bootstrap.NodeName)
 		}
-		return
+		if !hadOverrides {
+			return
+		}
+		// The row was there and now is not. On a split-horizon deployment the
+		// match is by NODE_NAME, and renaming a node through the admin form
+		// leaves this worker's environment pointing at a name nothing carries —
+		// so "no row" arrives while the API is still dispatching that row's
+		// overridden backend. Reverting to the cluster device here would pair
+		// the two wrongly for as long as the names disagree. A row that has
+		// gone is not evidence an operator cleared the override, so the last
+		// one read stands, exactly as it does when the lookup errors.
+		slog.WarnContext(ctx, "this node's stream_nodes row is no longer matchable; keeping the acceleration policy last read from it",
+			"component", "nodeconfig", "node_url", w.bootstrap.NodeURL, "node_name", w.bootstrap.NodeName)
+		overrides = previous
 	default:
 		w.mu.Lock()
 		w.overrides, w.overridesLoaded = overrides, true
