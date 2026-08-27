@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/playback"
 )
 
@@ -29,7 +33,7 @@ func decodeProxyHealth(t *testing.T, server *Server) healthResponse {
 // first snapshot the field must be absent rather than a hash of nothing, which
 // the sweep would treat as a real inventory.
 func TestProxyHealthPublishesCapabilityHashOnlyAfterSnapshot(t *testing.T) {
-	server := newDownloadProxyServer(t, "capability-secret")
+	server := newCapabilityProxyServer(t, "capability-secret")
 
 	if got := decodeProxyHealth(t, server).CapabilitiesHash; got != "" {
 		t.Fatalf("capabilities_hash = %q before any snapshot, want empty", got)
@@ -53,7 +57,7 @@ func TestProxyHealthPublishesCapabilityHashOnlyAfterSnapshot(t *testing.T) {
 // report carries the same hash health publishes.
 func TestProxyCapabilitiesPublishCapabilityHash(t *testing.T) {
 	const secret = "capability-secret"
-	server := newDownloadProxyServer(t, secret)
+	server := newCapabilityProxyServer(t, secret)
 
 	request := httptest.NewRequest(http.MethodGet, "/hw-capabilities", nil)
 	request.Header.Set("Authorization", "Bearer "+secret)
@@ -86,7 +90,7 @@ func TestProxyCapabilitiesPublishCapabilityHash(t *testing.T) {
 // drop. A caller that gives up must leave the published hash alone.
 func TestProxyCapabilitiesRejectsIncompleteProbeWithoutPublishing(t *testing.T) {
 	const secret = "capability-secret"
-	server := newDownloadProxyServer(t, secret)
+	server := newCapabilityProxyServer(t, secret)
 	server.refreshCapabilitySnapshot(context.Background())
 	published := decodeProxyHealth(t, server).CapabilitiesHash
 	if published == "" {
@@ -111,7 +115,7 @@ func TestProxyCapabilitiesRejectsIncompleteProbeWithoutPublishing(t *testing.T) 
 // The background snapshot has the same duty: a probe it could not finish is not
 // evidence the proxy lost hardware.
 func TestProxySnapshotKeepsPreviousHashWhenProbeCannotFinish(t *testing.T) {
-	server := newDownloadProxyServer(t, "capability-secret")
+	server := newCapabilityProxyServer(t, "capability-secret")
 	server.refreshCapabilitySnapshot(context.Background())
 	published := decodeProxyHealth(t, server).CapabilitiesHash
 	if published == "" {
@@ -125,4 +129,34 @@ func TestProxySnapshotKeepsPreviousHashWhenProbeCannotFinish(t *testing.T) {
 	if got := decodeProxyHealth(t, server).CapabilitiesHash; got != published {
 		t.Fatalf("health capabilities_hash = %q after an unfinished snapshot, want the previous %q", got, published)
 	}
+}
+
+// newCapabilityProxyServer builds a proxy whose configured ffmpeg is a script
+// with a known, successful answer for every listing the capability assembly
+// runs.
+//
+// The capability tests must not depend on the host's toolchain. Left
+// unconfigured, the probes shell out to whatever `ffmpeg` is on PATH — which
+// asserts a 200 on a developer's machine and a 503 on CI, where no ffmpeg is
+// installed, because ProbeTransformationRegistryWithToneMapV3Result reports the
+// exec failure. Scripting the binary also makes the published capability hash
+// deterministic, which is what the stability assertions here depend on.
+func newCapabilityProxyServer(t *testing.T, secret string) *Server {
+	t.Helper()
+	ffmpegPath := filepath.Join(t.TempDir(), "ffmpeg")
+	script := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *-bsfs*) echo 'dovi_rpu'; exit 0 ;;\n" +
+		"  *-encoders*) printf ' V..... libx264 H.264\\n A..... aac AAC\\n'; exit 0 ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	if err := os.WriteFile(ffmpegPath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake ffmpeg: %v", err)
+	}
+	w := nodeconfig.NewWatcher(nil, nil, nil, nodeconfig.BootstrapOverrides{})
+	cfg := &config.Config{}
+	cfg.Auth.JWTSecret = secret
+	cfg.Playback.FFmpegPath = ffmpegPath
+	w.SetConfigForTest(cfg)
+	return NewServer(w, nil)
 }

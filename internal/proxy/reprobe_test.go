@@ -13,7 +13,7 @@ import (
 // it immediately instead of at the next 15-minute tick.
 func TestProxyReprobeCapabilitiesRecomputesAndStoresHash(t *testing.T) {
 	const secret = "capability-secret"
-	server := newDownloadProxyServer(t, secret)
+	server := newCapabilityProxyServer(t, secret)
 	server.storeCapabilityHash("sha256:stale")
 
 	request := httptest.NewRequest(http.MethodPost, "/admin/reprobe-capabilities", nil)
@@ -40,7 +40,7 @@ func TestProxyReprobeCapabilitiesRecomputesAndStoresHash(t *testing.T) {
 // unfinished probe is not evidence the proxy lost hardware.
 func TestProxyReprobeCapabilitiesKeepsHashOnIncompleteProbe(t *testing.T) {
 	const secret = "capability-secret"
-	server := newDownloadProxyServer(t, secret)
+	server := newCapabilityProxyServer(t, secret)
 	server.refreshCapabilitySnapshot(context.Background())
 	published := decodeProxyHealth(t, server).CapabilitiesHash
 	if published == "" {
@@ -64,7 +64,7 @@ func TestProxyReprobeCapabilitiesKeepsHashOnIncompleteProbe(t *testing.T) {
 
 // The route executes ffmpeg, so it stays inside the bearer-authed admin group.
 func TestProxyReprobeCapabilitiesRequiresBearer(t *testing.T) {
-	server := newDownloadProxyServer(t, "capability-secret")
+	server := newCapabilityProxyServer(t, "capability-secret")
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/admin/reprobe-capabilities", nil))
 	if recorder.Code != http.StatusUnauthorized {
