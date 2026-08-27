@@ -135,11 +135,17 @@ func TestCgroupSelfFile(t *testing.T) {
 func TestWithCgroupSelfPathsKeepsTheRootFallback(t *testing.T) {
 	relative := map[string]string{"": "system.slice/silo.service", "memory": "system.slice/silo.service"}
 	got := withCgroupSelfPaths(relative, CgroupMemoryLimitPaths())
+	// Every cgroup between this process and the root, then the root path the
+	// list started with. The intermediate levels are the point: a leaf that says
+	// "max" inside a slice that does not is exactly the case being covered.
 	want := []string{
 		"/sys/fs/cgroup/system.slice/silo.service/memory.max",
+		"/sys/fs/cgroup/system.slice/memory.max",
 		"/sys/fs/cgroup/memory.max",
 		"/sys/fs/cgroup/memory/system.slice/silo.service/memory.limit_in_bytes",
+		"/sys/fs/cgroup/memory/system.slice/memory.limit_in_bytes",
 		"/sys/fs/cgroup/memory/memory.limit_in_bytes",
+		"/sys/fs/cgroup/memory.limit_in_bytes",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("withCgroupSelfPaths() =\n%v\nwant\n%v", got, want)
@@ -201,5 +207,96 @@ func TestWithCgroupSelfUsagePathsRewritesEveryFileOrNone(t *testing.T) {
 	}
 	if rewritten.inactiveFile != cgroupInactiveFileKeyV1 {
 		t.Fatalf("inactiveFile = %q, want the layout's own key preserved", rewritten.inactiveFile)
+	}
+}
+
+// A limit is not always written where the process sits: a systemd unit inherits
+// its quota from the slice containing it, and a container from its pod cgroup.
+// The leaf reads "max" and the kernel throttles anyway, so a walk that stops at
+// the leaf reports the whole host to a process that has two cores.
+func TestCgroupAncestorPaths(t *testing.T) {
+	got := cgroupAncestorPaths("/sys/fs/cgroup/kubepods/burstable/podabc/container1/cpu.max")
+	want := []string{
+		"/sys/fs/cgroup/kubepods/burstable/podabc/container1/cpu.max",
+		"/sys/fs/cgroup/kubepods/burstable/podabc/cpu.max",
+		"/sys/fs/cgroup/kubepods/burstable/cpu.max",
+		"/sys/fs/cgroup/kubepods/cpu.max",
+		cgroupCPUPaths[0].quota,
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("cgroupAncestorPaths() =\n%v\nwant\n%v", got, want)
+	}
+
+	// The mount root itself has nowhere to climb to.
+	if got := cgroupAncestorPaths(cgroupCPUPaths[0].quota); !slices.Equal(got, []string{cgroupCPUPaths[0].quota}) {
+		t.Fatalf("cgroupAncestorPaths(root) = %v, want just the file", got)
+	}
+	// A path outside the hierarchy still reads itself: a test harness pointing
+	// these at a temp directory has no ancestors, and must not lose its file.
+	if got := cgroupAncestorPaths("/tmp/fake/cpu.max"); !slices.Equal(got, []string{"/tmp/fake/cpu.max"}) {
+		t.Fatalf("cgroupAncestorPaths(outside) = %v, want just the file", got)
+	}
+	if got := cgroupAncestorPaths(""); got != nil {
+		t.Fatalf("cgroupAncestorPaths(\"\") = %v, want none", got)
+	}
+}
+
+// The quota a process is throttled against is the tightest anywhere above it,
+// and it has to be paired with the period from the same cgroup — a quota from
+// one level over a period from another describes no real budget.
+func TestEffectiveCgroupCPUQuotaTakesTheTightestAncestor(t *testing.T) {
+	root := t.TempDir()
+	leaf := filepath.Join(root, "system.slice", "silo.service")
+	slice := filepath.Join(root, "system.slice")
+	for _, dir := range []string{leaf, slice} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+	write := func(dir, name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s/%s: %v", dir, name, err)
+		}
+	}
+
+	// cgroupAncestorPaths only climbs inside the real cgroup mount, so the walk
+	// is exercised here by handing effectiveCgroupCPUQuota each level directly.
+	quotaAt := func(dir string) float64 {
+		return effectiveCgroupCPUQuota(cgroupCPUPath{quota: filepath.Join(dir, "cpu.max")})
+	}
+
+	// The service says "max" while its slice allows two cores.
+	write(leaf, "cpu.max", "max 100000\n")
+	write(slice, "cpu.max", "200000 100000\n")
+	if got := quotaAt(leaf); got != 0 {
+		t.Fatalf("leaf alone = %v cores, want 0 — it imposes none", got)
+	}
+	if got := quotaAt(slice); got != 2 {
+		t.Fatalf("slice = %v cores, want 2", got)
+	}
+
+	// A leaf tighter than its slice wins, and a looser one loses.
+	write(leaf, "cpu.max", "100000 100000\n")
+	if got := effectiveCgroupCPUQuota(cgroupCPUPath{quota: filepath.Join(leaf, "cpu.max")}); got != 1 {
+		t.Fatalf("tighter leaf = %v cores, want 1", got)
+	}
+}
+
+// v1 keeps quota and period in separate files, so both have to move together as
+// the walk climbs.
+func TestEffectiveCgroupCPUQuotaPairsQuotaWithItsOwnPeriod(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cpu.cfs_quota_us"), []byte("400000\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cpu.cfs_period_us"), []byte("100000\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := effectiveCgroupCPUQuota(cgroupCPUPath{
+		quota:  filepath.Join(dir, "cpu.cfs_quota_us"),
+		period: filepath.Join(dir, "cpu.cfs_period_us"),
+	})
+	if got != 4 {
+		t.Fatalf("v1 quota = %v cores, want 4", got)
 	}
 }

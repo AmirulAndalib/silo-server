@@ -159,17 +159,22 @@ func resolveNodeIdentity() string {
 // which would make an old node look like it had capability tracking.
 // The request bound comes from budget rather than a constant. A cold node's
 // answer runs the whole FFmpeg probe matrix, and the size of that matrix is a
-// function of how many hardware devices playback is configured with — a node
-// with two render devices legitimately advertises a budget past two minutes.
+// function of how many hardware devices that node will actually probe — two
+// render devices legitimately push the advertised budget past two minutes.
 // Bounding every fetch at a fixed two minutes abandons such a node mid-probe
 // and reports a fetch failure for a node operating inside its published
-// contract.
-func nodeCapabilityFetcher(jwtSecret string, budget func() time.Duration) nodepool.CapabilityFetcher {
+// contract. budget takes the node because the device set is a per-node
+// property: an hw_device override is exactly a node that probes a different
+// matrix from the one the cluster setting describes.
+func nodeCapabilityFetcher(jwtSecret string, budget func(*nodepool.Node) time.Duration) nodepool.CapabilityFetcher {
 	client := &http.Client{}
-	return func(ctx context.Context, nodeURL string) ([]byte, string, error) {
-		ctx, cancel := context.WithTimeout(ctx, budget())
+	return func(ctx context.Context, node *nodepool.Node) ([]byte, string, error) {
+		if node == nil {
+			return nil, "", fmt.Errorf("node capability request has no node")
+		}
+		ctx, cancel := context.WithTimeout(ctx, budget(node))
 		defer cancel()
-		info, payload, status, err := transcodenode.FetchHWCapabilitiesPayload(ctx, client, nodeURL, jwtSecret)
+		info, payload, status, err := transcodenode.FetchHWCapabilitiesPayload(ctx, client, node.URL, jwtSecret)
 		if err != nil {
 			return nil, "", err
 		}
@@ -245,16 +250,30 @@ const libraryPathQueryTimeout = 2 * time.Second
 // first report land instead of timing out.
 const nodeCapabilityRequestTimeout = 2 * time.Minute
 
-// nodeCapabilityProbeBudget reports how long to allow one capability fetch,
-// read from the live configuration on every call so an operator adding a second
-// render device does not have to restart the API for its fetches to stop being
-// cut short.
-func nodeCapabilityProbeBudget(live func() *config.Config) func() time.Duration {
-	return func() time.Duration {
+// nodeCapabilityProbeBudget reports how long to allow one node's capability
+// fetch.
+//
+// The cluster settings are read live on every call, so an operator adding a
+// second render device does not have to restart the API for its fetches to stop
+// being cut short. The node's own overrides win over them, because the worker
+// builds its probe matrix from the policy it will actually run: a node that
+// overrides hw_device with two devices needs the two-device budget even on a
+// cluster configured with one, and it is precisely that node whose inventory
+// would otherwise fail to refresh every sweep.
+func nodeCapabilityProbeBudget(live func() *config.Config) func(*nodepool.Node) time.Duration {
+	return func(node *nodepool.Node) time.Duration {
 		hwAccel, hwDevice := "", ""
 		if live != nil {
 			if current := live(); current != nil {
 				hwAccel, hwDevice = current.Playback.HWAccel, current.Playback.HWDevice
+			}
+		}
+		if node != nil {
+			if node.HWAccelOverride != nil && *node.HWAccelOverride != "" {
+				hwAccel = *node.HWAccelOverride
+			}
+			if node.HWDeviceOverride != nil && *node.HWDeviceOverride != "" {
+				hwDevice = *node.HWDeviceOverride
 			}
 		}
 		return max(nodeCapabilityRequestTimeout, tonemap.ProbeRequestTimeout(hwAccel, hwDevice))

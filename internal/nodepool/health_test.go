@@ -24,10 +24,10 @@ type fakeCapabilityFetcher struct {
 	err     error
 }
 
-func (f *fakeCapabilityFetcher) fetch(_ context.Context, nodeURL string) ([]byte, string, error) {
+func (f *fakeCapabilityFetcher) fetch(_ context.Context, node *Node) ([]byte, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, nodeURL)
+	f.calls = append(f.calls, node.URL)
 	return f.payload, f.hash, f.err
 }
 
@@ -418,7 +418,7 @@ func newBlockingFetcher() *blockingFetcher {
 	return &blockingFetcher{started: make(chan struct{}, 1), release: make(chan struct{})}
 }
 
-func (f *blockingFetcher) fetch(ctx context.Context, _ string) ([]byte, string, error) {
+func (f *blockingFetcher) fetch(ctx context.Context, _ *Node) ([]byte, string, error) {
 	f.calls.Add(1)
 	select {
 	case f.started <- struct{}{}:

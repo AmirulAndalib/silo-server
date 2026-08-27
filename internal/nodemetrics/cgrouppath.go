@@ -101,15 +101,65 @@ func cgroupSelfFile(relative map[string]string, file string) string {
 	return path.Join(cgroupMountRoot, controller, own, name)
 }
 
-// withCgroupSelfPaths returns files preceded by their this-process equivalents,
-// so a read tries the process's own cgroup before falling back to the root.
+// cgroupAncestorPaths returns file and the same file name at every cgroup above
+// it, nearest first, ending at the hierarchy mount root.
+//
+// A limit is not always written where the process sits. A systemd unit can
+// inherit its quota from the slice that contains it, and a container can inherit
+// one from its pod cgroup; in both cases the leaf reads "max" while the kernel
+// throttles against an ancestor. Reading only the leaf would report the host's
+// whole capacity for a process that has far less.
+//
+// The walk is by path, so every level it produces is a genuine ancestor of this
+// process. Levels that hold no such file simply fail to read, which is how the
+// v1 layouts skip the unified root they never had.
+func cgroupAncestorPaths(file string) []string {
+	if file == "" {
+		return nil
+	}
+	// The file itself is always a level. Only the walk above it needs the file
+	// to live under the cgroup mount — a test harness pointing these at a temp
+	// directory has no hierarchy to climb, and must still read what it was given.
+	if !strings.HasPrefix(file, cgroupMountRoot+"/") {
+		return []string{file}
+	}
+	name := path.Base(file)
+	out := []string{file}
+	for dir := path.Dir(file); strings.HasPrefix(dir, cgroupMountRoot); dir = path.Dir(dir) {
+		if candidate := path.Join(dir, name); candidate != file {
+			out = append(out, candidate)
+		}
+		if dir == cgroupMountRoot {
+			break
+		}
+	}
+	return out
+}
+
+// withCgroupSelfPaths returns files preceded by their this-process equivalents
+// and every cgroup between the two, so a read sees each limit in force on this
+// process rather than only the nearest and the root.
+//
+// The caller picks the tightest of what it can read, not the first: an ancestor
+// with a finite limit binds a leaf that says "max", so stopping at the first
+// readable file would report no limit for a process that has one.
 func withCgroupSelfPaths(relative map[string]string, files []string) []string {
 	out := make([]string, 0, len(files)*2)
+	seen := make(map[string]bool, len(files)*2)
+	add := func(candidate string) {
+		if candidate == "" || seen[candidate] {
+			return
+		}
+		seen[candidate] = true
+		out = append(out, candidate)
+	}
 	for _, file := range files {
 		if own := cgroupSelfFile(relative, file); own != "" {
-			out = append(out, own)
+			for _, candidate := range cgroupAncestorPaths(own) {
+				add(candidate)
+			}
 		}
-		out = append(out, file)
+		add(file)
 	}
 	return out
 }

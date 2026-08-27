@@ -205,6 +205,10 @@ func (s *Sampler) memoryStats() (usedBytes, totalBytes int64) {
 		}
 	}
 
+	// Every limit in force is read, not just the first: the list runs from this
+	// process's own cgroup up through its ancestors, and a leaf that says "max"
+	// can still sit inside a slice or pod cgroup that does not. The kernel
+	// OOM-kills against the tightest of them, so that is the one to report.
 	capped := false
 	for _, path := range s.cgroupLimitPaths {
 		limit, err := ReadCgroupMemoryLimit(path)
@@ -218,7 +222,6 @@ func (s *Sampler) memoryStats() (usedBytes, totalBytes int64) {
 			totalBytes = limit
 			capped = true
 		}
-		break
 	}
 
 	// Only when the total above is the cgroup's. A container with no memory

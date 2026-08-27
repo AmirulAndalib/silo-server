@@ -804,3 +804,61 @@ func TestSampleGPUDoesNotDuplicateAnAlreadyNamedDevice(t *testing.T) {
 		t.Fatalf("sessions = %d, want the workload joined onto the enriched entry", gpus[0].Sessions)
 	}
 }
+
+// A leaf cgroup that imposes no memory limit does not mean the process has
+// none: a systemd unit inside a slice with MemoryMax=, or a container under a
+// limited pod cgroup, is capped by an ancestor while its own memory.max reads
+// "max". Taking the first readable limit would report the host's RAM to a
+// process the kernel will OOM-kill at 2 GiB.
+func TestMemoryLimitTakesTheTightestCgroupInForce(t *testing.T) {
+	tree := newProcTree(t)
+	clock := newFakeClock()
+	tree.write("stat", "cpu  0 0 0 0 0 0 0 0\n")
+	tree.write("loadavg", "0 0 0 0/0 0\n")
+	tree.write("meminfo", "MemTotal: 67108864 kB\nMemAvailable: 33554432 kB\n")
+	tree.write("net/dev", "")
+
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		full := filepath.Join(dir, name)
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		return full
+	}
+	// Leaf first, as the resolved list is ordered. The leaf allows 8 GiB, but the
+	// slice containing it allows only 2 — so the first readable limit is not the
+	// one the kernel kills against, which is what makes this more than an
+	// ordering detail.
+	leaf := write("leaf.max", "8589934592\n")
+	slice := write("slice.max", "2147483648\n")
+	root := write("root.max", "68719476736\n")
+
+	usage := write("memory.current", "1073741824\n")
+	stat := write("memory.stat", "inactive_file 0\n")
+
+	s := newTestSampler(t, tree, clock, Options{})
+	s.cgroupLimitPaths = []string{leaf, slice, root}
+	s.cgroupUsagePaths = []cgroupUsagePath{{usage: usage, stat: stat, inactiveFile: cgroupInactiveFileKeyV2}}
+	s.sample(context.Background())
+
+	system := s.Snapshot().System
+	if system.MemTotalMB != 2048 {
+		t.Fatalf("MemTotalMB = %d, want the 2048 the slice allows, not the leaf's looser 8192", system.MemTotalMB)
+	}
+	// Total came from a cgroup, so used has to come from one too.
+	if system.MemUsedMB != 1024 {
+		t.Fatalf("MemUsedMB = %d, want the cgroup's own 1024", system.MemUsedMB)
+	}
+
+	// The other shape of the same bug: a leaf that imposes nothing at all while
+	// an ancestor does.
+	unlimited := write("unlimited.max", "max\n")
+	s = newTestSampler(t, tree, clock, Options{})
+	s.cgroupLimitPaths = []string{unlimited, slice, root}
+	s.cgroupUsagePaths = []cgroupUsagePath{{usage: usage, stat: stat, inactiveFile: cgroupInactiveFileKeyV2}}
+	s.sample(context.Background())
+	if got := s.Snapshot().System.MemTotalMB; got != 2048 {
+		t.Fatalf("MemTotalMB = %d with an unlimited leaf, want the slice's 2048", got)
+	}
+}

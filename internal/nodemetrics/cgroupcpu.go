@@ -83,13 +83,46 @@ func (s *Sampler) cgroupCPU(now time.Time) (cgroupCPUSample, float64) {
 		if err != nil {
 			continue
 		}
-		quota, err := readCgroupCPUQuota(paths)
-		if err != nil {
-			quota = 0
-		}
-		return cgroupCPUSample{usageNS: usage, at: now, valid: true}, quota
+		return cgroupCPUSample{usageNS: usage, at: now, valid: true}, effectiveCgroupCPUQuota(paths)
 	}
 	return cgroupCPUSample{}, 0
+}
+
+// effectiveCgroupCPUQuota returns the tightest CPU budget in force on this
+// cgroup, in cores, or 0 when nothing above it imposes one.
+//
+// Usage and quota are read from different places on purpose. Usage has to be
+// this process's own — an ancestor's counts every sibling service on the
+// machine — while the quota is whatever the kernel will actually throttle
+// against, which is the smallest limit anywhere between here and the mount
+// root. A systemd unit inside a slice with CPUQuota=, or a container under a
+// limited pod cgroup, reads "max" at its leaf and is nonetheless capped; taking
+// the leaf's answer would normalize a two-core service against sixty-four.
+//
+// The pair moves together at each level: a quota from one cgroup divided by a
+// period from another describes no real budget.
+func effectiveCgroupCPUQuota(paths cgroupCPUPath) float64 {
+	quotas := cgroupAncestorPaths(paths.quota)
+	periods := cgroupAncestorPaths(paths.period)
+	tightest := 0.0
+	for i, quota := range quotas {
+		level := paths
+		level.quota = quota
+		if paths.period != "" {
+			if i >= len(periods) {
+				break
+			}
+			level.period = periods[i]
+		}
+		cores, err := readCgroupCPUQuota(level)
+		if err != nil || cores <= 0 {
+			continue
+		}
+		if tightest == 0 || cores < tightest {
+			tightest = cores
+		}
+	}
+	return tightest
 }
 
 // readCgroupCPUUsage returns cumulative cgroup CPU time in nanoseconds.

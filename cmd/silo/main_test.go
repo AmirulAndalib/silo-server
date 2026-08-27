@@ -399,7 +399,8 @@ func TestNodeCapabilityFetcherStoresTheNodesOwnBytes(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	payload, hash, err := nodeCapabilityFetcher("secret", nodeCapabilityProbeBudget(nil))(context.Background(), server.URL)
+	payload, hash, err := nodeCapabilityFetcher("secret", nodeCapabilityProbeBudget(nil))(
+		context.Background(), &nodepool.Node{ID: 1, URL: server.URL})
 	if err != nil {
 		t.Fatalf("nodeCapabilityFetcher: %v", err)
 	}
@@ -430,8 +431,9 @@ func TestNodeCapabilityProbeBudgetTracksTheConfiguredDevices(t *testing.T) {
 	pair := &config.Config{}
 	pair.Playback.HWAccel, pair.Playback.HWDevice = "qsv", "/dev/dri/renderD128,/dev/dri/renderD129"
 
-	oneDevice := nodeCapabilityProbeBudget(func() *config.Config { return single })()
-	twoDevices := nodeCapabilityProbeBudget(func() *config.Config { return pair })()
+	clusterNode := &nodepool.Node{ID: 1, URL: "http://gpu-1"}
+	oneDevice := nodeCapabilityProbeBudget(func() *config.Config { return single })(clusterNode)
+	twoDevices := nodeCapabilityProbeBudget(func() *config.Config { return pair })(clusterNode)
 
 	if want := tonemap.ProbeRequestTimeout("qsv", pair.Playback.HWDevice); twoDevices != want {
 		t.Fatalf("two-device budget = %v, want the node's own advertised %v", twoDevices, want)
@@ -445,13 +447,29 @@ func TestNodeCapabilityProbeBudgetTracksTheConfiguredDevices(t *testing.T) {
 			twoDevices, oneDevice)
 	}
 
-	// Nothing configured, or no live config at all, still gets a usable bound
-	// rather than zero.
-	if got := nodeCapabilityProbeBudget(nil)(); got < nodeCapabilityRequestTimeout {
+	// A node's own override wins over the cluster setting, because the worker
+	// probes the policy it will actually run. This is the case a cluster-wide
+	// read cannot see: one device configured centrally, two on this node.
+	twoDeviceOverride := pair.Playback.HWDevice
+	overridden := &nodepool.Node{ID: 1, URL: "http://gpu-1", HWDeviceOverride: &twoDeviceOverride}
+	if got := nodeCapabilityProbeBudget(func() *config.Config { return single })(overridden); got != twoDevices {
+		t.Fatalf("overridden node budget = %v, want the two-device %v its own policy needs", got, twoDevices)
+	}
+
+	// An override set to the empty string means "inherit", not "no devices".
+	empty := ""
+	inheriting := &nodepool.Node{ID: 1, URL: "http://gpu-1", HWDeviceOverride: &empty, HWAccelOverride: &empty}
+	if got := nodeCapabilityProbeBudget(func() *config.Config { return pair })(inheriting); got != twoDevices {
+		t.Fatalf("inheriting node budget = %v, want the cluster's %v", got, twoDevices)
+	}
+
+	// Nothing configured, no live config, or no node at all still gets a usable
+	// bound rather than zero.
+	if got := nodeCapabilityProbeBudget(nil)(clusterNode); got < nodeCapabilityRequestTimeout {
 		t.Fatalf("budget with no configuration = %v, want at least the %v floor", got, nodeCapabilityRequestTimeout)
 	}
-	if got := nodeCapabilityProbeBudget(func() *config.Config { return nil })(); got < nodeCapabilityRequestTimeout {
-		t.Fatalf("budget with a nil config = %v, want at least the %v floor", got, nodeCapabilityRequestTimeout)
+	if got := nodeCapabilityProbeBudget(func() *config.Config { return nil })(nil); got < nodeCapabilityRequestTimeout {
+		t.Fatalf("budget with a nil config and nil node = %v, want at least the %v floor", got, nodeCapabilityRequestTimeout)
 	}
 }
 
@@ -460,7 +478,7 @@ func TestNodeCapabilityProbeBudgetTracksTheConfiguredDevices(t *testing.T) {
 func TestCapabilityFetchBackstopExceedsTheAdvertisedBudget(t *testing.T) {
 	pair := &config.Config{}
 	pair.Playback.HWAccel, pair.Playback.HWDevice = "qsv", "/dev/dri/renderD128,/dev/dri/renderD129"
-	budget := nodeCapabilityProbeBudget(func() *config.Config { return pair })()
+	budget := nodeCapabilityProbeBudget(func() *config.Config { return pair })(&nodepool.Node{ID: 1, URL: "http://gpu-1"})
 
 	if nodepool.CapabilityRefreshTimeout <= budget {
 		t.Fatalf("health sweep backstop %v does not exceed the %v a two-device node advertises",

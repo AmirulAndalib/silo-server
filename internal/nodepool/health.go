@@ -139,7 +139,13 @@ func trimJSONNull(raw json.RawMessage) json.RawMessage {
 // package never has to understand — or import — the playback capability model.
 // An empty hash means the payload cannot be tracked for change and must not be
 // persisted.
-type CapabilityFetcher func(ctx context.Context, nodeURL string) (payload []byte, hash string, err error)
+// The whole node is passed rather than its URL because the answer's cost is a
+// property of the node: a worker builds its probe matrix from its *effective*
+// acceleration policy, so one carrying an hw_device override with two devices
+// legitimately takes longer to answer than the cluster-wide setting predicts. A
+// fetcher that sizes its request from the cluster setting alone cancels such a
+// node mid-probe every sweep, and its inventory never lands.
+type CapabilityFetcher func(ctx context.Context, node *Node) (payload []byte, hash string, err error)
 
 // capabilityFetchTimeout is the backstop on one capability fetch, not its
 // budget.
@@ -391,7 +397,7 @@ func (hc *HealthChecker) refreshCapabilities(ctx context.Context, n *Node, apply
 	}
 	fetchCtx, cancel := context.WithTimeout(ctx, capabilityFetchTimeout)
 	defer cancel()
-	payload, hash, err := fetch(fetchCtx, n.URL)
+	payload, hash, err := fetch(fetchCtx, n)
 	if err != nil {
 		slog.WarnContext(ctx, "node capability fetch failed", "component", "nodepool",
 			"id", n.ID, "name", n.Name, "url", n.URL, "error", err)
