@@ -80,7 +80,10 @@ at once — QSV on a render node to NVENC on a CUDA index, say — would pair th
 backend with the old device until the node's own poll caught up.
 
 That reload is non-destructive: sessions already transcoding are untouched, and
-an edit that leaves both overrides where they were makes no call at all. It is
+an edit that leaves both overrides where they were makes no call at all. The
+API also drops its own cached view of what the node can do, so the next session
+is planned against the new backend's tone-map executors rather than the previous
+one's. It is
 also best effort — a node that is unreachable still applies the change on its
 next config reload (within 60 seconds). Either way the node re-advertises
 `capabilities.resolved` at its next capability snapshot (every 15 minutes). Two

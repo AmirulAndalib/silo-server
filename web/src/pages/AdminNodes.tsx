@@ -476,8 +476,13 @@ function NodeDevicePicker({
       </div>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <p className="text-muted-foreground text-sm">
+          {/*
+            No claim about what the cluster default *is*: it may be unset (each
+            node auto-discovers) or an explicit device list, and this form does
+            not know which.
+          */}
           {selectedCount === 0
-            ? "Using the cluster default (auto-discover this node's devices)."
+            ? "Using the cluster-wide device setting."
             : selectedCount === 1
               ? "All transcodes on this node run on the selected device."
               : "Transcodes on this node balance across the selected devices (least loaded first)."}
@@ -697,11 +702,7 @@ function NodeForm({
                   id="node-hw-device-override"
                   value={hwDeviceOverride}
                   onChange={(e) => setHwDeviceOverride(e.target.value)}
-                  placeholder={
-                    usesCUDADevices
-                      ? "Cluster default (CUDA device 0)"
-                      : "Cluster default (auto-discover)"
-                  }
+                  placeholder="Cluster default"
                 />
                 {/*
                   Each branch is a whole sentence rather than a shared tail: an
@@ -710,6 +711,12 @@ function NodeForm({
                   NVENC addresses), so "no inventory yet" is only true of the
                   other branch — and splitting one sentence across the
                   conditional also lets JSX drop the space before "empty".
+
+                  Neither branch says what leaving this empty resolves to. Empty
+                  inherits the cluster-wide playback.hw_device verbatim, and this
+                  form does not know that value — naming a default here would be
+                  a guess, and on the NVENC branch a dangerous one, since an
+                  inherited /dev/dri path reaches NVENC as a CUDA identity.
                 */}
                 <p className="text-muted-foreground text-sm">
                   {usesCUDADevices ? (
@@ -718,15 +725,16 @@ function NodeForm({
                       <span className="font-mono">0</span> or{" "}
                       <span className="font-mono">GPU-a1b2c3d4</span>). NVENC addresses GPUs by CUDA
                       identity, not by <span className="font-mono">/dev/dri</span> render path, so
-                      the device picker does not apply to it. Leave empty to use the cluster default
-                      (CUDA device 0).
+                      the device picker does not apply to it. Leaving this empty inherits the
+                      cluster-wide device setting, which must itself be a CUDA identity for NVENC to
+                      use it — set one here when the cluster is configured with render paths.
                     </>
                   ) : (
                     <>
                       Optional. Comma-separated render device paths this node transcodes on (e.g.{" "}
                       <span className="font-mono">/dev/dri/renderD128,/dev/dri/renderD129</span>).
                       This node has reported no device inventory yet, so there is nothing to pick
-                      from. Leave empty to use the cluster default (auto-discover).
+                      from. Leave empty to inherit the cluster-wide device setting.
                     </>
                   )}
                 </p>

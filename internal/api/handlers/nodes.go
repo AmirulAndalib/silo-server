@@ -62,6 +62,21 @@ type NodeHandler struct {
 	// deployment with no health checker, where a re-probe still runs on the node
 	// and the stored row catches up on the next sweep.
 	capabilities NodeCapabilityRefresher
+	// invalidateCapabilityCache drops one node's cached protocol-v3 planning
+	// inventory. nil outside integrated mode, where there is no playback handler
+	// holding one.
+	invalidateCapabilityCache func(nodeURL string)
+}
+
+// SetCapabilityInvalidator wires the planning-cache drop used after a node's
+// acceleration policy changes. Like SetCapabilityRefresher it is set after
+// construction, because the playback handler that owns the cache is built
+// before the router reaches this route group.
+func (h *NodeHandler) SetCapabilityInvalidator(invalidate func(nodeURL string)) {
+	if h == nil {
+		return
+	}
+	h.invalidateCapabilityCache = invalidate
 }
 
 // SetCapabilityRefresher wires the on-demand capability refresh used after a
@@ -197,6 +212,17 @@ func (h *NodeHandler) HandleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	// of requests pairing the new backend with the old device.
 	if nodeAccelerationChanged(previous, node) {
 		h.reloadNodeConfig(r.Context(), node)
+		// And drop what this server believes the node can do. The v3 planning
+		// cache holds the tone-map executors and transformation inventory the
+		// *old* backend advertised, and it stays valid for its own TTL — so
+		// without this a session started in the next minute is planned against
+		// the previous backend's filters and then rejected by the worker that
+		// has already moved on. Dropped before the pool reload, for the same
+		// reason the worker is nudged first: nothing should dispatch under the
+		// new policy while stale capabilities are still readable.
+		if h.invalidateCapabilityCache != nil {
+			h.invalidateCapabilityCache(node.URL)
+		}
 	}
 	h.reloadPools(r.Context())
 }

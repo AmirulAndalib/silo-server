@@ -3168,6 +3168,11 @@ func NewRouter(deps Dependencies) chi.Router {
 								if deps.NodeHealthChecker != nil {
 									nodeHandler.SetCapabilityRefresher(deps.NodeHealthChecker)
 								}
+								// An acceleration override change makes this
+								// server's cached view of the node wrong the
+								// moment it lands; the same invalidation the
+								// health sweep uses drops it.
+								nodeHandler.SetCapabilityInvalidator(playbackHandler.RefreshNodeCapabilitiesV3)
 								r.Route("/nodes", func(r chi.Router) {
 									r.Get("/", nodeHandler.HandleListNodes)
 									r.Post("/", nodeHandler.HandleCreateNode)

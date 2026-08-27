@@ -293,6 +293,62 @@ func TestReloadNodeConfigAcceptsNoContent(t *testing.T) {
 	}
 }
 
+// This server's cached view of what a node can do — the v3 planning inventory —
+// is keyed by node URL and holds the tone-map executors and transformations the
+// *previous* backend advertised. Changing the policy without dropping it plans
+// the next minute's sessions against filters the worker has already moved off,
+// and the worker then rejects the start.
+func TestHandleUpdateNodeInvalidatesCapabilityCacheAfterAnOverrideChange(t *testing.T) {
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(node.Close)
+
+	qsv, nvenc := "qsv", "nvenc"
+	before := &nodepool.Node{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL, HWAccelOverride: &qsv}
+	after := &nodepool.Node{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL, HWAccelOverride: &nvenc}
+	repo := &stubNodeRepository{updateResult: after, node: before}
+	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
+
+	invalidated := make(chan string, 4)
+	handler.SetCapabilityInvalidator(func(url string) { invalidated <- url })
+
+	handler.HandleUpdateNode(httptest.NewRecorder(), updateNodeRequest(t, `{"hw_accel_override":"nvenc"}`))
+
+	select {
+	case url := <-invalidated:
+		if url != node.URL {
+			t.Fatalf("invalidated %q, want the node's URL %q", url, node.URL)
+		}
+	default:
+		t.Fatal("the capability cache was not dropped after the policy changed")
+	}
+}
+
+// An edit that moves neither override leaves the cache alone: re-probing every
+// node on every rename would put ffmpeg execs behind an unrelated form save.
+func TestHandleUpdateNodeKeepsCapabilityCacheWithoutAnOverrideChange(t *testing.T) {
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(node.Close)
+
+	stored := &nodepool.Node{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL}
+	repo := &stubNodeRepository{updateResult: stored, node: stored}
+	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
+
+	invalidated := make(chan string, 4)
+	handler.SetCapabilityInvalidator(func(url string) { invalidated <- url })
+
+	handler.HandleUpdateNode(httptest.NewRecorder(), updateNodeRequest(t, `{"name":"gpu-one"}`))
+
+	select {
+	case url := <-invalidated:
+		t.Fatalf("a rename dropped the capability cache for %q", url)
+	default:
+	}
+}
+
 // The admin form posts both override fields on every transcode-node save, so
 // their presence says nothing about them moving. Nudging on presence alone made
 // an unrelated edit — a rename, a capacity change, or a plain resubmit — ask the
