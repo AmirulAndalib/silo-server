@@ -160,7 +160,7 @@ func TestReprobeCapabilitiesRefusesWhileWorkIsStarting(t *testing.T) {
 // and the API retries on another node.
 func TestTranscodeStartRefusedWhileReprobing(t *testing.T) {
 	server := newTestServer(t)
-	if _, ok := server.gpu.beginReprobe(0); !ok {
+	if _, ok := server.gpu.beginReprobe(0, 0); !ok {
 		t.Fatal("re-probe refused on an idle node")
 	}
 	t.Cleanup(server.gpu.endReprobe)
@@ -289,7 +289,7 @@ func TestCapabilitySnapshotRegistersAsGPUWork(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("the capability snapshot was never admitted as GPU work")
 	}
-	if _, ok := server.gpu.beginReprobe(0); ok {
+	if _, ok := server.gpu.beginReprobe(0, 0); ok {
 		server.gpu.endReprobe()
 		t.Fatal("a re-probe was admitted while a capability snapshot held the encoder")
 	}
@@ -307,7 +307,7 @@ func TestCapabilitySnapshotRegistersAsGPUWork(t *testing.T) {
 func TestCapabilitySnapshotRefusedWhileReprobing(t *testing.T) {
 	server := newTestServer(t)
 	server.storeCapabilityHash("sha256:previous")
-	if _, ok := server.gpu.beginReprobe(0); !ok {
+	if _, ok := server.gpu.beginReprobe(0, 0); !ok {
 		t.Fatal("re-probe refused on an idle node")
 	}
 	t.Cleanup(server.gpu.endReprobe)
@@ -339,7 +339,7 @@ func TestReprobeCapabilitiesRefusedWhileASessionIsStillClosing(t *testing.T) {
 	// Observed from inside the teardown, which is the only instant that matters.
 	err := server.retireGPUSession(func() error {
 		jobsDuringClose = server.activeJobs.Load()
-		busyDuringClose, reprobeAdmitted = server.gpu.beginReprobe(int(jobsDuringClose))
+		busyDuringClose, reprobeAdmitted = server.gpu.beginReprobe(int(jobsDuringClose), 0)
 		if reprobeAdmitted {
 			server.gpu.endReprobe()
 		}
@@ -360,7 +360,7 @@ func TestReprobeCapabilitiesRefusedWhileASessionIsStillClosing(t *testing.T) {
 	}
 
 	// The hold is released with the teardown, so an idle node re-probes again.
-	if _, ok := server.gpu.beginReprobe(int(server.activeJobs.Load())); !ok {
+	if _, ok := server.gpu.beginReprobe(int(server.activeJobs.Load()), 0); !ok {
 		t.Fatal("re-probe refused after the teardown completed")
 	}
 	server.gpu.endReprobe()

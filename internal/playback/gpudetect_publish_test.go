@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // A detection walk that ran out of budget marks backends it never reached
@@ -505,5 +506,78 @@ func TestCUDAOnlyHostPublishesItsGPUIdentities(t *testing.T) {
 	withOne.NVIDIAGPUUUIDs = []string{"GPU-aaa"}
 	if ComputeCapabilityHash(info) == ComputeCapabilityHash(withOne) {
 		t.Fatal("capability hash ignores the GPU identity list; a lost card would never trigger a refetch")
+	}
+}
+
+// The walk's budget can also run out *inside* a probe rather than between two of
+// them. Checking the context only at the top of the loop misses that entirely on
+// the last candidate of the last backend: the probe returns a context error, the
+// loop ends normally, and the report goes out claiming a verified regression —
+// a new hash, a recorded drift note, and a node routed to software, for a GPU
+// that is fine and merely slow to answer.
+func TestDetectHWAccelReportsADeadlineInsideTheFinalProbe(t *testing.T) {
+	env := setupHWAccelTest(t)
+	// An AMD card so VAAPI is the only backend with candidates: with QSV also in
+	// play, the walk's between-backends check would mask the gap.
+	env.addRenderDevice(t, "renderD128", "0x1002")
+	probe := successfulVAAPIProbe()
+	probe.hang = true
+	ffmpeg := writeFakeFFmpeg(t, probe)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	t.Cleanup(cancel)
+
+	info, err := DetectHWAccelWithFFmpegContextResult(ctx, hwAccelAuto, ffmpeg.path, "")
+	if !errors.Is(err, ErrHardwareDetectionIncomplete) {
+		t.Fatalf("error = %v, want ErrHardwareDetectionIncomplete for a deadline inside the probe", err)
+	}
+	for _, backend := range info.DetectedBackends {
+		if backend.Backend == transcodeHWVAAPI && backend.Verified {
+			t.Fatalf("vaapi = %+v, want no verification claimed", backend)
+		}
+	}
+}
+
+// A probe outlives its caller by design, so a component that released its own
+// claim on the GPU when its call returned can leave ffmpeg on the card with
+// nothing accounting for it. The count is what lets the transcode node's
+// re-probe gate see that.
+func TestHWProbesInFlightCountsADetachedProbe(t *testing.T) {
+	env := setupHWAccelTest(t)
+	env.addRenderDevice(t, "renderD128", "0x1002")
+	ffmpeg := writeFakeFFmpeg(t, successfulVAAPIProbe())
+	device := env.devicePath("renderD128")
+
+	// Measured as a delta rather than against zero: a detached probe outliving
+	// its caller is the very thing under test, so an earlier one in this process
+	// may still be running.
+	baseline := HWProbesInFlight()
+
+	// Decided by channel receipts, not a sleep: the flight parks inside the
+	// probe until this test has read the count.
+	started := make(chan struct{})
+	release := make(chan struct{})
+	hwProbeFlightStarted = func() {
+		close(started)
+		<-release
+	}
+	t.Cleanup(func() { hwProbeFlightStarted = nil })
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		if ok, reason := ffmpegSupportsBackend(transcodeHWVAAPI, ffmpeg.path, device); !ok {
+			t.Errorf("probe failed: %s", reason)
+		}
+	})
+
+	<-started
+	if got := HWProbesInFlight(); got != baseline+1 {
+		t.Fatalf("HWProbesInFlight() = %d while a smoke encode is running, want %d", got, baseline+1)
+	}
+	close(release)
+	wg.Wait()
+
+	if got := HWProbesInFlight(); got != baseline {
+		t.Fatalf("HWProbesInFlight() = %d after the probe finished, want %d", got, baseline)
 	}
 }

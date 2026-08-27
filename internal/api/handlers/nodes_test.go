@@ -579,3 +579,43 @@ func TestNodePolicyTargetChangeIgnoresATrailingSlash(t *testing.T) {
 		t.Fatal("a trailing-slash difference read as repointing the row")
 	}
 }
+
+// A partial PUT that carries only a new url still repoints the row's existing
+// overrides at a different worker. Loading the previous row only when an
+// override field is present left nodePolicyTargetChanged with nothing to compare
+// against, so the URL clause it grew for exactly this case never fired.
+func TestHandleUpdateNodeReloadsOnAURLOnlyRepoint(t *testing.T) {
+	reloaded := make(chan string, 4)
+	replacement := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/admin/reload") {
+			reloaded <- r.URL.Path
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(replacement.Close)
+
+	qsv, device := "qsv", "/dev/dri/renderD128"
+	repo := &stubNodeRepository{
+		node: &nodepool.Node{
+			ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: "http://retired-worker",
+			HWAccelOverride: &qsv, HWDeviceOverride: &device,
+		},
+		updateResult: &nodepool.Node{
+			ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: replacement.URL,
+			HWAccelOverride: &qsv, HWDeviceOverride: &device,
+		},
+	}
+	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
+
+	// Only the url: no acceleration field in the body at all.
+	handler.HandleUpdateNode(httptest.NewRecorder(), updateNodeRequest(t, `{"url":"`+replacement.URL+`"}`))
+
+	select {
+	case path := <-reloaded:
+		if path != "/admin/reload-config" {
+			t.Fatalf("nudged %q, want the non-destructive reload", path)
+		}
+	default:
+		t.Fatal("a url-only repoint left the replacement worker on its inherited policy")
+	}
+}

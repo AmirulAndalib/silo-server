@@ -75,13 +75,24 @@ func (g *gpuGate) endWork() {
 }
 
 // beginReprobe claims the encoder exclusively, or reports the work in progress
-// that stopped it. activeJobs is the node's own running-session count, passed in
-// so both halves of "is this node busy" are read under one lock rather than
-// sampled at two different instants.
-func (g *gpuGate) beginReprobe(activeJobs int) (busy int, ok bool) {
+// that stopped it.
+//
+// activeJobs is the node's own running-session count and detachedProbes is
+// playback.HWProbesInFlight. Both are passed in rather than read here so the
+// gate stays a lock over its own state, and so the count that refuses a caller
+// is the same one reported back to it.
+//
+// detachedProbes is the piece that is not this node's own bookkeeping. A
+// hardware probe runs on a background context so an abandoned caller cannot
+// kill work another request is waiting on, which means the capability build
+// releases its gate claim while ffmpeg may still be encoding. Without counting
+// those, a re-probe claims an encoder that is not free and its smoke matrix
+// races the one already running — publishing the false hardware verdict this
+// gate exists to prevent, by the same mechanism, one layer down.
+func (g *gpuGate) beginReprobe(activeJobs, detachedProbes int) (busy int, ok bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	busy = g.workers + activeJobs
+	busy = g.workers + activeJobs + detachedProbes
 	if g.reprobing || busy > 0 {
 		return busy, false
 	}

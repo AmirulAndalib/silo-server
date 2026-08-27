@@ -180,10 +180,16 @@ func (h *NodeHandler) HandleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read the row before the write so the nudge below can tell a real policy
-	// change from a resubmit: the admin form posts both override fields on
-	// every save, so the fields being present says nothing about them moving.
+	// change from a resubmit: the admin form posts every field on each save, so
+	// a field being present says nothing about it moving.
+	//
+	// The URL counts for the same reason the overrides do. A partial PUT that
+	// carries only a new url still repoints the row's existing overrides at a
+	// different worker, and without the old row to compare against
+	// nodePolicyTargetChanged has nothing to see — the replacement would keep
+	// running on what it inherited until its own 60s poll.
 	var previous *nodepool.Node
-	if input.HWAccelOverride != nil || input.HWDeviceOverride != nil {
+	if input.URL != nil || input.HWAccelOverride != nil || input.HWDeviceOverride != nil {
 		previous, _ = h.repo.GetByID(r.Context(), id)
 	}
 

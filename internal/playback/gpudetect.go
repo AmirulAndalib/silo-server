@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/nodemetrics"
@@ -471,6 +472,16 @@ func verifyHWAccelBackend(ctx context.Context, backend, ffmpegPath string, candi
 		}
 		probed = true
 		available, reason := ffmpegSupportsBackendContext(ctx, backend, ffmpegPath, device)
+		if !available && ctx.Err() != nil {
+			// The walk's own budget ran out while this probe was in flight, so
+			// the failure describes the deadline and not the hardware. Checking
+			// only at the top of the loop misses it entirely on the last
+			// candidate of the last backend, and the report would then publish
+			// a timeout as a real regression: a new hash, recorded drift, and a
+			// node resolved to software with nothing wrong with its GPU.
+			complete = false
+			break
+		}
 		if available {
 			// Execution has to land on a device a probe passed and not on
 			// whatever sorts first under /dev/dri, or a report saying "qsv
@@ -712,6 +723,15 @@ func ffmpegSupportsBackendContext(ctx context.Context, backend, ffmpegPath, devi
 		if ok && hwProbeCacheEntryCurrent(cached, now()) {
 			return cached.result, nil
 		}
+		// Counted for the life of the smoke encode, not the life of the caller.
+		// probeCtx is deliberately rooted at Background so an abandoned caller
+		// does not kill work another request is waiting on, which means ffmpeg
+		// can still be on the GPU after every caller has returned. Anything that
+		// needs the encoder to itself has to see that; see HWProbesInFlight.
+		// Raised before the test seam below, so an observer parked in it sees
+		// the state this counter exists to report.
+		hwProbesInFlight.Add(1)
+		defer hwProbesInFlight.Add(-1)
 		if flightStarted != nil {
 			flightStarted()
 		}
@@ -740,6 +760,29 @@ func ffmpegSupportsBackendContext(ctx context.Context, backend, ffmpegPath, devi
 		}
 		return result.available, result.reason
 	}
+}
+
+// hwProbesInFlight counts hardware smoke encodes running right now, including
+// ones whose caller has already given up on them.
+var hwProbesInFlight atomic.Int64
+
+// HWProbesInFlight reports how many hardware smoke encodes this process is
+// running.
+//
+// A probe outlives its caller by design: the singleflight task runs on a
+// background context so that a canceled request cannot kill work another
+// request is waiting on. The consequence is that a component which released its
+// own claim on the GPU when its call returned — the transcode node's capability
+// build is exactly this — can leave ffmpeg on the card with nothing accounting
+// for it. Anything that needs the encoder exclusively must add this to whatever
+// else it counts as busy, or it will claim an encoder that is not free and
+// publish the collision as a hardware failure.
+func HWProbesInFlight() int {
+	count := hwProbesInFlight.Load()
+	if count < 0 {
+		return 0
+	}
+	return int(count)
 }
 
 func hwProbeCacheEntryCurrent(entry hwProbeCacheEntry, now time.Time) bool {
