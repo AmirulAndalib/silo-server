@@ -46,15 +46,7 @@ func updateSingleSetting(h *AdminHandler, key, value string) *httptest.ResponseR
 }
 
 func updateCacheImagesSingle(h *AdminHandler, value string) *httptest.ResponseRecorder {
-	router := chi.NewRouter()
-	router.Put("/admin/settings/{key}", h.HandleUpdateSetting)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, httptest.NewRequest(
-		http.MethodPut,
-		"/admin/settings/metadata.cache_images",
-		strings.NewReader(`{"value":"`+value+`"}`),
-	))
-	return rec
+	return updateSingleSetting(h, "metadata.cache_images", value)
 }
 
 func assertStorageUnavailable(t *testing.T, rec *httptest.ResponseRecorder) {

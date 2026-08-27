@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/jellycompat"
@@ -49,6 +50,12 @@ func (h *AdminHandler) HandleGetServerStatus(w http.ResponseWriter, r *http.Requ
 			resp.RestartRequired = true
 			if resp.RestartRequiredReason == "" {
 				resp.RestartRequiredReason = "jellyfin_compat"
+			}
+			// This requirement is derived here rather than marked on the
+			// tracker, so the accumulated list has to gain it too — a client
+			// scoping restarts by reason would otherwise never see it.
+			if !slices.Contains(resp.RestartRequiredReasons, "jellyfin_compat") {
+				resp.RestartRequiredReasons = append(resp.RestartRequiredReasons, "jellyfin_compat")
 			}
 		}
 	}
