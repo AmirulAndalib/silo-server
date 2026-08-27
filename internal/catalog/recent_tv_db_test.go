@@ -144,11 +144,14 @@ func TestRecentTVRepositoryGroupsScanBatchesAndPaginates(t *testing.T) {
 		t.Fatalf("restricted targets = %#v, err %v", restricted, err)
 	}
 
-	if ids, ok, err := ResolveRecentTVLibraryIDs(ctx, pool, []int{tvFolderID}, false, AccessFilter{}); err != nil || !ok || !reflect.DeepEqual(ids, []int{tvFolderID}) {
+	if ids, ok, err := ResolveRecentTVLibraryIDs(ctx, pool, []int{tvFolderID}, "", AccessFilter{}); err != nil || !ok || !reflect.DeepEqual(ids, []int{tvFolderID}) {
 		t.Fatalf("TV scope = %v, %v, %v", ids, ok, err)
 	}
-	if _, ok, err := ResolveRecentTVLibraryIDs(ctx, pool, []int{tvFolderID, movieFolderID}, false, AccessFilter{}); err != nil || ok {
+	if _, ok, err := ResolveRecentTVLibraryIDs(ctx, pool, []int{tvFolderID, movieFolderID}, "", AccessFilter{}); err != nil || ok {
 		t.Fatalf("mixed implicit scope unexpectedly eligible: ok %v, err %v", ok, err)
+	}
+	if _, ok, err := ResolveRecentTVLibraryIDs(ctx, pool, []int{tvFolderID}, recentTVTypeEpisode, AccessFilter{}); err != nil || ok {
+		t.Fatalf("episode-filtered series library unexpectedly TV scoped: ok %v, err %v", ok, err)
 	}
 }
 

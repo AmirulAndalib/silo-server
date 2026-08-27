@@ -153,6 +153,8 @@ func (s *itemRefreshTestIngester) IngestSubtree(ctx context.Context, _ *models.M
 
 type itemRefreshTestScanRuns struct {
 	createdInput scanqueue.CreateInput
+	// existing, when set, makes Create report the scope as already claimed.
+	existing     *models.ScanRun
 	startedID    string
 	completedID  string
 	failedID     string
@@ -171,6 +173,9 @@ func (r *itemRefreshTestScanRuns) TouchHeartbeat(_ context.Context, _ string) er
 
 func (r *itemRefreshTestScanRuns) Create(_ context.Context, input scanqueue.CreateInput) (*models.ScanRun, bool, error) {
 	r.createdInput = input
+	if r.existing != nil {
+		return r.existing, false, nil
+	}
 	return &models.ScanRun{ID: "admin-refresh-run", MediaFolderID: input.LibraryID, Mode: input.Mode, Path: input.Path}, true, nil
 }
 
@@ -224,7 +229,7 @@ func TestBeginDirectSubtreeScanCancelsAcceptedRunWhenStartFails(t *testing.T) {
 
 func TestDirectScanHeartbeatKeepsRunAlive(t *testing.T) {
 	scanRuns := &itemRefreshTestScanRuns{}
-	stop := startDirectScanHeartbeat(scanRuns, "admin-refresh-run", time.Millisecond)
+	stop := startDirectScanHeartbeat(scanRuns, &models.ScanRun{ID: "admin-refresh-run"}, time.Millisecond)
 	deadline := time.Now().Add(time.Second)
 	for scanRuns.heartbeats.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -258,10 +263,11 @@ func (r *itemRefreshTestRefresher) RefreshTargetForLibrary(_ context.Context, ta
 	return r.err
 }
 
-func TestItemRefreshPublishesScanCompleteBeforeMetadataFailure(t *testing.T) {
+func TestItemRefreshWithholdsScanCompleteWhenMetadataFails(t *testing.T) {
 	t.Parallel()
 
 	eventBus := &libraryRefreshTestEventBus{}
+	scanRuns := &itemRefreshTestScanRuns{}
 	executor := NewItemRefreshExecutor(
 		&itemRefreshTestFolderRepo{folder: &models.MediaFolder{ID: 3, Enabled: true}},
 		&itemRefreshTestFileRepo{},
@@ -271,7 +277,7 @@ func TestItemRefreshPublishesScanCompleteBeforeMetadataFailure(t *testing.T) {
 		nil,
 		nil,
 		&itemRefreshTestIngester{},
-		&itemRefreshTestScanRuns{},
+		scanRuns,
 		&itemRefreshTestRefresher{err: errors.New("metadata failed")},
 		eventBus,
 		nil,
@@ -286,12 +292,103 @@ func TestItemRefreshPublishesScanCompleteBeforeMetadataFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "metadata failed") {
 		t.Fatalf("Execute() error = %v, want metadata failure", err)
 	}
+	// The scan run itself still completes; only the cache event waits for metadata.
+	if scanRuns.completedID != "admin-refresh-run" {
+		t.Fatalf("completed scan run = %q, want admin-refresh-run", scanRuns.completedID)
+	}
+	for _, event := range eventBus.events {
+		if event.Type == cache.EventScanComplete {
+			t.Fatalf("events = %#v, want no scan_complete before metadata succeeds", eventBus.events)
+		}
+	}
+}
+
+func TestItemRefreshPublishesScanCompleteAfterMetadataRefresh(t *testing.T) {
+	t.Parallel()
+
+	eventBus := &libraryRefreshTestEventBus{}
+	refresher := &itemRefreshTestRefresher{}
+	executor := NewItemRefreshExecutor(
+		&itemRefreshTestFolderRepo{folder: &models.MediaFolder{ID: 3, Enabled: true}},
+		&itemRefreshTestFileRepo{},
+		&itemRefreshTestRootClaimRepo{},
+		&itemRefreshTestGroupClaimRepo{},
+		newItemRefreshTestSkippedRootRepo(),
+		nil,
+		nil,
+		&itemRefreshTestIngester{},
+		&itemRefreshTestScanRuns{},
+		refresher,
+		eventBus,
+		nil,
+	)
+
+	if _, err := executor.Execute(context.Background(), ItemRefreshRequest{
+		RequestedContentID: "series-1",
+		RefreshContentID:   "series-1",
+		ScanFolderID:       3,
+		ScanPath:           "/media/show",
+	}, nil); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if refresher.contentID != "series-1" {
+		t.Fatalf("refreshed content = %q, want series-1", refresher.contentID)
+	}
 	for _, event := range eventBus.events {
 		if event.Type == cache.EventScanComplete && event.Payload == "3" {
 			return
 		}
 	}
-	t.Fatalf("events = %#v, want scan_complete before metadata failure", eventBus.events)
+	t.Fatalf("events = %#v, want scan_complete after metadata refresh", eventBus.events)
+}
+
+func TestItemRefreshIngestsWithoutRunWhenScopeAlreadyClaimed(t *testing.T) {
+	t.Parallel()
+
+	ingester := &itemRefreshTestIngester{}
+	scanRuns := &itemRefreshTestScanRuns{existing: &models.ScanRun{ID: "queued-autoscan-run", Status: scanqueue.StatusAccepted}}
+	executor := NewItemRefreshExecutor(
+		&itemRefreshTestFolderRepo{folder: &models.MediaFolder{ID: 3, Enabled: true}},
+		&itemRefreshTestFileRepo{},
+		&itemRefreshTestRootClaimRepo{},
+		&itemRefreshTestGroupClaimRepo{},
+		newItemRefreshTestSkippedRootRepo(),
+		nil,
+		nil,
+		ingester,
+		scanRuns,
+		&itemRefreshTestRefresher{},
+		nil,
+		nil,
+	)
+
+	result, err := executor.Execute(context.Background(), ItemRefreshRequest{
+		RequestedContentID: "series-1",
+		RefreshContentID:   "series-1",
+		ScanFolderID:       3,
+		ScanPath:           "/media/show",
+	}, nil)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want ingest to proceed without owning a run", err)
+	}
+	if result == nil || result.MatchedFiles != 2 {
+		t.Fatalf("Execute() result = %#v, want the subtree ingest to have run", result)
+	}
+	if ingester.scanPath != "/media/show" {
+		t.Fatalf("ingested path = %q, want /media/show", ingester.scanPath)
+	}
+	// No run is owned, so provenance is deliberately empty and nothing is
+	// started, completed, failed, or heart-beaten against the borrowed run.
+	if ingester.runID != "" {
+		t.Fatalf("scan provenance = %q, want empty for an unowned scan", ingester.runID)
+	}
+	if scanRuns.startedID != "" || scanRuns.completedID != "" || scanRuns.failedID != "" || scanRuns.cancelledID != "" {
+		t.Fatalf("scan lifecycle touched an unowned run: started=%q completed=%q failed=%q canceled=%q",
+			scanRuns.startedID, scanRuns.completedID, scanRuns.failedID, scanRuns.cancelledID)
+	}
+	if scanRuns.heartbeats.Load() != 0 {
+		t.Fatalf("heartbeats = %d, want 0 for an unowned run", scanRuns.heartbeats.Load())
+	}
 }
 
 type itemRefreshTestFileRepo struct {

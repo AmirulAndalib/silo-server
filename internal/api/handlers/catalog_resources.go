@@ -344,9 +344,7 @@ func (h *CatalogResourceHandler) HandleGetSeason(w http.ResponseWriter, r *http.
 				episodes,
 				h.items.getAggregateUserData(r, episodes),
 			)
-			seasonResponses := []seasonResponse{resp}
-			h.items.enrichSeasonPlayTargets(r, id, seasonResponses)
-			resp = seasonResponses[0]
+			h.items.resolveSeasonPlayTarget(r, id, &resp)
 			writeJSON(w, http.StatusOK, seasonDetailResponse{Season: resp})
 			return
 		case !errors.Is(err, catalog.ErrSeasonNotFound):
@@ -378,9 +376,7 @@ func (h *CatalogResourceHandler) HandleGetSeason(w http.ResponseWriter, r *http.
 		EpisodeCount: len(episodes),
 		UserData:     h.items.getAggregateUserData(r, episodes),
 	}
-	seasonResponses := []seasonResponse{resp}
-	h.items.enrichSeasonPlayTargets(r, id, seasonResponses)
-	resp = seasonResponses[0]
+	h.items.resolveSeasonPlayTarget(r, id, &resp)
 	writeJSON(w, http.StatusOK, seasonDetailResponse{Season: resp})
 }
 
@@ -509,13 +505,14 @@ func (h *CatalogResourceHandler) enrichItemDetail(r *http.Request, detail *catal
 	if detail == nil {
 		return
 	}
-	playTargets := h.items.resolvePlayableTargetInputs(r, []catalog.PlayableTargetInput{{
+	input := catalog.PlayableTargetInput{
 		ContentID:    detail.ContentID,
 		Type:         detail.Type,
 		SeriesID:     detail.SeriesID,
 		SeasonNumber: detail.SeasonNumber,
-	}}, nil, h.items.accessFilter(r))
-	detail.PlayContentID = playTargets[detail.ContentID]
+	}
+	playTargets := h.items.resolvePlayableTargetInputs(r, []catalog.PlayableTargetInput{input}, nil, h.items.accessFilter(r))
+	detail.PlayContentID = playTargets[input.Key()]
 
 	switch detail.Type {
 	case "season":

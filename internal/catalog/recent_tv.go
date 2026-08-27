@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,9 +18,18 @@ const (
 // RecentTVTarget is one card-producing TV availability event. Separate scan
 // runs remain separate even when two multi-episode runs target the same show.
 type RecentTVTarget struct {
-	ContentID     string
-	Type          string
-	AddedAt       time.Time
+	ContentID string
+	Type      string
+	AddedAt   time.Time
+	// PlayContentID is a profile-INDEPENDENT anchor hint: the episode this
+	// availability event is about. It is deliberately not filtered by the
+	// viewing profile's playback-quality ceiling, because List results are
+	// stored in the process-global resolved-list cache whose key excludes
+	// MaxPlaybackQuality (see AccessFilter.WriteAccessScopeCacheKey) — a
+	// quality-dependent value here would leak one profile's ceiling to
+	// another. Feed it to PlayableTargetResolver as
+	// PlayableTargetInput.PreferredContentID; that post-cache, profile-aware
+	// pass is the only authority on the final play target.
 	PlayContentID string
 }
 
@@ -44,17 +54,39 @@ func NewRecentTVRepository(pool *pgxpool.Pool) *RecentTVRepository {
 	return &RecentTVRepository{pool: pool}
 }
 
+// recentTVFilterTypeScope maps a section's configured filter_type onto TV event
+// grouping. An empty filter type leaves the decision to the library types;
+// "series" opts in explicitly; every other configured type ("movie",
+// "episode", "season", …) must keep the plain recently-added query, which is
+// the only path that applies the type filter itself.
+func recentTVFilterTypeScope(filterType string) (explicitSeries bool, tvEligible bool) {
+	switch strings.ToLower(strings.TrimSpace(filterType)) {
+	case "":
+		return false, true
+	case recentTVTypeSeries:
+		return true, true
+	default:
+		return false, false
+	}
+}
+
 // ResolveRecentTVLibraryIDs decides whether a recently-added section is
 // exclusively TV-targeted and returns the effective visible TV libraries.
-// Explicit series scopes may include mixed libraries; implicit scopes require
-// every requested library to be a dedicated series library.
+// filterType is the section's configured filter_type: an explicit "series"
+// scope may include mixed libraries, an empty scope requires every requested
+// library to be a dedicated series library, and any other type is not TV
+// scoped at all because event grouping cannot honor it.
 func ResolveRecentTVLibraryIDs(
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	requested []int,
-	explicitSeries bool,
+	filterType string,
 	access AccessFilter,
 ) ([]int, bool, error) {
+	explicitSeries, tvEligible := recentTVFilterTypeScope(filterType)
+	if !tvEligible {
+		return nil, false, nil
+	}
 	if pool == nil {
 		return nil, false, nil
 	}
@@ -256,15 +288,15 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 			SELECT series_id, 'series'::text, added_at, ''::text, series_id, NULL::integer, NULL::text
 			FROM series_without_episode_events
 		),
-		deduplicated AS (
-			SELECT target_id, target_type, added_at, event_id, series_id, anchor_season_number, single_episode_id,
-			       ROW_NUMBER() OVER (PARTITION BY target_id, target_type, event_id ORDER BY added_at DESC) AS target_rank
-			FROM all_events
-		),
+		-- No de-duplication pass: (target_id, target_type, event_id) is already
+		-- unique. episode_events groups by (series_id, first_seen_scan_run_id)
+		-- and an episode belongs to exactly one series, and
+		-- series_without_episode_events is disjoint from it by construction —
+		-- it only emits series with no present episode file, which every
+		-- episode_events row requires.
 		filtered AS (
 			SELECT target_id, target_type, added_at, event_id, series_id, anchor_season_number, single_episode_id
-			FROM deduplicated
-			WHERE target_rank = 1
+			FROM all_events
 		)%s,
 		page AS (
 			SELECT target_id, target_type, added_at, event_id, series_id, anchor_season_number, single_episode_id
@@ -275,6 +307,10 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 		SELECT page.target_id, page.target_type, page.added_at,
 		       COALESCE(page.single_episode_id, play_target.content_id) AS play_content_id%s
 		%s
+		-- Anchor hint only: profile-independent by design, so this page can be
+		-- shared through the process-global resolved-list cache. Playback
+		-- quality is enforced later by PlayableTargetResolver, which re-checks
+		-- this hint before using it (see RecentTVTarget.PlayContentID).
 		LEFT JOIN LATERAL (
 			SELECT e_play.content_id
 			FROM episodes e_play
@@ -369,29 +405,17 @@ func uniquePositiveInts(values []int) []int {
 
 func sortedUniqueInts(values []int) []int {
 	values = uniquePositiveInts(values)
-	for i := 1; i < len(values); i++ {
-		for j := i; j > 0 && values[j] < values[j-1]; j-- {
-			values[j], values[j-1] = values[j-1], values[j]
-		}
-	}
+	slices.Sort(values)
 	return values
 }
 
+// intersectOptionalInts is intersectInts with the access-layer convention that
+// a nil allow-list means unrestricted rather than "allow nothing".
 func intersectOptionalInts(values, allowed []int) []int {
 	if allowed == nil {
 		return values
 	}
-	allowedSet := make(map[int]struct{}, len(allowed))
-	for _, value := range allowed {
-		allowedSet[value] = struct{}{}
-	}
-	result := make([]int, 0, len(values))
-	for _, value := range values {
-		if _, ok := allowedSet[value]; ok {
-			result = append(result, value)
-		}
-	}
-	return result
+	return intersectInts(values, allowed)
 }
 
 func subtractInts(values, denied []int) []int {

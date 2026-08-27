@@ -31,7 +31,22 @@ type directScanRunRepository interface {
 	MarkCancelled(ctx context.Context, id string) (*models.ScanRun, bool, error)
 }
 
-func startDirectScanHeartbeat(repo directScanRunRepository, runID string, interval time.Duration) func() {
+// activeScanRunID reports the ID of an already-active run for logging, tolerating
+// a repository that returns no row for the conflicting scope.
+func activeScanRunID(run *models.ScanRun) string {
+	if run == nil {
+		return ""
+	}
+	return run.ID
+}
+
+// startDirectScanHeartbeat keeps run alive while a direct scan is ingesting. A nil
+// run means the scan is not owned by this caller, so there is nothing to touch.
+func startDirectScanHeartbeat(repo directScanRunRepository, run *models.ScanRun, interval time.Duration) func() {
+	if run == nil {
+		return func() {}
+	}
+	runID := run.ID
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -78,7 +93,20 @@ func beginDirectSubtreeScan(
 		return nil, nil, fmt.Errorf("create scan run: %w", err)
 	}
 	if !created {
-		return nil, nil, fmt.Errorf("scan scope already has active run %s", run.ID)
+		// The partial unique index idx_scan_runs_active_scope already has an
+		// accepted/running row for this scope (a queued autoscan subtree scan, a
+		// concurrent refresh, or a direct run still inside the stale window). Fall
+		// back to the pre-scan-run behavior and ingest without owning a run rather
+		// than failing the refresh. Files first seen here get a NULL
+		// first_seen_scan_run_id, which is the documented legacy provenance path
+		// (they render as series cards in Recently Added).
+		slog.InfoContext(ctx, "direct scan proceeding without scan-run provenance: scope already claimed",
+			"library_id", libraryID,
+			"path", path,
+			"trigger", trigger,
+			"active_scan_id", activeScanRunID(run),
+		)
+		return scanbatch.WithRunID(ctx, ""), nil, nil
 	}
 	runID := run.ID
 	run, err = repo.Start(ctx, runID)
@@ -96,7 +124,8 @@ func beginDirectSubtreeScan(
 
 func completeDirectScan(ctx context.Context, repo directScanRunRepository, run *models.ScanRun, result *libraryingest.Result) error {
 	if run == nil {
-		return fmt.Errorf("scan run is missing")
+		// Scope was already claimed, so this caller never owned a run to complete.
+		return nil
 	}
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), directScanFinishTimeout)
 	defer cancel()

@@ -23,27 +23,32 @@ import (
 
 // SectionHandler handles section management and batch section endpoints.
 type SectionHandler struct {
-	repo           *sections.Repository
-	fetcher        *sections.Fetcher
-	previewFetcher sectionPreviewFetcher // set to fetcher at construction; separate for test injection
-	episodeFetcher sectionEpisodeFetcher
-	FolderRepo     *catalog.FolderRepository
-	EpisodeRepo    *catalog.EpisodeRepository
-	StoreProvider  userstore.UserStoreProvider
-	UserRepo       *auth.UserRepository
-	DetailSvc      *catalog.DetailService
-	Settings       catalog.SettingsStore
-	CollectionRepo *catalog.LibraryCollectionRepository
-	EbookProgress  EbookReaderProgressLister
+	repo            *sections.Repository
+	fetcher         *sections.Fetcher
+	previewFetcher  sectionPreviewFetcher // set to fetcher at construction; separate for test injection
+	episodeFetcher  sectionEpisodeFetcher
+	playableTargets sectionPlayableTargetResolver // set to fetcher at construction; separate for test injection
+	FolderRepo      *catalog.FolderRepository
+	EpisodeRepo     *catalog.EpisodeRepository
+	StoreProvider   userstore.UserStoreProvider
+	UserRepo        *auth.UserRepository
+	DetailSvc       *catalog.DetailService
+	Settings        catalog.SettingsStore
+	CollectionRepo  *catalog.LibraryCollectionRepository
+	EbookProgress   EbookReaderProgressLister
 }
 
 // NewSectionHandler creates a new SectionHandler.
 func NewSectionHandler(repo *sections.Repository, fetcher *sections.Fetcher) *SectionHandler {
-	return &SectionHandler{repo: repo, fetcher: fetcher, previewFetcher: fetcher, episodeFetcher: fetcher}
+	return &SectionHandler{repo: repo, fetcher: fetcher, previewFetcher: fetcher, episodeFetcher: fetcher, playableTargets: fetcher}
 }
 
 type sectionEpisodeFetcher interface {
 	FetchEpisodesByContentIDs(ctx context.Context, contentIDs []string, filter catalog.AccessFilter) ([]*models.MediaItem, map[string]sections.SectionItemMeta, error)
+}
+
+type sectionPlayableTargetResolver interface {
+	ResolvePlayableTargets(ctx context.Context, query catalog.PlayableTargetQuery) (map[string]string, error)
 }
 
 func (h *SectionHandler) defaultHomeSections(ctx context.Context) ([]*sections.PageSection, error) {
@@ -583,7 +588,7 @@ func (h *SectionHandler) HandleHomeSections(w http.ResponseWriter, r *http.Reque
 	withItems := h.fetcher.FetchAll(r.Context(), resolved, nil, libraryIDs, userID, profileID, accessFilter)
 	withItems = applyDiversityFilter(withItems)
 	withItems = dropEmptySeasonalSections(withItems)
-	writeJSON(w, http.StatusOK, h.buildSectionsResponse(r, withItems))
+	writeJSON(w, http.StatusOK, h.buildSectionsResponse(r, withItems, nil))
 }
 
 // HandleHomeSectionItems handles GET /home/sections/{id}/items
@@ -616,7 +621,7 @@ func (h *SectionHandler) HandleHomeSectionItems(w http.ResponseWriter, r *http.R
 			}
 		}
 
-		resp := h.buildSectionsResponse(r, []sections.SectionWithItems{withItems})
+		resp := h.buildSectionsResponse(r, []sections.SectionWithItems{withItems}, nil)
 		if len(resp.Sections) == 0 {
 			resp.Sections = append(resp.Sections, resolvedSectionResponse{
 				ID:          withItems.ID,
@@ -659,7 +664,7 @@ func (h *SectionHandler) HandleLibrarySections(w http.ResponseWriter, r *http.Re
 	withItems := h.fetcher.FetchAll(r.Context(), resolved, &libraryID, nil, userID, profileID, accessFilter)
 	withItems = applyDiversityFilter(withItems)
 	withItems = dropEmptySeasonalSections(withItems)
-	writeJSON(w, http.StatusOK, h.buildSectionsResponse(r, withItems))
+	writeJSON(w, http.StatusOK, h.buildSectionsResponse(r, withItems, &libraryID))
 }
 
 // HandleLibrarySectionItems handles GET /library/{id}/sections/{sectionId}/items
@@ -698,7 +703,7 @@ func (h *SectionHandler) HandleLibrarySectionItems(w http.ResponseWriter, r *htt
 			}
 		}
 
-		resp := h.buildSectionsResponse(r, []sections.SectionWithItems{withItems})
+		resp := h.buildSectionsResponse(r, []sections.SectionWithItems{withItems}, &libraryID)
 		if len(resp.Sections) == 0 {
 			resp.Sections = append(resp.Sections, resolvedSectionResponse{
 				ID:          withItems.ID,
@@ -1206,7 +1211,10 @@ type sectionItemImageURLs struct {
 	logoURL     string
 }
 
-func (h *SectionHandler) buildSectionsResponse(r *http.Request, withItems []sections.SectionWithItems) homeSectionsResponse {
+// buildSectionsResponse renders resolved sections. libraryID carries the
+// already-validated library scope of library-scoped endpoints (nil for the
+// home/profile surfaces) so play-target resolution stays scoped to it.
+func (h *SectionHandler) buildSectionsResponse(r *http.Request, withItems []sections.SectionWithItems, libraryID *int) homeSectionsResponse {
 	overlaySummaries := make(map[string]*models.OverlaySummary)
 	contentIDs := make([]string, 0)
 	seen := make(map[string]struct{})
@@ -1239,20 +1247,28 @@ func (h *SectionHandler) buildSectionsResponse(r *http.Request, withItems []sect
 		allItems = append(allItems, s.Items...)
 	}
 	playTargets := map[string]string{}
-	if h.fetcher != nil {
+	if h.playableTargets != nil {
 		inputs := make([]catalog.PlayableTargetInput, 0, len(allItems))
 		for _, item := range allItems {
 			if item == nil || item.ContentID == "" {
 				continue
 			}
-			inputs = append(inputs, catalog.PlayableTargetInput{ContentID: item.ContentID, Type: item.Type})
+			// Section items can come from the process-global resolved-list
+			// cache, so their hint is profile-independent: the resolver
+			// validates it instead of the response emitting it directly.
+			inputs = append(inputs, playableTargetInputForItem(item))
 		}
-		resolvedTargets, err := h.fetcher.ResolvePlayableTargets(r.Context(), catalog.PlayableTargetQuery{
-			UserID:     apimw.GetUserID(r.Context()),
-			ProfileID:  apimw.GetProfileID(r.Context()),
-			LibraryIDs: sectionRequestLibraryIDs(r),
-			Access:     requestAccessFilter(r),
-			Items:      inputs,
+		var libraryIDs []int
+		if libraryID != nil && *libraryID > 0 {
+			libraryIDs = []int{*libraryID}
+		}
+		resolvedTargets, err := h.playableTargets.ResolvePlayableTargets(r.Context(), catalog.PlayableTargetQuery{
+			UserID:        apimw.GetUserID(r.Context()),
+			ProfileID:     apimw.GetProfileID(r.Context()),
+			LibraryIDs:    libraryIDs,
+			Access:        requestAccessFilter(r),
+			Items:         inputs,
+			ProgressStore: h.sectionProgressStore(r),
 		})
 		if err != nil {
 			slog.WarnContext(r.Context(), "resolving section playable targets", "component", "api", "error", err)
@@ -1290,7 +1306,7 @@ func (h *SectionHandler) buildSectionsResponse(r *http.Request, withItems []sect
 				meta.SeriesTitle = value.SeriesTitle
 			}
 			imageKey := sectionItemImageKey{sectionID: s.ID, contentID: item.ContentID}
-			items = append(items, h.toSectionItemResponse(s.SectionType, item, meta, overlaySummaries[item.ContentID], userStates[item.ContentID], imageURLs[imageKey], playTargets[item.ContentID]))
+			items = append(items, h.toSectionItemResponse(s.SectionType, item, meta, overlaySummaries[item.ContentID], userStates[item.ContentID], imageURLs[imageKey], playTargets[playableTargetKeyForItem(item)]))
 		}
 		resp.Sections = append(resp.Sections, resolvedSectionResponse{
 			ID:          s.ID,
@@ -1307,15 +1323,23 @@ func (h *SectionHandler) buildSectionsResponse(r *http.Request, withItems []sect
 	return resp
 }
 
-func sectionRequestLibraryIDs(r *http.Request) []int {
-	if r == nil || !strings.Contains(r.URL.Path, "/library/") {
+// sectionProgressStore resolves the acting profile's store so play-target
+// resolution can rank series and season candidates by watch progress. A missing
+// provider, an anonymous request, or a lookup failure yields nil, which the
+// resolver tolerates by falling back to the first available episode.
+func (h *SectionHandler) sectionProgressStore(r *http.Request) userstore.UserStore {
+	if h == nil || h.StoreProvider == nil {
 		return nil
 	}
-	libraryID, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil || libraryID <= 0 {
+	userID := apimw.GetUserID(r.Context())
+	if userID == 0 || apimw.GetProfileID(r.Context()) == "" {
 		return nil
 	}
-	return []int{libraryID}
+	store, err := h.StoreProvider.ForUser(r.Context(), userID)
+	if err != nil || store == nil {
+		return nil
+	}
+	return store
 }
 
 // listSectionMangaChapterItemMeta resolves series linkage for every manga
@@ -1441,13 +1465,11 @@ func (h *SectionHandler) resolveSectionItemImageURLs(ctx context.Context, withIt
 }
 
 func (h *SectionHandler) toSectionItemResponse(sectionType sections.SectionType, item *models.MediaItem, meta *sections.SectionItemMeta, overlaySummary *models.OverlaySummary, userState *itemUserStateResponse, imageURLs sectionItemImageURLs, resolvedPlayContentID string) sectionItemResponse {
-	playContentID := item.PlayContentID
-	if playContentID == "" {
-		playContentID = resolvedPlayContentID
-	}
 	resp := sectionItemResponse{
-		ContentID:         item.ContentID,
-		PlayContentID:     playContentID,
+		ContentID: item.ContentID,
+		// The resolver validated the item's own hint against this profile, so
+		// its answer replaces the unvalidated one carried by the item.
+		PlayContentID:     resolvedPlayContentID,
 		Type:              item.Type,
 		Title:             item.Title,
 		Year:              item.Year,

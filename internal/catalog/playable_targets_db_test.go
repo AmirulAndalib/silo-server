@@ -33,7 +33,7 @@ func TestPlayableTargetResolverProfileStateAvailabilityAndAccess(t *testing.T) {
 	movie, missingMovie := id("movie"), id("missing-movie")
 	series, completedSeries, deniedSeries := id("series"), id("completed"), id("denied")
 	season := id("season-1")
-	special, episode1, episode2 := id("special"), id("episode-1"), id("episode-2")
+	special, episode1, episode2, uhdEpisode := id("special"), id("episode-1"), id("episode-2"), id("episode-4k")
 	crossLibraryEpisode := id("cross-library-episode")
 	completed1, completed2 := id("completed-1"), id("completed-2")
 	deniedEpisode := id("denied-episode")
@@ -115,6 +115,16 @@ func TestPlayableTargetResolverProfileStateAvailabilityAndAccess(t *testing.T) {
 	}
 	seedFile("", deniedEpisode, deniedFolderID, false)
 	seedFile("", crossLibraryEpisode, deniedFolderID, false)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO episodes (content_id, series_id, season_number, episode_number, title)
+		VALUES ($1, $2, 1, 4, 'Four Kay Only')
+	`, uhdEpisode, series); err != nil {
+		t.Fatalf("seed 4K episode: %v", err)
+	}
+	seedFile("", uhdEpisode, allowedFolderID, false)
+	if _, err := pool.Exec(ctx, `UPDATE media_files SET resolution = '2160p' WHERE episode_id = $1`, uhdEpisode); err != nil {
+		t.Fatalf("mark episode as 4K: %v", err)
+	}
 
 	base := time.Now().UTC().Add(-time.Hour)
 	if _, err := pool.Exec(ctx, `
@@ -150,52 +160,117 @@ func TestPlayableTargetResolverProfileStateAvailabilityAndAccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve profile A: %v", err)
 	}
+	// Results are keyed by PlayableTargetInput.Key, not by content ID, so two
+	// cards showing the same item can resolve to different targets.
 	wantA := map[string]string{
-		movie:           movie,
-		episode1:        episode1,
-		series:          episode2,
-		completedSeries: completed1,
-		season:          episode2,
+		PlayableTargetInput{ContentID: movie, Type: "movie"}.Key():            movie,
+		PlayableTargetInput{ContentID: episode1, Type: "episode"}.Key():       episode1,
+		PlayableTargetInput{ContentID: series, Type: "series"}.Key():          episode2,
+		PlayableTargetInput{ContentID: completedSeries, Type: "series"}.Key(): completed1,
+		PlayableTargetInput{ContentID: season, Type: "season"}.Key():          episode2,
 	}
 	if !reflect.DeepEqual(targetsA, wantA) {
 		t.Fatalf("profile A targets = %#v, want %#v", targetsA, wantA)
 	}
 
+	cappedInput := PlayableTargetInput{ContentID: movie, Type: "movie"}
 	qualityCapped, err := resolver.Resolve(ctx, PlayableTargetQuery{
 		UserID: userID, ProfileID: profileA,
-		Items:         []PlayableTargetInput{{ContentID: movie, Type: "movie"}},
+		Items:         []PlayableTargetInput{cappedInput},
 		Access:        AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}, MaxPlaybackQuality: "1080p"},
 		ProgressStore: progressStore,
 	})
-	if err != nil || qualityCapped[movie] != "" {
+	if err != nil || qualityCapped[cappedInput.Key()] != "" {
 		t.Fatalf("quality-capped target = %#v, err %v; want no 4K movie target", qualityCapped, err)
 	}
 
+	// A card's anchor hint (for example the episode a recently-added event is
+	// about) is profile-independent and may come from a shared cache, so it is
+	// honored only when it clears the same per-profile file conditions as any
+	// other candidate.
+	for name, tc := range map[string]struct {
+		hint    string
+		access  AccessFilter
+		want    string
+		wantMsg string
+	}{
+		"available hint wins over progress ranking": {
+			hint:   uhdEpisode,
+			access: AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}},
+			want:   uhdEpisode,
+		},
+		"hint above the quality ceiling falls back": {
+			hint:   uhdEpisode,
+			access: AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}, MaxPlaybackQuality: "1080p"},
+			want:   episode2,
+		},
+		"hint outside the card falls back": {
+			hint:   deniedEpisode,
+			access: AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}},
+			want:   episode2,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := PlayableTargetInput{ContentID: series, Type: "series", PreferredContentID: tc.hint}
+			targets, err := resolver.Resolve(ctx, PlayableTargetQuery{
+				UserID: userID, ProfileID: profileA,
+				Items:         []PlayableTargetInput{input},
+				Access:        tc.access,
+				ProgressStore: progressStore,
+			})
+			if err != nil || targets[input.Key()] != tc.want {
+				t.Fatalf("hinted target = %#v, err %v; want %s", targets, err, tc.want)
+			}
+		})
+	}
+
+	// Recently-added TV renders one card per scan-run event, so the same series
+	// can appear twice with different anchors in a single page. Each card must
+	// keep its own target instead of both collapsing onto the first one.
+	t.Run("repeated cards for one series keep separate hints", func(t *testing.T) {
+		first := PlayableTargetInput{ContentID: series, Type: "series", PreferredContentID: episode1}
+		second := PlayableTargetInput{ContentID: series, Type: "series", PreferredContentID: episode2}
+		targets, err := resolver.Resolve(ctx, PlayableTargetQuery{
+			UserID: userID, ProfileID: profileA,
+			Items:         []PlayableTargetInput{first, second},
+			Access:        AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}},
+			ProgressStore: progressStore,
+		})
+		if err != nil {
+			t.Fatalf("resolve repeated series cards: %v", err)
+		}
+		if targets[first.Key()] != episode1 || targets[second.Key()] != episode2 {
+			t.Fatalf("repeated series targets = %#v; want %s and %s", targets, episode1, episode2)
+		}
+	})
+
+	libraryScopedInput := PlayableTargetInput{ContentID: series, Type: "series"}
 	libraryScoped, err := resolver.Resolve(ctx, PlayableTargetQuery{
 		UserID: userID, ProfileID: profileA,
-		Items:         []PlayableTargetInput{{ContentID: series, Type: "series"}},
+		Items:         []PlayableTargetInput{libraryScopedInput},
 		LibraryIDs:    []int{allowedFolderID},
 		ProgressStore: progressStore,
 	})
-	if err != nil || libraryScoped[series] != episode2 {
+	if err != nil || libraryScoped[libraryScopedInput.Key()] != episode2 {
 		t.Fatalf("library-scoped target = %#v, err %v; want in-library episode %s", libraryScoped, err, episode2)
 	}
 
+	seriesInput := PlayableTargetInput{ContentID: series, Type: "series"}
 	targetsB, err := resolver.Resolve(ctx, PlayableTargetQuery{
 		UserID: userID, ProfileID: profileB,
-		Items:  []PlayableTargetInput{{ContentID: series, Type: "series"}},
+		Items:  []PlayableTargetInput{seriesInput},
 		Access: AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}}, ProgressStore: progressStore,
 	})
-	if err != nil || targetsB[series] != episode1 {
+	if err != nil || targetsB[seriesInput.Key()] != episode1 {
 		t.Fatalf("profile B target = %#v, err %v; want resumable %s", targetsB, err, episode1)
 	}
 
 	untouched, err := resolver.Resolve(ctx, PlayableTargetQuery{
 		UserID: userID, ProfileID: id("no-progress"),
-		Items:  []PlayableTargetInput{{ContentID: series, Type: "series"}},
+		Items:  []PlayableTargetInput{seriesInput},
 		Access: AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}}, ProgressStore: progressStore,
 	})
-	if err != nil || untouched[series] != episode1 {
+	if err != nil || untouched[seriesInput.Key()] != episode1 {
 		t.Fatalf("untouched target = %#v, err %v; want regular season before special %s", untouched, err, episode1)
 	}
 
@@ -208,7 +283,7 @@ func TestPlayableTargetResolverProfileStateAvailabilityAndAccess(t *testing.T) {
 				UserID: userID, ProfileID: profileA, Items: []PlayableTargetInput{input},
 				Access: AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}}, ProgressStore: progressStore,
 			})
-			if err != nil || targets[season] != episode2 {
+			if err != nil || targets[input.Key()] != episode2 {
 				t.Fatalf("season target = %#v, err %v; want %s", targets, err, episode2)
 			}
 		})
@@ -237,14 +312,104 @@ func TestPlayableTargetResolverProfileStateAvailabilityAndAccess(t *testing.T) {
 
 		targets, err := resolver.Resolve(ctx, PlayableTargetQuery{
 			UserID: userID, ProfileID: profileA,
-			Items:         []PlayableTargetInput{{ContentID: series, Type: "series"}},
+			Items:         []PlayableTargetInput{seriesInput},
 			Access:        AccessFilter{AllowedLibraryIDs: []int{allowedFolderID}},
 			ProgressStore: sqliteStore,
 		})
-		if err != nil || targets[series] != episode1 {
+		if err != nil || targets[seriesInput.Key()] != episode1 {
 			t.Fatalf("sqlite-backed target = %#v, err %v; want resumable %s", targets, err, episode1)
 		}
 	})
+}
+
+// Long-running series are the case this project exists for. Candidates must
+// stay uncapped: bounding them in season/episode order would hide an
+// in-progress episode deep in the run and silently degrade the card to "play
+// the first episode". The bind-parameter ceiling is handled by batching the
+// progress lookup instead, which costs nothing behaviorally.
+func TestPlayableTargetResolverResumesDeepInsideLongSeries(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	const episodeCount = 420
+	const inProgressEpisode = 400
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := time.Now().UnixNano()
+	series := fmt.Sprintf("deep-series-%d", suffix)
+	episodeID := func(number int) string { return fmt.Sprintf("deep-episode-%d-%d", suffix, number) }
+	profileID := fmt.Sprintf("deep-profile-%d", suffix)
+
+	var userID, folderID int
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO users (email, username, role, enabled)
+		VALUES ($1, $1, 'user', TRUE)
+		RETURNING id
+	`, fmt.Sprintf("deep-%d@example.invalid", suffix)).Scan(&userID); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO media_folders (type, name, enabled) VALUES ('series', $1, TRUE) RETURNING id`, series).Scan(&folderID); err != nil {
+		t.Fatalf("seed folder: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id = $1`, series)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_folders WHERE id = $1`, folderID)
+	})
+	if _, err := pool.Exec(ctx, `INSERT INTO user_profiles (id, user_id, name) VALUES ($1, $2, 'Deep')`, profileID, userID); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO media_items (content_id, type, title, status, genres)
+		VALUES ($1, 'series', 'Very Long Runner', 'matched', '{}')
+	`, series); err != nil {
+		t.Fatalf("seed series: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO episodes (content_id, series_id, season_number, episode_number, title)
+		SELECT format('deep-episode-%s-%s', $1::text, g), $2, 1, g, 'Episode ' || g
+		FROM generate_series(1, $3) g
+	`, fmt.Sprintf("%d", suffix), series, episodeCount); err != nil {
+		t.Fatalf("seed episodes: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO media_files (episode_id, media_folder_id, file_path)
+		SELECT format('deep-episode-%s-%s', $1::text, g), $2, format('/deep/%s-%s.mkv', $1::text, g)
+		FROM generate_series(1, $3) g
+	`, fmt.Sprintf("%d", suffix), folderID, episodeCount); err != nil {
+		t.Fatalf("seed files: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO user_watch_progress (user_id, profile_id, media_item_id, position_seconds, duration_seconds, completed, updated_at)
+		VALUES ($1, $2, $3, 600, 1200, FALSE, NOW())
+	`, userID, profileID, episodeID(inProgressEpisode)); err != nil {
+		t.Fatalf("seed deep progress: %v", err)
+	}
+
+	progressStore, err := pgstore.NewPostgresProvider(pool).ForUser(ctx, userID)
+	if err != nil {
+		t.Fatalf("create progress store: %v", err)
+	}
+	input := PlayableTargetInput{ContentID: series, Type: "series"}
+	targets, err := NewPlayableTargetResolver(pool).Resolve(ctx, PlayableTargetQuery{
+		UserID: userID, ProfileID: profileID,
+		Items:         []PlayableTargetInput{input},
+		Access:        AccessFilter{AllowedLibraryIDs: []int{folderID}},
+		ProgressStore: progressStore,
+	})
+	if err != nil {
+		t.Fatalf("resolve long series: %v", err)
+	}
+	if got := targets[input.Key()]; got != episodeID(inProgressEpisode) {
+		t.Fatalf("long-series target = %q, want the in-progress episode %q", got, episodeID(inProgressEpisode))
+	}
 }
 
 func nilIfBlank(value string) any {

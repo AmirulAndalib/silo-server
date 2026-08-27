@@ -51,7 +51,17 @@ const (
 	// resolvedListInvalidationInterval coalesces scan-complete bursts so file
 	// scans cannot keep the recently-added cache permanently cold.
 	resolvedListInvalidationInterval = 30 * time.Second
+	// resolvedListGenerationPrefix heads every generation-scoped cache key.
+	// Keys without it (every non-recently-added section) are generation
+	// independent and must never be swept by an invalidation.
+	resolvedListGenerationPrefix = "generation="
 )
+
+// resolvedListGenerationKeyPrefix returns the key prefix carried by entries
+// built under generation.
+func resolvedListGenerationKeyPrefix(generation uint64) string {
+	return resolvedListGenerationPrefix + strconv.FormatUint(generation, 10) + "|"
+}
 
 // resolvedListLoader builds the shared item list for a cache key. It takes a
 // context so the async refresh path can run detached from the request that
@@ -96,10 +106,11 @@ var (
 	}
 )
 
-// InvalidateResolvedListCache advances the cache namespace. Existing entries
-// and in-flight refreshes remain under the old generation and therefore cannot
-// repopulate reads after a catalog scan completes. Scan-complete bursts are
-// coalesced so large batches advance the namespace at most once per 30 seconds.
+// InvalidateResolvedListCache advances the cache namespace and releases the
+// entries the bump supersedes. In-flight refreshes remain under the old
+// generation and therefore cannot repopulate reads after a catalog scan
+// completes. Scan-complete bursts are coalesced so large batches advance the
+// namespace at most once per 30 seconds.
 func InvalidateResolvedListCache() {
 	resolvedListInvalidationMu.Lock()
 	defer resolvedListInvalidationMu.Unlock()
@@ -120,7 +131,7 @@ func InvalidateResolvedListCache() {
 				resolvedListInvalidationPending = false
 				resolvedListInvalidationCancel = nil
 				resolvedListLastInvalidation = deadline
-				resolvedListGeneration.Add(1)
+				dropSupersededResolvedListEntries(resolvedListGeneration.Add(1))
 			})
 		}
 		return
@@ -132,7 +143,47 @@ func InvalidateResolvedListCache() {
 	}
 	resolvedListInvalidationPending = false
 	resolvedListLastInvalidation = now
-	resolvedListGeneration.Add(1)
+	dropSupersededResolvedListEntries(resolvedListGeneration.Add(1))
+}
+
+// dropSupersededResolvedListEntries releases the cache entries a generation bump
+// leaves behind. Advancing the generation only changes FUTURE keys, so without
+// this every obsolete (library × access-scope) recently-added entry would stay
+// resident until its 15-minute expiry and be swept only opportunistically by
+// pruneExpiredResolvedListEntriesLocked. A long multi-library rescan bumps the
+// generation every 30s, which would otherwise keep up to 30 generations of every
+// entry — each holding an ItemLimit-sized item slice — alive at once.
+//
+// Entries with an in-flight background refresh are left in place so a refresh
+// that started under the old generation can still finish writing to its own old
+// key (it can never repopulate the active key, whose generation differs). Those
+// keys are superseded too, so the next bump releases them.
+//
+// Concurrency: the caller holds resolvedListInvalidationMu. This takes
+// resolvedListRefreshMu and resolvedListCacheMu one after the other and never
+// nests them, and no cache path ever acquires resolvedListInvalidationMu, so the
+// immediate and trailing-edge invalidation paths cannot deadlock.
+func dropSupersededResolvedListEntries(generation uint64) {
+	current := resolvedListGenerationKeyPrefix(generation)
+
+	resolvedListRefreshMu.Lock()
+	refreshing := make(map[string]struct{}, len(resolvedListRefreshing))
+	for key := range resolvedListRefreshing {
+		refreshing[key] = struct{}{}
+	}
+	resolvedListRefreshMu.Unlock()
+
+	resolvedListCacheMu.Lock()
+	for key := range resolvedListCache {
+		if !strings.HasPrefix(key, resolvedListGenerationPrefix) || strings.HasPrefix(key, current) {
+			continue
+		}
+		if _, inflight := refreshing[key]; inflight {
+			continue
+		}
+		delete(resolvedListCache, key)
+	}
+	resolvedListCacheMu.Unlock()
 }
 
 // getOrRefresh returns the shared item list for key, implementing serve /
@@ -318,9 +369,7 @@ func cloneMediaItems(items []*models.MediaItem) []*models.MediaItem {
 func resolvedListCacheKey(resolved ResolvedSection, libraryID *int, libraryIDs []int, filter catalog.AccessFilter) string {
 	var b strings.Builder
 	if resolved.SectionType == SectionRecentlyAdded {
-		b.WriteString("generation=")
-		b.WriteString(strconv.FormatUint(resolvedListGeneration.Load(), 10))
-		b.WriteString("|")
+		b.WriteString(resolvedListGenerationKeyPrefix(resolvedListGeneration.Load()))
 	}
 	b.WriteString("type=")
 	b.WriteString(string(resolved.SectionType))

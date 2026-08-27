@@ -448,7 +448,7 @@ func (r *CatalogResolver) resolveRecentTVSectionSource(
 		ctx,
 		r.itemRepo.pool,
 		requested,
-		filters.FilterType == recentTVTypeSeries,
+		filters.FilterType,
 		access,
 	)
 	if err != nil || !tvScoped {

@@ -2307,7 +2307,6 @@ func (f *Fetcher) fetchTVRecentlyAdded(
 		return nil, 0, false, nil
 	}
 
-	const seriesType = "series"
 	cfgFilters := recentlyAddedConfigFilters(s.Config)
 	requested := cfgFilters.LibraryIDs()
 	if libraryID != nil {
@@ -2319,7 +2318,7 @@ func (f *Fetcher) fetchTVRecentlyAdded(
 		ctx,
 		f.pool,
 		requested,
-		cfgFilters.FilterType == seriesType,
+		cfgFilters.FilterType,
 		filter,
 	)
 	if err != nil || !tvScoped {

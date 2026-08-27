@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -16,6 +17,14 @@ const (
 	playableTypeSeries = "series"
 	playableTypeSeason = "season"
 	playableFileExists = "mf.missing_since IS NULL"
+
+	// playableTargetProgressBatchSize keeps each progress lookup well below
+	// PostgreSQL's 65535 bind-parameter limit. Candidates are deliberately NOT
+	// capped per card: a profile deep into a long-running series has its
+	// in-progress episode far down the season/episode ordering, and dropping it
+	// would silently degrade that card to "play the first episode". Batching
+	// here removes the parameter ceiling without that behavioral cost.
+	playableTargetProgressBatchSize = 500
 )
 
 // PlayableTargetInput identifies a displayed card whose direct-play target
@@ -25,6 +34,30 @@ type PlayableTargetInput struct {
 	Type         string
 	SeriesID     string
 	SeasonNumber *int
+	// PreferredContentID is an optional, profile-independent anchor hint for
+	// this card: the leaf (episode or movie) the surface would like to play,
+	// such as RecentTVTarget.PlayContentID / models.MediaItem.PlayContentID.
+	//
+	// Callers that render such a hint MUST route it through here instead of
+	// emitting it directly. Those hints are produced before profile-aware
+	// filtering (and are cached across profiles), so only Resolve can check
+	// them against this profile's library access and playback-quality ceiling.
+	// Resolve returns the hint only when it is one of this card's own
+	// available leaves and passes exactly the same file conditions as any
+	// other candidate; otherwise it falls back to normal series/season/leaf
+	// resolution for the card.
+	PreferredContentID string
+}
+
+// Key identifies this card in the map Resolve returns. It includes the anchor
+// hint because two cards can legitimately display the SAME item and still want
+// different targets — recently-added TV keeps one card per scan-run event, so a
+// series hit by two multi-episode runs appears twice with different anchors.
+// Callers look a response row up with the key built from the same three fields.
+func (in PlayableTargetInput) Key() string {
+	return strings.ToLower(strings.TrimSpace(in.Type)) + "\x00" +
+		strings.TrimSpace(in.ContentID) + "\x00" +
+		strings.TrimSpace(in.PreferredContentID)
 }
 
 // PlayableTargetQuery scopes direct-play target resolution to the acting
@@ -66,8 +99,11 @@ func NewPlayableTargetResolverForItems(repo *ItemRepository) *PlayableTargetReso
 }
 
 // Resolve returns one accessible, currently available target for each
-// playable movie/TV card. Series and seasons prefer the newest in-progress
-// episode, then the first unwatched episode, then the first available episode.
+// playable movie/TV card, keyed by PlayableTargetInput.Key so that two cards
+// displaying the same item resolve independently. A card's PreferredContentID
+// hint wins when it still satisfies this profile's file conditions; otherwise
+// series and seasons prefer the newest in-progress episode, then the first
+// unwatched episode, then the first available episode.
 // MaxContentRating and AllowedContentIDs are intentionally not reapplied to
 // candidate episodes: the displayed item has already passed those content
 // access filters, and episodes inherit the parent series rating. File-library
@@ -85,6 +121,10 @@ func (r *PlayableTargetResolver) Resolve(ctx context.Context, q PlayableTargetQu
 	types := make([]string, 0, len(q.Items))
 	seriesIDs := make([]string, 0, len(q.Items))
 	seasonNumbers := make([]int, 0, len(q.Items))
+	preferredIDs := make([]string, 0, len(q.Items))
+	// keysByOrd maps a request row's 1-based SQL ordinality back to its input
+	// key, so two cards that share a content ID stay distinguishable.
+	keysByOrd := make([]string, 0, len(q.Items))
 	seen := make(map[string]struct{}, len(q.Items))
 	for _, item := range q.Items {
 		contentID := strings.TrimSpace(item.ContentID)
@@ -92,11 +132,12 @@ func (r *PlayableTargetResolver) Resolve(ctx context.Context, q PlayableTargetQu
 		if contentID == "" || (mediaType != playableTypeMovie && mediaType != recentTVTypeEpisode && mediaType != playableTypeSeries && mediaType != playableTypeSeason) {
 			continue
 		}
-		key := mediaType + "\x00" + contentID
+		key := item.Key()
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
+		keysByOrd = append(keysByOrd, key)
 		ids = append(ids, contentID)
 		types = append(types, mediaType)
 		seriesIDs = append(seriesIDs, strings.TrimSpace(item.SeriesID))
@@ -105,13 +146,14 @@ func (r *PlayableTargetResolver) Resolve(ctx context.Context, q PlayableTargetQu
 			seasonNumber = *item.SeasonNumber
 		}
 		seasonNumbers = append(seasonNumbers, seasonNumber)
+		preferredIDs = append(preferredIDs, strings.TrimSpace(item.PreferredContentID))
 	}
 	if len(ids) == 0 {
 		return result, nil
 	}
 
-	args := []any{ids, types, seriesIDs, seasonNumbers}
-	argIdx := 5
+	args := []any{ids, types, seriesIDs, seasonNumbers, preferredIDs}
+	argIdx := 6
 	fileConditions := []string{
 		playableFileExists,
 		"EXISTS (SELECT 1 FROM media_folders pf WHERE pf.id = mf.media_folder_id AND pf.enabled = TRUE)",
@@ -150,9 +192,9 @@ func (r *PlayableTargetResolver) Resolve(ctx context.Context, q PlayableTargetQu
 
 	query := fmt.Sprintf(`
 		WITH requested AS (
-			SELECT content_id, media_type, series_id, season_number, ord
-			FROM unnest($1::text[], $2::text[], $3::text[], $4::integer[]) WITH ORDINALITY
-			  AS requested(content_id, media_type, series_id, season_number, ord)
+			SELECT content_id, media_type, series_id, season_number, preferred_content_id, ord
+			FROM unnest($1::text[], $2::text[], $3::text[], $4::integer[], $5::text[]) WITH ORDINALITY
+			  AS requested(content_id, media_type, series_id, season_number, preferred_content_id, ord)
 		),
 		leaf_targets AS (
 			SELECT requested.ord, requested.content_id, requested.content_id AS play_content_id
@@ -199,7 +241,7 @@ func (r *PlayableTargetResolver) Resolve(ctx context.Context, q PlayableTargetQu
 			  ON episode.series_id = season.series_id
 			 AND episode.season_number = season.season_number
 		),
-		episode_candidates AS (
+		available_candidates AS (
 			SELECT requested.ord,
 			       requested.content_id,
 			       candidate.content_id AS play_content_id,
@@ -214,14 +256,34 @@ func (r *PlayableTargetResolver) Resolve(ctx context.Context, q PlayableTargetQu
 				  AND %s
 			  )
 		),
-		resolved AS (
-			SELECT ord, content_id, play_content_id, -1 AS season_number, -1 AS episode_number FROM leaf_targets
+		hint_targets AS (
+			-- A card's anchor hint is honored only when it is one of that
+			-- card's own available leaves, so it passes exactly the same file
+			-- conditions (library, enabled folder, quality rank) as any other
+			-- candidate and can never point outside the displayed item.
+			SELECT candidate.ord, candidate.content_id, candidate.play_content_id
+			FROM available_candidates candidate
+			JOIN requested
+			  ON requested.ord = candidate.ord
+			 AND requested.preferred_content_id = candidate.play_content_id
 			UNION ALL
-			SELECT ord, content_id, play_content_id, season_number, episode_number FROM episode_candidates
+			SELECT leaf.ord, leaf.content_id, leaf.play_content_id
+			FROM leaf_targets leaf
+			JOIN requested
+			  ON requested.ord = leaf.ord
+			 AND requested.preferred_content_id = leaf.play_content_id
+		),
+		resolved AS (
+			SELECT ord, play_content_id, TRUE AS is_hint, -1 AS season_number, -1 AS episode_number FROM hint_targets
+			UNION ALL
+			SELECT ord, play_content_id, FALSE, -1, -1 FROM leaf_targets
+			UNION ALL
+			SELECT ord, play_content_id, FALSE, season_number, episode_number FROM available_candidates
 		)
-		SELECT content_id, play_content_id
+		SELECT ord, play_content_id, is_hint
 		FROM resolved
 		ORDER BY ord,
+		         is_hint DESC,
 		         CASE WHEN season_number = 0 THEN 1 ELSE 0 END,
 		         season_number,
 		         episode_number,
@@ -234,31 +296,74 @@ func (r *PlayableTargetResolver) Resolve(ctx context.Context, q PlayableTargetQu
 	}
 	defer rows.Close()
 	candidates := make(map[string][]string, len(ids))
-	allCandidateIDs := make([]string, 0)
+	hints := make(map[string]string, len(ids))
+	allCandidateIDs := make([]string, 0, len(ids))
+	seenCandidateIDs := make(map[string]struct{}, len(ids))
 	for rows.Next() {
-		var contentID, playContentID string
-		if err := rows.Scan(&contentID, &playContentID); err != nil {
+		var ord int64
+		var playContentID string
+		var isHint bool
+		if err := rows.Scan(&ord, &playContentID, &isHint); err != nil {
 			return nil, fmt.Errorf("scanning playable poster target: %w", err)
 		}
-		candidates[contentID] = append(candidates[contentID], playContentID)
-		allCandidateIDs = append(allCandidateIDs, playContentID)
+		if ord < 1 || ord > int64(len(keysByOrd)) {
+			return nil, fmt.Errorf("playable poster target ordinality %d is outside the requested set", ord)
+		}
+		key := keysByOrd[ord-1]
+		if isHint {
+			// Hints are ordered first within a card; the first one wins.
+			if _, ok := hints[key]; !ok {
+				hints[key] = playContentID
+			}
+			continue
+		}
+		candidates[key] = append(candidates[key], playContentID)
+		if _, ok := seenCandidateIDs[playContentID]; !ok {
+			seenCandidateIDs[playContentID] = struct{}{}
+			allCandidateIDs = append(allCandidateIDs, playContentID)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating playable poster targets: %w", err)
 	}
 	progress := map[string]userstore.WatchProgress{}
 	if q.ProgressStore != nil && len(allCandidateIDs) > 0 {
-		progress, err = q.ProgressStore.ListProgressByMediaItems(ctx, q.ProfileID, allCandidateIDs)
+		progress, err = listPlayableTargetProgress(ctx, q.ProgressStore, q.ProfileID, allCandidateIDs)
 		if err != nil {
 			return nil, fmt.Errorf("listing progress for playable poster targets: %w", err)
 		}
 	}
-	for contentID, targetCandidates := range candidates {
+	for key, targetCandidates := range candidates {
 		if len(targetCandidates) > 0 {
-			result[contentID] = preferredPlayableTarget(targetCandidates, progress)
+			result[key] = preferredPlayableTarget(targetCandidates, progress)
 		}
 	}
+	// A validated hint is the surface's own anchor (for example the episode a
+	// recently-added event is about), so it outranks progress-based ranking.
+	for key, hint := range hints {
+		result[key] = hint
+	}
 	return result, nil
+}
+
+// listPlayableTargetProgress fetches progress in batches: the PostgreSQL store
+// binds one parameter per ID and PostgreSQL rejects more than 65535 bind
+// parameters in a single statement, which one page of long series can exceed.
+func listPlayableTargetProgress(
+	ctx context.Context,
+	store PlayableTargetProgressStore,
+	profileID string,
+	ids []string,
+) (map[string]userstore.WatchProgress, error) {
+	progress := make(map[string]userstore.WatchProgress, len(ids))
+	for start := 0; start < len(ids); start += playableTargetProgressBatchSize {
+		batch, err := store.ListProgressByMediaItems(ctx, profileID, ids[start:min(start+playableTargetProgressBatchSize, len(ids))])
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(progress, batch)
+	}
+	return progress, nil
 }
 
 func preferredPlayableTarget(candidates []string, progress map[string]userstore.WatchProgress) string {

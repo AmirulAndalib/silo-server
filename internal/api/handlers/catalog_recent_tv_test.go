@@ -54,13 +54,27 @@ func TestUniversalPlayableTargetsAreAdditiveAcrossResponseShapes(t *testing.T) {
 		t.Fatalf("season JSON = %s, err %v", seasonJSON, err)
 	}
 
+	// A card's own hint reaches the resolver as PreferredContentID, so the
+	// resolved value already carries the event-specific target when this
+	// profile can play it. The response takes the resolver's answer.
 	h := &SectionHandler{}
 	recent := h.toSectionItemResponse(
 		sections.SectionRecentlyAdded,
 		&models.MediaItem{ContentID: "series-1", PlayContentID: "event-episode", Type: "series", Title: "Show"},
-		nil, nil, nil, sectionItemImageURLs{}, "generic-episode",
+		nil, nil, nil, sectionItemImageURLs{}, "event-episode",
 	)
 	if recent.PlayContentID != "event-episode" {
 		t.Fatalf("recent target = %q, want event-specific target", recent.PlayContentID)
+	}
+
+	// When the hint does not survive profile-aware validation, the resolver's
+	// fallback wins instead of the unvalidated hint carried by the item.
+	rejected := h.toSectionItemResponse(
+		sections.SectionRecentlyAdded,
+		&models.MediaItem{ContentID: "series-1", PlayContentID: "unplayable-episode", Type: "series", Title: "Show"},
+		nil, nil, nil, sectionItemImageURLs{}, "playable-episode",
+	)
+	if rejected.PlayContentID != "playable-episode" {
+		t.Fatalf("rejected hint target = %q, want playable-episode", rejected.PlayContentID)
 	}
 }

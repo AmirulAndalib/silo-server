@@ -285,12 +285,11 @@ func (s *Service) requeueStale() {
 	defer cancel()
 
 	staleBefore := time.Now().UTC().Add(-s.staleAfter)
-	failed, err := s.repo.FailStaleDirect(ctx, staleBefore)
-	if err != nil {
+	// The two recoveries are independent: a failure to abandon stale direct runs
+	// must not disable requeueing of runs abandoned by a crashed queue worker.
+	if failed, err := s.repo.FailStaleDirect(ctx, staleBefore); err != nil {
 		slog.Warn("scan queue: failed to abandon stale direct runs", "error", err)
-		return
-	}
-	if failed > 0 {
+	} else if failed > 0 {
 		slog.Info("scan queue: failed abandoned direct runs", "count", failed)
 	}
 

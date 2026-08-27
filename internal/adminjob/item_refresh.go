@@ -501,7 +501,7 @@ func (e *ItemRefreshExecutor) Execute(ctx context.Context, req ItemRefreshReques
 	if err != nil {
 		return nil, fmt.Errorf("scan scope: %w", err)
 	}
-	stopScanHeartbeat := startDirectScanHeartbeat(e.scanRuns, scanRun.ID, directScanHeartbeatEvery)
+	stopScanHeartbeat := startDirectScanHeartbeat(e.scanRuns, scanRun, directScanHeartbeatEvery)
 	ingestResult, err := e.ingester.IngestSubtree(scanCtx, folder, req.ScanPath)
 	stopScanHeartbeat()
 	if err != nil {
@@ -510,7 +510,6 @@ func (e *ItemRefreshExecutor) Execute(ctx context.Context, req ItemRefreshReques
 	if err := completeDirectScan(ctx, e.scanRuns, scanRun, ingestResult); err != nil {
 		return nil, fmt.Errorf("scan scope: %w", err)
 	}
-	e.publish(cache.EventScanComplete, strconv.Itoa(req.ScanFolderID))
 	scanResult := ingestResult.ScanResult
 
 	if progress != nil {
@@ -551,6 +550,10 @@ func (e *ItemRefreshExecutor) Execute(ctx context.Context, req ItemRefreshReques
 		return nil, fmt.Errorf("refresh metadata: %w", err)
 	}
 
+	// Publish only after the metadata refresh: scan_complete advances the resolved
+	// list-cache generation, so emitting it earlier lets a rail rebuild from
+	// pre-refresh titles/posters and serve them for the whole cache TTL.
+	e.publish(cache.EventScanComplete, strconv.Itoa(req.ScanFolderID))
 	e.publish(cache.EventMetadataUpdated, refreshContentID)
 	if e.realtimeHub != nil {
 		if scanResult != nil && (scanResult.New > 0 || scanResult.Updated > 0 || scanResult.Missing > 0 || matched > 0) {

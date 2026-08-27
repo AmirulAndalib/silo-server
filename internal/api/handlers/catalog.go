@@ -219,9 +219,9 @@ func (h *CatalogHandler) catalogItemResponses(r *http.Request, resultItems []*mo
 			continue
 		}
 		resp := itemListResponseShell(item, overlaySummaries[item.ContentID], userStates[item.ContentID])
-		if resp.PlayContentID == "" {
-			resp.PlayContentID = playTargets[item.ContentID]
-		}
+		// The resolver validated the item's own hint against this profile, so
+		// its answer replaces the unvalidated one carried by the item.
+		resp.PlayContentID = playTargets[playableTargetKeyForItem(item)]
 		if meta, ok := episodeMetadata[item.ContentID]; ok {
 			applyEpisodeBrowseMetadata(&resp, meta)
 		}

@@ -917,11 +917,15 @@ func (h *ItemsHandler) writeCatalogBrowseResponse(w http.ResponseWriter, r *http
 	overlaySummaries := h.listOverlaySummaries(r.Context(), result.Items, h.accessFilter(r))
 	userStates := h.listItemUserStates(r, result.Items)
 	playTargets := h.listPlayableTargets(r, result.Items, req.Query.LibraryIDs, h.accessFilter(r))
+	episodeMetadata := h.listEpisodeBrowseMetadata(r.Context(), result.Items)
 	items := make([]itemListResponse, 0, len(result.Items))
 	for _, item := range result.Items {
 		resp := h.toItemListResponseWithOverlay(r, item, overlaySummaries[item.ContentID], userStates[item.ContentID])
-		if resp.PlayContentID == "" {
-			resp.PlayContentID = playTargets[item.ContentID]
+		// The resolver validated the item's own hint against this profile, so
+		// its answer replaces the unvalidated one carried by the item.
+		resp.PlayContentID = playTargets[playableTargetKeyForItem(item)]
+		if meta, ok := episodeMetadata[item.ContentID]; ok {
+			applyEpisodeBrowseMetadata(&resp, meta)
 		}
 		items = append(items, resp)
 	}
@@ -941,9 +945,29 @@ func (h *ItemsHandler) listPlayableTargets(r *http.Request, items []*models.Medi
 		if item == nil || item.ContentID == "" {
 			continue
 		}
-		inputs = append(inputs, catalog.PlayableTargetInput{ContentID: item.ContentID, Type: item.Type})
+		inputs = append(inputs, playableTargetInputForItem(item))
 	}
 	return h.resolvePlayableTargetInputs(r, inputs, libraryIDs, filter)
+}
+
+// playableTargetInputForItem builds the resolver input for one displayed card.
+// Response rows find their own target with playableTargetKeyForItem, which
+// keys off the same fields — including the anchor hint, so a series that
+// appears on two recently-added scan-run event cards resolves each card
+// separately instead of both taking the first card's answer.
+func playableTargetInputForItem(item *models.MediaItem) catalog.PlayableTargetInput {
+	return catalog.PlayableTargetInput{
+		ContentID: item.ContentID,
+		Type:      item.Type,
+		// The item's own hint is profile-independent and cached across
+		// profiles, so it is routed through the resolver for validation
+		// instead of being emitted directly.
+		PreferredContentID: item.PlayContentID,
+	}
+}
+
+func playableTargetKeyForItem(item *models.MediaItem) string {
+	return playableTargetInputForItem(item).Key()
 }
 
 func (h *ItemsHandler) resolvePlayableTargetInputs(r *http.Request, inputs []catalog.PlayableTargetInput, libraryIDs []int, filter catalog.AccessFilter) map[string]string {
@@ -969,17 +993,32 @@ func (h *ItemsHandler) resolvePlayableTargetInputs(r *http.Request, inputs []cat
 func (h *ItemsHandler) enrichSeasonPlayTargets(r *http.Request, seriesID string, seasons []seasonResponse) {
 	inputs := make([]catalog.PlayableTargetInput, 0, len(seasons))
 	for i := range seasons {
-		seasonNumber := seasons[i].SeasonNumber
-		inputs = append(inputs, catalog.PlayableTargetInput{
-			ContentID:    seasons[i].ContentID,
-			Type:         "season",
-			SeriesID:     seriesID,
-			SeasonNumber: &seasonNumber,
-		})
+		inputs = append(inputs, seasonPlayableTargetInput(seriesID, &seasons[i]))
 	}
 	targets := h.resolvePlayableTargetInputs(r, inputs, nil, h.accessFilter(r))
-	for i := range seasons {
-		seasons[i].PlayContentID = targets[seasons[i].ContentID]
+	for i := range inputs {
+		seasons[i].PlayContentID = targets[inputs[i].Key()]
+	}
+}
+
+// resolveSeasonPlayTarget is the single-season counterpart of
+// enrichSeasonPlayTargets, for the endpoints that return one season.
+func (h *ItemsHandler) resolveSeasonPlayTarget(r *http.Request, seriesID string, season *seasonResponse) {
+	if season == nil {
+		return
+	}
+	inputs := []catalog.PlayableTargetInput{seasonPlayableTargetInput(seriesID, season)}
+	targets := h.resolvePlayableTargetInputs(r, inputs, nil, h.accessFilter(r))
+	season.PlayContentID = targets[inputs[0].Key()]
+}
+
+func seasonPlayableTargetInput(seriesID string, season *seasonResponse) catalog.PlayableTargetInput {
+	seasonNumber := season.SeasonNumber
+	return catalog.PlayableTargetInput{
+		ContentID:    season.ContentID,
+		Type:         "season",
+		SeriesID:     seriesID,
+		SeasonNumber: &seasonNumber,
 	}
 }
 

@@ -113,6 +113,11 @@ func TestResolvedListCacheInvalidationAdvancesGeneration(t *testing.T) {
 	if newKey == oldKey {
 		t.Fatal("invalidation did not advance the cache generation")
 	}
+	// The superseded entry is released by the bump itself: nothing can ever read
+	// it again, so holding it until its 15-minute expiry would only waste memory.
+	if _, ok := resolvedListGet(oldKey); ok {
+		t.Fatal("invalidation did not release the superseded generation entry")
+	}
 	fresh, _, err := getOrRefresh(context.Background(), newKey, now, staticLoader(mediaItems("fresh"), nil))
 	if err != nil {
 		t.Fatalf("load new generation: %v", err)
@@ -120,8 +125,76 @@ func TestResolvedListCacheInvalidationAdvancesGeneration(t *testing.T) {
 	if got := itemIDs(fresh); len(got) != 1 || got[0] != "fresh" {
 		t.Fatalf("new generation served %v, want [fresh]", got)
 	}
-	if old, ok := resolvedListGet(oldKey); !ok || itemIDs(old.items)[0] != "stale" {
-		t.Fatalf("old generation entry unexpectedly mutated: %#v, ok %v", old, ok)
+	if _, ok := resolvedListGet(oldKey); ok {
+		t.Fatal("new generation build resurrected the old generation key")
+	}
+}
+
+// TestResolvedListCacheInvalidationReleasesSupersededEntries verifies a
+// generation bump actually frees the entries it obsoletes — a long rescan bumps
+// the generation every 30s, well inside the 15-minute TTL, so leaving them for
+// the expiry sweep would keep many generations of every (library × scope) entry
+// resident at once. Generation-independent entries must survive.
+func TestResolvedListCacheInvalidationReleasesSupersededEntries(t *testing.T) {
+	resetResolvedListCacheForTest()
+	defer resetResolvedListCacheForTest()
+
+	clock := time.Unix(1_700_000_000, 0)
+	resolvedListInvalidationMu.Lock()
+	resolvedListNow = func() time.Time { return clock }
+	resolvedListInvalidationMu.Unlock()
+
+	recent := ResolvedSection{SectionType: SectionRecentlyAdded, ItemLimit: 20}
+	genre := ResolvedSection{SectionType: SectionGenre, ItemLimit: 20}
+
+	prime := func(key string) {
+		t.Helper()
+		if _, _, err := getOrRefresh(context.Background(), key, clock, staticLoader(mediaItems("cached"), nil)); err != nil {
+			t.Fatalf("prime %q: %v", key, err)
+		}
+		if _, ok := resolvedListGet(key); !ok {
+			t.Fatalf("entry %q should be cached right after priming", key)
+		}
+	}
+
+	// Several access scopes of the generation-scoped rail, plus one rail that is
+	// not generation scoped.
+	var oldKeys []string
+	for _, libraries := range [][]int{{1}, {2}, {3}} {
+		key := resolvedListCacheKey(recent, nil, libraries, catalog.AccessFilter{})
+		prime(key)
+		oldKeys = append(oldKeys, key)
+	}
+	genreKey := resolvedListCacheKey(genre, nil, []int{1}, catalog.AccessFilter{})
+	prime(genreKey)
+
+	InvalidateResolvedListCache()
+
+	for _, key := range oldKeys {
+		if _, ok := resolvedListGet(key); ok {
+			t.Fatalf("superseded entry %q was not released", key)
+		}
+	}
+	if _, ok := resolvedListGet(genreKey); !ok {
+		t.Fatal("generation-independent entry must survive an invalidation")
+	}
+
+	// The new generation caches normally and is itself released by the next bump.
+	newKey := resolvedListCacheKey(recent, nil, []int{1}, catalog.AccessFilter{})
+	prime(newKey)
+	clock = clock.Add(resolvedListInvalidationInterval)
+	InvalidateResolvedListCache()
+	if _, ok := resolvedListGet(newKey); ok {
+		t.Fatal("second bump did not release the previous generation's entry")
+	}
+	if _, ok := resolvedListGet(genreKey); !ok {
+		t.Fatal("generation-independent entry must survive repeated invalidations")
+	}
+	resolvedListCacheMu.RLock()
+	size := len(resolvedListCache)
+	resolvedListCacheMu.RUnlock()
+	if size != 1 {
+		t.Fatalf("cache holds %d entries after two bumps, want 1 (the generation-independent rail)", size)
 	}
 }
 

@@ -44,49 +44,51 @@ function typeLabel(type: BrowseItem["type"]): string {
   }
 }
 
+// Shared by the option row and the play-overlay layer stacked on top of it, so
+// the overlay always lands on the poster even if the row's spacing changes.
+const ROW_LAYOUT_CLASSES = "flex w-full cursor-pointer items-center gap-3 px-3 py-2 text-left";
+const ROW_POSTER_CLASSES = "relative h-14 w-10 shrink-0";
+
 function GlobalSearchResultRow({
   item,
   index,
   isSelected,
   onPick,
   onPlay,
-  onMoveSelection,
 }: {
   item: BrowseItem;
   index: number;
   isSelected: boolean;
   onPick: (contentId: string) => void;
   onPlay: () => void;
-  onMoveSelection: (index: number) => void;
 }) {
   const { loaded, onLoad } = useImageLoaded(item.poster_url);
   const thumbhashUrl = item.poster_thumbhash ? decodeThumbhash(item.poster_thumbhash) : "";
 
+  // Virtual focus: keyboard focus stays in the search input and the option is
+  // pointed at by aria-activedescendant, so the row is not a tab stop.
+  //
+  // The play link is a SIBLING of the option, not a child. role="option" is
+  // "Children Presentational: True", so a link inside it would be stripped of
+  // its role and name in the accessibility tree and become undiscoverable to
+  // screen-reader users. The overlay layer instead repeats the row's own flex
+  // layout (same gap/padding/poster box) so it tracks the poster without
+  // hard-coded offsets, and is pointer-events-none so row clicks pass through.
   return (
-    <div
-      role="listitem"
-      data-selected={isSelected || undefined}
-      className="group/media hover:bg-muted/80 data-[selected]:bg-accent relative rounded-md transition-colors"
-    >
-      <button
+    <div className="group/media hover:bg-muted/80 data-[selected]:bg-accent relative rounded-md transition-colors">
+      <div
         id={`search-result-${index}`}
-        type="button"
+        role="option"
+        aria-selected={isSelected}
+        aria-label={[item.title, item.year > 0 ? String(item.year) : null, typeLabel(item.type)]
+          .filter(Boolean)
+          .join(", ")}
+        data-selected={isSelected || undefined}
         onClick={() => onPick(item.content_id)}
-        onFocus={() => onMoveSelection(index)}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowDown") {
-            event.preventDefault();
-            onMoveSelection(index + 1);
-          } else if (event.key === "ArrowUp") {
-            event.preventDefault();
-            onMoveSelection(index - 1);
-          }
-        }}
-        aria-current={isSelected ? "true" : undefined}
-        className="flex w-full items-center gap-3 px-3 py-2 text-left"
+        className={ROW_LAYOUT_CLASSES}
       >
         <div
-          className="bg-muted relative h-14 w-10 shrink-0 overflow-hidden rounded-md"
+          className={`bg-muted overflow-hidden rounded-md ${ROW_POSTER_CLASSES}`}
           style={
             thumbhashUrl
               ? {
@@ -118,16 +120,18 @@ function GlobalSearchResultRow({
             {typeLabel(item.type)}
           </div>
         </div>
-      </button>
+      </div>
       {item.play_content_id ? (
-        <div className="pointer-events-none absolute top-2 left-3 h-14 w-10">
-          <CardPlayOverlay
-            contentId={item.play_content_id}
-            title={item.title}
-            type={item.type === "movie" ? "movie" : "episode"}
-            size="compact"
-            onPlaybackStart={onPlay}
-          />
+        <div className={`pointer-events-none absolute inset-0 ${ROW_LAYOUT_CLASSES}`}>
+          <div className={ROW_POSTER_CLASSES}>
+            <CardPlayOverlay
+              contentId={item.play_content_id}
+              title={item.title}
+              type={item.type === "movie" ? "movie" : "episode"}
+              size="compact"
+              onPlaybackStart={onPlay}
+            />
+          </div>
         </div>
       ) : null}
     </div>
@@ -237,12 +241,13 @@ export function GlobalSearch({
     setSelectedIndex(-1);
   }, [query]);
 
-  // Auto-scroll the selected result into view
+  // Auto-scroll the selected result into view. DOM focus deliberately stays in
+  // the input; aria-activedescendant carries the selection.
   useEffect(() => {
     if (selectedIndex >= 0) {
-      const selectedResult = document.getElementById(`search-result-${selectedIndex}`);
-      selectedResult?.focus();
-      selectedResult?.scrollIntoView?.({ block: "nearest" });
+      document.getElementById(`search-result-${selectedIndex}`)?.scrollIntoView?.({
+        block: "nearest",
+      });
     }
   }, [selectedIndex]);
 
@@ -298,8 +303,13 @@ export function GlobalSearch({
               className="placeholder:text-muted-foreground flex h-12 w-full bg-transparent text-sm outline-none"
               autoFocus
               aria-label="Search"
-              role="searchbox"
+              role="combobox"
+              aria-expanded={showResultsPanel}
+              aria-autocomplete="list"
               aria-controls="global-search-library-results"
+              aria-activedescendant={
+                selectedIndex >= 0 ? `search-result-${selectedIndex}` : undefined
+              }
               onKeyDown={(e) => {
                 if (e.key === "ArrowDown") {
                   e.preventDefault();
@@ -325,7 +335,7 @@ export function GlobalSearch({
             <div className="max-h-[min(22rem,55vh)] overflow-y-auto overscroll-contain px-2 py-2">
               <div
                 id="global-search-library-results"
-                role="list"
+                role="listbox"
                 aria-label="Library search results"
               >
                 {showLoading && (
@@ -351,7 +361,6 @@ export function GlobalSearch({
                     isSelected={i === selectedIndex}
                     onPick={handlePickItem}
                     onPlay={() => setOpen(false)}
-                    onMoveSelection={moveResultFocus}
                   />
                 ))}
               </div>
