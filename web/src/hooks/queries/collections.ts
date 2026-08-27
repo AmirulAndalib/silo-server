@@ -1,5 +1,10 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/api/client";
+import {
+  api,
+  apiWithProfileRequestContext,
+  isProfileRequestContextCurrent,
+  type ProfileRequestContextSnapshot,
+} from "@/api/client";
 import type {
   Collection,
   CollectionCapabilitiesResponse,
@@ -385,6 +390,11 @@ export function useDeleteUserCollectionImage() {
  * Failures are deliberately silent: the sort is already applied to the current
  * view through the URL, and a toast for a preference that will be re-sent on
  * the next change would be noise.
+ *
+ * The write carries the profile authority captured when the viewer picked the
+ * sort. These preferences are profile-scoped and the mutations are serialized,
+ * so a queued write that executed under whatever profile happened to be active
+ * on send could otherwise land on a household member who never chose it.
  */
 export function useSetCollectionSortPreference() {
   const queryClient = useQueryClient();
@@ -393,19 +403,27 @@ export function useSetCollectionSortPreference() {
     // earlier, slower request from completing after a later choice and
     // overwriting the preference the viewer actually selected last.
     scope: { id: "collection-sort-preference" },
-    mutationFn: (body: {
+    mutationFn: ({
+      profileAuth,
+      ...body
+    }: {
       collection_kind: "library" | "user" | "watchlist" | "favorites";
       collection_id?: string;
       field: string;
       order: NonNullable<CollectionSortConfig["order"]> | "";
+      /** Profile authority captured when the viewer picked this sort. */
+      profileAuth: ProfileRequestContextSnapshot;
     }) =>
-      api("/collections/sort-preference", {
+      apiWithProfileRequestContext("/collections/sort-preference", profileAuth, {
         method: "PUT",
         body: JSON.stringify(body),
       }),
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       // The next visit resolves through the server, so drop cached catalog
-      // pages that were built against the previous effective sort.
+      // pages that were built against the previous effective sort. Skip it if
+      // the viewer has since switched profiles — those pages belong to someone
+      // else and this write did not change them.
+      if (!isProfileRequestContextCurrent(variables.profileAuth)) return;
       queryClient.invalidateQueries({ queryKey: catalogKeys.all });
     },
   });

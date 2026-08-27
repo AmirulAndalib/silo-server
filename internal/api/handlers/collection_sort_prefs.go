@@ -178,6 +178,17 @@ func (h *CollectionHandler) HandleClearCollectionSortPreference(w http.ResponseW
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// sortPreferenceKinds is every collection_kind the sort-preference endpoints
+// accept. The collection capabilities response advertises it so a client can
+// feature-detect the personal-list kinds instead of discovering that an older
+// server rejects them by receiving a 400.
+var sortPreferenceKinds = []string{
+	userstore.CollectionKindLibrary,
+	userstore.CollectionKindUser,
+	userstore.CollectionKindWatchlist,
+	userstore.CollectionKindFavorites,
+}
+
 func normalizeCollectionRef(rawKind, rawID string) (string, string, bool) {
 	kind := strings.ToLower(strings.TrimSpace(rawKind))
 	if isPersonalSortPreferenceKind(kind) {

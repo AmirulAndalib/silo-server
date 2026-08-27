@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { CheckSquare, Search, Trash2, X } from "lucide-react";
 
+import { captureProfileRequestContext } from "@/api/client";
 import type { BrowseItem } from "@/api/types";
 import ItemGrid from "@/components/ItemGrid";
 import { RequestToAddSection } from "@/components/RequestToAddSection";
@@ -206,12 +207,18 @@ function CatalogResults({
         ? ""
         : querySortToSelectValue(sortedState.query_definition.sort);
       if (nextValue === currentValue) return;
+      // Captured here, at the moment of the pick, rather than inside the
+      // mutation: these writes are serialized, so one that runs later must
+      // still land on the profile that actually chose the sort.
+      const profileAuth = captureProfileRequestContext();
+      if (!profileAuth) return;
       const [field, order] = nextValue ? nextValue.split(":") : ["", ""];
       setCollectionSortPreference.mutate({
         collection_kind: collectionKind,
         collection_id: collectionId,
         field: field ?? "",
         order: order === "asc" || order === "desc" ? order : "",
+        profileAuth,
       });
     },
     [setCollectionSortPreference, sortedState],

@@ -1383,6 +1383,12 @@ export interface CollectionCapabilitiesResponse {
   collection_default_sort?: boolean;
   collection_sort_preferences?: boolean;
   effective_collection_sort?: boolean;
+  /**
+   * The collection_kind values this server accepts on the sort-preference
+   * endpoints. Absent on servers predating the personal-list kinds, where only
+   * "library" and "user" may be assumed.
+   */
+  sort_preference_kinds?: string[];
 }
 
 export interface QueryRule {
