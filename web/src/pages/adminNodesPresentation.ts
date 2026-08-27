@@ -231,7 +231,7 @@ function describeBackend(resolved: string, detected: readonly NodeDetected[]): N
   }
 
   const label = resolved.toUpperCase();
-  const entry = detected.find((candidate) => candidate.backend?.trim().toLowerCase() === resolved);
+  const entry = findDetectedEntry(resolved, detected);
   if (!entry) {
     // A configured backend wins resolution even with no candidate hardware to
     // probe, so absence of an entry is unknown, not failure.
@@ -259,6 +259,47 @@ function badge(label: string, state: NodeGPUBackendState, title: string): NodeGP
 }
 
 type NodeDetected = NonNullable<NodeCapabilities["detected_backends"]>[number];
+
+/** The probe entry for the resolved backend, or undefined when none was run. */
+function findDetectedEntry(
+  resolved: string,
+  detected: readonly NodeDetected[],
+): NodeDetected | undefined {
+  return detected.find((candidate) => candidate.backend?.trim().toLowerCase() === resolved);
+}
+
+/**
+ * One-line summary of what a transcode node's acceleration resolves to right
+ * now, for display under the per-node override select. Null when the node has
+ * never reported capabilities — there is nothing stored to describe yet, which
+ * is also true of a server predating capability reporting.
+ *
+ * This mirrors `describeBackend`'s verified/failed/unverified/none states but
+ * renders them as plain prose rather than a badge, since the edit dialog has
+ * no badge to hang it on.
+ */
+export function describeEffectiveAcceleration(node: StreamNode): string | null {
+  const capabilities = node.capabilities;
+  if (!capabilities) {
+    return null;
+  }
+
+  const resolved = capabilities.resolved?.trim().toLowerCase() ?? "";
+  if (resolved === "" || resolved === "none") {
+    return "Currently resolves: software encoding";
+  }
+
+  const label = resolved.toUpperCase();
+  const entry = findDetectedEntry(resolved, capabilities.detected_backends ?? []);
+  if (!entry) {
+    return `Currently resolves: ${label} — not verified`;
+  }
+  if (!entry.verified) {
+    return `Currently resolves: ${label} — probe failed`;
+  }
+  const device = entry.device?.trim();
+  return `Currently resolves: ${label} — verified${device ? ` on ${device}` : ""}`;
+}
 
 function otherFailures(resolved: string, detected: readonly NodeDetected[]): NodeGPUFailure[] {
   return detected
@@ -584,7 +625,7 @@ export const HW_ACCEL_INHERIT = "inherit";
  * backend the cluster-wide setting could also name.
  */
 export const HW_ACCEL_OVERRIDE_OPTIONS: readonly { value: string; label: string }[] = [
-  { value: HW_ACCEL_INHERIT, label: "Inherit cluster setting" },
+  { value: HW_ACCEL_INHERIT, label: "Cluster default" },
   { value: "auto", label: "Auto" },
   { value: "qsv", label: "Intel Quick Sync (QSV)" },
   { value: "vaapi", label: "VA-API" },

@@ -42,6 +42,7 @@ import {
   HW_ACCEL_OVERRIDE_OPTIONS,
   buildNodeHWDeviceRows,
   describeCapabilityDrift,
+  describeEffectiveAcceleration,
   describeNodeAccelerationOverride,
   describeNodeGPU,
   describeNodeSystem,
@@ -475,14 +476,14 @@ function NodeDevicePicker({
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <p className="text-muted-foreground text-sm">
           {selectedCount === 0
-            ? "Inheriting the cluster-wide device selection."
+            ? "Using the cluster default (auto-discover this node's devices)."
             : selectedCount === 1
               ? "All transcodes on this node run on the selected device."
               : "Transcodes on this node balance across the selected devices (least loaded first)."}
         </p>
         {selectedCount > 0 && (
           <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={onInherit}>
-            Inherit cluster setting
+            Use cluster default
           </Button>
         )}
       </div>
@@ -516,6 +517,7 @@ function NodeForm({
   const hasDeviceInventory = nodeHasHWDeviceInventory(node);
   const deviceRows = buildNodeHWDeviceRows(node, hwDeviceOverride);
   const devicePaths = nodeHWDevicePaths(node);
+  const effectiveAcceleration = node ? describeEffectiveAcceleration(node) : null;
   const createMutation = useCreateNode();
   const updateMutation = useUpdateNode();
   const isPending = createMutation.isPending || updateMutation.isPending;
@@ -541,13 +543,15 @@ function NodeForm({
     if (node) {
       // null on either override is what restores inheritance of the
       // cluster-wide playback setting; omitting the key would leave the stored
-      // value alone instead.
-      const overrideDevices = parseHWDeviceOverride(hwDeviceOverride);
-      const body: UpdateNodeRequest = {
-        ...fields,
-        hw_accel_override: hwAccelOverride === HW_ACCEL_INHERIT ? null : hwAccelOverride,
-        hw_device_override: overrideDevices.length > 0 ? overrideDevices.join(",") : null,
-      };
+      // value alone instead. The override controls only render for transcode
+      // nodes, so a proxy edit must omit both keys rather than send null —
+      // sending null here would clear an existing value the form never showed.
+      const body: UpdateNodeRequest = { ...fields };
+      if (nodeType === "transcode") {
+        const overrideDevices = parseHWDeviceOverride(hwDeviceOverride);
+        body.hw_accel_override = hwAccelOverride === HW_ACCEL_INHERIT ? null : hwAccelOverride;
+        body.hw_device_override = overrideDevices.length > 0 ? overrideDevices.join(",") : null;
+      }
       updateMutation.mutate({ id: node.id, body }, { onSuccess: onClose });
     } else {
       const body: CreateNodeRequest = { type: nodeType, ...fields };
@@ -638,8 +642,12 @@ function NodeForm({
       )}
 
       {/* Overrides are edit-only: the create endpoint takes no acceleration
-          fields, so offering them here would silently drop what was typed. */}
-      {node && (
+          fields, so offering them here would silently drop what was typed.
+          They are also transcode-only: a proxy node only remuxes/strips
+          bitstreams, so it never encodes and these fields would be
+          meaningless — and their absence keeps a proxy edit from sending
+          override fields at all. */}
+      {node && nodeType === "transcode" && (
         <>
           <div className="space-y-2">
             <Label htmlFor="node-hw-accel-override">Hardware Acceleration</Label>
@@ -657,10 +665,14 @@ function NodeForm({
             </Select>
             <p className="text-muted-foreground text-sm">
               Optional. Overrides the cluster-wide Hardware Acceleration setting for this node only
-              — use it when this node's hardware differs from the rest of the cluster. Applies to
-              new transcodes within a minute; restart the node to re-prime its encoder for the new
-              backend.
+              — use it when this node's hardware differs from the rest of the cluster. The cluster
+              default is Auto unless changed on the Playback settings page, and Auto detects this
+              node's own hardware, not the server's. Applies to new transcodes within a minute;
+              restart the node to re-prime its encoder for the new backend.
             </p>
+            {effectiveAcceleration && (
+              <p className="text-muted-foreground text-sm">{effectiveAcceleration}</p>
+            )}
           </div>
 
           <div className="space-y-2">
@@ -681,13 +693,13 @@ function NodeForm({
                   id="node-hw-device-override"
                   value={hwDeviceOverride}
                   onChange={(e) => setHwDeviceOverride(e.target.value)}
-                  placeholder="Inherit cluster setting"
+                  placeholder="Cluster default (auto-discover)"
                 />
                 <p className="text-muted-foreground text-sm">
                   Optional. Comma-separated render device paths this node transcodes on (e.g.{" "}
                   <span className="font-mono">/dev/dri/renderD128,/dev/dri/renderD129</span>). Leave
-                  empty to inherit the cluster-wide device selection. This node has reported no
-                  device inventory yet, so there is nothing to pick from.
+                  empty to use the cluster default (auto-discover). This node has reported no device
+                  inventory yet, so there is nothing to pick from.
                 </p>
               </>
             )}

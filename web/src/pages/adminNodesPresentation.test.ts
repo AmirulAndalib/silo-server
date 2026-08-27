@@ -5,6 +5,7 @@ import {
   DISK_FILL_WARNING_PCT,
   buildNodeHWDeviceRows,
   describeCapabilityDrift,
+  describeEffectiveAcceleration,
   describeGPUBusy,
   describeNodeAccelerationOverride,
   describeNodeGPU,
@@ -484,6 +485,68 @@ describe("describeNodeGPU", () => {
     expect(
       describeNodeGPU(makeNode({ capabilities, physical_gpu_keys: ["GPU-abc"] }), NOW),
     ).toEqual(describeNodeGPU(makeNode({ capabilities }), NOW));
+  });
+});
+
+describe("describeEffectiveAcceleration", () => {
+  it("has nothing to say about a node with no stored capabilities", () => {
+    expect(describeEffectiveAcceleration(makeNode())).toBeNull();
+    expect(describeEffectiveAcceleration(makeNode({ capabilities: null }))).toBeNull();
+  });
+
+  it("names the device a verified backend resolved on", () => {
+    const node = makeNode({
+      capabilities: {
+        resolved: "qsv",
+        detected_backends: [{ backend: "qsv", verified: true, device: "/dev/dri/renderD128" }],
+      },
+    });
+
+    expect(describeEffectiveAcceleration(node)).toBe(
+      "Currently resolves: QSV — verified on /dev/dri/renderD128",
+    );
+  });
+
+  it("omits the device for a verified backend with no render node, like NVENC", () => {
+    const node = makeNode({
+      capabilities: {
+        resolved: "nvenc",
+        detected_backends: [{ backend: "nvenc", verified: true }],
+      },
+    });
+
+    expect(describeEffectiveAcceleration(node)).toBe("Currently resolves: NVENC — verified");
+  });
+
+  it("says a failed probe failed, without repeating the reason", () => {
+    const node = makeNode({
+      capabilities: {
+        resolved: "qsv",
+        detected_backends: [
+          { backend: "qsv", verified: false, reason: "h264_qsv smoke encode failed: device busy" },
+        ],
+      },
+    });
+
+    expect(describeEffectiveAcceleration(node)).toBe("Currently resolves: QSV — probe failed");
+  });
+
+  it("calls a configured backend with no probe entry not verified", () => {
+    expect(describeEffectiveAcceleration(makeNode({ capabilities: { resolved: "qsv" } }))).toBe(
+      "Currently resolves: QSV — not verified",
+    );
+  });
+
+  it("describes no resolved backend as software encoding", () => {
+    expect(describeEffectiveAcceleration(makeNode({ capabilities: { resolved: "none" } }))).toBe(
+      "Currently resolves: software encoding",
+    );
+  });
+
+  it("treats a report from a server predating these fields as software encoding", () => {
+    expect(describeEffectiveAcceleration(makeNode({ capabilities: {} }))).toBe(
+      "Currently resolves: software encoding",
+    );
   });
 });
 
