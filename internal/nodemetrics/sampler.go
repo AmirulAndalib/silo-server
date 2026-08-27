@@ -460,6 +460,27 @@ func (s *Sampler) sampleGPU(ctx context.Context, now time.Time) []GPUStats {
 		}
 	}
 
+	// 4. Workloads this process knows it started, on devices nothing above
+	// named. Session accounting comes from the playback allocator rather than
+	// from a driver, so it is true whether or not any measurement source
+	// answered — and NVENC workloads are keyed by CUDA index or GPU uuid, which
+	// only the nvidia-smi step supplies. With that step failed or its breaker
+	// tripped, an NVENC node would otherwise report zero sessions while it
+	// transcodes, and one exposing no readable render node would vanish from the
+	// sample entirely. Nothing here can say *which* card a bare "cuda:0" is
+	// without nvidia-smi, so it stands as its own unmeasured entry: an honest
+	// "a workload is running on this device and nobody could measure it" beats a
+	// silent zero.
+	for name, count := range sessions {
+		if name == "" || count <= 0 {
+			continue
+		}
+		if slices.ContainsFunc(order, func(key string) bool { return slices.Contains(aliases[key], name) }) {
+			continue
+		}
+		upsert(name)
+	}
+
 	if len(order) == 0 {
 		return nil
 	}

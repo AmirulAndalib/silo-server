@@ -3,6 +3,7 @@ package nodemetrics
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -740,5 +741,65 @@ func TestMemoryStatsUsesCgroupUsageBesideACgroupLimit(t *testing.T) {
 	}
 	if used != 1048576 {
 		t.Fatalf("used = %d, want the cgroup working set", used)
+	}
+}
+
+// NVENC workloads are keyed by CUDA index or GPU uuid, and only the nvidia-smi
+// step supplies those aliases. With that step failed — a timeout, a missing
+// toolkit, a tripped breaker — an NVENC node reported zero sessions while it
+// transcoded, and one exposing no readable render node vanished from the sample
+// altogether. Session accounting comes from the playback allocator, not a
+// driver, so it is true regardless.
+func TestSampleGPUReportsSessionsWhenNVIDIAEnrichmentFails(t *testing.T) {
+	tree := newProcTree(t)
+	tree.write("stat", "cpu  0 0 0 0 0 0 0 0\n")
+	tree.write("loadavg", "0 0 0 0/0 0\n")
+	tree.write("meminfo", "MemTotal: 1024 kB\n")
+	tree.write("net/dev", "")
+	s := newTestSampler(t, tree, newFakeClock(), Options{})
+	s.runNVIDIASMI = func(context.Context) ([]byte, error) {
+		return nil, errors.New("nvidia-smi not installed")
+	}
+	s.identities = func() []DeviceIdentity { return nil }
+	s.sessions = func() map[string]int { return map[string]int{"cuda:0": 2} }
+
+	gpus := s.sampleGPU(context.Background(), s.now())
+
+	if len(gpus) != 1 {
+		t.Fatalf("gpu sample = %+v, want the known workload's device reported", gpus)
+	}
+	if gpus[0].Device != "cuda:0" {
+		t.Fatalf("device = %q, want the name the workload is counted under", gpus[0].Device)
+	}
+	if gpus[0].Sessions != 2 {
+		t.Fatalf("sessions = %d, want the allocator's count", gpus[0].Sessions)
+	}
+	if gpus[0].Source != SourceUnavailable {
+		t.Fatalf("source = %q, want it reported as unmeasured", gpus[0].Source)
+	}
+}
+
+// A workload whose device an enrichment source did name is not duplicated: the
+// alias set already covers it.
+func TestSampleGPUDoesNotDuplicateAnAlreadyNamedDevice(t *testing.T) {
+	tree := newProcTree(t)
+	tree.write("stat", "cpu  0 0 0 0 0 0 0 0\n")
+	tree.write("loadavg", "0 0 0 0/0 0\n")
+	tree.write("meminfo", "MemTotal: 1024 kB\n")
+	tree.write("net/dev", "")
+	s := newTestSampler(t, tree, newFakeClock(), Options{})
+	s.runNVIDIASMI = func(context.Context) ([]byte, error) {
+		return []byte("0, GPU-x, 00000000:03:00.0, 71, 63, 12, 812, 8192\n"), nil
+	}
+	s.identities = func() []DeviceIdentity { return nil }
+	s.sessions = func() map[string]int { return map[string]int{"cuda:0": 2} }
+
+	gpus := s.sampleGPU(context.Background(), s.now())
+
+	if len(gpus) != 1 {
+		t.Fatalf("gpu sample = %+v, want one entry for the enriched device", gpus)
+	}
+	if gpus[0].Sessions != 2 {
+		t.Fatalf("sessions = %d, want the workload joined onto the enriched entry", gpus[0].Sessions)
 	}
 }
