@@ -300,7 +300,7 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 					SELECT series_id, NULL::text, added_at FROM series_without_episode_events
 				) keys
 			) ranked
-			WHERE added_rank <= $%[4]d + $%[5]d
+			WHERE added_rank <= $%[4]d::bigint + $%[5]d::bigint
 		),
 		episode_events AS (
 			SELECT pk.series_id, pk.scan_run_id, agg.added_at, agg.episode_count, agg.episode_id, agg.anchor_season_number
