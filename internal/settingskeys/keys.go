@@ -9,7 +9,7 @@
 package settingskeys
 
 // Revision is the manifest revision these bindings were generated from.
-const Revision = 7
+const Revision = 8
 
 // Setting keys, one constant per definition.
 const (
@@ -93,6 +93,10 @@ const (
 	UiCardOverlays = "ui.card_overlays"
 	// Media cards
 	UiCardPresentation = "ui.card_presentation"
+	// Card quick actions
+	UiCardQuickActions = "ui.card_quick_actions"
+	// Card quick actions enabled
+	UiCardQuickActionsEnabled = "ui.card_quick_actions_enabled"
 	// Custom CSS
 	UiCustomCss = "ui.custom_css"
 	// Custom theme variables
@@ -157,6 +161,8 @@ var Remote = []string{
 	SearchMediaScope,
 	UiCardOverlays,
 	UiCardPresentation,
+	UiCardQuickActions,
+	UiCardQuickActionsEnabled,
 	UiCustomCss,
 	UiCustomThemeVars,
 	UiDateFormat,

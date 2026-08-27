@@ -1242,7 +1242,6 @@
     justify-content: center;
     width: 2.5rem;
     height: 2.5rem;
-    flex-shrink: 0;
     border-radius: 9999px;
     color: rgb(255 255 255 / 0.78);
     background: transparent;
@@ -1335,6 +1334,15 @@
   .media-card:hover {
     filter: brightness(1.1);
     transform: translateY(-4px);
+  }
+
+  /* Home/library pages can contain hundreds of cards across off-screen rows.
+     Let supporting engines skip layout and paint for those rows until they
+     approach the viewport. Browsers without content-visibility ignore this
+     and keep the existing rendering path. */
+  .media-carousel {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 24rem;
   }
 
   /* Card actions stay hidden at rest so touch devices get clean artwork; a

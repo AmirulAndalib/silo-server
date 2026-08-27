@@ -389,6 +389,7 @@ describe("MediaItemMenu trigger visibility", () => {
     expect(className).not.toContain("opacity-");
     expect(className).not.toContain("group-hover");
     expect(className).not.toContain("group-focus-within");
+    expect(className).not.toContain("backdrop-blur");
     expect(className).toContain("focus-visible:ring-2");
     expect(className).toContain("size-6");
     expect(className).toContain("sm:size-8");
@@ -691,6 +692,34 @@ describe("MediaItemMenu trigger visibility", () => {
     );
 
     expect(screen.getByRole("button", { name: "Mark Watched" })).toBeTruthy();
+  });
+
+  it("shows only the quick actions selected by the resolved profile mode", () => {
+    const userState = { played: false, is_favorite: false, in_watchlist: false };
+    const renderMenu = (quickActionMode: "favorites" | "watched" | "none") => (
+      <MemoryRouter>
+        <MediaItemMenu
+          contentId="movie-1"
+          mediaType="movie"
+          userState={userState}
+          variant="poster"
+          quickActionMode={quickActionMode}
+        />
+      </MemoryRouter>
+    );
+    const { rerender } = render(renderMenu("favorites"));
+
+    expect(screen.getByRole("button", { name: "Add to favorites" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Mark Watched" })).toBeNull();
+
+    rerender(renderMenu("watched"));
+    expect(screen.queryByRole("button", { name: "Add to favorites" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Mark Watched" })).toBeTruthy();
+
+    rerender(renderMenu("none"));
+    expect(screen.queryByRole("button", { name: "Add to favorites" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Mark Watched" })).toBeNull();
+    expect(screen.getByRole("button", { name: "More actions" })).toBeTruthy();
   });
 
   it("uses matching action icons and sizes the menu to its longest entry", async () => {
@@ -1144,5 +1173,29 @@ describe("MediaItemMenu long-press action sheet", () => {
 
     expect(mocks.toggleWatched).toHaveBeenCalledWith(true);
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("keeps long press while omitting desktop-only shortcut trees on coarse-pointer devices", () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: false,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+
+    render(<LongPressCard />);
+
+    expect(screen.queryByRole("button", { name: "Mark Watched" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add to favorites" })).toBeNull();
+    expect(screen.getByRole("button", { name: "More actions" })).toBeTruthy();
+
+    pressCard();
+    holdPastLongPress();
+
+    expect(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Mark Watched" }),
+    ).toBeTruthy();
   });
 });

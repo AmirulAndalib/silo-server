@@ -1201,16 +1201,28 @@ func (h *SettingsHandler) resolveEffectiveSetting(
 	return resolved, nil
 }
 
+const (
+	defaultCardQuickActionMode   = "both"
+	cardQuickActionModeFavorites = calendarFilterFavorites
+	cardQuickActionModeWatched   = "watched"
+)
+
 // overlayConfigResponse is returned by GET /settings/overlay-config.
 type overlayConfigResponse struct {
-	Enabled  bool   `json:"enabled"`
-	Defaults string `json:"defaults,omitempty"`
+	Enabled             bool   `json:"enabled"`
+	Defaults            string `json:"defaults,omitempty"`
+	QuickActionsEnabled bool   `json:"quick_actions_enabled"`
+	QuickActionsDefault string `json:"quick_actions_default"`
 }
 
 // HandleGetOverlayConfig returns the server-wide overlay configuration.
 // Available to all authenticated users (not admin-only).
 func (h *SettingsHandler) HandleGetOverlayConfig(w http.ResponseWriter, r *http.Request) {
-	resp := overlayConfigResponse{Enabled: true}
+	resp := overlayConfigResponse{
+		Enabled:             true,
+		QuickActionsEnabled: true,
+		QuickActionsDefault: defaultCardQuickActionMode,
+	}
 
 	if h.serverSettings != nil {
 		if v, _ := h.serverSettings.Get(r.Context(), "overlays.enabled"); v == "false" {
@@ -1218,6 +1230,15 @@ func (h *SettingsHandler) HandleGetOverlayConfig(w http.ResponseWriter, r *http.
 		}
 		if v, _ := h.serverSettings.Get(r.Context(), "defaults.card_overlays"); v != "" {
 			resp.Defaults = v
+		}
+		if v, _ := h.serverSettings.Get(r.Context(), "defaults.card_quick_actions_enabled"); v == "false" {
+			resp.QuickActionsEnabled = false
+		}
+		if v, _ := h.serverSettings.Get(r.Context(), "defaults.card_quick_actions"); v != "" {
+			switch v {
+			case defaultCardQuickActionMode, cardQuickActionModeFavorites, cardQuickActionModeWatched:
+				resp.QuickActionsDefault = v
+			}
 		}
 	}
 
