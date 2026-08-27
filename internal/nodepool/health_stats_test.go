@@ -147,13 +147,13 @@ func TestApplyHealthClearsStatsWhenACheckCarriesNone(t *testing.T) {
 	pool := NewTranscodePool()
 	pool.SetNodes([]*Node{{ID: 1, URL: "http://node", Enabled: true}})
 
-	pool.ApplyHealth(1, true, 1, 0, []byte(`{"system":{"cpu_pct":41}}`), time.Now())
+	pool.ApplyHealth(1, "http://node", true, 1, 0, []byte(`{"system":{"cpu_pct":41}}`), time.Now())
 	stored := pool.Nodes()[0]
 	if len(stored.LastStats) == 0 {
 		t.Fatal("stats were not published to the pool")
 	}
 
-	pool.ApplyHealth(1, false, 0, 0, nil, time.Now())
+	pool.ApplyHealth(1, "http://node", false, 0, 0, nil, time.Now())
 	if got := pool.Nodes()[0].LastStats; got != nil {
 		t.Fatalf("LastStats = %s after a failed check, want nil", got)
 	}
@@ -166,10 +166,57 @@ func TestApplyHealthClonesStats(t *testing.T) {
 	pool.SetNodes([]*Node{{ID: 1, URL: "http://node", Enabled: true}})
 
 	buffer := []byte(`{"system":{"cpu_pct":41}}`)
-	pool.ApplyHealth(1, true, 0, 0, buffer, time.Now())
+	pool.ApplyHealth(1, "http://node", true, 0, 0, buffer, time.Now())
 	copy(buffer, []byte(`{"system":{"cpu_pct":99}}`))
 
 	if got := string(pool.Nodes()[0].LastStats); got != `{"system":{"cpu_pct":41}}` {
 		t.Fatalf("LastStats = %s, want the published copy to be independent of the caller's buffer", got)
+	}
+}
+
+// The database fence cannot undo a pool write that already happened. A health
+// request is bounded at five seconds, which is ample time for an administrator
+// to repoint a row and reload the pools; publishing by id alone would then put
+// one worker's health — and the scratch fill transcode admission reads — onto
+// the replacement, and it would stay there until a later sweep.
+func TestApplyHealthIgnoresAResultForAReplacedWorker(t *testing.T) {
+	pool := NewTranscodePool()
+	pool.SetNodes([]*Node{{ID: 1, URL: "http://replacement", Enabled: true}})
+
+	pool.ApplyHealth(1, "http://original", true, 7, 0, []byte(`{"system":{"cpu_pct":41}}`), time.Now())
+
+	stored := pool.Nodes()[0]
+	if stored.ActiveJobs != 0 || len(stored.LastStats) != 0 || stored.LastHealthCheck != nil {
+		t.Fatalf("pool took the old worker's result: %+v", stored)
+	}
+}
+
+// The fence must not reject the ordinary case: the pools normalize URLs and the
+// database column does not, so a trailing slash on one side is the same worker.
+func TestApplyHealthAcceptsATrailingSlashDifference(t *testing.T) {
+	pool := NewTranscodePool()
+	pool.SetNodes([]*Node{{ID: 1, URL: "http://node/", Enabled: true}})
+
+	pool.ApplyHealth(1, "http://node", true, 3, 0, nil, time.Now())
+
+	if stored := pool.Nodes()[0]; stored.ActiveJobs != 3 {
+		t.Fatalf("active jobs = %d, want the result applied despite the trailing slash", stored.ActiveJobs)
+	}
+}
+
+// Capability reports carry the GPU identities the planner places work on, and
+// their fetch is bounded at two minutes — an even wider window for the row to
+// be repointed underneath them.
+func TestApplyCapabilitiesIgnoresAReportForAReplacedWorker(t *testing.T) {
+	pool := NewTranscodePool()
+	pool.SetNodes([]*Node{{ID: 1, URL: "http://replacement", Enabled: true}})
+
+	pool.ApplyCapabilities(1, "http://original",
+		[]byte(`{"resolved":"qsv","render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],"boot_id":"boot-1"}`),
+		"sha256:stale", time.Now(), nil)
+
+	stored := pool.Nodes()[0]
+	if len(stored.Capabilities) != 0 || stored.CapabilitiesHash != nil || len(stored.PhysicalGPUKeys) != 0 {
+		t.Fatalf("pool took the old worker's capability report: %+v", stored)
 	}
 }

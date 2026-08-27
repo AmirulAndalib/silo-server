@@ -86,24 +86,37 @@ func (p *TranscodePool) Nodes() []*Node {
 
 // ApplyHealth records a health check result by swapping the node for an
 // updated copy, keeping published *Node values immutable.
-func (p *TranscodePool) ApplyHealth(id int, healthy bool, activeJobs, egressKbps int, lastStats []byte, checkedAt time.Time) {
+func (p *TranscodePool) ApplyHealth(id int, checkedURL string, healthy bool, activeJobs, egressKbps int, lastStats []byte, checkedAt time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	applyNodeHealth(p.nodes, id, healthy, activeJobs, egressKbps, lastStats, checkedAt)
+	applyNodeHealth(p.nodes, id, checkedURL, healthy, activeJobs, egressKbps, lastStats, checkedAt)
 }
 
 // ApplyCapabilities records a freshly fetched capability report by swapping the
 // node for an updated copy, keeping published *Node values immutable.
-func (p *TranscodePool) ApplyCapabilities(id int, capabilities []byte, hash string, refreshedAt time.Time, drift *string) {
+func (p *TranscodePool) ApplyCapabilities(id int, fetchedFrom string, capabilities []byte, hash string, refreshedAt time.Time, drift *string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	applyNodeCapabilities(p.nodes, id, capabilities, hash, refreshedAt, drift)
+	applyNodeCapabilities(p.nodes, id, fetchedFrom, capabilities, hash, refreshedAt, drift)
+}
+
+// sameNodeURL compares two node addresses the way the pools store them, so a
+// trailing slash on one side is not a different worker.
+func sameNodeURL(a, b string) bool {
+	return normalizeNodeURL(a) == normalizeNodeURL(b)
 }
 
 // applyNodeHealth replaces the slice entry for id with an updated copy.
-func applyNodeHealth(nodes []*Node, id int, healthy bool, activeJobs, egressKbps int, lastStats []byte, checkedAt time.Time) {
+//
+// checkedURL fences the write the same way the database update does, and for
+// the same reason: a health request is bounded at five seconds, which is ample
+// time for an administrator to repoint the row and reload the pools. Publishing
+// by id alone would then write one worker's health — and the scratch fill
+// transcode admission reads — onto the replacement, and the database fence
+// downstream cannot undo that. The pool would stay wrong until a later sweep.
+func applyNodeHealth(nodes []*Node, id int, checkedURL string, healthy bool, activeJobs, egressKbps int, lastStats []byte, checkedAt time.Time) {
 	for i, n := range nodes {
-		if n.ID != id {
+		if n.ID != id || !sameNodeURL(n.URL, checkedURL) {
 			continue
 		}
 		clone := *n
@@ -132,9 +145,9 @@ func applyNodeHealth(nodes []*Node, id int, healthy bool, activeJobs, egressKbps
 // drift is set verbatim, nil included: the note describes the comparison that
 // produced this payload, so a node whose hardware recovered must lose the note
 // at the same moment it gains the clean report.
-func applyNodeCapabilities(nodes []*Node, id int, capabilities []byte, hash string, refreshedAt time.Time, drift *string) {
+func applyNodeCapabilities(nodes []*Node, id int, fetchedFrom string, capabilities []byte, hash string, refreshedAt time.Time, drift *string) {
 	for i, n := range nodes {
-		if n.ID != id {
+		if n.ID != id || !sameNodeURL(n.URL, fetchedFrom) {
 			continue
 		}
 		clone := *n

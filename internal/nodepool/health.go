@@ -237,10 +237,10 @@ func (hc *HealthChecker) Start(ctx context.Context) {
 }
 
 // applyHealthFunc is a pool's copy-on-write health writer.
-type applyHealthFunc func(id int, healthy bool, activeJobs, egressKbps int, lastStats []byte, checkedAt time.Time)
+type applyHealthFunc func(id int, checkedURL string, healthy bool, activeJobs, egressKbps int, lastStats []byte, checkedAt time.Time)
 
 // applyCapabilitiesFunc is a pool's copy-on-write capability writer.
-type applyCapabilitiesFunc func(id int, capabilities []byte, hash string, refreshedAt time.Time, drift *string)
+type applyCapabilitiesFunc func(id int, fetchedFrom string, capabilities []byte, hash string, refreshedAt time.Time, drift *string)
 
 func (hc *HealthChecker) checkAll(ctx context.Context) {
 	var wg sync.WaitGroup
@@ -249,8 +249,10 @@ func (hc *HealthChecker) checkAll(ctx context.Context) {
 			healthy, activeJobs, egressKbps, capabilitiesHash, lastStats := CheckNode(ctx, n)
 
 			// Publish the result through the pool lock so readers never see
-			// a Node struct mutated in place (the pool swaps in a copy).
-			applyHealth(n.ID, healthy, activeJobs, egressKbps, lastStats, time.Now())
+			// a Node struct mutated in place (the pool swaps in a copy). Fenced
+			// on the checked URL, like the database write below: the pool can be
+			// reloaded with a different worker on this id while the check runs.
+			applyHealth(n.ID, n.URL, healthy, activeJobs, egressKbps, lastStats, time.Now())
 
 			if n.Healthy && !healthy {
 				slog.WarnContext(ctx, "stream node unhealthy", "component", "nodepool", "id", n.ID, "name", n.Name, "url", n.URL)
@@ -423,7 +425,7 @@ func (hc *HealthChecker) refreshCapabilities(ctx context.Context, n *Node, apply
 	}
 	logCapabilityChange(ctx, n, drift, parsed)
 	if applyCapabilities != nil {
-		applyCapabilities(n.ID, payload, hash, refreshedAt, note)
+		applyCapabilities(n.ID, n.URL, payload, hash, refreshedAt, note)
 	}
 	if onChanged != nil {
 		onChanged(n.URL)
