@@ -1251,8 +1251,11 @@ func main() {
 		deps.NodePlanner = nodepool.NewPlanner(proxyPool, transcodePool)
 
 		healthChecker := nodepool.NewHealthChecker(proxyPool, transcodePool, nodeRepo)
-		healthChecker.SetCapabilityFetcher(
-			nodeCapabilityFetcher(cfg.Auth.JWTSecret, nodeCapabilityProbeBudget(configWatcher.Config)))
+		capabilityBudget := nodeCapabilityProbeBudget(configWatcher.Config)
+		healthChecker.SetCapabilityFetcher(nodeCapabilityFetcher(cfg.Auth.JWTSecret, capabilityBudget))
+		// The sweep's backstop is derived from the same budget, so it can never
+		// be the deadline that fires first on a node with many devices.
+		healthChecker.SetCapabilityFetchBudget(capabilityBudget)
 		deps.NodeHealthChecker = healthChecker
 		healthChecker.Start(appCtx)
 		slog.Info("node pools initialized", "proxy_nodes", len(proxyNodes), "transcode_nodes", len(transcodeNodes))

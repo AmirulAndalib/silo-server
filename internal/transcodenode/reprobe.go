@@ -60,7 +60,7 @@ func (s *Server) handleReprobeCapabilities(w http.ResponseWriter, r *http.Reques
 	// collide with the smoke encode minutes into the probe. The gate is the
 	// same exclusion the transcode-start path consults, so from here until the
 	// deferred release no new GPU work is admitted.
-	busy, ok := s.gpu.beginReprobe(int(s.activeJobs.Load()), playback.HWProbesInFlight())
+	busy, ok := s.gpu.beginReprobe(int(s.activeJobs.Load()), playback.HWProbesInFlight()+tonemap.ProbesInFlight())
 	if !ok {
 		slog.InfoContext(r.Context(), "transcode node capability re-probe refused while busy",
 			"component", "transcodenode", "active_jobs", busy)

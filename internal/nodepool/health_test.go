@@ -506,3 +506,36 @@ func TestHealthCheckerDoesNotStackCapabilityFetchesForOneNode(t *testing.T) {
 		t.Fatalf("capability fetches = %d after the report was stored, want 1", got)
 	}
 }
+
+// The probe matrix a cold node runs grows with its device count without bound —
+// nine render devices legitimately ask for over five minutes — so a fixed outer
+// deadline cancels a node operating inside its published contract, and its
+// inventory never populates. The backstop is derived from the budget the fetcher
+// gave itself so the fetcher's own deadline always fires first.
+func TestCapabilityFetchBackstopSitsAboveTheFetcherBudget(t *testing.T) {
+	checker := NewHealthChecker(NewProxyPool(), NewTranscodePool(), nil)
+	node := &Node{ID: 1, URL: "http://gpu-1"}
+
+	if got := checker.capabilityFetchBackstop(node); got != capabilityFetchTimeout {
+		t.Fatalf("backstop with no budget wired = %v, want the %v floor", got, capabilityFetchTimeout)
+	}
+
+	// A budget under the floor leaves the floor standing: it already clears the
+	// fetcher by a wide margin.
+	checker.SetCapabilityFetchBudget(func(*Node) time.Duration { return 2 * time.Minute })
+	if got := checker.capabilityFetchBackstop(node); got != capabilityFetchTimeout {
+		t.Fatalf("backstop for a small budget = %v, want the %v floor", got, capabilityFetchTimeout)
+	}
+
+	// A budget above it carries the backstop with it, always by the slack, so
+	// the fetch is never cut short by this.
+	big := 311 * time.Second
+	checker.SetCapabilityFetchBudget(func(*Node) time.Duration { return big })
+	got := checker.capabilityFetchBackstop(node)
+	if got != big+capabilityFetchSlack {
+		t.Fatalf("backstop for a %v budget = %v, want %v", big, got, big+capabilityFetchSlack)
+	}
+	if got <= big {
+		t.Fatalf("backstop %v does not clear the %v the fetcher allowed itself", got, big)
+	}
+}

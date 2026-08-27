@@ -125,3 +125,18 @@ func TestGPUGateRefusesReprobeWhileADetachedProbeRuns(t *testing.T) {
 		t.Fatal("re-probe refused once no probe was in flight")
 	}
 }
+
+// Tone-map probes detach from their caller exactly as hardware probes do, and
+// they run their own FFmpeg smoke encodes, so a re-probe that counted only the
+// hardware ones would start a second matrix beside a running first.
+func TestGPUGateCountsEveryDetachedProbeSource(t *testing.T) {
+	var gate gpuGate
+
+	busy, ok := gate.beginReprobe(0, 2)
+	if ok {
+		t.Fatal("re-probe admitted while detached smoke encodes were still running")
+	}
+	if busy != 2 {
+		t.Fatalf("busy = %d, want both detached probe sources counted", busy)
+	}
+}

@@ -147,19 +147,26 @@ func trimJSONNull(raw json.RawMessage) json.RawMessage {
 // node mid-probe every sweep, and its inventory never lands.
 type CapabilityFetcher func(ctx context.Context, node *Node) (payload []byte, hash string, err error)
 
-// capabilityFetchTimeout is the backstop on one capability fetch, not its
-// budget.
+// capabilityFetchTimeout is the floor under the backstop on one capability
+// fetch. It is not the budget.
 //
 // The budget belongs to the fetcher, which knows the configured hardware and
-// sizes each request against the node's own advertised probe matrix; that grows
-// with the device count and passes two minutes at two devices, so a fixed bound
-// here would cut short a node operating well inside its published contract. What
-// this stops is the other failure: a fetcher that never returns pinning a
-// goroutine and a node's inventory forever. It is deliberately far above any
-// budget a real configuration produces — five minutes covers a node probing
-// roughly seven devices — because a backstop that trips during ordinary
-// operation is indistinguishable from the bug it was meant to catch.
+// sizes each request against the node's own advertised probe matrix. That matrix
+// grows with the device count without bound — nine render devices legitimately
+// ask for over five minutes — so no fixed number here can be both a real
+// backstop and safe against cutting a node short. What this stops is the other
+// failure: a fetcher that never returns, pinning a goroutine and a node's
+// inventory forever.
+//
+// So the backstop is derived from the fetcher's own budget and this floor is
+// only what applies when no budget is wired. A backstop that trips during
+// ordinary operation is indistinguishable from the bug it was meant to catch.
 const capabilityFetchTimeout = 5 * time.Minute
+
+// capabilityFetchSlack is how far the sweep's backstop sits above the budget the
+// fetcher gave itself, so the fetcher's own deadline is always the one that
+// fires first and the failure an operator sees names the probe rather than this.
+const capabilityFetchSlack = time.Minute
 
 // CapabilityRefreshTimeout is the bound RefreshNodeCapabilities puts on the
 // fetch it performs. It is exported for the one caller that has to hold an HTTP
@@ -181,6 +188,7 @@ type HealthChecker struct {
 	// be running.
 	mu                    sync.RWMutex
 	capFetch              CapabilityFetcher
+	capFetchBudget        func(*Node) time.Duration
 	onCapabilitiesChanged func(nodeURL string)
 
 	// capabilityRefreshes tracks the detached capability fetches so shutdown —
@@ -200,6 +208,33 @@ func NewHealthChecker(proxyPool *ProxyPool, transcodePool *TranscodePool, repo *
 		repo:          repo,
 		interval:      30 * time.Second,
 	}
+}
+
+// SetCapabilityFetchBudget wires how long the fetcher will allow itself for one
+// node, so the sweep's backstop can be derived from it rather than guessed.
+//
+// Without it the backstop falls back to capabilityFetchTimeout, which is right
+// for the common configuration and too tight for a node with many devices —
+// hence this, supplied by the same wiring that supplies the fetcher.
+func (hc *HealthChecker) SetCapabilityFetchBudget(budget func(*Node) time.Duration) {
+	if hc == nil {
+		return
+	}
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	hc.capFetchBudget = budget
+}
+
+// capabilityFetchBackstop bounds one fetch above whatever the fetcher allowed
+// itself, so the fetcher's deadline always fires first.
+func (hc *HealthChecker) capabilityFetchBackstop(n *Node) time.Duration {
+	hc.mu.RLock()
+	budget := hc.capFetchBudget
+	hc.mu.RUnlock()
+	if budget == nil {
+		return capabilityFetchTimeout
+	}
+	return max(capabilityFetchTimeout, budget(n)+capabilityFetchSlack)
 }
 
 // SetCapabilityFetcher wires how the sweep retrieves a node's capability report
@@ -395,7 +430,7 @@ func (hc *HealthChecker) refreshCapabilities(ctx context.Context, n *Node, apply
 	if fetch == nil {
 		return nil
 	}
-	fetchCtx, cancel := context.WithTimeout(ctx, capabilityFetchTimeout)
+	fetchCtx, cancel := context.WithTimeout(ctx, hc.capabilityFetchBackstop(n))
 	defer cancel()
 	payload, hash, err := fetch(fetchCtx, n)
 	if err != nil {

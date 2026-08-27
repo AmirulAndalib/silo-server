@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -79,6 +80,13 @@ func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevic
 	}
 	probeCache.Unlock()
 
+	// Claimed here, on the calling goroutine, not inside the function below.
+	// DoChan schedules that function and returns without waiting for it, so a
+	// caller whose context is already done returns while the probe has not
+	// reached its first line — and this probe runs real smoke encodes on the
+	// GPU. Anything that needs the encoder to itself has to see them; see
+	// ProbesInFlight.
+	probesInFlight.Add(1)
 	resultCh := probeCache.group.DoChan(key, func() (any, error) {
 		probeCache.Lock()
 		cached, ok := probeCache.entries[key]
@@ -103,8 +111,16 @@ func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevic
 	})
 	select {
 	case <-ctx.Done():
+		// The flight outlives this caller by design — its probe context is
+		// rooted at Background so a canceled request cannot kill work another
+		// request is waiting on — so the claim goes with the flight, not with us.
+		go func() {
+			<-resultCh
+			probesInFlight.Add(-1)
+		}()
 		return nil, ctx.Err()
 	case result := <-resultCh:
+		probesInFlight.Add(-1)
 		if result.Err != nil {
 			return nil, result.Err
 		}
@@ -187,6 +203,34 @@ func InvalidateProbeCache() {
 	defer probeCache.Unlock()
 	probeCache.generation++
 	probeCache.entries = make(map[string]probeCacheEntry)
+}
+
+// probesInFlight counts tone-map probes this process has claimed the encoder
+// for, including ones whose caller has already given up on them.
+var probesInFlight atomic.Int64
+
+// ProbesInFlight reports how many tone-map probes this process has claimed the
+// encoder for.
+//
+// The matrix behind one of these is real FFmpeg smoke encodes, and a probe
+// outlives its caller by design: the singleflight task runs on a background
+// context so a canceled request cannot kill work another request is waiting on.
+// A component that released its own claim on the GPU when its call returned —
+// the transcode node's capability build does exactly that — can therefore leave
+// encodes running with nothing accounting for them. Anything that needs the
+// encoder exclusively must add this to whatever else it counts as busy, or it
+// will start a second matrix beside the first and publish the collision as a
+// capability failure.
+//
+// It counts claims rather than processes and errs high, for the same reason its
+// hardware-probe counterpart does: an overcount costs a retry, an undercount
+// costs a false verdict.
+func ProbesInFlight() int {
+	count := probesInFlight.Load()
+	if count < 0 {
+		return 0
+	}
+	return int(count)
 }
 
 // probeCacheEntryCurrent reports whether a complete result or unexpired

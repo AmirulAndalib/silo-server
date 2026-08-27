@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -408,4 +410,63 @@ func TestProbeCallerCancellationDoesNotCancelSharedProbe(t *testing.T) {
 func resetProbeCache(t *testing.T) {
 	t.Helper()
 	InvalidateProbeCache()
+}
+
+// A tone-map probe outlives its caller by design, so a component that released
+// its own claim on the GPU when its call returned can leave smoke encodes
+// running with nothing accounting for them. The count is what lets the transcode
+// node's re-probe gate see that.
+func TestProbesInFlightCountsADetachedProbe(t *testing.T) {
+	awaitNoProbesInFlight(t)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	// The probe runs several commands; only the first needs to announce itself.
+	var announce, released sync.Once
+	t.Cleanup(func() { released.Do(func() { close(release) }) })
+
+	// The probe has to be running before the caller gives up, or the flight
+	// finishes on the canceled context and there is nothing detached to count.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := probeCached(ctx, "ffmpeg", BackendQSV, "/dev/dri/renderD128",
+			func(context.Context, string, ...string) ([]byte, error) {
+				announce.Do(func() { close(started) })
+				<-release
+				return nil, errors.New("probe abandoned")
+			}, time.Now)
+		done <- err
+	}()
+
+	<-started
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("an abandoned probe reported success")
+	}
+
+	// Checked the instant the caller returned, which is when its own claim on
+	// the encoder goes away while the smoke encode keeps running.
+	if got := ProbesInFlight(); got < 1 {
+		t.Fatalf("ProbesInFlight() = %d the moment the caller returned, want at least 1", got)
+	}
+	released.Do(func() { close(release) })
+	awaitNoProbesInFlight(t)
+}
+
+// awaitNoProbesInFlight waits for every claim on the encoder to be released,
+// including ones detached from a caller that has already returned. Waiting on
+// the counter rather than on a delay keeps this independent of machine load.
+func awaitNoProbesInFlight(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if got := ProbesInFlight(); got == 0 {
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("ProbesInFlight() = %d, want every detached probe released", got)
+		}
+		runtime.Gosched()
+	}
 }
