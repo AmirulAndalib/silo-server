@@ -1,8 +1,10 @@
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { catalogKeys, sectionKeys } from "@/hooks/queries/keys";
+import { catalogKeys, mediaSurfaceKeys, sectionKeys } from "@/hooks/queries/keys";
 import {
   createCatalogInvalidationScheduler,
+  PROGRESS_HOME_REFRESH_WINDOW_MS,
+  scheduleProgressHomeRefresh,
   userStateChangeAffectsSectionMembership,
 } from "./realtimeCatalogInvalidation";
 
@@ -148,5 +150,35 @@ describe("userStateChangeAffectsSectionMembership", () => {
 
   it("treats an unknown change as membership-affecting", () => {
     expect(userStateChangeAffectsSectionMembership(undefined)).toBe(true);
+  });
+});
+
+describe("scheduleProgressHomeRefresh", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    // Drain any armed trailing refresh so module-level timer state cannot
+    // leak into the next test.
+    vi.runAllTimers();
+    vi.useRealTimers();
+  });
+
+  it("coalesces a stream of progress ticks into one trailing refresh", () => {
+    const queryClient = new QueryClient();
+    const signal = () => queryClient.getQueryData<number>(mediaSurfaceKeys.refreshSignal()) ?? 0;
+
+    for (let i = 0; i < 10; i += 1) {
+      scheduleProgressHomeRefresh(queryClient);
+      vi.advanceTimersByTime(1_000);
+    }
+    // Ticks alone never reset the home load queue…
+    expect(signal()).toBe(0);
+
+    vi.advanceTimersByTime(PROGRESS_HOME_REFRESH_WINDOW_MS);
+    // …but an open home catches the playback within one window.
+    expect(signal()).toBe(1);
+
+    scheduleProgressHomeRefresh(queryClient);
+    vi.advanceTimersByTime(PROGRESS_HOME_REFRESH_WINDOW_MS);
+    expect(signal()).toBe(2);
   });
 });

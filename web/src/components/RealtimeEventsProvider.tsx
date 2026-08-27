@@ -32,6 +32,7 @@ import {
 import {
   createCatalogInvalidationScheduler,
   invalidateCatalogState,
+  scheduleProgressHomeRefresh,
   userStateChangeAffectsSectionMembership,
 } from "@/components/realtimeCatalogInvalidation";
 import { useAuth } from "@/hooks/useAuth";
@@ -459,10 +460,14 @@ function handleUserStateEvent(
         }
       : { skipSimilarItems: true },
   ).then(() => {
-    // Resetting home's load queue re-runs every section fetch. Only do that for
-    // a change that can move an item between sections.
+    // Resetting home's load queue re-runs every section fetch. Membership
+    // changes do it immediately; progress ticks coalesce into one trailing
+    // refresh per window so an open home still catches another client's
+    // playback without a per-tick storm.
     if (userStateChangeAffectsSectionMembership(payload.change)) {
       bumpHomeRefreshSignal(queryClient);
+    } else {
+      scheduleProgressHomeRefresh(queryClient);
     }
   });
   void queryClient.invalidateQueries({
