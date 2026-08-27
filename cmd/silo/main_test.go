@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -372,5 +373,47 @@ func TestCachedLibraryPathsDoesNotShareItsCachedSlice(t *testing.T) {
 	fallback[0] = "/tmp/clobbered-again"
 	if got := provider(context.Background()); !slices.Equal(got, []string{"/mnt/movies"}) {
 		t.Fatalf("fallback = %v, want the cache untouched by a mutation of an earlier fallback", got)
+	}
+}
+
+// The stored capability payload has to be the node's own bytes.
+//
+// Re-marshaling the decoded struct drops every field this build has no member
+// for, which is exactly what happens during a rolling upgrade where a node is
+// newer than the API reading it — and the truncation is then stored under the
+// node's own hash. After the API is upgraded, the sweep sees the hashes agree
+// and never refetches, so the durable inventory stays missing fields the new
+// code reads until something unrelated moves the hash.
+func TestNodeCapabilityFetcherStoresTheNodesOwnBytes(t *testing.T) {
+	const body = `{"resolved":"nvenc","render_devices":["/dev/dri/renderD128"],` +
+		`"capability_hash":"sha256:abc","a_field_this_build_has_never_heard_of":{"nested":[1,2,3]}}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/hw-capabilities" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+
+	payload, hash, err := nodeCapabilityFetcher("secret")(context.Background(), server.URL)
+	if err != nil {
+		t.Fatalf("nodeCapabilityFetcher: %v", err)
+	}
+	if hash != "sha256:abc" {
+		t.Fatalf("hash = %q, want the node's own", hash)
+	}
+
+	var stored map[string]any
+	if err := json.Unmarshal(payload, &stored); err != nil {
+		t.Fatalf("stored payload is not valid JSON: %v (%s)", err, payload)
+	}
+	if _, ok := stored["a_field_this_build_has_never_heard_of"]; !ok {
+		t.Fatalf("a field this build does not know was dropped, but its hash was kept: %s", payload)
+	}
+	if stored["resolved"] != "nvenc" {
+		t.Fatalf("resolved = %v, want the report's own value", stored["resolved"])
 	}
 }

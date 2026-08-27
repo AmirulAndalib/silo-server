@@ -141,25 +141,30 @@ func resolveNodeIdentity() string {
 }
 
 // nodeCapabilityFetcher adapts the authenticated node capability client to the
-// node health sweep, which stores capability reports opaquely. The stored
-// payload is this server's re-marshaling of the decoded report rather than the
-// node's bytes, so what is persisted is exactly what the API understood; the
-// hash comes out of the payload itself, because only the node knows what it
+// node health sweep, which stores capability reports opaquely.
+//
+// What is persisted is the node's own response bytes, not this server's
+// re-marshaling of the decoded struct. The two differ exactly when the node is
+// newer than the API server reading it, which is every rolling upgrade: a
+// re-marshal drops the fields this build has no struct member for, and stores
+// the truncation under the node's hash. After the API is upgraded the sweep
+// then sees the hashes agree and never refetches, leaving the durable inventory
+// permanently missing fields the new code reads. The bytes are bounded and
+// already parsed by the client, so storing them verbatim costs nothing but
+// keeps the payload honest about the hash filed with it.
+//
+// The hash comes out of the payload itself, because only the node knows what it
 // hashed. A report without one is refused rather than given a synthetic hash,
 // which would make an old node look like it had capability tracking.
 func nodeCapabilityFetcher(jwtSecret string) nodepool.CapabilityFetcher {
 	client := &http.Client{Timeout: nodeCapabilityRequestTimeout}
 	return func(ctx context.Context, nodeURL string) ([]byte, string, error) {
-		info, status, err := transcodenode.FetchHWCapabilities(ctx, client, nodeURL, jwtSecret)
+		info, payload, status, err := transcodenode.FetchHWCapabilitiesPayload(ctx, client, nodeURL, jwtSecret)
 		if err != nil {
 			return nil, "", err
 		}
 		if status != http.StatusOK {
 			return nil, "", fmt.Errorf("node capability request returned status %d", status)
-		}
-		payload, err := json.Marshal(info)
-		if err != nil {
-			return nil, "", err
 		}
 		return payload, info.CapabilityHash, nil
 	}
