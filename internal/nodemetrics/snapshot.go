@@ -80,8 +80,13 @@ type DiskStats struct {
 	// for each media root. It is assigned when the sample is built, so every
 	// surface — health, metrics, the admin API — names a mount identically, and
 	// the index stays with the mount even when a probe cannot measure it.
-	Role    string  `json:"role,omitempty"`
-	UsedGB  float64 `json:"used_gb"`
+	Role   string  `json:"role,omitempty"`
+	UsedGB float64 `json:"used_gb"`
+	// TotalGB is the capacity usable by this process: bytes in use plus bytes
+	// still available to it. Blocks a filesystem reserves for root are in
+	// neither, so this reads lower than the device's nameplate size on a default
+	// ext4 volume — and UsedGB/TotalGB is the ratio `df` prints as Use%, which
+	// is what makes a full volume read as full rather than as 95%.
 	TotalGB float64 `json:"total_gb"`
 	// Stale marks numbers carried over from an earlier pass because the current
 	// probe has not returned — the normal reading for a network mount whose

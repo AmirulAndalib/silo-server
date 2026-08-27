@@ -106,6 +106,10 @@ type Sampler struct {
 	// probesInFlight is how many statfs goroutines are outstanding right now,
 	// bounded by maxOutstandingDiskProbes. Guarded by diskMu.
 	probesInFlight int
+	// diskProbeCursor rotates which non-scratch mount is offered a probe slot
+	// first, so a slot parked forever on a wedged mount cannot starve the path
+	// at the end of the list. See probeOrderLocked.
+	diskProbeCursor int
 	// probeBudgetExhausted latches the ceiling warning to one line per episode.
 	probeBudgetExhausted bool
 	// diskProbeDone, when non-nil, receives each completed probe's path. Tests

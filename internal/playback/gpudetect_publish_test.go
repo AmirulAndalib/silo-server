@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -353,5 +354,116 @@ func TestNVENCProbedWhenTheConfiguredDeviceIsACUDAIdentity(t *testing.T) {
 			}
 			t.Fatalf("no nvenc entry in %+v", info.DetectedBackends)
 		})
+	}
+}
+
+// A configured multi-device hw_device is a set the balancer allocates *across*,
+// not a list of alternatives detection picks from. Stopping the walk at the
+// first pass left every later entry untested while the report said the backend
+// was verified, and acquireHWDevice balanced onto them regardless — so a share
+// of the node's transcodes started on a card that had already failed its smoke
+// encode, and each of them died at ffmpeg init.
+func TestConfiguredDeviceListIsProbedInFullAndBalancedOnlyAcrossPasses(t *testing.T) {
+	env := setupHWAccelTest(t)
+	env.addRenderDevice(t, "renderD128", "0x8086")
+	env.addRenderDevice(t, "renderD129", "0x8086")
+	probe := successfulQSVProbe()
+	probe.smokeDeviceFailures = []string{"renderD129"}
+	ffmpeg := writeFakeFFmpeg(t, probe)
+
+	working, broken := env.devicePath("renderD128"), env.devicePath("renderD129")
+	configured := working + "," + broken
+
+	info, err := DetectHWAccelWithFFmpegContextResult(context.Background(), hwAccelAuto, ffmpeg.path, configured)
+	if err != nil {
+		t.Fatalf("DetectHWAccelWithFFmpegContextResult: %v", err)
+	}
+	if info.Resolved != transcodeHWQSV {
+		t.Fatalf("resolved = %q, want qsv from the device that passed", info.Resolved)
+	}
+
+	if got := VerifiedHWDevices(transcodeHWQSV); !slices.Equal(got, []string{working}) {
+		t.Fatalf("verified devices = %v, want only the card whose probe passed", got)
+	}
+
+	// Ten acquisitions is far more than the balancer needs to reach a second
+	// device: with both present it alternates on the very next one.
+	releases := make([]func(), 0, 10)
+	t.Cleanup(func() {
+		for _, release := range releases {
+			release()
+		}
+	})
+	for i := range 10 {
+		device, _, release := acquireHWDevice(configured, transcodeHWQSV, "")
+		releases = append(releases, release)
+		if device != working {
+			t.Fatalf("acquisition %d selected %q, want the verified device %q", i, device, working)
+		}
+	}
+}
+
+// With nothing verified — a cold process, or hw_accel named explicitly so the
+// walk never ran — the balancer must not narrow to an empty set and must keep
+// using every present device exactly as before.
+func TestBalancingIsUnchangedWhenNoDeviceHasBeenVerified(t *testing.T) {
+	env := setupHWAccelTest(t)
+	env.addRenderDevice(t, "renderD128", "0x8086")
+	env.addRenderDevice(t, "renderD129", "0x8086")
+	first, second := env.devicePath("renderD128"), env.devicePath("renderD129")
+	configured := first + "," + second
+
+	selected := map[string]bool{}
+	releases := make([]func(), 0, 2)
+	t.Cleanup(func() {
+		for _, release := range releases {
+			release()
+		}
+	})
+	for range 2 {
+		device, _, release := acquireHWDevice(configured, transcodeHWQSV, "")
+		releases = append(releases, release)
+		selected[device] = true
+	}
+	if len(selected) != 2 {
+		t.Fatalf("selected %v, want both devices used when no probe has ruled either out", selected)
+	}
+}
+
+// The narrowing above is only safe because the whole configured list is probed.
+// If the walk stopped at the first pass, every other card in the set would be
+// unverified and the balancer would collapse a multi-GPU node onto one device —
+// trading a correctness bug for a capacity one.
+func TestEveryConfiguredDeviceThatPassesStaysInTheBalancer(t *testing.T) {
+	env := setupHWAccelTest(t)
+	env.addRenderDevice(t, "renderD128", "0x8086")
+	env.addRenderDevice(t, "renderD129", "0x8086")
+	ffmpeg := writeFakeFFmpeg(t, successfulQSVProbe())
+
+	first, second := env.devicePath("renderD128"), env.devicePath("renderD129")
+	configured := first + "," + second
+
+	if _, err := DetectHWAccelWithFFmpegContextResult(
+		context.Background(), hwAccelAuto, ffmpeg.path, configured); err != nil {
+		t.Fatalf("DetectHWAccelWithFFmpegContextResult: %v", err)
+	}
+	if got := VerifiedHWDevices(transcodeHWQSV); !slices.Equal(got, []string{first, second}) {
+		t.Fatalf("verified devices = %v, want both cards in the configured set", got)
+	}
+
+	selected := map[string]bool{}
+	releases := make([]func(), 0, 2)
+	t.Cleanup(func() {
+		for _, release := range releases {
+			release()
+		}
+	})
+	for range 2 {
+		device, _, release := acquireHWDevice(configured, transcodeHWQSV, "")
+		releases = append(releases, release)
+		selected[device] = true
+	}
+	if len(selected) != 2 {
+		t.Fatalf("selected %v, want the workload spread across both verified cards", selected)
 	}
 }

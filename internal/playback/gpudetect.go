@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,13 +69,15 @@ var hwProbeCache = struct {
 	// a caller arriving afterwards asks a different key and therefore starts a
 	// fresh probe instead of joining the stale one.
 	generation uint64
-	// verifiedDevices records, per generation and backend, the candidate device
-	// whose smoke encode passed. Execution reads it so a backend verified on
-	// one render node is not then run on another; see VerifiedHWDevice.
-	verifiedDevices map[string]string
+	// verifiedDevices records, per generation and backend, every candidate
+	// device whose smoke encode passed, in probe order. Execution reads it so a
+	// backend verified on one render node is not then run on another, and so
+	// balancing across a configured multi-device list cannot land a workload on
+	// a card no probe ever passed; see VerifiedHWDevice and VerifiedHWDevices.
+	verifiedDevices map[string][]string
 }{
 	entries:         make(map[string]hwProbeCacheEntry),
-	verifiedDevices: make(map[string]string),
+	verifiedDevices: make(map[string][]string),
 }
 
 // DetectedBackend reports one hardware backend that has candidate devices on
@@ -420,9 +423,18 @@ func walkHWAccelBackends(ctx context.Context, ffmpegPath string, candidates hwCa
 	return resolved, detected, complete
 }
 
-// verifyHWAccelBackend probes a backend's candidate devices in order and stops
-// at the first one that passes, so a broken GPU sorting ahead of a working one
-// does not disable the backend for the whole host.
+// verifyHWAccelBackend probes a backend's candidate devices in order. A broken
+// GPU sorting ahead of a working one does not disable the backend for the whole
+// host: the first device that passes decides the backend's verdict.
+//
+// Whether the walk continues past that device depends on what the rest of the
+// list is for. Discovered candidates are alternatives — execution adopts the one
+// device detection verified — so probing the losers costs FFmpeg launches and
+// buys nothing. A configured multi-device playback.hw_device is different: it is
+// a set the device balancer allocates *across*, so every entry is a device a
+// transcode can be handed, and stopping early would leave the inventory
+// vouching for cards nothing ever tested while acquireHWDevice happily balanced
+// onto them.
 //
 // complete reports whether every candidate was reached. A device left unprobed
 // because the budget ran out is not a device that failed, and the difference is
@@ -433,6 +445,7 @@ func verifyHWAccelBackend(ctx context.Context, backend, ffmpegPath string, candi
 	reasons := make([]string, 0, len(devices))
 	probed := false
 	complete = true
+	probeEveryDevice := candidates.allocatesAcross(backend)
 	// Captured before any probe runs: a verdict earned under this generation is
 	// only worth recording if no invalidation has landed by the time it lands.
 	generation := hwProbeGeneration()
@@ -448,15 +461,26 @@ func verifyHWAccelBackend(ctx context.Context, backend, ffmpegPath string, candi
 		probed = true
 		available, reason := ffmpegSupportsBackendContext(ctx, backend, ffmpegPath, device)
 		if available {
-			entry.Verified = true
-			entry.Device = device
-			// Execution has to land on this device and not on whatever sorts
-			// first under /dev/dri, or a report saying "qsv verified" is paired
-			// with a transcode initializing a GPU the probe never touched.
+			// Execution has to land on a device a probe passed and not on
+			// whatever sorts first under /dev/dri, or a report saying "qsv
+			// verified" is paired with a transcode initializing a GPU the probe
+			// never touched.
 			recordVerifiedHWDevice(generation, backend, device)
-			return entry, complete
+			if !entry.Verified {
+				entry.Verified = true
+				entry.Device = device
+			}
+			if !probeEveryDevice {
+				return entry, complete
+			}
+			continue
 		}
 		reasons = append(reasons, hwProbeFailureReason(len(devices), device, reason))
+	}
+	if entry.Verified {
+		// The reasons collected past the first pass belong to devices the
+		// balancer will now skip, not to a backend that failed.
+		return entry, complete
 	}
 	if len(reasons) == 0 {
 		reasons = append(reasons, "hardware detection budget exhausted before probing "+backend)
@@ -494,7 +518,11 @@ func recordVerifiedHWDevice(generation uint64, backend, device string) {
 	if hwProbeCache.generation != generation {
 		return
 	}
-	hwProbeCache.verifiedDevices[verifiedHWDeviceKey(generation, backend)] = device
+	key := verifiedHWDeviceKey(generation, backend)
+	if slices.Contains(hwProbeCache.verifiedDevices[key], device) {
+		return
+	}
+	hwProbeCache.verifiedDevices[key] = append(hwProbeCache.verifiedDevices[key], device)
 }
 
 // VerifiedHWDevice returns the render device this process most recently
@@ -509,13 +537,43 @@ func recordVerifiedHWDevice(generation uint64, backend, device string) {
 // never verified. Reading the verified device closes that gap without making
 // every caller of resolution carry a second return value.
 func VerifiedHWDevice(backend string) string {
+	devices := VerifiedHWDevices(backend)
+	if len(devices) == 0 {
+		return ""
+	}
+	return devices[0]
+}
+
+// VerifiedHWDevices returns every device this process has verified the given
+// backend on, in probe order, or nil when no probe has passed for it.
+//
+// It has more than one entry only for a configured multi-device
+// playback.hw_device: detection stops at the first pass when it is choosing a
+// backend, but a configured list is *allocated* across, so every entry in it
+// has to be probed or the inventory would vouch for cards nothing tested. The
+// device balancer intersects its candidates with this set, which is what keeps
+// a workload off a card that is present but broken.
+func VerifiedHWDevices(backend string) []string {
 	hwProbeCache.Lock()
 	defer hwProbeCache.Unlock()
-	return hwProbeCache.verifiedDevices[verifiedHWDeviceKey(hwProbeCache.generation, backend)]
+	return slices.Clone(hwProbeCache.verifiedDevices[verifiedHWDeviceKey(hwProbeCache.generation, backend)])
 }
 
 func verifiedHWDeviceKey(generation uint64, backend string) string {
 	return strconv.FormatUint(generation, 10) + "\x00" + backend
+}
+
+// allocatesAcross reports whether every one of a backend's candidate devices is
+// one execution may be handed, rather than an alternative detection chooses
+// between.
+//
+// That is true only for a configured multi-device playback.hw_device, which is
+// what accessible being non-nil marks. NVENC is never balanced across a list —
+// acquireHWDevice hands it the first configured entry — and discovered
+// candidates are alternatives, resolved to the single device VerifiedHWDevice
+// reports.
+func (c hwCandidates) allocatesAcross(backend string) bool {
+	return backend != transcodeHWNVENC && c.accessible != nil && len(c.devicesFor(backend)) > 1
 }
 
 // unprobeableReason reports why a candidate cannot be smoke-encoded on, or
@@ -700,7 +758,7 @@ func InvalidateHWProbeCache() {
 	defer hwProbeCache.Unlock()
 	hwProbeCache.generation++
 	hwProbeCache.entries = make(map[string]hwProbeCacheEntry)
-	hwProbeCache.verifiedDevices = make(map[string]string)
+	hwProbeCache.verifiedDevices = make(map[string][]string)
 	// The GPU identity listing goes too. A re-probe is exactly when nvidia-smi
 	// may have become available, or a card in the same slot may have been
 	// replaced, and both of those change identities the drift comparison and

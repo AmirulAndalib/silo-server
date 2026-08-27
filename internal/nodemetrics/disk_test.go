@@ -493,3 +493,115 @@ func TestDiskProbesAreBoundedAcrossReconfiguration(t *testing.T) {
 		t.Fatalf("outstanding probes = %d, want at most %d", outstanding, maxOutstandingDiskProbes)
 	}
 }
+
+// A probe parked on a mount that has since been retired holds one global probe
+// slot until the process exits. Offering the same paths in the same order every
+// sample then spends the remaining budget on the same prefix, and the path at
+// the end of the list is never measured even once — reported unavailable for as
+// long as the dead mount stays dead, which is a lie about a healthy disk.
+func TestRefreshDisksRotatesProbesPastAWedgedRetiredMount(t *testing.T) {
+	tree := newProcTree(t)
+	clock := newFakeClock()
+	s := newTestSampler(t, tree, clock, Options{ScratchDir: "/transcode"})
+	done := make(chan string, 64)
+	s.diskProbeDone = done
+
+	gate := make(chan struct{})
+	t.Cleanup(func() { close(gate) })
+	var mu sync.Mutex
+	probed := map[string]bool{}
+	s.statfs = func(path string) (fsStats, error) {
+		if path == "/dead" {
+			<-gate
+			return fsStats{}, os.ErrNotExist
+		}
+		mu.Lock()
+		probed[path] = true
+		mu.Unlock()
+		return fsStats{UsedBytes: 1 << 30, TotalBytes: 2 << 30, FSID: path}, nil
+	}
+
+	now := clock.now()
+	// One sample parks a probe on a mount that the next configuration drops.
+	s.refreshDisks([]string{"/dead"}, now)
+
+	live := []string{"/transcode"}
+	for i := range maxOutstandingDiskProbes - 1 {
+		live = append(live, "/media/"+strconv.Itoa(i))
+	}
+	// live fills the ceiling exactly and one slot is gone for good, so each pass
+	// can start one fewer probe than there are paths.
+	perPass := len(live) - 1
+	for range len(live) {
+		s.refreshDisks(live, now)
+		for range perPass {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for a disk probe to complete")
+			}
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, path := range live {
+		if !probed[path] {
+			t.Fatalf("%s was never probed across %d passes; the retired mount starved it", path, len(live))
+		}
+	}
+}
+
+// Scratch keeps its priority through the rotation: it is the mount transcode
+// admission reads, so it must be the one that gets a freed slot.
+func TestRefreshDisksAlwaysOffersScratchFirst(t *testing.T) {
+	tree := newProcTree(t)
+	clock := newFakeClock()
+	s := newTestSampler(t, tree, clock, Options{ScratchDir: "/transcode"})
+
+	candidates := []*diskEntry{{path: "/transcode"}, {path: "/a"}, {path: "/b"}, {path: "/c"}}
+	for pass := range 6 {
+		ordered := s.probeOrderLocked(candidates)
+		if ordered[0].path != "/transcode" {
+			t.Fatalf("pass %d offered %q first, want the scratch dir", pass, ordered[0].path)
+		}
+		if len(ordered) != len(candidates) {
+			t.Fatalf("pass %d offered %d entries, want all %d", pass, len(ordered), len(candidates))
+		}
+	}
+}
+
+// Capacity is measured against what this process can write, not against the
+// device: a filesystem that reserves blocks for root hands them to nobody else,
+// and counting them as headroom is what makes a volume with nothing left read
+// as 95% full — exactly where the scratch admission guard sits.
+func TestFSCapacityExcludesBlocksReservedFromThisProcess(t *testing.T) {
+	const block = 4096
+	// 100 GiB with a 5% root reserve, filled to the point an unprivileged
+	// process can write nothing more.
+	total := uint64(100<<30) / block
+	reserved := total / 20
+	stats := fsCapacity(total, reserved, 0, block)
+
+	if stats.UsedBytes != (total-reserved)*block {
+		t.Fatalf("UsedBytes = %d, want the reserve counted as used, as df does", stats.UsedBytes)
+	}
+	if stats.TotalBytes != stats.UsedBytes {
+		t.Fatalf("TotalBytes = %d, want %d: no writable bytes remain", stats.TotalBytes, stats.UsedBytes)
+	}
+
+	// An empty volume reports the whole writable capacity, which is the device
+	// size less the reserve rather than the device size.
+	empty := fsCapacity(total, total, total-reserved, block)
+	if empty.UsedBytes != 0 {
+		t.Fatalf("UsedBytes = %d on an empty volume, want 0", empty.UsedBytes)
+	}
+	if empty.TotalBytes != (total-reserved)*block {
+		t.Fatalf("TotalBytes = %d, want the reserve excluded from capacity", empty.TotalBytes)
+	}
+
+	// Nonsense counters must not wrap an unsigned subtraction into a petabyte.
+	if got := fsCapacity(10, 20, 5, block); got.UsedBytes != 0 {
+		t.Fatalf("UsedBytes = %d for free > total, want 0", got.UsedBytes)
+	}
+}

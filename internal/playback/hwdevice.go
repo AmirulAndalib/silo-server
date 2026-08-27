@@ -3,6 +3,7 @@ package playback
 import (
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -283,7 +284,7 @@ func acquireHWDevice(configured, resolvedHWAccel, avoidDevice string) (device, w
 	}
 	// Select and reserve in one critical section so concurrent workload starts
 	// observe each other's reservations instead of piling onto one device.
-	present := presentHWDevices(set.List())
+	present := verifiedHWDevices(resolvedHWAccel, presentHWDevices(set.List()))
 	if len(present) > 1 && avoidDevice != "" {
 		eligible := make([]string, 0, len(present)-1)
 		for _, device := range present {
@@ -303,6 +304,41 @@ func acquireHWDevice(configured, resolvedHWAccel, avoidDevice string) (device, w
 	slog.Info("GPU workload device selected", "device", selected, "active_workloads", count)
 
 	return selected, selected, newHWDeviceRelease(selected)
+}
+
+// verifiedHWDevices narrows a configured device list to the entries whose smoke
+// encode actually passed.
+//
+// Presence is not fitness. A device that exists and can be opened can still fail
+// to initialize the backend — a card in a bad state, a driver mismatch, a
+// container that mapped the node without the matching libraries — and detection
+// already found that out. Balancing across every present entry would hand a
+// share of the node's workloads to that card and fail each of them at startup,
+// while the capability report shows the backend verified.
+//
+// It narrows only when there is something to narrow to. An empty verified set
+// means detection never ran for this backend (a cold process, or hw_accel named
+// explicitly so resolution short-circuited), which is no evidence against any
+// device, so the full present list stands.
+func verifiedHWDevices(resolvedHWAccel string, present []string) []string {
+	verified := VerifiedHWDevices(resolvedHWAccel)
+	if len(verified) == 0 {
+		return present
+	}
+	eligible := make([]string, 0, len(present))
+	for _, device := range present {
+		if slices.Contains(verified, device) {
+			eligible = append(eligible, device)
+		}
+	}
+	if len(eligible) == 0 {
+		// Every present device failed its probe, or the probe set and the
+		// configured set have drifted apart. Excluding everything would leave
+		// the balancer with nothing to pick, which is worse than letting ffmpeg
+		// try and report a real error.
+		return present
+	}
+	return eligible
 }
 
 // hwDeviceActiveCount reports the active workload count for one device; test

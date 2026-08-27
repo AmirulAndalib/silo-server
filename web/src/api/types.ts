@@ -3848,8 +3848,13 @@ export interface HostDiskStats {
    * sample is built, so it names the same mount on every surface.
    */
   role?: string;
-  /** Capacity in GiB. Used counts filesystem-reserved blocks, matching `df`. */
+  /** Capacity in GiB. `used_gb` counts filesystem-reserved blocks, as `df` does. */
   used_gb?: number;
+  /**
+   * Capacity usable by the node process — used plus still-available. Blocks a
+   * filesystem reserves for root are in neither, so this reads lower than the
+   * device's nameplate size, and `used_gb`/`total_gb` is `df`'s Use%.
+   */
   total_gb?: number;
   /** Real numbers carried over from an earlier pass because the probe has not returned. */
   stale?: boolean;

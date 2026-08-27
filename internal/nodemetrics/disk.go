@@ -31,6 +31,21 @@ type fsStats struct {
 	FSID string
 }
 
+// fsCapacity converts raw statfs(2) block counts into the used/total shape this
+// package reports. It is separate from the syscall so the arithmetic — which is
+// where the reserved-block subtlety lives — can be exercised directly.
+//
+// A filesystem can only report more free blocks than it holds if the numbers
+// are nonsense, so the subtraction is guarded rather than allowed to wrap an
+// unsigned counter into a petabyte.
+func fsCapacity(blocks, free, available, blockSize uint64) fsStats {
+	if free > blocks {
+		free = blocks
+	}
+	used := (blocks - free) * blockSize
+	return fsStats{UsedBytes: used, TotalBytes: used + available*blockSize}
+}
+
 // diskEntry is one path's probe state. Probes run detached from the sample
 // loop, so this holds the last good answer for readers to fall back to.
 type diskEntry struct {
@@ -92,6 +107,7 @@ func (s *Sampler) refreshDisks(paths []string, now time.Time) {
 	s.pruneDisksLocked(wanted)
 
 	seen := make(map[string]bool, len(paths))
+	candidates := make([]*diskEntry, 0, len(paths))
 	for _, path := range paths {
 		if path == "" || seen[path] {
 			continue
@@ -101,14 +117,18 @@ func (s *Sampler) refreshDisks(paths []string, now time.Time) {
 		if entry == nil {
 			entry = &diskEntry{path: path}
 			s.disks[path] = entry
+			// Reporting order is the order the caller offered, whatever order
+			// the probes below are started in.
 			s.diskOrder = append(s.diskOrder, path)
 		}
+		candidates = append(candidates, entry)
+	}
+
+	for _, entry := range s.probeOrderLocked(candidates) {
 		if entry.inFlight {
 			continue
 		}
 		if s.probesInFlight >= maxOutstandingDiskProbes {
-			// Paths are offered scratch-first, so the mount admission control
-			// reads is the one that gets a freed slot first.
 			s.noteProbeBudgetExhaustedLocked()
 			break
 		}
@@ -117,6 +137,39 @@ func (s *Sampler) refreshDisks(paths []string, now time.Time) {
 		s.probesInFlight++
 		go s.probeDisk(entry)
 	}
+}
+
+// probeOrderLocked is the order this sample offers entries to the probe budget.
+//
+// Scratch stays first: it is the mount transcode admission reads, so it is the
+// one that must get a freed slot. The rest rotate, and that is not fairness for
+// its own sake. The budget is a global ceiling, and a probe parked on a wedged
+// mount holds its slot until the mount recovers or the process exits — so a
+// deployment with one dead mount permanently runs one slot short. Offering the
+// same list in the same order every sample would then spend the whole remaining
+// budget on the same prefix and never reach the last path at all: it would be
+// reported unavailable indefinitely, which is a lie about a disk that is fine
+// and would have answered instantly. Advancing the start by one each sample
+// costs a path its refresh roughly once per cycle and guarantees every mount is
+// measured.
+//
+// Callers must hold diskMu.
+func (s *Sampler) probeOrderLocked(candidates []*diskEntry) []*diskEntry {
+	rotatable := candidates
+	ordered := make([]*diskEntry, 0, len(candidates))
+	if s.scratchDir != "" && len(candidates) > 0 && candidates[0].path == s.scratchDir {
+		ordered = append(ordered, candidates[0])
+		rotatable = candidates[1:]
+	}
+	if len(rotatable) == 0 {
+		return ordered
+	}
+	start := s.diskProbeCursor % len(rotatable)
+	s.diskProbeCursor = (start + 1) % len(rotatable)
+	for i := range rotatable {
+		ordered = append(ordered, rotatable[(start+i)%len(rotatable)])
+	}
+	return ordered
 }
 
 // noteProbeBudgetExhaustedLocked logs the first sample in which the probe
