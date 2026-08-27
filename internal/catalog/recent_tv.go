@@ -165,7 +165,11 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 
 	args := []any{sortedUniqueInts(q.LibraryIDs)}
 	argIdx := 2
-	availabilityConditions := []string{
+	// episodeRowConditions scope the shared available_episode_rows CTE and may
+	// only reference el/e/mf_event: series-level access conditions belong in
+	// eventConditions so the series_without_episode_events anti-join still sees
+	// every series that has any present episode file (see the CTE comment).
+	episodeRowConditions := []string{
 		"el.media_folder_id = ANY($1)",
 		`EXISTS (
 			SELECT 1 FROM media_files mf_event
@@ -174,25 +178,24 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 			  AND mf_event.missing_since IS NULL
 		)`,
 	}
+	eventConditions := []string{}
 	seriesConditions := []string{"mil.media_folder_id = ANY($1)", "mi.type = 'series'"}
-	seriesWithoutEpisodeSnapshotCondition := ""
 
 	if q.SnapshotAt != nil {
-		availabilityConditions = append(availabilityConditions, fmt.Sprintf("el.first_seen_at <= $%d", argIdx))
+		episodeRowConditions = append(episodeRowConditions, fmt.Sprintf("el.first_seen_at <= $%d", argIdx))
 		seriesConditions = append(seriesConditions, fmt.Sprintf("mil.first_seen_at <= $%d", argIdx))
-		seriesWithoutEpisodeSnapshotCondition = fmt.Sprintf("AND el_none.first_seen_at <= $%d", argIdx)
 		args = append(args, *q.SnapshotAt)
 		argIdx++
 	}
 
 	access := q.Access
 	access.NamePrefix = ""
-	appendLibraryAccessConditions("si.content_id", access, &availabilityConditions, &args, &argIdx)
+	appendLibraryAccessConditions("si.content_id", access, &eventConditions, &args, &argIdx)
 	applyAccessFilter("si", AccessFilter{
 		MaxContentRating:   access.MaxContentRating,
 		ExcludedMediaTypes: access.ExcludedMediaTypes,
-	}, &availabilityConditions, &args, &argIdx)
-	appendAllowedContentCondition("si.content_id", access.AllowedContentIDs, &availabilityConditions, &args, &argIdx)
+	}, &eventConditions, &args, &argIdx)
+	appendAllowedContentCondition("si.content_id", access.AllowedContentIDs, &eventConditions, &args, &argIdx)
 
 	appendLibraryAccessConditions("mi.content_id", access, &seriesConditions, &args, &argIdx)
 	applyAccessFilter("mi", AccessFilter{
@@ -203,8 +206,8 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 
 	if prefix := strings.TrimSpace(q.NamePrefix); prefix != "" {
 		pattern := likePrefixPattern(strings.ToLower(prefix))
-		availabilityConditions = append(availabilityConditions, fmt.Sprintf(
-			"(LOWER(COALESCE(NULLIF(BTRIM(si.sort_title), ''), si.title)) LIKE $%d ESCAPE '\\' OR LOWER(e.title) LIKE $%d ESCAPE '\\')",
+		eventConditions = append(eventConditions, fmt.Sprintf(
+			"(LOWER(COALESCE(NULLIF(BTRIM(si.sort_title), ''), si.title)) LIKE $%d ESCAPE '\\' OR LOWER(aer.episode_title) LIKE $%d ESCAPE '\\')",
 			argIdx, argIdx,
 		))
 		seriesConditions = append(seriesConditions, fmt.Sprintf(
@@ -213,6 +216,10 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 		))
 		args = append(args, pattern)
 		argIdx++
+	}
+	eventWhere := "TRUE"
+	if len(eventConditions) > 0 {
+		eventWhere = strings.Join(eventConditions, " AND ")
 	}
 
 	fetchLimit := limit
@@ -236,18 +243,37 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 	}
 
 	sql := fmt.Sprintf(`
-		WITH episode_events AS (
-			SELECT e.series_id,
+		WITH available_episode_rows AS MATERIALIZED (
+			-- One shared pass over the availability rows for the requested
+			-- libraries. It deliberately carries only folder/snapshot/file
+			-- conditions: the series_without_episode_events anti-join below
+			-- must see every series with any present episode file, not only
+			-- series the caller may surface, so a series never turns into a
+			-- bare "series added" event just because its episodes were
+			-- filtered for this caller. Series-level access and name-prefix
+			-- conditions apply in episode_events instead.
+			SELECT el.episode_id,
+			       el.first_seen_at,
 			       el.first_seen_scan_run_id AS scan_run_id,
-			       MAX(el.first_seen_at) AS added_at,
-			       COUNT(DISTINCT el.episode_id) AS episode_count,
-			       (array_agg(el.episode_id ORDER BY el.first_seen_at DESC, e.season_number DESC, e.episode_number DESC, el.episode_id ASC))[1] AS episode_id,
-			       (array_agg(e.season_number ORDER BY el.first_seen_at DESC, e.season_number DESC, e.episode_number DESC, el.episode_id ASC))[1] AS anchor_season_number
+			       e.series_id,
+			       e.season_number,
+			       e.episode_number,
+			       e.title AS episode_title
 			FROM episode_libraries el
 			JOIN episodes e ON e.content_id = el.episode_id
-			JOIN media_items si ON si.content_id = e.series_id
 			WHERE %s
-			GROUP BY e.series_id, el.first_seen_scan_run_id
+		),
+		episode_events AS (
+			SELECT aer.series_id,
+			       aer.scan_run_id,
+			       MAX(aer.first_seen_at) AS added_at,
+			       COUNT(DISTINCT aer.episode_id) AS episode_count,
+			       (array_agg(aer.episode_id ORDER BY aer.first_seen_at DESC, aer.season_number DESC, aer.episode_number DESC, aer.episode_id ASC))[1] AS episode_id,
+			       (array_agg(aer.season_number ORDER BY aer.first_seen_at DESC, aer.season_number DESC, aer.episode_number DESC, aer.episode_id ASC))[1] AS anchor_season_number
+			FROM available_episode_rows aer
+			JOIN media_items si ON si.content_id = aer.series_id
+			WHERE %s
+			GROUP BY aer.series_id, aer.scan_run_id
 		),
 		series_without_episode_events AS (
 			SELECT mi.content_id AS series_id,
@@ -261,17 +287,8 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 			WHERE %s
 			  AND NOT EXISTS (
 				SELECT 1
-				FROM episodes e_none
-				JOIN episode_libraries el_none ON el_none.episode_id = e_none.content_id
-				WHERE e_none.series_id = mi.content_id
-				  AND el_none.media_folder_id = ANY($1)
-				  %s
-				  AND EXISTS (
-					  SELECT 1 FROM media_files mf_none
-					  WHERE mf_none.episode_id = el_none.episode_id
-					    AND mf_none.media_folder_id = el_none.media_folder_id
-					    AND mf_none.missing_since IS NULL
-				  )
+				FROM available_episode_rows aer
+				WHERE aer.series_id = mi.content_id
 			  )
 			GROUP BY mi.content_id
 		),
@@ -333,7 +350,7 @@ func (r *RecentTVRepository) List(ctx context.Context, q RecentTVQuery) ([]Recen
 			LIMIT 1
 		) play_target ON true
 		ORDER BY page.added_at DESC, page.target_type ASC, page.target_id ASC, page.event_id ASC
-	`, strings.Join(availabilityConditions, " AND "), strings.Join(seriesConditions, " AND "), seriesWithoutEpisodeSnapshotCondition, totalsCTE, limitIdx, offsetIdx, totalColumn, fromClause)
+	`, strings.Join(episodeRowConditions, " AND "), eventWhere, strings.Join(seriesConditions, " AND "), totalsCTE, limitIdx, offsetIdx, totalColumn, fromClause)
 
 	rows, err := r.pool.Query(ctx, sql, args...)
 	if err != nil {
