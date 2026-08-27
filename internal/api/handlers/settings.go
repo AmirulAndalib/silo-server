@@ -1220,7 +1220,7 @@ type overlayConfigResponse struct {
 func (h *SettingsHandler) HandleGetOverlayConfig(w http.ResponseWriter, r *http.Request) {
 	resp := overlayConfigResponse{
 		Enabled:             true,
-		QuickActionsEnabled: true,
+		QuickActionsEnabled: false,
 		QuickActionsDefault: defaultCardQuickActionMode,
 	}
 
@@ -1231,8 +1231,8 @@ func (h *SettingsHandler) HandleGetOverlayConfig(w http.ResponseWriter, r *http.
 		if v, _ := h.serverSettings.Get(r.Context(), "defaults.card_overlays"); v != "" {
 			resp.Defaults = v
 		}
-		if v, _ := h.serverSettings.Get(r.Context(), "defaults.card_quick_actions_enabled"); v == "false" {
-			resp.QuickActionsEnabled = false
+		if v, _ := h.serverSettings.Get(r.Context(), "defaults.card_quick_actions_enabled"); v == "true" {
+			resp.QuickActionsEnabled = true
 		}
 		if v, _ := h.serverSettings.Get(r.Context(), "defaults.card_quick_actions"); v != "" {
 			switch v {

@@ -145,7 +145,6 @@ export default function OverlaySettings() {
   if (form.isLoading) return <div>Loading...</div>;
 
   const overlaysEnabled = form.getValue("overlays.enabled") !== "false";
-  const quickActionsEnabled = form.getValue("defaults.card_quick_actions_enabled") !== "false";
   const quickActionMode = normalizeCardQuickActionMode(
     form.getValue("defaults.card_quick_actions"),
   );
@@ -159,17 +158,18 @@ export default function OverlaySettings() {
         <h2 className="text-xl font-semibold tracking-tight">Card Overlays</h2>
         <p className="text-muted-foreground text-sm leading-relaxed">
           Configure card quick actions, default overlay badges, and the style preset shown on poster
-          cards. Users can customize the defaults while the server-wide controls are enabled.
+          cards. Profiles can override the quick-action defaults; overlay badges stay hidden for
+          everyone while the server-wide switch is off.
         </p>
       </div>
 
       <div className="flex-1 space-y-6">
         <FieldGroup label="General">
           <SettingField
-            label="Card Quick Actions Enabled"
-            hint="When disabled, no profile can show them."
+            label="Card Quick Actions Default"
+            hint="Default for profiles that have not chosen; each profile can turn quick actions on or off for themselves."
             type="toggle"
-            value={form.getValue("defaults.card_quick_actions_enabled") || "true"}
+            value={form.getValue("defaults.card_quick_actions_enabled") || "false"}
             onChange={(v) => form.setValue("defaults.card_quick_actions_enabled", v)}
           />
           <SettingField
@@ -177,7 +177,6 @@ export default function OverlaySettings() {
             hint="The mode applied to profiles that have not chosen their own."
             type="select"
             options={[...CARD_QUICK_ACTION_OPTIONS]}
-            disabled={!quickActionsEnabled}
             value={quickActionMode}
             onChange={(v) => form.setValue("defaults.card_quick_actions", v)}
           />

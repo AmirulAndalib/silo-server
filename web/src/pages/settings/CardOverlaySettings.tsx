@@ -283,7 +283,6 @@ export default function CardOverlaySettings() {
     quickActionPreference,
     setQuickActionMode,
     quickActionsEnabled,
-    quickActionsGloballyEnabled,
     setQuickActionsEnabled,
     isLoading,
     enabled,
@@ -345,7 +344,6 @@ export default function CardOverlaySettings() {
               <Switch
                 id={id}
                 checked={quickActionsEnabled}
-                disabled={!quickActionsGloballyEnabled}
                 onCheckedChange={handleQuickActionsEnabledChange}
                 aria-label="Enable card quick actions"
               />
@@ -353,8 +351,6 @@ export default function CardOverlaySettings() {
           )}
         />
       </SettingsGroup>
-
-      {!quickActionsGloballyEnabled && <AdminDisabledNotice feature="Card quick actions" />}
 
       {!enabled && <AdminDisabledNotice feature="Card overlays" />}
 

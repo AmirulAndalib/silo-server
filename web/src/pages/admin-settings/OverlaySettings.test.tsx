@@ -117,8 +117,10 @@ describe("OverlaySettings", () => {
         "defaults.card_overlays",
       ],
     });
-    expect(markup).toContain("Card quick actions");
-    expect(markup).toContain("When disabled, no profile can show them.");
+    expect(markup).toContain("Card Quick Actions Default");
+    expect(markup).toContain(
+      "Default for profiles that have not chosen; each profile can turn quick actions on or off for themselves.",
+    );
     expect(markup).toContain("Favorites only");
     expect(markup).toContain("Watch indicator only");
     expect(markup.indexOf("Card quick actions")).toBeLessThan(
@@ -169,13 +171,21 @@ describe("OverlaySettings", () => {
     expect(mocks.setValue).not.toHaveBeenCalled();
   });
 
-  it("disables only the quick-action dropdown when its default toggle is off", () => {
+  it("defaults the quick-action toggle to off when the setting is unset", () => {
+    values["defaults.card_quick_actions_enabled"] = "";
+    render(<OverlaySettings />);
+
+    // The switch mock reports the value it would write, which is the negation
+    // of the checked state it rendered with.
+    fireEvent.click(screen.getAllByTestId("overlay-switch")[0]);
+
+    expect(mocks.setValue).toHaveBeenCalledWith("defaults.card_quick_actions_enabled", "true");
+  });
+
+  it("keeps the quick-action mode selectable when the default toggle is off", () => {
     values["defaults.card_quick_actions_enabled"] = "false";
     render(<OverlaySettings />);
 
-    const selectControls = screen.getAllByTestId("select-control");
-
-    expect(selectControls[0]).toHaveAttribute("disabled");
-    expect(selectControls.slice(1).some((control) => !control.hasAttribute("disabled"))).toBe(true);
+    expect(screen.getAllByTestId("select-control")[0]).not.toHaveAttribute("disabled");
   });
 });

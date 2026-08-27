@@ -851,7 +851,7 @@
       "label": "Card quick actions",
       "description": "Which favorite and watched shortcuts appear on media cards.",
       "recommended_control": "select",
-      "notes": "null means the user has not chosen a mode, so the server-wide default from the overlay-config endpoint applies. Profiles can override the default mode only while the server-wide quick-action switch is enabled."
+      "notes": "null means the user has not chosen a mode, so the server-wide default from the overlay-config endpoint applies. The mode applies whenever quick actions are effectively enabled for the profile."
     },
     {
       "key": "ui.card_quick_actions_enabled",
@@ -864,9 +864,9 @@
       "platforms": ["web"],
       "category": "appearance",
       "label": "Card quick actions enabled",
-      "description": "Show the selected favorite and watched shortcuts when permitted by the server-wide admin setting.",
+      "description": "Show the selected favorite and watched shortcuts on media cards.",
       "recommended_control": "switch",
-      "notes": "null means the profile has not chosen whether quick actions are enabled. A profile may disable or enable its shortcuts while the server-wide switch is on. When the server-wide switch is off, clients must treat quick actions as disabled regardless of this value; the stored preference is retained and applies again once an administrator re-enables the feature."
+      "notes": "null means the profile has not chosen whether quick actions are enabled, so the server-wide default from the overlay-config endpoint applies. An explicit profile choice overrides the server-wide default in either direction."
     },
     {
       "key": "ui.next_up_mode",

@@ -757,7 +757,7 @@
     },
     {
       "name": "card_quick_actions_enabled_profile_opt_out",
-      "description": "A profile that turned its own quick actions off resolves false at profile scope; the server-wide switch is not part of settings resolution.",
+      "description": "A profile that turned its own quick actions off resolves false at profile scope; the server-wide default is not part of settings resolution.",
       "keys": ["ui.card_quick_actions_enabled"],
       "context": { "profile_id": "p1" },
       "stored": [
@@ -772,6 +772,27 @@
         {
           "key": "ui.card_quick_actions_enabled",
           "value": false,
+          "source": "profile"
+        }
+      ]
+    },
+    {
+      "name": "card_quick_actions_enabled_profile_opt_in",
+      "description": "A profile that turned its own quick actions on resolves true at profile scope, which is what lets it override a server-wide default of off.",
+      "keys": ["ui.card_quick_actions_enabled"],
+      "context": { "profile_id": "p1" },
+      "stored": [
+        {
+          "key": "ui.card_quick_actions_enabled",
+          "scope": "profile",
+          "profile_id": "p1",
+          "value": true
+        }
+      ],
+      "expected": [
+        {
+          "key": "ui.card_quick_actions_enabled",
+          "value": true,
           "source": "profile"
         }
       ]
