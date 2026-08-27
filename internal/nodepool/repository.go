@@ -66,6 +66,13 @@ type Node struct {
 	// it. It is written beside Capabilities in one statement, so it always
 	// describes the report stored with it, and nothing routes on it.
 	CapabilityDrift *string `json:"capability_drift,omitempty"`
+	// CapabilityDriftBaseline records, machine-readably, the backends and device
+	// identities CapabilityDrift is waiting on. Recovery cannot be derived from
+	// the stored report alone — once a degraded report is stored every later
+	// comparison is degraded-to-degraded — so the note keeps what it is standing
+	// for. Non-nil exactly when CapabilityDrift is, except on a note written
+	// before this column existed.
+	CapabilityDriftBaseline json.RawMessage `json:"capability_drift_baseline,omitempty"`
 	// PhysicalGPUKeys identifies the actual GPUs behind this node, derived from
 	// Capabilities rather than stored: it is a pure function of that payload, so
 	// a column would only be a second copy that can disagree with it. Two nodes
@@ -250,13 +257,13 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
-const nodeColumns = `id, name, type, url, enabled, healthy, active_jobs, node_group, max_jobs, max_bandwidth_kbps, egress_kbps, last_health_check, created_at, capabilities, capabilities_hash, capabilities_refreshed_at, last_stats, hw_accel_override, hw_device_override, capability_drift`
+const nodeColumns = `id, name, type, url, enabled, healthy, active_jobs, node_group, max_jobs, max_bandwidth_kbps, egress_kbps, last_health_check, created_at, capabilities, capabilities_hash, capabilities_refreshed_at, last_stats, hw_accel_override, hw_device_override, capability_drift, capability_drift_baseline`
 
 func scanNode(row pgx.Row) (*Node, error) {
 	var n Node
 	// jsonb is scanned as raw bytes rather than into json.RawMessage directly so
 	// a NULL column stays nil instead of decoding through the JSON codec.
-	var capabilities, lastStats []byte
+	var capabilities, lastStats, driftBaselineBytes []byte
 	err := row.Scan(
 		&n.ID, &n.Name, &n.Type, &n.URL,
 		&n.Enabled, &n.Healthy, &n.ActiveJobs,
@@ -266,7 +273,7 @@ func scanNode(row pgx.Row) (*Node, error) {
 		&capabilities, &n.CapabilitiesHash, &n.CapabilitiesRefreshedAt,
 		&lastStats,
 		&n.HWAccelOverride, &n.HWDeviceOverride,
-		&n.CapabilityDrift,
+		&n.CapabilityDrift, &driftBaselineBytes,
 	)
 	if err != nil {
 		return nil, err
@@ -276,6 +283,9 @@ func scanNode(row pgx.Row) (*Node, error) {
 	}
 	if len(lastStats) > 0 {
 		n.LastStats = json.RawMessage(lastStats)
+	}
+	if len(driftBaselineBytes) > 0 {
+		n.CapabilityDriftBaseline = json.RawMessage(driftBaselineBytes)
 	}
 	// Derived here so every reader of a stored row — the admin listing as much
 	// as a pool load — sees the same identities without parsing the payload
@@ -456,11 +466,11 @@ func (r *Repository) UpdateHealth(ctx context.Context, id int, checkedURL string
 // shared-GPU work on that reading until another sweep corrected it. Trailing
 // slashes are ignored on both sides because the pools normalize URLs and the
 // column does not.
-func (r *Repository) UpdateCapabilities(ctx context.Context, id int, fetchedFrom string, capabilities []byte, hash string, refreshedAt time.Time, drift *string) error {
+func (r *Repository) UpdateCapabilities(ctx context.Context, id int, fetchedFrom string, capabilities []byte, hash string, refreshedAt time.Time, drift *string, driftBaseline []byte) error {
 	tag, err := r.pool.Exec(ctx,
-		`UPDATE stream_nodes SET capabilities = $2, capabilities_hash = $3, capabilities_refreshed_at = $4, capability_drift = $5
+		`UPDATE stream_nodes SET capabilities = $2, capabilities_hash = $3, capabilities_refreshed_at = $4, capability_drift = $5, capability_drift_baseline = $7
 		 WHERE id = $1 AND rtrim(url, '/') = rtrim($6, '/')`,
-		id, capabilities, hash, refreshedAt, drift, fetchedFrom)
+		id, capabilities, hash, refreshedAt, drift, fetchedFrom, driftBaseline)
 	if err != nil {
 		return fmt.Errorf("update node capabilities: %w", err)
 	}

@@ -240,7 +240,7 @@ func (hc *HealthChecker) Start(ctx context.Context) {
 type applyHealthFunc func(id int, checkedURL string, healthy bool, activeJobs, egressKbps int, lastStats []byte, checkedAt time.Time)
 
 // applyCapabilitiesFunc is a pool's copy-on-write capability writer.
-type applyCapabilitiesFunc func(id int, fetchedFrom string, capabilities []byte, hash string, refreshedAt time.Time, drift *string)
+type applyCapabilitiesFunc func(id int, fetchedFrom string, capabilities []byte, hash string, refreshedAt time.Time, drift *string, driftBaseline []byte)
 
 func (hc *HealthChecker) checkAll(ctx context.Context) {
 	var wg sync.WaitGroup
@@ -403,13 +403,13 @@ func (hc *HealthChecker) refreshCapabilities(ctx context.Context, n *Node, apply
 	// this one replaces, and stored with it so a reader never sees a note
 	// describing a different payload.
 	drift, parsed := computeCapabilityDrift(n.Capabilities, payload)
-	note := resolveDriftNote(n.CapabilityDrift, drift, parsed, payload)
+	note, driftBaseline := resolveDriftNote(n.CapabilityDrift, n.CapabilityDriftBaseline, drift, parsed, payload)
 	refreshedAt := time.Now()
 	if hc.repo != nil {
 		// Fenced on the URL this payload was fetched from: the fetch is
 		// detached and bounded at two minutes, so the row may since have been
 		// repointed at a different worker.
-		if err := hc.repo.UpdateCapabilities(ctx, n.ID, n.URL, payload, hash, refreshedAt, note); err != nil {
+		if err := hc.repo.UpdateCapabilities(ctx, n.ID, n.URL, payload, hash, refreshedAt, note, driftBaseline); err != nil {
 			if errors.Is(err, ErrNodeMoved) {
 				// Not a failure to report loudly: the node was edited or
 				// removed while this fetch ran, and the next sweep will fetch
@@ -425,7 +425,7 @@ func (hc *HealthChecker) refreshCapabilities(ctx context.Context, n *Node, apply
 	}
 	logCapabilityChange(ctx, n, drift, parsed)
 	if applyCapabilities != nil {
-		applyCapabilities(n.ID, n.URL, payload, hash, refreshedAt, note)
+		applyCapabilities(n.ID, n.URL, payload, hash, refreshedAt, note, driftBaseline)
 	}
 	if onChanged != nil {
 		onChanged(n.URL)
@@ -532,15 +532,28 @@ func renderDeviceAliasSets(view capabilityDriftView) []renderDeviceAliases {
 	return devices
 }
 
-// lostRenderDevices names the devices in previous that nothing in current
-// answers to.
-func lostRenderDevices(previous, current capabilityDriftView) []string {
+// lostRenderDeviceEntries returns the devices in previous that nothing in
+// current answers to, with their full alias sets: the note displays the path,
+// while the drift baseline keeps every identity so the device can be recognized
+// when it comes back under a different one.
+func lostRenderDeviceEntries(previous, current capabilityDriftView) []renderDeviceAliases {
 	currentDevices := renderDeviceAliasSets(current)
-	var lost []string
+	var lost []renderDeviceAliases
 	for _, device := range renderDeviceAliasSets(previous) {
 		if slices.ContainsFunc(currentDevices, device.sameDevice) {
 			continue
 		}
+		lost = append(lost, device)
+	}
+	return lost
+}
+
+// lostRenderDevices names the devices in previous that nothing in current
+// answers to.
+func lostRenderDevices(previous, current capabilityDriftView) []string {
+	entries := lostRenderDeviceEntries(previous, current)
+	lost := make([]string, 0, len(entries))
+	for _, device := range entries {
 		name := device.path
 		if name == "" {
 			name = device.aliases[0]
@@ -564,11 +577,9 @@ type capabilityDrift struct {
 	// lostDevices are render devices present in the previous report and absent
 	// from this one.
 	lostDevices []string
-	// regained reports that this refetch found hardware the stored report did
-	// not have: a backend that now verifies and did not, or a device identity
-	// that is present and was not. It is the only evidence that a standing
-	// regression actually recovered — see resolveDriftNote.
-	regained bool
+	// lostDeviceAliases carries every identity each lost device answered to, so
+	// the drift baseline can recognize it if it comes back under another one.
+	lostDeviceAliases []renderDeviceAliases
 	// previousResolved and resolved are the backend each report resolved to;
 	// carried for the log line, which is where an operator reads the effect.
 	previousResolved string
@@ -647,27 +658,117 @@ func truncateDriftNote(note string) string {
 // backend is still failing its probe, which is the one reading this column must
 // never produce. So the note is latched, and only a report whose probes all pass
 // clears it.
-func resolveDriftNote(stored *string, drift capabilityDrift, parsed bool, payload []byte) *string {
+func resolveDriftNote(stored *string, storedBaseline []byte, drift capabilityDrift, parsed bool, payload []byte) (*string, []byte) {
+	outstanding := mergeDriftBaseline(storedBaseline, drift)
 	if note := drift.persistedNote(); note != nil {
-		return note
+		// A fresh loss extends whatever was already outstanding rather than
+		// replacing it: two GPUs going one at a time must both have to return.
+		return note, marshalDriftBaseline(outstanding)
 	}
 	if stored == nil || strings.TrimSpace(*stored) == "" {
-		return nil
+		return nil, nil
 	}
 	if !parsed || !hardwareProbesClean(payload) {
 		// Nothing new was lost, but this report is not evidence of recovery.
-		return stored
+		return stored, marshalDriftBaseline(outstanding)
 	}
-	if !drift.regained {
-		// Every probe that ran passed — but on a multi-GPU node the surviving
-		// card passes just as cleanly with its sibling still missing, and once
-		// the degraded report is stored the delta finds nothing lost forever
-		// after. A clean sweep of what remains is not evidence that what went
-		// away came back; only hardware appearing that the stored report lacked
-		// is.
-		return stored
+	if !outstanding.recoveredBy(payload) {
+		// Recovery is the *originally lost* hardware coming back, not the
+		// inventory merely looking healthy. A surviving sibling probes just as
+		// cleanly with its partner still missing, and an unrelated GPU added
+		// later is growth without repair. Only the baseline can tell those from
+		// a genuine return, which is why it is kept rather than re-derived: once
+		// the degraded report is stored, every later comparison is
+		// degraded-to-degraded and finds nothing at all.
+		return stored, marshalDriftBaseline(outstanding)
 	}
-	return nil
+	return nil, nil
+}
+
+// driftBaseline is the hardware a standing capability_drift note is waiting on.
+type driftBaseline struct {
+	// Backends must verify again.
+	Backends []string `json:"backends,omitempty"`
+	// Devices are alias sets: any one member reappearing identifies the card,
+	// so a renumbered render node or a pass without nvidia-smi still matches.
+	Devices [][]string `json:"devices,omitempty"`
+}
+
+func (b driftBaseline) empty() bool { return len(b.Backends) == 0 && len(b.Devices) == 0 }
+
+// recoveredBy reports whether every backend and device the note is waiting on is
+// accounted for in this report.
+func (b driftBaseline) recoveredBy(payload []byte) bool {
+	if b.empty() {
+		// Nothing recorded to wait for — a note written before baselines
+		// existed. A clean report is the best evidence available, and holding
+		// such a note forever would strand it.
+		return true
+	}
+	var current capabilityDriftView
+	if json.Unmarshal(payload, &current) != nil {
+		return false
+	}
+	verified := make(map[string]bool, len(current.DetectedBackends))
+	for _, backend := range current.DetectedBackends {
+		verified[backend.Backend] = backend.Verified
+	}
+	for _, backend := range b.Backends {
+		if !verified[backend] {
+			return false
+		}
+	}
+	present := make(map[string]bool)
+	for _, device := range renderDeviceAliasSets(current) {
+		for _, alias := range device.aliases {
+			present[alias] = true
+		}
+	}
+	for _, aliases := range b.Devices {
+		if !slices.ContainsFunc(aliases, func(alias string) bool { return present[alias] }) {
+			return false
+		}
+	}
+	return true
+}
+
+// mergeDriftBaseline adds this refetch's losses to whatever the note was already
+// waiting on.
+func mergeDriftBaseline(stored []byte, drift capabilityDrift) driftBaseline {
+	var baseline driftBaseline
+	if len(stored) > 0 {
+		// An unreadable baseline is treated as absent rather than as a reason to
+		// discard the losses this pass found.
+		_ = json.Unmarshal(stored, &baseline)
+	}
+	for _, backend := range drift.lostBackends {
+		if !slices.Contains(baseline.Backends, backend) {
+			baseline.Backends = append(baseline.Backends, backend)
+		}
+	}
+	for _, device := range drift.lostDeviceAliases {
+		if slices.ContainsFunc(baseline.Devices, func(existing []string) bool {
+			return slices.ContainsFunc(existing, func(alias string) bool {
+				return slices.Contains(device.aliases, alias)
+			})
+		}) {
+			continue
+		}
+		baseline.Devices = append(baseline.Devices, slices.Clone(device.aliases))
+	}
+	slices.Sort(baseline.Backends)
+	return baseline
+}
+
+func marshalDriftBaseline(baseline driftBaseline) []byte {
+	if baseline.empty() {
+		return nil
+	}
+	encoded, err := json.Marshal(baseline)
+	if err != nil {
+		return nil
+	}
+	return encoded
 }
 
 // hardwareProbesClean reports whether the node probed at least one backend and
@@ -739,19 +840,7 @@ func computeCapabilityDrift(stored, payload []byte) (drift capabilityDrift, pars
 		drift.lostBackends = append(drift.lostBackends, backend.Backend)
 	}
 	drift.lostDevices = lostRenderDevices(previous, current)
-	// The mirror comparison. Once a degraded report is stored, every later delta
-	// is degraded-to-degraded and finds nothing lost; growth is what separates
-	// "still broken" from "came back".
-	drift.regained = len(lostRenderDevices(current, previous)) > 0
-	verifiedBefore := make(map[string]bool, len(previous.DetectedBackends))
-	for _, backend := range previous.DetectedBackends {
-		verifiedBefore[backend.Backend] = backend.Verified
-	}
-	for _, backend := range current.DetectedBackends {
-		if backend.Verified && !verifiedBefore[backend.Backend] {
-			drift.regained = true
-		}
-	}
+	drift.lostDeviceAliases = lostRenderDeviceEntries(previous, current)
 	return drift, true
 }
 

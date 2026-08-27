@@ -33,6 +33,7 @@ Always `200 OK` with a JSON array.
 | `last_stats` | object | The node's most recent host resource sample — `{"system": …, "gpu": […]}` in the shape below. Omitted when the node reported none. |
 | `hw_accel_override`, `hw_device_override` | string | This node's own acceleration policy (see below). Omitted when the node inherits the cluster-wide settings, which is the normal case. |
 | `capability_drift` | string | Human-readable note describing how the node's hardware got worse at the last capability refetch. Omitted when the last refetch found no regression (see below). |
+| `capability_drift_baseline` | object | What that note is waiting on — `{"backends": [...], "devices": [[alias, ...], ...]}`. Present with `capability_drift`, absent without it. Each device is every stable name it answered to, so it is recognized if it returns renumbered. |
 
 ### Acceleration overrides
 
@@ -230,17 +231,21 @@ long before anyone reads a log.
 Semantics worth knowing:
 
 - Setting it is a comparison; clearing it is not. The note appears when a refetch
-  loses something, and clearing takes positive evidence of recovery: a report
-  that probed at least one backend, had every backend it probed pass, *and*
-  regained something the stored report lacked — a backend that now verifies and
-  did not, or a device identity that is present and was not. A refetch that finds
-  nothing *newly* lost leaves it alone, because a delta against an
-  already-degraded report always finds nothing — a reboot moves `boot_id`, a
-  reworded FFmpeg failure moves the probe reason, and either would otherwise
-  erase a standing regression and report a broken node as repaired. Two cases
-  make the "regained" half necessary rather than pedantic: a GPU that disappeared
-  completely leaves no candidate backend to fail, and a multi-GPU node that lost
-  one card keeps probing the survivor perfectly cleanly.
+  loses something, and it records what it lost in `capability_drift_baseline`.
+  Clearing requires that specific hardware back: every backend in the baseline
+  verifying again, and every device in it answering to one of its recorded
+  aliases. A refetch that finds nothing *newly* lost leaves the note alone,
+  because a delta against an already-degraded report always finds nothing — a
+  reboot moves `boot_id`, a reworded FFmpeg failure moves the probe reason, and
+  either would otherwise erase a standing regression. Three cases make the
+  baseline necessary rather than pedantic, and none of them are caught by
+  looking at the current report alone: a GPU that disappeared completely leaves
+  no candidate backend to fail; a multi-GPU node that lost one card keeps
+  probing the survivor perfectly cleanly; and adding an unrelated GPU grows the
+  inventory without repairing anything. Successive losses accumulate, so two
+  cards going one at a time must both return.
+- A note carried over from before the baseline existed has nothing recorded to
+  wait for, and a clean report clears it.
 - A backend reported as `skipped` neither sets the note nor holds it open.
   Skipping means no probe ran because the node cannot open the backend's
   configured devices, which is a statement about access rather than about

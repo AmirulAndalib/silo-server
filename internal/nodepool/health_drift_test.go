@@ -151,7 +151,7 @@ func TestResolveDriftNoteKeepsNoteWhenNoProbePassed(t *testing.T) {
 			// Both sides degraded: the delta finds nothing newly lost, which is
 			// exactly the state in which clearing has to be refused.
 			drift, parsed := computeCapabilityDrift(payload, payload)
-			got := resolveDriftNote(&standing, drift, parsed, payload)
+			got, _ := resolveDriftNote(&standing, nil, drift, parsed, payload)
 			if got == nil {
 				t.Fatal("capability_drift was cleared by a report in which no probe passed")
 			}
@@ -173,12 +173,94 @@ func TestResolveDriftNoteClearsWhenHardwareComesBack(t *testing.T) {
 		`{"backend":"qsv","verified":false,"skipped":true}]}`
 
 	standing := "verified hardware backends lost: vaapi"
+	// The baseline the loss recorded: vaapi has to verify again.
+	baseline := []byte(`{"backends":["vaapi"]}`)
 	drift, parsed := computeCapabilityDrift([]byte(degraded), []byte(recovered))
-	if !drift.regained {
-		t.Fatal("a report that regained a verified backend and a device was not seen as recovery")
+	got, gotBaseline := resolveDriftNote(&standing, baseline, drift, parsed, []byte(recovered))
+	if got != nil {
+		t.Fatalf("capability_drift = %q, want the recovered backend to clear it", *got)
 	}
-	if got := resolveDriftNote(&standing, drift, parsed, []byte(recovered)); got != nil {
-		t.Fatalf("capability_drift = %q, want recovered hardware to clear it", *got)
+	if gotBaseline != nil {
+		t.Fatalf("baseline = %s, want it cleared with the note", gotBaseline)
+	}
+}
+
+// Growth is not repair. A node standing on a lost GPU that gains an unrelated
+// one has a bigger, perfectly clean inventory and still has not got its card
+// back — which is why the note keeps what it is waiting for rather than
+// re-deriving it from the stored report.
+func TestResolveDriftNoteKeepsNoteWhenAnUnrelatedGPUIsAdded(t *testing.T) {
+	const gained = `{"resolved":"vaapi","render_devices":["/dev/dri/renderD130"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD130","pci_address":"0000:09:00.0"}],` +
+		`"detected_backends":[{"backend":"vaapi","verified":true}]}`
+
+	standing := "render devices gone: /dev/dri/renderD128"
+	// The lost card, by every identity it answered to.
+	baseline := []byte(`{"devices":[["0000:03:00.0","/dev/dri/renderD128"]]}`)
+	payload := []byte(gained)
+	drift, parsed := computeCapabilityDrift(payload, payload)
+
+	got, gotBaseline := resolveDriftNote(&standing, baseline, drift, parsed, payload)
+	if got == nil {
+		t.Fatal("capability_drift cleared because an unrelated GPU appeared")
+	}
+	if *got != standing {
+		t.Fatalf("capability_drift = %q, want the standing note %q", *got, standing)
+	}
+	if len(gotBaseline) == 0 {
+		t.Fatal("the baseline was dropped while the note still stands")
+	}
+}
+
+// The lost card coming back under a renumbered render node still counts: the
+// baseline keeps every identity it answered to, and any one of them matching
+// identifies it.
+func TestResolveDriftNoteClearsWhenTheLostCardReturnsRenumbered(t *testing.T) {
+	const back = `{"resolved":"vaapi","render_devices":["/dev/dri/renderD129"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD129","pci_address":"0000:03:00.0"}],` +
+		`"detected_backends":[{"backend":"vaapi","verified":true}]}`
+
+	standing := "render devices gone: /dev/dri/renderD128"
+	baseline := []byte(`{"devices":[["0000:03:00.0","/dev/dri/renderD128"]]}`)
+	payload := []byte(back)
+	drift, parsed := computeCapabilityDrift(payload, payload)
+
+	if got, _ := resolveDriftNote(&standing, baseline, drift, parsed, payload); got != nil {
+		t.Fatalf("capability_drift = %q, want the card at the same slot to clear it", *got)
+	}
+}
+
+// Two cards going one at a time must both have to return: the second loss
+// extends the baseline rather than replacing it.
+func TestResolveDriftNoteAccumulatesSuccessiveLosses(t *testing.T) {
+	const twoCards = `{"resolved":"vaapi","render_devices":["/dev/dri/renderD128","/dev/dri/renderD129"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"},` +
+		`{"path":"/dev/dri/renderD129","pci_address":"0000:04:00.0"}],` +
+		`"detected_backends":[{"backend":"vaapi","verified":true}]}`
+	const oneCard = `{"resolved":"vaapi","render_devices":["/dev/dri/renderD129"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD129","pci_address":"0000:04:00.0"}],` +
+		`"detected_backends":[{"backend":"vaapi","verified":true}]}`
+	const noCards = `{"resolved":"none","render_devices":[],"detected_backends":[]}`
+
+	firstLoss, parsed := computeCapabilityDrift([]byte(twoCards), []byte(oneCard))
+	note, baseline := resolveDriftNote(nil, nil, firstLoss, parsed, []byte(oneCard))
+	if note == nil || len(baseline) == 0 {
+		t.Fatalf("first loss produced note=%v baseline=%s", note, baseline)
+	}
+
+	secondLoss, parsed := computeCapabilityDrift([]byte(oneCard), []byte(noCards))
+	note, baseline = resolveDriftNote(note, baseline, secondLoss, parsed, []byte(noCards))
+	if note == nil || len(baseline) == 0 {
+		t.Fatal("second loss dropped the standing note or its baseline")
+	}
+
+	// Only the first card returns; the note must stand for the second.
+	if got, _ := resolveDriftNote(note, baseline, capabilityDrift{}, true, []byte(oneCard)); got == nil {
+		t.Fatal("capability_drift cleared with one of two lost cards still missing")
+	}
+	// Both back clears it.
+	if got, _ := resolveDriftNote(note, baseline, capabilityDrift{}, true, []byte(twoCards)); got != nil {
+		t.Fatalf("capability_drift = %q, want both cards returning to clear it", *got)
 	}
 }
 
@@ -194,14 +276,15 @@ func TestResolveDriftNoteKeepsNoteWhileASiblingGPUIsStillMissing(t *testing.T) {
 		`"detected_backends":[{"backend":"vaapi","verified":true}]}`
 
 	standing := "render devices gone: /dev/dri/renderD129"
+	baseline := []byte(`{"devices":[["0000:04:00.0","/dev/dri/renderD129"]]}`)
 	payload := []byte(degraded)
-	// The next refetch is degraded-to-degraded: nothing newly lost, nothing
-	// regained, every probe clean.
+	// The next refetch is degraded-to-degraded: nothing newly lost, and every
+	// probe that ran passed, because the survivor is fine.
 	drift, parsed := computeCapabilityDrift(payload, payload)
 	if !hardwareProbesClean(payload) {
 		t.Fatal("the surviving card should probe cleanly; that is the point")
 	}
-	got := resolveDriftNote(&standing, drift, parsed, payload)
+	got, _ := resolveDriftNote(&standing, baseline, drift, parsed, payload)
 	if got == nil {
 		t.Fatal("capability_drift cleared while the lost card was still missing")
 	}
@@ -479,7 +562,7 @@ func TestComputeCapabilityDriftDoesNotTreatASkippedBackendAsLost(t *testing.T) {
 	// And the pair round-trips: what does not set the note must not be held
 	// open by it either.
 	standing := "verified hardware backends lost: qsv"
-	if got := resolveDriftNote(&standing, drift, parsed, []byte(after)); got == nil || *got != standing {
+	if got, _ := resolveDriftNote(&standing, nil, drift, parsed, []byte(after)); got == nil || *got != standing {
 		t.Fatalf("resolveDriftNote = %v, want a skipped report to leave a standing note alone", got)
 	}
 }
@@ -514,5 +597,23 @@ func TestComputeCapabilityDriftCatchesABackendThatStoppedBeingReported(t *testin
 	}
 	if len(drift.lostBackends) != 1 || drift.lostBackends[0] != "qsv" {
 		t.Fatalf("lostBackends = %v, want the vanished backend reported", drift.lostBackends)
+	}
+}
+
+// A note written before the baseline column existed has nothing recorded to wait
+// for. Holding it forever would strand it on an upgraded deployment, so a clean
+// report clears it — the best evidence available for a note whose subject was
+// never captured.
+func TestResolveDriftNoteClearsALegacyNoteWithNoBaseline(t *testing.T) {
+	const clean = `{"resolved":"vaapi","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],` +
+		`"detected_backends":[{"backend":"vaapi","verified":true}]}`
+
+	standing := "verified hardware backends lost: vaapi"
+	payload := []byte(clean)
+	drift, parsed := computeCapabilityDrift(payload, payload)
+
+	if got, _ := resolveDriftNote(&standing, nil, drift, parsed, payload); got != nil {
+		t.Fatalf("capability_drift = %q, want a baseline-less note cleared by a clean report", *got)
 	}
 }

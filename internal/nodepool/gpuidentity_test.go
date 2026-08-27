@@ -113,7 +113,7 @@ func TestApplyCapabilitiesDerivesGPUKeys(t *testing.T) {
 
 	transcodes := NewTranscodePool()
 	transcodes.SetNodes([]*Node{{ID: 1, URL: "http://tc-1", Enabled: true, Healthy: true}})
-	transcodes.ApplyCapabilities(1, "http://tc-1", []byte(gpuAAACapabilities), "sha256:aaa", refreshedAt, nil)
+	transcodes.ApplyCapabilities(1, "http://tc-1", []byte(gpuAAACapabilities), "sha256:aaa", refreshedAt, nil, nil)
 	if got := transcodes.Nodes()[0].PhysicalGPUKeys; !slices.Equal(got, []string{"GPU-aaa"}) {
 		t.Fatalf("transcode ApplyCapabilities derived %v, want [GPU-aaa]", got)
 	}
@@ -121,14 +121,14 @@ func TestApplyCapabilitiesDerivesGPUKeys(t *testing.T) {
 	// The card was passed through to another host: the node now reports a
 	// device it cannot identify, and must stop claiming the old key.
 	transcodes.ApplyCapabilities(1, "http://tc-1", []byte(`{"boot_id":"boot-2","render_device_details":[{"path":"/dev/dri/renderD128"}]}`),
-		"sha256:bbb", refreshedAt, nil)
+		"sha256:bbb", refreshedAt, nil, nil)
 	if got := transcodes.Nodes()[0].PhysicalGPUKeys; got != nil {
 		t.Fatalf("stale identities survived a new report: %v", got)
 	}
 
 	proxies := NewProxyPool()
 	proxies.SetNodes([]*Node{{ID: 2, URL: "http://proxy-1", Enabled: true, Healthy: true}})
-	proxies.ApplyCapabilities(2, "http://proxy-1", []byte(gpuAAACapabilities), "sha256:aaa", refreshedAt, nil)
+	proxies.ApplyCapabilities(2, "http://proxy-1", []byte(gpuAAACapabilities), "sha256:aaa", refreshedAt, nil, nil)
 	if got := proxies.Nodes()[0].PhysicalGPUKeys; !slices.Equal(got, []string{"GPU-aaa"}) {
 		t.Fatalf("proxy ApplyCapabilities derived %v, want [GPU-aaa]", got)
 	}

@@ -94,10 +94,10 @@ func (p *TranscodePool) ApplyHealth(id int, checkedURL string, healthy bool, act
 
 // ApplyCapabilities records a freshly fetched capability report by swapping the
 // node for an updated copy, keeping published *Node values immutable.
-func (p *TranscodePool) ApplyCapabilities(id int, fetchedFrom string, capabilities []byte, hash string, refreshedAt time.Time, drift *string) {
+func (p *TranscodePool) ApplyCapabilities(id int, fetchedFrom string, capabilities []byte, hash string, refreshedAt time.Time, drift *string, driftBaseline []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	applyNodeCapabilities(p.nodes, id, fetchedFrom, capabilities, hash, refreshedAt, drift)
+	applyNodeCapabilities(p.nodes, id, fetchedFrom, capabilities, hash, refreshedAt, drift, driftBaseline)
 }
 
 // sameNodeURL compares two node addresses the way the pools store them, so a
@@ -145,7 +145,7 @@ func applyNodeHealth(nodes []*Node, id int, checkedURL string, healthy bool, act
 // drift is set verbatim, nil included: the note describes the comparison that
 // produced this payload, so a node whose hardware recovered must lose the note
 // at the same moment it gains the clean report.
-func applyNodeCapabilities(nodes []*Node, id int, fetchedFrom string, capabilities []byte, hash string, refreshedAt time.Time, drift *string) {
+func applyNodeCapabilities(nodes []*Node, id int, fetchedFrom string, capabilities []byte, hash string, refreshedAt time.Time, drift *string, driftBaseline []byte) {
 	for i, n := range nodes {
 		if n.ID != id || !sameNodeURL(n.URL, fetchedFrom) {
 			continue
@@ -155,6 +155,11 @@ func applyNodeCapabilities(nodes []*Node, id int, fetchedFrom string, capabiliti
 		clone.CapabilitiesHash = &hash
 		clone.CapabilitiesRefreshedAt = &refreshedAt
 		clone.CapabilityDrift = drift
+		if len(driftBaseline) > 0 {
+			clone.CapabilityDriftBaseline = append(json.RawMessage(nil), driftBaseline...)
+		} else {
+			clone.CapabilityDriftBaseline = nil
+		}
 		// The GPU identities belong to the payload being replaced, so they are
 		// re-derived rather than carried over from the previous report.
 		applyPhysicalGPUKeys(&clone)

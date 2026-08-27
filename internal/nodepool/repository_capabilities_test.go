@@ -64,7 +64,7 @@ func TestRepositoryUpdateCapabilitiesRoundTrip(t *testing.T) {
 
 	payload := json.RawMessage(`{"resolved":"nvenc","render_devices":["/dev/dri/renderD128"]}`)
 	refreshedAt := time.Now().UTC().Truncate(time.Millisecond)
-	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:abc", refreshedAt, nil); err != nil {
+	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:abc", refreshedAt, nil, nil); err != nil {
 		t.Fatalf("update capabilities: %v", err)
 	}
 
@@ -113,7 +113,7 @@ func TestRepositoryUpdateCapabilitiesDriftRoundTripAndClear(t *testing.T) {
 
 	note := "verified hardware backends lost: nvenc; resolved backend nvenc -> none"
 	payload := json.RawMessage(`{"resolved":"none"}`)
-	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:degraded", time.Now(), &note); err != nil {
+	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:degraded", time.Now(), &note, nil); err != nil {
 		t.Fatalf("update capabilities with drift: %v", err)
 	}
 	reloaded, err := repo.GetByID(ctx, node.ID)
@@ -125,7 +125,7 @@ func TestRepositoryUpdateCapabilitiesDriftRoundTripAndClear(t *testing.T) {
 	}
 
 	recovered := json.RawMessage(`{"resolved":"nvenc"}`)
-	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, recovered, "sha256:recovered", time.Now(), nil); err != nil {
+	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, recovered, "sha256:recovered", time.Now(), nil, nil); err != nil {
 		t.Fatalf("update capabilities without drift: %v", err)
 	}
 	reloaded, err = repo.GetByID(ctx, node.ID)
@@ -139,7 +139,7 @@ func TestRepositoryUpdateCapabilitiesDriftRoundTripAndClear(t *testing.T) {
 
 func TestRepositoryUpdateCapabilitiesUnknownNode(t *testing.T) {
 	repo := NewRepository(newNodeTestPool(t))
-	err := repo.UpdateCapabilities(context.Background(), -1, "http://gone", []byte(`{}`), "sha256:abc", time.Now(), nil)
+	err := repo.UpdateCapabilities(context.Background(), -1, "http://gone", []byte(`{}`), "sha256:abc", time.Now(), nil, nil)
 	if !errors.Is(err, ErrNodeMoved) {
 		t.Fatalf("err = %v, want ErrNodeMoved", err)
 	}
@@ -168,7 +168,7 @@ func TestRepositoryUpdateCapabilitiesRefusesAfterAURLEdit(t *testing.T) {
 		t.Fatalf("repoint node: %v", err)
 	}
 
-	err = repo.UpdateCapabilities(ctx, node.ID, node.URL, []byte(`{"resolved":"qsv"}`), "sha256:stale", time.Now(), nil)
+	err = repo.UpdateCapabilities(ctx, node.ID, node.URL, []byte(`{"resolved":"qsv"}`), "sha256:stale", time.Now(), nil, nil)
 	if !errors.Is(err, ErrNodeMoved) {
 		t.Fatalf("err = %v, want ErrNodeMoved after the row was repointed", err)
 	}
@@ -198,7 +198,7 @@ func TestRepositoryUpdateCapabilitiesIgnoresATrailingSlash(t *testing.T) {
 	t.Cleanup(func() { _ = repo.Delete(ctx, node.ID) })
 
 	normalized := strings.TrimSuffix(node.URL, "/")
-	if err := repo.UpdateCapabilities(ctx, node.ID, normalized, []byte(`{"resolved":"qsv"}`), "sha256:ok", time.Now(), nil); err != nil {
+	if err := repo.UpdateCapabilities(ctx, node.ID, normalized, []byte(`{"resolved":"qsv"}`), "sha256:ok", time.Now(), nil, nil); err != nil {
 		t.Fatalf("UpdateCapabilities with a normalized URL: %v", err)
 	}
 }

@@ -213,7 +213,7 @@ func TestApplyCapabilitiesIgnoresAReportForAReplacedWorker(t *testing.T) {
 
 	pool.ApplyCapabilities(1, "http://original",
 		[]byte(`{"resolved":"qsv","render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],"boot_id":"boot-1"}`),
-		"sha256:stale", time.Now(), nil)
+		"sha256:stale", time.Now(), nil, nil)
 
 	stored := pool.Nodes()[0]
 	if len(stored.Capabilities) != 0 || stored.CapabilitiesHash != nil || len(stored.PhysicalGPUKeys) != 0 {
