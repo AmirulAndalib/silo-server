@@ -38,6 +38,11 @@ var (
 	hwProbeNegativeTTL         = 15 * time.Second
 	// hwProbeNow is the cache clock; tests advance it instead of sleeping.
 	hwProbeNow = time.Now
+	// hwProbeFlightStarted, when set, is called on the shared probe goroutine
+	// once it has committed to running a probe. It is the seam a test uses to
+	// order an invalidation against a flight that is genuinely in progress,
+	// rather than sleeping and hoping. Production leaves it nil.
+	hwProbeFlightStarted func()
 )
 
 // hwProbeResult records whether one backend was verified end to end on this
@@ -557,6 +562,7 @@ func ffmpegSupportsBackendContext(ctx context.Context, backend, ffmpegPath, devi
 	commandTimeout := hwProbeCommandTimeout
 	negativeTTL := hwProbeNegativeTTL
 	now := hwProbeNow
+	flightStarted := hwProbeFlightStarted
 	hwProbeCache.Lock()
 	// The generation is baked into the key, so an invalidation that lands while
 	// this probe runs leaves the flight writing to a key nobody will read again
@@ -574,6 +580,9 @@ func ffmpegSupportsBackendContext(ctx context.Context, backend, ffmpegPath, devi
 		hwProbeCache.Unlock()
 		if ok && hwProbeCacheEntryCurrent(cached, now()) {
 			return cached.result, nil
+		}
+		if flightStarted != nil {
+			flightStarted()
 		}
 		probeCtx, cancel := context.WithTimeout(context.Background(), time.Duration(probe.commandCount)*commandTimeout+time.Second)
 		defer cancel()

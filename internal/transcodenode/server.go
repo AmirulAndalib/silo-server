@@ -643,13 +643,6 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 	if !s.requireApprovedInputPath(w, r, req.InputPath) {
 		return
 	}
-	// A prepared download encodes on the GPU like any transcode, so it takes
-	// the same exclusion against a running capability re-probe.
-	if !s.gpu.beginWork() {
-		http.Error(w, "node is re-probing its hardware; retry shortly", http.StatusServiceUnavailable)
-		return
-	}
-	defer s.gpu.endWork()
 	opts := req.TranscodeOpts(cfg.Playback.FFmpegPath, cfg.Playback.HWAccel, cfg.Playback.HWDevice, s.ffmpegSink)
 	artifactRoot := s.artifactRoot
 	if err := os.MkdirAll(artifactRoot, 0o755); err != nil {
@@ -669,6 +662,16 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Claimed only once this request is committed to producing something: a
+	// prepared download encodes on the GPU like any transcode, and the tone-map
+	// recipe resolution just below runs ffmpeg probes on it too. Serving an
+	// artifact that already exists touches neither, so a re-probe must not
+	// refuse it.
+	if !s.gpu.beginWork() {
+		http.Error(w, "node is re-probing its hardware; retry shortly", http.StatusServiceUnavailable)
+		return
+	}
+	defer s.gpu.endWork()
 	if req.ToneMapRequested() {
 		if err := s.resolveToneMapRecipe(r.Context(), &opts); err != nil {
 			writeToneMapRecipeError(w, err)

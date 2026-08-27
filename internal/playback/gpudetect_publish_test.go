@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // A detection walk that ran out of budget marks backends it never reached
@@ -121,15 +121,23 @@ func TestAcquireHWDeviceLeavesTheDeviceUnsetWithoutAVerifiedProbe(t *testing.T) 
 // republish exactly what it was asked to discard and report "nothing changed".
 func TestInvalidateHWProbeCacheSupersedesAnInFlightProbe(t *testing.T) {
 	env := setupHWAccelTest(t)
-	// The shared setup pins a 200ms per-command budget so hung-probe tests stay
-	// fast; this one needs a probe that is slow but succeeds, so it has to
-	// outlive that. setupHWAccelTest restores the original on cleanup.
-	hwProbeCommandTimeout = 5 * time.Second
 	env.addRenderDevice(t, "renderD128", "0x8086")
-	probe := successfulVAAPIProbe()
-	probe.delay = 300 * time.Millisecond
-	ffmpeg := writeFakeFFmpeg(t, probe)
+	ffmpeg := writeFakeFFmpeg(t, successfulVAAPIProbe())
 	device := env.devicePath("renderD128")
+
+	// The race is decided by channel receipts rather than a sleep: the first
+	// flight parks inside the probe until the invalidation has landed, so this
+	// cannot pass or fail on how loaded the machine is.
+	started := make(chan struct{})
+	blocked := make(chan struct{})
+	var flights atomic.Int32
+	hwProbeFlightStarted = func() {
+		if flights.Add(1) == 1 {
+			close(started)
+			<-blocked
+		}
+	}
+	t.Cleanup(func() { hwProbeFlightStarted = nil })
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -138,9 +146,9 @@ func TestInvalidateHWProbeCacheSupersedesAnInFlightProbe(t *testing.T) {
 		}
 	})
 
-	// Let the flight start its first bounded command, then discard its verdict.
-	time.Sleep(50 * time.Millisecond)
+	<-started
 	InvalidateHWProbeCache()
+	close(blocked)
 
 	if ok, reason := ffmpegSupportsBackend(transcodeHWVAAPI, ffmpeg.path, device); !ok {
 		t.Fatalf("post-invalidation probe failed: %s", reason)
