@@ -78,6 +78,13 @@ var (
 // by.
 const gpuDeviceLabel = "device"
 
+// isMeasuredGPUSource reports whether a source actually produced engine
+// readings. SourceUnavailable means nothing could measure the device, so its
+// zeros carry no measurement.
+func isMeasuredGPUSource(source string) bool {
+	return source != "" && source != SourceUnavailable
+}
+
 // collector adapts a Sampler to prometheus.Collector.
 type collector struct{ sampler *Sampler }
 
@@ -116,8 +123,21 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 	}
 	const bytesPerMBFloat = float64(1024 * 1024)
 	for _, gpu := range snapshot.GPU {
-		gauge(descGPUVideoBusy, float64(gpu.VideoBusyPct), gpu.Device)
-		gauge(descGPURenderBusy, float64(gpu.RenderBusyPct), gpu.Device)
+		// Engine percentages are omitted rather than reported as zero when
+		// nothing measured them. The JSON surfaces carry `source` alongside and
+		// can render the difference; a Prometheus sample cannot, so an exported
+		// 0 would read as an idle GPU on every dashboard and alert — including
+		// for a card that is busy and merely unobservable, which is exactly the
+		// state `unavailable` names. An absent series is the honest shape for a
+		// number that was not taken.
+		if isMeasuredGPUSource(gpu.Source) {
+			gauge(descGPUVideoBusy, float64(gpu.VideoBusyPct), gpu.Device)
+			gauge(descGPURenderBusy, float64(gpu.RenderBusyPct), gpu.Device)
+		}
+		// Sessions always ships: it comes from this process's own workload
+		// accounting, not from a driver, so it is exact whatever the driver can
+		// or cannot tell us — and a busy GPU with no engine reading is precisely
+		// when an operator needs it.
 		gauge(descGPUSessions, float64(gpu.Sessions), gpu.Device)
 		if gpu.VRAMUsedMB != nil {
 			gauge(descGPUVRAMUsed, float64(*gpu.VRAMUsedMB)*bytesPerMBFloat, gpu.Device)

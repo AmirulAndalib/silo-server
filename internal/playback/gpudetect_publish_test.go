@@ -251,3 +251,48 @@ func TestAcquireHWDeviceCountsTheAutoDetectedDeviceWithoutAProbe(t *testing.T) {
 		t.Fatalf("active workloads after release = %d, want 0", got)
 	}
 }
+
+// The identity listing used to be a sync.Once, so an nvidia-smi that was
+// missing at first call was never asked again and a card swapped into the same
+// slot kept answering to its predecessor's uuid — both of which feed drift
+// detection and shared-GPU placement. A re-probe is exactly when either becomes
+// true, so it drops the listing too.
+func TestInvalidateHWProbeCacheRequeriesNVIDIAIdentities(t *testing.T) {
+	setupHWAccelTest(t)
+
+	queries := 0
+	answer := ""
+	previous := nvidiaSMIQuery
+	nvidiaSMIQuery = func(context.Context) ([]byte, error) {
+		queries++
+		if answer == "" {
+			return nil, errors.New("nvidia-smi not installed")
+		}
+		return []byte(answer), nil
+	}
+	t.Cleanup(func() {
+		nvidiaSMIQuery = previous
+		resetNVIDIAGPUUUIDs()
+	})
+	resetNVIDIAGPUUUIDs()
+
+	if got := nvidiaGPUUUIDsByPCIAddress(); len(got) != 0 {
+		t.Fatalf("identities = %v, want none while nvidia-smi is unavailable", got)
+	}
+	if nvidiaGPUUUIDsByPCIAddress(); queries != 1 {
+		t.Fatalf("queries = %d, want the failure cached within a generation", queries)
+	}
+
+	// The toolkit is installed, or the card is replaced. Only a re-probe should
+	// make the process notice.
+	answer = "GPU-new, 00000000:03:00.0\n"
+	if got := nvidiaGPUUUIDsByPCIAddress(); len(got) != 0 {
+		t.Fatalf("identities = %v, want the cached answer until the caches are dropped", got)
+	}
+
+	InvalidateHWProbeCache()
+	got := nvidiaGPUUUIDsByPCIAddress()
+	if got["0000:03:00.0"] != "GPU-new" {
+		t.Fatalf("identities = %v, want the re-probe to pick up the new uuid", got)
+	}
+}

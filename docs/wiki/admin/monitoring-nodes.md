@@ -283,6 +283,11 @@ groups:
           summary: "Silo node CPU pegged on {{ $labels.instance }} — check the GPU column for a failed probe"
 ```
 
+A GPU nothing could measure exports no engine gauges at all rather than zeros —
+a Prometheus sample carries no `source` to qualify them, and a zero would read as
+idle on a card that may be busy and merely unobservable. Its session count still
+ships, since that comes from Silo's own accounting rather than from a driver.
+
 The GPU gauges (`streamapp_node_gpu_video_busy_percent`,
 `streamapp_node_gpu_render_busy_percent`, `streamapp_node_gpu_sessions`,
 `streamapp_node_gpu_vram_used_bytes`, `streamapp_node_gpu_vram_total_bytes`) are

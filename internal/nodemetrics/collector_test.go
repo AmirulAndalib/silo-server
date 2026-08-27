@@ -235,3 +235,50 @@ func diskSeriesByLabel(t *testing.T, sampler *Sampler) map[string]float64 {
 	}
 	return byLabel
 }
+
+// A GPU nothing could measure has zeros that mean "not taken", not "idle". The
+// JSON surfaces carry `source` alongside and render the difference; a Prometheus
+// sample cannot, so an exported 0 would show a busy-but-unobservable card as
+// idle on every dashboard. The session count still ships: it comes from this
+// process's own accounting rather than a driver.
+func TestCollectorOmitsUnmeasuredGPUEngineGauges(t *testing.T) {
+	sampler := NewFixedSamplerForTest(Snapshot{
+		Available: true,
+		System:    &SystemStats{},
+		GPU: []GPUStats{{
+			Device: "cuda:0", Vendor: vendorNVIDIA, Sessions: 2, Source: SourceUnavailable,
+		}},
+	})
+
+	values := gatherNames(t, sampler)
+	if _, present := values["streamapp_node_gpu_video_busy_percent"]; present {
+		t.Fatal("an unmeasured GPU exported a video busy percentage")
+	}
+	if _, present := values["streamapp_node_gpu_render_busy_percent"]; present {
+		t.Fatal("an unmeasured GPU exported a render busy percentage")
+	}
+	if got := values["streamapp_node_gpu_sessions"]; got != 2 {
+		t.Fatalf("gpu sessions = %v, want the workload count exported regardless", got)
+	}
+}
+
+// A measured source exports both engines, including a genuine zero — which does
+// mean idle.
+func TestCollectorExportsMeasuredGPUEngineGauges(t *testing.T) {
+	sampler := NewFixedSamplerForTest(Snapshot{
+		Available: true,
+		System:    &SystemStats{},
+		GPU: []GPUStats{{
+			Device: "/dev/dri/renderD128", Sessions: 0,
+			VideoBusyPct: 0, RenderBusyPct: 0, Source: SourceFdinfo,
+		}},
+	})
+
+	values := gatherNames(t, sampler)
+	if _, present := values["streamapp_node_gpu_video_busy_percent"]; !present {
+		t.Fatal("a measured idle GPU omitted its video busy percentage")
+	}
+	if _, present := values["streamapp_node_gpu_render_busy_percent"]; !present {
+		t.Fatal("a measured idle GPU omitted its render busy percentage")
+	}
+}

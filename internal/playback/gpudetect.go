@@ -672,6 +672,11 @@ func InvalidateHWProbeCache() {
 	hwProbeCache.generation++
 	hwProbeCache.entries = make(map[string]hwProbeCacheEntry)
 	hwProbeCache.verifiedDevices = make(map[string]string)
+	// The GPU identity listing goes too. A re-probe is exactly when nvidia-smi
+	// may have become available, or a card in the same slot may have been
+	// replaced, and both of those change identities the drift comparison and
+	// shared-GPU placement read.
+	resetNVIDIAGPUUUIDs()
 }
 
 // hwProbeCacheKey separates results per invalidation generation, per backend,
@@ -1082,12 +1087,29 @@ var nvidiaSMIQueryTimeout = 3 * time.Second
 // it rather than installing a fake binary on PATH.
 var nvidiaSMIQuery = runNVIDIASMIQuery
 
-// nvidiaGPUUUIDs caches the one nvidia-smi listing this process makes. GPU
-// identities cannot change without a reboot, so a second query could only cost
-// a subprocess to learn the same answer.
+// nvidiaGPUUUIDs caches the nvidia-smi listing. Within one generation of the
+// probe caches a second query could only cost a subprocess to learn the same
+// answer, since GPU identities do not change under a running kernel.
+//
+// It is not cached for the process lifetime, though, which a sync.Once would
+// make it. Two things invalidate it and both are exactly what the operator
+// re-probe exists for: an nvidia-smi that was missing or broken at first call
+// would otherwise never be asked again, leaving every NVIDIA card without its
+// permanent id; and a card swapped into the same PCI slot would keep answering
+// to its predecessor's uuid. Both feed drift detection and shared-GPU
+// placement, so a stale answer here is a wrong answer there.
 var nvidiaGPUUUIDs struct {
-	once  sync.Once
-	byPCI map[string]string
+	mu     sync.Mutex
+	loaded bool
+	byPCI  map[string]string
+}
+
+// resetNVIDIAGPUUUIDs drops the cached listing so the next lookup re-queries.
+func resetNVIDIAGPUUUIDs() {
+	nvidiaGPUUUIDs.mu.Lock()
+	defer nvidiaGPUUUIDs.mu.Unlock()
+	nvidiaGPUUUIDs.loaded = false
+	nvidiaGPUUUIDs.byPCI = nil
 }
 
 func runNVIDIASMIQuery(ctx context.Context) ([]byte, error) {
@@ -1099,18 +1121,22 @@ func runNVIDIASMIQuery(ctx context.Context) ([]byte, error) {
 }
 
 func nvidiaGPUUUIDsByPCIAddress() map[string]string {
-	nvidiaGPUUUIDs.once.Do(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), nvidiaSMIQueryTimeout)
-		defer cancel()
-		output, err := nvidiaSMIQuery(ctx)
-		if err != nil {
-			// Expected on every host without the NVIDIA toolkit installed, so
-			// this stays at debug: the report is complete without it.
-			slog.Debug("nvidia-smi gpu identity query unavailable", "component", "playback", "error", err)
-			return
-		}
-		nvidiaGPUUUIDs.byPCI = parseNVIDIAGPUUUIDs(output)
-	})
+	nvidiaGPUUUIDs.mu.Lock()
+	defer nvidiaGPUUUIDs.mu.Unlock()
+	if nvidiaGPUUUIDs.loaded {
+		return nvidiaGPUUUIDs.byPCI
+	}
+	nvidiaGPUUUIDs.loaded = true
+	ctx, cancel := context.WithTimeout(context.Background(), nvidiaSMIQueryTimeout)
+	defer cancel()
+	output, err := nvidiaSMIQuery(ctx)
+	if err != nil {
+		// Expected on every host without the NVIDIA toolkit installed, so this
+		// stays at debug: the report is complete without it.
+		slog.Debug("nvidia-smi gpu identity query unavailable", "component", "playback", "error", err)
+		return nil
+	}
+	nvidiaGPUUUIDs.byPCI = parseNVIDIAGPUUUIDs(output)
 	return nvidiaGPUUUIDs.byPCI
 }
 

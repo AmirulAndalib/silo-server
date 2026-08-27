@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 )
 
@@ -63,8 +62,7 @@ func stubNVIDIASMI(t *testing.T, output string, err error) {
 }
 
 func resetNVIDIAUUIDCacheForTest() {
-	nvidiaGPUUUIDs.once = sync.Once{}
-	nvidiaGPUUUIDs.byPCI = nil
+	resetNVIDIAGPUUUIDs()
 }
 
 func renderDeviceDetail(t *testing.T, info HWAccelInfo, path string) RenderDeviceInfo {
