@@ -33,6 +33,18 @@ func updateCacheImagesBatch(h *AdminHandler, values string) *httptest.ResponseRe
 	return rec
 }
 
+func updateSingleSetting(h *AdminHandler, key, value string) *httptest.ResponseRecorder {
+	router := chi.NewRouter()
+	router.Put("/admin/settings/{key}", h.HandleUpdateSetting)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPut,
+		"/admin/settings/"+key,
+		strings.NewReader(`{"value":"`+value+`"}`),
+	))
+	return rec
+}
+
 func updateCacheImagesSingle(h *AdminHandler, value string) *httptest.ResponseRecorder {
 	router := chi.NewRouter()
 	router.Put("/admin/settings/{key}", h.HandleUpdateSetting)
@@ -268,6 +280,47 @@ func TestCacheImagesEnableRequiresPublicBucket(t *testing.T) {
 			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 		}
 		if settings.values["metadata.cache_images"] != "false" {
+			t.Fatalf("stored values = %#v", settings.values)
+		}
+	})
+
+	// The legacy single-key route must hold the same line as the batch:
+	// clearing the bucket while caching is stored on strands the cacher.
+	t.Run("single bucket clear while caching is on", func(t *testing.T) {
+		settings := &fakeServerSettingsStore{values: map[string]string{
+			"metadata.cache_images": "true",
+			"s3.public_bucket":      "silo-public",
+		}}
+		rec := updateSingleSetting(cacheImagesHandler(settings, true), "s3.public_bucket", "")
+		assertStorageUnavailable(t, rec)
+		if settings.values["s3.public_bucket"] != "silo-public" {
+			t.Fatalf("stored values = %#v", settings.values)
+		}
+	})
+
+	t.Run("single bucket clear while caching is off", func(t *testing.T) {
+		settings := &fakeServerSettingsStore{values: map[string]string{
+			"s3.public_bucket": "silo-public",
+		}}
+		rec := updateSingleSetting(cacheImagesHandler(settings, false), "s3.public_bucket", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if settings.values["s3.public_bucket"] != "" {
+			t.Fatalf("stored values = %#v", settings.values)
+		}
+	})
+
+	t.Run("single bucket change to a new value while caching is on", func(t *testing.T) {
+		settings := &fakeServerSettingsStore{values: map[string]string{
+			"metadata.cache_images": "true",
+			"s3.public_bucket":      "silo-public",
+		}}
+		rec := updateSingleSetting(cacheImagesHandler(settings, false), "s3.public_bucket", "silo-art")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if settings.values["s3.public_bucket"] != "silo-art" {
 			t.Fatalf("stored values = %#v", settings.values)
 		}
 	})

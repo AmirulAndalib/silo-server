@@ -2990,6 +2990,7 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 		after            map[string]string
 		effectiveChanged bool
 		validationErr    error
+		validationCode   string
 	)
 	err := updateServerSettingsAtomically(r.Context(), h.SettingsRepo,
 		func(stored map[string]string) (map[string]string, error) {
@@ -2998,14 +2999,28 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 			// This legacy route can only change one key, so enforcing every
 			// cross-field invariant would make paired settings impossible to
 			// establish or clear one write at a time. Per-key validation above
-			// remains strict; Redis transport is the one durable prerequisite
-			// that may not be broken by a single-key write.
+			// remains strict; the durable prerequisites are the exception — a
+			// single-key write may not break them.
 			if key == "redis.url" {
 				if err := config.ValidateRedisRateLimitTransport(
 					h.activeAdminSettings(prospective),
 					h.RedisBootstrapAvailable,
 				); err != nil {
 					validationErr = err
+					validationCode = "invalid_settings"
+					return nil, err
+				}
+			}
+			// Image caching's bucket is the other durable prerequisite: clearing
+			// it here while metadata.cache_images is stored on would leave the
+			// cacher unable to start after restart. Disable caching first.
+			if key == settingPublicBucket || key == settingPublicBucketLegacy {
+				if err := h.validateProspectiveImageCaching(
+					h.effectiveAdminSettings(prospective),
+					map[string]string{key: req.Value},
+				); err != nil {
+					validationErr = err
+					validationCode = errCodeStorageUnavailable
 					return nil, err
 				}
 			}
@@ -3019,7 +3034,7 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 			return nil, nil
 		})
 	if validationErr != nil {
-		writeError(w, http.StatusBadRequest, "invalid_settings", validationErr.Error())
+		writeError(w, http.StatusBadRequest, validationCode, validationErr.Error())
 		return
 	}
 	if err != nil {

@@ -55,6 +55,27 @@ every asset response carries `X-Content-Type-Options: nosniff` and a sandboxing
 `Content-Security-Policy` — a directly-navigated SVG cannot run script in the
 viewer's session.
 
+## Server status and restarts
+
+Some settings are only read at startup. Two routes carry that contract:
+
+| Route | Auth | Purpose |
+|---|---|---|
+| `GET /api/v1/admin/server/status` | admin | Process start time and pending-restart state. |
+| `GET /api/v1/admin/settings/restart-keys` | admin | The compiled registry of setting keys that only take effect after a restart (`internal/config/restart_keys.go`). |
+
+`GET /api/v1/admin/server/status` response:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `started_at` | RFC3339 string | When this process started. |
+| `restart_required` | bool | A restart-required change was saved. Latches true for the life of the process; a real restart clears it by starting a new process. |
+| `restart_required_at` | RFC3339 string | When the flag first latched. Omitted until then. |
+| `restart_required_reason` | string | The reason of the **last** restart-required save only — later saves overwrite it. |
+| `restart_required_reasons` | string[] | Every distinct reason since boot, first-seen order. Settings saves record one `setting:<key>` entry per restart-required key, so a client can scope a pending restart to the subsystem it belongs to. |
+| `restart_mark_count` | int | Increments on every restart-required save. Because the boolean latches, this counter is the only signal that a **new** requirement arrived — the admin UI re-arms its dismissed restart banner on it. |
+| `restart_requested`, `restart_requested_at` | bool, RFC3339 string | An in-app restart was requested, and when. |
+
 ## `GET /api/v1/admin/stream-telemetry/parity`
 
 Returns the merged stream-telemetry view beside the two legacy live-session
