@@ -1,11 +1,13 @@
 package transcodenode
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/playback"
 )
@@ -163,5 +165,54 @@ func TestTranscodeStartRefusedWhileReprobing(t *testing.T) {
 
 	if server.gpu.beginWork() {
 		t.Fatal("GPU work admitted while a re-probe held the encoder")
+	}
+}
+
+// A hardware thumbnail extraction reserves a render device and runs ffmpeg on
+// it, but never touches activeJobs — so before it consulted the gate it left
+// the node looking idle and a re-probe could smoke-encode beside it.
+func TestReprobeCapabilitiesRefusesWhileExtractingAThumbnail(t *testing.T) {
+	server := newTestServer(t)
+	server.storeCapabilityHash("sha256:previous")
+	if !server.gpu.beginWork() {
+		t.Fatal("beginWork on an idle node was refused")
+	}
+	t.Cleanup(server.gpu.endWork)
+
+	if recorder := postReprobe(t, server); recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 while a GPU extraction holds the encoder", recorder.Code)
+	}
+	if got := server.storedCapabilityHash(); got != "sha256:previous" {
+		t.Fatalf("stored hash = %q, want the previous report untouched", got)
+	}
+}
+
+// The re-probe deliberately does not join a capability build already in flight
+// — bumping the invalidation generation is what makes it honest — so without a
+// lock the scheduled snapshot's ffmpeg matrix and the operator's would run at
+// once on the same GPU, which is the collision the 409 exists to prevent.
+func TestCapabilityBuildsAreSerialized(t *testing.T) {
+	server := newTestServer(t)
+
+	server.capabilityBuildMu.Lock()
+	building := make(chan struct{})
+	go func() {
+		defer close(building)
+		// Any builder: the scheduled snapshot takes the same lock the endpoint
+		// and the re-probe do.
+		server.refreshCapabilitySnapshot(context.Background())
+	}()
+
+	select {
+	case <-building:
+		t.Fatal("a capability build ran while another held the build lock")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	server.capabilityBuildMu.Unlock()
+	select {
+	case <-building:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the capability build never ran after the lock was released")
 	}
 }

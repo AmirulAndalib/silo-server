@@ -180,8 +180,55 @@ func (h *NodeHandler) HandleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, node)
+	// Order matters: the node has to adopt its new device before this server
+	// starts dispatching its new backend. reloadPools publishes the updated
+	// policy, and EffectiveHWAccel then names the new backend on every start
+	// request; the node itself only re-reads its row on the config watcher's
+	// 60s poll. Without the nudge, an operator switching both overlays at once
+	// (QSV on a render node to NVENC on a CUDA index, say) gets up to a minute
+	// of requests pairing the new backend with the old device.
+	if input.HWAccelOverride != nil || input.HWDeviceOverride != nil {
+		h.reloadNodeConfig(r.Context(), node)
+	}
 	h.reloadPools(r.Context())
 }
+
+// reloadNodeConfig asks one node to re-read its configuration now.
+//
+// Best effort by design: the override is already stored, and the node's own
+// watcher poll is the backstop, so a node that is unreachable or predates the
+// route must not turn a successful update into a failed one. It is bounded
+// tightly for the same reason — this runs after the response is written, but
+// still on the request's goroutine and context.
+func (h *NodeHandler) reloadNodeConfig(ctx context.Context, node *nodepool.Node) {
+	if node == nil || node.URL == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, nodeConfigReloadTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, node.URL+"/admin/force-reload", nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+h.jwtSecret)
+	resp, err := (&http.Client{Timeout: nodeConfigReloadTimeout}).Do(req)
+	if err != nil {
+		slog.WarnContext(ctx, "node did not reload after an acceleration override change; it will pick it up on its next config poll",
+			"component", "api", "node_id", node.ID, "name", node.Name, "error", logredact.SanitizeURLError(err))
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK {
+		slog.WarnContext(ctx, "node refused the reload after an acceleration override change; it will pick it up on its next config poll",
+			"component", "api", "node_id", node.ID, "name", node.Name, "status", resp.StatusCode)
+	}
+}
+
+// nodeConfigReloadTimeout bounds the post-update nudge. A config reload is a
+// database read on the node, not a probe, so this only has to cover a round
+// trip to a node that is up.
+const nodeConfigReloadTimeout = 10 * time.Second
 
 // HandleDeleteNode handles DELETE /admin/nodes/{id}.
 func (h *NodeHandler) HandleDeleteNode(w http.ResponseWriter, r *http.Request) {

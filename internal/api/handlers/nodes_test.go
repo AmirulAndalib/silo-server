@@ -213,3 +213,72 @@ func equalStringPointer(a, b *string) bool {
 	}
 	return *a == *b
 }
+
+// A node re-reads its own row on a 60s config poll, but this server starts
+// dispatching the new backend the moment its pool reloads. An operator moving a
+// node from QSV on a render node to NVENC on a CUDA index would otherwise get
+// up to a minute of start requests pairing the new backend with the old device,
+// so the node is nudged to reload before the updated policy is published.
+func TestHandleUpdateNodeReloadsTheNodeAfterAnOverrideChange(t *testing.T) {
+	reloaded := make(chan string, 4)
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/admin/force-reload" && r.Method == http.MethodPost {
+			reloaded <- r.Header.Get("Authorization")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(node.Close)
+
+	stored := &nodepool.Node{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL}
+	repo := &stubNodeRepository{updateResult: stored, node: stored}
+	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
+
+	body := `{"hw_accel_override":"nvenc","hw_device_override":"0"}`
+	request := httptest.NewRequest(http.MethodPut, "/admin/nodes/1", strings.NewReader(body))
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("id", "1")
+	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeCtx))
+	recorder := httptest.NewRecorder()
+	handler.HandleUpdateNode(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	select {
+	case authorization := <-reloaded:
+		if authorization != "Bearer secret" {
+			t.Fatalf("node saw authorization %q, want the bearer secret", authorization)
+		}
+	default:
+		t.Fatal("the node was not asked to reload after its overrides changed")
+	}
+}
+
+// An edit that touches no acceleration field must not cost a round trip to the
+// node: renaming a node has nothing to do with what it probes.
+func TestHandleUpdateNodeDoesNotReloadWithoutAnOverrideChange(t *testing.T) {
+	reloaded := make(chan struct{}, 4)
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/admin/force-reload" {
+			reloaded <- struct{}{}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(node.Close)
+
+	stored := &nodepool.Node{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL}
+	repo := &stubNodeRepository{updateResult: stored, node: stored}
+	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
+
+	request := httptest.NewRequest(http.MethodPut, "/admin/nodes/1", strings.NewReader(`{"name":"gpu-one"}`))
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("id", "1")
+	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeCtx))
+	handler.HandleUpdateNode(httptest.NewRecorder(), request)
+
+	select {
+	case <-reloaded:
+		t.Fatal("a rename asked the node to reload its configuration")
+	default:
+	}
+}

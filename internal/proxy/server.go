@@ -66,6 +66,13 @@ type Server struct {
 	// metrics samples host and GPU resources in the background. Nil until
 	// StartMetricsSampler runs, which leaves health exactly as it was before.
 	metrics *nodemetrics.Sampler
+
+	// capabilityBuildMu serializes capability assemblies with each other, so an
+	// operator re-probe cannot run its ffmpeg probes beside the scheduled
+	// snapshot's. The probe caches no longer coalesce the two — bumping the
+	// invalidation generation is what makes the re-probe honest — so without
+	// this they would genuinely run at once.
+	capabilityBuildMu sync.Mutex
 }
 
 type remoteArtifactMissReporter interface {
@@ -245,6 +252,16 @@ func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
 // caller must keep the previous hash rather than publish the partial report,
 // exactly as a transcode node does.
 func (s *Server) buildCapabilitySnapshot(ctx context.Context) (playback.HWAccelInfo, error) {
+	s.capabilityBuildMu.Lock()
+	defer s.capabilityBuildMu.Unlock()
+	return s.buildCapabilitySnapshotLocked(ctx)
+}
+
+// buildCapabilitySnapshotLocked is buildCapabilitySnapshot's body. Callers must
+// hold capabilityBuildMu; the re-probe takes it itself so its cache
+// invalidation and its rebuild are one step no other builder can interleave
+// with.
+func (s *Server) buildCapabilitySnapshotLocked(ctx context.Context) (playback.HWAccelInfo, error) {
 	ffmpegPath := ""
 	hwAccel := playback.HWAccelNone
 	hwDevice := ""

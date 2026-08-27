@@ -71,12 +71,19 @@ func (s *Server) handleReprobeCapabilities(w http.ResponseWriter, r *http.Reques
 	}
 	defer s.gpu.endReprobe()
 
+	// Held across the invalidation and the rebuild together: discarding the
+	// verdicts and recomputing them has to be one step, or the scheduled
+	// snapshot could start its own cold matrix in between and run ffmpeg on the
+	// same GPU at the same time.
+	s.capabilityBuildMu.Lock()
+	defer s.capabilityBuildMu.Unlock()
+
 	playback.InvalidateHWProbeCache()
 	tonemap.InvalidateProbeCache()
 
-	// buildCapabilitySnapshot owns the probe deadline, so a re-probe can never
-	// cost more than a cold capability fetch already may.
-	info, err := s.buildCapabilitySnapshot(r.Context())
+	// buildCapabilitySnapshotLocked owns the probe deadline, so a re-probe can
+	// never cost more than a cold capability fetch already may.
+	info, err := s.buildCapabilitySnapshotLocked(r.Context())
 	if err != nil {
 		slog.WarnContext(r.Context(), "transcode node capability re-probe incomplete",
 			"component", "transcodenode", "error", err)

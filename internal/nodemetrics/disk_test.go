@@ -462,3 +462,34 @@ func TestDiskPathsAreBoundedByTheSampleCap(t *testing.T) {
 		t.Fatalf("first probed path = %q, want the scratch dir", paths[0])
 	}
 }
+
+// Bounding the paths offered per sample is not enough on its own. A probe stuck
+// on a dead mount is deliberately kept, so a deployment whose library roots
+// churn while mounts are wedged would retire one set of parked goroutines'
+// paths and immediately be free to park a fresh set for the replacements.
+// Without a ceiling the parked count grows every time that repeats.
+func TestDiskProbesAreBoundedAcrossReconfiguration(t *testing.T) {
+	f := newDiskFixture(t, "/transcode")
+	// Every mount wedges: the probe goroutine parks and never returns, which is
+	// what statfs on a dead network mount actually does.
+	roots := make([]string, 0, maxOutstandingDiskProbes*3)
+	for i := range cap(roots) {
+		path := "/media/wedged-" + strconv.Itoa(i)
+		roots = append(roots, path)
+		f.wedge(t, path)
+	}
+	f.wedge(t, "/transcode")
+
+	// Offer a fresh set of roots each pass, as a library reconfiguration would.
+	for pass := range 3 {
+		window := roots[pass*maxOutstandingDiskProbes : (pass+1)*maxOutstandingDiskProbes]
+		f.sampler.refreshDisks(append([]string{"/transcode"}, window...), f.clock.now())
+	}
+
+	f.sampler.diskMu.Lock()
+	outstanding := f.sampler.probesInFlight
+	f.sampler.diskMu.Unlock()
+	if outstanding > maxOutstandingDiskProbes {
+		t.Fatalf("outstanding probes = %d, want at most %d", outstanding, maxOutstandingDiskProbes)
+	}
+}

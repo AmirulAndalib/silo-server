@@ -32,12 +32,19 @@ type reprobeCapabilitiesResponse struct {
 // encoder sessions: a proxy's jobs are remuxes and RPU strips, which hold no
 // encoder slot for a probe's smoke encode to lose a race against.
 func (s *Server) handleReprobeCapabilities(w http.ResponseWriter, r *http.Request) {
+	// Held across the invalidation and the rebuild together: discarding the
+	// verdicts and recomputing them has to be one step, or the scheduled
+	// snapshot could start its own cold matrix in between and run ffmpeg on the
+	// same GPU at the same time.
+	s.capabilityBuildMu.Lock()
+	defer s.capabilityBuildMu.Unlock()
+
 	playback.InvalidateHWProbeCache()
 	tonemap.InvalidateProbeCache()
 
-	// buildCapabilitySnapshot owns the probe deadline, so a re-probe can never
-	// cost more than a cold capability fetch already may.
-	info, err := s.buildCapabilitySnapshot(r.Context())
+	// buildCapabilitySnapshotLocked owns the probe deadline, so a re-probe can
+	// never cost more than a cold capability fetch already may.
+	info, err := s.buildCapabilitySnapshotLocked(r.Context())
 	if err != nil {
 		slog.WarnContext(r.Context(), "proxy capability re-probe incomplete", "component", "proxy", "error", err)
 		http.Error(w, "capability probe unavailable", http.StatusServiceUnavailable)

@@ -94,6 +94,11 @@ type Sampler struct {
 	disks     map[string]*diskEntry
 	diskOrder []string
 	statfs    func(string) (fsStats, error)
+	// probesInFlight is how many statfs goroutines are outstanding right now,
+	// bounded by maxOutstandingDiskProbes. Guarded by diskMu.
+	probesInFlight int
+	// probeBudgetExhausted latches the ceiling warning to one line per episode.
+	probeBudgetExhausted bool
 	// diskProbeDone, when non-nil, receives each completed probe's path. Tests
 	// wait on it instead of sleeping; production leaves it nil.
 	diskProbeDone chan string

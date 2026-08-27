@@ -1,6 +1,7 @@
 package nodemetrics
 
 import (
+	"log/slog"
 	"strconv"
 	"time"
 )
@@ -60,6 +61,20 @@ func (e *diskEntry) stale(now time.Time, interval time.Duration) bool {
 	return now.Sub(e.goodAt) > interval+diskProbeTimeout
 }
 
+// maxOutstandingDiskProbes is the ceiling on statfs goroutines this sampler may
+// have parked at once, across every path it has ever been asked about.
+//
+// Bounding the paths offered per sample is not enough on its own. A probe stuck
+// on a dead mount is kept — dropping its entry would only let the next sample
+// start a second goroutine against the same mount — so a deployment whose
+// library roots churn while mounts are wedged would retire one set of parked
+// goroutines' paths and immediately be free to park a fresh set for the
+// replacements. Repeat that and the count grows without limit. This ceiling is
+// what makes it a fixed cost instead: once it is reached no new probe starts,
+// which is the correct backpressure, since a sampler with this many mounts
+// wedged has nothing useful left to measure anyway.
+const maxOutstandingDiskProbes = maxSampledDisks
+
 // refreshDisks starts a probe for every path that is not already being probed
 // and returns immediately. It never waits for a result: the caller is the
 // sample loop, and the whole point of this package is that one bad mount cannot
@@ -91,10 +106,31 @@ func (s *Sampler) refreshDisks(paths []string, now time.Time) {
 		if entry.inFlight {
 			continue
 		}
+		if s.probesInFlight >= maxOutstandingDiskProbes {
+			// Paths are offered scratch-first, so the mount admission control
+			// reads is the one that gets a freed slot first.
+			s.noteProbeBudgetExhaustedLocked()
+			break
+		}
 		entry.inFlight = true
 		entry.startedAt = now
+		s.probesInFlight++
 		go s.probeDisk(entry)
 	}
+}
+
+// noteProbeBudgetExhaustedLocked logs the first sample in which the probe
+// ceiling stopped new work, and nothing further until it clears. Every entry it
+// skips keeps reporting its last good numbers marked stale, so without a line
+// here the state reads as mounts that merely went quiet.
+// Callers must hold diskMu.
+func (s *Sampler) noteProbeBudgetExhaustedLocked() {
+	if s.probeBudgetExhausted {
+		return
+	}
+	s.probeBudgetExhausted = true
+	slog.Warn("node metrics disk probes are at their ceiling; mounts are not being re-measured",
+		"component", "nodemetrics", "outstanding", s.probesInFlight, "limit", maxOutstandingDiskProbes)
 }
 
 // pruneDisksLocked forgets paths no longer offered, so a server whose libraries
@@ -124,6 +160,13 @@ func (s *Sampler) probeDisk(entry *diskEntry) {
 
 	s.diskMu.Lock()
 	entry.inFlight = false
+	if s.probesInFlight > 0 {
+		s.probesInFlight--
+	}
+	if s.probeBudgetExhausted && s.probesInFlight < maxOutstandingDiskProbes {
+		s.probeBudgetExhausted = false
+		slog.Info("node metrics disk probes are below their ceiling again", "component", "nodemetrics")
+	}
 	if err != nil {
 		entry.lastErr = true
 		// A path that has never been measured and just failed is not a mount

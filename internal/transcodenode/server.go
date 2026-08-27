@@ -224,6 +224,17 @@ type Server struct {
 	// gpu keeps a capability re-probe's smoke encode and real transcodes off
 	// the encoder at the same time; see gpuGate.
 	gpu gpuGate
+
+	// capabilityBuildMu serializes capability assemblies with each other.
+	//
+	// The gpuGate covers transcodes and downloads, not other capability
+	// builders, and the probe caches no longer coalesce a re-probe with work
+	// already in flight — bumping the invalidation generation is what makes the
+	// re-probe honest. Those two together would otherwise let the scheduled
+	// snapshot (or an authenticated /hw-capabilities request) run its smoke
+	// matrix beside the operator's, which on session-limited hardware is
+	// exactly the collision that publishes a false regression.
+	capabilityBuildMu sync.Mutex
 }
 
 // storedCapabilityHash returns the last published capability hash, or empty
@@ -984,6 +995,16 @@ func (s *Server) StartMetricsSampler(ctx context.Context) {
 // The probes behind it are individually cached, so repeating this is cheap once
 // the first pass has run.
 func (s *Server) buildCapabilitySnapshot(ctx context.Context) (playback.HWAccelInfo, error) {
+	s.capabilityBuildMu.Lock()
+	defer s.capabilityBuildMu.Unlock()
+	return s.buildCapabilitySnapshotLocked(ctx)
+}
+
+// buildCapabilitySnapshotLocked is buildCapabilitySnapshot's body. Callers must
+// hold capabilityBuildMu; the re-probe takes it itself so its cache
+// invalidation and its rebuild are one step no other builder can interleave
+// with.
+func (s *Server) buildCapabilitySnapshotLocked(ctx context.Context) (playback.HWAccelInfo, error) {
 	ffmpegPath := ""
 	configuredHWAccel := playback.HWAccelNone
 	hwDevice := ""
@@ -1108,6 +1129,16 @@ func (s *Server) handleChapterThumbnailExtract(w http.ResponseWriter, r *http.Re
 		writeChapterThumbnailError(w, http.StatusServiceUnavailable, "node_unavailable", "node not configured")
 		return
 	}
+	// A QSV or VAAPI extraction reserves a render device and runs ffmpeg on it,
+	// so it takes the same exclusion a transcode does. Without this the route
+	// leaves the gate looking idle — it never touches activeJobs either — and a
+	// re-probe could smoke-encode beside a live extraction.
+	if !s.gpu.beginWork() {
+		writeChapterThumbnailError(w, http.StatusServiceUnavailable, "node_unavailable",
+			"node is re-probing its hardware; retry shortly")
+		return
+	}
+	defer s.gpu.endWork()
 	frame, reason, err := chapterthumbs.ExtractFrame(r.Context(), chapterthumbs.FrameExtractOptions{
 		InputPath:            req.InputPath,
 		SeekSeconds:          req.SeekSeconds,

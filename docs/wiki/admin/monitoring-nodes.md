@@ -149,9 +149,13 @@ Re-probe does not restart anything and does not reload configuration. It is
 the GPU, and a card at its concurrent session limit fails that encode with an
 error nothing can tell apart from a broken driver — which would flag working
 hardware as a regression and take the node's tone-map inventory down with it.
-Disable the node or wait for it to drain, then re-probe. On an idle node the call
-can take a couple of minutes, because it pays the full cold probe cost on
-purpose.
+Disable the node or wait for it to drain, then re-probe. "Transcoding" covers
+everything that opens an encoder on that node — playback transcodes,
+reconstructed sessions, prepared downloads, and hardware chapter-thumbnail
+extraction — and the exclusion runs both ways: while a re-probe is in progress
+the node refuses new GPU work with a 503 rather than queueing it, so the API
+places that session elsewhere. On an idle node the call can take a couple of
+minutes, because it pays the full cold probe cost on purpose.
 
 Two outcomes are worth knowing:
 

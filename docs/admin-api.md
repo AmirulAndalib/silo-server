@@ -72,14 +72,18 @@ column, not `capabilities.resolved`: a node inheriting `auto` is dispatched
 `auto` so it resolves against live hardware at session start rather than
 against a snapshot.
 
-**A changed override applies without a restart, but not all at once.** Dispatch
-picks it up as soon as the update returns, because the pools are reloaded. The
-node applies it to new transcodes on its next config reload (within 60 seconds)
-and re-advertises `capabilities.resolved` at its next capability snapshot
-(every 15 minutes). Two things do wait for a restart: the hardware encoder
-warmup that ran at boot, which stays primed for the old backend, and sessions
-already transcoding, which keep the backend they started with. Restart the node
-when you want all four in agreement immediately.
+**A changed override applies without a restart, but not all at once.** An update
+that touches either override asks the node to re-read its configuration before
+the pools are reloaded, so it adopts the new device before this server begins
+dispatching the new backend — without that ordering, changing both at once (QSV
+on a render node to NVENC on a CUDA index, say) would pair the new backend with
+the old device until the node's own poll caught up. The nudge is best effort: a
+node that is unreachable still applies the change on its next config reload
+(within 60 seconds). Either way the node re-advertises `capabilities.resolved`
+at its next capability snapshot (every 15 minutes). Two things do wait for a
+restart: the hardware encoder warmup that ran at boot, which stays primed for
+the old backend, and sessions already transcoding, which keep the backend they
+started with. Restart the node when you want all four in agreement immediately.
 
 ### `last_stats`
 
@@ -106,7 +110,7 @@ bind-mounts lxcfs's virtualized `/proc` files in — see the LXC section of
 | `load1` | float | 1-minute load average. Unlike `cpu_pct` it also counts tasks blocked on storage, so a node stuck on I/O looks idle in one and busy in the other. Always host-wide: the kernel keeps no per-cgroup load average. |
 | `cores` | int | CPUs this process may run on — the cgroup's CPU quota rounded up where one is set, otherwise every CPU the kernel reports. This is what `cpu_pct` is normalized against and what `load1` must be read relative to. |
 | `mem_used_mb`, `mem_total_mb` | int | Memory. Under a cgroup these are the cgroup's limit and working set (page cache excluded), not the host's. |
-| `disks` | object[] | Sampled mounts, transcode scratch first, deduplicated by filesystem and capped at 8 — unmeasurable paths included, so the array never grows with the library count. The cap is on what is *probed*, not only on what is reported: each mount costs a `statfs` goroutine per interval that a dead network mount parks indefinitely. Roots past the cap are not sampled, and the omission is logged (`component=nodemetrics`) rather than left to look like a clean bill of health. |
+| `disks` | object[] | Sampled mounts, transcode scratch first, deduplicated by filesystem and capped at 8 — unmeasurable paths included, so the array never grows with the library count. The cap is on what is *probed*, not only on what is reported: each mount costs a `statfs` goroutine per interval that a dead network mount parks indefinitely. Roots past the cap are not sampled, and the omission is logged (`component=nodemetrics`) rather than left to look like a clean bill of health. A second ceiling bounds probes outstanding at once across every path ever offered, so reconfiguring library roots while mounts are wedged cannot accumulate parked goroutines. |
 | `net_rx_bps`, `net_tx_bps` | int | Aggregate throughput in **bits** per second, loopback excluded. In a container this is the container's own network namespace. |
 
 Each entry in `disks`:
