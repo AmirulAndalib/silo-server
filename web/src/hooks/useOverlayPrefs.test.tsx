@@ -66,7 +66,9 @@ describe("useOverlayPrefs", () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     expect(mocks.api).toHaveBeenCalledWith("/settings/overlay-config");
-    expect(result.current.enabled).toBe(true);
+    expect(result.current.overlaysEnabled).toBe(true);
+    expect(result.current.prefs).not.toBeNull();
+    expect(result.current).not.toHaveProperty("enabled");
     expect(result.current.quickActionsEnabled).toBe(false);
     expect(result.current).not.toHaveProperty("quickActionsGloballyEnabled");
     expect(result.current.quickActionPreference).toBe("both");
@@ -177,6 +179,84 @@ describe("useOverlayPrefs", () => {
       {
         key: "ui.card_quick_actions",
         value: "both",
+        identity: { scope: "profile" },
+      },
+      expect.objectContaining({ onError: expect.any(Function) }),
+    );
+  });
+
+  it("inherits a disabled overlay default for a profile that has not chosen", async () => {
+    mocks.profileId = "profile-1";
+    mocks.effective = {};
+    mocks.api.mockResolvedValue({ enabled: false });
+    const { result } = renderHook(() => useOverlayPrefs(), { wrapper: createWrapper() });
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.overlaysEnabled).toBe(false);
+    expect(result.current.prefs).toBeNull();
+  });
+
+  it("lets a profile opt in to overlays while the server default is off", async () => {
+    mocks.profileId = "profile-1";
+    mocks.effective = { "ui.card_overlays_enabled": { value: true } };
+    mocks.api.mockResolvedValue({ enabled: false });
+    const { result } = renderHook(() => useOverlayPrefs(), { wrapper: createWrapper() });
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.overlaysEnabled).toBe(true);
+    expect(result.current.prefs).not.toBeNull();
+
+    act(() => result.current.setOverlaysEnabled(false));
+    expect(mocks.setValue).toHaveBeenCalledWith(
+      {
+        key: "ui.card_overlays_enabled",
+        value: false,
+        identity: { scope: "profile" },
+      },
+      expect.objectContaining({ onError: expect.any(Function) }),
+    );
+  });
+
+  it("lets a profile opt out of overlays while the server default is on", async () => {
+    mocks.profileId = "profile-1";
+    mocks.effective = { "ui.card_overlays_enabled": { value: false } };
+    mocks.api.mockResolvedValue({ enabled: true });
+    const { result } = renderHook(() => useOverlayPrefs(), { wrapper: createWrapper() });
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.overlaysEnabled).toBe(false);
+    expect(result.current.prefs).toBeNull();
+
+    act(() => result.current.setOverlaysEnabled(false));
+    expect(mocks.setValue).not.toHaveBeenCalled();
+
+    act(() => result.current.setOverlaysEnabled(true));
+    expect(mocks.setValue).toHaveBeenCalledWith(
+      {
+        key: "ui.card_overlays_enabled",
+        value: true,
+        identity: { scope: "profile" },
+      },
+      expect.objectContaining({ onError: expect.any(Function) }),
+    );
+  });
+
+  it("writes an overlay opt-in for a profile that has expressed no preference", async () => {
+    mocks.profileId = "profile-1";
+    mocks.effective = {};
+    mocks.api.mockResolvedValue({ enabled: false });
+    const { result } = renderHook(() => useOverlayPrefs(), { wrapper: createWrapper() });
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    act(() => result.current.setOverlaysEnabled(true));
+    expect(mocks.setValue).toHaveBeenCalledWith(
+      {
+        key: "ui.card_overlays_enabled",
+        value: true,
         identity: { scope: "profile" },
       },
       expect.objectContaining({ onError: expect.any(Function) }),

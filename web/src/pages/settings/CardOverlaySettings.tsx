@@ -227,14 +227,6 @@ function OverlayToggle({ overlayId, prefs, onUpdate }: OverlayToggleProps) {
   );
 }
 
-function AdminDisabledNotice({ feature }: { feature: string }) {
-  return (
-    <div className="surface-panel-subtle rounded-2xl border px-4 py-3 text-sm">
-      {feature} have been disabled by your server administrator.
-    </div>
-  );
-}
-
 interface PresetPickerProps {
   value: PresetId;
   onChange: (next: PresetId) => void;
@@ -284,8 +276,9 @@ export default function CardOverlaySettings() {
     setQuickActionMode,
     quickActionsEnabled,
     setQuickActionsEnabled,
+    overlaysEnabled,
+    setOverlaysEnabled,
     isLoading,
-    enabled,
   } = useOverlayPrefs();
   const [previewVariant, setPreviewVariant] = useState<"movie" | "show">("movie");
 
@@ -301,6 +294,11 @@ export default function CardOverlaySettings() {
 
   const handleQuickActionsEnabledChange = (next: boolean) => {
     setQuickActionsEnabled(next);
+    toast.success("Setting saved");
+  };
+
+  const handleOverlaysEnabledChange = (next: boolean) => {
+    setOverlaysEnabled(next);
     toast.success("Setting saved");
   };
 
@@ -350,11 +348,21 @@ export default function CardOverlaySettings() {
             </div>
           )}
         />
+        <SettingRow
+          label="Card overlay badges"
+          description="Show overlay badges on media cards for this profile."
+          control={({ id }) => (
+            <Switch
+              id={id}
+              checked={overlaysEnabled}
+              onCheckedChange={handleOverlaysEnabledChange}
+              aria-label="Enable card overlay badges"
+            />
+          )}
+        />
       </SettingsGroup>
 
-      {!enabled && <AdminDisabledNotice feature="Card overlays" />}
-
-      <div className={enabled ? "" : "pointer-events-none opacity-50"}>
+      <div className={overlaysEnabled ? "" : "pointer-events-none opacity-50"}>
         <SettingsGroup
           title="Preview"
           description="Live preview of your current overlay configuration."

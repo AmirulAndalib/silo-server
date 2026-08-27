@@ -23,6 +23,7 @@ const PROFILE_SCOPE: SettingIdentity = { scope: "profile" };
 
 const OVERLAY_KEYS = [
   SETTING_KEYS.UI_CARD_OVERLAYS,
+  SETTING_KEYS.UI_CARD_OVERLAYS_ENABLED,
   SETTING_KEYS.UI_CARD_QUICK_ACTIONS,
   SETTING_KEYS.UI_CARD_QUICK_ACTIONS_ENABLED,
 ] as const;
@@ -34,9 +35,9 @@ interface OverlayConfig {
   quick_actions_default?: string;
 }
 
-// The overlay-badge kill switch and server-wide defaults live in
-// server_settings, not the user-settings contract, so this endpoint stays
-// alongside the canonical values API.
+// The server-wide overlay defaults live in server_settings, not the
+// user-settings contract, so this endpoint stays alongside the canonical
+// values API.
 function useOverlayConfig() {
   return useQuery({
     queryKey: settingsKeys.overlayConfig(),
@@ -93,6 +94,7 @@ export function useOverlayPrefs() {
   // The contract default is null — "no preference expressed" — which is what
   // lets the server-wide admin default apply; a stored value wins outright.
   const userValue = effective?.[SETTING_KEYS.UI_CARD_OVERLAYS]?.value ?? null;
+  const overlaysEnabledUserValue = effective?.[SETTING_KEYS.UI_CARD_OVERLAYS_ENABLED]?.value;
   const quickActionUserValue = effective?.[SETTING_KEYS.UI_CARD_QUICK_ACTIONS]?.value ?? null;
   const quickActionsEnabledUserValue =
     effective?.[SETTING_KEYS.UI_CARD_QUICK_ACTIONS_ENABLED]?.value;
@@ -103,8 +105,15 @@ export function useOverlayPrefs() {
     return parseOverlayPrefs(source);
   }, [userValue, config?.defaults]);
 
-  // Admin kill switch: if disabled server-wide, return null prefs
-  const enabled = config?.enabled !== false;
+  // Overlay badges are inherit-with-override, not a policy gate: the server
+  // setting is only the default for profiles that have not chosen, and an
+  // explicit profile choice wins in either direction. Absent server config
+  // (including while it loads) means on, which is the shipped default.
+  const overlaysDefaultEnabled = config?.enabled !== false;
+  const overlaysEnabled =
+    typeof overlaysEnabledUserValue === "boolean"
+      ? overlaysEnabledUserValue
+      : overlaysDefaultEnabled;
   // Quick actions are inherit-with-override, not a policy gate: the server
   // setting is only the default for profiles that have not chosen, and an
   // explicit profile choice wins in either direction. Absent server config
@@ -134,6 +143,16 @@ export function useOverlayPrefs() {
     [userValue, setProfileValue],
   );
 
+  const setOverlaysEnabled = useCallback(
+    (next: boolean) => {
+      if (typeof overlaysEnabledUserValue === "boolean" && overlaysEnabledUserValue === next) {
+        return;
+      }
+      setProfileValue(SETTING_KEYS.UI_CARD_OVERLAYS_ENABLED, next);
+    },
+    [overlaysEnabledUserValue, setProfileValue],
+  );
+
   const setQuickActionMode = useCallback(
     (next: EnabledCardQuickActionMode) => {
       // Compare against the mode the control displays, not a differently
@@ -160,12 +179,14 @@ export function useOverlayPrefs() {
 
   // While either query is in flight, report null prefs instead of built-in
   // defaults: rendering defaults first would flash badges that vanish (or
-  // change) the moment the user's own config or the admin kill switch loads.
+  // change) the moment the user's own config or the server default loads.
   const isLoading = (hasProfile && userLoading) || configLoading;
 
   return {
-    prefs: enabled && !isLoading ? prefs : null,
+    prefs: overlaysEnabled && !isLoading ? prefs : null,
     setPrefs,
+    overlaysEnabled,
+    setOverlaysEnabled,
     quickActionMode:
       quickActionsEnabled && !isLoading ? configuredQuickActionMode : ("none" as const),
     quickActionPreference: configuredQuickActionMode,
@@ -173,6 +194,5 @@ export function useOverlayPrefs() {
     quickActionsEnabled,
     setQuickActionsEnabled,
     isLoading,
-    enabled,
   };
 }

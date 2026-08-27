@@ -91,6 +91,8 @@ const (
 	SubtitleMatchesDevice = "subtitle.matches_device"
 	// Poster badges
 	UiCardOverlays = "ui.card_overlays"
+	// Card overlays enabled
+	UiCardOverlaysEnabled = "ui.card_overlays_enabled"
 	// Media cards
 	UiCardPresentation = "ui.card_presentation"
 	// Card quick actions
@@ -160,6 +162,7 @@ var Remote = []string{
 	PlayerVideoGravity,
 	SearchMediaScope,
 	UiCardOverlays,
+	UiCardOverlaysEnabled,
 	UiCardPresentation,
 	UiCardQuickActions,
 	UiCardQuickActionsEnabled,

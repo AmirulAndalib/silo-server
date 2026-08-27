@@ -114,7 +114,7 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
         settings: settingIndex(
           "Card Quick Actions Default",
           "Card quick actions",
-          "Card Overlays Enabled",
+          "Card Overlays Default",
           "Default Configuration",
           "Default style preset",
           "Overlay position",

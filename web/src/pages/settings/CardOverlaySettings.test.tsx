@@ -1,8 +1,14 @@
 import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import CardOverlaySettings from "./CardOverlaySettings";
+
+const mocks = vi.hoisted(() => ({
+  overlaysEnabled: true,
+  setOverlaysEnabled: vi.fn(),
+  setQuickActionsEnabled: vi.fn(),
+}));
 
 vi.mock("@/hooks/useOverlayPrefs", () => ({
   useOverlayPrefs: () => ({
@@ -11,9 +17,10 @@ vi.mock("@/hooks/useOverlayPrefs", () => ({
     quickActionPreference: "favorites",
     setQuickActionMode: vi.fn(),
     quickActionsEnabled: false,
-    setQuickActionsEnabled: vi.fn(),
+    setQuickActionsEnabled: mocks.setQuickActionsEnabled,
+    overlaysEnabled: mocks.overlaysEnabled,
+    setOverlaysEnabled: mocks.setOverlaysEnabled,
     isLoading: false,
-    enabled: true,
   }),
 }));
 
@@ -31,7 +38,17 @@ vi.mock("@/components/ui/select", () => ({
   SelectValue: () => null,
 }));
 
+function switchMarkup(markup: string, label: string) {
+  return markup.match(new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`))?.[0];
+}
+
 describe("CardOverlaySettings", () => {
+  beforeEach(() => {
+    mocks.overlaysEnabled = true;
+    mocks.setOverlaysEnabled.mockReset();
+    mocks.setQuickActionsEnabled.mockReset();
+  });
+
   it("places the profile quick-action override above the overlay preview", () => {
     const markup = renderToStaticMarkup(<CardOverlaySettings />);
 
@@ -48,13 +65,36 @@ describe("CardOverlaySettings", () => {
     const markup = renderToStaticMarkup(<CardOverlaySettings />);
 
     expect(markup).not.toContain("Card quick actions have been disabled by your server");
-    const quickActionsSwitch = markup.match(
-      /<button[^>]*aria-label="Enable card quick actions"[^>]*>/,
-    )?.[0];
+    const quickActionsSwitch = switchMarkup(markup, "Enable card quick actions");
     expect(quickActionsSwitch).toBeDefined();
     // Tailwind `disabled:` variants live in the class list, so match the
     // rendered attribute rather than the bare word.
     expect(quickActionsSwitch).not.toContain('disabled=""');
     expect(quickActionsSwitch).not.toContain("data-disabled");
+  });
+
+  it("offers a profile overlay-badge switch above the badge configuration", () => {
+    const markup = renderToStaticMarkup(<CardOverlaySettings />);
+
+    expect(markup).toContain("Card overlay badges");
+    expect(markup).toContain('aria-label="Enable card overlay badges"');
+    expect(markup.indexOf("Card overlay badges")).toBeLessThan(markup.indexOf("Overlay preview"));
+    expect(markup).not.toContain("pointer-events-none opacity-50");
+  });
+
+  it("dims the badge configuration but keeps its switch operable when overlays are off", () => {
+    mocks.overlaysEnabled = false;
+    const markup = renderToStaticMarkup(<CardOverlaySettings />);
+
+    expect(markup).not.toContain("Card overlays have been disabled by your server");
+    expect(markup).toContain("pointer-events-none opacity-50");
+    const overlaysSwitch = switchMarkup(markup, "Enable card overlay badges");
+    expect(overlaysSwitch).toBeDefined();
+    expect(overlaysSwitch).not.toContain('disabled=""');
+    expect(overlaysSwitch).not.toContain("data-disabled");
+    // The switch sits outside the dimmed region.
+    expect(markup.indexOf('aria-label="Enable card overlay badges"')).toBeLessThan(
+      markup.indexOf("pointer-events-none opacity-50"),
+    );
   });
 });

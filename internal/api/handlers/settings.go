@@ -1216,7 +1216,10 @@ type overlayConfigResponse struct {
 }
 
 // HandleGetOverlayConfig returns the server-wide overlay configuration.
-// Available to all authenticated users (not admin-only).
+// Available to all authenticated users (not admin-only). Enabled and
+// QuickActionsEnabled are only the defaults for profiles that have not chosen:
+// an explicit ui.card_overlays_enabled / ui.card_quick_actions_enabled profile
+// setting overrides them in either direction.
 func (h *SettingsHandler) HandleGetOverlayConfig(w http.ResponseWriter, r *http.Request) {
 	resp := overlayConfigResponse{
 		Enabled:             true,
