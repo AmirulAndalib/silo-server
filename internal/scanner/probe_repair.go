@@ -311,10 +311,11 @@ func (e *PlaybackProbeEnsurer) ScanCopySafety(ctx context.Context, file *models.
 	if e == nil || file == nil {
 		return false, false, nil
 	}
-	if strings.TrimSpace(e.binaries().ffmpegPath) == "" {
+	ffmpegPath := strings.TrimSpace(e.binaries().ffmpegPath)
+	if ffmpegPath == "" {
 		return false, false, errCopySafetyScanUnavailable
 	}
-	return e.scanAndPersistCopySafety(ctx, file)
+	return e.scanAndPersistCopySafety(ctx, file, ffmpegPath)
 }
 
 // KnownCopySafetyVerdict answers the copy-safety question for a file without
@@ -367,8 +368,11 @@ func (e *PlaybackProbeEnsurer) ensureProbeRepair(ctx context.Context, file *mode
 	}
 
 	current := file
-	if NeedsCriticalProbeRepair(file) && strings.TrimSpace(e.binaries().ffprobePath) != "" {
-		repaired, err := e.ensureCriticalProbe(ctx, file)
+	// One snapshot per repair: the guard and the ffprobe run must see the same
+	// binaries, or a SetFFmpegPath between them hands probeFile an empty path.
+	ffprobePath := strings.TrimSpace(e.binaries().ffprobePath)
+	if NeedsCriticalProbeRepair(file) && ffprobePath != "" {
+		repaired, err := e.ensureCriticalProbe(ctx, file, ffprobePath)
 		if err != nil {
 			return file, err
 		}
@@ -390,7 +394,7 @@ func (e *PlaybackProbeEnsurer) ensureProbeRepair(ctx context.Context, file *mode
 // cancellation while waiting. Inside the flight the row is re-read first, so a
 // caller holding a stale snapshot of an already-repaired file spawns no ffprobe
 // at all.
-func (e *PlaybackProbeEnsurer) ensureCriticalProbe(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error) {
+func (e *PlaybackProbeEnsurer) ensureCriticalProbe(ctx context.Context, file *models.MediaFile, ffprobePath string) (*models.MediaFile, error) {
 	sharedCtx := context.WithoutCancel(ctx)
 	revisionKey := tonemap.RevisionForFile(file).Fingerprint()
 	resultCh := e.probeRepair.DoChan(revisionKey, func() (any, error) {
@@ -428,7 +432,7 @@ func (e *PlaybackProbeEnsurer) ensureCriticalProbe(ctx context.Context, file *mo
 		if probeFile == nil {
 			probeFile = ProbeFile
 		}
-		probe, err := probeFile(probeCtx, e.binaries().ffprobePath, current.FilePath)
+		probe, err := probeFile(probeCtx, ffprobePath, current.FilePath)
 		if err != nil || probe == nil {
 			return nil, err
 		}
@@ -457,7 +461,8 @@ func (e *PlaybackProbeEnsurer) ensureCriticalProbe(ctx context.Context, file *mo
 // media_files row, and only then runs the bitstream scan — so a restart no
 // longer re-reads the opening seconds of every browsed H.264 file.
 func (e *PlaybackProbeEnsurer) ensureCopySafety(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error) {
-	if !needsCopySafetyProbe(file) || strings.TrimSpace(e.binaries().ffmpegPath) == "" {
+	ffmpegPath := strings.TrimSpace(e.binaries().ffmpegPath)
+	if !needsCopySafetyProbe(file) || ffmpegPath == "" {
 		return file, nil
 	}
 
@@ -466,7 +471,7 @@ func (e *PlaybackProbeEnsurer) ensureCopySafety(ctx context.Context, file *model
 		return fileWithMultiplePPS(file, multi), nil
 	}
 
-	multi, stale, err := e.scanAndPersistCopySafety(ctx, file)
+	multi, stale, err := e.scanAndPersistCopySafety(ctx, file, ffmpegPath)
 	if err != nil {
 		// Unknown safety must not fail open to the video-copy path this probe is
 		// intended to guard. Leave MultiplePPS unset and do not cache or persist
@@ -531,7 +536,7 @@ func copySafetyFlightKey(file *models.MediaFile) string {
 // A write refused as stale is neither memoized nor reported as a verdict: the
 // row has moved to a generation this scan never read, and both the memo and any
 // downstream notification would be facts about bytes nobody is serving.
-func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, file *models.MediaFile) (bool, bool, error) {
+func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, file *models.MediaFile, ffmpegPath string) (bool, bool, error) {
 	fileID := file.ID
 	filePath := file.FilePath
 	fileSize := file.FileSize
@@ -543,7 +548,7 @@ func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, fil
 			timeout = 30 * time.Second
 		}
 		scanCtx, cancel := context.WithTimeout(ctx, timeout)
-		multi, err := DetectMultiplePPSH264(scanCtx, e.binaries().ffmpegPath, filePath)
+		multi, err := DetectMultiplePPSH264(scanCtx, ffmpegPath, filePath)
 		cancel()
 		if err != nil {
 			return copySafetyOutcome{}, err

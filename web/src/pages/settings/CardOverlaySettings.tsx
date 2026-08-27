@@ -397,7 +397,13 @@ export default function CardOverlaySettings() {
         }}
       />
 
-      <div className={overlaysEnabled ? "" : "pointer-events-none opacity-50"}>
+      {/* `inert`, not just pointer-events: the controls must also be
+          unreachable by keyboard and invisible to assistive tech while card
+          overlays are disabled for this profile. */}
+      <div
+        inert={!overlaysEnabled}
+        className={overlaysEnabled ? "" : "pointer-events-none opacity-50"}
+      >
         <SettingsGroup
           title="Preview"
           description="Live preview of your current overlay configuration."

@@ -89,17 +89,23 @@ export function MarkerTasksCard() {
   useEventChannel("tasks");
   const { data: tasks } = useTasks();
   const runTask = useRunTask();
-  const [pendingTask, setPendingTask] = useState<string | null>(null);
+  // Per-task, not one shared value: both tasks can be started back to back,
+  // and the first completion must not re-enable the row that is still running.
+  const [pendingTasks, setPendingTasks] = useState<ReadonlySet<string>>(new Set());
 
   const detectTask = tasks?.find((task) => task.key === "detect_intro_markers");
   const contributeTask = tasks?.find((task) => task.key === "contribute_markers");
 
   async function run(key: string) {
-    setPendingTask(key);
+    setPendingTasks((current) => new Set(current).add(key));
     try {
       await runTask.mutateAsync(key);
     } finally {
-      setPendingTask(null);
+      setPendingTasks((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
     }
   }
 
@@ -110,14 +116,14 @@ export function MarkerTasksCard() {
         fallbackName="Populate markers"
         fallbackDescription="Populates intro and credits markers for opted-in libraries."
         onRun={() => void run("detect_intro_markers")}
-        pending={pendingTask === "detect_intro_markers"}
+        pending={pendingTasks.has("detect_intro_markers")}
       />
       <TaskActionRow
         task={contributeTask}
         fallbackName="Contribute markers"
         fallbackDescription="Submits high-confidence local intro markers to enabled providers."
         onRun={() => void run("contribute_markers")}
-        pending={pendingTask === "contribute_markers"}
+        pending={pendingTasks.has("contribute_markers")}
       />
     </div>
   );

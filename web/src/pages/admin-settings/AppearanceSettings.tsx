@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { AlertTriangle, Check, RotateCcw } from "lucide-react";
 
 import { BrandingAssetField } from "@/components/admin/BrandingAssetField";
+import { BRANDING_ASSET_SPECS } from "@/components/admin/brandingAssetSpecs";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
   OverlayPreviewCard,
@@ -252,6 +253,17 @@ export default function AppearanceSettings() {
               preview="wide"
             />
             <BrandingAssetField
+              label="Logo (wordmark, light themes)"
+              description="Optional. Shown on light themes; falls back to the main logo."
+              kind="wordmark_light"
+              currentUrl={branding.wordmarkLightUrl}
+              fallbackUrl={branding.wordmarkUrl ?? BRANDING_ASSET_SPECS.wordmark.defaultUrl}
+              accept={IMAGE_ACCEPT}
+              enabled={assetStorageAvailable}
+              preview="wide"
+              previewBg="light"
+            />
+            <BrandingAssetField
               label="Logo (icon)"
               description="Shown in the collapsed sidebar and the installed app."
               kind="mark"
@@ -259,6 +271,17 @@ export default function AppearanceSettings() {
               accept={IMAGE_ACCEPT}
               enabled={assetStorageAvailable}
               preview="square"
+            />
+            <BrandingAssetField
+              label="Logo (icon, light themes)"
+              description="Optional. Shown on light themes; falls back to the main icon."
+              kind="mark_light"
+              currentUrl={branding.markLightUrl}
+              fallbackUrl={branding.markUrl ?? BRANDING_ASSET_SPECS.mark.defaultUrl}
+              accept={IMAGE_ACCEPT}
+              enabled={assetStorageAvailable}
+              preview="square"
+              previewBg="light"
             />
             <BrandingAssetField
               label="Favicon"
@@ -467,7 +490,10 @@ export default function AppearanceSettings() {
           {/* Row and preview are one list child so the hairline falls after
               the pair, not between them. The preview gets a full-width framed
               strip instead of squatting in the row's control column. */}
-          <div className={overlaysEnabled ? undefined : "pointer-events-none opacity-50"}>
+          <div
+            inert={!overlaysEnabled}
+            className={overlaysEnabled ? undefined : "pointer-events-none opacity-50"}
+          >
             <SettingFieldRow
               label="Badge style"
               description="Default for people who have not chosen their own."
@@ -501,7 +527,10 @@ export default function AppearanceSettings() {
             </div>
           </div>
 
-          <div className={cn(overlaysEnabled ? "" : "pointer-events-none opacity-50")}>
+          <div
+            inert={!overlaysEnabled}
+            className={cn(overlaysEnabled ? "" : "pointer-events-none opacity-50")}
+          >
             <AdvancedSection
               id="appearance.overlays"
               count={OVERLAY_REGISTRY.length}
