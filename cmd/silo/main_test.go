@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -292,5 +293,73 @@ func TestReloadWatchSyncPluginProvidersDropsStaleProvidersOnCapabilityReadFailur
 	}
 	if _, ok := registry.Get(provider.Key()); ok {
 		t.Fatalf("stale provider %q remained registered", provider.Key())
+	}
+}
+
+// The sampler treats the returned root set as the whole truth: paths outside it
+// are pruned — losing their cached capacity readings — and omitted from the
+// sample. Returning nothing on a transient database error would therefore blank
+// every library mount from the admin panel and from Prometheus, and leave the
+// next pass reporting them unavailable until fresh probes land, all while the
+// mounts are healthy.
+func TestCachedLibraryPathsReusesTheLastGoodSetOnError(t *testing.T) {
+	var (
+		paths []string
+		err   error
+	)
+	provider := cachedLibraryPaths(func(context.Context) ([]string, error) { return paths, err })
+
+	paths = []string{"/mnt/movies", "/mnt/shows"}
+	if got := provider(context.Background()); !slices.Equal(got, paths) {
+		t.Fatalf("first read = %v, want %v", got, paths)
+	}
+
+	paths, err = nil, errors.New("database is not answering")
+	if got := provider(context.Background()); !slices.Equal(got, []string{"/mnt/movies", "/mnt/shows"}) {
+		t.Fatalf("read after an error = %v, want the last good set", got)
+	}
+
+	// Recovery replaces it rather than merging.
+	paths, err = []string{"/mnt/movies"}, nil
+	if got := provider(context.Background()); !slices.Equal(got, []string{"/mnt/movies"}) {
+		t.Fatalf("read after recovery = %v, want the fresh set", got)
+	}
+}
+
+// An empty set the database actually returned is a real answer: an operator who
+// removed their last library has no roots, and holding the old ones would keep
+// reporting mounts the deployment no longer has.
+func TestCachedLibraryPathsCachesADeliberateEmptyResult(t *testing.T) {
+	var (
+		paths = []string{"/mnt/movies"}
+		err   error
+	)
+	provider := cachedLibraryPaths(func(context.Context) ([]string, error) { return paths, err })
+	provider(context.Background())
+
+	paths = nil
+	if got := provider(context.Background()); len(got) != 0 {
+		t.Fatalf("read = %v, want the deliberate empty result", got)
+	}
+	// And that empty result is what a later failure falls back to.
+	err = errors.New("database is not answering")
+	if got := provider(context.Background()); len(got) != 0 {
+		t.Fatalf("read after an error = %v, want the cached empty result", got)
+	}
+}
+
+// The caller must not be able to mutate the cache through the slice it is given.
+func TestCachedLibraryPathsDoesNotShareItsCachedSlice(t *testing.T) {
+	provider := cachedLibraryPaths(func(context.Context) ([]string, error) {
+		return []string{"/mnt/movies"}, nil
+	})
+	first := provider(context.Background())
+	first[0] = "/tmp/clobbered"
+
+	failing := cachedLibraryPaths(func(context.Context) ([]string, error) {
+		return nil, errors.New("boom")
+	})
+	if got := failing(context.Background()); got != nil && len(got) != 0 {
+		t.Fatalf("an empty cache returned %v", got)
 	}
 }

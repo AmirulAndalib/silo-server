@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -167,23 +168,49 @@ func nodeCapabilityFetcher(jwtSecret string) nodepool.CapabilityFetcher {
 // libraryPathProvider adapts the folder repository to the sampler's media-root
 // provider.
 //
-// It runs on the sampling goroutine every interval, so it is bounded
-// separately from the caller's context: a database that has stopped answering
-// must cost one interval's disk sampling, not the sampler. A failed read
-// reports no roots for that pass rather than an error, because the previous
-// pass's mounts are still tracked and keep reporting.
+// It runs on the sampling goroutine every interval, so it is bounded separately
+// from the caller's context: a database that has stopped answering must cost one
+// interval's disk sampling, not the sampler.
 func libraryPathProvider(repo *catalog.FolderRepository) func(context.Context) []string {
 	if repo == nil {
 		return nil
 	}
-	return func(ctx context.Context) []string {
+	return cachedLibraryPaths(func(ctx context.Context) ([]string, error) {
 		queryCtx, cancel := context.WithTimeout(ctx, libraryPathQueryTimeout)
 		defer cancel()
-		paths, err := repo.DistinctLibraryPaths(queryCtx)
+		return repo.DistinctLibraryPaths(queryCtx)
+	})
+}
+
+// cachedLibraryPaths wraps a library-root query so a failed read reuses the last
+// set that succeeded.
+//
+// Returning nothing on error is not the harmless degradation it looks like. The
+// sampler treats the returned set as the whole truth: refreshDisks prunes every
+// path outside it — dropping the cached capacity readings with it — and
+// diskStats omits them from the sample. A two-second database hiccup would
+// therefore blank every library mount from the admin resource panel and from
+// Prometheus, and leave the next pass reporting them unavailable until fresh
+// probes land, all while the mounts themselves are perfectly healthy. Only the
+// query failed, so the previous answer is still the best one available.
+//
+// An empty result that the database actually returned is cached like any other:
+// an operator who removed their last library has genuinely no roots.
+func cachedLibraryPaths(query func(context.Context) ([]string, error)) func(context.Context) []string {
+	var (
+		mu       sync.Mutex
+		lastGood []string
+	)
+	return func(ctx context.Context) []string {
+		paths, err := query(ctx)
+		mu.Lock()
+		defer mu.Unlock()
 		if err != nil {
-			slog.DebugContext(ctx, "library paths unavailable for resource sampling", "component", "app", "error", err)
-			return nil
+			slog.DebugContext(ctx, "library paths unavailable for resource sampling; reusing the last known set",
+				"component", "app", "error", err, "roots", len(lastGood))
+			return slices.Clone(lastGood)
 		}
+		lastGood = slices.Clone(paths)
 		return paths
 	}
 }

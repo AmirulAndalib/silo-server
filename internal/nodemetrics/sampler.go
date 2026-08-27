@@ -30,6 +30,15 @@ type Options struct {
 	// MediaRoots returns library folder paths to sample alongside the scratch
 	// dir. It is called on the sampling goroutine each pass, so it must be cheap
 	// and must respect ctx; a nil provider samples the scratch dir only.
+	//
+	// What it returns is taken as the whole truth: paths outside the set are
+	// pruned, losing their cached readings, and omitted from the sample. A
+	// provider backed by anything fallible therefore has to answer with its last
+	// known set rather than nothing, or a momentary failure reads as every
+	// library mount disappearing. It is the only provider here that crosses a
+	// database or network boundary — the others read local state whose failure
+	// is permanent rather than transient — which is why it is the only one that
+	// needs to.
 	MediaRoots func(ctx context.Context) []string
 	// FFmpegChildren returns the pids whose DRM fdinfo counts as this node's GPU
 	// work. The default is this process's direct ffmpeg children.
