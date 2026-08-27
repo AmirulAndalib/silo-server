@@ -995,7 +995,25 @@ func (s *Server) StartMetricsSampler(ctx context.Context) {
 //
 // The probes behind it are individually cached, so repeating this is cheap once
 // the first pass has run.
+// ErrCapabilityBuildBusy reports that a capability snapshot was not attempted
+// because a re-probe holds the encoder. The previously published hash stands.
+var ErrCapabilityBuildBusy = errors.New("capability build refused while the node is re-probing")
+
 func (s *Server) buildCapabilitySnapshot(ctx context.Context) (playback.HWAccelInfo, error) {
+	// A snapshot runs ffmpeg on the GPU whenever the probe caches are cold, so
+	// it registers as GPU work. That is what stops a manual re-probe from
+	// claiming an apparently idle encoder and running its own smoke matrix
+	// beside this one.
+	//
+	// It deliberately does *not* refuse while transcodes are running. A node
+	// under sustained load would then never refresh its inventory, and its
+	// advertised hash would go stale indefinitely — a worse failure than the
+	// cold-start contention this would avoid, which a positive probe result
+	// caches away after the first success and which the next snapshot corrects.
+	if !s.gpu.beginWork() {
+		return playback.HWAccelInfo{}, ErrCapabilityBuildBusy
+	}
+	defer s.gpu.endWork()
 	s.capabilityBuildMu.Lock()
 	defer s.capabilityBuildMu.Unlock()
 	return s.buildCapabilitySnapshotLocked(ctx)

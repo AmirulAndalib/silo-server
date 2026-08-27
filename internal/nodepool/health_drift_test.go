@@ -401,3 +401,23 @@ func TestComputeCapabilityDriftMatchesAcrossIdentityStrength(t *testing.T) {
 		})
 	}
 }
+
+// A replacement card in the same slot keeps the slot's PCI address and usually
+// the render path too, so matching on any shared alias would hide the old card's
+// disappearance entirely. Two permanent uuids that disagree settle it.
+func TestComputeCapabilityDriftReportsAReplacedCardInTheSameSlot(t *testing.T) {
+	const before = `{"resolved":"nvenc","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0","gpu_uuid":"GPU-old"}],` +
+		`"detected_backends":[{"backend":"nvenc","verified":true}]}`
+	const after = `{"resolved":"nvenc","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0","gpu_uuid":"GPU-new"}],` +
+		`"detected_backends":[{"backend":"nvenc","verified":true}]}`
+
+	drift, parsed := computeCapabilityDrift([]byte(before), []byte(after))
+	if !parsed {
+		t.Fatal("both reports should parse")
+	}
+	if len(drift.lostDevices) != 1 || drift.lostDevices[0] != "/dev/dri/renderD128" {
+		t.Fatalf("lostDevices = %v, want the replaced card reported gone", drift.lostDevices)
+	}
+}

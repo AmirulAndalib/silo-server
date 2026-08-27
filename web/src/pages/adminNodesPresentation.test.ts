@@ -3,6 +3,7 @@ import type { HostSystemStats, ReprobeNodeResult, StreamNode } from "@/api/types
 import {
   CAPABILITY_STALE_AFTER_MS,
   DISK_FILL_WARNING_PCT,
+  HW_ACCEL_INHERIT,
   buildNodeHWDeviceRows,
   describeCapabilityDrift,
   describeEffectiveAcceleration,
@@ -16,6 +17,7 @@ import {
   formatBitsPerSecond,
   nodeHWDevicePaths,
   nodeHasHWDeviceInventory,
+  nodeUsesCUDADevices,
   parseHWDeviceOverride,
 } from "./adminNodesPresentation";
 
@@ -1140,5 +1142,33 @@ describe("parseHWDeviceOverride", () => {
     expect(parseHWDeviceOverride(null)).toEqual([]);
     expect(parseHWDeviceOverride(undefined)).toEqual([]);
     expect(parseHWDeviceOverride("  ")).toEqual([]);
+  });
+});
+
+describe("nodeUsesCUDADevices", () => {
+  // NVENC takes the configured value straight through as its -hwaccel_device,
+  // so offering /dev/dri render paths for it hands the backend something it
+  // cannot use — the same reason the cluster Playback form hides its picker.
+  it("treats an explicit nvenc override as CUDA-addressed", () => {
+    expect(nodeUsesCUDADevices(makeNode({}), "nvenc")).toBe(true);
+  });
+
+  it("follows what the node resolves to when the backend is inherited", () => {
+    const node = makeNode({ capabilities: { resolved: "nvenc" } });
+    expect(nodeUsesCUDADevices(node, HW_ACCEL_INHERIT)).toBe(true);
+    expect(nodeUsesCUDADevices(node, "auto")).toBe(true);
+  });
+
+  // An explicit render-device backend wins over whatever the stale report says.
+  it("uses render paths when the override names a render-device backend", () => {
+    const node = makeNode({ capabilities: { resolved: "nvenc" } });
+    expect(nodeUsesCUDADevices(node, "qsv")).toBe(false);
+    expect(nodeUsesCUDADevices(node, "vaapi")).toBe(false);
+  });
+
+  it("uses render paths for a node that resolves to one", () => {
+    const node = makeNode({ capabilities: { resolved: "qsv" } });
+    expect(nodeUsesCUDADevices(node, HW_ACCEL_INHERIT)).toBe(false);
+    expect(nodeUsesCUDADevices(null, HW_ACCEL_INHERIT)).toBe(false);
   });
 });

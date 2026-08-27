@@ -30,7 +30,7 @@ type NodeRepository interface {
 	Create(ctx context.Context, input nodepool.CreateNodeInput) (*nodepool.Node, error)
 	Update(ctx context.Context, id int, input nodepool.UpdateNodeInput) (*nodepool.Node, error)
 	Delete(ctx context.Context, id int) error
-	UpdateHealth(ctx context.Context, id int, healthy bool, activeJobs, egressKbps int, lastStats []byte) error
+	UpdateHealth(ctx context.Context, id int, checkedURL string, healthy bool, activeJobs, egressKbps int, lastStats []byte) error
 }
 
 // NodeListEnabled queries enabled nodes by type for pool reload.
@@ -310,7 +310,7 @@ func (h *NodeHandler) HandleCheckNode(w http.ResponseWriter, r *http.Request) {
 
 	healthy, activeJobs, egressKbps, capabilitiesHash, lastStats := nodepool.CheckNode(r.Context(), node)
 
-	if err := h.repo.UpdateHealth(r.Context(), id, healthy, activeJobs, egressKbps, lastStats); err != nil {
+	if err := h.repo.UpdateHealth(r.Context(), id, node.URL, healthy, activeJobs, egressKbps, lastStats); err != nil {
 		slog.ErrorContext(r.Context(), "persisting health check result", "component", "api", "node_id", id, "error", err)
 	}
 

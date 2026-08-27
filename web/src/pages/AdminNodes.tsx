@@ -49,6 +49,7 @@ import {
   describeSharedGPU,
   nodeHWDevicePaths,
   nodeHasHWDeviceInventory,
+  nodeUsesCUDADevices,
   parseHWDeviceOverride,
 } from "./adminNodesPresentation";
 
@@ -514,7 +515,10 @@ function NodeForm({
   // The picker is driven by the node's own reported inventory; a node that has
   // never reported one keeps the free-text field, since the override still has
   // to be settable on a node this server has not heard from yet.
-  const hasDeviceInventory = nodeHasHWDeviceInventory(node);
+  // NVENC names GPUs by CUDA index or UUID, so the render-path picker is
+  // meaningless for it — the same rule the cluster-wide Playback form applies.
+  const usesCUDADevices = nodeUsesCUDADevices(node, hwAccelOverride);
+  const hasDeviceInventory = nodeHasHWDeviceInventory(node) && !usesCUDADevices;
   const deviceRows = buildNodeHWDeviceRows(node, hwDeviceOverride);
   const devicePaths = nodeHWDevicePaths(node);
   const effectiveAcceleration = node ? describeEffectiveAcceleration(node) : null;
@@ -693,11 +697,25 @@ function NodeForm({
                   id="node-hw-device-override"
                   value={hwDeviceOverride}
                   onChange={(e) => setHwDeviceOverride(e.target.value)}
-                  placeholder="Cluster default (auto-discover)"
+                  placeholder={
+                    usesCUDADevices ? "Cluster default (CUDA device 0)" : "Cluster default (auto-discover)"
+                  }
                 />
                 <p className="text-muted-foreground text-sm">
-                  Optional. Comma-separated render device paths this node transcodes on (e.g.{" "}
-                  <span className="font-mono">/dev/dri/renderD128,/dev/dri/renderD129</span>). Leave
+                  {usesCUDADevices ? (
+                    <>
+                      Optional. The CUDA device this node encodes on — an index or a GPU UUID (e.g.{" "}
+                      <span className="font-mono">0</span> or{" "}
+                      <span className="font-mono">GPU-a1b2c3d4</span>). NVENC does not use{" "}
+                      <span className="font-mono">/dev/dri</span> render paths. Leave
+                    </>
+                  ) : (
+                    <>
+                      Optional. Comma-separated render device paths this node transcodes on (e.g.{" "}
+                      <span className="font-mono">/dev/dri/renderD128,/dev/dri/renderD129</span>).
+                      Leave
+                    </>
+                  )}
                   empty to use the cluster default (auto-discover). This node has reported no device
                   inventory yet, so there is nothing to pick from.
                 </p>

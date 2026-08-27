@@ -633,6 +633,35 @@ export const HW_ACCEL_OVERRIDE_OPTIONS: readonly { value: string; label: string 
   { value: "none", label: "Software" },
 ];
 
+/**
+ * Whether this node's devices are named as CUDA identities rather than render
+ * paths.
+ *
+ * NVENC addresses GPUs by CUDA index or GPU UUID and takes the configured value
+ * straight through as its `-hwaccel_device`, so a `/dev/dri/renderD…` path is
+ * meaningless to it. The cluster-wide Playback form hides its device picker on
+ * the same rule; a per-node override has to as well, or switching a node to
+ * NVENC leaves it holding a render path with no way to type the CUDA identity
+ * the backend actually needs.
+ *
+ * `override` is the backend selected in the editor, which may be the inherit
+ * sentinel — in that case what matters is the backend the node currently
+ * resolves to, exactly as the cluster form falls back to its detection result.
+ */
+export function nodeUsesCUDADevices(
+  node: StreamNode | null | undefined,
+  override: string | null | undefined,
+): boolean {
+  const selected = override?.trim().toLowerCase() ?? "";
+  if (selected === "nvenc") {
+    return true;
+  }
+  if (selected !== "" && selected !== HW_ACCEL_INHERIT && selected !== "auto") {
+    return false;
+  }
+  return node?.capabilities?.resolved?.trim().toLowerCase() === "nvenc";
+}
+
 /** A node's own acceleration policy, as rendered beside its GPU inventory. */
 export interface NodeAccelerationOverride {
   /** Compact row text, e.g. "override: qsv · /dev/dri/renderD129". */

@@ -268,9 +268,14 @@ type hwCandidates struct {
 	vaapi         []string
 	// accessible records, for a configured probe set only, which devices this
 	// process can actually open. nil means the set came from discovery, which
-	// already filtered on openability. NVENC's empty device string never
-	// consults it — CUDA selects its GPU without a render-node path.
-	accessible    map[string]bool
+	// already filtered on openability. NVENC never consults it — CUDA names its
+	// GPU by index or uuid, neither of which is a file.
+	accessible map[string]bool
+	// nvencDevice is the CUDA identity a NVENC transcode will actually be given:
+	// the first configured hw_device entry, exactly what acquireHWDevice hands
+	// execution, or empty for the CUDA default. The probe uses it so a working
+	// GPU 0 cannot verify NVENC on behalf of a configured GPU 1 that is absent.
+	nvencDevice   string
 	nvidiaPresent bool
 	// intelPresent describes the inventory rather than the probe set, so a
 	// pinned non-Intel device does not hide an Intel GPU from operators.
@@ -283,8 +288,14 @@ type hwCandidates struct {
 // is what a transcode opens. NVIDIA hardware also counts when only the control
 // device is exposed, which is how NVENC-only containers appear.
 func collectHWCandidates(configuredDevice string) hwCandidates {
-	candidates := hwCandidates{renderDevices: listRenderDevices(defaultDRIDir)}
-	probeDevices := ParseHWDeviceSet(configuredDevice).List()
+	configured := ParseHWDeviceSet(configuredDevice)
+	candidates := hwCandidates{
+		renderDevices: listRenderDevices(defaultDRIDir),
+		// NVENC is never balanced across a list, so the first entry is the one
+		// execution uses and therefore the one worth probing.
+		nvencDevice: configured.First(),
+	}
+	probeDevices := configured.List()
 	if len(probeDevices) == 0 {
 		probeDevices = candidates.renderDevices
 	} else {
@@ -349,7 +360,10 @@ func (c hwCandidates) presentFor(backend string) bool {
 // than a render node, so it probes once with no device path.
 func (c hwCandidates) probeDevicesFor(backend string) []string {
 	if backend == transcodeHWNVENC {
-		return []string{""}
+		// The configured CUDA identity when there is one, so the smoke encode
+		// opens the same GPU -hwaccel_device will name; empty otherwise, which
+		// is the CUDA default execution also falls back to.
+		return []string{c.nvencDevice}
 	}
 	return c.devicesFor(backend)
 }
@@ -424,7 +438,7 @@ func verifyHWAccelBackend(ctx context.Context, backend, ffmpegPath string, candi
 			complete = false
 			break
 		}
-		if !candidates.deviceProbeable(device) {
+		if !candidates.deviceProbeable(backend, device) {
 			reasons = append(reasons, hwProbeFailureReason(len(devices), device, "device not accessible on this node"))
 			continue
 		}
@@ -488,11 +502,13 @@ func verifiedHWDeviceKey(generation uint64, backend string) string {
 }
 
 // deviceProbeable reports whether a candidate device may be smoke-encoded on.
-// The empty device is NVENC's — CUDA needs no render-node path — and a nil map
-// means the candidate set came from discovery, which is openable by
-// construction.
-func (c hwCandidates) deviceProbeable(device string) bool {
-	if device == "" || c.accessible == nil {
+//
+// An empty device names no file, and a nil map means the candidate set came
+// from discovery, which is openable by construction. NVENC is exempt whatever
+// its device says: a CUDA index or GPU uuid is not a path, so failing to open it
+// is meaningless, and the smoke encode is the only thing that can answer.
+func (c hwCandidates) deviceProbeable(backend, device string) bool {
+	if device == "" || c.accessible == nil || backend == transcodeHWNVENC {
 		return true
 	}
 	return c.accessible[device]

@@ -259,8 +259,16 @@ func (hc *HealthChecker) checkAll(ctx context.Context) {
 			}
 
 			if hc.repo != nil {
-				if err := hc.repo.UpdateHealth(ctx, n.ID, healthy, activeJobs, egressKbps, lastStats); err != nil {
-					slog.ErrorContext(ctx, "failed to persist node health", "component", "nodepool", "id", n.ID, "error", err)
+				// Fenced on the URL that was checked: last_stats feeds transcode
+				// admission, so one worker's disk reading must never land on a
+				// row an administrator has since repointed at another.
+				if err := hc.repo.UpdateHealth(ctx, n.ID, n.URL, healthy, activeJobs, egressKbps, lastStats); err != nil {
+					if errors.Is(err, ErrNodeMoved) {
+						slog.InfoContext(ctx, "discarded a health result for a node that changed identity mid-check",
+							"component", "nodepool", "id", n.ID, "name", n.Name, "url", n.URL)
+					} else {
+						slog.ErrorContext(ctx, "failed to persist node health", "component", "nodepool", "id", n.ID, "error", err)
+					}
 				}
 			}
 
@@ -470,15 +478,36 @@ type capabilityDriftView struct {
 type renderDeviceAliases struct {
 	// path is what the note names the device by; it is the least stable of the
 	// aliases, which is why it is display only.
-	path    string
+	path string
+	// uuid is the card's permanent identity where it published one. It is held
+	// apart from the aliases because it is the only name that can prove two
+	// devices are *different*: a slot and a render path are properties of the
+	// machine and outlive the card in them.
+	uuid    string
 	aliases []string
+}
+
+// sameDevice reports whether two reports describe one card.
+//
+// Two permanent uuids that disagree settle it on their own — a replacement card
+// in the same slot keeps the slot's PCI address and usually the same render
+// path, and letting those weaker names match would hide the old card's
+// disappearance entirely. Only when at least one side published no uuid does a
+// shared weaker alias stand in for one.
+func (a renderDeviceAliases) sameDevice(b renderDeviceAliases) bool {
+	if a.uuid != "" && b.uuid != "" {
+		return a.uuid == b.uuid
+	}
+	return slices.ContainsFunc(a.aliases, func(alias string) bool {
+		return slices.Contains(b.aliases, alias)
+	})
 }
 
 func renderDeviceAliasSets(view capabilityDriftView) []renderDeviceAliases {
 	devices := make([]renderDeviceAliases, 0, len(view.RenderDevices))
 	covered := make(map[string]bool, len(view.RenderDeviceDetails))
 	for _, device := range view.RenderDeviceDetails {
-		entry := renderDeviceAliases{path: device.Path}
+		entry := renderDeviceAliases{path: device.Path, uuid: device.GPUUUID}
 		for _, alias := range []string{device.GPUUUID, device.PCIAddress, device.Path} {
 			if alias != "" && !slices.Contains(entry.aliases, alias) {
 				entry.aliases = append(entry.aliases, alias)
@@ -504,15 +533,10 @@ func renderDeviceAliasSets(view capabilityDriftView) []renderDeviceAliases {
 // lostRenderDevices names the devices in previous that nothing in current
 // answers to.
 func lostRenderDevices(previous, current capabilityDriftView) []string {
-	present := make(map[string]bool)
-	for _, device := range renderDeviceAliasSets(current) {
-		for _, alias := range device.aliases {
-			present[alias] = true
-		}
-	}
+	currentDevices := renderDeviceAliasSets(current)
 	var lost []string
 	for _, device := range renderDeviceAliasSets(previous) {
-		if slices.ContainsFunc(device.aliases, func(alias string) bool { return present[alias] }) {
+		if slices.ContainsFunc(currentDevices, device.sameDevice) {
 			continue
 		}
 		name := device.path

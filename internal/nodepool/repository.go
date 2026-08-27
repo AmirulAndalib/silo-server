@@ -420,16 +420,21 @@ func (r *Repository) Delete(ctx context.Context, id int) error {
 // an older build, or a non-Linux host — must produce. Passing the previous
 // value through instead would leave a dead node's numbers on screen looking
 // current.
-func (r *Repository) UpdateHealth(ctx context.Context, id int, healthy bool, activeJobs, egressKbps int, lastStats []byte) error {
+// checkedURL fences the write the same way UpdateCapabilities does. The window
+// is smaller — a health request is bounded at five seconds — but the
+// consequence is not: last_stats carries the scratch fill that transcode
+// admission reads, so one worker's disk reading landing on a row that now
+// addresses another can exclude a healthy node or admit a full one.
+func (r *Repository) UpdateHealth(ctx context.Context, id int, checkedURL string, healthy bool, activeJobs, egressKbps int, lastStats []byte) error {
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE stream_nodes SET healthy = $2, active_jobs = $3, egress_kbps = $4, last_stats = $5, last_health_check = NOW()
-		 WHERE id = $1`,
-		id, healthy, activeJobs, egressKbps, lastStats)
+		 WHERE id = $1 AND rtrim(url, '/') = rtrim($6, '/')`,
+		id, healthy, activeJobs, egressKbps, lastStats, checkedURL)
 	if err != nil {
 		return fmt.Errorf("update node health: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNodeNotFound
+		return ErrNodeMoved
 	}
 	return nil
 }

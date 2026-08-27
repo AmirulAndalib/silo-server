@@ -154,7 +154,10 @@ everything that opens an encoder on that node — playback transcodes,
 reconstructed sessions, prepared downloads, and hardware chapter-thumbnail
 extraction — and the exclusion runs both ways: while a re-probe is in progress
 the node refuses new GPU work with a 503 rather than queueing it, so the API
-places that session elsewhere. On an idle node the call can take a couple of
+places that session elsewhere, and its own scheduled capability snapshot stands
+down until the re-probe finishes. A scheduled snapshot does not refuse while
+transcodes run, though: a node under sustained load would otherwise never
+refresh its inventory at all. On an idle node the call can take a couple of
 minutes, because it pays the full cold probe cost on purpose.
 
 Two outcomes are worth knowing:

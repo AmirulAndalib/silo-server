@@ -3,6 +3,7 @@ package transcodenode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -246,5 +247,58 @@ func TestReloadConfigKeepsActiveSessions(t *testing.T) {
 	}
 	if got := server.activeJobs.Load(); got != 1 {
 		t.Fatalf("active jobs = %d, want the session still counted", got)
+	}
+}
+
+// An ordinary snapshot runs ffmpeg on the GPU whenever the probe caches are
+// cold, so it registers as GPU work and a manual re-probe cannot claim an
+// apparently idle encoder beside it.
+func TestCapabilitySnapshotRegistersAsGPUWork(t *testing.T) {
+	server := newTestServer(t)
+
+	server.capabilityBuildMu.Lock()
+	building := make(chan struct{})
+	go func() {
+		defer close(building)
+		server.refreshCapabilitySnapshot(context.Background())
+	}()
+
+	// Wait for the snapshot to have claimed the work slot but still be blocked
+	// on the build lock, which is the window a re-probe used to slip through.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, ok := server.gpu.beginReprobe(0); !ok {
+			break
+		}
+		server.gpu.endReprobe()
+		if time.Now().After(deadline) {
+			t.Fatal("the capability snapshot never registered as GPU work")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	server.capabilityBuildMu.Unlock()
+	select {
+	case <-building:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the capability snapshot never completed")
+	}
+}
+
+// The other direction: a snapshot refuses rather than running its matrix beside
+// a re-probe's, and the previously published hash stands.
+func TestCapabilitySnapshotRefusedWhileReprobing(t *testing.T) {
+	server := newTestServer(t)
+	server.storeCapabilityHash("sha256:previous")
+	if _, ok := server.gpu.beginReprobe(0); !ok {
+		t.Fatal("re-probe refused on an idle node")
+	}
+	t.Cleanup(server.gpu.endReprobe)
+
+	if _, err := server.buildCapabilitySnapshot(context.Background()); !errors.Is(err, ErrCapabilityBuildBusy) {
+		t.Fatalf("err = %v, want ErrCapabilityBuildBusy", err)
+	}
+	if got := server.storedCapabilityHash(); got != "sha256:previous" {
+		t.Fatalf("stored hash = %q, want the previous report untouched", got)
 	}
 }

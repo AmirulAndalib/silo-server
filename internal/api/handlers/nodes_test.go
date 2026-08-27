@@ -52,7 +52,7 @@ func (s *stubNodeRepository) Update(_ context.Context, _ int, input nodepool.Upd
 
 func (s *stubNodeRepository) Delete(context.Context, int) error { return nil }
 
-func (s *stubNodeRepository) UpdateHealth(context.Context, int, bool, int, int, []byte) error {
+func (s *stubNodeRepository) UpdateHealth(context.Context, int, string, bool, int, int, []byte) error {
 	return nil
 }
 

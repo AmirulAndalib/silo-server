@@ -179,3 +179,56 @@ func smokeEncodeCount(t *testing.T, logPath string) int {
 func (e *hwAccelTestEnv) devicePath(name string) string {
 	return filepath.Join(e.driDir, name)
 }
+
+// NVENC takes the configured hw_device through to -hwaccel_device, so probing
+// with an empty device lets a working GPU 0 verify the backend on behalf of a
+// configured GPU 1 that is absent or broken — and the real transcode then fails.
+func TestNVENCProbesTheConfiguredCUDADevice(t *testing.T) {
+	env := setupHWAccelTest(t)
+	env.addNVIDIADevice(t, "nvidia0")
+	probe := fullyCapableProbe()
+	// Only the default CUDA device works; the configured one does not.
+	probe.smokeDeviceFailures = []string{"1"}
+	ffmpeg := writeFakeFFmpeg(t, probe)
+
+	info, err := DetectHWAccelWithFFmpegContextResult(context.Background(), hwAccelAuto, ffmpeg.path, "1")
+	if err != nil {
+		t.Fatalf("DetectHWAccelWithFFmpegContextResult: %v", err)
+	}
+	for _, backend := range info.DetectedBackends {
+		if backend.Backend != transcodeHWNVENC {
+			continue
+		}
+		if backend.Verified {
+			t.Fatalf("nvenc reported verified while the configured CUDA device fails: %+v", backend)
+		}
+		return
+	}
+	t.Fatalf("no nvenc entry in %+v", info.DetectedBackends)
+}
+
+// A CUDA index is not a filesystem path, so the accessibility filter that keeps
+// a proxy from probing a render node it cannot open must not silently skip it.
+func TestNVENCConfiguredDeviceIsProbedNotSkipped(t *testing.T) {
+	env := setupHWAccelTest(t)
+	env.addNVIDIADevice(t, "nvidia0")
+	ffmpeg := writeFakeFFmpeg(t, fullyCapableProbe())
+
+	info, err := DetectHWAccelWithFFmpegContextResult(context.Background(), hwAccelAuto, ffmpeg.path, "0")
+	if err != nil {
+		t.Fatalf("DetectHWAccelWithFFmpegContextResult: %v", err)
+	}
+	for _, backend := range info.DetectedBackends {
+		if backend.Backend != transcodeHWNVENC {
+			continue
+		}
+		if backend.Skipped {
+			t.Fatalf("nvenc was skipped for an unopenable CUDA index: %+v", backend)
+		}
+		if !backend.Verified {
+			t.Fatalf("nvenc should verify against a working CUDA device: %+v", backend)
+		}
+		return
+	}
+	t.Fatalf("no nvenc entry in %+v", info.DetectedBackends)
+}

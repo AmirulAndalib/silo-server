@@ -3,6 +3,7 @@ package nodepool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -52,7 +53,7 @@ func TestRepositoryUpdateHealthPersistsLastStats(t *testing.T) {
 	}
 
 	stats := []byte(`{"system":{"cpu_pct":41,"mem_used_mb":9011},"gpu":[{"device":"/dev/dri/renderD128","source":"fdinfo"}]}`)
-	if err := repo.UpdateHealth(ctx, node.ID, true, 3, 17, stats); err != nil {
+	if err := repo.UpdateHealth(ctx, node.ID, node.URL, true, 3, 17, stats); err != nil {
 		t.Fatalf("update health: %v", err)
 	}
 
@@ -90,10 +91,10 @@ func TestRepositoryUpdateHealthWritesNullForNodesWithoutStats(t *testing.T) {
 	ctx := context.Background()
 	node := createLastStatsNode(t, repo)
 
-	if err := repo.UpdateHealth(ctx, node.ID, true, 1, 0, []byte(`{"system":{"cpu_pct":41}}`)); err != nil {
+	if err := repo.UpdateHealth(ctx, node.ID, node.URL, true, 1, 0, []byte(`{"system":{"cpu_pct":41}}`)); err != nil {
 		t.Fatalf("update health: %v", err)
 	}
-	if err := repo.UpdateHealth(ctx, node.ID, false, 0, 0, nil); err != nil {
+	if err := repo.UpdateHealth(ctx, node.ID, node.URL, false, 0, 0, nil); err != nil {
 		t.Fatalf("update health without stats: %v", err)
 	}
 
@@ -117,5 +118,39 @@ func TestRepositoryUpdateHealthWritesNullForNodesWithoutStats(t *testing.T) {
 	}
 	if _, ok := body["last_stats"]; ok {
 		t.Fatalf("last_stats emitted for a node with none: %s", encoded)
+	}
+}
+
+// last_stats carries the scratch fill transcode admission reads, so one worker's
+// disk reading must never land on a row an administrator has repointed at
+// another during the health request.
+func TestRepositoryUpdateHealthRefusesAfterAURLEdit(t *testing.T) {
+	ctx := context.Background()
+	repo := NewRepository(newNodeTestPool(t))
+	node, err := repo.Create(ctx, CreateNodeInput{
+		Name: fmt.Sprintf("health-moved-%d", time.Now().UnixNano()),
+		Type: NodeTypeTranscode,
+		URL:  fmt.Sprintf("http://health-moved-%d", time.Now().UnixNano()),
+	})
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Delete(ctx, node.ID) })
+
+	moved := node.URL + "-elsewhere"
+	if _, err := repo.Update(ctx, node.ID, UpdateNodeInput{URL: &moved}); err != nil {
+		t.Fatalf("repoint node: %v", err)
+	}
+
+	err = repo.UpdateHealth(ctx, node.ID, node.URL, true, 3, 17, []byte(`{"system":{"cpu_pct":41}}`))
+	if !errors.Is(err, ErrNodeMoved) {
+		t.Fatalf("err = %v, want ErrNodeMoved after the row was repointed", err)
+	}
+	reloaded, err := repo.GetByID(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("reload node: %v", err)
+	}
+	if len(reloaded.LastStats) != 0 {
+		t.Fatalf("last_stats = %s, want the stale sample discarded", reloaded.LastStats)
 	}
 }
