@@ -157,7 +157,7 @@ Each entry in `last_stats.gpu`:
 |---|---|---|
 | `device` | string | The render node path (`/dev/dri/renderD128`), or `cuda:N` for an NVIDIA GPU with no readable DRM node. |
 | `vendor` | string | `intel`, `nvidia` or `amd`. Omitted when sysfs names a vendor we do not recognize. |
-| `sessions` | int | GPU workloads this node currently has pinned to the device. It comes from the playback device balancer, so it is exact for Silo's own work and blind to any other tenant's. A workload started with no `playback.hw_device` configured under QSV/VAAPI has no device name until ffmpeg picks one, and is the one case not counted here. |
+| `sessions` | int | GPU workloads this node currently has pinned to the device. It comes from the playback device balancer, so it is exact for Silo's own work and blind to any other tenant's. With no `playback.hw_device` configured the workload is counted against the render device auto-detection verified the backend on; it goes uncounted only when no probe has verified one, which is the state of a node whose backend was named explicitly and never walked. |
 | `video_busy_pct`, `render_busy_pct` | int | Engine busy percentages over the sampling interval. |
 | `total_busy_pct` | int | Whole-GPU utilization *including other tenants*. Present only with an enrichment source — absent is not zero, and must not be rendered as an idle GPU. |
 | `vram_used_mb`, `vram_total_mb` | int | GPU memory, on the same terms as `total_busy_pct`. |
@@ -171,8 +171,9 @@ the device this interval; its percentages are zeros with no measurement behind
 them.
 
 A node reports these fields in its own `/health` and `/status`; the API stores
-them opaquely and never routes on them. Nothing in node selection reads
-`last_stats`.
+them opaquely and parses only what it routes on. No GPU field is one of those —
+nothing in node selection reads `last_stats.gpu`. The one part that is read is
+the `scratch` disk entry, described under "Scratch admission" above.
 
 Capability reports are refreshed by the background health sweep, not by this
 read: a node advertises a `capabilities_hash` in its own health response, and
@@ -206,11 +207,15 @@ long before anyone reads a log.
 Semantics worth knowing:
 
 - Setting it is a comparison; clearing it is not. The note appears when a refetch
-  loses something, and stays until a refetch produces a report whose probes all
-  pass. A refetch that finds nothing *newly* lost leaves it alone, because a
-  delta against an already-degraded report always finds nothing — a reboot moves
-  `boot_id`, a reworded FFmpeg failure moves the probe reason, and either would
-  otherwise erase a standing regression and report a broken node as repaired.
+  loses something, and stays until a refetch produces a report that probed at
+  least one backend and every backend it probed passed. A refetch that finds
+  nothing *newly* lost leaves it alone, because a delta against an
+  already-degraded report always finds nothing — a reboot moves `boot_id`, a
+  reworded FFmpeg failure moves the probe reason, and either would otherwise
+  erase a standing regression and report a broken node as repaired. A report
+  that probed nothing at all does not clear it either: a GPU that disappeared
+  completely leaves no candidate backend to fail, and the absence of anything to
+  probe is not evidence of recovery.
 - A backend reported as `skipped` does not hold the note open. Skipping means
   the node cannot open the devices, which is a statement about access rather
   than about hardware.

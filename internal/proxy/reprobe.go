@@ -1,11 +1,9 @@
 package proxy
 
 import (
-	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
@@ -37,9 +35,9 @@ func (s *Server) handleReprobeCapabilities(w http.ResponseWriter, r *http.Reques
 	playback.InvalidateHWProbeCache()
 	tonemap.InvalidateProbeCache()
 
-	ctx, cancel := context.WithTimeout(r.Context(), s.capabilityProbeBudget())
-	defer cancel()
-	info, err := s.buildCapabilitySnapshot(ctx)
+	// buildCapabilitySnapshot owns the probe deadline, so a re-probe can never
+	// cost more than a cold capability fetch already may.
+	info, err := s.buildCapabilitySnapshot(r.Context())
 	if err != nil {
 		slog.WarnContext(r.Context(), "proxy capability re-probe incomplete", "component", "proxy", "error", err)
 		http.Error(w, "capability probe unavailable", http.StatusServiceUnavailable)
@@ -56,22 +54,4 @@ func (s *Server) handleReprobeCapabilities(w http.ResponseWriter, r *http.Reques
 	}); err != nil {
 		slog.WarnContext(r.Context(), "encode proxy re-probe result", "component", "proxy", "error", err)
 	}
-}
-
-// capabilityProbeBudget is the deadline one snapshot rebuild gets.
-//
-// A proxy's snapshot is the bounded hardware walk plus the transformation
-// registry's own bounded commands — not the tone-map matrix — so this is an
-// over-allowance rather than a measurement. It is deliberately the same number
-// the transcode node uses: both node types advertise one probe budget to
-// callers, and a second constant here would be a second thing to keep in step
-// with the walk and registry timeouts.
-func (s *Server) capabilityProbeBudget() time.Duration {
-	hwAccel := playback.HWAccelNone
-	hwDevice := ""
-	if cfg := s.watcher.Config(); cfg != nil {
-		hwAccel = cfg.Playback.HWAccel
-		hwDevice = cfg.Playback.HWDevice
-	}
-	return tonemap.ProbeEndpointTimeout(hwAccel, hwDevice)
 }

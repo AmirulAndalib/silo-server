@@ -1,12 +1,10 @@
 package transcodenode
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
@@ -57,21 +55,28 @@ type reprobeCapabilitiesResponse struct {
 // hardware investigation and, through the tone-map inventory in the same
 // snapshot, degraded routing until the next clean probe.
 func (s *Server) handleReprobeCapabilities(w http.ResponseWriter, r *http.Request) {
-	if active := s.activeJobs.Load(); active > 0 {
+	// Claimed for the whole rebuild, not sampled once: a node idle at a
+	// point-in-time check can accept a transcode milliseconds later and still
+	// collide with the smoke encode minutes into the probe. The gate is the
+	// same exclusion the transcode-start path consults, so from here until the
+	// deferred release no new GPU work is admitted.
+	busy, ok := s.gpu.beginReprobe(int(s.activeJobs.Load()))
+	if !ok {
 		slog.InfoContext(r.Context(), "transcode node capability re-probe refused while busy",
-			"component", "transcodenode", "active_jobs", active)
+			"component", "transcodenode", "active_jobs", busy)
 		http.Error(w, fmt.Sprintf(
 			"node is running %d transcode job(s); a re-probe smoke-encodes on the GPU and a busy encoder would report working hardware as failed. Retry when the node is idle.",
-			active), http.StatusConflict)
+			busy), http.StatusConflict)
 		return
 	}
+	defer s.gpu.endReprobe()
 
 	playback.InvalidateHWProbeCache()
 	tonemap.InvalidateProbeCache()
 
-	ctx, cancel := context.WithTimeout(r.Context(), s.capabilityProbeBudget())
-	defer cancel()
-	info, err := s.buildCapabilitySnapshot(ctx)
+	// buildCapabilitySnapshot owns the probe deadline, so a re-probe can never
+	// cost more than a cold capability fetch already may.
+	info, err := s.buildCapabilitySnapshot(r.Context())
 	if err != nil {
 		slog.WarnContext(r.Context(), "transcode node capability re-probe incomplete",
 			"component", "transcodenode", "error", err)
@@ -91,17 +96,4 @@ func (s *Server) handleReprobeCapabilities(w http.ResponseWriter, r *http.Reques
 	}); err != nil {
 		slog.WarnContext(r.Context(), "encode transcode node re-probe result", "component", "transcodenode", "error", err)
 	}
-}
-
-// capabilityProbeBudget is the deadline one snapshot rebuild gets. It is the
-// same budget buildCapabilitySnapshot applies internally, named here so the
-// re-probe route is bounded whether or not its caller sent one.
-func (s *Server) capabilityProbeBudget() time.Duration {
-	hwAccel := playback.HWAccelNone
-	hwDevice := ""
-	if cfg := s.watcher.Config(); cfg != nil {
-		hwAccel = cfg.Playback.HWAccel
-		hwDevice = cfg.Playback.HWDevice
-	}
-	return toneMapCapabilityResolveTimeout(hwAccel, hwDevice)
 }

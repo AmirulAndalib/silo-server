@@ -2,6 +2,7 @@ package playback
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -54,8 +55,20 @@ var hwProbeCache = struct {
 	sync.Mutex
 	entries map[string]hwProbeCacheEntry
 	group   singleflight.Group
+	// generation counts invalidations. It is part of every cache and
+	// singleflight key, which is what makes InvalidateHWProbeCache supersede a
+	// probe already in flight rather than merely clearing the map in front of
+	// it: the flight stores its result under the generation it started in, and
+	// a caller arriving afterwards asks a different key and therefore starts a
+	// fresh probe instead of joining the stale one.
+	generation uint64
+	// verifiedDevices records, per generation and backend, the candidate device
+	// whose smoke encode passed. Execution reads it so a backend verified on
+	// one render node is not then run on another; see VerifiedHWDevice.
+	verifiedDevices map[string]string
 }{
-	entries: make(map[string]hwProbeCacheEntry),
+	entries:         make(map[string]hwProbeCacheEntry),
+	verifiedDevices: make(map[string]string),
 }
 
 // DetectedBackend reports one hardware backend that has candidate devices on
@@ -138,16 +151,39 @@ func DetectHWAccelWithFFmpeg(hwAccel, ffmpegPath, hwDevice string) HWAccelInfo {
 // pass-through contract: an explicitly configured backend wins even when its
 // probe failed, and the report carries the failure reason.
 func DetectHWAccelWithFFmpegContext(ctx context.Context, hwAccel, ffmpegPath, hwDevice string) HWAccelInfo {
+	info, _ := DetectHWAccelWithFFmpegContextResult(ctx, hwAccel, ffmpegPath, hwDevice)
+	return info
+}
+
+// ErrHardwareDetectionIncomplete reports that a detection walk ended before it
+// had probed every candidate backend, because its own budget or the caller's
+// context ran out.
+//
+// The report it accompanies is still returned — an operator-facing surface can
+// show what was learned — but it must never be hashed and published as this
+// host's capabilities. A cut-short walk marks unprobed backends Verified=false
+// and resolves to software, which is byte-for-byte what a real hardware failure
+// looks like: the API's health sweep would then persist a capability_drift note
+// for hardware that is fine, latch it until a clean report arrives, and route
+// the node to software encoding in the meantime.
+var ErrHardwareDetectionIncomplete = errors.New("hardware detection did not complete within its budget")
+
+// DetectHWAccelWithFFmpegContextResult is DetectHWAccelWithFFmpegContext with
+// the walk's completeness reported. Callers that publish or hash the report —
+// the node capability endpoints and their background snapshots — must use this
+// form and refuse to publish on ErrHardwareDetectionIncomplete.
+func DetectHWAccelWithFFmpegContextResult(ctx context.Context, hwAccel, ffmpegPath, hwDevice string) (HWAccelInfo, error) {
 	candidates := collectHWCandidates(hwDevice)
 	resolved := HWAccelNone
 	var detected []DetectedBackend
+	complete := true
 	if currentGOOS == directPlayLinuxGOOS {
-		resolved, detected = walkHWAccelBackends(ctx, ffmpegPath, candidates, false)
+		resolved, detected, complete = walkHWAccelBackends(ctx, ffmpegPath, candidates, false)
 	}
 	if configured := strings.TrimSpace(hwAccel); configured != "" && configured != hwAccelAuto {
 		resolved = configured
 	}
-	return HWAccelInfo{
+	info := HWAccelInfo{
 		Resolved:            resolved,
 		RenderDevices:       candidates.renderDevices,
 		RenderDeviceDetails: renderDeviceDetails(candidates.renderDevices),
@@ -156,6 +192,10 @@ func DetectHWAccelWithFFmpegContext(ctx context.Context, hwAccel, ffmpegPath, hw
 		BootID:              detectBootID(),
 		Source:              "local",
 	}
+	if !complete {
+		return info, ErrHardwareDetectionIncomplete
+	}
+	return info, nil
 }
 
 // PickRenderDevice returns the GPU render device path to use.
@@ -194,7 +234,7 @@ func ResolveHWAccelWithFFmpegContext(ctx context.Context, hwAccel, ffmpegPath, h
 	if currentGOOS != "linux" {
 		return HWAccelNone
 	}
-	resolved, _ := walkHWAccelBackends(ctx, ffmpegPath, collectHWCandidates(hwDevice), true)
+	resolved, _, _ := walkHWAccelBackends(ctx, ffmpegPath, collectHWCandidates(hwDevice), true)
 	return resolved
 }
 
@@ -311,23 +351,32 @@ func (c hwCandidates) probeDevicesFor(backend string) []string {
 // walkHWAccelBackends verifies each backend with candidate hardware in
 // preference order and reports the first one whose probe passes. Resolution
 // stops there; detection continues so every candidate backend is reported.
-func walkHWAccelBackends(ctx context.Context, ffmpegPath string, candidates hwCandidates, stopAtFirstVerified bool) (string, []DetectedBackend) {
+//
+// complete reports whether every candidate backend was actually probed. It is
+// false when the walk budget or the caller's context ran out partway through,
+// which leaves unprobed backends indistinguishable from failed ones — see
+// ErrHardwareDetectionIncomplete for why a publisher must not hash such a
+// report.
+func walkHWAccelBackends(ctx context.Context, ffmpegPath string, candidates hwCandidates, stopAtFirstVerified bool) (resolved string, detected []DetectedBackend, complete bool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(ctx, hwAccelWalkTimeout)
 	defer cancel()
-	resolved := ""
-	var detected []DetectedBackend
+	complete = true
 	for _, backend := range hwAccelPreferenceOrder {
 		if !candidates.presentFor(backend) {
 			continue
 		}
 		// A caller that has already given up must not start further probes.
 		if ctx.Err() != nil {
+			complete = false
 			break
 		}
-		entry := verifyHWAccelBackend(ctx, backend, ffmpegPath, candidates)
+		entry, probedFully := verifyHWAccelBackend(ctx, backend, ffmpegPath, candidates)
+		if !probedFully {
+			complete = false
+		}
 		if !entry.Verified {
 			slog.WarnContext(ctx, "hw_accel=auto: candidate hardware failed its FFmpeg probe",
 				"backend", backend, "devices", entry.Devices,
@@ -338,26 +387,35 @@ func walkHWAccelBackends(ctx context.Context, ffmpegPath string, candidates hwCa
 		}
 		detected = append(detected, entry)
 		if resolved != "" && stopAtFirstVerified {
-			return resolved, detected
+			// Stopping early is the caller's instruction, not a budget failure:
+			// the remaining backends are lower preference and would not have
+			// been selected either way.
+			return resolved, detected, complete
 		}
 	}
 	if resolved == "" {
 		slog.InfoContext(ctx, "hw_accel=auto: no verified hardware backend, using software encoding")
-		return HWAccelNone, detected
+		return HWAccelNone, detected, complete
 	}
-	return resolved, detected
+	return resolved, detected, complete
 }
 
 // verifyHWAccelBackend probes a backend's candidate devices in order and stops
 // at the first one that passes, so a broken GPU sorting ahead of a working one
 // does not disable the backend for the whole host.
-func verifyHWAccelBackend(ctx context.Context, backend, ffmpegPath string, candidates hwCandidates) DetectedBackend {
+//
+// complete reports whether every candidate was reached. A device left unprobed
+// because the budget ran out is not a device that failed, and the difference is
+// invisible in the returned entry.
+func verifyHWAccelBackend(ctx context.Context, backend, ffmpegPath string, candidates hwCandidates) (entry DetectedBackend, complete bool) {
 	devices := candidates.probeDevicesFor(backend)
-	entry := DetectedBackend{Backend: backend, Devices: candidates.devicesFor(backend)}
+	entry = DetectedBackend{Backend: backend, Devices: candidates.devicesFor(backend)}
 	reasons := make([]string, 0, len(devices))
 	probed := false
+	complete = true
 	for _, device := range devices {
 		if ctx.Err() != nil {
+			complete = false
 			break
 		}
 		if !candidates.deviceProbeable(device) {
@@ -369,7 +427,11 @@ func verifyHWAccelBackend(ctx context.Context, backend, ffmpegPath string, candi
 		if available {
 			entry.Verified = true
 			entry.Device = device
-			return entry
+			// Execution has to land on this device and not on whatever sorts
+			// first under /dev/dri, or a report saying "qsv verified" is paired
+			// with a transcode initializing a GPU the probe never touched.
+			recordVerifiedHWDevice(backend, device)
+			return entry, complete
 		}
 		reasons = append(reasons, hwProbeFailureReason(len(devices), device, reason))
 	}
@@ -378,7 +440,45 @@ func verifyHWAccelBackend(ctx context.Context, backend, ffmpegPath string, candi
 	}
 	entry.Skipped = !probed && len(devices) > 0 && ctx.Err() == nil
 	entry.Reason = strings.Join(reasons, "; ")
-	return entry
+	return entry, complete
+}
+
+// recordVerifiedHWDevice remembers the candidate a backend's smoke encode
+// passed on, for the generation that probed it.
+//
+// It is scoped to the probe generation so an operator-triggered re-probe cannot
+// be answered with a device blessed by the verdicts it just discarded. NVENC
+// records the empty device — CUDA addresses its GPU without a render-node path
+// — which reads identically to "nothing verified" and is exactly right: there
+// is no path for execution to adopt.
+func recordVerifiedHWDevice(backend, device string) {
+	if device == "" {
+		return
+	}
+	hwProbeCache.Lock()
+	defer hwProbeCache.Unlock()
+	hwProbeCache.verifiedDevices[verifiedHWDeviceKey(hwProbeCache.generation, backend)] = device
+}
+
+// VerifiedHWDevice returns the render device this process most recently
+// verified the given backend on, or "" when no probe has passed for it.
+//
+// It exists because auto-detection and execution pick devices independently:
+// detection walks a backend's candidates in order and stops at the first that
+// passes a smoke encode, while a transcode with no configured playback.hw_device
+// falls back to PickRenderDevice, which returns whatever sorts first under
+// /dev/dri. On a host whose first render node belongs to a different vendor,
+// those are different GPUs, and the transcode initializes hardware that was
+// never verified. Reading the verified device closes that gap without making
+// every caller of resolution carry a second return value.
+func VerifiedHWDevice(backend string) string {
+	hwProbeCache.Lock()
+	defer hwProbeCache.Unlock()
+	return hwProbeCache.verifiedDevices[verifiedHWDeviceKey(hwProbeCache.generation, backend)]
+}
+
+func verifiedHWDeviceKey(generation uint64, backend string) string {
+	return strconv.FormatUint(generation, 10) + "\x00" + backend
 }
 
 // deviceProbeable reports whether a candidate device may be smoke-encoded on.
@@ -451,13 +551,16 @@ func ffmpegSupportsBackendContext(ctx context.Context, backend, ffmpegPath, devi
 		return false, "unsupported hardware backend " + backend
 	}
 	ffmpegPath = normalizeFFmpegPath(ffmpegPath)
-	cacheKey := hwProbeCacheKey(ffmpegPath, backend, device)
 	// The flight below outlives an abandoned caller, so every test-mutable seam
 	// it touches is snapshotted here rather than dereferenced inside it.
 	commandTimeout := hwProbeCommandTimeout
 	negativeTTL := hwProbeNegativeTTL
 	now := hwProbeNow
 	hwProbeCache.Lock()
+	// The generation is baked into the key, so an invalidation that lands while
+	// this probe runs leaves the flight writing to a key nobody will read again
+	// and sends the next caller to a fresh one.
+	cacheKey := hwProbeCacheKey(hwProbeCache.generation, ffmpegPath, backend, device)
 	if entry, ok := hwProbeCache.entries[cacheKey]; ok && hwProbeCacheEntryCurrent(entry, now()) {
 		hwProbeCache.Unlock()
 		return entry.result.available, entry.result.reason
@@ -512,23 +615,26 @@ func hwProbeCacheEntryCurrent(entry hwProbeCacheEntry, now time.Time) bool {
 // a card, or changing device access underneath a running node. Without this the
 // only way to re-verify is a restart.
 //
-// A probe already in flight is neither canceled nor discarded: it completes and
-// writes its result, and a caller that re-probes while another goroutine is
-// mid-probe therefore joins that flight and can observe the pre-invalidation
-// verdict once. Canceling shared work would instead fail an unrelated playback
-// request that is waiting on it, which is the worse trade. The operator-facing
-// re-probe action runs the detection walk itself after invalidating, so in the
-// ordinary single-caller case the cache is repopulated from a cold start.
+// A probe already in flight is neither canceled nor discarded — canceling
+// shared work would fail an unrelated playback request waiting on it — but it
+// is superseded: bumping the generation moves every cache and singleflight key,
+// so the in-flight probe stores its verdict where nothing will read it and the
+// next caller starts a genuinely cold probe rather than joining the old flight.
+// That is what makes the operator-facing re-probe honest; without it a re-probe
+// racing a background capability fetch would republish the verdict it was asked
+// to discard, and report "nothing changed".
 func InvalidateHWProbeCache() {
 	hwProbeCache.Lock()
 	defer hwProbeCache.Unlock()
+	hwProbeCache.generation++
 	hwProbeCache.entries = make(map[string]hwProbeCacheEntry)
+	hwProbeCache.verifiedDevices = make(map[string]string)
 }
 
-// hwProbeCacheKey separates results per backend and per candidate device on top
-// of the FFmpeg binary's identity.
-func hwProbeCacheKey(ffmpegPath, backend, device string) string {
-	return strings.Join([]string{ffmpegIdentityKey(ffmpegPath), backend, device}, "\x00")
+// hwProbeCacheKey separates results per invalidation generation, per backend,
+// and per candidate device on top of the FFmpeg binary's identity.
+func hwProbeCacheKey(generation uint64, ffmpegPath, backend, device string) string {
+	return strings.Join([]string{strconv.FormatUint(generation, 10), ffmpegIdentityKey(ffmpegPath), backend, device}, "\x00")
 }
 
 // ffmpegIdentityKey invalidates cached capability results when an FFmpeg

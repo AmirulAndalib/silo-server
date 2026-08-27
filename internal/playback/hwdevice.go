@@ -253,10 +253,21 @@ func acquireHWDevice(configured, resolvedHWAccel, avoidDevice string) (device, w
 		// Nothing to balance, but there is still a workload on a known device.
 		// Selection and accounting are separate decisions: skipping the second
 		// with the first is what left every single-GPU QSV/VAAPI node reporting
-		// zero sessions beside a busy engine. An empty value has no device to
-		// name — ffmpeg picks one downstream — so it stays uncounted.
+		// zero sessions beside a busy engine.
 		if first := set.First(); first != "" {
 			return first, first, countHWDeviceWorkload(first)
+		}
+		// No configured device. Resolving it here rather than leaving it to
+		// PickRenderDevice downstream fixes two things at once: the workload
+		// runs on the render node auto-detection actually verified this backend
+		// on — not on whatever sorts first under /dev/dri, which on a
+		// mixed-vendor host is a different GPU — and it becomes countable, so a
+		// default-configured node stops reporting zero sessions beside a busy
+		// engine. With no verified device (nothing probed yet, or a backend
+		// named explicitly and never walked) this falls through unchanged and
+		// ffmpeg picks one downstream exactly as before.
+		if verified := VerifiedHWDevice(resolvedHWAccel); verified != "" {
+			return verified, verified, countHWDeviceWorkload(verified)
 		}
 		return "", "", noop
 	}

@@ -279,6 +279,10 @@ volumes:
   - /proc/loadavg:/host/proc/loadavg:ro
 ```
 
+No setting turns this on: the sampler uses each file under `/host/proc` when it
+is present and falls back to its own `/proc` when it is not, per file, so the
+mounts take effect on the next sample and removing one reverts it.
+
 These three mounts are only useful when the Docker host is itself an LXC/lxcfs
 container — a bare-metal or VM Docker host has nothing extra to gain from them,
 since its own `/proc` is already correct or already cgroup-corrected. Without

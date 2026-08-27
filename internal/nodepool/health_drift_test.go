@@ -114,16 +114,65 @@ func TestRefreshNodeCapabilitiesKeepsDriftWhenNothingRecovered(t *testing.T) {
 	}
 }
 
-// A backend that was skipped is a statement about device access, not about
-// hardware: it is the normal reading for a proxy pointed at a cluster-wide
-// hw_device. It must not hold a drift note open forever.
-func TestResolveDriftNoteClearsOnASkippedButOtherwiseCleanReport(t *testing.T) {
-	const skippedPayload = `{"resolved":"none","render_devices":[],` +
-		`"detected_backends":[{"backend":"vaapi","verified":false,"skipped":true}]}`
+// Clearing the note requires evidence that hardware came back, and a report in
+// which nothing was probed carries none.
+//
+// The two shapes that produce no passing probe are the two ways hardware goes
+// away: a device the node can no longer open reports the backend `skipped`, and
+// a card that is gone entirely leaves no candidate backend to report at all.
+// Both used to read as clean — the first because a skipped backend is not a
+// failure, the second because a loop over an empty list finds none — so a
+// standing regression was erased by the next unrelated hash change (a reboot
+// moving boot_id is enough), telling an operator a still-broken node had
+// recovered.
+//
+// A proxy pointed at a cluster-wide hw_device does not get stuck behind this:
+// it never verified those backends in the first place, so computeCapabilityDrift
+// never gives it a note to hold open.
+func TestResolveDriftNoteKeepsNoteWhenNoProbePassed(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{
+			name: "every candidate device is inaccessible",
+			payload: `{"resolved":"none","render_devices":[],` +
+				`"detected_backends":[{"backend":"vaapi","verified":false,"skipped":true}]}`,
+		},
+		{
+			name:    "the gpu is gone, so nothing was a candidate",
+			payload: `{"resolved":"none","render_devices":[],"detected_backends":[]}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			standing := "verified hardware backends lost: vaapi"
+			payload := []byte(test.payload)
+			// Both sides degraded: the delta finds nothing newly lost, which is
+			// exactly the state in which clearing has to be refused.
+			drift, parsed := computeCapabilityDrift(payload, payload)
+			got := resolveDriftNote(&standing, drift, parsed, payload)
+			if got == nil {
+				t.Fatal("capability_drift was cleared by a report in which no probe passed")
+			}
+			if *got != standing {
+				t.Fatalf("capability_drift = %q, want the standing note %q", *got, standing)
+			}
+		})
+	}
+}
+
+// The complement: a report with a backend that actually passed its probe is the
+// evidence recovery needs, and clears the note.
+func TestResolveDriftNoteClearsOnAPassingProbe(t *testing.T) {
+	const recoveredPayload = `{"resolved":"vaapi","render_devices":["/dev/dri/renderD128"],` +
+		`"detected_backends":[{"backend":"vaapi","verified":true},` +
+		`{"backend":"qsv","verified":false,"skipped":true}]}`
 	standing := "verified hardware backends lost: vaapi"
-	drift, parsed := computeCapabilityDrift([]byte(skippedPayload), []byte(skippedPayload))
-	if got := resolveDriftNote(&standing, drift, parsed, []byte(skippedPayload)); got != nil {
-		t.Fatalf("capability_drift = %q, want a skipped backend to count as clean", *got)
+	payload := []byte(recoveredPayload)
+	drift, parsed := computeCapabilityDrift(payload, payload)
+	if got := resolveDriftNote(&standing, drift, parsed, payload); got != nil {
+		t.Fatalf("capability_drift = %q, want a verified backend to clear it", *got)
 	}
 }
 

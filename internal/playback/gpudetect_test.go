@@ -661,11 +661,11 @@ func TestHWProbeCacheSeparatesBackendsAndDevices(t *testing.T) {
 	ffmpeg := writeFakeFFmpeg(t, fullyCapableProbe())
 
 	keys := map[string]string{
-		"nvenc":       hwProbeCacheKey(ffmpeg.path, transcodeHWNVENC, ""),
-		"qsv-128":     hwProbeCacheKey(ffmpeg.path, transcodeHWQSV, "/dev/dri/renderD128"),
-		"qsv-129":     hwProbeCacheKey(ffmpeg.path, transcodeHWQSV, "/dev/dri/renderD129"),
-		"vaapi-128":   hwProbeCacheKey(ffmpeg.path, transcodeHWVAAPI, "/dev/dri/renderD128"),
-		"identity-eq": hwProbeCacheKey(ffmpeg.path, transcodeHWNVENC, ""),
+		"nvenc":       hwProbeCacheKey(0, ffmpeg.path, transcodeHWNVENC, ""),
+		"qsv-128":     hwProbeCacheKey(0, ffmpeg.path, transcodeHWQSV, "/dev/dri/renderD128"),
+		"qsv-129":     hwProbeCacheKey(0, ffmpeg.path, transcodeHWQSV, "/dev/dri/renderD129"),
+		"vaapi-128":   hwProbeCacheKey(0, ffmpeg.path, transcodeHWVAAPI, "/dev/dri/renderD128"),
+		"identity-eq": hwProbeCacheKey(0, ffmpeg.path, transcodeHWNVENC, ""),
 	}
 	if keys["nvenc"] != keys["identity-eq"] {
 		t.Fatal("identical backend and device produced different cache keys")

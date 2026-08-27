@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,12 @@ var probeCache = struct {
 	sync.Mutex
 	entries map[string]probeCacheEntry
 	group   singleflight.Group
+	// generation counts invalidations and is part of every cache and
+	// singleflight key. It is what makes InvalidateProbeCache supersede a probe
+	// already in flight instead of merely clearing the map in front of it: the
+	// flight stores its inventory under the generation it started in, and the
+	// next caller asks a different key and therefore runs a fresh probe.
+	generation uint64
 }{entries: make(map[string]probeCacheEntry)}
 
 // Probe returns the cached, smoke-tested tone-map capabilities for an FFmpeg
@@ -62,8 +69,8 @@ func Probe(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevice stri
 // probeCached coalesces identical probes without allowing one caller's
 // cancellation to abort the shared work needed by other playback requests.
 func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevice string, run CommandRunner, now func() time.Time) (Capabilities, error) {
-	key := probeCacheKey(ffmpegPath, hardwareBackend, hardwareDevice)
 	probeCache.Lock()
+	key := probeCacheKey(probeCache.generation, ffmpegPath, hardwareBackend, hardwareDevice)
 	if cached, ok := probeCache.entries[key]; ok && probeCacheEntryCurrent(cached, now()) {
 		result := append(Capabilities(nil), cached.capabilities...)
 		probeCache.Unlock()
@@ -136,7 +143,7 @@ func probeWithRunner(
 
 // probeCacheKey binds reusable capabilities to the resolved FFmpeg binary and
 // the driver facts for every configured hardware device.
-func probeCacheKey(ffmpegPath, hardwareBackend, hardwareDevice string) string {
+func probeCacheKey(generation uint64, ffmpegPath, hardwareBackend, hardwareDevice string) string {
 	binaryIdentity := strings.TrimSpace(ffmpegPath)
 	if _, cacheKey, cacheable := ffmpegBinaryCacheKey(binaryIdentity); cacheable {
 		binaryIdentity = cacheKey
@@ -152,7 +159,10 @@ func probeCacheKey(ffmpegPath, hardwareBackend, hardwareDevice string) string {
 			driverIdentities = append(driverIdentities, driverFingerprint(backend, configuredDevice))
 		}
 	}
-	return strings.Join([]string{binaryIdentity, backend, device, strings.Join(driverIdentities, ",")}, "\x00")
+	return strings.Join([]string{
+		strconv.FormatUint(generation, 10),
+		binaryIdentity, backend, device, strings.Join(driverIdentities, ","),
+	}, "\x00")
 }
 
 // InvalidateProbeCache drops every cached tone-map inventory so the next probe
@@ -164,14 +174,17 @@ func probeCacheKey(ffmpegPath, hardwareBackend, hardwareDevice string) string {
 // when the file does, and a driver has no key at all. This is the seam an
 // operator-triggered re-probe uses to force the matrix to run again.
 //
-// A probe already in flight is neither canceled nor discarded: it completes and
-// stores its result, so a caller that invalidates concurrently with another
-// probe of the same key joins that flight and can observe the pre-invalidation
-// inventory once. Canceling shared work would fail the unrelated playback
-// request waiting on it.
+// A probe already in flight is neither canceled nor discarded — canceling
+// shared work would fail the unrelated playback request waiting on it — but it
+// is superseded: bumping the generation moves every cache and singleflight key,
+// so the in-flight probe stores its inventory where nothing will read it and
+// the next caller runs a genuinely cold probe rather than joining the old
+// flight. Without that, a re-probe racing a background capability fetch would
+// republish the very inventory it was asked to discard.
 func InvalidateProbeCache() {
 	probeCache.Lock()
 	defer probeCache.Unlock()
+	probeCache.generation++
 	probeCache.entries = make(map[string]probeCacheEntry)
 }
 

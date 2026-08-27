@@ -122,3 +122,46 @@ func TestReprobeCapabilitiesRequiresBearer(t *testing.T) {
 		t.Fatalf("status = %d, want 401 without a bearer token", recorder.Code)
 	}
 }
+
+// The active-job count only moves once ffmpeg is already running, so checking it
+// alone leaves a window: a node idle at the check accepts a transcode while the
+// probe still has minutes to go, and the smoke encode races the live encoder
+// after all. Work that has been admitted but is not yet an active job has to
+// refuse the re-probe too.
+func TestReprobeCapabilitiesRefusesWhileWorkIsStarting(t *testing.T) {
+	server := newTestServer(t)
+	server.storeCapabilityHash("sha256:previous")
+	if !server.gpu.beginWork() {
+		t.Fatal("beginWork on an idle node was refused")
+	}
+	t.Cleanup(server.gpu.endWork)
+
+	// activeJobs is deliberately zero: this is exactly the state the old
+	// point-in-time check read as idle.
+	if got := server.activeJobs.Load(); got != 0 {
+		t.Fatalf("active jobs = %d, want the pre-registration window", got)
+	}
+	recorder := postReprobe(t, server)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 while a transcode is starting", recorder.Code)
+	}
+	if got := server.storedCapabilityHash(); got != "sha256:previous" {
+		t.Fatalf("stored hash = %q, want the previous report untouched", got)
+	}
+}
+
+// The other direction: while a re-probe holds the encoder, new GPU work is
+// refused rather than allowed to collide with the smoke encode. It is refused,
+// not queued — a viewer pressing play must not wait out a multi-minute probe,
+// and the API retries on another node.
+func TestTranscodeStartRefusedWhileReprobing(t *testing.T) {
+	server := newTestServer(t)
+	if _, ok := server.gpu.beginReprobe(0); !ok {
+		t.Fatal("re-probe refused on an idle node")
+	}
+	t.Cleanup(server.gpu.endReprobe)
+
+	if server.gpu.beginWork() {
+		t.Fatal("GPU work admitted while a re-probe held the encoder")
+	}
+}

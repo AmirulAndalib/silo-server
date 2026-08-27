@@ -179,3 +179,59 @@ func TestRegisterCollectorIsIdempotent(t *testing.T) {
 	registerCollector(first)
 	registerCollector(second)
 }
+
+// The positional library label is a promise about which volume a series
+// describes, and Prometheus has no way to signal that the promise moved: a
+// mount going unavailable used to renumber every library after it, so an alert
+// rule keyed on mount="library-1" silently followed a different disk with no
+// gap in the series to show it happened.
+func TestCollectorKeepsLibraryLabelsPositional(t *testing.T) {
+	f := newDiskFixture(t, "/transcode", "/mnt/nas/movies", "/mnt/nas/shows")
+	f.answer("/transcode", fsStats{UsedBytes: 1 << 30, TotalBytes: 10 << 30, FSID: "a:1"})
+	// /mnt/nas/movies is never answered, so it stays unavailable — the media
+	// root that lives on another node, or the export whose server went away.
+	f.answer("/mnt/nas/shows", fsStats{UsedBytes: 3 << 30, TotalBytes: 30 << 30, FSID: "c:1"})
+
+	f.sampleAndSettle(t, 3)
+	f.sampleAndSettle(t, 3)
+
+	used := diskSeriesByLabel(t, f.sampler)
+	if _, reported := used["library-1"]; reported {
+		t.Fatalf("unavailable mount emitted a series: %v", used)
+	}
+	// The measurable root keeps the index its position earns, rather than
+	// sliding into the missing one's label.
+	if got, ok := used["library-2"]; !ok || got != float64(3<<30) {
+		t.Fatalf("library-2 = %v (present=%t), want the second library root's %v bytes",
+			got, ok, float64(3<<30))
+	}
+}
+
+// diskSeriesByLabel collects streamapp_node_disk_used_bytes keyed by its mount
+// label.
+func diskSeriesByLabel(t *testing.T, sampler *Sampler) map[string]float64 {
+	t.Helper()
+	registry := prometheus.NewRegistry()
+	if err := registry.Register(collector{sampler: sampler}); err != nil {
+		t.Fatalf("register collector: %v", err)
+	}
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	byLabel := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != "streamapp_node_disk_used_bytes" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == gpuDeviceLabel {
+					continue
+				}
+				byLabel[label.GetValue()] = metric.GetGauge().GetValue()
+			}
+		}
+	}
+	return byLabel
+}

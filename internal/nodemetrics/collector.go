@@ -107,12 +107,17 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 		const bytesPerGB = float64(1024 * 1024 * 1024)
 		libraries := 0
 		for _, disk := range system.Disks {
+			// The positional index has to advance for every non-scratch entry,
+			// measurable or not. Skipping first would renumber the mounts after
+			// an unavailable one, so an alert rule keyed on mount="library-1"
+			// would silently start reporting a different volume with no gap in
+			// the series to show it happened.
+			label := diskSeriesLabel(disk, &libraries)
 			if disk.Unavailable {
 				// A path this node cannot measure has no value to report, and a
 				// zero would read as an empty disk in every alert rule.
 				continue
 			}
-			label := diskSeriesLabel(disk, &libraries)
 			gauge(descDiskUsed, disk.UsedGB*bytesPerGB, label)
 			gauge(descDiskTotal, disk.TotalGB*bytesPerGB, label)
 		}

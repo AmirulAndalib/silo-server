@@ -29,6 +29,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 // Server is the HTTP handler for proxy mode.
@@ -252,10 +253,19 @@ func (s *Server) buildCapabilitySnapshot(ctx context.Context) (playback.HWAccelI
 		hwAccel = cfg.Playback.HWAccel
 		hwDevice = cfg.Playback.HWDevice
 	}
-	info := playback.DetectHWAccelWithFFmpegContext(ctx, hwAccel, ffmpegPath, hwDevice)
-	if err := ctx.Err(); err != nil {
-		// The hardware walk has no error return: it degrades to unverified
-		// backends when its context ends mid-probe.
+	// One hardware-aware deadline over both probes, matching the transcode
+	// node: each has its own internal bound, but only a shared budget keeps the
+	// whole rebuild inside the window a caller was told to allow, and only a
+	// deadline the builder owns bounds the background snapshot, whose context
+	// lives as long as the process.
+	ctx, cancel := context.WithTimeout(ctx, tonemap.ProbeEndpointTimeout(hwAccel, hwDevice))
+	defer cancel()
+	// A walk that ran out of budget is refused rather than published: it marks
+	// unprobed backends Verified=false, which is byte-identical to a real
+	// hardware failure, so hashing it would announce a change that did not
+	// happen and cost this proxy its stored inventory.
+	info, err := playback.DetectHWAccelWithFFmpegContextResult(ctx, hwAccel, ffmpegPath, hwDevice)
+	if err != nil {
 		return playback.HWAccelInfo{}, err
 	}
 	registry, err := playback.ProbeTransformationRegistryWithToneMapV3Result(ctx, ffmpegPath, nil)
@@ -887,10 +897,16 @@ type statusResponse struct {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	// NewServer accepts a nil tracker and handleHealth already tolerates one;
+	// this must too, or the same construction that answers /health panics here.
+	activeSessions := 0
+	if s.tracker != nil {
+		activeSessions = s.tracker.ActiveCount()
+	}
 	snapshot := s.metrics.Snapshot()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(statusResponse{
-		ActiveSessions: s.tracker.ActiveCount(),
+		ActiveSessions: activeSessions,
 		System:         snapshot.System,
 		GPU:            snapshot.GPU,
 	})

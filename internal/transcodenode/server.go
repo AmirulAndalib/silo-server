@@ -216,6 +216,10 @@ type Server struct {
 	// metrics samples host and GPU resources in the background. Nil until
 	// StartMetricsSampler runs, which leaves health exactly as it was before.
 	metrics *nodemetrics.Sampler
+
+	// gpu keeps a capability re-probe's smoke encode and real transcodes off
+	// the encoder at the same time; see gpuGate.
+	gpu gpuGate
 }
 
 // storedCapabilityHash returns the last published capability hash, or empty
@@ -635,6 +639,13 @@ func (s *Server) handleDownloadPrepare(w http.ResponseWriter, r *http.Request) {
 	if !s.requireApprovedInputPath(w, r, req.InputPath) {
 		return
 	}
+	// A prepared download encodes on the GPU like any transcode, so it takes
+	// the same exclusion against a running capability re-probe.
+	if !s.gpu.beginWork() {
+		http.Error(w, "node is re-probing its hardware; retry shortly", http.StatusServiceUnavailable)
+		return
+	}
+	defer s.gpu.endWork()
 	opts := req.TranscodeOpts(cfg.Playback.FFmpegPath, cfg.Playback.HWAccel, cfg.Playback.HWDevice, s.ffmpegSink)
 	artifactRoot := s.artifactRoot
 	if err := os.MkdirAll(artifactRoot, 0o755); err != nil {
@@ -993,7 +1004,15 @@ func (s *Server) buildCapabilitySnapshot(ctx context.Context) (playback.HWAccelI
 	defer cancel()
 	// One detection walk answers both questions: Resolved honors the configured
 	// backend's pass-through contract, and DetectedBackends explains it.
-	info := playback.DetectHWAccelWithFFmpegContext(resolveCtx, configuredHWAccel, ffmpegPath, hwDevice)
+	//
+	// A walk that ran out of budget is refused rather than published: it marks
+	// unprobed backends Verified=false, which is byte-identical to a real
+	// hardware failure, so hashing it would make the API persist a capability
+	// regression for hardware that is fine.
+	info, err := playback.DetectHWAccelWithFFmpegContextResult(resolveCtx, configuredHWAccel, ffmpegPath, hwDevice)
+	if err != nil {
+		return playback.HWAccelInfo{}, err
+	}
 	info.ProbeRequestTimeoutMillis = tonemap.ProbeRequestTimeout(configuredHWAccel, hwDevice).Milliseconds()
 	capabilities, err := tonemap.Probe(resolveCtx, playback.ResolveFFmpegPath(ffmpegPath), info.Resolved, hwDevice)
 	if err != nil {
@@ -1166,6 +1185,15 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "node not configured", http.StatusServiceUnavailable)
 		return
 	}
+	// Held from here until the handler returns, by which point activeJobs
+	// covers the session. Without the overlap a re-probe could start in the gap
+	// between admitting this transcode and it becoming visible as an active
+	// job, and its smoke encode would then race a live encoder session.
+	if !s.gpu.beginWork() {
+		http.Error(w, "node is re-probing its hardware; retry shortly", http.StatusServiceUnavailable)
+		return
+	}
+	defer s.gpu.endWork()
 	outputDir := s.sessionOutputDir(req.SessionID)
 
 	opts := playback.TranscodeOpts{
@@ -1467,6 +1495,15 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	if cfg == nil {
 		return nil, nil
 	}
+	// A reconstruct spawns ffmpeg on the GPU exactly as a fresh start does, so
+	// it takes the same exclusion against a running capability re-probe. Held
+	// until this call returns, by which point activeJobs covers the session.
+	if !s.gpu.beginWork() {
+		slog.InfoContext(r.Context(), "transcode node reconstruct deferred while re-probing hardware",
+			"component", "transcodenode", "session", sessionID)
+		return nil, nil
+	}
+	defer s.gpu.endWork()
 	outputDir := s.sessionOutputDir(sessionID)
 	opts := card.TranscodeOpts(outputDir, cfg.Playback.FFmpegPath, s.ffmpegSink)
 	opts.SessionID = sessionID

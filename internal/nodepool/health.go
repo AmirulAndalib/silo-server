@@ -539,21 +539,35 @@ func resolveDriftNote(stored *string, drift capabilityDrift, parsed bool, payloa
 	return nil
 }
 
-// hardwareProbesClean reports whether every backend the node actually probed
-// passed. A skipped backend is not a failure — it means the node cannot open the
-// devices, which is the normal reading for a proxy pointed at a cluster-wide
-// hw_device — and a report that cannot be parsed is not evidence of anything.
+// hardwareProbesClean reports whether the node probed at least one backend and
+// every backend it probed passed. A skipped backend is not a failure — it means
+// the node cannot open the devices, which is the normal reading for a proxy
+// pointed at a cluster-wide hw_device — and a report that cannot be parsed is
+// not evidence of anything.
+//
+// The "at least one" half matters as much as the "every" half. A GPU that
+// disappears completely leaves a report with no detected_backends at all, and a
+// loop over an empty list finds no failure: taking that as clean would clear a
+// standing drift note on the next unrelated hash change — a reboot moving
+// boot_id is enough — and tell an operator the node recovered while its card is
+// still gone. Recovery has to be evidenced by hardware that was actually
+// probed, not by the absence of anything to probe.
 func hardwareProbesClean(payload []byte) bool {
 	var current capabilityDriftView
 	if json.Unmarshal(payload, &current) != nil {
 		return false
 	}
+	probed := false
 	for _, backend := range current.DetectedBackends {
-		if !backend.Verified && !backend.Skipped {
+		if backend.Skipped {
+			continue
+		}
+		if !backend.Verified {
 			return false
 		}
+		probed = true
 	}
-	return true
+	return probed
 }
 
 // computeCapabilityDrift compares the report a node just served against the one
