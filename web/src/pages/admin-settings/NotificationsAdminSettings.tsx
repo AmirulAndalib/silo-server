@@ -48,6 +48,7 @@ import { useServerNotificationChannels } from "@/hooks/queries/admin/serverNotif
 import { useUpdateServerSettings } from "@/hooks/queries/admin/settings";
 import { useRestartKeys } from "@/hooks/useRestartKeys";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
+import { useReportUnsavedChanges } from "@/hooks/useUnsavedChanges";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 import { FieldGroup } from "./FieldGroup";
@@ -700,6 +701,9 @@ function DiscordAppCredentials({
   const ready = savedClientId.trim() !== "" && secretConfigured && tokenConfigured;
   const unsaved =
     clientId !== savedClientId || clientSecret.trim() !== "" || botToken.trim() !== "";
+  // The card's drafts live outside useSettingsForm, so the navigation guard
+  // and the reload prompt only see them through this report.
+  useReportUnsavedChanges(unsaved);
   const anyStored = savedClientId.trim() !== "" || secretConfigured || tokenConfigured;
 
   async function save() {
@@ -953,9 +957,14 @@ export default function NotificationsAdminSettings() {
   const mailServerSet = form.getValue("email.smtp_host").trim() !== "";
   const outboundMailOn = form.getValue("email.enabled") === "true";
   const mailReady = mailServerSet && outboundMailOn;
-  // The Discord application (client id, secret, bot token) is configured in
-  // the Discord channel card below, next to the delivery settings it gates.
-  const discordAppConfigured = form.sensitiveConfigured.includes("discord.bot_token");
+  // The Discord application is configured in the Discord channel card below,
+  // next to the delivery settings it gates. "Configured" mirrors the server's
+  // own rule (DiscordConfigured): client id, client secret, AND bot token —
+  // a partial save (say, only the bot token) must not read as connected.
+  const discordAppConfigured =
+    form.getValue("discord.client_id").trim() !== "" &&
+    form.sensitiveConfigured.includes("discord.client_secret") &&
+    form.sensitiveConfigured.includes("discord.bot_token");
 
   const channelStates = [
     uiOn,

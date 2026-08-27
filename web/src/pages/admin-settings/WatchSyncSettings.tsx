@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { RestartServerButton } from "@/components/admin/RestartServerButton";
 import { installationConfigReady } from "@/lib/pluginConfigReady";
+import { useReportUnsavedChanges } from "@/hooks/useUnsavedChanges";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAdminPluginInstallations } from "@/hooks/queries/admin/plugins";
@@ -136,6 +137,9 @@ function WatchProviderTile({
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [needsRestart, setNeedsRestart] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  // Tile drafts live outside useSettingsForm, so the navigation guard and the
+  // reload prompt only see them if the tile reports them itself.
+  useReportUnsavedChanges(Object.values(drafts).some((value) => value !== ""));
 
   const { title } = provider;
   const fields = credentialKeys(provider.key);
