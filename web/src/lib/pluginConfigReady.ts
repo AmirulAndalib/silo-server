@@ -19,8 +19,12 @@ export function installationConfigReady(installation: PluginInstallation): boole
     const config = saved.get(key);
     if (!config) return false;
     if ((config.configured_secrets ?? []).length > 0) return true;
+    // Any saved non-null value counts — `false` and `0` are values an admin
+    // deliberately chose (a required boolean saved as false is configured).
+    // Only a blank string is excluded: an empty text box is not a value, and
+    // counting it would let a keyless plugin read as connected.
     return Object.values(config.value ?? {}).some((value) =>
-      typeof value === "string" ? value.trim() !== "" : value != null && value !== false,
+      typeof value === "string" ? value.trim() !== "" : value != null,
     );
   };
 
