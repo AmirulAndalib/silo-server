@@ -61,7 +61,11 @@ type Watcher struct {
 	eventBus  cache.EventBus
 	bootstrap BootstrapOverrides
 	onChange  []func(old, updated *config.Config)
-	reloadCh  chan struct{} // buffered(1), event bus writes here
+	// normalizers run on every config the watcher constructs, after bootstrap
+	// overrides and before the config becomes visible, so derived repairs
+	// (e.g. resolving the seeded ffmpeg path) survive hot reloads.
+	normalizers []func(*config.Config)
+	reloadCh    chan struct{} // buffered(1), event bus writes here
 
 	// loadOverrides reads this node's own acceleration overrides; see the
 	// overlay in applySettings.
@@ -91,6 +95,12 @@ func NewWatcher(pool *pgxpool.Pool, cipher *secret.Cipher, eventBus cache.EventB
 	}
 	w.loadOverrides = w.queryNodeHWOverrides
 	return w
+}
+
+// OnLoad registers a normalization applied to every config this watcher
+// constructs (initial load and every reload). Register before Start.
+func (w *Watcher) OnLoad(fn func(*config.Config)) {
+	w.normalizers = append(w.normalizers, fn)
 }
 
 // Config returns the current config. Safe for concurrent use.
@@ -234,8 +244,13 @@ func (w *Watcher) applySettings(ctx context.Context, m map[string]string) error 
 		newCfg.Redis.URL = w.bootstrap.RedisURL
 	}
 
-	// Last word, after the bootstrap re-apply: the node's own row decides its
-	// acceleration policy, and nothing above may put the cluster value back.
+	for _, normalize := range w.normalizers {
+		normalize(newCfg)
+	}
+
+	// Last word, after the bootstrap re-apply and the normalizers: the node's
+	// own row decides its acceleration policy, and nothing above may put the
+	// cluster value back.
 	w.applyNodeHWOverrides(ctx, newCfg)
 
 	w.mu.Lock()

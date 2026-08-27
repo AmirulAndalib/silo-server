@@ -563,7 +563,7 @@ func (fileInfoWithoutSystem) Sys() any {
 
 func platformRequiresDirectPlayValidator() bool {
 	switch runtime.GOOS {
-	case directPlayDarwinGOOS, directPlayLinuxGOOS, directPlayWindowsGOOS:
+	case darwinGOOS, linuxGOOS, windowsGOOS:
 		return true
 	default:
 		return false

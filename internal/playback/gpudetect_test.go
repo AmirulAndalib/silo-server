@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 type hwAccelTestEnv struct {
@@ -30,6 +32,9 @@ type fakeFFmpegProbe struct {
 	h264VAAPI    bool
 	scaleCUDA    bool
 	uploadCUDA   bool
+	videotoolbox bool
+	h264VT       bool
+	hevcVT       bool
 	smokeOK      bool
 	// smokeFailures names encoders whose smoke encode fails even when smokeOK
 	// is set, modeling a listed encoder with no working driver behind it.
@@ -300,10 +305,12 @@ func TestResolveHWAccelPassesThroughConfiguredBackends(t *testing.T) {
 	}
 }
 
-func TestResolveHWAccelAutoIsNoneOffLinux(t *testing.T) {
+// Windows rather than macOS: macOS has its own hardware path through
+// VideoToolbox, so it is no longer a platform with nothing to probe.
+func TestResolveHWAccelAutoIsNoneOnAPlatformWithNoHardwarePath(t *testing.T) {
 	env := setupHWAccelTest(t)
 	env.addRenderDevice(t, "renderD128", "0x8086")
-	currentGOOS = "darwin"
+	currentGOOS = windowsGOOS
 	ffmpeg := writeFakeFFmpeg(t, fullyCapableProbe())
 
 	if got := ResolveHWAccelWithFFmpeg("auto", ffmpeg.path, ""); got != HWAccelNone {
@@ -479,6 +486,51 @@ func TestNormalizeProbeRequestTimeout(t *testing.T) {
 func TestResolveFFmpegPathTrimsWithoutCleaningRelativeExecutable(t *testing.T) {
 	if got := ResolveFFmpegPath(" ./ffmpeg "); got != "./ffmpeg" {
 		t.Fatalf("ResolveFFmpegPath() = %q, want ./ffmpeg", got)
+	}
+}
+
+func TestDiscoverFFmpegPathDarwinPrefersFullHomebrewBuilds(t *testing.T) {
+	tests := []struct {
+		name      string
+		available map[string]bool
+		want      string
+	}{
+		{
+			name:      "Apple Silicon prefix",
+			available: map[string]bool{homebrewFFmpegFullAppleSilicon: true},
+			want:      homebrewFFmpegFullAppleSilicon,
+		},
+		{
+			name:      "Intel prefix",
+			available: map[string]bool{homebrewFFmpegFullIntel: true},
+			want:      homebrewFFmpegFullIntel,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lookPath := func(path string) (string, error) {
+				if tt.available[path] {
+					return path, nil
+				}
+				return "", fmt.Errorf("not found")
+			}
+			if got := discoverFFmpegPath(darwinGOOS, lookPath); got != tt.want {
+				t.Fatalf("discoverFFmpegPath() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveFFmpegPathFallsBackOnlyForMissingLegacyDefault(t *testing.T) {
+	missing := func(string) (string, error) { return "", fmt.Errorf("not found") }
+	discover := func() string { return homebrewFFmpegFullAppleSilicon }
+
+	if got := resolveFFmpegPath(jellyfinFFmpegPath, missing, discover); got != discover() {
+		t.Fatalf("legacy default resolved to %q, want discovery result", got)
+	}
+	if got := resolveFFmpegPath("/custom/missing/ffmpeg", missing, discover); got != "/custom/missing/ffmpeg" {
+		t.Fatalf("custom path resolved to %q, want the explicit value preserved", got)
 	}
 }
 
@@ -967,6 +1019,12 @@ func writeFakeFFmpeg(t *testing.T, probe fakeFFmpegProbe) fakeFFmpegBinary {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ffmpeg")
 	logPath := filepath.Join(dir, "probe.log")
+	writeFakeFFmpegScript(t, path, logPath, probe)
+	return fakeFFmpegBinary{path: path, logPath: logPath}
+}
+
+func writeFakeFFmpegScript(t *testing.T, path, logPath string, probe fakeFFmpegProbe) {
+	t.Helper()
 
 	script := "#!/bin/sh\n"
 	script += fmt.Sprintf("printf '%%s\\n' \"$*\" >> %q\n", logPath)
@@ -988,6 +1046,9 @@ func writeFakeFFmpeg(t *testing.T, probe fakeFFmpegProbe) fakeFFmpegBinary {
 	if probe.vaapiHWAccel {
 		script += "    echo 'vaapi'\n"
 	}
+	if probe.videotoolbox {
+		script += "    echo 'videotoolbox'\n"
+	}
 	script += "    exit 0 ;;\n"
 	script += "  *-encoders*)\n"
 	if probe.h264NVENC {
@@ -1005,6 +1066,12 @@ func writeFakeFFmpeg(t *testing.T, probe fakeFFmpegProbe) fakeFFmpegBinary {
 	if probe.h264VAAPI {
 		script += "    echo ' V..... h264_vaapi H.264 VAAPI encoder'\n"
 	}
+	if probe.h264VT {
+		script += "    echo ' V..... h264_videotoolbox VideoToolbox H.264 encoder'\n"
+	}
+	if probe.hevcVT {
+		script += "    echo ' V..... hevc_videotoolbox VideoToolbox hevc encoder'\n"
+	}
 	script += "    exit 0 ;;\n"
 	script += "  *-filters*)\n"
 	if probe.scaleCUDA {
@@ -1014,7 +1081,7 @@ func writeFakeFFmpeg(t *testing.T, probe fakeFFmpegProbe) fakeFFmpegBinary {
 		script += "    echo ' ... hwupload_cuda V->V upload CUDA frames'\n"
 	}
 	script += "    exit 0 ;;\n"
-	for _, encoder := range []string{"h264_nvenc", "h264_qsv", "h264_vaapi"} {
+	for _, encoder := range []string{"h264_nvenc", "h264_qsv", "h264_vaapi", "h264_videotoolbox", "hevc_videotoolbox"} {
 		script += fmt.Sprintf("  *%s*)\n", encoder)
 		if probe.smokeOK && !slices.Contains(probe.smokeFailures, encoder) {
 			// The init chain carries the device path, so a broken GPU is modeled
@@ -1044,7 +1111,6 @@ func writeFakeFFmpeg(t *testing.T, probe fakeFFmpegProbe) fakeFFmpegBinary {
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake ffmpeg: %v", err)
 	}
-	return fakeFFmpegBinary{path: path, logPath: logPath}
 }
 
 // resetHWProbeCacheForTest clears the probe cache between cases. It delegates
@@ -1052,4 +1118,209 @@ func writeFakeFFmpeg(t *testing.T, probe fakeFFmpegProbe) fakeFFmpegBinary {
 // action uses rather than a second, drifting implementation.
 func resetHWProbeCacheForTest() {
 	InvalidateHWProbeCache()
+}
+
+func successfulVideoToolboxProbe() fakeFFmpegProbe {
+	return fakeFFmpegProbe{videotoolbox: true, h264VT: true, hevcVT: true, smokeOK: true}
+}
+
+func TestResolveHWAccelWithFFmpegDarwinUsesVideoToolbox(t *testing.T) {
+	setupHWAccelTest(t)
+	currentGOOS = "darwin"
+	ffmpeg := writeFakeFFmpeg(t, successfulVideoToolboxProbe())
+
+	if got := ResolveHWAccelWithFFmpeg("auto", ffmpeg.path, ""); got != "videotoolbox" {
+		t.Fatalf("ResolveHWAccelWithFFmpeg() = %q, want videotoolbox", got)
+	}
+}
+
+func TestResolveHWAccelWithFFmpegContextDarwinHonorsCallerDeadline(t *testing.T) {
+	setupHWAccelTest(t)
+	currentGOOS = "darwin"
+	ffmpeg := writeFakeFFmpeg(t, fakeFFmpegProbe{hang: true})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if got := ResolveHWAccelWithFFmpegContext(ctx, "auto", ffmpeg.path, ""); got != HWAccelNone {
+		t.Fatalf("ResolveHWAccelWithFFmpegContext() = %q, want none", got)
+	}
+	if elapsed := time.Since(started); elapsed >= 150*time.Millisecond {
+		t.Fatalf("caller deadline took %s, want less than per-command timeout", elapsed)
+	}
+	if ctx.Err() != context.DeadlineExceeded {
+		t.Fatalf("context error = %v, want deadline exceeded", ctx.Err())
+	}
+	// Let the bounded shared probe finish before test cleanup restores globals.
+	_ = cachedVideoToolboxProbe(ffmpeg.path)
+}
+
+func TestResolveHWAccelWithFFmpegDarwinFallsBackToNoneWhenProbeFails(t *testing.T) {
+	setupHWAccelTest(t)
+	currentGOOS = "darwin"
+	ffmpeg := writeFakeFFmpeg(t, fakeFFmpegProbe{})
+
+	if got := ResolveHWAccelWithFFmpeg("auto", ffmpeg.path, ""); got != "none" {
+		t.Fatalf("ResolveHWAccelWithFFmpeg() = %q, want none", got)
+	}
+}
+
+func TestResolveHWAccelWithFFmpegDarwinAllowsH264OnlyVideoToolbox(t *testing.T) {
+	setupHWAccelTest(t)
+	currentGOOS = "darwin"
+	ffmpeg := writeFakeFFmpeg(t, fakeFFmpegProbe{videotoolbox: true, h264VT: true, smokeOK: true})
+
+	if got := ResolveHWAccelWithFFmpeg("auto", ffmpeg.path, ""); got != "videotoolbox" {
+		t.Fatalf("ResolveHWAccelWithFFmpeg() = %q, want videotoolbox for H.264-only Mac", got)
+	}
+	if ok, _ := videoToolboxSupportsTargetCodec(ffmpeg.path, "hevc"); ok {
+		t.Fatal("HEVC target unexpectedly accepted without hevc_videotoolbox")
+	}
+}
+
+func TestResolveHWAccelWithFFmpegDarwinFallsBackToNoneWhenSmokeEncodeFails(t *testing.T) {
+	setupHWAccelTest(t)
+	currentGOOS = "darwin"
+	ffmpeg := writeFakeFFmpeg(t, fakeFFmpegProbe{videotoolbox: true, h264VT: true, hevcVT: true})
+
+	if got := ResolveHWAccelWithFFmpeg("auto", ffmpeg.path, ""); got != "none" {
+		t.Fatalf("ResolveHWAccelWithFFmpeg() = %q, want none when smoke encode fails", got)
+	}
+}
+
+func TestVideoToolboxProbeSmokesBothEncodersInPortableBitrateMode(t *testing.T) {
+	setupHWAccelTest(t)
+	currentGOOS = "darwin"
+	ffmpeg := writeFakeFFmpeg(t, successfulVideoToolboxProbe())
+
+	if got := ResolveHWAccelWithFFmpeg("auto", ffmpeg.path, ""); got != "videotoolbox" {
+		t.Fatalf("ResolveHWAccelWithFFmpeg() = %q, want videotoolbox", got)
+	}
+	log, err := os.ReadFile(ffmpeg.logPath)
+	if err != nil {
+		t.Fatalf("read probe log: %v", err)
+	}
+	// FFmpeg restricts -q:v to Apple Silicon. The portable bitrate path keeps
+	// H.264 acceleration available on older Intel Macs as well.
+	for _, want := range []string{
+		"-c:v h264_videotoolbox -b:v 2000k -maxrate 2000k -bufsize 4000k",
+		"-vf format=p010le -c:v hevc_videotoolbox -b:v 2000k -maxrate 2000k -bufsize 4000k",
+	} {
+		if !strings.Contains(string(log), want) {
+			t.Fatalf("probe log missing %q:\n%s", want, log)
+		}
+	}
+}
+
+func TestExplicitVideoToolboxBypassesFFmpegProbe(t *testing.T) {
+	setupHWAccelTest(t)
+
+	if got := ResolveHWAccelWithFFmpeg("videotoolbox", "/does/not/exist/ffmpeg", ""); got != "videotoolbox" {
+		t.Fatalf("ResolveHWAccelWithFFmpeg() = %q, want videotoolbox", got)
+	}
+}
+
+func TestCachedVideoToolboxProbeExecutesConfiguredRelativePath(t *testing.T) {
+	setupHWAccelTest(t)
+	ffmpeg := writeFakeFFmpeg(t, successfulVideoToolboxProbe())
+	// Empty PATH: if the probe cleaned "./ffmpeg" to a bare name it would fall
+	// back to PATH lookup and fail instead of executing the configured file.
+	t.Setenv("PATH", t.TempDir())
+	t.Chdir(filepath.Dir(ffmpeg.path))
+
+	result := cachedVideoToolboxProbe("./" + filepath.Base(ffmpeg.path))
+	if !result.available {
+		t.Fatalf("probe must execute the configured relative path, got reason %q", result.reason)
+	}
+}
+
+func TestCachedVideoToolboxProbeKeepsRelativeAndPathSpellingsDistinct(t *testing.T) {
+	setupHWAccelTest(t)
+	capable := writeFakeFFmpeg(t, successfulVideoToolboxProbe())
+	incapable := writeFakeFFmpeg(t, fakeFFmpegProbe{})
+	// PATH resolves the bare "ffmpeg" name to the incapable binary while the
+	// dot-relative spelling names the capable one; a cleaned cache key would
+	// collide the two and let one spelling's verdict leak to the other.
+	t.Setenv("PATH", filepath.Dir(incapable.path))
+	t.Chdir(filepath.Dir(capable.path))
+
+	if result := cachedVideoToolboxProbe("./" + filepath.Base(capable.path)); !result.available {
+		t.Fatalf("relative spelling should probe the capable binary, got %q", result.reason)
+	}
+	if result := cachedVideoToolboxProbe("ffmpeg"); result.available {
+		t.Fatal("PATH spelling should probe the incapable binary, not reuse the relative spelling's cache entry")
+	}
+}
+
+func TestStartupRetryHWAccel(t *testing.T) {
+	// Explicit values bypass ffmpeg probing, keeping this host-independent.
+	if got := StartupRetryHWAccel(TranscodeOpts{HWAccel: "videotoolbox", FFmpegPath: "/does/not/exist"}); got != "none" {
+		t.Fatalf("videotoolbox retry accel = %q, want none (no alternate device to move to)", got)
+	}
+	for _, accel := range []string{"qsv", "vaapi", "nvenc", "none"} {
+		if got := StartupRetryHWAccel(TranscodeOpts{HWAccel: accel, FFmpegPath: "/does/not/exist"}); got != accel {
+			t.Fatalf("%s retry accel = %q, want unchanged", accel, got)
+		}
+	}
+	if got := StartupRetryHWAccel(TranscodeOpts{
+		HWAccel: "videotoolbox", FFmpegPath: "/does/not/exist", ToneMapMode: tonemap.ModeHardware,
+	}); got != "videotoolbox" {
+		t.Fatalf("hardware tone-map retry accel = %q, want unchanged frozen executor", got)
+	}
+}
+
+func TestCachedVideoToolboxProbeCoalescesConcurrentColdProbes(t *testing.T) {
+	setupHWAccelTest(t)
+	ffmpeg := writeFakeFFmpeg(t, fakeFFmpegProbe{hang: true})
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cachedVideoToolboxProbe(ffmpeg.path)
+		}()
+	}
+	wg.Wait()
+
+	log, err := os.ReadFile(ffmpeg.logPath)
+	if err != nil {
+		t.Fatalf("read probe log: %v", err)
+	}
+	if got := strings.Count(string(log), "-hwaccels"); got != 1 {
+		t.Fatalf("concurrent cold probes ran %d ffmpeg invocations, want 1 (coalesced):\n%s", got, log)
+	}
+}
+
+func TestCachedVideoToolboxProbeRetriesNegativeResultsAfterExpiry(t *testing.T) {
+	setupHWAccelTest(t)
+	oldDelay := videoToolboxProbeRetryDelay
+	videoToolboxProbeRetryDelay = 0
+	t.Cleanup(func() { videoToolboxProbeRetryDelay = oldDelay })
+
+	ffmpeg := writeFakeFFmpeg(t, fakeFFmpegProbe{})
+	if result := cachedVideoToolboxProbe(ffmpeg.path); result.available {
+		t.Fatal("failing fake should probe unavailable")
+	}
+
+	// The hardware "recovers": the same binary now answers every probe.
+	writeFakeFFmpegScript(t, ffmpeg.path, ffmpeg.logPath, successfulVideoToolboxProbe())
+	if result := cachedVideoToolboxProbe(ffmpeg.path); !result.available {
+		t.Fatalf("expired negative result should re-probe, got reason %q", result.reason)
+	}
+}
+
+func TestCachedVideoToolboxProbeInvalidatesWhenExecutableIsReplaced(t *testing.T) {
+	setupHWAccelTest(t)
+	ffmpeg := writeFakeFFmpeg(t, successfulVideoToolboxProbe())
+	if result := cachedVideoToolboxProbe(ffmpeg.path); !result.available {
+		t.Fatalf("capable fake should probe available, got %q", result.reason)
+	}
+
+	// Replace the binary at the same configured spelling. Its identity is part
+	// of the cache key, so the old positive verdict must not survive.
+	writeFakeFFmpegScript(t, ffmpeg.path, ffmpeg.logPath, fakeFFmpegProbe{})
+	if result := cachedVideoToolboxProbe(ffmpeg.path); result.available {
+		t.Fatal("replacement binary reused the previous executable's positive verdict")
+	}
 }

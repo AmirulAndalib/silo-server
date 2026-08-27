@@ -182,7 +182,7 @@ func hardwareSmokeEncodeArgs(backend, device string) []string {
 	default:
 		return nil
 	}
-	base = append(base, "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=1")
+	base = append(base, "-f", "lavfi", "-i", smokeEncodeSource)
 	switch backend {
 	case transcodeHWQSV:
 		base = append(base, "-vf", "format=nv12,hwupload=extra_hw_frames=64", "-frames:v", "1", "-an", "-c:v", "h264_qsv")

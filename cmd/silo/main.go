@@ -621,6 +621,15 @@ func runCompatWebCommand(ctx context.Context, args []string) error {
 	}
 }
 
+// normalizeLoadedConfig repairs derived config values after every load: the
+// DB-seeded default is Jellyfin's Linux-only ffmpeg path, so resolve it
+// through the same discovery the playback pipeline uses. Registered as an
+// OnLoad hook on both config watchers so hot reloads cannot restore the
+// seeded value, and applied to the startup snapshot before the watchers run.
+func normalizeLoadedConfig(cfg *config.Config) {
+	cfg.Playback.FFmpegPath = playback.ResolveFFmpegPath(cfg.Playback.FFmpegPath)
+}
+
 // main starts the Silo server or a requested maintenance command.
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "compat-web" {
@@ -809,6 +818,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("building config: %v", err)
 	}
+	normalizeLoadedConfig(cfg)
 
 	// Step 7: Apply bootstrap overrides
 	cfg.Server.Listen = bc.Listen
@@ -891,6 +901,13 @@ func main() {
 	var restartRequested atomic.Bool
 
 	eventBus := cache.NewEventBus(cfg.Redis.URL)
+	if err := eventBus.Subscribe(appCtx, cache.ChannelCatalog, func(event cache.Event) {
+		if event.Type == cache.EventScanComplete {
+			sections.InvalidateResolvedListCache()
+		}
+	}); err != nil {
+		slog.Warn("subscribe section cache invalidation failed", "error", err)
+	}
 	logStreamHub := logstream.NewHub(nodeID, eventBus)
 	if err := logStreamHub.Start(appCtx); err != nil {
 		log.Fatalf("log stream hub start: %v", err)
@@ -946,6 +963,7 @@ func main() {
 			NodeName:    nodeName,
 		}
 		watcher := nodeconfig.NewWatcher(pool, dataCipher, eventBus, bootstrap)
+		watcher.OnLoad(normalizeLoadedConfig)
 		if err := watcher.Start(appCtx); err != nil {
 			slog.Error("config watcher start failed", "error", err)
 			os.Exit(1)
@@ -1037,6 +1055,7 @@ func main() {
 		JFListen:    bc.JFListen,
 		RedisURL:    bc.RedisURL,
 	})
+	configWatcher.OnLoad(normalizeLoadedConfig)
 	if err := configWatcher.Start(appCtx); err != nil {
 		log.Fatalf("config watcher start: %v", err)
 	}
@@ -1878,6 +1897,7 @@ func main() {
 				deps.FolderRepo,
 				itemRefreshResolver,
 				libraryIngestExecutor,
+				scanqueue.NewRepository(deps.DB),
 				metadataService,
 				deps.EventBus,
 				deps.RealtimeHub,
@@ -1893,6 +1913,7 @@ func main() {
 				seasonRepo,
 				episodeRepo,
 				libraryIngestExecutor,
+				scanqueue.NewRepository(deps.DB),
 				metadataService,
 				deps.EventBus,
 				deps.RealtimeHub,
@@ -2202,6 +2223,10 @@ func main() {
 		log.Fatalf("seed activitylog defaults: %v", err)
 	}
 
+	if err := taskmanager.SeedHistoryRetentionDefaults(ctx, settingsRepo); err != nil {
+		log.Fatalf("seed task history retention defaults: %v", err)
+	}
+
 	// Seed default page sections for home and existing libraries.
 	sectionRepo := sections.NewRepository(pool)
 	var folders []*models.MediaFolder
@@ -2342,6 +2367,7 @@ func main() {
 		catalogSearchIndexer := catalog.NewCatalogSearchIndexer(deps.DB, settingsRepo)
 		taskMgr.Register(tasks.NewSyncCatalogSearchIndexTask(catalogSearchIndexer))
 		taskMgr.Register(tasks.NewRebuildCatalogSearchIndexTask(catalogSearchIndexer))
+		taskMgr.Register(tasks.NewCatalogSearchEventRetentionTask(catalog.NewSearchIndexEventRepository(deps.DB)))
 		if deps.IntroAnalyzer != nil {
 			taskMgr.Register(tasks.NewDetectIntroMarkersTask(deps.IntroAnalyzer, settingsRepo))
 		}
@@ -2355,6 +2381,7 @@ func main() {
 		}
 		taskMgr.Register(tasks.NewActivityLogCleanupTask(deps.DB, settingsRepo, activityPM))
 		taskMgr.Register(tasks.NewOperationalLogCleanupTask(deps.DB, settingsRepo, opsPM))
+		taskMgr.Register(tasks.NewTaskHistoryCleanupTask(historyRepo, settingsRepo))
 		var diagnosticsStore diagnostics.ObjectStore
 		if deps.S3Private != nil {
 			diagnosticsStore = diagnostics.NewS3ObjectStore(deps.S3Private)
