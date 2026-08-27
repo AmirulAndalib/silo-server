@@ -443,16 +443,27 @@ func (r *Repository) UpdateHealth(ctx context.Context, id int, healthy bool, act
 // flagged: the note describes the last comparison, not a latched incident, so
 // carrying the previous value forward would keep a repaired driver on screen as
 // broken.
-func (r *Repository) UpdateCapabilities(ctx context.Context, id int, capabilities []byte, hash string, refreshedAt time.Time, drift *string) error {
+// fetchedFrom fences the write against the row having been repointed while the
+// fetch was in flight. A capability fetch runs detached from the sweep and is
+// bounded at two minutes, which is ample time for an administrator to edit the
+// node's URL; an id-only write would then store one worker's GPU identities on
+// a row that now addresses a different machine, and the planner would place
+// shared-GPU work on that reading until another sweep corrected it. Trailing
+// slashes are ignored on both sides because the pools normalize URLs and the
+// column does not.
+func (r *Repository) UpdateCapabilities(ctx context.Context, id int, fetchedFrom string, capabilities []byte, hash string, refreshedAt time.Time, drift *string) error {
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE stream_nodes SET capabilities = $2, capabilities_hash = $3, capabilities_refreshed_at = $4, capability_drift = $5
-		 WHERE id = $1`,
-		id, capabilities, hash, refreshedAt, drift)
+		 WHERE id = $1 AND rtrim(url, '/') = rtrim($6, '/')`,
+		id, capabilities, hash, refreshedAt, drift, fetchedFrom)
 	if err != nil {
 		return fmt.Errorf("update node capabilities: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNodeNotFound
+		// Either the row is gone or it no longer addresses the worker this
+		// payload came from. Both mean the same thing to the caller: do not
+		// publish it.
+		return ErrNodeMoved
 	}
 	return nil
 }
@@ -463,4 +474,9 @@ var (
 	// ErrInvalidNodeInput marks a caller-supplied value the store refuses, so
 	// an API layer can answer 400 without string-matching the message.
 	ErrInvalidNodeInput = errors.New("invalid node input")
+	// ErrNodeMoved reports that a row no longer matches the identity a
+	// long-running fetch was made against — it was deleted, or its URL was
+	// edited to address a different worker. The result must be discarded rather
+	// than published against whatever the row is now.
+	ErrNodeMoved = errors.New("stream node no longer matches the fetched identity")
 )

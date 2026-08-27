@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,7 +64,7 @@ func TestRepositoryUpdateCapabilitiesRoundTrip(t *testing.T) {
 
 	payload := json.RawMessage(`{"resolved":"nvenc","render_devices":["/dev/dri/renderD128"]}`)
 	refreshedAt := time.Now().UTC().Truncate(time.Millisecond)
-	if err := repo.UpdateCapabilities(ctx, node.ID, payload, "sha256:abc", refreshedAt, nil); err != nil {
+	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:abc", refreshedAt, nil); err != nil {
 		t.Fatalf("update capabilities: %v", err)
 	}
 
@@ -112,7 +113,7 @@ func TestRepositoryUpdateCapabilitiesDriftRoundTripAndClear(t *testing.T) {
 
 	note := "verified hardware backends lost: nvenc; resolved backend nvenc -> none"
 	payload := json.RawMessage(`{"resolved":"none"}`)
-	if err := repo.UpdateCapabilities(ctx, node.ID, payload, "sha256:degraded", time.Now(), &note); err != nil {
+	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:degraded", time.Now(), &note); err != nil {
 		t.Fatalf("update capabilities with drift: %v", err)
 	}
 	reloaded, err := repo.GetByID(ctx, node.ID)
@@ -124,7 +125,7 @@ func TestRepositoryUpdateCapabilitiesDriftRoundTripAndClear(t *testing.T) {
 	}
 
 	recovered := json.RawMessage(`{"resolved":"nvenc"}`)
-	if err := repo.UpdateCapabilities(ctx, node.ID, recovered, "sha256:recovered", time.Now(), nil); err != nil {
+	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, recovered, "sha256:recovered", time.Now(), nil); err != nil {
 		t.Fatalf("update capabilities without drift: %v", err)
 	}
 	reloaded, err = repo.GetByID(ctx, node.ID)
@@ -138,8 +139,66 @@ func TestRepositoryUpdateCapabilitiesDriftRoundTripAndClear(t *testing.T) {
 
 func TestRepositoryUpdateCapabilitiesUnknownNode(t *testing.T) {
 	repo := NewRepository(newNodeTestPool(t))
-	err := repo.UpdateCapabilities(context.Background(), -1, []byte(`{}`), "sha256:abc", time.Now(), nil)
-	if !errors.Is(err, ErrNodeNotFound) {
-		t.Fatalf("err = %v, want ErrNodeNotFound", err)
+	err := repo.UpdateCapabilities(context.Background(), -1, "http://gone", []byte(`{}`), "sha256:abc", time.Now(), nil)
+	if !errors.Is(err, ErrNodeMoved) {
+		t.Fatalf("err = %v, want ErrNodeMoved", err)
+	}
+}
+
+// A capability fetch is detached from the sweep and bounded at two minutes,
+// which is ample time for an administrator to repoint the row at a different
+// machine. Writing by id alone would store one worker's GPU identities against
+// another's URL, and the planner would place shared-GPU work on that reading
+// until a later sweep corrected it.
+func TestRepositoryUpdateCapabilitiesRefusesAfterAURLEdit(t *testing.T) {
+	ctx := context.Background()
+	repo := NewRepository(newNodeTestPool(t))
+	node, err := repo.Create(ctx, CreateNodeInput{
+		Name: fmt.Sprintf("moved-test-%d", time.Now().UnixNano()),
+		Type: NodeTypeTranscode,
+		URL:  fmt.Sprintf("http://moved-test-%d", time.Now().UnixNano()),
+	})
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Delete(ctx, node.ID) })
+
+	moved := node.URL + "-elsewhere"
+	if _, err := repo.Update(ctx, node.ID, UpdateNodeInput{URL: &moved}); err != nil {
+		t.Fatalf("repoint node: %v", err)
+	}
+
+	err = repo.UpdateCapabilities(ctx, node.ID, node.URL, []byte(`{"resolved":"qsv"}`), "sha256:stale", time.Now(), nil)
+	if !errors.Is(err, ErrNodeMoved) {
+		t.Fatalf("err = %v, want ErrNodeMoved after the row was repointed", err)
+	}
+	reloaded, err := repo.GetByID(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("reload node: %v", err)
+	}
+	if len(reloaded.Capabilities) != 0 {
+		t.Fatalf("capabilities = %s, want the stale payload discarded", reloaded.Capabilities)
+	}
+}
+
+// The trailing slash a pool trims is not a different node: the pools normalize
+// URLs and the column does not, so an exact match would fence out every
+// legitimate write for a row registered with one.
+func TestRepositoryUpdateCapabilitiesIgnoresATrailingSlash(t *testing.T) {
+	ctx := context.Background()
+	repo := NewRepository(newNodeTestPool(t))
+	node, err := repo.Create(ctx, CreateNodeInput{
+		Name: fmt.Sprintf("slash-test-%d", time.Now().UnixNano()),
+		Type: NodeTypeTranscode,
+		URL:  fmt.Sprintf("http://slash-test-%d/", time.Now().UnixNano()),
+	})
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Delete(ctx, node.ID) })
+
+	normalized := strings.TrimSuffix(node.URL, "/")
+	if err := repo.UpdateCapabilities(ctx, node.ID, normalized, []byte(`{"resolved":"qsv"}`), "sha256:ok", time.Now(), nil); err != nil {
+		t.Fatalf("UpdateCapabilities with a normalized URL: %v", err)
 	}
 }

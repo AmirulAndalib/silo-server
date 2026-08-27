@@ -299,3 +299,77 @@ func TestRefreshNodeCapabilitiesRefusesWhenAlreadyInFlight(t *testing.T) {
 		t.Fatalf("fetch calls = %d, want none while a refresh is in flight", got)
 	}
 }
+
+// DRM is free to hand the same card a different renderD number across a reboot.
+// Comparing enumeration paths alone then reports a GPU as gone, and because the
+// reboot moves boot_id it also triggers the refetch that persists the note — so
+// an operator sees a hardware regression for a card that never moved.
+func TestComputeCapabilityDriftMatchesRenumberedRenderDevices(t *testing.T) {
+	const before = `{"resolved":"qsv","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],` +
+		`"detected_backends":[{"backend":"qsv","verified":true}]}`
+	const after = `{"resolved":"qsv","render_devices":["/dev/dri/renderD129"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD129","pci_address":"0000:03:00.0"}],` +
+		`"detected_backends":[{"backend":"qsv","verified":true}]}`
+
+	drift, parsed := computeCapabilityDrift([]byte(before), []byte(after))
+	if !parsed {
+		t.Fatal("both reports should parse")
+	}
+	if drift.regressed() {
+		t.Fatalf("drift = %+v, want a renumbered path at the same PCI slot to be no regression", drift)
+	}
+}
+
+// A card that genuinely goes away has neither its path nor its slot in the new
+// report, and must still be caught.
+func TestComputeCapabilityDriftStillCatchesARemovedDevice(t *testing.T) {
+	const before = `{"resolved":"qsv","render_devices":["/dev/dri/renderD128","/dev/dri/renderD129"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"},` +
+		`{"path":"/dev/dri/renderD129","pci_address":"0000:04:00.0"}],` +
+		`"detected_backends":[{"backend":"qsv","verified":true}]}`
+	const after = `{"resolved":"qsv","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],` +
+		`"detected_backends":[{"backend":"qsv","verified":true}]}`
+
+	drift, parsed := computeCapabilityDrift([]byte(before), []byte(after))
+	if !parsed {
+		t.Fatal("both reports should parse")
+	}
+	if len(drift.lostDevices) != 1 || drift.lostDevices[0] != "/dev/dri/renderD129" {
+		t.Fatalf("lostDevices = %v, want the card at 0000:04:00.0 reported gone", drift.lostDevices)
+	}
+}
+
+// An NVIDIA uuid outranks the slot, so a card moved between slots is still the
+// same card.
+func TestComputeCapabilityDriftMatchesAMovedCardByUUID(t *testing.T) {
+	const before = `{"resolved":"nvenc","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0","gpu_uuid":"GPU-abc"}],` +
+		`"detected_backends":[{"backend":"nvenc","verified":true}]}`
+	const after = `{"resolved":"nvenc","render_devices":["/dev/dri/renderD130"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD130","pci_address":"0000:07:00.0","gpu_uuid":"GPU-abc"}],` +
+		`"detected_backends":[{"backend":"nvenc","verified":true}]}`
+
+	drift, parsed := computeCapabilityDrift([]byte(before), []byte(after))
+	if !parsed || drift.regressed() {
+		t.Fatalf("drift = %+v (parsed=%v), want the same uuid to be the same card", drift, parsed)
+	}
+}
+
+// A node that predates render_device_details reports paths only, and must still
+// be comparable.
+func TestComputeCapabilityDriftFallsBackToPathsWithoutDetails(t *testing.T) {
+	const before = `{"resolved":"qsv","render_devices":["/dev/dri/renderD128"],` +
+		`"detected_backends":[{"backend":"qsv","verified":true}]}`
+	const after = `{"resolved":"none","render_devices":[],` +
+		`"detected_backends":[{"backend":"qsv","verified":false}]}`
+
+	drift, parsed := computeCapabilityDrift([]byte(before), []byte(after))
+	if !parsed {
+		t.Fatal("both reports should parse")
+	}
+	if len(drift.lostDevices) != 1 || drift.lostDevices[0] != "/dev/dri/renderD128" {
+		t.Fatalf("lostDevices = %v, want the path-only device reported gone", drift.lostDevices)
+	}
+}

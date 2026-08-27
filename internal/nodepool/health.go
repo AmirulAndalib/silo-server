@@ -396,7 +396,18 @@ func (hc *HealthChecker) refreshCapabilities(ctx context.Context, n *Node, apply
 	note := resolveDriftNote(n.CapabilityDrift, drift, parsed, payload)
 	refreshedAt := time.Now()
 	if hc.repo != nil {
-		if err := hc.repo.UpdateCapabilities(ctx, n.ID, payload, hash, refreshedAt, note); err != nil {
+		// Fenced on the URL this payload was fetched from: the fetch is
+		// detached and bounded at two minutes, so the row may since have been
+		// repointed at a different worker.
+		if err := hc.repo.UpdateCapabilities(ctx, n.ID, n.URL, payload, hash, refreshedAt, note); err != nil {
+			if errors.Is(err, ErrNodeMoved) {
+				// Not a failure to report loudly: the node was edited or
+				// removed while this fetch ran, and the next sweep will fetch
+				// whatever the row addresses now.
+				slog.InfoContext(ctx, "discarded a capability report for a node that changed identity mid-fetch",
+					"component", "nodepool", "id", n.ID, "name", n.Name, "url", n.URL)
+				return err
+			}
 			slog.WarnContext(ctx, "failed to persist node capabilities", "component", "nodepool",
 				"id", n.ID, "name", n.Name, "error", err)
 			return err
@@ -434,6 +445,50 @@ type capabilityDriftView struct {
 		Skipped bool `json:"skipped"`
 	} `json:"detected_backends"`
 	RenderDevices []string `json:"render_devices"`
+	// RenderDeviceDetails carries each device's stable identity. Comparing
+	// enumeration paths alone reports a GPU as gone whenever DRM hands out a
+	// different renderD number, which a reboot is free to do; the uuid and the
+	// PCI slot survive that.
+	RenderDeviceDetails []struct {
+		Path       string `json:"path"`
+		PCIAddress string `json:"pci_address"`
+		GPUUUID    string `json:"gpu_uuid"`
+	} `json:"render_device_details"`
+}
+
+// renderDeviceIdentities maps each device in a report to the strongest identity
+// it published, and back to the path an operator recognizes it by.
+//
+// An NVIDIA uuid follows the card anywhere; a PCI slot survives re-enumeration
+// within a host; the path is the last resort and is all an older node reports.
+// Matching on the strongest available identity is what keeps a renumbered
+// renderD node from reading as a card that disappeared.
+func renderDeviceIdentities(view capabilityDriftView) map[string]string {
+	identities := make(map[string]string, len(view.RenderDevices))
+	covered := make(map[string]bool, len(view.RenderDeviceDetails))
+	for _, device := range view.RenderDeviceDetails {
+		identity := device.GPUUUID
+		if identity == "" {
+			identity = device.PCIAddress
+		}
+		if identity == "" {
+			identity = device.Path
+		}
+		if identity == "" {
+			continue
+		}
+		identities[identity] = device.Path
+		covered[device.Path] = true
+	}
+	// A report that lists paths without details (a node predating them) still
+	// has to be comparable, so any uncovered path is its own identity.
+	for _, path := range view.RenderDevices {
+		if path == "" || covered[path] {
+			continue
+		}
+		identities[path] = path
+	}
+	return identities
 }
 
 // capabilityDrift is what a refetch lost relative to the report it replaces.
@@ -593,11 +648,18 @@ func computeCapabilityDrift(stored, payload []byte) (drift capabilityDrift, pars
 			drift.lostBackends = append(drift.lostBackends, backend.Backend)
 		}
 	}
-	for _, device := range previous.RenderDevices {
-		if !slices.Contains(current.RenderDevices, device) {
-			drift.lostDevices = append(drift.lostDevices, device)
+	currentDevices := renderDeviceIdentities(current)
+	for identity, path := range renderDeviceIdentities(previous) {
+		if _, present := currentDevices[identity]; present {
+			continue
 		}
+		if path == "" {
+			path = identity
+		}
+		drift.lostDevices = append(drift.lostDevices, path)
 	}
+	// Map iteration is unordered, and this note is persisted and compared.
+	slices.Sort(drift.lostDevices)
 	return drift, true
 }
 
