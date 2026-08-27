@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { AudioLines, CircleAlert, ExternalLink, Languages } from "lucide-react";
 import { toast } from "sonner";
 
@@ -8,6 +8,7 @@ import { ProviderTile, ProviderTileGrid } from "@/components/settings/ProviderTi
 import type { ProviderTileState } from "@/components/settings/ProviderTile";
 import { SecretField } from "@/components/settings/SecretField";
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
+import { SettingsSubheading } from "@/components/settings/SettingsSubheading";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useCheckAdminSettingsConnection } from "@/hooks/queries/admin/settings";
@@ -163,7 +164,11 @@ function testedLabel(test: AITestState): string {
   return `Tested ${ago} · ${test.durationMs} ms`;
 }
 
-/** The action row shared by both model tiles. */
+/**
+ * The action row shared by both model tiles. Both controls carry a border or a
+ * fill at rest: a `ghost` button reads as plain text until it is hovered, which
+ * hid Close from admins who never hovered it.
+ */
 function ModelPanelActions({
   testLabel,
   pendingLabel,
@@ -188,33 +193,61 @@ function ModelPanelActions({
   test: AITestState | undefined;
 }) {
   return (
-    <div className="mt-3.5 flex flex-wrap items-center gap-2">
-      <Button
-        type="button"
-        size="sm"
-        variant="outline"
-        onClick={onTest}
-        disabled={testDisabled || isTesting}
-      >
-        {isTesting ? pendingLabel : testLabel}
-      </Button>
-      {canCollapse ? (
-        <Button type="button" size="sm" variant="ghost" onClick={onCollapse}>
-          Close
-        </Button>
-      ) : null}
+    // Buttons right-aligned to match the collapsed tile's Manage button (and
+    // the shared ProviderPanelActions); the test status takes the left side.
+    <div className="mt-3.5 flex flex-wrap items-center justify-end gap-2">
       {test ? (
         <span
           role="status"
           aria-live="polite"
           className={cn(
-            "ml-auto text-[11.5px]",
+            "mr-auto text-[11.5px]",
             test.ok ? "text-muted-foreground" : "text-amber-600 dark:text-amber-400",
           )}
         >
           {test.ok ? `${test.message} · ${testedLabel(test)}` : test.message}
         </span>
       ) : null}
+      <Button
+        type="button"
+        size="sm"
+        variant="secondary"
+        onClick={onTest}
+        disabled={testDisabled || isTesting}
+      >
+        {isTesting ? pendingLabel : testLabel}
+      </Button>
+      {canCollapse ? (
+        <Button type="button" size="sm" variant="outline" onClick={onCollapse}>
+          Close
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * A labelled cluster inside the Advanced disclosure. The tuning fields mix two
+ * scopes — server-wide dispatch/batching and a per-login-account quota — and
+ * nothing on the row itself says which is which, so the scope is stated once
+ * per cluster instead of being repeated (or omitted) field by field.
+ *
+ * One element per cluster also means the disclosure's child rule draws a single
+ * hairline between the two, with the rows keeping their own inside each.
+ */
+function TuningScope({
+  label,
+  caption,
+  children,
+}: {
+  label: string;
+  caption: string;
+  children: ReactNode;
+}) {
+  return (
+    <div>
+      <SettingsSubheading caption={caption}>{label}</SettingsSubheading>
+      {children}
     </div>
   );
 }
@@ -534,6 +567,8 @@ export default function AISettings() {
     (asrBaseURL.trim() !== "" || textBaseURL.trim() !== "") && asrModel.trim() !== "";
   const speechCompatible = !isChatOnlyGateway(speechUsesTextEndpoint ? textBaseURL : asrBaseURL);
   const speechReady = speechCheckable && speechCompatible;
+  const subtitleTranslateEnabled = value("subtitle_ai.enabled", "false") === "true";
+  const transcribeEnabled = value("subtitle_ai.transcribe_enabled", "false") === "true";
   const descriptionEnabled = value("metadata_ai.enabled", "false") === "true";
   const textDirty = TEXT_AI_KEYS.some((key) => form.isDirty(key));
   const speechDirty = SPEECH_ONLY_KEYS.some((key) => form.isDirty(key));
@@ -643,7 +678,7 @@ export default function AISettings() {
 
       <FieldGroup label="Models">
         <div className="py-3.5">
-          <ProviderTileGrid className="xl:grid-cols-2">
+          <ProviderTileGrid>
             <TextModelTile
               baseURL={textBaseURL}
               chatModel={chatModel}
@@ -691,12 +726,24 @@ export default function AISettings() {
       </FieldGroup>
 
       <FieldGroup label="Features">
+        <p className="text-muted-foreground py-3.5 text-xs leading-relaxed">
+          Nothing here runs on a schedule: subtitle work starts when a viewer or admin asks for a
+          track, and description translation when an admin queues it or a viewer opens a detail
+          page.
+        </p>
+        {/*
+          A feature whose model is not configured only queues jobs that fail at
+          the provider, so its switch is disabled until the model is ready. One
+          that is already on stays switchable, so a degraded provider can be
+          turned off without being fixed first.
+        */}
         <SettingField
           label="Translate subtitles"
           type="toggle"
           value={value("subtitle_ai.enabled", "false")}
           onChange={(next) => setValue("subtitle_ai.enabled", next)}
-          description="Turns an existing subtitle track into another language."
+          description="Turns an existing subtitle track into another language, on request."
+          disabled={!textReady && !subtitleTranslateEnabled}
           status={
             textReady ? undefined : (
               <SettingFieldStatus tone="warn">Needs the text model</SettingFieldStatus>
@@ -709,7 +756,8 @@ export default function AISettings() {
           type="toggle"
           value={value("subtitle_ai.transcribe_enabled", "false")}
           onChange={(next) => setValue("subtitle_ai.transcribe_enabled", next)}
-          description="Writes timed subtitles from the audio track."
+          description="Writes timed subtitles from the audio track, on request."
+          disabled={!speechReady && !transcribeEnabled}
           status={
             speechReady ? undefined : (
               <SettingFieldStatus tone="warn">Needs speech-to-text</SettingFieldStatus>
@@ -722,7 +770,8 @@ export default function AISettings() {
           type="toggle"
           value={value("metadata_ai.enabled", "false")}
           onChange={(next) => setValue("metadata_ai.enabled", next)}
-          description="Translates overviews and taglines."
+          description="Translates overviews and taglines for the items an admin or viewer asks for."
+          disabled={!textReady && !descriptionEnabled}
           status={
             textReady ? undefined : (
               <SettingFieldStatus tone="warn">Needs the text model</SettingFieldStatus>
@@ -751,56 +800,71 @@ export default function AISettings() {
           count={AI_ADVANCED_KEYS.length}
           forceOpen={advancedChangedCount > 0}
         >
-          <SettingField
-            label="Jobs running at once"
-            type="number"
-            value={effectiveValue("ai.max_concurrent_jobs", "subtitle_ai.max_concurrent_jobs", "2")}
-            onChange={(next) => setValue("ai.max_concurrent_jobs", next)}
-            description="Shared by every AI job."
-            restartRequired={restartKeys.has("ai.max_concurrent_jobs")}
-          />
-          <SettingField
-            label="Subtitle lines per request"
-            type="number"
-            value={value("subtitle_ai.batch_size", "40")}
-            onChange={(next) => setValue("subtitle_ai.batch_size", next)}
-            restartRequired={restartKeys.has("subtitle_ai.batch_size")}
-          />
-          <SettingField
-            label="Surrounding lines sent for context"
-            type="number"
-            value={value("subtitle_ai.context_neighbors", "2")}
-            onChange={(next) => setValue("subtitle_ai.context_neighbors", next)}
-            restartRequired={restartKeys.has("subtitle_ai.context_neighbors")}
-          />
-          <SettingField
-            label="Audio per request"
-            type="number"
-            unit="seconds"
-            value={value("subtitle_ai.asr_chunk_seconds", "600")}
-            onChange={(next) => setValue("subtitle_ai.asr_chunk_seconds", next)}
-            description="Between 60 and 600."
-            restartRequired={restartKeys.has("subtitle_ai.asr_chunk_seconds")}
-          />
-          <LimitField
-            label="Transcriptions per account"
-            value={value("subtitle_ai.transcribe_quota_jobs", "0")}
-            onChange={(next) => setValue("subtitle_ai.transcribe_quota_jobs", next)}
-            fallbackValue="10"
-            hint="Shared by every profile on the account."
-            restartRequired={restartKeys.has("subtitle_ai.transcribe_quota_jobs")}
-          />
-          <SettingField
-            label="Allowance resets"
-            type="select"
-            value={value("subtitle_ai.transcribe_quota_period", "day")}
-            onChange={(next) => setValue("subtitle_ai.transcribe_quota_period", next)}
-            options={QUOTA_PERIODS.map((period) => ({
-              value: period,
-              label: `Per ${period} (rolling ${QUOTA_PERIOD_WINDOW_LABELS[period]})`,
-            }))}
-            restartRequired={restartKeys.has("subtitle_ai.transcribe_quota_period")}
-          />
+          <TuningScope
+            label="Server-wide tuning"
+            caption="One setting for the whole server, whoever the job belongs to."
+          >
+            <SettingField
+              label="Jobs running at once"
+              type="number"
+              value={effectiveValue(
+                "ai.max_concurrent_jobs",
+                "subtitle_ai.max_concurrent_jobs",
+                "2",
+              )}
+              onChange={(next) => setValue("ai.max_concurrent_jobs", next)}
+              description="One budget shared by every AI job on the server."
+              restartRequired={restartKeys.has("ai.max_concurrent_jobs")}
+            />
+            <SettingField
+              label="Subtitle lines per request"
+              type="number"
+              value={value("subtitle_ai.batch_size", "40")}
+              onChange={(next) => setValue("subtitle_ai.batch_size", next)}
+              restartRequired={restartKeys.has("subtitle_ai.batch_size")}
+            />
+            <SettingField
+              label="Surrounding lines sent for context"
+              type="number"
+              value={value("subtitle_ai.context_neighbors", "2")}
+              onChange={(next) => setValue("subtitle_ai.context_neighbors", next)}
+              restartRequired={restartKeys.has("subtitle_ai.context_neighbors")}
+            />
+            <SettingField
+              label="Audio per request"
+              type="number"
+              unit="seconds"
+              value={value("subtitle_ai.asr_chunk_seconds", "600")}
+              onChange={(next) => setValue("subtitle_ai.asr_chunk_seconds", next)}
+              description="Between 60 and 600."
+              restartRequired={restartKeys.has("subtitle_ai.asr_chunk_seconds")}
+            />
+          </TuningScope>
+          <TuningScope
+            label="Per-account limits"
+            caption="Counted per login account, shared by every profile on it."
+          >
+            <LimitField
+              label="Transcriptions per account"
+              value={value("subtitle_ai.transcribe_quota_jobs", "0")}
+              onChange={(next) => setValue("subtitle_ai.transcribe_quota_jobs", next)}
+              fallbackValue="10"
+              hint="Every profile on the account draws from this one allowance."
+              restartRequired={restartKeys.has("subtitle_ai.transcribe_quota_jobs")}
+            />
+            <SettingField
+              label="Allowance resets"
+              type="select"
+              value={value("subtitle_ai.transcribe_quota_period", "day")}
+              onChange={(next) => setValue("subtitle_ai.transcribe_quota_period", next)}
+              options={QUOTA_PERIODS.map((period) => ({
+                value: period,
+                label: `Per ${period} (rolling ${QUOTA_PERIOD_WINDOW_LABELS[period]})`,
+              }))}
+              description="Rolling window for the transcription allowance above."
+              restartRequired={restartKeys.has("subtitle_ai.transcribe_quota_period")}
+            />
+          </TuningScope>
         </AdvancedSection>
       </FieldGroup>
 

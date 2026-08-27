@@ -9,6 +9,50 @@ This document is new and covers only the routes listed below. The rest of the
 admin surface predates it and is currently documented by the code and by the
 design documents under `docs/design/`.
 
+## Branding assets
+
+Four uploadable images white-label the server: the sidebar wordmark, the square
+mark (collapsed sidebar and installed PWA), the browser favicon, and the login
+background. Each is stored in the public S3 bucket and referenced from a
+`server_settings` row, so uploads return `503 unavailable` until
+`s3.public_bucket` is configured.
+
+| Route | Auth | Purpose |
+|---|---|---|
+| `POST /api/v1/admin/branding/assets/{kind}` | admin | Upload (multipart, field name `file`). Replaces whatever is stored. |
+| `DELETE /api/v1/admin/branding/assets/{kind}` | admin | Clear the asset. `204`, and clearing an unset asset is not an error. |
+| `GET /api/v1/branding/assets/{kind}` | public | Serve the stored bytes. Content-addressed, so `immutable` cached. |
+| `GET /api/v1/theme/branding` | public | Current branding, including each asset URL (omitted when unset). |
+
+Public reads are deliberately unauthenticated: branding has to apply on the
+login page, before anyone has a session.
+
+`{kind}` is one of `wordmark`, `mark`, `favicon`, `login_bg`. Uploads are
+processed per kind — the numbers below are the contract the admin UI quotes back
+to the operator, and they live in `internal/branding/assets.go`:
+
+| Kind | Accepts | Max upload | Stored as |
+|---|---|---|---|
+| `wordmark` | PNG, JPEG, WebP | 8 MB | WebP, aspect preserved, capped at 640px wide. Narrower art is not enlarged. |
+| `mark` | PNG, JPEG, WebP | 8 MB | WebP, center-cropped to a square, then forced to exactly 512×512 (smaller art is upscaled). |
+| `favicon` | PNG, WebP, ICO, SVG | 1 MB | Byte-for-byte as uploaded, so `.ico` and `.svg` keep working in browsers that will not render a WebP favicon. |
+| `login_bg` | PNG, JPEG, WebP | 12 MB | WebP, aspect preserved, capped at 2560px wide. Clients display it cover-cropped. |
+
+There is one stored variant per kind, not a responsive set: the PWA manifest
+advertises the single 512px mark at both 192×192 and 512×512, and native clients
+read the same URLs as the web app. Recommend source art at or above the stored
+size — anything larger is downscaled, anything smaller is either left small
+(wordmark, login background) or upscaled (mark).
+
+Failure modes: `400 bad_request` for an unknown kind, a missing `file` field, or
+a content type the kind does not accept; `413 too_large` past the cap;
+`503 unavailable` when asset storage is not configured.
+
+Uploaded SVG favicons are admin-controlled but served from the app origin, so
+every asset response carries `X-Content-Type-Options: nosniff` and a sandboxing
+`Content-Security-Policy` — a directly-navigated SVG cannot run script in the
+viewer's session.
+
 ## `GET /api/v1/admin/stream-telemetry/parity`
 
 Returns the merged stream-telemetry view beside the two legacy live-session

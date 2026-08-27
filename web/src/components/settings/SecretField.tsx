@@ -1,7 +1,8 @@
 import { useId } from "react";
 
 import { Input } from "@/components/ui/input";
-import { SettingFieldRow } from "@/pages/admin-settings/SettingField";
+import { cn } from "@/lib/utils";
+import { SETTINGS_CONTROL_WIDTH, SettingFieldRow } from "@/pages/admin-settings/SettingField";
 
 export interface SecretFieldProps {
   label: string;
@@ -70,7 +71,7 @@ export function SecretField({
         value={value}
         onChange={(e) => handleChange(e.target.value)}
         disabled={disabled}
-        className="border-muted-foreground/25 w-full sm:w-60"
+        className={cn("border-muted-foreground/25", SETTINGS_CONTROL_WIDTH)}
         aria-describedby={description ? hintId : undefined}
       />
     </SettingFieldRow>

@@ -7,6 +7,7 @@ import type {
 } from "@/api/types";
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
+import { SettingsSubheading } from "@/components/settings/SettingsSubheading";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -18,12 +19,18 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useRateLimitConfig, useUpdateRateLimitConfig } from "@/hooks/queries/admin/rateLimits";
-import { useAdminServerStatus } from "@/hooks/queries/admin/settings";
 import { useRestartKeys } from "@/hooks/useRestartKeys";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
+import { cn } from "@/lib/utils";
 import { FieldGroup } from "./FieldGroup";
-import { RestartBanner, SaveBar } from "./SaveBar";
-import { SettingField, SettingFieldRow } from "./SettingField";
+import { SaveBar } from "./SaveBar";
+import {
+  SETTINGS_CONTROL_WIDTH,
+  SETTINGS_NUMBER_WIDTH,
+  SettingField,
+  SettingFieldRow,
+  SettingFieldStatus,
+} from "./SettingField";
 
 // Sign-in lifetimes and proxy trust go through the batched settings endpoint.
 // Rate limits do not: they live behind /admin/rate-limits/config and the batch
@@ -161,11 +168,26 @@ export default function SecurityAccessSettings() {
   const restartKeys = useRestartKeys();
   const allRestart = (keys: string[]) => keys.every((key) => restartKeys.has(key));
   const { data: serverConfig, isLoading: rateLimitsLoading } = useRateLimitConfig();
-  // Already fetched (and cached) by the settings shell for its own banner.
-  const { data: serverStatus } = useAdminServerStatus();
   const updateConfig = useUpdateRateLimitConfig();
 
   const trustedProxiesManaged = form.sensitiveManagedByEnv.includes("clientip.trusted_proxies");
+
+  // The save endpoint rejects the Redis backend unless Redis is configured, so
+  // mirror that rule on the option itself. The server stays the source of
+  // truth; an older response without the field leaves the option enabled.
+  const redisSelectable = serverConfig?.redis_available !== false;
+
+  // Drift the shared restart banner cannot see: what the limiter in this
+  // process actually runs with, straight from the GET response. The
+  // restart_required flag only covers staged saves — a limiter that failed to
+  // apply the saved backend at boot (say, Redis was unreachable) drifts
+  // without the flag, and a restart alone may not fix it, so the hint states
+  // the mismatch instead of prescribing a restart.
+  const savedBackend = serverConfig?.backend || "memory";
+  const limiterInactive = serverConfig?.enabled === true && serverConfig.active === false;
+  const runningBackend = serverConfig?.active === true ? serverConfig.active_backend : undefined;
+  const runningBackendDiffers = Boolean(runningBackend) && runningBackend !== savedBackend;
+  const backendNoun = (backend?: string) => (backend === "redis" ? "Redis" : "in-memory");
 
   const hydratedConfig = useMemo<RateLimitConfig>(() => {
     if (!serverConfig) return DEFAULT_CONFIG;
@@ -248,16 +270,6 @@ export default function SecurityAccessSettings() {
   const advancedCount =
     2 + 3 + Object.keys(TIER_LABELS).length * 3 + Object.keys(AUTH_ENDPOINT_LABELS).length * 2;
 
-  // The limiter only starts (and only switches backend) at boot, so the saved
-  // config can disagree with what this process is actually enforcing.
-  const limiterNeedsRestart =
-    (!!serverConfig &&
-      ((serverConfig.enabled && serverConfig.active === false) ||
-        (serverConfig.active === true &&
-          !!serverConfig.active_backend &&
-          serverConfig.backend !== serverConfig.active_backend))) ||
-    updateConfig.data?.restart_required === true;
-
   async function handleSave() {
     if (rateLimitsDirty) updateConfig.mutate(config);
     if (form.dirtyCount > 0) await form.save();
@@ -333,6 +345,14 @@ export default function SecurityAccessSettings() {
             value={config.enabled ? "true" : "false"}
             onChange={(v) => updateConfigState((prev) => ({ ...prev, enabled: v === "true" }))}
             disabled={savingRateLimits}
+            status={
+              limiterInactive ? (
+                <SettingFieldStatus tone="warn">
+                  Enabled, but no limiter is running in this process — it may have failed to start.
+                  Check the server logs.
+                </SettingFieldStatus>
+              ) : undefined
+            }
           />
 
           <AdvancedSection
@@ -343,7 +363,20 @@ export default function SecurityAccessSettings() {
             <SettingFieldRow
               label="Where counters are kept"
               htmlFor="rate-limit-backend"
-              description="Redis shares counters across servers, after a restart."
+              description={
+                redisSelectable
+                  ? "Redis shares counters across servers, after a restart."
+                  : "Redis shares counters across servers, after a restart. Configure Redis under Infrastructure first."
+              }
+              status={
+                runningBackendDiffers ? (
+                  <SettingFieldStatus tone="warn">
+                    The running limiter is using {backendNoun(runningBackend)} counters, not the
+                    saved {backendNoun(savedBackend)} backend. If a restart does not fix it, check
+                    that the saved backend is reachable.
+                  </SettingFieldStatus>
+                ) : undefined
+              }
             >
               <Select
                 value={config.backend}
@@ -352,12 +385,14 @@ export default function SecurityAccessSettings() {
                 }
                 disabled={savingRateLimits}
               >
-                <SelectTrigger id="rate-limit-backend" className="w-full sm:w-48">
+                <SelectTrigger id="rate-limit-backend" className={SETTINGS_CONTROL_WIDTH}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="memory">This server only</SelectItem>
-                  <SelectItem value="redis">Shared via Redis</SelectItem>
+                  <SelectItem value="redis" disabled={!redisSelectable}>
+                    Shared via Redis
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </SettingFieldRow>
@@ -366,6 +401,10 @@ export default function SecurityAccessSettings() {
               label="Whole-server limit"
               htmlFor="global-rps"
               description="Ceiling across every rate-limited route."
+              // The row's unit slot rather than a span beside the input: the
+              // triad rows below have no unit, and an inline one here would
+              // push this box off the column they share.
+              unit="per second"
             >
               <Input
                 id="global-rps"
@@ -378,9 +417,8 @@ export default function SecurityAccessSettings() {
                   )(e.target.value)
                 }
                 disabled={savingRateLimits}
-                className="w-full text-right tabular-nums sm:w-40"
+                className={cn("text-right tabular-nums", SETTINGS_NUMBER_WIDTH)}
               />
-              <span className="text-muted-foreground text-xs">requests/second</span>
             </SettingFieldRow>
 
             <RateTriadRow
@@ -434,9 +472,7 @@ export default function SecurityAccessSettings() {
               );
             })}
 
-            <div className="py-3.5">
-              <p className="text-sm font-medium">Sign-in and webhook endpoints</p>
-            </div>
+            <SettingsSubheading>Sign-in and webhook endpoints</SettingsSubheading>
             {Object.keys(AUTH_ENDPOINT_LABELS).map((endpoint) => {
               const epConfig = config.auth_endpoints[endpoint] ?? DEFAULT_AUTH_ENDPOINT;
               return (
@@ -467,17 +503,6 @@ export default function SecurityAccessSettings() {
         onDiscard={handleDiscard}
         isSaving={form.isSaving || savingRateLimits}
       />
-
-      {/* The limiter has its own reason to restart (it only reads its backend at
-          boot), but the shell already pins one banner to the bottom of the
-          viewport — a second one would land on top of it, and both drive the
-          same `--settings-dock-offset`. Only speak when the shell is silent. */}
-      {serverStatus?.restart_required ? null : (
-        <RestartBanner
-          restartRequired={limiterNeedsRestart}
-          description="The running rate limiter is not using the saved backend."
-        />
-      )}
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, ArrowRight } from "lucide-react";
 import { Link } from "react-router";
 
 import type { ConnectionCheckResponse } from "@/api/types";
@@ -13,7 +13,7 @@ import { useCheckAdminSettingsConnection } from "@/hooks/queries/admin/settings"
 import { useRestartKeys } from "@/hooks/useRestartKeys";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
 import { FieldGroup } from "./FieldGroup";
-import { MarkerProviderCards, MarkerTasksCard } from "./MarkerProviderSettings";
+import { MarkerTasksCard } from "./MarkerTasksCard";
 import { SaveBar } from "./SaveBar";
 import { SearchStatusPanel } from "./SearchStatusPanel";
 import { SettingField } from "./SettingField";
@@ -178,11 +178,28 @@ export default function LibraryMetadataSettings() {
           </AdvancedSection>
         </FieldGroup>
 
-        <FieldGroup label="Intro and credits markers" restartAll={allRestart(MARKER_KEYS)}>
+        {/*
+          Detection behavior lives here; which online providers answer a lookup,
+          and on what terms, is provider configuration and lives with the other
+          providers.
+        */}
+        <FieldGroup
+          label="Intro and credits markers"
+          restartAll={allRestart(MARKER_KEYS)}
+          actions={
+            <Link
+              to="/admin/settings/providers"
+              className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1.5 text-xs font-medium transition-colors"
+            >
+              Marker providers
+              <ArrowRight className="h-3 w-3" aria-hidden="true" />
+            </Link>
+          }
+        >
           <SettingField
             label="Find intros and credits"
             type="select"
-            description="Detecting on this server costs CPU."
+            description="Detecting on this server utilizes CPU. Looking online uses the marker providers set up on the Subtitles & Metadata page."
             options={[
               { value: "off", label: "Off" },
               { value: "local", label: "Detect on this server" },
@@ -194,21 +211,14 @@ export default function LibraryMetadataSettings() {
             restartRequired={restartKeys.has("markers.mode")}
           />
 
-          <AdvancedSection
-            id="library.markers"
-            count={2}
-            forceOpen={form.isDirty("markers.lazy_playback")}
-          >
-            <SettingField
-              label="Look up missing markers when playback starts"
-              type="toggle"
-              description="Can delay the first few seconds of playback."
-              value={form.getValue("markers.lazy_playback") || "false"}
-              onChange={(value) => form.setValue("markers.lazy_playback", value)}
-              restartRequired={restartKeys.has("markers.lazy_playback")}
-            />
-            <MarkerProviderCards />
-          </AdvancedSection>
+          <SettingField
+            label="Fetch markers on playback"
+            type="toggle"
+            description="Uses the enabled marker providers to look up missing markers when playback starts. Can delay the first few seconds."
+            value={form.getValue("markers.lazy_playback") || "false"}
+            onChange={(value) => form.setValue("markers.lazy_playback", value)}
+            restartRequired={restartKeys.has("markers.lazy_playback")}
+          />
 
           <div className="py-3.5">
             <MarkerTasksCard />
@@ -219,7 +229,7 @@ export default function LibraryMetadataSettings() {
           <SettingField
             label="Search engine"
             type="select"
-            description="Meilisearch tolerates typos but runs as its own service."
+            description="Meilisearch tolerates typos but runs as its own service. If it goes down, search falls back to the built-in engine automatically."
             value={provider}
             onChange={(value) => form.setValue("catalog.search.provider", value)}
             options={[
@@ -249,14 +259,12 @@ export default function LibraryMetadataSettings() {
                 disabled={!meiliEnabled}
                 restartRequired={restartKeys.has(MEILI_API_KEY)}
               />
-              <div className="py-3">
-                <ConnectionCheckAction
-                  onClick={handleCheckConnection}
-                  result={connectionResult}
-                  isPending={checkConnection.isPending}
-                  disabled={!meiliEnabled}
-                />
-              </div>
+              <ConnectionCheckAction
+                onClick={handleCheckConnection}
+                result={connectionResult}
+                isPending={checkConnection.isPending}
+                disabled={!meiliEnabled}
+              />
 
               <AdvancedSection
                 id="library.search.meilisearch"

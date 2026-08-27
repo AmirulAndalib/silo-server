@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -129,9 +130,14 @@ type playbackProbeFileRepository interface {
 // PlaybackProbeEnsurer repairs missing playback-critical probe metadata on
 // demand by running a local ffprobe and persisting the result.
 type PlaybackProbeEnsurer struct {
-	fileRepo    playbackProbeFileRepository
+	fileRepo playbackProbeFileRepository
+	// ffprobePath and ffmpegPath are the binaries captured when the ensurer was
+	// built. They are the fallback only: livePaths, once SetFFmpegPath has been
+	// called, supersedes them so a changed playback.ffmpeg_path reaches probe
+	// repair and the copy-safety scan without a server restart.
 	ffprobePath string
 	ffmpegPath  string
+	livePaths   atomic.Pointer[probeBinaries]
 	timeout     time.Duration
 	// probeFile is the ffprobe entry point; nil means the package's ProbeFile.
 	// Tests substitute it to drive the coalescing behavior deterministically.
@@ -194,6 +200,42 @@ func NewPlaybackProbeEnsurer(fileRepo *FileRepository, ffprobePath, ffmpegPath s
 	return e
 }
 
+// probeBinaries is the pair of executables a probe run needs. They move
+// together because both are derived from the single playback.ffmpeg_path
+// setting.
+type probeBinaries struct {
+	ffprobePath string
+	ffmpegPath  string
+}
+
+// SetFFmpegPath points probe repair and the copy-safety scan at a different
+// FFmpeg install. Wiring it to the config watcher is what lets a changed
+// playback.ffmpeg_path take effect without restarting the server. An in-flight
+// probe keeps the binary it started with; the next one picks up the new path.
+func (e *PlaybackProbeEnsurer) SetFFmpegPath(ffmpegPath string) {
+	if e == nil {
+		return
+	}
+	ffmpegPath = strings.TrimSpace(ffmpegPath)
+	e.livePaths.Store(&probeBinaries{
+		ffprobePath: FFprobePathFromFFmpeg(ffmpegPath),
+		ffmpegPath:  ffmpegPath,
+	})
+}
+
+// binaries returns the executables this probe run should use: the live
+// configuration when one has been installed, otherwise the pair captured at
+// construction.
+func (e *PlaybackProbeEnsurer) binaries() probeBinaries {
+	if e == nil {
+		return probeBinaries{}
+	}
+	if live := e.livePaths.Load(); live != nil {
+		return *live
+	}
+	return probeBinaries{ffprobePath: e.ffprobePath, ffmpegPath: e.ffmpegPath}
+}
+
 // Ensure repairs playback-critical probe metadata and resolves the H.264
 // copy-safety verdict. Use it where a play is being prepared — the planner
 // consumes the verdict to decide whether a video stream-copy is safe.
@@ -249,7 +291,7 @@ func (e *PlaybackProbeEnsurer) EnsureCopySafetyCached(ctx context.Context, file 
 // real work for this file: an H.264 video whose verdict is neither cached nor
 // persisted, on a server that has an ffmpeg to scan with.
 func (e *PlaybackProbeEnsurer) NeedsCopySafetyScan(file *models.MediaFile) bool {
-	if e == nil || strings.TrimSpace(e.ffmpegPath) == "" || !needsCopySafetyProbe(file) {
+	if e == nil || strings.TrimSpace(e.binaries().ffmpegPath) == "" || !needsCopySafetyProbe(file) {
 		return false
 	}
 	_, known := e.knownCopySafetyVerdict(file)
@@ -269,7 +311,7 @@ func (e *PlaybackProbeEnsurer) ScanCopySafety(ctx context.Context, file *models.
 	if e == nil || file == nil {
 		return false, false, nil
 	}
-	if strings.TrimSpace(e.ffmpegPath) == "" {
+	if strings.TrimSpace(e.binaries().ffmpegPath) == "" {
 		return false, false, errCopySafetyScanUnavailable
 	}
 	return e.scanAndPersistCopySafety(ctx, file)
@@ -325,7 +367,7 @@ func (e *PlaybackProbeEnsurer) ensureProbeRepair(ctx context.Context, file *mode
 	}
 
 	current := file
-	if NeedsCriticalProbeRepair(file) && strings.TrimSpace(e.ffprobePath) != "" {
+	if NeedsCriticalProbeRepair(file) && strings.TrimSpace(e.binaries().ffprobePath) != "" {
 		repaired, err := e.ensureCriticalProbe(ctx, file)
 		if err != nil {
 			return file, err
@@ -386,7 +428,7 @@ func (e *PlaybackProbeEnsurer) ensureCriticalProbe(ctx context.Context, file *mo
 		if probeFile == nil {
 			probeFile = ProbeFile
 		}
-		probe, err := probeFile(probeCtx, e.ffprobePath, current.FilePath)
+		probe, err := probeFile(probeCtx, e.binaries().ffprobePath, current.FilePath)
 		if err != nil || probe == nil {
 			return nil, err
 		}
@@ -415,7 +457,7 @@ func (e *PlaybackProbeEnsurer) ensureCriticalProbe(ctx context.Context, file *mo
 // media_files row, and only then runs the bitstream scan — so a restart no
 // longer re-reads the opening seconds of every browsed H.264 file.
 func (e *PlaybackProbeEnsurer) ensureCopySafety(ctx context.Context, file *models.MediaFile) (*models.MediaFile, error) {
-	if !needsCopySafetyProbe(file) || strings.TrimSpace(e.ffmpegPath) == "" {
+	if !needsCopySafetyProbe(file) || strings.TrimSpace(e.binaries().ffmpegPath) == "" {
 		return file, nil
 	}
 
@@ -501,7 +543,7 @@ func (e *PlaybackProbeEnsurer) scanAndPersistCopySafety(ctx context.Context, fil
 			timeout = 30 * time.Second
 		}
 		scanCtx, cancel := context.WithTimeout(ctx, timeout)
-		multi, err := DetectMultiplePPSH264(scanCtx, e.ffmpegPath, filePath)
+		multi, err := DetectMultiplePPSH264(scanCtx, e.binaries().ffmpegPath, filePath)
 		cancel()
 		if err != nil {
 			return copySafetyOutcome{}, err

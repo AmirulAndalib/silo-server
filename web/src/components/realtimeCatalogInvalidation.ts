@@ -3,14 +3,16 @@ import { adminKeys, libraryKeys } from "@/hooks/queries/keys";
 import { invalidateMediaSurfaceQueries } from "@/hooks/queries/mediaSurfaceRefresh";
 import { bumpHomeRefreshSignal } from "@/pages/homeSurfaceRefresh";
 
+export interface CatalogInvalidationOptions {
+  itemId?: string;
+  libraryId?: number;
+  allowDashboardRefetch: boolean;
+  includeLibraryLists?: boolean;
+}
+
 export function invalidateCatalogState(
   queryClient: QueryClient,
-  options: {
-    itemId?: string;
-    libraryId?: number;
-    allowDashboardRefetch: boolean;
-    includeLibraryLists?: boolean;
-  },
+  options: CatalogInvalidationOptions,
 ) {
   const { itemId, libraryId, allowDashboardRefetch, includeLibraryLists = true } = options;
   void invalidateMediaSurfaceQueries(queryClient, { itemId, libraryId }).then(() => {
@@ -28,4 +30,118 @@ export function invalidateCatalogState(
     queryKey: adminKeys.stats(),
     refetchType: allowDashboardRefetch ? "active" : "none",
   });
+}
+
+/**
+ * A scan emits one catalog event per file it touches. Running the full
+ * invalidation sweep for each of them refetches every open surface hundreds of
+ * times a minute for data that is still changing, so events are coalesced into
+ * one sweep per window.
+ */
+export const CATALOG_INVALIDATION_WINDOW_MS = 2_000;
+
+interface PendingCatalogInvalidation {
+  itemIds: Set<string>;
+  libraryIds: Set<number>;
+  hasUnscopedEvent: boolean;
+  allowDashboardRefetch: boolean;
+  includeLibraryLists: boolean;
+}
+
+export interface CatalogInvalidationScheduler {
+  /** Invalidates now if the window is open, otherwise folds into its flush. */
+  schedule: (options: CatalogInvalidationOptions) => void;
+  /** Drops anything still queued. Call on teardown. */
+  cancel: () => void;
+}
+
+/**
+ * Throttles catalog invalidation to one sweep per window, with the first event
+ * after an idle period applied immediately so an isolated change (a single
+ * metadata edit) still lands without delay.
+ *
+ * Merging widens rather than narrows: a window that saw two libraries, or any
+ * event with no library at all, flushes unscoped, and a window that saw several
+ * items drops the per-item keys — the broad `items`/`catalog` invalidations
+ * inside `invalidateMediaSurfaceQueries` already cover every item detail.
+ */
+export function createCatalogInvalidationScheduler(
+  queryClient: QueryClient,
+  windowMs: number = CATALOG_INVALIDATION_WINDOW_MS,
+): CatalogInvalidationScheduler {
+  let windowTimer: number | undefined;
+  let pending: PendingCatalogInvalidation | null = null;
+
+  const flush = () => {
+    const batch = pending;
+    pending = null;
+    windowTimer = window.setTimeout(onWindowClosed, windowMs);
+    if (batch) {
+      invalidateCatalogState(queryClient, resolveBatch(batch));
+    }
+  };
+
+  const onWindowClosed = () => {
+    windowTimer = undefined;
+    if (pending) flush();
+  };
+
+  return {
+    schedule(options) {
+      pending = mergeCatalogInvalidation(pending, options);
+      if (windowTimer === undefined) flush();
+    },
+    cancel() {
+      if (windowTimer !== undefined) window.clearTimeout(windowTimer);
+      windowTimer = undefined;
+      pending = null;
+    },
+  };
+}
+
+function mergeCatalogInvalidation(
+  pending: PendingCatalogInvalidation | null,
+  options: CatalogInvalidationOptions,
+): PendingCatalogInvalidation {
+  const next: PendingCatalogInvalidation = pending ?? {
+    itemIds: new Set(),
+    libraryIds: new Set(),
+    hasUnscopedEvent: false,
+    allowDashboardRefetch: false,
+    includeLibraryLists: false,
+  };
+
+  if (options.itemId) next.itemIds.add(options.itemId);
+  if (options.libraryId === undefined) {
+    next.hasUnscopedEvent = true;
+  } else {
+    next.libraryIds.add(options.libraryId);
+  }
+  next.allowDashboardRefetch = next.allowDashboardRefetch || options.allowDashboardRefetch;
+  next.includeLibraryLists = next.includeLibraryLists || (options.includeLibraryLists ?? true);
+
+  return next;
+}
+
+function resolveBatch(batch: PendingCatalogInvalidation): CatalogInvalidationOptions {
+  const [onlyItemId] = batch.itemIds;
+  const [onlyLibraryId] = batch.libraryIds;
+  return {
+    itemId: batch.itemIds.size === 1 ? onlyItemId : undefined,
+    libraryId: !batch.hasUnscopedEvent && batch.libraryIds.size === 1 ? onlyLibraryId : undefined,
+    allowDashboardRefetch: batch.allowDashboardRefetch,
+    includeLibraryLists: batch.includeLibraryLists,
+  };
+}
+
+/**
+ * Whether a `user_state` change can move an item in or out of a home section.
+ *
+ * Progress ticks arrive every few seconds throughout playback and only move a
+ * position, so they must not reset the home load queue; the surrounding
+ * invalidation still marks the sections stale, and home refreshes them the next
+ * time it mounts.
+ */
+export function userStateChangeAffectsSectionMembership(change: string | undefined): boolean {
+  return change !== "progress";
 }

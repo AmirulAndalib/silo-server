@@ -95,3 +95,55 @@ describe("LimitField", () => {
     expect(onChange).toHaveBeenLastCalledWith("25");
   });
 });
+
+function ScaledHarness({ initial, onChange }: { initial: string; onChange?: (v: string) => void }) {
+  const [value, setValue] = useState(initial);
+  return (
+    <LimitField
+      label="Prepared file storage budget"
+      value={value}
+      unit="GB"
+      scale={1_000_000_000}
+      onChange={(next) => {
+        setValue(next);
+        onChange?.(next);
+      }}
+    />
+  );
+}
+
+describe("LimitField scaled units", () => {
+  it("shows a stored byte value in the display unit", () => {
+    render(<ScaledHarness initial="53687091200" />);
+
+    expect(screen.getByLabelText("Prepared file storage budget")).toHaveValue(53.687);
+  });
+
+  it("stores what was typed in the underlying unit", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<ScaledHarness initial="" onChange={onChange} />);
+
+    await user.type(screen.getByLabelText("Prepared file storage budget"), "50");
+    expect(onChange).toHaveBeenLastCalledWith("50000000000");
+  });
+
+  it("keeps a fractional entry typeable instead of rewriting it mid-keystroke", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<ScaledHarness initial="" onChange={onChange} />);
+
+    await user.type(screen.getByLabelText("Prepared file storage budget"), "1.5");
+    expect(onChange).toHaveBeenLastCalledWith("1500000000");
+  });
+
+  it("writes the unscaled sentinel for unlimited", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<ScaledHarness initial="50000000000" onChange={onChange} />);
+
+    await user.click(screen.getByRole("checkbox", { name: "Unlimited" }));
+    expect(onChange).toHaveBeenLastCalledWith("0");
+    expect(screen.getByLabelText("Prepared file storage budget")).toHaveValue(null);
+  });
+});

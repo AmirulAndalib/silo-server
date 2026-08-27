@@ -80,9 +80,10 @@ describe("GeneralSettings", () => {
       "aria-checked",
       "true",
     );
+    // Deep-links straight to the Invite Codes tab rather than the Users tab.
     expect(screen.getByRole("link", { name: /Manage invite codes/i })).toHaveAttribute(
       "href",
-      "/admin/users",
+      "/admin/users?tab=invite-codes",
     );
   });
 

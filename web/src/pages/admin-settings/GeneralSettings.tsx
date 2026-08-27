@@ -81,7 +81,7 @@ export default function GeneralSettings() {
           dirty={anyDirty(ACCESS_KEYS)}
           actions={
             <Link
-              to="/admin/users"
+              to="/admin/users?tab=invite-codes"
               className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1.5 text-xs font-medium transition-colors"
             >
               Manage invite codes

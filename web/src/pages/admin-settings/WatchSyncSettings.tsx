@@ -3,7 +3,11 @@ import { Link, useNavigate } from "react-router";
 import { toast } from "sonner";
 
 import type { PluginInstallation } from "@/api/types";
-import { ProviderTile, ProviderTileGrid } from "@/components/settings/ProviderTile";
+import {
+  ProviderTile,
+  ProviderTileGrid,
+  providerMonogram,
+} from "@/components/settings/ProviderTile";
 import { RestartBadge } from "@/components/settings/RestartBadge";
 import { SecretField } from "@/components/settings/SecretField";
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
@@ -17,6 +21,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { RestartServerButton } from "@/components/admin/RestartServerButton";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAdminPluginInstallations } from "@/hooks/queries/admin/plugins";
@@ -25,7 +30,6 @@ import { useRestartKeys, type RestartKeyMatcher } from "@/hooks/useRestartKeys";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
 
 import { FieldGroup } from "./FieldGroup";
-import { RestartServerButton } from "./RestartServerButton";
 
 /**
  * App credentials only. A viewer's own Trakt or Simkl account is linked from
@@ -98,15 +102,6 @@ function pluginWatchProviders(installations: PluginInstallation[]): PluginWatchP
     }
   }
   return providers.sort((a, b) => a.name.localeCompare(b.name));
-}
-
-function monogramOf(name: string): string {
-  return (
-    name
-      .replace(/[^\p{L}\p{N}]/gu, "")
-      .slice(0, 2)
-      .toUpperCase() || "??"
-  );
 }
 
 function credentialKeys(providerKey: string) {
@@ -205,6 +200,11 @@ function WatchProviderTile({
           restartRequired={restartKeys.has(field.key)}
         />
       ))}
+      {/*
+        Every action carries a border at rest. A `ghost` button reads as plain
+        text until it is hovered, which hid Clear credentials and Close from
+        admins who never hovered them.
+      */}
       <div className="mt-3.5 flex flex-wrap items-center gap-2">
         <Button
           type="button"
@@ -215,11 +215,11 @@ function WatchProviderTile({
           {updateSettings.isPending ? "Saving..." : "Save"}
         </Button>
         {anyConfigured ? (
-          <Button type="button" size="sm" variant="ghost" onClick={() => setConfirmClear(true)}>
+          <Button type="button" size="sm" variant="outline" onClick={() => setConfirmClear(true)}>
             Clear credentials
           </Button>
         ) : null}
-        <Button type="button" size="sm" variant="ghost" onClick={onCollapse}>
+        <Button type="button" size="sm" variant="outline" onClick={onCollapse}>
           Close
         </Button>
       </div>
@@ -300,7 +300,7 @@ export default function WatchSyncSettings() {
                 key={`plugin-${provider.installationId}-${provider.capabilityId}`}
                 name={provider.name}
                 tagline="Watch provider plugin"
-                monogram={monogramOf(provider.name)}
+                monogram={providerMonogram(provider.name)}
                 monogramClass="bg-violet-500/20 text-violet-700 dark:text-violet-300"
                 state={provider.enabled ? "connected" : "not_connected"}
                 statePill={provider.enabled ? "Enabled" : "Disabled"}

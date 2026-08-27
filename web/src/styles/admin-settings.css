@@ -18,3 +18,49 @@
   /* Slightly stronger, for 1px hairlines that still have to read as violet. */
   --settings-accent-line: color-mix(in srgb, var(--settings-accent) 32%, transparent);
 }
+
+/* ================================================================
+   Settings rows — alignment contract
+   ================================================================
+   Every settings row is three zones, left to right:
+
+     [ label + description ]   [ control ]   [ unit ]
+
+   The control zone is right-aligned, so an input, a select, a switch
+   and a slider all end on the same vertical edge. The unit zone is a
+   fixed-width trailing slot that is reserved whether or not the row
+   fills it — that reservation is the whole point: without it
+   "Maximum log size [ 500 ] MB" pushes its input left by the width of
+   "MB" while "Maximum log entries [ 1000 ]" sits flush, and a column of
+   number fields comes out ragged.
+
+   Widths are per control kind, not per row, so a number box stays a
+   number box beside a full-width text box and the two still share
+   their right edge. Consume them through `SETTINGS_CONTROL_WIDTH` /
+   `SETTINGS_NUMBER_WIDTH` in SettingField.tsx rather than re-deriving
+   a width per page.
+   ================================================================ */
+
+:root {
+  /* Text, password, and select controls. */
+  --settings-control-w: 15rem;
+  /* Number controls: the values are short, so the box is narrower. */
+  --settings-control-w-num: 10rem;
+  /* Trailing unit slot; sized for the longest unit in use ("per minute"). */
+  --settings-unit-w: 4rem;
+}
+
+/*
+ * A stack of settings rows, hairline-ruled between them and not after the last.
+ * `SettingFieldRow` already draws its own rule, so a list that adds `divide-y`
+ * on top of it renders a 2px double line between every pair of rows — use this
+ * instead. It also rules the custom blocks (action rows, notes) that sit
+ * between fields, which a row's own border cannot.
+ */
+.settings-field-list > * {
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+.settings-field-list > *:last-child {
+  border-bottom: 0;
+}

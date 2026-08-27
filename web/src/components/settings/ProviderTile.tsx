@@ -81,7 +81,12 @@ export function ProviderState({
   );
 }
 
-/** Three-up grid for tiles; an expanded tile spans the full width inside it. */
+/**
+ * Two-up grid for tiles; an expanded tile spans the full width inside it.
+ * It stops at two columns on purpose: the settings content column is clamped
+ * to `max-w-3xl`, so a third column leaves each tile too narrow for its header
+ * (monogram, name, badge, state pill) and truncates provider names.
+ */
 export function ProviderTileGrid({
   className,
   children,
@@ -89,8 +94,84 @@ export function ProviderTileGrid({
   className?: string;
   children: ReactNode;
 }) {
+  return <div className={cn("grid gap-3 sm:grid-cols-2", className)}>{children}</div>;
+}
+
+/** Two letters for a provider whose logo square is just its name, e.g. "AniList" → "AN". */
+export function providerMonogram(name: string): string {
   return (
-    <div className={cn("grid gap-3 sm:grid-cols-2 xl:grid-cols-3", className)}>{children}</div>
+    name
+      .replace(/[^\p{L}\p{N}]/gu, "")
+      .slice(0, 2)
+      .toUpperCase() || "??"
+  );
+}
+
+/** Result of the last Test on a tile, kept in memory for the tile itself. */
+export interface ProviderTestState {
+  ok: boolean;
+  message: string;
+  /** `Date.now()` when the result came back. */
+  at: number;
+  durationMs: number;
+}
+
+function testedLabel(test: ProviderTestState): string {
+  const seconds = Math.max(0, Math.round((Date.now() - test.at) / 1000));
+  const ago = seconds < 60 ? `${seconds}s ago` : `${Math.round(seconds / 60)}m ago`;
+  return `Tested ${ago} · ${test.durationMs} ms`;
+}
+
+/**
+ * The tile's state, from the three things every provider page knows: whether
+ * its panel is open, the last test, and whether the provider is actually usable
+ * right now. Shared so "connected" means the same thing on every page.
+ */
+export function resolveProviderTileState({
+  expanded,
+  test,
+  connected,
+}: {
+  expanded: boolean;
+  test: ProviderTestState | undefined;
+  connected: boolean;
+}): ProviderTileState {
+  if (expanded) return "editing";
+  if (test && !test.ok) return "error";
+  return connected ? "connected" : "not_connected";
+}
+
+/**
+ * The action row every connect panel ends with. Every control in it carries a
+ * border or a fill at rest: a `ghost` button reads as plain text until it is
+ * hovered, which hid the secondary actions from admins who never hovered them.
+ */
+export function ProviderPanelActions({
+  test,
+  children,
+}: {
+  test?: ProviderTestState;
+  children: ReactNode;
+}) {
+  return (
+    // Buttons sit at the right edge — the same corner as the collapsed tile's
+    // Manage button — so the eye finds the actions in one place in both
+    // states. The test status takes the leftover left side.
+    <div className="mt-3.5 flex flex-wrap items-center justify-end gap-2">
+      {test ? (
+        <span
+          role="status"
+          className={
+            test.ok
+              ? "text-muted-foreground mr-auto text-[11.5px]"
+              : "mr-auto text-[11.5px] text-amber-600 dark:text-amber-400"
+          }
+        >
+          {test.ok ? testedLabel(test) : test.message}
+        </span>
+      ) : null}
+      {children}
+    </div>
   );
 }
 
@@ -158,8 +239,13 @@ export function ProviderTile({
         </div>
       </div>
 
+      {/* Grid rows stretch the tiles to equal height, but a taller tagline
+          would otherwise push these rows down in one tile and not its
+          neighbor. `mt-auto` on the first bottom-block element pins the
+          action and meta lines to the tile foot, so they sit on the same
+          baseline across every tile in the row. */}
       {!expanded && primaryAction ? (
-        <div className="mt-3.5 flex justify-end">
+        <div className="mt-auto flex justify-end pt-3.5">
           <Button
             type="button"
             size="sm"
@@ -175,7 +261,8 @@ export function ProviderTile({
       {meta ? (
         <p
           className={cn(
-            "mt-2.5 text-[11.5px]",
+            "text-[11.5px]",
+            !expanded && primaryAction ? "mt-2.5" : "mt-auto pt-2.5",
             state === "error" ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground",
           )}
         >

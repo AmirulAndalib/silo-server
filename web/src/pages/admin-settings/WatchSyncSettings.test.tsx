@@ -141,6 +141,23 @@ describe("WatchSyncSettings", () => {
     expect(screen.queryByLabelText("Client ID")).not.toBeInTheDocument();
   });
 
+  it("gives every panel action a resting affordance instead of ghost text", async () => {
+    const user = userEvent.setup();
+    render(<WatchSyncSettings />);
+
+    await user.click(
+      within(screen.getByRole("group", { name: "Trakt" })).getByRole("button", { name: "Manage" }),
+    );
+
+    const trakt = screen.getByRole("group", { name: "Trakt" });
+    for (const name of ["Clear credentials", "Close"]) {
+      expect(within(trakt).getByRole("button", { name })).toHaveAttribute(
+        "data-variant",
+        "outline",
+      );
+    }
+  });
+
   it("saves only the credentials that were typed", async () => {
     const user = userEvent.setup();
     render(<WatchSyncSettings />);

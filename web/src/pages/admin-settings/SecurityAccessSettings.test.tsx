@@ -5,10 +5,25 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RateLimitConfig } from "@/api/types";
 import SecurityAccessSettings from "./SecurityAccessSettings";
 
+// Radix Select reads element sizes via ResizeObserver, which jsdom does not
+// provide, and opens through pointer capture, which jsdom also lacks.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+if (typeof globalThis.ResizeObserver === "undefined") {
+  (globalThis as unknown as { ResizeObserver: typeof ResizeObserverStub }).ResizeObserver =
+    ResizeObserverStub;
+}
+if (typeof window !== "undefined" && !window.HTMLElement.prototype.hasPointerCapture) {
+  window.HTMLElement.prototype.hasPointerCapture = () => false;
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+}
+
 const useSettingsFormMock = vi.fn();
 const rateLimitConfigMock = vi.fn();
 const updateRateLimitMock = vi.fn();
-const serverStatusMock = vi.fn();
 
 vi.mock("@/hooks/useSettingsForm", () => ({
   useSettingsForm: (...args: unknown[]) => useSettingsFormMock(...args),
@@ -21,10 +36,6 @@ vi.mock("@/hooks/useRestartKeys", () => ({
 vi.mock("@/hooks/queries/admin/rateLimits", () => ({
   useRateLimitConfig: () => rateLimitConfigMock(),
   useUpdateRateLimitConfig: () => updateRateLimitMock(),
-}));
-
-vi.mock("@/hooks/queries/admin/settings", () => ({
-  useAdminServerStatus: () => serverStatusMock(),
 }));
 
 const SERVER_CONFIG: RateLimitConfig = {
@@ -49,7 +60,15 @@ const SERVER_CONFIG: RateLimitConfig = {
   },
   active: true,
   active_backend: "memory",
+  redis_available: true,
 };
+
+const REDIS_HINT = /Configure Redis under Infrastructure first/;
+
+async function openBackendSelect() {
+  await userEvent.click(screen.getByRole("button", { name: /Advanced/i }));
+  await userEvent.click(screen.getByRole("combobox", { name: /Where counters are kept/i }));
+}
 
 function makeForm(overrides: Record<string, unknown> = {}) {
   return {
@@ -75,7 +94,6 @@ describe("SecurityAccessSettings", () => {
     useSettingsFormMock.mockReturnValue(makeForm());
     rateLimitConfigMock.mockReturnValue({ data: SERVER_CONFIG, isLoading: false });
     updateRateLimitMock.mockReturnValue({ mutate: vi.fn(), isPending: false, data: undefined });
-    serverStatusMock.mockReturnValue({ data: undefined });
   });
 
   it("renders every field group", () => {
@@ -145,7 +163,38 @@ describe("SecurityAccessSettings", () => {
     expect(save).toHaveBeenCalled();
   });
 
-  it("warns when the running limiter disagrees with the saved backend", () => {
+  it("offers the Redis backend when the server reports Redis configured", async () => {
+    render(<SecurityAccessSettings />);
+    await openBackendSelect();
+
+    expect(screen.getByRole("option", { name: "Shared via Redis" })).not.toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(screen.queryByText(REDIS_HINT)).not.toBeInTheDocument();
+  });
+
+  it("disables the Redis backend and points at Infrastructure when Redis is unconfigured", async () => {
+    rateLimitConfigMock.mockReturnValue({
+      data: { ...SERVER_CONFIG, redis_available: false },
+      isLoading: false,
+    });
+
+    render(<SecurityAccessSettings />);
+    await openBackendSelect();
+
+    expect(screen.getByRole("option", { name: "Shared via Redis" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(screen.getByRole("option", { name: "This server only" })).not.toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(screen.getByText(REDIS_HINT)).toBeInTheDocument();
+  });
+
+  it("leaves the restart prompt to the admin shell", () => {
     rateLimitConfigMock.mockReturnValue({
       data: { ...SERVER_CONFIG, backend: "redis", active_backend: "memory" },
       isLoading: false,
@@ -153,22 +202,44 @@ describe("SecurityAccessSettings", () => {
 
     render(<SecurityAccessSettings />);
 
-    expect(screen.getByText("Restart required")).toBeInTheDocument();
+    // AdminLayout renders the one banner for the whole admin area, driven by
+    // GET /admin/server/status; saving a backend change marks that flag
+    // server-side, so this page adds nothing of its own.
+    expect(screen.queryByText("Restart required")).not.toBeInTheDocument();
+  });
+
+  it("warns on the backend row when the running limiter disagrees with the saved backend", async () => {
+    rateLimitConfigMock.mockReturnValue({
+      data: { ...SERVER_CONFIG, backend: "redis", active_backend: "memory" },
+      isLoading: false,
+    });
+
+    render(<SecurityAccessSettings />);
+    await userEvent.click(screen.getByRole("button", { name: /Advanced/i }));
+
     expect(
-      screen.getByText("The running rate limiter is not using the saved backend."),
+      screen.getByText(/running limiter is using in-memory counters, not the saved Redis/i),
     ).toBeInTheDocument();
   });
 
-  it("leaves the limiter banner to the shell when a server restart is already owed", () => {
+  it("warns when rate limiting is enabled but no limiter is running", () => {
     rateLimitConfigMock.mockReturnValue({
-      data: { ...SERVER_CONFIG, backend: "redis", active_backend: "memory" },
+      data: { ...SERVER_CONFIG, active: false, active_backend: "" },
       isLoading: false,
     });
-    serverStatusMock.mockReturnValue({ data: { restart_required: true } });
 
     render(<SecurityAccessSettings />);
 
-    // Two fixed bottom banners would sit on top of each other.
-    expect(screen.queryByText("Restart required")).not.toBeInTheDocument();
+    expect(screen.getByText(/no limiter is running in this process/i)).toBeInTheDocument();
+  });
+
+  it("shows no drift warnings when the running limiter matches the saved config", async () => {
+    rateLimitConfigMock.mockReturnValue({ data: SERVER_CONFIG, isLoading: false });
+
+    render(<SecurityAccessSettings />);
+    await userEvent.click(screen.getByRole("button", { name: /Advanced/i }));
+
+    expect(screen.queryByText(/no limiter is running/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/running limiter is using/i)).not.toBeInTheDocument();
   });
 });

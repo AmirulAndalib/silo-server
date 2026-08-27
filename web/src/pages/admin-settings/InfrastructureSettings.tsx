@@ -6,6 +6,7 @@ import { ConnectionCheckAction } from "@/components/admin/ConnectionCheckAction"
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
 import { SecretField } from "@/components/settings/SecretField";
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
+import { SettingsSubheading } from "@/components/settings/SettingsSubheading";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -185,11 +186,16 @@ function RedisGroup({
             disabled={managedByEnv || secrets.disabled}
             restartRequired={restartKeys.has("redis.url")}
           />
+          {/*
+            Env-managed URLs stay checkable: the field is read-only so nothing
+            is dirty, and the server checks the effective value it merged from
+            REDIS_URL. Only writes are refused for env-managed keys.
+          */}
           <ConnectionCheckAction
             onClick={handleCheckConnection}
             result={connectionResult}
             isPending={checkConnection.isPending}
-            disabled={form.isSaving || managedByEnv}
+            disabled={form.isSaving}
           />
         </>
       )}
@@ -641,9 +647,7 @@ function LogsGroup({ form, restartKeys }: { form: SettingsForm; restartKeys: Res
         count={LOG_ADVANCED_KEYS.length}
         forceOpen={advancedChanged > 0}
       >
-        <div className="py-3.5">
-          <h4 className="text-sm font-medium">Permission checks</h4>
-        </div>
+        <SettingsSubheading>Permission checks</SettingsSubheading>
         <SettingField
           label="Delete permission records older than"
           type="number"

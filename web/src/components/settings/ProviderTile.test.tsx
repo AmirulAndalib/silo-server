@@ -2,7 +2,21 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { ProviderTile } from "@/components/settings/ProviderTile";
+import { ProviderTile, ProviderTileGrid } from "@/components/settings/ProviderTile";
+
+describe("ProviderTileGrid", () => {
+  it("stops at two columns so tile headers do not truncate the provider name", () => {
+    const { container } = render(
+      <ProviderTileGrid>
+        <ProviderTile name="OpenSubtitles" state="connected" />
+      </ProviderTileGrid>,
+    );
+
+    const grid = container.firstElementChild;
+    expect(grid).toHaveClass("sm:grid-cols-2");
+    expect(grid?.className).not.toMatch(/grid-cols-3/);
+  });
+});
 
 describe("ProviderTile", () => {
   it("names the tile after the provider so it can be found as a group", () => {

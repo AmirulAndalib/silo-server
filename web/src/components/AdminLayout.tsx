@@ -3,6 +3,7 @@ import { Outlet, useLocation } from "react-router";
 import AdminSidebar from "@/components/AdminSidebar";
 import { AdminSectionCommandDialog } from "@/components/AdminSectionCommandDialog";
 import ServerActivity from "@/components/ServerActivity";
+import { RestartBanner } from "@/components/admin/RestartBanner";
 import {
   Sheet,
   SheetClose,
@@ -14,6 +15,7 @@ import {
 import { useDocumentTitle } from "@/hooks/useDocumentTitle";
 import { useAdminPluginInstallations } from "@/hooks/queries/admin/plugins";
 import { usePolicyCapability } from "@/hooks/queries/admin/policy";
+import { useAdminServerStatus } from "@/hooks/queries/admin/settings";
 import { buildAdminCommandNavSections } from "@/lib/adminNavigation";
 import { resolveAdminDocumentTitle } from "@/lib/documentTitle";
 import { cn } from "@/lib/utils";
@@ -29,6 +31,12 @@ export default function AdminLayout() {
   const location = useLocation();
   const { data: adminInstallations } = useAdminPluginInstallations();
   const policyCapability = usePolicyCapability();
+  // The one restart prompt for the admin area. Read here, not in a page: a
+  // restart is owed by the server, not by the page that happened to ask for
+  // it, so the prompt has to survive navigating away from settings. The query
+  // is shared and cached, so the settings overview reading the same status
+  // costs nothing extra.
+  const { data: serverStatus } = useAdminServerStatus();
   // Mounted here rather than on the dashboard so Cmd+K reaches every admin
   // page, which is what the pages that advertise the shortcut assume.
   const adminSearchSections = useMemo(
@@ -152,6 +160,12 @@ export default function AdminLayout() {
         }`}
       >
         <div className="admin-shell">
+          {/* Above the routed page and inside the content column, so every
+              admin page carries the prompt and none of them can be covered by
+              it. `lg:mt-7` clears the fixed Search/activity controls in the
+              top-right corner (top-5, h-9 → they end 3.5rem down), which would
+              otherwise float over the banner's buttons. */}
+          <RestartBanner restartRequired={serverStatus?.restart_required} className="lg:mt-7" />
           <Outlet />
         </div>
       </main>

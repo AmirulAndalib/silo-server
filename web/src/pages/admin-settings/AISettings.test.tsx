@@ -192,6 +192,45 @@ describe("AISettings", () => {
     );
   });
 
+  it("gives the model panel actions a resting affordance instead of ghost text", async () => {
+    const user = userEvent.setup();
+    render(<AISettings />);
+
+    const tile = await openTile(user, "Text model");
+    expect(within(tile).getByRole("button", { name: "Test text model" })).toHaveAttribute(
+      "data-variant",
+      "secondary",
+    );
+    expect(within(tile).getByRole("button", { name: "Close" })).toHaveAttribute(
+      "data-variant",
+      "outline",
+    );
+  });
+
+  it("says the features run on demand rather than on a schedule", () => {
+    render(<AISettings />);
+
+    expect(screen.getByText(/Nothing here runs on a schedule/)).toBeInTheDocument();
+  });
+
+  it("blocks turning on a feature whose model cannot serve it", () => {
+    // A chat-only endpoint cannot transcribe, so speech-to-text is not ready.
+    values["ai.base_url"] = "https://openrouter.ai/api";
+
+    render(<AISettings />);
+
+    expect(screen.getByRole("switch", { name: "Create subtitles from audio" })).toBeDisabled();
+  });
+
+  it("still lets an enabled feature be turned off after its model degrades", () => {
+    values["ai.base_url"] = "https://openrouter.ai/api";
+    values["subtitle_ai.transcribe_enabled"] = "true";
+
+    render(<AISettings />);
+
+    expect(screen.getByRole("switch", { name: "Create subtitles from audio" })).toBeEnabled();
+  });
+
   it("says nothing under a feature whose model is ready", () => {
     render(<AISettings />);
 
@@ -222,6 +261,19 @@ describe("AISettings", () => {
     expect(screen.getByLabelText("Jobs running at once")).toBeInTheDocument();
     // Restart-only keys carry the badge instead of hint text.
     expect(screen.getAllByLabelText("Takes effect after a server restart").length).toBe(1);
+  });
+
+  it("separates server-wide tuning from the per-account limit", async () => {
+    const user = userEvent.setup();
+    render(<AISettings />);
+
+    await user.click(screen.getByRole("button", { name: /Advanced · 6 settings/ }));
+
+    expect(screen.getByRole("heading", { name: "Server-wide tuning" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Per-account limits" })).toBeInTheDocument();
+    expect(
+      screen.getByText("Counted per login account, shared by every profile on it."),
+    ).toBeInTheDocument();
   });
 
   it("auto-expands the advanced section around a staged change", () => {

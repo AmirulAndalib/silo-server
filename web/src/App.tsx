@@ -1,6 +1,8 @@
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  BrowserRouter,
+  createBrowserRouter,
+  createRoutesFromElements,
+  Outlet,
   Routes,
   Route,
   Navigate,
@@ -9,6 +11,10 @@ import {
   useParams,
   useSearchParams,
 } from "react-router";
+// The DOM build of the provider is the same component with `ReactDOM.flushSync`
+// wired in, which is what lets a view-transition navigation apply its state
+// inside `startViewTransition`. Links across the app opt into view transitions.
+import { RouterProvider } from "react-router/dom";
 import { QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { queryClient } from "@/lib/query-client";
 import { AuthProvider, useAuth } from "@/hooks/useAuth";
@@ -52,17 +58,26 @@ import {
 import { buildLegacyWebhookSyncRedirectTarget } from "@/lib/webhookSync";
 import { toast } from "sonner";
 import { prewarmCodecDetection } from "@/player/hooks/useCodecDetection";
+import { prefetchRouteChunks, type RouteChunkImport } from "@/lib/routeChunkPrefetch";
+
+// Hot routes keep their import factory in a named binding so the idle warm-up
+// below can pull the chunk before the user navigates. See HOT_ROUTE_CHUNKS.
+const importLibraryPage = () => import("@/pages/LibraryPage");
+const importItemDetail = () => import("@/pages/ItemDetail/index");
+const importPersonDetail = () => import("@/pages/PersonDetail");
+const importCollections = () => import("@/pages/Collections");
+const importRecommendations = () => import("@/pages/Recommendations");
 
 const AdminLayout = lazy(() => import("@/components/AdminLayout"));
 const OAuthComplete = lazy(() => import("@/pages/OAuthComplete"));
 const ActivateDevice = lazy(() => import("@/pages/ActivateDevice"));
 const SetupWizard = lazy(() => import("@/pages/SetupWizard"));
 const Profiles = lazy(() => import("@/pages/Profiles"));
-const LibraryPage = lazy(() => import("@/pages/LibraryPage"));
-const ItemDetail = lazy(() => import("@/pages/ItemDetail/index"));
+const LibraryPage = lazy(importLibraryPage);
+const ItemDetail = lazy(importItemDetail);
 const EbookReader = lazy(() => import("@/pages/EbookReader"));
-const PersonDetail = lazy(() => import("@/pages/PersonDetail"));
-const Collections = lazy(() => import("@/pages/Collections"));
+const PersonDetail = lazy(importPersonDetail);
+const Collections = lazy(importCollections);
 const CollectionEditor = lazy(() => import("@/pages/CollectionEditor"));
 const Notifications = lazy(() => import("@/pages/Notifications"));
 const DeviceSettings = lazy(() => import("@/pages/settings/DeviceSettings"));
@@ -96,7 +111,7 @@ const AdminPlugins = lazy(() => import("@/pages/AdminPlugins"));
 const AdminHistoryImport = lazy(() => import("@/pages/AdminHistoryImport"));
 const AdminRecommendations = lazy(() => import("@/pages/AdminRecommendations"));
 const AdminPolicyLayout = lazy(() => import("@/pages/admin-policy/AdminPolicyLayout"));
-const Recommendations = lazy(() => import("@/pages/Recommendations"));
+const Recommendations = lazy(importRecommendations);
 const RecommendationsSection = lazy(() => import("@/pages/RecommendationsSection"));
 const Calendar = lazy(() => import("@/pages/Calendar"));
 const Signup = lazy(() => import("@/pages/Signup"));
@@ -124,7 +139,26 @@ const WatchTogetherRoomPage = lazy(() => import("@/pages/WatchTogetherRoomPage")
 const WatchRoute = lazy(() => import("@/pages/WatchRoute"));
 const ProfileCustomizeHome = lazy(() => import("@/pages/ProfileCustomizeHome"));
 
-/** Scrolls to top on pathname change (custom replacement for ScrollRestoration which requires data router). */
+/**
+ * Routes a browsing session reaches within the first few interactions. Home
+ * links straight into item details, the sidebar into libraries, and item pages
+ * into people and recommendations, so paying their chunk cost while the app is
+ * idle is cheaper than paying it inside a navigation.
+ */
+const HOT_ROUTE_CHUNKS: readonly RouteChunkImport[] = [
+  importItemDetail,
+  importLibraryPage,
+  importPersonDetail,
+  importRecommendations,
+  importCollections,
+];
+
+/**
+ * Scrolls to top on pathname change. Kept in place of react-router's
+ * `<ScrollRestoration>`, which the data router would now allow: that one
+ * restores the previous offset on back/forward, while every page here expects
+ * to open at the top.
+ */
 function useScrollRestoration() {
   const { pathname } = useLocation();
   useEffect(() => {
@@ -665,41 +699,89 @@ function PlaybackCapabilityPrewarmer() {
   return null;
 }
 
-export default function App() {
+/** Warms the hot route chunks once the first screen has settled. */
+function RouteChunkPrewarmer() {
+  const { user } = useAuth();
+  const isAuthenticated = Boolean(user);
+  useEffect(() => {
+    // Nothing behind these routes is reachable while signed out, and the login
+    // screen is exactly where bandwidth should stay free for the first paint.
+    if (!isAuthenticated) return;
+    return prefetchRouteChunks(HOT_ROUTE_CHUNKS);
+  }, [isAuthenticated]);
+  return null;
+}
+
+/**
+ * Everything that used to sit directly inside `<BrowserRouter>`: providers,
+ * app-wide chrome, and the routed page tree behind one Suspense boundary.
+ *
+ * `RouterProvider` takes no children, so this is the data router's single root
+ * layout route. Nothing was hoisted above the router: ErrorBoundary,
+ * RealtimeEventsProvider and WatchPlaybackProvider all read the location or
+ * navigate, and the providers that need nothing from the router sit above those
+ * in the chain — so splitting the stack would reorder providers for no gain.
+ * The element below is created once at module scope, so React skips
+ * re-rendering this subtree on navigation exactly as it did when the tree hung
+ * off `<BrowserRouter>`.
+ */
+function AppShell() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <QueryClientProvider client={queryClient}>
-          <ErrorBoundary>
-            <BrandingProvider>
-              <ThemeProvider>
-                <CustomThemeProvider>
-                  <DateTimeFormatProvider>
-                    <WatchPlaybackProvider>
-                      <AudiobookPlaybackProvider>
-                        <RealtimeEventsProvider>
-                          <PlaybackCapabilityPrewarmer />
-                          <RealtimeEventChannels />
-                          <ScrollRestorationManager />
-                          <RouteAnnouncer />
-                          <QueryCacheManager />
-                          <AppChrome />
-                          <Suspense fallback={<RouteLoading />}>
-                            <ReactiveAppRoutes />
-                          </Suspense>
-                          <WatchPlaybackHost />
-                          <WatchPlaybackBar />
-                          <Toaster />
-                        </RealtimeEventsProvider>
-                      </AudiobookPlaybackProvider>
-                    </WatchPlaybackProvider>
-                  </DateTimeFormatProvider>
-                </CustomThemeProvider>
-              </ThemeProvider>
-            </BrandingProvider>
-          </ErrorBoundary>
-        </QueryClientProvider>
-      </AuthProvider>
-    </BrowserRouter>
+    <AuthProvider>
+      <QueryClientProvider client={queryClient}>
+        <ErrorBoundary>
+          <BrandingProvider>
+            <ThemeProvider>
+              <CustomThemeProvider>
+                <DateTimeFormatProvider>
+                  <WatchPlaybackProvider>
+                    <AudiobookPlaybackProvider>
+                      <RealtimeEventsProvider>
+                        <PlaybackCapabilityPrewarmer />
+                        <RouteChunkPrewarmer />
+                        <RealtimeEventChannels />
+                        <ScrollRestorationManager />
+                        <RouteAnnouncer />
+                        <QueryCacheManager />
+                        <AppChrome />
+                        <Suspense fallback={<RouteLoading />}>
+                          <Outlet />
+                        </Suspense>
+                        <WatchPlaybackHost />
+                        <WatchPlaybackBar />
+                        <Toaster />
+                      </RealtimeEventsProvider>
+                    </AudiobookPlaybackProvider>
+                  </WatchPlaybackProvider>
+                </DateTimeFormatProvider>
+              </CustomThemeProvider>
+            </ThemeProvider>
+          </BrandingProvider>
+        </ErrorBoundary>
+      </QueryClientProvider>
+    </AuthProvider>
   );
+}
+
+/**
+ * A data router is what makes navigation blockable (`useBlocker`, used by
+ * `UnsavedChangesGuard` to protect staged settings edits) — that is the whole
+ * reason for `createBrowserRouter` here. The route tree itself stays
+ * declarative below the root: the splat child hands off to `<Routes>`, whose
+ * descendant routes match from `/` because a splat contributes nothing to the
+ * pathname base.
+ */
+const appRoutes = createRoutesFromElements(
+  <Route element={<AppShell />}>
+    <Route path="*" element={<ReactiveAppRoutes />} />
+  </Route>,
+);
+
+export default function App() {
+  // Per-App-instance rather than a module-scope singleton: a router captures
+  // the current history the moment it is built, and tests render App more than
+  // once against different entries.
+  const [router] = useState(() => createBrowserRouter(appRoutes));
+
+  return <RouterProvider router={router} />;
 }

@@ -1,9 +1,10 @@
 import { useMemo, useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/api/client";
+import { api, ApiClientError } from "@/api/client";
 import {
   effectiveSettingsQueryKey,
   isDefinitiveSettingMutationRejection,
+  useClearSettingValue,
   useEffectiveSettings,
   useSetSettingValue,
   type EffectiveSettingsMap,
@@ -64,6 +65,7 @@ export function useOverlayPrefs() {
   });
   const { data: config, isLoading: configLoading } = useOverlayConfig();
   const { mutate: setSettingValue } = useSetSettingValue();
+  const clearValue = useClearSettingValue();
   const queryClient = useQueryClient();
   const effectiveQueryKey = useMemo(
     () => effectiveSettingsQueryKey({ keys: OVERLAY_KEYS, profileId: profileId ?? undefined }),
@@ -163,6 +165,41 @@ export function useOverlayPrefs() {
     [setProfileValue],
   );
 
+  const resetPrefs = useCallback(async () => {
+    await Promise.all(
+      OVERLAY_KEYS.map(async (key) => {
+        try {
+          await clearValue.mutateAsync({ key, identity: PROFILE_SCOPE });
+        } catch (error) {
+          // A missing scoped value already means this part of the preference
+          // is inheriting from the server default.
+          if (!(error instanceof ApiClientError && error.status === 404)) throw error;
+        }
+      }),
+    );
+  }, [clearValue]);
+
+  const hasOverride = OVERLAY_KEYS.some((key) => effective?.[key]?.source === "profile");
+
+  // Editing anything on the overlay settings page copies the whole resolved
+  // document — including whatever the admin had configured at that moment —
+  // into the profile, and a stored document wins outright from then on. The
+  // only way back to tracking the server defaults is to remove the profile
+  // value entirely, which is why this deletes rather than writing a snapshot
+  // of the current server values.
+  const resetPrefs = useCallback(async () => {
+    try {
+      await clearValue.mutateAsync({
+        key: SETTING_KEYS.UI_CARD_OVERLAYS,
+        identity: PROFILE_SCOPE,
+      });
+    } catch (error) {
+      // The canonical DELETE answers 404 when nothing was stored at that
+      // scope, which for a reset means "already inheriting", not a failure.
+      if (!(error instanceof ApiClientError && error.status === 404)) throw error;
+    }
+  }, [clearValue]);
+
   // While either query is in flight, report null prefs instead of built-in
   // defaults: rendering defaults first would flash badges that vanish (or
   // change) the moment the user's own config or the server default loads.
@@ -179,6 +216,9 @@ export function useOverlayPrefs() {
     setQuickActionMode,
     quickActionsEnabled,
     setQuickActionsEnabled,
+    resetPrefs,
+    hasOverride,
+    isResetting: clearValue.isPending,
     isLoading,
   };
 }

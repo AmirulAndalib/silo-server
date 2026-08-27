@@ -2,7 +2,12 @@ import { useMemo, useState } from "react";
 import { AlertTriangle, Check, RotateCcw } from "lucide-react";
 
 import { BrandingAssetField } from "@/components/admin/BrandingAssetField";
-import { OverlayPreviewCard } from "@/components/overlays/OverlayPreviewCard";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import {
+  OverlayPreviewCard,
+  type OverlayPreviewVariant,
+} from "@/components/overlays/OverlayPreviewCard";
+import { OverlayPreviewVariantToggle } from "@/components/overlays/OverlayPreviewVariantToggle";
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
 import { RawCssEditor } from "@/components/theme/RawCssEditor";
@@ -44,7 +49,7 @@ import { THEME_IDS, THEMES } from "@/lib/themes";
 import { cn } from "@/lib/utils";
 import { FieldGroup } from "./FieldGroup";
 import { SaveBar } from "./SaveBar";
-import { SettingField, SettingFieldRow } from "./SettingField";
+import { SETTINGS_CONTROL_WIDTH, SettingField, SettingFieldRow } from "./SettingField";
 
 const IMAGE_ACCEPT = "image/png,image/jpeg,image/webp";
 const FAVICON_ACCEPT =
@@ -74,6 +79,13 @@ const THEME_KEYS = [ACCENT_KEY, DEFAULT_THEME_KEY, THEME_VARS_KEY, CUSTOM_CSS_KE
 const OVERLAY_KEYS = [OVERLAYS_ENABLED_KEY, OVERLAY_DEFAULTS_KEY];
 
 /**
+ * Silo's built-in overlay configuration, derived from the registry's own
+ * per-overlay defaults rather than copied out into a literal here, so an
+ * overlay added to the registry is covered without touching this page.
+ */
+const BUILT_IN_OVERLAY_DEFAULTS = serializeOverlayPrefs(buildDefaultPrefs());
+
+/**
  * Every appearance key the page stages, saved as one batch by the shared
  * SaveBar. Theming used to autosave each keystroke through
  * `useUpdateServerSetting`; it now shares this form so the whole page has one
@@ -99,8 +111,15 @@ export default function AppearanceSettings() {
   // essential edit. Track use of the advanced controls themselves instead.
   const [tokensTouched, setTokensTouched] = useState(false);
   const [overlayItemsTouched, setOverlayItemsTouched] = useState(false);
+  const [confirmRestoreOverlaysOpen, setConfirmRestoreOverlaysOpen] = useState(false);
+  // Which sample the badge preview stands in for. View state only — show-only
+  // overlays (network, show status) are otherwise impossible to see here.
+  const [previewVariant, setPreviewVariant] = useState<OverlayPreviewVariant>("movie");
 
   const accentColor = form.getValue(ACCENT_KEY);
+  const customAccentActive =
+    Boolean(accentColor) &&
+    !ACCENT_PRESETS.some((hex) => hex.toLowerCase() === accentColor.toLowerCase());
   const defaultTheme = form.getValue(DEFAULT_THEME_KEY);
   const vars = parseVarsJson(form.getValue(THEME_VARS_KEY));
   const savedCss = form.getValue(CUSTOM_CSS_KEY);
@@ -114,8 +133,10 @@ export default function AppearanceSettings() {
 
   const overlaysEnabled = form.getValue(OVERLAYS_ENABLED_KEY) !== "false";
   const overlayPrefs = parseOverlayPrefs(
-    form.getValue(OVERLAY_DEFAULTS_KEY) || serializeOverlayPrefs(buildDefaultPrefs()),
+    form.getValue(OVERLAY_DEFAULTS_KEY) || BUILT_IN_OVERLAY_DEFAULTS,
   );
+  const overlayDefaultsAreBuiltIn =
+    serializeOverlayPrefs(overlayPrefs) === BUILT_IN_OVERLAY_DEFAULTS;
 
   const setVars = (next: ThemeVarOverrides) => form.setValue(THEME_VARS_KEY, JSON.stringify(next));
 
@@ -176,6 +197,14 @@ export default function AppearanceSettings() {
     });
   };
 
+  // Restoring stages the built-in document like any other edit rather than
+  // writing it: the admin still confirms the whole batch through the SaveBar,
+  // and Discard puts the previous defaults back.
+  const restoreOverlayDefaults = () => {
+    setConfirmRestoreOverlaysOpen(false);
+    form.setValue(OVERLAY_DEFAULTS_KEY, BUILT_IN_OVERLAY_DEFAULTS);
+  };
+
   // Discarding has to drop the untouched CSS draft too, otherwise the box would
   // keep showing text that is no longer staged.
   const discard = () => {
@@ -233,7 +262,7 @@ export default function AppearanceSettings() {
             />
             <BrandingAssetField
               label="Favicon"
-              description="PNG, ICO, or SVG."
+              description="Shown in the browser tab."
               kind="favicon"
               currentUrl={branding.faviconUrl}
               accept={FAVICON_ACCEPT}
@@ -258,26 +287,56 @@ export default function AppearanceSettings() {
             description="Recolors buttons, focus outlines, and the sidebar."
           >
             <div className="flex flex-wrap items-center justify-end gap-2 sm:max-w-[300px]">
-              {ACCENT_PRESETS.map((hex) => (
-                <button
-                  key={hex}
-                  type="button"
-                  onClick={() => applyAccent(hex)}
-                  aria-label={`Use accent ${hex}`}
-                  className={cn(
-                    "relative h-8 w-8 rounded-full border transition-transform hover:scale-110",
-                    accentColor.toLowerCase() === hex.toLowerCase()
-                      ? "border-foreground"
-                      : "border-border",
-                  )}
-                  style={{ backgroundColor: hex }}
-                >
-                  {accentColor.toLowerCase() === hex.toLowerCase() && (
-                    <Check className="absolute inset-0 m-auto h-4 w-4 text-white drop-shadow" />
-                  )}
-                </button>
-              ))}
-              <label className="border-border inline-flex h-8 cursor-pointer items-center gap-2 rounded-lg border px-2.5 text-xs font-medium">
+              {/* Exactly one control in this row is always marked selected:
+                  the Default swatch when no accent is stored, the matching
+                  preset when one is, or the Custom chip when the stored hex
+                  matches no preset. */}
+              <button
+                type="button"
+                onClick={clearAccent}
+                aria-label="Use theme default accent"
+                aria-pressed={!accentColor}
+                title="Theme default"
+                className={cn(
+                  "bg-muted text-muted-foreground relative grid h-8 w-8 place-items-center rounded-full border transition-transform hover:scale-110",
+                  !accentColor
+                    ? "border-foreground ring-foreground ring-offset-background ring-2 ring-offset-2"
+                    : "border-border",
+                )}
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+              </button>
+              {ACCENT_PRESETS.map((hex) => {
+                const selected = accentColor.toLowerCase() === hex.toLowerCase();
+                return (
+                  <button
+                    key={hex}
+                    type="button"
+                    onClick={() => applyAccent(hex)}
+                    aria-label={`Use accent ${hex}`}
+                    aria-pressed={selected}
+                    className={cn(
+                      "relative h-8 w-8 rounded-full border transition-transform hover:scale-110",
+                      selected
+                        ? "border-foreground ring-foreground ring-offset-background ring-2 ring-offset-2"
+                        : "border-border",
+                    )}
+                    style={{ backgroundColor: hex }}
+                  >
+                    {selected && (
+                      <Check className="absolute inset-0 m-auto h-4 w-4 text-white drop-shadow" />
+                    )}
+                  </button>
+                );
+              })}
+              <label
+                className={cn(
+                  "inline-flex h-8 cursor-pointer items-center gap-2 rounded-lg border px-2.5 text-xs font-medium",
+                  customAccentActive
+                    ? "border-foreground ring-foreground ring-offset-background ring-1 ring-offset-1"
+                    : "border-border",
+                )}
+              >
                 <input
                   type="color"
                   aria-label="Custom accent color"
@@ -286,17 +345,8 @@ export default function AppearanceSettings() {
                   className="h-5 w-5 cursor-pointer border-0 bg-transparent p-0"
                 />
                 Custom
+                {customAccentActive && <Check className="h-3.5 w-3.5" />}
               </label>
-              {accentColor && (
-                <button
-                  type="button"
-                  onClick={clearAccent}
-                  className="text-muted-foreground hover:text-destructive inline-flex items-center gap-1.5 text-xs font-medium transition-colors"
-                >
-                  <RotateCcw className="h-3 w-3" />
-                  Reset
-                </button>
-              )}
             </div>
           </SettingFieldRow>
 
@@ -390,7 +440,21 @@ export default function AppearanceSettings() {
           </AdvancedSection>
         </FieldGroup>
 
-        <FieldGroup label="Card overlays" restartAll={allRestart(OVERLAY_KEYS)}>
+        <FieldGroup
+          label="Card overlays"
+          restartAll={allRestart(OVERLAY_KEYS)}
+          actions={
+            <button
+              type="button"
+              onClick={() => setConfirmRestoreOverlaysOpen(true)}
+              disabled={overlayDefaultsAreBuiltIn}
+              className="text-muted-foreground hover:text-destructive inline-flex items-center gap-1.5 text-xs font-medium transition-colors disabled:pointer-events-none disabled:opacity-40"
+            >
+              <RotateCcw className="h-3 w-3" aria-hidden="true" />
+              Restore defaults
+            </button>
+          }
+        >
           <SettingField
             label="Show badges on poster art"
             description="Off hides badges for everyone."
@@ -400,17 +464,19 @@ export default function AppearanceSettings() {
             restartRequired={restartKeys.has(OVERLAYS_ENABLED_KEY)}
           />
 
-          <SettingFieldRow
-            label="Badge style"
-            description="Default for people who have not chosen their own."
-            className={overlaysEnabled ? undefined : "pointer-events-none opacity-50"}
-          >
-            <div className="flex flex-col items-end gap-3">
+          {/* Row and preview are one list child so the hairline falls after
+              the pair, not between them. The preview gets a full-width framed
+              strip instead of squatting in the row's control column. */}
+          <div className={overlaysEnabled ? undefined : "pointer-events-none opacity-50"}>
+            <SettingFieldRow
+              label="Badge style"
+              description="Default for people who have not chosen their own."
+            >
               <Select
                 value={overlayPrefs.preset}
                 onValueChange={(v) => setOverlayPrefs({ ...overlayPrefs, preset: v as PresetId })}
               >
-                <SelectTrigger className="w-[200px]" aria-label="Badge style">
+                <SelectTrigger className={SETTINGS_CONTROL_WIDTH} aria-label="Badge style">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -421,9 +487,19 @@ export default function AppearanceSettings() {
                   ))}
                 </SelectContent>
               </Select>
-              <OverlayPreviewCard prefs={overlayPrefs} size="sm" variant="movie" />
+            </SettingFieldRow>
+            <div className="border-border/70 bg-foreground/[0.02] mb-4 rounded-xl border p-3">
+              <div className="flex items-center justify-between gap-3 px-1">
+                <span className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">
+                  Preview
+                </span>
+                <OverlayPreviewVariantToggle value={previewVariant} onChange={setPreviewVariant} />
+              </div>
+              <div className="mt-3 flex justify-center pb-1">
+                <OverlayPreviewCard prefs={overlayPrefs} size="sm" variant={previewVariant} />
+              </div>
             </div>
-          </SettingFieldRow>
+          </div>
 
           <div className={cn(overlaysEnabled ? "" : "pointer-events-none opacity-50")}>
             <AdvancedSection
@@ -439,7 +515,7 @@ export default function AppearanceSettings() {
                     <p className="text-muted-foreground pt-3.5 pb-1 text-xs font-medium">
                       {CATEGORY_META[category].title}
                     </p>
-                    <div className="[&>*]:border-b [&>*]:border-[color-mix(in_srgb,var(--border)_60%,transparent)] [&>*:last-child]:border-b-0">
+                    <div className="settings-field-list">
                       {overlays.map((def) => {
                         const config = overlayPrefs.items[def.id];
                         return (
@@ -487,6 +563,16 @@ export default function AppearanceSettings() {
           </div>
         </FieldGroup>
       </div>
+
+      <ConfirmDialog
+        open={confirmRestoreOverlaysOpen}
+        onOpenChange={setConfirmRestoreOverlaysOpen}
+        title="Restore badge defaults"
+        description="Replace the server-wide badge defaults with Silo's built-in configuration. The badge on/off switch is left alone, and nothing is written until you save."
+        confirmLabel="Restore"
+        variant="destructive"
+        onConfirm={restoreOverlayDefaults}
+      />
 
       <SaveBar
         dirtyCount={form.dirtyCount}

@@ -8,9 +8,7 @@ interface SettingsSearchInputProps {
   value: string;
   onChange: (value: string) => void;
   resultCount: number;
-  totalCount: number;
   placeholder?: string;
-  itemLabel?: string;
   emptyLabel?: string;
   className?: string;
   shortcutMediaQuery?: string;
@@ -26,9 +24,7 @@ export function SettingsSearchInput({
   value,
   onChange,
   resultCount,
-  totalCount,
   placeholder = "Search settings",
-  itemLabel = "settings sections",
   emptyLabel = "No matching settings",
   className,
   shortcutMediaQuery,
@@ -42,11 +38,13 @@ export function SettingsSearchInput({
     typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.userAgent)
       ? "⌘ K"
       : "Ctrl K";
+  // Idle shows nothing: a "12 settings pages" style count under an untouched
+  // box is noise. The line only speaks while a query is filtering.
   const status = hasQuery
     ? resultCount === 0
       ? emptyLabel
       : `${resultCount} ${resultCount === 1 ? "match" : "matches"}`
-    : `${totalCount} ${itemLabel}`;
+    : null;
 
   useEffect(() => {
     if (!captureShortcut) return;
@@ -108,7 +106,9 @@ export function SettingsSearchInput({
           </kbd>
         ) : null}
       </div>
-      <p className="text-muted-foreground mt-2 text-xs" aria-live="polite">
+      {/* Always mounted so the live region reliably announces count changes;
+          visually collapses to nothing while idle. */}
+      <p className={cn("text-muted-foreground text-xs", status && "mt-2")} aria-live="polite">
         {status}
       </p>
     </div>

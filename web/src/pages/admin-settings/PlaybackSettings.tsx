@@ -2,16 +2,21 @@ import { useMemo } from "react";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
 import { useRestartKeys } from "@/hooks/useRestartKeys";
 import { useHWAccelDetection, type HWAccelInfo } from "@/hooks/queries/admin/system";
-import { Label } from "@/components/ui/label";
+import { useAdminNodes } from "@/hooks/queries/admin/nodes";
 import { Switch } from "@/components/ui/switch";
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
-import { LimitField } from "@/components/settings/LimitField";
+import { PathSettingField } from "@/components/settings/PathSettingField";
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
-import { SettingField, SettingFieldStatus } from "./SettingField";
+import { SettingsSubheading } from "@/components/settings/SettingsSubheading";
+import { SettingField, SettingFieldRow, SettingFieldStatus } from "./SettingField";
 import { SaveBar } from "./SaveBar";
 import { FieldGroup } from "./FieldGroup";
+import { DEFAULT_FFMPEG_PATH, DEFAULT_TRANSCODE_DIR } from "./settingsPathDefaults";
 import {
+  CHAPTER_THUMBNAIL_EXECUTION_DEFAULT,
   buildHWDeviceRows,
+  chapterThumbnailExecutionOptions,
+  hasUsableTranscodeNode,
   nodeInventoriesDiverge,
   parseHWDeviceList,
   toggleHWDevice,
@@ -42,29 +47,13 @@ const TRANSCODING_ADVANCED_KEYS = [
 
 const WATCH_KEYS = ["playback.watched_threshold", "playback.min_resume_threshold"];
 
-const DOWNLOAD_ESSENTIAL_KEYS = ["download.enabled", "download.user_bandwidth_mbps"];
-
-const DOWNLOAD_ADVANCED_KEYS = [
-  "download.server_bandwidth_mbps",
-  "download.max_concurrent_per_user",
-  "download.max_per_period",
-  "download.period_duration",
-  "download.transcode_enabled",
-  "download.artifact_dir",
-  "download.max_concurrent_prepares",
-  "download.artifact_max_bytes",
-];
-
 // `playback.chapter_thumbnail_node_capacity` is deliberately absent from the
 // UI (hidden tier): it is still saved and read through the settings API, but
 // the per-node budget is derived from the node pool rather than typed in.
-const KEYS = [
-  ...TRANSCODING_ESSENTIAL_KEYS,
-  ...TRANSCODING_ADVANCED_KEYS,
-  ...WATCH_KEYS,
-  ...DOWNLOAD_ESSENTIAL_KEYS,
-  ...DOWNLOAD_ADVANCED_KEYS,
-];
+//
+// The `download.*` family is its own page (DownloadsSettings), so it is not
+// loaded or saved here.
+const KEYS = [...TRANSCODING_ESSENTIAL_KEYS, ...TRANSCODING_ADVANCED_KEYS, ...WATCH_KEYS];
 
 export default function PlaybackSettings() {
   const form = useSettingsForm({ keys: useMemo(() => KEYS, []) });
@@ -83,12 +72,50 @@ export default function PlaybackSettings() {
   const inventoriesDiverge = nodeInventoriesDiverge(hwDetection.data);
   const showDevicePicker = hwAccel !== "none" && !isNvenc && deviceRows.length > 0;
 
+  const nodes = useAdminNodes();
+  const chapterExecution =
+    form.getValue("playback.chapter_thumbnail_execution") || CHAPTER_THUMBNAIL_EXECUTION_DEFAULT;
+  // Gate the node-backed extraction modes only on a node list we actually
+  // have: while the query is in flight or after it failed, leave every option
+  // reachable rather than blocking a valid choice on a transient error.
+  const transcodeNodeAvailable = !nodes.isSuccess || hasUsableTranscodeNode(nodes.data);
+
   const isDirty = form.isDirty;
   const anyDirty = (keys: string[]) => keys.some((key) => isDirty(key));
   const allRestart = (keys: string[]) => keys.every((key) => restartKeys.has(key));
 
   const detection = hwAccel === "none" ? undefined : hwDetection.data;
   const detectedLabel = describeDetection(detection);
+
+  // Everything the hardware-acceleration field has to say about itself, in its
+  // own status slot. The NVENC note used to be a bare paragraph between rows,
+  // which read as a row with no label and broke the group's rhythm.
+  const hwAccelLines =
+    hwAccel === "none"
+      ? []
+      : [
+          detectedLabel ? (
+            <SettingFieldStatus
+              key="detected"
+              tone={detection?.resolved && detection.resolved !== "none" ? "ok" : "warn"}
+            >
+              {detectedLabel}
+            </SettingFieldStatus>
+          ) : hwDetection.isLoading ? (
+            <SettingFieldStatus key="detecting" tone="muted">
+              Detecting hardware…
+            </SettingFieldStatus>
+          ) : null,
+          isNvenc && selectedDevices.length > 1 ? (
+            <SettingFieldStatus key="nvenc" tone="warn">
+              NVENC uses the first configured device ({selectedDevices[0]}).
+            </SettingFieldStatus>
+          ) : null,
+        ].filter(Boolean);
+  const hwAccelStatus =
+    hwAccelLines.length > 0 ? (
+      <span className="flex flex-col items-start gap-1">{hwAccelLines}</span>
+    ) : undefined;
 
   if (form.isLoading) return <div>Loading...</div>;
 
@@ -121,26 +148,11 @@ export default function PlaybackSettings() {
               { value: "none", label: "Software" },
             ]}
             description="Auto picks the best device this server can see."
-            status={
-              hwAccel === "none" ? undefined : detectedLabel ? (
-                <SettingFieldStatus
-                  tone={detection?.resolved && detection.resolved !== "none" ? "ok" : "warn"}
-                >
-                  {detectedLabel}
-                </SettingFieldStatus>
-              ) : hwDetection.isLoading ? (
-                <SettingFieldStatus tone="muted">Detecting hardware…</SettingFieldStatus>
-              ) : undefined
-            }
+            status={hwAccelStatus}
             value={hwAccel}
             onChange={(v) => form.setValue("playback.hw_accel", v)}
             restartRequired={restartKeys.has("playback.hw_accel")}
           />
-          {hwAccel !== "none" && isNvenc && selectedDevices.length > 1 && (
-            <p className="py-2 text-xs text-amber-500">
-              NVENC uses the first configured device ({selectedDevices[0]}).
-            </p>
-          )}
           <SettingField
             label="Allow 4K transcoding"
             type="toggle"
@@ -155,73 +167,78 @@ export default function PlaybackSettings() {
             count={TRANSCODING_ADVANCED_KEYS.length - (showDevicePicker ? 0 : 1)}
             forceOpen={anyDirty(TRANSCODING_ADVANCED_KEYS)}
           >
-            <SettingField
+            <PathSettingField
               label="FFmpeg path"
-              hint="/usr/lib/silo-ffmpeg/ffmpeg"
-              description="Empty uses the FFmpeg that ships with the server."
+              defaultValue={DEFAULT_FFMPEG_PATH}
+              description={`Leave blank to use the FFmpeg that ships with the server, at ${DEFAULT_FFMPEG_PATH}.`}
               value={form.getValue("playback.ffmpeg_path")}
               onChange={(v) => form.setValue("playback.ffmpeg_path", v)}
               restartRequired={restartKeys.has("playback.ffmpeg_path")}
             />
-            <SettingField
+            <PathSettingField
               label="Transcode directory"
-              hint="/var/lib/silo/transcode"
-              description="Use fast local storage with room to spare."
+              defaultValue={DEFAULT_TRANSCODE_DIR}
+              description={`Use fast local storage with room to spare. Leave blank to use ${DEFAULT_TRANSCODE_DIR}.`}
               value={form.getValue("playback.transcode_dir")}
               onChange={(v) => form.setValue("playback.transcode_dir", v)}
               restartRequired={restartKeys.has("playback.transcode_dir")}
             />
             {showDevicePicker && (
-              <div className="flex flex-col gap-2 py-3.5">
-                <div className="space-y-1">
-                  <Label className="text-sm font-medium">GPU devices</Label>
-                  <p className="text-muted-foreground text-xs leading-relaxed">
-                    {selectedDevices.length === 0
+              <div>
+                <SettingsSubheading
+                  caption={
+                    selectedDevices.length === 0
                       ? "Auto: the first available device takes every transcode."
                       : selectedDevices.length === 1
                         ? "All transcodes run on the selected device."
-                        : "Transcodes balance across the selected devices."}
+                        : "Transcodes balance across the selected devices."
+                  }
+                >
+                  GPU devices
+                </SettingsSubheading>
+                {inventoriesDiverge && (
+                  <p className="pb-2 text-xs text-amber-500">
+                    Nodes report different devices. Only paths on every node are safe to select.
                   </p>
-                  {inventoriesDiverge && (
-                    <p className="text-xs text-amber-500">
-                      Nodes report different devices. Only paths on every node are safe to select.
-                    </p>
-                  )}
-                </div>
-                <div className="space-y-2">
-                  {deviceRows.map((row) => (
-                    <div key={row.path} className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <p
-                          className={`truncate text-sm ${row.detected ? "" : "text-muted-foreground"}`}
-                        >
-                          {row.description}
-                        </p>
-                        <p className="text-muted-foreground truncate font-mono text-xs">
-                          {row.path}
-                        </p>
+                )}
+                {/* One shared row shell per device, so these switches land on the
+                    same edge as every other control in the group instead of
+                    hugging the panel. */}
+                {deviceRows.map((row) => (
+                  <SettingFieldRow
+                    key={row.path}
+                    label={
+                      <span className={row.detected ? undefined : "text-muted-foreground"}>
+                        {row.description}
+                      </span>
+                    }
+                    description={
+                      <>
+                        <span className="block font-mono">{row.path}</span>
                         {row.missingOnNodes.length > 0 && (
-                          <p className="truncate text-xs text-amber-500">
+                          <span className="mt-0.5 block text-amber-500">
                             Not present on: {row.missingOnNodes.join(", ")}
-                          </p>
+                          </span>
                         )}
-                      </div>
-                      <Switch
-                        checked={selectedDevices.includes(row.path)}
-                        onCheckedChange={() =>
-                          form.setValue(
-                            "playback.hw_device",
-                            toggleHWDevice(
-                              form.getValue("playback.hw_device"),
-                              row.path,
-                              detectedPaths,
-                            ),
-                          )
-                        }
-                      />
-                    </div>
-                  ))}
-                </div>
+                      </>
+                    }
+                  >
+                    <Switch
+                      checked={selectedDevices.includes(row.path)}
+                      aria-label={row.description}
+                      onCheckedChange={() =>
+                        form.setValue(
+                          "playback.hw_device",
+                          toggleHWDevice(
+                            form.getValue("playback.hw_device"),
+                            row.path,
+                            detectedPaths,
+                          ),
+                        )
+                      }
+                    />
+                  </SettingFieldRow>
+                ))}
               </div>
             )}
             <SettingField
@@ -277,12 +294,15 @@ export default function PlaybackSettings() {
             <SettingField
               label="Generate chapter thumbnails on"
               type="select"
-              options={[
-                { value: "local", label: "This server" },
-                { value: "prefer_transcode_nodes", label: "Transcode nodes when available" },
-                { value: "transcode_nodes_only", label: "Transcode nodes only" },
-              ]}
-              value={form.getValue("playback.chapter_thumbnail_execution") || "local"}
+              options={chapterThumbnailExecutionOptions(chapterExecution, transcodeNodeAvailable)}
+              status={
+                transcodeNodeAvailable ? undefined : (
+                  <SettingFieldStatus tone="warn">
+                    No transcode nodes are connected
+                  </SettingFieldStatus>
+                )
+              }
+              value={chapterExecution}
               onChange={(v) => form.setValue("playback.chapter_thumbnail_execution", v)}
               restartRequired={restartKeys.has("playback.chapter_thumbnail_execution")}
             />
@@ -334,95 +354,6 @@ export default function PlaybackSettings() {
             onChange={(v) => form.setValue("playback.min_resume_threshold", v)}
             restartRequired={restartKeys.has("playback.min_resume_threshold")}
           />
-        </FieldGroup>
-
-        <FieldGroup
-          label="Downloads"
-          restartAll={allRestart([...DOWNLOAD_ESSENTIAL_KEYS, ...DOWNLOAD_ADVANCED_KEYS])}
-        >
-          <SettingField
-            label="Allow downloads"
-            type="toggle"
-            value={form.getValue("download.enabled")}
-            onChange={(v) => form.setValue("download.enabled", v)}
-            restartRequired={restartKeys.has("download.enabled")}
-          />
-          <LimitField
-            label="Per-user bandwidth"
-            unit="Mbps"
-            value={form.getValue("download.user_bandwidth_mbps")}
-            onChange={(v) => form.setValue("download.user_bandwidth_mbps", v)}
-            restartRequired={restartKeys.has("download.user_bandwidth_mbps")}
-          />
-
-          <AdvancedSection
-            id="playback.downloads"
-            count={DOWNLOAD_ADVANCED_KEYS.length}
-            forceOpen={anyDirty(DOWNLOAD_ADVANCED_KEYS)}
-          >
-            <LimitField
-              label="Server bandwidth"
-              unit="Mbps"
-              hint="All downloads on this server combined."
-              value={form.getValue("download.server_bandwidth_mbps")}
-              onChange={(v) => form.setValue("download.server_bandwidth_mbps", v)}
-              restartRequired={restartKeys.has("download.server_bandwidth_mbps")}
-            />
-            <LimitField
-              label="Downloads at once per user"
-              value={form.getValue("download.max_concurrent_per_user")}
-              onChange={(v) => form.setValue("download.max_concurrent_per_user", v)}
-              restartRequired={restartKeys.has("download.max_concurrent_per_user")}
-            />
-            <LimitField
-              label="Downloads per period"
-              hint="Counted against the period below."
-              value={form.getValue("download.max_per_period")}
-              onChange={(v) => form.setValue("download.max_per_period", v)}
-              restartRequired={restartKeys.has("download.max_per_period")}
-            />
-            <SettingField
-              label="Period length"
-              type="duration"
-              description="Rolling window, e.g. 24h or 168h."
-              value={form.getValue("download.period_duration")}
-              onChange={(v) => form.setValue("download.period_duration", v)}
-              restartRequired={restartKeys.has("download.period_duration")}
-            />
-            <SettingField
-              label="Prepare device-friendly copies"
-              type="toggle"
-              description="Converts a file the device cannot play before download."
-              value={form.getValue("download.transcode_enabled")}
-              onChange={(v) => form.setValue("download.transcode_enabled", v)}
-              restartRequired={restartKeys.has("download.transcode_enabled")}
-            />
-            <SettingField
-              label="Prepared file directory"
-              description="Empty puts them next to the transcode directory."
-              value={form.getValue("download.artifact_dir")}
-              onChange={(v) => form.setValue("download.artifact_dir", v)}
-              restartRequired={restartKeys.has("download.artifact_dir")}
-            />
-            {/* Not a LimitField: the server reads 0 as "use the built-in
-                worker count" (2), not as unlimited. */}
-            <SettingField
-              label="Files prepared at once"
-              type="number"
-              description="0 uses the built-in default of 2."
-              value={form.getValue("download.max_concurrent_prepares")}
-              onChange={(v) => form.setValue("download.max_concurrent_prepares", v)}
-              restartRequired={restartKeys.has("download.max_concurrent_prepares")}
-            />
-            <LimitField
-              label="Prepared file storage budget"
-              unit="bytes"
-              hint="Least recently used files are deleted first."
-              value={form.getValue("download.artifact_max_bytes")}
-              onChange={(v) => form.setValue("download.artifact_max_bytes", v)}
-              restartRequired={restartKeys.has("download.artifact_max_bytes")}
-            />
-          </AdvancedSection>
         </FieldGroup>
       </div>
 

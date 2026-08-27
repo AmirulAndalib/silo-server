@@ -25,12 +25,6 @@ vi.mock("@/hooks/queries/admin/settings", () => ({
   useCatalogSearchStatus: () => ({ data: undefined, isLoading: true }),
 }));
 
-vi.mock("@/hooks/queries/admin/markers", () => ({
-  useMarkerProviders: () => ({ data: { providers: [] }, isLoading: false }),
-  useUpdateMarkerProvider: () => ({ mutate: vi.fn(), isPending: false }),
-  useValidateMarkerProvider: () => ({ mutate: vi.fn(), isPending: false, data: undefined }),
-}));
-
 vi.mock("@/hooks/queries/admin/tasks", () => ({
   useTasks: () => ({ data: [] }),
   useRunTask: () => ({ mutateAsync: vi.fn() }),
@@ -111,6 +105,29 @@ describe("LibraryMetadataSettings", () => {
     expect(rendered).toContain("Search engine");
   });
 
+  it("states the CPU cost of local detection and the search fallback guarantee", () => {
+    const rendered = text(render({ "catalog.search.provider": "meilisearch" }));
+
+    expect(rendered).toContain("Detecting on this server utilizes CPU.");
+    expect(rendered).toContain(
+      "Meilisearch tolerates typos but runs as its own service. If it goes down, search falls back to the built-in engine automatically.",
+    );
+  });
+
+  it("offers the Meilisearch connection check as a filled button", () => {
+    const container = document.createElement("div");
+    container.innerHTML = render({ "catalog.search.provider": "meilisearch" });
+
+    const button = Array.from(container.querySelectorAll("button")).find(
+      (el) => el.textContent?.trim() === "Check Connection",
+    );
+
+    expect(button).toBeDefined();
+    // Filled rather than the transparent outline variant, so the control does
+    // not read as flat text inside the group panel.
+    expect(button?.getAttribute("data-variant")).toBe("secondary");
+  });
+
   it("manages the merged key set of the three tabs it replaces", () => {
     render({});
 
@@ -134,6 +151,18 @@ describe("LibraryMetadataSettings", () => {
     expect(keys).not.toContain("catalog.search.meilisearch.embedder");
     expect(keys).not.toContain("catalog.search.meilisearch.binary_quantized");
     expect(keys).not.toContain("catalog.search.meilisearch.rebuild_batch_size");
+  });
+
+  it("keeps marker behavior and points provider setup at the providers page", () => {
+    const rendered = render({ "catalog.search.provider": "postgres" });
+
+    expect(text(rendered)).toContain("Find intros and credits");
+    // Per-provider configuration moved to Subtitles & Metadata; only the link
+    // to it is left here.
+    expect(text(rendered)).not.toContain("Use for online marker lookup");
+    expect(text(rendered)).not.toContain("Minimum confidence");
+    expect(text(rendered)).toContain("Marker providers");
+    expect(rendered).toContain("/admin/settings/providers");
   });
 
   it("keeps advanced settings collapsed but expands a section holding a staged edit", () => {

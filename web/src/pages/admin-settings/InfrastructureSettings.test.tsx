@@ -133,6 +133,31 @@ describe("InfrastructureSettings", () => {
     expect(markup).not.toContain("Not currently in use");
   });
 
+  it("keeps the Redis connection check available when REDIS_URL comes from the environment", () => {
+    mockForm({
+      sensitiveConfigured: ["redis.url"],
+      sensitiveManagedByEnv: ["redis.url"],
+    });
+
+    render(<InfrastructureSettings />);
+
+    const redisGroup = within(screen.getByRole("group", { name: "Redis" }));
+    // The value stays read-only — only writes are refused for env-managed keys —
+    // but the check runs against the value the server merged from REDIS_URL.
+    expect(redisGroup.getByLabelText("Connection URL")).toBeDisabled();
+    expect(redisGroup.getByRole("button", { name: "Check Connection" })).toBeEnabled();
+  });
+
+  it("renders Check Connection as a filled button rather than flat text", () => {
+    mockForm();
+
+    render(<InfrastructureSettings />);
+
+    for (const button of screen.getAllByRole("button", { name: "Check Connection" })) {
+      expect(button).toHaveAttribute("data-variant", "secondary");
+    }
+  });
+
   it("opens an Advanced section while one of its fields is unsaved", () => {
     mockForm({ isDirty: (key: string) => key === "database.max_connections", dirtyCount: 1 });
 

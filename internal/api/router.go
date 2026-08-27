@@ -1533,19 +1533,12 @@ func NewRouter(deps Dependencies) chi.Router {
 				client: tmdb.NewClient(apiKey, 40),
 			}
 		}
-		traktClientID := ""
-		if settingsRepo != nil {
-			ctx := deps.AppContext
-			if ctx == nil {
-				ctx = context.Background()
-			}
-			if value, err := settingsRepo.Get(ctx, "watchsync.trakt.client_id"); err == nil {
-				traktClientID = value
-			}
-		}
 		if libraryCollectionService.TraktCollections == nil {
+			// The client ID is resolved per call rather than captured here, so
+			// saving new Trakt credentials applies without a server restart.
 			libraryCollectionService.TraktCollections = &traktCollectionAdapter{
-				client: metatrakt.NewClient(traktClientID, 5),
+				client:   metatrakt.NewClient("", 5),
+				settings: settingsRepo,
 			}
 		}
 		if libraryCollectionService.TraktTokenResolver == nil && deps.DB != nil && settingsRepo != nil {
@@ -3657,11 +3650,33 @@ func (a *tmdbDiscoverAdapter) Discover(ctx context.Context, mediaType string, pa
 	return entries, nil
 }
 
+// traktClientIDSettingKey holds the Trakt app client ID. It is deliberately
+// not in config.restartRequiredKeys: the adapter re-reads it before every
+// upstream call, so a saved change converges without a restart.
+const traktClientIDSettingKey = "watchsync.trakt.client_id"
+
 type traktCollectionAdapter struct {
 	client *metatrakt.Client
+	// settings is the live source of the app client ID. Nil only where no
+	// settings store exists (tests), where the client ID stays empty and the
+	// upstream call fails the same way it always did.
+	settings catalog.SettingsStore
+}
+
+// refreshClientID pushes the currently saved app client ID onto the shared
+// client. A read failure leaves the last known value in place: failing the
+// request at Trakt is more useful than failing it here on a transient DB blip.
+func (a *traktCollectionAdapter) refreshClientID(ctx context.Context) {
+	if a.settings == nil {
+		return
+	}
+	if clientID, err := a.settings.Get(ctx, traktClientIDSettingKey); err == nil {
+		a.client.SetClientID(clientID)
+	}
 }
 
 func (a *traktCollectionAdapter) GetCollectionPreset(ctx context.Context, preset, mediaType string, limit int, accessToken string) ([]catalog.TraktCollectionEntry, error) {
+	a.refreshClientID(ctx)
 	results, err := a.client.GetCollectionPreset(ctx, preset, mediaType, limit, accessToken)
 	if err != nil {
 		return nil, err
@@ -3683,6 +3698,7 @@ func (a *traktCollectionAdapter) GetCollectionPreset(ctx context.Context, preset
 }
 
 func (a *traktCollectionAdapter) GetUserList(ctx context.Context, user, list string, limit int, accessToken string) ([]catalog.TraktCollectionEntry, error) {
+	a.refreshClientID(ctx)
 	results, err := a.client.GetUserList(ctx, user, list, limit, accessToken)
 	if err != nil {
 		return nil, err

@@ -23,6 +23,16 @@ interface SelectOption {
 }
 
 /**
+ * Width of a text, password, or select control inside a settings row. Pages
+ * that hand `SettingFieldRow` a control of their own use this instead of
+ * picking a width, so every row on a page ends on the same edge.
+ */
+export const SETTINGS_CONTROL_WIDTH = "w-full sm:w-[var(--settings-control-w)]";
+
+/** Width of a number control inside a settings row. See {@link SETTINGS_CONTROL_WIDTH}. */
+export const SETTINGS_NUMBER_WIDTH = "w-full sm:w-[var(--settings-control-w-num)]";
+
+/**
  * One-line probe result rendered under a field description, e.g.
  * "Detected VA-API on renderD128". Pass any node to `status` instead when the
  * copy needs richer markup.
@@ -69,8 +79,13 @@ export interface SettingFieldRowProps {
   status?: ReactNode;
   /** Amber "Restart" chip after the label; drive it from `useRestartKeys`. */
   restartRequired?: boolean;
-  /** Toggles sit flush right; every other control reserves a 200px column. */
-  align?: "control" | "toggle";
+  /**
+   * Trailing unit for the control, e.g. "days" or "Mbps". It renders in the
+   * row's own unit slot rather than beside the control on purpose: the slot is
+   * reserved on every row, so a row that has a unit and a row that does not
+   * still end their controls on the same edge.
+   */
+  unit?: ReactNode;
   className?: string;
   /** The control itself. */
   children: ReactNode;
@@ -78,8 +93,9 @@ export interface SettingFieldRowProps {
 
 /**
  * The row shell every admin setting sits in: label and description on the
- * left, control right-aligned, hairline underneath. Exported so the credential
- * and limit variants line up with plain fields instead of re-deriving spacing.
+ * left, control right-aligned, unit slot after it, hairline underneath.
+ * Exported so the credential and limit variants line up with plain fields
+ * instead of re-deriving spacing.
  */
 export function SettingFieldRow({
   label,
@@ -90,7 +106,7 @@ export function SettingFieldRow({
   descriptionId,
   status,
   restartRequired,
-  align = "control",
+  unit,
   className,
   children,
 }: SettingFieldRowProps) {
@@ -131,13 +147,25 @@ export function SettingFieldRow({
         ) : null}
         {status ? <div className="mt-1.5">{status}</div> : null}
       </div>
-      <div
-        className={cn(
-          "flex shrink-0 items-center gap-2 sm:justify-end",
-          align === "control" && "sm:min-w-[200px]",
+      <div className="flex w-full items-center gap-2 sm:w-auto sm:shrink-0 sm:justify-end">
+        {/* Grows to fill the row on a stacked phone layout; content-sized and
+            right-aligned from `sm` up, which is what puts every control on the
+            shared edge. */}
+        <div className="flex min-w-0 flex-1 items-center gap-2 sm:flex-none sm:justify-end">
+          {children}
+        </div>
+        {unit ? (
+          <span className="text-muted-foreground shrink-0 text-xs whitespace-nowrap sm:w-[var(--settings-unit-w)]">
+            {unit}
+          </span>
+        ) : (
+          // The reserved half of the contract: an empty slot on a unit-less row
+          // so its control does not slide right past the rows that have one.
+          <span
+            aria-hidden="true"
+            className="hidden shrink-0 sm:block sm:w-[var(--settings-unit-w)]"
+          />
         )}
-      >
-        {children}
       </div>
     </div>
   );
@@ -159,7 +187,7 @@ interface SettingFieldProps {
   description?: ReactNode;
   /** Extra line under the description, e.g. a detection result. */
   status?: ReactNode;
-  /** Rendered after the control, e.g. "%" or "Mbps". */
+  /** Rendered in the row's trailing unit slot, e.g. "%" or "Mbps". */
   unit?: string;
   value: string;
   onChange: (value: string) => void;
@@ -197,7 +225,7 @@ export function SettingField({
   const rowDescription = description ?? hintAsDescription;
   const describedBy = rowDescription ? hintId : undefined;
 
-  const row = (control: ReactNode, align: "control" | "toggle" = "control") => (
+  const row = (control: ReactNode) => (
     <SettingFieldRow
       label={label}
       htmlFor={controlId}
@@ -207,11 +235,10 @@ export function SettingField({
       descriptionId={hintId}
       status={status}
       restartRequired={restartRequired}
-      align={align}
+      unit={unit}
       className={className}
     >
       {control}
-      {unit ? <span className="text-muted-foreground text-xs">{unit}</span> : null}
     </SettingFieldRow>
   );
 
@@ -224,7 +251,6 @@ export function SettingField({
         disabled={disabled}
         aria-describedby={describedBy}
       />,
-      "toggle",
     );
   }
 
@@ -234,7 +260,7 @@ export function SettingField({
       <Select value={currentVal} onValueChange={onChange} disabled={disabled}>
         <SelectTrigger
           id={controlId}
-          className="border-muted-foreground/25 w-full sm:w-60"
+          className={cn("border-muted-foreground/25", SETTINGS_CONTROL_WIDTH)}
           aria-describedby={describedBy}
         >
           <SelectValue />
@@ -259,7 +285,7 @@ export function SettingField({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        className="border-muted-foreground/25 w-full sm:w-60"
+        className={cn("border-muted-foreground/25", SETTINGS_CONTROL_WIDTH)}
         aria-describedby={describedBy}
       />,
     );
@@ -273,7 +299,7 @@ export function SettingField({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        className="border-muted-foreground/25 w-full sm:w-40"
+        className={cn("border-muted-foreground/25", SETTINGS_NUMBER_WIDTH)}
         aria-describedby={describedBy}
       />,
     );
@@ -287,7 +313,7 @@ export function SettingField({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       disabled={disabled}
-      className="border-muted-foreground/25 w-full sm:w-60"
+      className={cn("border-muted-foreground/25", SETTINGS_CONTROL_WIDTH)}
       placeholder={type === "text" ? hint : undefined}
       aria-describedby={describedBy}
     />,

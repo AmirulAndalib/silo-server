@@ -42,6 +42,7 @@ import { Switch } from "@/components/ui/switch";
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
 import { SecretField } from "@/components/settings/SecretField";
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
+import { SettingsSubheading } from "@/components/settings/SettingsSubheading";
 import { adminKeys } from "@/hooks/queries/keys";
 import { useServerNotificationChannels } from "@/hooks/queries/admin/serverNotificationChannels";
 import { useUpdateServerSettings } from "@/hooks/queries/admin/settings";
@@ -181,15 +182,6 @@ function ZoneHeading({ title }: { title: string }) {
     <h3 className="text-muted-foreground px-1 text-xs font-semibold tracking-[0.22em] uppercase">
       {title}
     </h3>
-  );
-}
-
-/** Sub-grouping label inside an expanded channel card. */
-function SubsectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="text-muted-foreground/80 pt-4 pb-1 text-[11px] font-semibold tracking-wider uppercase">
-      {children}
-    </div>
   );
 }
 
@@ -757,9 +749,9 @@ function DiscordAppCredentials({
 
   return (
     <>
-      <SubsectionLabel>Application</SubsectionLabel>
+      <SettingsSubheading>Application</SettingsSubheading>
       <DiscordSetupGuide />
-      <div className="divide-border divide-y">
+      <div className="settings-field-list">
         <SettingField
           label="Client ID"
           value={clientId}
@@ -769,7 +761,7 @@ function DiscordAppCredentials({
         />
       </div>
       <InviteBotRow clientId={clientId} />
-      <div className="divide-border divide-y">
+      <div className="settings-field-list">
         <SecretField
           label="Client secret"
           value={clientSecret}
@@ -1074,7 +1066,7 @@ export default function NotificationsAdminSettings() {
               )
             }
           >
-            <div className="divide-border divide-y">
+            <div className="settings-field-list">
               <MobilePushPrivacyDisclosure />
               <SettingField
                 label="Apple Push (APNs)"
@@ -1138,8 +1130,8 @@ export default function NotificationsAdminSettings() {
               </>
             }
           >
-            <SubsectionLabel>Mail Server</SubsectionLabel>
-            <div className="divide-border divide-y">
+            <SettingsSubheading>Mail Server</SettingsSubheading>
+            <div className="settings-field-list">
               <SettingField
                 label="Send email from this server"
                 description="Covers every email Silo sends, not just notifications."
@@ -1207,8 +1199,8 @@ export default function NotificationsAdminSettings() {
               />
               <TestEmailRow />
             </div>
-            <SubsectionLabel>Delivery</SubsectionLabel>
-            <div className="divide-border divide-y">
+            <SettingsSubheading>Delivery</SettingsSubheading>
+            <div className="settings-field-list">
               <SettingField
                 label="Let people pick an email per episode"
                 description="Off sends them the daily summary instead."
@@ -1256,8 +1248,8 @@ export default function NotificationsAdminSettings() {
               sensitiveConfigured={form.sensitiveConfigured}
               restartKeys={restartKeys}
             />
-            <SubsectionLabel>Delivery</SubsectionLabel>
-            <div className="divide-border divide-y">
+            <SettingsSubheading>Delivery</SettingsSubheading>
+            <div className="settings-field-list">
               <SettingField
                 label="Let people pick a DM per episode"
                 description="Off sends them the daily summary instead."
@@ -1276,7 +1268,7 @@ export default function NotificationsAdminSettings() {
                 restartRequired={needsRestart("notifications.discord.digest_hour")}
               />
             </div>
-            <SubsectionLabel>Appearance</SubsectionLabel>
+            <SettingsSubheading>Appearance</SettingsSubheading>
             <SettingField
               label="Artwork"
               description="Server images reveal your server URL to anyone who sees the message."
@@ -1371,7 +1363,7 @@ export default function NotificationsAdminSettings() {
               </>
             }
           >
-            <div className="divide-border divide-y">
+            <div className="settings-field-list">
               <SettingField
                 label="Batch window"
                 description="New content waits this long so a season posts as one message."
@@ -1401,7 +1393,11 @@ export default function NotificationsAdminSettings() {
         {/* ── Tuning: everything here has a working default ── */}
         <section className="space-y-3">
           <ZoneHeading title="Tuning" />
-          <div className="grid gap-3 xl:grid-cols-2 xl:gap-6">
+          {/* Full width, not a two-up grid: the settings column is clamped to
+              max-w-3xl, so side-by-side groups left each row with a ~140px
+              label column beside its control and every description wrapped to
+              six lines. */}
+          <div className="space-y-3">
             <FieldGroup label="Grouping and flood control" restartAll={allRestart(FANOUT_KEYS)}>
               <AdvancedSection
                 id="notifications.fanout"

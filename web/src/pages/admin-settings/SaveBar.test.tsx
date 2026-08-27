@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { RestartBanner, SaveBar } from "./SaveBar";
+import { SaveBar } from "./SaveBar";
 
 function renderBar(props: Partial<Parameters<typeof SaveBar>[0]> = {}) {
   return render(
@@ -48,39 +48,11 @@ describe("SaveBar", () => {
     expect(screen.getByRole("button", { name: "Saving..." })).toBeDisabled();
   });
 
+  // The restart prompt belongs to the admin shell (see
+  // components/admin/RestartBanner.test.tsx); the pill must never grow one.
   it("renders no restart prompt of its own", () => {
     renderBar({ dirtyCount: 2 });
 
     expect(screen.queryByText("Restart required")).not.toBeInTheDocument();
-  });
-});
-
-describe("RestartBanner", () => {
-  it("stays hidden until a restart is owed", () => {
-    const { container } = render(<RestartBanner />);
-
-    expect(container).toBeEmptyDOMElement();
-  });
-
-  it("prompts for a restart and can be deferred", async () => {
-    render(<RestartBanner restartRequired description="FFmpeg path takes effect on restart." />);
-
-    expect(screen.getByText("Restart required")).toBeInTheDocument();
-    expect(screen.getByText("FFmpeg path takes effect on restart.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Restart server/ })).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole("button", { name: "Later" }));
-    expect(screen.queryByText("Restart required")).not.toBeInTheDocument();
-  });
-
-  it("comes back when a new restart reason arrives", async () => {
-    const { rerender } = render(<RestartBanner restartRequired />);
-
-    await userEvent.click(screen.getByRole("button", { name: "Later" }));
-    expect(screen.queryByText("Restart required")).not.toBeInTheDocument();
-
-    rerender(<RestartBanner restartRequired={false} />);
-    rerender(<RestartBanner restartRequired />);
-    expect(screen.getByText("Restart required")).toBeInTheDocument();
   });
 });

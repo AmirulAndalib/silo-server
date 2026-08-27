@@ -1,6 +1,9 @@
-import { render, screen, within } from "@testing-library/react";
+import { render as renderDOM, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { MarkerProviderConfig, PluginInstallation } from "@/api/types";
 
 import ProvidersSettings from "./ProvidersSettings";
 
@@ -12,13 +15,51 @@ const mocks = vi.hoisted(() => ({
   updateProvider: vi.fn(),
   testProvider: vi.fn(),
   updateSettings: vi.fn(),
+  updateMarkerProvider: vi.fn(),
+  validateMarkerProvider: vi.fn(),
+}));
+
+function render(ui: React.ReactElement) {
+  return renderDOM(<MemoryRouter>{ui}</MemoryRouter>);
+}
+
+function markerProvider(overrides: Partial<MarkerProviderConfig> = {}): MarkerProviderConfig {
+  return {
+    provider: "plugin:6:introdb",
+    display_name: "TheIntroDB",
+    source_type: "plugin",
+    plugin_id: "silo.theintrodb",
+    plugin_installation_id: 6,
+    capability_id: "introdb",
+    is_submitter: true,
+    fetch_enabled: true,
+    fetch_priority: 10,
+    contribute_enabled: false,
+    contribute_auto_local: false,
+    contribute_min_confidence: 0.95,
+    ...overrides,
+  };
+}
+
+let markerProviders: MarkerProviderConfig[] = [];
+let pluginInstallations: Partial<PluginInstallation>[] = [];
+
+vi.mock("@/hooks/queries/admin/markers", () => ({
+  useMarkerProviders: () => ({ data: { providers: markerProviders }, isLoading: false }),
+  useUpdateMarkerProvider: () => ({ mutate: mocks.updateMarkerProvider, isPending: false }),
+  useValidateMarkerProvider: () => ({ mutate: mocks.validateMarkerProvider, isPending: false }),
+}));
+
+vi.mock("@/hooks/queries/admin/plugins", () => ({
+  useAdminPluginInstallations: () => ({ data: pluginInstallations }),
 }));
 
 let sensitiveConfigured: string[] = ["mdblist.api_key"];
+let settingsValues: Record<string, string> = {};
 
 const useSettingsFormMock = vi.fn((_options?: { keys: string[] }) => ({
   isLoading: false,
-  getValue: () => "",
+  getValue: (key: string) => settingsValues[key] ?? "",
   setValue: vi.fn(),
   resetValue: vi.fn(),
   dirtyCount: 0,
@@ -96,10 +137,13 @@ describe("ProvidersSettings", () => {
   beforeEach(() => {
     localStorage.clear();
     sensitiveConfigured = ["mdblist.api_key"];
+    settingsValues = {};
+    markerProviders = [];
+    pluginInstallations = [];
     for (const mock of Object.values(mocks)) mock.mockReset();
   });
 
-  it("heads the page and both provider groups", () => {
+  it("heads the page and every provider group", () => {
     render(<ProvidersSettings />);
 
     expect(
@@ -110,6 +154,7 @@ describe("ProvidersSettings", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Subtitle providers" })).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Metadata providers" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Marker providers" })).toBeInTheDocument();
     expect(screen.queryByText("Searched in order, top to bottom")).not.toBeInTheDocument();
   });
 
@@ -248,10 +293,188 @@ describe("ProvidersSettings", () => {
     expect(within(subsource).getByText("401 — key rejected")).toBeInTheDocument();
   });
 
+  it("gives every panel action a resting affordance instead of ghost text", async () => {
+    const user = userEvent.setup();
+    render(<ProvidersSettings />);
+
+    await user.click(
+      within(screen.getByRole("group", { name: "SubSource" })).getByRole("button", {
+        name: "Manage",
+      }),
+    );
+
+    const subsource = screen.getByRole("group", { name: "SubSource" });
+    expect(within(subsource).getByRole("button", { name: "Test connection" })).toHaveAttribute(
+      "data-variant",
+      "secondary",
+    );
+    for (const name of ["Disconnect", "Close"]) {
+      expect(within(subsource).getByRole("button", { name })).toHaveAttribute(
+        "data-variant",
+        "outline",
+      );
+    }
+  });
+
   it("points metadata plugins at the plugins page instead of faking tiles", () => {
     render(<ProvidersSettings />);
 
     expect(screen.getByRole("link", { name: "Plugins" })).toHaveAttribute("href", "/admin/plugins");
     expect(screen.queryByRole("group", { name: "TMDB" })).not.toBeInTheDocument();
+  });
+
+  it("says so plainly when no marker provider plugin is installed", () => {
+    render(<ProvidersSettings />);
+
+    expect(screen.getByText(/No marker provider plugins are installed/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "plugin catalog" })).toHaveAttribute(
+      "href",
+      "/admin/plugins?tab=catalog",
+    );
+  });
+
+  it("counts a marker provider whose plugin has no saved key as not connected", () => {
+    markerProviders = [markerProvider()];
+    pluginInstallations = [
+      {
+        id: 6,
+        plugin_id: "silo.theintrodb",
+        enabled: true,
+        global_config_schema: [
+          { key: "account", title: "Account", json_schema: "{}", required: false },
+        ],
+        global_configs: [],
+      },
+    ];
+
+    render(<ProvidersSettings />);
+
+    const tile = screen.getByRole("group", { name: "TheIntroDB" });
+    expect(tile).toHaveAttribute("data-state", "not_connected");
+    expect(within(tile).getByText("Needs setup")).toBeInTheDocument();
+    // The next step is the plugin's own page, so the tile does not offer to
+    // "Manage" settings that cannot work yet.
+    expect(within(tile).getByRole("button", { name: "Set up" })).toBeInTheDocument();
+  });
+
+  it("counts a configured, lookup-enabled marker provider as connected", () => {
+    markerProviders = [markerProvider()];
+    pluginInstallations = [
+      {
+        id: 6,
+        plugin_id: "silo.theintrodb",
+        enabled: true,
+        global_config_schema: [
+          { key: "account", title: "Account", json_schema: "{}", required: true },
+        ],
+        global_configs: [{ key: "account", value: {}, configured_secrets: ["api_key"] }],
+      },
+    ];
+
+    render(<ProvidersSettings />);
+
+    const tile = screen.getByRole("group", { name: "TheIntroDB" });
+    expect(tile).toHaveAttribute("data-state", "connected");
+    expect(within(tile).getByText("Connected")).toBeInTheDocument();
+  });
+
+  it("marks a configured provider that is off for lookup", () => {
+    markerProviders = [markerProvider({ fetch_enabled: false })];
+    pluginInstallations = [
+      {
+        id: 6,
+        plugin_id: "silo.theintrodb",
+        enabled: true,
+        global_config_schema: [
+          { key: "account", title: "Account", json_schema: "{}", required: true },
+        ],
+        global_configs: [{ key: "account", value: {}, configured_secrets: ["api_key"] }],
+      },
+    ];
+
+    render(<ProvidersSettings />);
+
+    const tile = screen.getByRole("group", { name: "TheIntroDB" });
+    expect(tile).toHaveAttribute("data-state", "not_connected");
+    expect(within(tile).getByText("Connected · off")).toBeInTheDocument();
+  });
+
+  it("edits marker provider behavior in the tile and sends the whole row", async () => {
+    const user = userEvent.setup();
+    markerProviders = [markerProvider()];
+
+    render(<ProvidersSettings />);
+
+    await user.click(
+      within(screen.getByRole("group", { name: "TheIntroDB" })).getByRole("button", {
+        name: "Manage",
+      }),
+    );
+
+    const tile = screen.getByRole("group", { name: "TheIntroDB" });
+    expect(tile).toHaveAttribute("data-expanded", "true");
+    expect(within(tile).getByLabelText("Lookup order")).toHaveValue(10);
+    // Credentials are the plugin's, not Silo's: the panel links out for them.
+    expect(within(tile).getByRole("link", { name: "plugin page" })).toHaveAttribute(
+      "href",
+      "/admin/plugins?installed_q=silo.theintrodb&configure=silo.theintrodb",
+    );
+
+    await user.clear(within(tile).getByLabelText("Lookup order"));
+    await user.type(within(tile).getByLabelText("Lookup order"), "5");
+    await user.click(within(tile).getByRole("button", { name: "Save" }));
+
+    expect(mocks.updateMarkerProvider).toHaveBeenCalledWith({
+      provider: "plugin:6:introdb",
+      patch: {
+        fetch_enabled: true,
+        fetch_priority: 5,
+        contribute_enabled: false,
+        contribute_auto_local: false,
+        contribute_min_confidence: 0.95,
+      },
+    });
+  });
+
+  it("admits when the detection mode never looks online", () => {
+    markerProviders = [markerProvider()];
+    settingsValues = { "markers.mode": "local" };
+
+    render(<ProvidersSettings />);
+
+    expect(screen.getByText(/Nothing here is searched right now/)).toBeInTheDocument();
+    expect(screen.getByText(/is set to Detect on this server/)).toBeInTheDocument();
+  });
+
+  it("says when providers are in play instead", () => {
+    markerProviders = [markerProvider()];
+    settingsValues = { "markers.mode": "both" };
+
+    render(<ProvidersSettings />);
+
+    expect(screen.getByText(/Providers are searched when/)).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing here is searched right now/)).not.toBeInTheDocument();
+  });
+
+  it("closes a subtitle panel when a marker tile is opened", async () => {
+    const user = userEvent.setup();
+    markerProviders = [markerProvider()];
+
+    render(<ProvidersSettings />);
+
+    await user.click(
+      within(screen.getByRole("group", { name: "SubDL" })).getByRole("button", { name: "Connect" }),
+    );
+    await user.click(
+      within(screen.getByRole("group", { name: "TheIntroDB" })).getByRole("button", {
+        name: "Manage",
+      }),
+    );
+
+    expect(screen.getByRole("group", { name: "SubDL" })).not.toHaveAttribute("data-expanded");
+    expect(screen.getByRole("group", { name: "TheIntroDB" })).toHaveAttribute(
+      "data-expanded",
+      "true",
+    );
   });
 });

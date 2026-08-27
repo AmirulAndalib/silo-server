@@ -5,6 +5,7 @@ import {
   useUpdateServerSettings,
   useAdminSensitiveStatus,
 } from "@/hooks/queries/admin/settings";
+import { useReportUnsavedChanges } from "@/hooks/useUnsavedChanges";
 
 interface UseSettingsFormOptions {
   /** Setting keys this section manages */
@@ -84,14 +85,16 @@ export function useSettingsForm({ keys }: UseSettingsFormOptions) {
   const dirtyCount = dirty.size;
   const dirtyKeys = useMemo(() => Array.from(dirty), [dirty]);
 
+  // In-app navigation is guarded by `UnsavedChangesGuard`, which blocks the
+  // router for as long as this registration is live. Reporting through a module
+  // store rather than owning the prompt keeps the hook usable where no guard is
+  // mounted (the setup wizard) and outside a router entirely.
+  useReportUnsavedChanges(dirtyCount > 0);
+
   // Every admin settings tab stages edits and only writes them through the
   // SaveBar, so closing or reloading the tab would silently drop them. One
-  // guard here covers all tabs.
-  //
-  // Only the browser-level teardown is guarded: react-router's `useBlocker`
-  // needs a data router, and the app mounts the declarative `<BrowserRouter>`
-  // (web/src/App.tsx), where calling it throws. Wire it up here if the app
-  // ever moves to `createBrowserRouter`.
+  // guard here covers all tabs, and it is the only thing the browser lets us
+  // intercept: a tab close or reload never reaches the router.
   useEffect(() => {
     if (dirtyCount === 0) return;
     function warnOnUnload(event: BeforeUnloadEvent) {

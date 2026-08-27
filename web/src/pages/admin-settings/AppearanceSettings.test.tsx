@@ -50,10 +50,27 @@ vi.mock("@/components/theme/ThemePreviewCard", () => ({
 }));
 
 vi.mock("@/components/overlays/OverlayPreviewCard", () => ({
-  OverlayPreviewCard: () => null,
+  OverlayPreviewCard: ({ variant }: { variant?: string }) => (
+    <div data-testid="overlay-preview">{variant}</div>
+  ),
 }));
 
+import { buildDefaultPrefs, serializeOverlayPrefs } from "@/lib/overlays";
+
 import AppearanceSettings from "./AppearanceSettings";
+
+const BUILT_IN_OVERLAY_DEFAULTS = serializeOverlayPrefs(buildDefaultPrefs());
+
+/** The built-in document with one badge flipped, so it is not already default. */
+function customizedOverlayDefaults() {
+  const prefs = buildDefaultPrefs();
+  prefs.preset = "vibrant";
+  prefs.items.resolution = {
+    ...prefs.items.resolution,
+    enabled: !prefs.items.resolution.enabled,
+  };
+  return serializeOverlayPrefs(prefs);
+}
 
 function makeForm(values: Record<string, string> = {}) {
   const staged: Record<string, string> = { ...values };
@@ -140,6 +157,54 @@ describe("AppearanceSettings", () => {
     expect(screen.getByRole("button", { name: "Set primary token" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Custom CSS editor" })).toBeInTheDocument();
     expect(screen.getByLabelText("Community theme list")).toBeInTheDocument();
+  });
+
+  // Show-only overlays (network, show status) are invisible against the movie
+  // sample, so the admin editing server defaults needs the same toggle the user
+  // page has. It is view state: switching it stages nothing.
+  it("previews the badge defaults against either a movie or a show sample", () => {
+    render(<AppearanceSettings />);
+
+    expect(screen.getByTestId("overlay-preview")).toHaveTextContent("movie");
+
+    fireEvent.click(screen.getByRole("button", { name: "show" }));
+
+    expect(screen.getByTestId("overlay-preview")).toHaveTextContent("show");
+    expect(form.setValue).not.toHaveBeenCalled();
+  });
+
+  // Restoring is an ordinary staged edit: the admin still confirms the batch
+  // through the SaveBar, and Discard puts the previous defaults back.
+  it("stages the registry's built-in overlay document instead of saving it", () => {
+    form = makeForm({ "defaults.card_overlays": customizedOverlayDefaults() });
+    render(<AppearanceSettings />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Restore defaults/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+
+    expect(form.setValue).toHaveBeenCalledWith("defaults.card_overlays", BUILT_IN_OVERLAY_DEFAULTS);
+    expect(form.save).not.toHaveBeenCalled();
+  });
+
+  it("leaves the badge kill switch alone when restoring the defaults", () => {
+    form = makeForm({
+      "defaults.card_overlays": customizedOverlayDefaults(),
+      "overlays.enabled": "false",
+    });
+    render(<AppearanceSettings />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Restore defaults/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+
+    expect(form.setValue).toHaveBeenCalledTimes(1);
+    expect(form.setValue).not.toHaveBeenCalledWith("overlays.enabled", expect.anything());
+  });
+
+  it("offers nothing to restore while the defaults already match the registry", () => {
+    form = makeForm({ "defaults.card_overlays": BUILT_IN_OVERLAY_DEFAULTS });
+    render(<AppearanceSettings />);
+
+    expect(screen.getByRole("button", { name: /Restore defaults/ })).toBeDisabled();
   });
 
   it("stages sanitized CSS while the editor keeps showing what was typed", () => {

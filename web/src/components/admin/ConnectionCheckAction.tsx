@@ -25,7 +25,10 @@ export function ConnectionCheckAction({
       <Button
         type="button"
         size="sm"
-        variant="outline"
+        // Filled rather than outline: inside a group's inset panel a
+        // transparent hairline button reads as flat text. `secondary` keeps the
+        // check subordinate to the primary Save action in the save bar.
+        variant="secondary"
         onClick={() => void onClick()}
         disabled={disabled || isPending}
       >

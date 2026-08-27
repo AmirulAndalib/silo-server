@@ -3,6 +3,7 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { useHasUnsavedChanges } from "./useUnsavedChanges";
 import { useSettingsForm } from "./useSettingsForm";
 
 const { mutateAsync } = vi.hoisted(() => ({ mutateAsync: vi.fn() }));
@@ -189,5 +190,37 @@ describe("useSettingsForm unsaved-changes guard", () => {
     unmount();
 
     expect(fireBeforeUnload().defaultPrevented).toBe(false);
+  });
+
+  // What `UnsavedChangesGuard` reads to block in-app navigation. The hook keeps
+  // no router dependency of its own; it only reports.
+  it("publishes staged edits to the shared unsaved-changes registry", () => {
+    const registry = renderHook(() => useHasUnsavedChanges());
+    const form = renderHook(() => useSettingsForm({ keys: KEYS }));
+
+    expect(registry.result.current).toBe(false);
+
+    act(() => {
+      form.result.current.setValue("branding.server_name", "Casa");
+    });
+    expect(registry.result.current).toBe(true);
+
+    act(() => {
+      form.result.current.discard();
+    });
+    expect(registry.result.current).toBe(false);
+  });
+
+  it("withdraws its registry claim when the form unmounts", () => {
+    const registry = renderHook(() => useHasUnsavedChanges());
+    const form = renderHook(() => useSettingsForm({ keys: KEYS }));
+
+    act(() => {
+      form.result.current.setValue("branding.server_name", "Casa");
+    });
+    expect(registry.result.current).toBe(true);
+
+    form.unmount();
+    expect(registry.result.current).toBe(false);
   });
 });

@@ -123,7 +123,7 @@ export function AdvancedSection({
         <div
           className={cn(
             "ml-[6px] border-l-2 border-[var(--settings-accent-line)] pl-[15px]",
-            "[&>*]:border-b [&>*]:border-[color-mix(in_srgb,var(--border)_60%,transparent)] [&>*:last-child]:border-b-0",
+            "settings-field-list",
           )}
         >
           {children}

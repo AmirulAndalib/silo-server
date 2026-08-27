@@ -17,16 +17,17 @@ import { useHWAccelDetection, type HWAccelInfo } from "@/hooks/queries/admin/sys
  */
 export const ADMIN_SETTINGS_PAGE_IDS = [
   "general",
+  "infrastructure",
   "appearance",
   "security",
   "library",
   "playback",
+  "downloads",
   "providers",
   "watch-sync",
   "ai",
   "notifications",
   "compatibility",
-  "infrastructure",
 ] as const;
 
 export type AdminSettingsPageID = (typeof ADMIN_SETTINGS_PAGE_IDS)[number];

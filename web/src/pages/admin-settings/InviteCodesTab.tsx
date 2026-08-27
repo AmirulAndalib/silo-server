@@ -8,6 +8,7 @@ import {
   useTopUpInviteCode,
   useDeleteInviteCode,
 } from "@/hooks/queries/admin/inviteCodes";
+import { useAdminServerSettings } from "@/hooks/queries/admin/settings";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -29,7 +30,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { ArrowRight, Copy, Plus, PlusCircle, Trash2 } from "lucide-react";
+import { AlertTriangle, ArrowRight, Copy, Plus, PlusCircle, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { formatDate } from "@/lib/datetime";
@@ -37,6 +38,8 @@ import { Link } from "react-router";
 
 export default function InviteCodesTab() {
   const { data: codes = [], isLoading } = useAdminInviteCodes();
+  const { data: serverSettings } = useAdminServerSettings();
+  const signupsEnabled = serverSettings?.["signup.enabled"] === "true";
   const updateCode = useUpdateInviteCode();
   const deleteCode = useDeleteInviteCode();
   const [createOpen, setCreateOpen] = useState(false);
@@ -109,16 +112,34 @@ export default function InviteCodesTab() {
         </Dialog>
       </div>
 
-      <p className="text-muted-foreground text-sm">
-        Codes only work while public signups are on.{" "}
-        <Link
-          to="/admin/settings/general"
-          className="text-foreground inline-flex items-center gap-1 font-medium hover:underline"
-        >
-          Public signups setting
-          <ArrowRight className="h-3 w-3" aria-hidden="true" />
-        </Link>
-      </p>
+      {serverSettings !== undefined &&
+        (signupsEnabled ? (
+          <p className="text-muted-foreground text-sm">
+            Codes only work while public signups are on.{" "}
+            <Link
+              to="/admin/settings/general"
+              className="text-foreground inline-flex items-center gap-1 font-medium hover:underline"
+            >
+              Public signups setting
+              <ArrowRight className="h-3 w-3" aria-hidden="true" />
+            </Link>
+          </p>
+        ) : (
+          <div className="flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+            <p className="text-[13px] leading-relaxed">
+              <span className="font-medium text-amber-500">Public signups are off</span> — these
+              codes won't work until you enable them.{" "}
+              <Link
+                to="/admin/settings/general"
+                className="text-foreground inline-flex items-center gap-1 font-medium hover:underline"
+              >
+                Public signups setting
+                <ArrowRight className="h-3 w-3" aria-hidden="true" />
+              </Link>
+            </p>
+          </div>
+        ))}
 
       <Table>
         <TableHeader>

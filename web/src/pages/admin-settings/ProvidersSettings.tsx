@@ -1,9 +1,15 @@
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
+import { Link } from "react-router";
 import { toast } from "sonner";
 
 import type { SubtitleProviderConfig } from "@/api/types";
-import { ProviderTile, ProviderTileGrid } from "@/components/settings/ProviderTile";
-import type { ProviderTileState } from "@/components/settings/ProviderTile";
+import {
+  ProviderPanelActions,
+  ProviderTile,
+  ProviderTileGrid,
+  resolveProviderTileState,
+} from "@/components/settings/ProviderTile";
+import type { ProviderTestState } from "@/components/settings/ProviderTile";
 import { RestartBadge } from "@/components/settings/RestartBadge";
 import { SecretField } from "@/components/settings/SecretField";
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
@@ -33,6 +39,7 @@ import { useRestartKeys, type RestartKeyMatcher } from "@/hooks/useRestartKeys";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
 
 import { FieldGroup } from "./FieldGroup";
+import { MarkerProviderTiles } from "./MarkerProviderTiles";
 import { SettingField } from "./SettingField";
 
 /**
@@ -46,61 +53,11 @@ const KEYS = ["mdblist.api_key"];
 // Shared tile plumbing
 // ---------------------------------------------------------------------------
 
-/** Result of the last Test on a tile, kept in memory for the tile itself. */
-export interface ProviderTestState {
-  ok: boolean;
-  message: string;
-  /** `Date.now()` when the result came back. */
-  at: number;
-  durationMs: number;
-}
-
-function testedLabel(test: ProviderTestState): string {
-  const seconds = Math.max(0, Math.round((Date.now() - test.at) / 1000));
-  const ago = seconds < 60 ? `${seconds}s ago` : `${Math.round(seconds / 60)}m ago`;
-  return `Tested ${ago} · ${test.durationMs} ms`;
-}
-
 /** Marks the elapsed time of a request without each caller re-deriving it. */
 async function timed<T>(run: () => Promise<T>): Promise<{ result: T; durationMs: number }> {
   const started = Date.now();
   const result = await run();
   return { result, durationMs: Date.now() - started };
-}
-
-function resolveState({
-  expanded,
-  test,
-  connected,
-}: {
-  expanded: boolean;
-  test: ProviderTestState | undefined;
-  connected: boolean;
-}): ProviderTileState {
-  if (expanded) return "editing";
-  if (test && !test.ok) return "error";
-  return connected ? "connected" : "not_connected";
-}
-
-/** The action row every connect panel ends with. */
-function PanelActions({ test, children }: { test?: ProviderTestState; children: ReactNode }) {
-  return (
-    <div className="mt-3.5 flex flex-wrap items-center gap-2">
-      {children}
-      {test ? (
-        <span
-          role="status"
-          className={
-            test.ok
-              ? "text-muted-foreground ml-auto text-[11.5px]"
-              : "ml-auto text-[11.5px] text-amber-600 dark:text-amber-400"
-          }
-        >
-          {test.ok ? testedLabel(test) : test.message}
-        </span>
-      ) : null}
-    </div>
-  );
 }
 
 function DisconnectButton({
@@ -120,7 +77,7 @@ function DisconnectButton({
 
   return (
     <>
-      <Button type="button" size="sm" variant="ghost" onClick={() => setOpen(true)}>
+      <Button type="button" size="sm" variant="outline" onClick={() => setOpen(true)}>
         {label}
       </Button>
       <AlertDialog open={open} onOpenChange={setOpen}>
@@ -300,7 +257,7 @@ function SubtitleProviderTile({
   }
 
   const connected = configured && enabled;
-  const state = resolveState({ expanded, test, connected });
+  const state = resolveProviderTileState({ expanded, test, connected });
   const statePill = !expanded && configured && !enabled ? "Connected · off" : undefined;
   // Only a failure earns the extra line: "connected" is already in the header.
   const meta = !expanded && test && !test.ok ? test.message : undefined;
@@ -355,14 +312,14 @@ function SubtitleProviderTile({
           onChange={handleApiKeyChange}
         />
       )}
-      <PanelActions test={test}>
+      <ProviderPanelActions test={test}>
         <Button type="button" size="sm" onClick={handleSave} disabled={updateProvider.isPending}>
           {updateProvider.isPending ? "Saving..." : "Save"}
         </Button>
         <Button
           type="button"
           size="sm"
-          variant="outline"
+          variant="secondary"
           onClick={handleTest}
           disabled={testProvider.isPending}
         >
@@ -376,10 +333,10 @@ function SubtitleProviderTile({
             onConfirm={handleClear}
           />
         ) : null}
-        <Button type="button" size="sm" variant="ghost" onClick={onCollapse}>
+        <Button type="button" size="sm" variant="outline" onClick={onCollapse}>
           Close
         </Button>
-      </PanelActions>
+      </ProviderPanelActions>
       <p className="text-muted-foreground mt-2 text-xs">Test uses the values typed here.</p>
     </ProviderTile>
   );
@@ -465,7 +422,7 @@ function MDBListTile({
     }
   }
 
-  const state = resolveState({ expanded, test, connected: configured });
+  const state = resolveProviderTileState({ expanded, test, connected: configured });
   const meta = !expanded && test && !test.ok ? test.message : undefined;
 
   return (
@@ -508,7 +465,7 @@ function MDBListTile({
         }}
         restartRequired={restartKeys.has("mdblist.api_key")}
       />
-      <PanelActions test={test}>
+      <ProviderPanelActions test={test}>
         <Button
           type="button"
           size="sm"
@@ -520,7 +477,7 @@ function MDBListTile({
         <Button
           type="button"
           size="sm"
-          variant="outline"
+          variant="secondary"
           onClick={() => void runTest()}
           disabled={testing || (!configured && !hasDraft)}
         >
@@ -533,10 +490,10 @@ function MDBListTile({
             onConfirm={() => void clearAll()}
           />
         ) : null}
-        <Button type="button" size="sm" variant="ghost" onClick={onCollapse}>
+        <Button type="button" size="sm" variant="outline" onClick={onCollapse}>
           Close
         </Button>
-      </PanelActions>
+      </ProviderPanelActions>
       <p className="text-muted-foreground mt-2 text-xs">
         Test uses the key typed here, or the saved one.
       </p>
@@ -560,6 +517,13 @@ export default function ProvidersSettings() {
   function recordTest(id: string, test: ProviderTestState | undefined) {
     setTests((current) => ({ ...current, [id]: test }));
   }
+
+  // Marker tiles can be perfectly set up and still never run: the detection
+  // mode on Library & Metadata decides whether Silo looks online at all. The
+  // key is read, not staged — this page never saves it.
+  const markerMode = form.getValue("markers.mode");
+  const offlineMarkerMode =
+    markerMode === "off" ? "Off" : markerMode === "local" ? "Detect on this server" : null;
 
   const providers = [...(data?.providers ?? [])].sort((a, b) => {
     const ai = SUBTITLE_PROVIDER_ORDER.indexOf(a.provider_name);
@@ -627,6 +591,47 @@ export default function ProvidersSettings() {
               Plugins
             </a>
             .
+          </p>
+        </div>
+      </FieldGroup>
+
+      {/*
+        Marker providers are the online half of "Find intros and credits". The
+        detection mode itself stays on Library & Metadata; what each provider
+        does — lookup order, whether this server contributes back — is provider
+        configuration and belongs beside the other providers.
+      */}
+      <FieldGroup label="Marker providers">
+        <div className="space-y-3 py-3.5">
+          <MarkerProviderTiles
+            expandedTile={expandedTile}
+            onExpand={setExpandedTile}
+            onCollapse={() => setExpandedTile(null)}
+          />
+          <p className="text-muted-foreground text-xs">
+            {offlineMarkerMode ? (
+              <>
+                Nothing here is searched right now:{" "}
+                <Link
+                  to="/admin/settings/library"
+                  className="hover:text-foreground font-medium underline underline-offset-2 transition-colors"
+                >
+                  Find intros and credits
+                </Link>{" "}
+                is set to {offlineMarkerMode}.
+              </>
+            ) : (
+              <>
+                Providers are searched when{" "}
+                <Link
+                  to="/admin/settings/library"
+                  className="hover:text-foreground font-medium underline underline-offset-2 transition-colors"
+                >
+                  Find intros and credits
+                </Link>{" "}
+                looks online.
+              </>
+            )}
           </p>
         </div>
       </FieldGroup>

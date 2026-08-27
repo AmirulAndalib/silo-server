@@ -42,7 +42,7 @@ function model(overrides: Partial<SettingsOverviewModel> = {}): SettingsOverview
         action: { label: "Set up", page: "notifications" },
       },
     ],
-    cards: [{ id: "playback" }, { id: "notifications" }, { id: "watch-sync" }],
+    cards: [{ id: "playback" }, { id: "downloads" }, { id: "notifications" }, { id: "watch-sync" }],
     ...overrides,
   };
 }
@@ -108,14 +108,16 @@ describe("SettingsOverview", () => {
     expect(playback).toHaveAttribute("href", "/admin/settings/playback");
     expect(within(playback).getByText("Playback")).toBeInTheDocument();
     expect(
-      within(playback).getByText(
-        "Transcoding, hardware acceleration, watch thresholds, and downloads.",
-      ),
+      within(playback).getByText("Transcoding, hardware acceleration, and watch thresholds."),
     ).toBeInTheDocument();
     expect(within(playback).getByText("Transcoding")).toBeInTheDocument();
     expect(within(playback).getByText("Watch behavior")).toBeInTheDocument();
-    expect(within(playback).getByText("Downloads")).toBeInTheDocument();
     expect(within(playback).queryByText("Current")).not.toBeInTheDocument();
+
+    // Downloads is its own page, not a section of Playback.
+    const downloads = screen.getByTestId("overview-card-downloads");
+    expect(downloads).toHaveAttribute("href", "/admin/settings/downloads");
+    expect(within(playback).queryByText("Downloads")).not.toBeInTheDocument();
 
     expect(screen.getByTestId("overview-card-watch-sync")).toHaveAttribute(
       "href",

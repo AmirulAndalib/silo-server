@@ -83,9 +83,7 @@ export function FieldGroup({
       className={cn("min-w-0", className)}
     >
       <GroupRestartContext.Provider value={effectiveRestartAll}>
-        <div className="[&>*]:border-b [&>*]:border-[color-mix(in_srgb,var(--border)_60%,transparent)] [&>*:last-child]:border-b-0">
-          {children}
-        </div>
+        <div className="settings-field-list">{children}</div>
       </GroupRestartContext.Provider>
     </SettingsGroup>
   );
