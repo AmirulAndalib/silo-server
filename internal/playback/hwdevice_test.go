@@ -58,12 +58,20 @@ func TestParseHWDeviceSet(t *testing.T) {
 	}
 }
 
-func TestAcquireHWDeviceEmptyValueStaysEmpty(t *testing.T) {
+// An empty setting resolves to nothing only when there is nothing to resolve to.
+// Pointed at an empty device directory for the same reason as the counting test
+// below: with a real /dev/dri present this now returns the device execution
+// would pick, which is the point of resolving it here.
+func TestAcquireHWDeviceEmptyValueStaysEmptyWithoutDevices(t *testing.T) {
 	resetDeviceLoad(t)
+	original := defaultDRIDir
+	defaultDRIDir = t.TempDir()
+	t.Cleanup(func() { defaultDRIDir = original })
+
 	device, release := AcquireHWDevice("", "qsv")
 	defer release()
 	if device != "" {
-		t.Fatalf("device = %q, want empty so auto-detection applies", device)
+		t.Fatalf("device = %q, want empty so auto-detection applies downstream", device)
 	}
 }
 
@@ -102,11 +110,17 @@ func TestAcquireHWDeviceSingleRenderDeviceIsCounted(t *testing.T) {
 	}
 }
 
-// With no device configured there is no name to count against: ffmpeg picks the
-// device downstream, and inventing a key would report sessions on a device the
-// sampler never names.
+// With no render device to name, the workload stays uncounted rather than being
+// attributed to a device that does not exist. The device directory is pointed at
+// an empty temp dir rather than left at the real /dev/dri: unconfigured
+// acquisition now falls back to the device execution would pick, so on a host
+// that actually has a GPU this would otherwise assert the opposite of the truth.
 func TestAcquireHWDeviceUnconfiguredRenderDeviceIsNotCounted(t *testing.T) {
 	resetDeviceLoad(t)
+	original := defaultDRIDir
+	defaultDRIDir = t.TempDir()
+	t.Cleanup(func() { defaultDRIDir = original })
+
 	_, release := AcquireHWDevice("", "vaapi")
 	defer release()
 	if got := HWDeviceLoadSnapshot(); len(got) != 0 {

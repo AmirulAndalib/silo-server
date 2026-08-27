@@ -84,10 +84,12 @@ spread the work at all.
 
 **Drift**, an amber badge, means a capability refetch found the node's hardware
 got *worse* than the report it replaced: a backend that used to pass its probe
-now fails, or a render device is gone. Hover for the note. The badge stays until
-a refetch produces a report whose probes all pass — it is not erased by the next
+now fails, or a render device is gone. Hover for the note. The badge stays until a
+refetch both probes cleanly *and* regains something the stored report lacked — a
+backend that verifies again, or a device that is back. It is not erased by a
 refetch that merely loses nothing further, so a reboot or a reworded FFmpeg error
-cannot make a standing regression look repaired. Re-probing the node is the
+cannot make a standing regression look repaired, and on a multi-GPU node the
+surviving card probing cleanly does not speak for the one that went away. Re-probing the node is the
 direct way to ask whether it is still true. It is a warning, not a routing input
 — nothing in node selection reads it.
 

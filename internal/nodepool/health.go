@@ -564,6 +564,11 @@ type capabilityDrift struct {
 	// lostDevices are render devices present in the previous report and absent
 	// from this one.
 	lostDevices []string
+	// regained reports that this refetch found hardware the stored report did
+	// not have: a backend that now verifies and did not, or a device identity
+	// that is present and was not. It is the only evidence that a standing
+	// regression actually recovered — see resolveDriftNote.
+	regained bool
 	// previousResolved and resolved are the backend each report resolved to;
 	// carried for the log line, which is where an operator reads the effect.
 	previousResolved string
@@ -653,6 +658,15 @@ func resolveDriftNote(stored *string, drift capabilityDrift, parsed bool, payloa
 		// Nothing new was lost, but this report is not evidence of recovery.
 		return stored
 	}
+	if !drift.regained {
+		// Every probe that ran passed — but on a multi-GPU node the surviving
+		// card passes just as cleanly with its sibling still missing, and once
+		// the degraded report is stored the delta finds nothing lost forever
+		// after. A clean sweep of what remains is not evidence that what went
+		// away came back; only hardware appearing that the stored report lacked
+		// is.
+		return stored
+	}
 	return nil
 }
 
@@ -725,6 +739,19 @@ func computeCapabilityDrift(stored, payload []byte) (drift capabilityDrift, pars
 		drift.lostBackends = append(drift.lostBackends, backend.Backend)
 	}
 	drift.lostDevices = lostRenderDevices(previous, current)
+	// The mirror comparison. Once a degraded report is stored, every later delta
+	// is degraded-to-degraded and finds nothing lost; growth is what separates
+	// "still broken" from "came back".
+	drift.regained = len(lostRenderDevices(current, previous)) > 0
+	verifiedBefore := make(map[string]bool, len(previous.DetectedBackends))
+	for _, backend := range previous.DetectedBackends {
+		verifiedBefore[backend.Backend] = backend.Verified
+	}
+	for _, backend := range current.DetectedBackends {
+		if backend.Verified && !verifiedBefore[backend.Backend] {
+			drift.regained = true
+		}
+	}
 	return drift, true
 }
 

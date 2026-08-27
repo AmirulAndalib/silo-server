@@ -269,6 +269,16 @@ func acquireHWDevice(configured, resolvedHWAccel, avoidDevice string) (device, w
 		if verified := VerifiedHWDevice(resolvedHWAccel); verified != "" {
 			return verified, verified, countHWDeviceWorkload(verified)
 		}
+		// Nothing verified. That is not only the cold-process case: an
+		// explicitly configured backend short-circuits resolution, so a host
+		// running hw_accel=qsv with no hw_device never walks its hardware at all
+		// and would otherwise never name a device here — reporting zero GPU
+		// sessions for every transcode it runs. Fall back to the device
+		// execution is about to pick anyway, which is this same first render
+		// node; appendHWAccelArgs resolves an empty value the same way.
+		if detected := detectRenderDevice(defaultDRIDir); detected != "" {
+			return detected, detected, countHWDeviceWorkload(detected)
+		}
 		return "", "", noop
 	}
 	// Select and reserve in one critical section so concurrent workload starts

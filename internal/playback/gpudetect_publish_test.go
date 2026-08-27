@@ -102,18 +102,6 @@ func TestAcquireHWDeviceUsesTheVerifiedRenderDevice(t *testing.T) {
 	}
 }
 
-// With nothing verified — a backend named explicitly and never walked — the
-// device stays unresolved and ffmpeg picks one downstream, exactly as before.
-func TestAcquireHWDeviceLeavesTheDeviceUnsetWithoutAVerifiedProbe(t *testing.T) {
-	setupHWAccelTest(t)
-
-	device, workload, release := acquireHWDevice("", transcodeHWQSV, "")
-	defer release()
-	if device != "" || workload != "" {
-		t.Fatalf("acquireHWDevice() = (%q, %q), want both empty with no verified device", device, workload)
-	}
-}
-
 // Invalidation has to supersede a probe already in flight, not merely clear the
 // map in front of it. The operator-facing re-probe exists to force a cold
 // re-verification; if a probe that started before the invalidation could hand
@@ -231,4 +219,35 @@ func TestNVENCConfiguredDeviceIsProbedNotSkipped(t *testing.T) {
 		return
 	}
 	t.Fatalf("no nvenc entry in %+v", info.DetectedBackends)
+}
+
+// An explicitly configured backend short-circuits resolution, so the detection
+// walk never runs and nothing is ever recorded as verified. Without a fallback
+// the workload went uncounted and the node reported zero GPU sessions while it
+// transcoded — the same reporting hole the auto path had, on the branch that
+// never probes.
+func TestAcquireHWDeviceCountsTheAutoDetectedDeviceWithoutAProbe(t *testing.T) {
+	env := setupHWAccelTest(t)
+	env.addRenderDevice(t, "renderD128", "0x8086")
+
+	// No walk has run, so nothing is verified — exactly the state a host with
+	// hw_accel=qsv and no hw_device is in.
+	if got := VerifiedHWDevice(transcodeHWQSV); got != "" {
+		t.Fatalf("VerifiedHWDevice = %q, want nothing verified for this test", got)
+	}
+
+	device, release := AcquireHWDevice("", transcodeHWQSV)
+	defer release()
+
+	want := env.devicePath("renderD128")
+	if device != want {
+		t.Fatalf("AcquireHWDevice() = %q, want the device execution will pick, %q", device, want)
+	}
+	if got := hwDeviceActiveCount(want); got != 1 {
+		t.Fatalf("active workloads on %s = %d, want the transcode counted", want, got)
+	}
+	release()
+	if got := hwDeviceActiveCount(want); got != 0 {
+		t.Fatalf("active workloads after release = %d, want 0", got)
+	}
 }

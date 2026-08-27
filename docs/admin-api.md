@@ -174,7 +174,7 @@ Each entry in `last_stats.gpu`:
 |---|---|---|
 | `device` | string | The render node path (`/dev/dri/renderD128`), or `cuda:N` for an NVIDIA GPU with no readable DRM node. |
 | `vendor` | string | `intel`, `nvidia` or `amd`. Omitted when sysfs names a vendor we do not recognize. |
-| `sessions` | int | GPU workloads this node currently has pinned to the device. It comes from the playback device balancer, so it is exact for Silo's own work and blind to any other tenant's. With no `playback.hw_device` configured the workload is counted against the render device auto-detection verified the backend on; it goes uncounted only when no probe has verified one, which is the state of a node whose backend was named explicitly and never walked. |
+| `sessions` | int | GPU workloads this node currently has pinned to the device. It comes from the playback device balancer, so it is exact for Silo's own work and blind to any other tenant's. With no `playback.hw_device` configured the workload is counted against the render device the transcode will actually open — the one auto-detection verified the backend on, or the first available render node when the backend was named explicitly and no detection walk ran. It goes uncounted only on a host with no render device at all. |
 | `video_busy_pct`, `render_busy_pct` | int | Engine busy percentages over the sampling interval. |
 | `total_busy_pct` | int | Whole-GPU utilization *including other tenants*. Present only with an enrichment source — absent is not zero, and must not be rendered as an idle GPU. |
 | `vram_used_mb`, `vram_total_mb` | int | GPU memory, on the same terms as `total_busy_pct`. |
@@ -230,15 +230,17 @@ long before anyone reads a log.
 Semantics worth knowing:
 
 - Setting it is a comparison; clearing it is not. The note appears when a refetch
-  loses something, and stays until a refetch produces a report that probed at
-  least one backend and every backend it probed passed. A refetch that finds
+  loses something, and clearing takes positive evidence of recovery: a report
+  that probed at least one backend, had every backend it probed pass, *and*
+  regained something the stored report lacked — a backend that now verifies and
+  did not, or a device identity that is present and was not. A refetch that finds
   nothing *newly* lost leaves it alone, because a delta against an
   already-degraded report always finds nothing — a reboot moves `boot_id`, a
   reworded FFmpeg failure moves the probe reason, and either would otherwise
-  erase a standing regression and report a broken node as repaired. A report
-  that probed nothing at all does not clear it either: a GPU that disappeared
-  completely leaves no candidate backend to fail, and the absence of anything to
-  probe is not evidence of recovery.
+  erase a standing regression and report a broken node as repaired. Two cases
+  make the "regained" half necessary rather than pedantic: a GPU that disappeared
+  completely leaves no candidate backend to fail, and a multi-GPU node that lost
+  one card keeps probing the survivor perfectly cleanly.
 - A backend reported as `skipped` neither sets the note nor holds it open.
   Skipping means no probe ran because the node cannot open the backend's
   configured devices, which is a statement about access rather than about

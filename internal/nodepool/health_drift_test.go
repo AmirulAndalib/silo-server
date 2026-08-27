@@ -162,17 +162,51 @@ func TestResolveDriftNoteKeepsNoteWhenNoProbePassed(t *testing.T) {
 	}
 }
 
-// The complement: a report with a backend that actually passed its probe is the
+// The complement: a report that gains back what the stored one lacked is the
 // evidence recovery needs, and clears the note.
-func TestResolveDriftNoteClearsOnAPassingProbe(t *testing.T) {
-	const recoveredPayload = `{"resolved":"vaapi","render_devices":["/dev/dri/renderD128"],` +
+func TestResolveDriftNoteClearsWhenHardwareComesBack(t *testing.T) {
+	const degraded = `{"resolved":"none","render_devices":[],` +
+		`"detected_backends":[{"backend":"vaapi","verified":false,"reason":"no such device"}]}`
+	const recovered = `{"resolved":"vaapi","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],` +
 		`"detected_backends":[{"backend":"vaapi","verified":true},` +
 		`{"backend":"qsv","verified":false,"skipped":true}]}`
+
 	standing := "verified hardware backends lost: vaapi"
-	payload := []byte(recoveredPayload)
+	drift, parsed := computeCapabilityDrift([]byte(degraded), []byte(recovered))
+	if !drift.regained {
+		t.Fatal("a report that regained a verified backend and a device was not seen as recovery")
+	}
+	if got := resolveDriftNote(&standing, drift, parsed, []byte(recovered)); got != nil {
+		t.Fatalf("capability_drift = %q, want recovered hardware to clear it", *got)
+	}
+}
+
+// A multi-GPU node that lost one card keeps probing the survivor cleanly, and
+// once the degraded report is stored the delta finds nothing lost ever again.
+// Clearing on that generic success told an operator the node recovered while
+// one of its cards was still missing.
+func TestResolveDriftNoteKeepsNoteWhileASiblingGPUIsStillMissing(t *testing.T) {
+	// Two cards before the loss, one after — and the survivor verifies, so
+	// every probe that ran passes.
+	const degraded = `{"resolved":"vaapi","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],` +
+		`"detected_backends":[{"backend":"vaapi","verified":true}]}`
+
+	standing := "render devices gone: /dev/dri/renderD129"
+	payload := []byte(degraded)
+	// The next refetch is degraded-to-degraded: nothing newly lost, nothing
+	// regained, every probe clean.
 	drift, parsed := computeCapabilityDrift(payload, payload)
-	if got := resolveDriftNote(&standing, drift, parsed, payload); got != nil {
-		t.Fatalf("capability_drift = %q, want a verified backend to clear it", *got)
+	if !hardwareProbesClean(payload) {
+		t.Fatal("the surviving card should probe cleanly; that is the point")
+	}
+	got := resolveDriftNote(&standing, drift, parsed, payload)
+	if got == nil {
+		t.Fatal("capability_drift cleared while the lost card was still missing")
+	}
+	if *got != standing {
+		t.Fatalf("capability_drift = %q, want the standing note %q", *got, standing)
 	}
 }
 
