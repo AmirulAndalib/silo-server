@@ -325,6 +325,59 @@ func TestHandleUpdateNodeInvalidatesCapabilityCacheAfterAnOverrideChange(t *test
 	}
 }
 
+// A node that does not confirm the reload is out of step: its backend now comes
+// from this server's pool while its device still comes from its own
+// configuration. The policy is published regardless — withholding it would
+// strand an override the operator can see stored, since nothing else re-reads
+// the column — so what this pins down is that the update still succeeds and the
+// caller learns the node did not confirm.
+func TestReloadNodeConfigReportsAnUnconfirmedNode(t *testing.T) {
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(node.Close)
+
+	handler := NewNodeHandler(&stubNodeRepository{}, nil, nil, nil, nil, nil, "secret")
+	if handler.reloadNodeConfig(context.Background(), &nodepool.Node{ID: 1, Name: "gpu-1", URL: node.URL}) {
+		t.Fatal("a 500 from the node reported the reload as confirmed")
+	}
+	if handler.reloadNodeConfig(context.Background(), &nodepool.Node{ID: 1, Name: "gpu-1", URL: "http://127.0.0.1:1"}) {
+		t.Fatal("an unreachable node reported the reload as confirmed")
+	}
+}
+
+// The update itself still succeeds and the new policy still reaches the pool: a
+// stored override that never reaches dispatch is a silent permanent
+// misconfiguration, where the mismatch is loud, bounded by the node's poll, and
+// self-healing.
+func TestHandleUpdateNodePublishesPolicyEvenWhenTheNodeDoesNotConfirm(t *testing.T) {
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(node.Close)
+
+	qsv, nvenc := "qsv", "nvenc"
+	before := &nodepool.Node{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL, HWAccelOverride: &qsv}
+	after := &nodepool.Node{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL, HWAccelOverride: &nvenc}
+	repo := &stubNodeRepository{updateResult: after, node: before}
+	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
+
+	invalidated := make(chan string, 4)
+	handler.SetCapabilityInvalidator(func(url string) { invalidated <- url })
+
+	recorder := httptest.NewRecorder()
+	handler.HandleUpdateNode(recorder, updateNodeRequest(t, `{"hw_accel_override":"nvenc"}`))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want the update to succeed anyway", recorder.Code)
+	}
+	select {
+	case <-invalidated:
+	default:
+		t.Fatal("the capability cache was not dropped when the node did not confirm")
+	}
+}
+
 // An edit that moves neither override leaves the cache alone: re-probing every
 // node on every rename would put ffmpeg execs behind an unrelated form save.
 func TestHandleUpdateNodeKeepsCapabilityCacheWithoutAnOverrideChange(t *testing.T) {

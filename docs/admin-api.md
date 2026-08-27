@@ -85,7 +85,12 @@ API also drops its own cached view of what the node can do, so the next session
 is planned against the new backend's tone-map executors rather than the previous
 one's. It is
 also best effort — a node that is unreachable still applies the change on its
-next config reload (within 60 seconds). Either way the node re-advertises
+next config reload (within 60 seconds). When it does not confirm, the policy is
+published anyway and a warning names the node: withholding it would leave a
+stored override never reaching dispatch, since nothing else re-reads the column.
+Until that node's poll catches up its backend comes from this server while its
+device comes from its own configuration, so a start dispatched to it in that
+window can pair the two wrongly and fail. Either way the node re-advertises
 `capabilities.resolved` at its next capability snapshot (every 15 minutes). Two
 things do wait for a restart: the hardware encoder warmup that ran at boot,
 which stays primed for the old backend, and sessions already transcoding, which

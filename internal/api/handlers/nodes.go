@@ -211,7 +211,23 @@ func (h *NodeHandler) HandleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	// (QSV on a render node to NVENC on a CUDA index, say) gets up to a minute
 	// of requests pairing the new backend with the old device.
 	if nodeAccelerationChanged(previous, node) {
-		h.reloadNodeConfig(r.Context(), node)
+		if !h.reloadNodeConfig(r.Context(), node) {
+			// The node did not confirm. Its backend now comes from this
+			// server's pool while its device still comes from its own
+			// configuration, so until its poll catches up (within 60s) a start
+			// request can pair the new backend with the old device and fail.
+			//
+			// The policy is published anyway. Withholding it would leave an
+			// override an operator has saved and can see stored never reaching
+			// dispatch at all — nothing else re-reads the column — which is a
+			// silent permanent misconfiguration rather than a loud, bounded,
+			// self-healing one. Closing the window properly means sending the
+			// effective device alongside the backend so both come from one
+			// source; that is a change to the node start contract, not
+			// something to slip into a policy edit.
+			slog.WarnContext(r.Context(), "node has not adopted its new acceleration policy yet; transcodes dispatched to it may fail until its next config poll",
+				"component", "api", "node_id", node.ID, "name", node.Name)
+		}
 		// And drop what this server believes the node can do. The v3 planning
 		// cache holds the tone-map executors and transformation inventory the
 		// *old* backend advertised, and it stays valid for its own TTL — so
@@ -250,7 +266,8 @@ func sameOptionalString(a, b *string) bool {
 	return *a == *b
 }
 
-// reloadNodeConfig asks one node to re-read its configuration now.
+// reloadNodeConfig asks one node to re-read its configuration now, reporting
+// whether it confirmed.
 //
 // It targets /admin/reload-config, never /admin/force-reload: the latter tears
 // down every live playback session on a transcode node, which is a reasonable
@@ -261,23 +278,24 @@ func sameOptionalString(a, b *string) bool {
 // watcher poll is the backstop, so a node that is unreachable or predates the
 // route must not turn a successful update into a failed one. It is bounded
 // tightly for the same reason — this runs after the response is written, but
-// still on the request's goroutine and context.
-func (h *NodeHandler) reloadNodeConfig(ctx context.Context, node *nodepool.Node) {
+// still on the request's goroutine and context. The caller uses the result to
+// say how far out of step the node may be, not to fail the update.
+func (h *NodeHandler) reloadNodeConfig(ctx context.Context, node *nodepool.Node) bool {
 	if node == nil || node.URL == "" {
-		return
+		return false
 	}
 	ctx, cancel := context.WithTimeout(ctx, nodeConfigReloadTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, node.URL+"/admin/reload-config", nil)
 	if err != nil {
-		return
+		return false
 	}
 	req.Header.Set("Authorization", "Bearer "+h.jwtSecret)
 	resp, err := (&http.Client{Timeout: nodeConfigReloadTimeout}).Do(req)
 	if err != nil {
 		slog.WarnContext(ctx, "node did not reload after an acceleration override change; it will pick it up on its next config poll",
 			"component", "api", "node_id", node.ID, "name", node.Name, "error", logredact.SanitizeURLError(err))
-		return
+		return false
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
@@ -287,7 +305,9 @@ func (h *NodeHandler) reloadNodeConfig(ctx context.Context, node *nodepool.Node)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		slog.WarnContext(ctx, "node refused the reload after an acceleration override change; it will pick it up on its next config poll",
 			"component", "api", "node_id", node.ID, "name", node.Name, "status", resp.StatusCode)
+		return false
 	}
+	return true
 }
 
 // nodeConfigReloadTimeout bounds the post-update nudge. A config reload is a
