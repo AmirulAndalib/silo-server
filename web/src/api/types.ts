@@ -4393,6 +4393,12 @@ export interface AdminServerStatus {
   restart_required: boolean;
   restart_required_at?: string;
   restart_required_reason?: string;
+  /**
+   * Every distinct reason marked since boot ("setting:<key>" for settings
+   * saves), so pending restarts can be scoped per subsystem. The singular
+   * field only remembers the last save.
+   */
+  restart_required_reasons?: string[];
   /** Increments on every restart-required save; re-arms the dismissed banner. */
   restart_mark_count?: number;
   restart_requested: boolean;

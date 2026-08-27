@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +20,12 @@ type ServerRestartStatusTracker struct {
 	// latches true for the life of the process, so this counter is the only
 	// signal that a NEW restart-required save happened — the admin UI keys its
 	// banner re-arm (after "Later") on it.
-	restartMarkCount   int
+	restartMarkCount int
+	// restartReasons accumulates every distinct reason marked since boot, in
+	// first-seen order. The single restartRequiredReason only remembers the
+	// LAST save, so a tile scoped to one subsystem cannot trust it: an
+	// unrelated later save overwrites it. The full set can be scoped.
+	restartReasons     []string
 	restartRequested   bool
 	restartRequestedAt time.Time
 }
@@ -29,6 +35,7 @@ type ServerRestartStatusSnapshot struct {
 	RestartRequired       bool
 	RestartRequiredAt     *time.Time
 	RestartRequiredReason string
+	RestartReasons        []string
 	RestartMarkCount      int
 	RestartRequested      bool
 	RestartRequestedAt    *time.Time
@@ -58,6 +65,9 @@ func (s *ServerRestartStatusTracker) MarkRequired(reason string) {
 	s.restartMarkCount++
 	if reason != "" {
 		s.restartRequiredReason = reason
+		if !slices.Contains(s.restartReasons, reason) {
+			s.restartReasons = append(s.restartReasons, reason)
+		}
 	}
 }
 
@@ -103,6 +113,7 @@ func (s *ServerRestartStatusTracker) Snapshot() ServerRestartStatusSnapshot {
 		RestartRequired:       s.restartRequired,
 		RestartRequiredAt:     restartRequiredAt,
 		RestartRequiredReason: s.restartRequiredReason,
+		RestartReasons:        slices.Clone(s.restartReasons),
 		RestartMarkCount:      s.restartMarkCount,
 		RestartRequested:      s.restartRequested,
 		RestartRequestedAt:    restartRequestedAt,

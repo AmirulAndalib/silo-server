@@ -88,19 +88,15 @@ type authEndpointConfigRequest struct {
 
 // HandleGetConfig handles GET /admin/rate-limits/config.
 func (h *RateLimitHandler) HandleGetConfig(w http.ResponseWriter, r *http.Request) {
-	cfg, err := ratelimit.LoadConfig(r.Context(), h.store)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load rate limit config")
-		return
-	}
-
-	// One read serves both the stored backend and the Redis-availability bit,
-	// so the answer cannot straddle two snapshots of the settings table.
+	// One read serves the rate values, the stored backend, and the
+	// Redis-availability bit, so no field of the response can straddle two
+	// snapshots of the settings table.
 	values, err := h.store.GetAll(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load rate limit config")
 		return
 	}
+	cfg := ratelimit.ConfigFromSettings(values)
 
 	backend := values["ratelimit.backend"]
 	if backend == "" {

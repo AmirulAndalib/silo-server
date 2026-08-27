@@ -141,10 +141,9 @@ function searchProviderLabel(value: string): string {
 }
 
 /**
- * Restart reasons that name a subsystem other than the settings batch. The
- * tracker only records a coarse reason (`internal/api/handlers`), so a
- * "server_settings" restart is the closest signal there is to "a saved
- * playback key is waiting for a restart".
+ * Restart reasons that name a subsystem other than the settings batch. Only
+ * used against servers that predate the accumulated per-key reasons list,
+ * where the single last-writer reason is the closest signal there is.
  */
 const NON_SETTINGS_RESTART_REASONS = new Set([
   "jellyfin_compat",
@@ -153,10 +152,32 @@ const NON_SETTINGS_RESTART_REASONS = new Set([
   "plugin_task_binding",
 ]);
 
-function settingsRestartPending(status: AdminServerStatus | undefined): boolean {
-  if (!status?.restart_required) return false;
+function legacySettingsRestartPending(status: AdminServerStatus): boolean {
   const reason = (status.restart_required_reason ?? "").trim();
   return reason === "" || !NON_SETTINGS_RESTART_REASONS.has(reason);
+}
+
+/**
+ * Whether a saved setting under one of `prefixes` is waiting for a restart.
+ *
+ * The server accumulates one "setting:<key>" reason per restart-required save,
+ * so a tile can warn about its own keys and stay quiet for everyone else's —
+ * and a later unrelated save cannot overwrite the evidence. An older server
+ * without the list falls back to the coarse last-reason heuristic, which warns
+ * for any settings save rather than missing a real one.
+ */
+function settingsRestartPending(
+  status: AdminServerStatus | undefined,
+  prefixes: readonly string[],
+): boolean {
+  if (!status?.restart_required) return false;
+  const reasons = status.restart_required_reasons;
+  if (!reasons) return legacySettingsRestartPending(status);
+  return reasons.some((reason) => {
+    if (!reason.startsWith("setting:")) return false;
+    const key = reason.slice("setting:".length);
+    return prefixes.some((prefix) => key.startsWith(prefix));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -180,8 +201,6 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
   const { settings } = input;
   const configured = new Set(input.sensitiveConfigured ?? []);
 
-  const restartPending = settingsRestartPending(input.serverStatus);
-
   const publicBucket = readText(settings, "s3.public_bucket");
   const privateBucket = readText(settings, "s3.private_bucket");
   const storageReady = input.storageAvailable === true;
@@ -194,7 +213,8 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
   // save that first configures a bucket cannot flip it — only the restart that
   // save already asked for can. Reporting "Not set up" in that window tells an
   // admin who just did the work that it did not take.
-  const storageRestartPending = !storageReady && publicBucket !== "" && restartPending;
+  const storageRestartPending =
+    !storageReady && publicBucket !== "" && settingsRestartPending(input.serverStatus, ["s3."]);
   const storageState: OverviewState = storageReady ? "ok" : storageRestartPending ? "warn" : "off";
 
   const maxConnections = readInt(settings, "database.max_connections");
@@ -203,7 +223,12 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
   const transcodeEnabled = readBool(settings, "playback.transcode_enabled");
   const transcodeMode = transcodeModeLabel(readText(settings, "playback.hw_accel"), input.hwAccel);
   const renderDevice = input.hwAccel?.render_devices?.[0] ?? "";
-  const transcodeState: OverviewState = restartPending ? "warn" : transcodeEnabled ? "ok" : "off";
+  const playbackRestartPending = settingsRestartPending(input.serverStatus, ["playback."]);
+  const transcodeState: OverviewState = playbackRestartPending
+    ? "warn"
+    : transcodeEnabled
+      ? "ok"
+      : "off";
 
   const activeSearch =
     input.search?.active_provider || readText(settings, "catalog.search.provider") || "postgres";
@@ -257,8 +282,8 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
       id: "transcoding",
       label: "Transcoding",
       state: transcodeState,
-      stateText: restartPending ? "Restart pending" : transcodeEnabled ? "Ready" : "Off",
-      detail: restartPending
+      stateText: playbackRestartPending ? "Restart pending" : transcodeEnabled ? "Ready" : "Off",
+      detail: playbackRestartPending
         ? "Saved changes apply after a restart"
         : transcodeEnabled
           ? join([transcodeMode, renderDevice])

@@ -2703,8 +2703,11 @@ func (h *AdminHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.Reque
 			restartKeys = append(restartKeys, key)
 		}
 	}
-	if len(restartKeys) > 0 {
-		h.markServerRestartRequired("server_settings")
+	// Per-key reasons ("setting:<key>") so the admin UI can scope a pending
+	// restart to the subsystem the key belongs to instead of warning on every
+	// tile for any settings save.
+	for _, restartKey := range restartKeys {
+		h.markServerRestartRequired("setting:" + restartKey)
 	}
 	writeJSON(w, http.StatusOK, updateSettingsResponse{
 		Values:              responseValues,
@@ -3034,7 +3037,7 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 	}
 	restartRequired := effectiveChanged && config.RestartRequired(key)
 	if restartRequired {
-		h.markServerRestartRequired("server_settings")
+		h.markServerRestartRequired("setting:" + key)
 	}
 	if sensitiveSettingKeys[key] {
 		writeJSON(w, http.StatusOK, adminSettingResponse{Key: key, RestartRequired: restartRequired})

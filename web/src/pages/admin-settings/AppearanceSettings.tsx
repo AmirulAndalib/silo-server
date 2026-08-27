@@ -605,7 +605,16 @@ export default function AppearanceSettings() {
 
       <SaveBar
         dirtyCount={form.dirtyCount}
-        onSave={form.save}
+        onSave={() => {
+          // What persists is the SANITIZED css. Dropping the raw draft on
+          // success flips the editor to the canonical saved value, so stripped
+          // content (an external @import, say) never lingers on screen looking
+          // accepted. On failure the draft stays; the mutation already toasts.
+          void form.save().then(
+            () => setCssDraft(null),
+            () => {},
+          );
+        }}
         onDiscard={discard}
         isSaving={form.isSaving}
       />

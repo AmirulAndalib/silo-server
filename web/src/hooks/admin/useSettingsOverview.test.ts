@@ -135,6 +135,46 @@ describe("buildSettingsOverview health tiles", () => {
     expect(transcoding.detail).toBe("Auto · VA-API · /dev/dri/renderD128");
   });
 
+  it("scopes restart warnings to the tile whose keys are actually pending", () => {
+    // A saved database key owes a restart; neither storage nor transcoding
+    // changed, so neither tile may claim "Restart pending".
+    const base = {
+      settings: { "playback.transcode_enabled": "true", "s3.public_bucket": "silo-art" },
+      serverStatus: {
+        started_at: "2026-01-01T00:00:00Z",
+        restart_required: true,
+        restart_required_reason: "setting:database.max_connections",
+        restart_required_reasons: ["setting:database.max_connections"],
+        restart_requested: false,
+      },
+    };
+    expect(tile(base, "transcoding").stateText).toBe("Ready");
+    expect(tile(base, "storage").stateText).toBe("Not set up");
+
+    // A pending playback key warns transcoding even when a LATER unrelated
+    // save overwrote the singular last-reason field.
+    const playbackPending = {
+      ...base,
+      serverStatus: {
+        ...base.serverStatus,
+        restart_required_reason: "jellyfin_compat",
+        restart_required_reasons: ["setting:playback.hw_accel", "jellyfin_compat"],
+      },
+    };
+    expect(tile(playbackPending, "transcoding").stateText).toBe("Restart pending");
+    expect(tile(playbackPending, "storage").stateText).toBe("Not set up");
+
+    const storagePending = {
+      ...base,
+      serverStatus: {
+        ...base.serverStatus,
+        restart_required_reasons: ["setting:s3.public_bucket"],
+      },
+    };
+    expect(tile(storagePending, "storage").stateText).toBe("Restart pending");
+    expect(tile(storagePending, "transcoding").stateText).toBe("Ready");
+  });
+
   it("turns the transcoding tile amber while a settings restart is pending", () => {
     const transcoding = tile(
       {

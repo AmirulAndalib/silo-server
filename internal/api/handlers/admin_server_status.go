@@ -12,6 +12,11 @@ type adminServerStatusResponse struct {
 	RestartRequired       bool       `json:"restart_required"`
 	RestartRequiredAt     *time.Time `json:"restart_required_at,omitempty"`
 	RestartRequiredReason string     `json:"restart_required_reason,omitempty"`
+	// RestartRequiredReasons accumulates every distinct reason marked since
+	// boot ("setting:<key>" entries for settings saves), so a client can scope
+	// a pending restart to the subsystem it belongs to. The singular field
+	// above only remembers the last save.
+	RestartRequiredReasons []string `json:"restart_required_reasons,omitempty"`
 	// RestartMarkCount increments on every restart-required save. The boolean
 	// above latches for the process lifetime, so this is the client's only
 	// signal that a NEW requirement arrived after one was dismissed.
@@ -24,13 +29,14 @@ type adminServerStatusResponse struct {
 func (h *AdminHandler) HandleGetServerStatus(w http.ResponseWriter, r *http.Request) {
 	snapshot := h.RestartStatus.Snapshot()
 	resp := adminServerStatusResponse{
-		StartedAt:             snapshot.StartedAt,
-		RestartRequired:       snapshot.RestartRequired,
-		RestartRequiredAt:     snapshot.RestartRequiredAt,
-		RestartRequiredReason: snapshot.RestartRequiredReason,
-		RestartMarkCount:      snapshot.RestartMarkCount,
-		RestartRequested:      snapshot.RestartRequested,
-		RestartRequestedAt:    snapshot.RestartRequestedAt,
+		StartedAt:              snapshot.StartedAt,
+		RestartRequired:        snapshot.RestartRequired,
+		RestartRequiredAt:      snapshot.RestartRequiredAt,
+		RestartRequiredReason:  snapshot.RestartRequiredReason,
+		RestartRequiredReasons: snapshot.RestartReasons,
+		RestartMarkCount:       snapshot.RestartMarkCount,
+		RestartRequested:       snapshot.RestartRequested,
+		RestartRequestedAt:     snapshot.RestartRequestedAt,
 	}
 
 	if h.SettingsRepo != nil {
