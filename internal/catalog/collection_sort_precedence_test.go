@@ -248,6 +248,35 @@ func TestPersonalSourceSortPreferencePrecedence(t *testing.T) {
 				}
 			})
 
+			// Grouped browse pages one logical request several times. Once the
+			// first page has resolved and advertised a sort, later pages must
+			// reuse it rather than re-reading a preference that changed in
+			// between.
+			t.Run("frozen sort wins over a changed preference without a lookup", func(t *testing.T) {
+				store := &sortPrefStore{pref: &userstore.CollectionSortPreference{SortField: "title", SortOrder: "asc"}}
+				resolver := &CatalogResolver{storeProvider: &sortPrefProvider{store: store}}
+				frozen := QuerySort{Field: "runtime", Order: "desc"}
+				req := resolver.resolvePersonalSourceEffectiveSort(context.Background(), CatalogRequest{
+					Source: source, UseSourceOrder: true, ResolvedSort: &frozen,
+				}, access)
+				if req.Query.Sort != frozen || req.UseSourceOrder || store.calls != 0 {
+					t.Fatalf("resolved request = %+v, lookups = %d; want frozen runtime/desc and zero lookups", req, store.calls)
+				}
+			})
+
+			t.Run("frozen source order stays on the list path", func(t *testing.T) {
+				store := &sortPrefStore{pref: &userstore.CollectionSortPreference{SortField: "title", SortOrder: "asc"}}
+				resolver := &CatalogResolver{storeProvider: &sortPrefProvider{store: store}}
+				for _, frozen := range []QuerySort{{}, {Field: "added_at", Order: "desc"}} {
+					req := resolver.resolvePersonalSourceEffectiveSort(context.Background(), CatalogRequest{
+						Source: source, UseSourceOrder: true, ResolvedSort: &frozen,
+					}, access)
+					if !req.UseSourceOrder || req.Query.Sort != frozen || store.calls != 0 {
+						t.Fatalf("frozen %+v resolved to %+v, lookups = %d; want the list path", frozen, req, store.calls)
+					}
+				}
+			})
+
 			for _, pref := range []*userstore.CollectionSortPreference{
 				{SortField: "", SortOrder: ""},
 				{SortField: "retired", SortOrder: "desc"},

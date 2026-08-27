@@ -25,4 +25,20 @@ DELETE.
 
 When a catalog request has no explicit sort, its saved preference is applied
 before the source default. `/api/v1/catalog` reports an applied saved/default
-sort as `effective_sort`; source order omits that field.
+sort as `effective_sort`; source order omits that field. `effective_sort` is
+reported the same way for `group=work` requests, and `sort_metrics` on each item
+describes the effective sort rather than the (possibly empty) requested one.
+
+## Feature detection
+
+`GET /api/v1/collections/capabilities` returns `sort_preference_kinds`, the
+`collection_kind` values this server accepts:
+
+```json
+{ "sort_preference_kinds": ["library", "user", "watchlist", "favorites"] }
+```
+
+Check it before saving a Watchlist or Favorites preference. The older
+`collection_sort_preferences` boolean is also true on servers that predate the
+personal-list kinds and reject them with a 400, so it cannot be used to detect
+them. When `sort_preference_kinds` is absent, assume `library` and `user` only.

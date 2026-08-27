@@ -132,7 +132,7 @@ func (h *CatalogHandler) HandleGetCatalog(w http.ResponseWriter, r *http.Request
 		}
 
 		resultItems := groupedCatalogItems(entries)
-		items := h.catalogItemResponses(r, resultItems, catalog.NormalizeQuerySort(req.Query.Sort).Field, accessFilter)
+		items := h.catalogItemResponses(r, resultItems, catalogSortMetricField(req, result), accessFilter)
 		for i := range items {
 			if i < len(entries) && entries[i].summary != nil {
 				applyWorkSummaryToCatalogItem(&items[i], entries[i].summary)
@@ -156,8 +156,19 @@ func (h *CatalogHandler) HandleGetCatalog(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to resolve catalog")
 		return
 	}
-	items := h.catalogItemResponses(r, result.Items, catalog.NormalizeQuerySort(req.Query.Sort).Field, accessFilter)
+	items := h.catalogItemResponses(r, result.Items, catalogSortMetricField(req, result), accessFilter)
 	h.writeCatalogResponse(w, result, items, groupedByWork)
+}
+
+// catalogSortMetricField is the field the returned items are actually ordered
+// by. When the request carries no sort, the resolver may still apply a saved or
+// default sort and report it as EffectiveSort; sort_metrics has to explain the
+// ordering the client received, not the empty one it asked for.
+func catalogSortMetricField(req catalog.CatalogRequest, result *catalog.CatalogResult) string {
+	if result != nil && strings.TrimSpace(result.EffectiveSort.Field) != "" {
+		return catalog.NormalizeQuerySort(result.EffectiveSort).Field
+	}
+	return catalog.NormalizeQuerySort(req.Query.Sort).Field
 }
 
 func (h *CatalogHandler) catalogItemResponses(r *http.Request, resultItems []*models.MediaItem, sortField string, accessFilter catalog.AccessFilter) []itemListResponse {
@@ -287,11 +298,24 @@ func (h *CatalogHandler) resolveGroupedCatalogByWork(r *http.Request, req catalo
 	entries := make([]groupedCatalogEntry, 0, req.Limit+1)
 	groupIndex := 0
 	var snapshot time.Time
+	// The first page resolves the saved/default sort; every later page is then
+	// pinned to it, so a preference edited mid-pagination cannot order the tail
+	// of this response differently than the head. Without carrying the sort onto
+	// the result below, group=work would also silently drop effective_sort even
+	// though the items came back in the saved order.
+	var effectiveSort catalog.QuerySort
+	firstPage := true
 
 	for {
 		result, err := h.resolver.Resolve(r.Context(), fetchReq, accessFilter)
 		if err != nil {
 			return nil, nil, err
+		}
+		if firstPage {
+			firstPage = false
+			effectiveSort = result.EffectiveSort
+			frozen := effectiveSort
+			fetchReq.ResolvedSort = &frozen
 		}
 		if snapshot.IsZero() {
 			snapshot = result.SnapshotAt
@@ -333,11 +357,12 @@ func (h *CatalogHandler) resolveGroupedCatalogByWork(r *http.Request, req catalo
 		total++
 	}
 	result := &catalog.CatalogResult{
-		Items:      groupedCatalogItems(entries),
-		Total:      total,
-		HasMore:    hasMore,
-		TotalExact: false,
-		SnapshotAt: snapshot,
+		Items:         groupedCatalogItems(entries),
+		Total:         total,
+		HasMore:       hasMore,
+		TotalExact:    false,
+		SnapshotAt:    snapshot,
+		EffectiveSort: effectiveSort,
 	}
 	return result, entries, nil
 }
