@@ -288,3 +288,69 @@ func TestCollectorExportsMeasuredGPUEngineGauges(t *testing.T) {
 		t.Fatal("a measured idle GPU omitted its render busy percentage")
 	}
 }
+
+// gatherLabeled reads one metric family keyed by its single label value, so a
+// test can assert per-mount or per-device rather than on whichever series the
+// registry happened to order first.
+func gatherLabeled(t *testing.T, sampler *Sampler, name string) map[string]float64 {
+	t.Helper()
+	registry := prometheus.NewRegistry()
+	if err := registry.Register(collector{sampler: sampler}); err != nil {
+		t.Fatalf("register collector: %v", err)
+	}
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	values := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				values[label.GetValue()] = metric.GetGauge().GetValue()
+			}
+		}
+	}
+	return values
+}
+
+// A mount whose probe has not come back keeps exporting its last real numbers —
+// dropping them would blank a dashboard for a network mount that is merely slow,
+// which sets Stale routinely — but a scrape carries no `stale` field the way the
+// JSON surfaces do. Without a series saying so, a fill alert sits green forever
+// on a volume that stopped answering at 40% and has been filling since.
+func TestCollectorMarksStaleDiskReadings(t *testing.T) {
+	sampler := NewFixedSamplerForTest(Snapshot{
+		Available: true,
+		System: &SystemStats{Disks: []DiskStats{
+			{Role: ScratchDiskRole, UsedGB: 100, TotalGB: 500},
+			{Role: "library-1", UsedGB: 400, TotalGB: 500, Stale: true},
+			{Role: "library-2", Unavailable: true},
+		}},
+	})
+
+	stale := gatherLabeled(t, sampler, "streamapp_node_disk_stale")
+	if got, ok := stale[ScratchDiskRole]; !ok || got != 0 {
+		t.Fatalf("scratch stale = %v (present=%v), want a measured 0", got, ok)
+	}
+	if got, ok := stale["library-1"]; !ok || got != 1 {
+		t.Fatalf("library-1 stale = %v (present=%v), want 1", got, ok)
+	}
+	// An unavailable mount has no measurement at all, so it exports nothing —
+	// including no staleness, which would imply there were numbers to qualify.
+	if _, ok := stale["library-2"]; ok {
+		t.Fatalf("unavailable mount exported a staleness series: %v", stale)
+	}
+
+	// The values themselves still ship for the stale mount: they are real, only
+	// old, and an operator needs to see a volume that was nearly full.
+	used := gatherLabeled(t, sampler, "streamapp_node_disk_used_bytes")
+	if got, ok := used["library-1"]; !ok || got != 400*float64(1024*1024*1024) {
+		t.Fatalf("library-1 used = %v (present=%v), want the carried-over reading kept", got, ok)
+	}
+	if _, ok := used["library-2"]; ok {
+		t.Fatalf("unavailable mount exported a used-bytes series: %v", used)
+	}
+}

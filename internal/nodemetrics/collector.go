@@ -39,11 +39,15 @@ var (
 	descDiskUsed = prometheus.NewDesc(
 		"streamapp_node_disk_used_bytes",
 		"Used bytes on a sampled mount, labeled by role rather than by path.",
-		[]string{"mount"}, nil)
+		[]string{diskMountLabel}, nil)
 	descDiskTotal = prometheus.NewDesc(
 		"streamapp_node_disk_total_bytes",
 		"Total bytes on a sampled mount, labeled by role rather than by path.",
-		[]string{"mount"}, nil)
+		[]string{diskMountLabel}, nil)
+	descDiskStale = prometheus.NewDesc(
+		"streamapp_node_disk_stale",
+		"1 when a mount's used/total bytes are carried over from an earlier pass because its probe has not returned, 0 when they are current.",
+		[]string{diskMountLabel}, nil)
 	descNetworkRx = prometheus.NewDesc(
 		"streamapp_node_network_rx_bps",
 		"Aggregate received bits per second, loopback excluded.",
@@ -74,9 +78,13 @@ var (
 		[]string{gpuDeviceLabel}, nil)
 )
 
-// gpuDeviceLabel is the Prometheus label name every per-GPU series is keyed
-// by.
-const gpuDeviceLabel = "device"
+// gpuDeviceLabel is the Prometheus label name every per-GPU series is keyed by,
+// and diskMountLabel the one every per-mount series is keyed by. Its value is
+// DiskStats.Role, not a path; see the comment on the disk descriptors.
+const (
+	gpuDeviceLabel = "device"
+	diskMountLabel = "mount"
+)
 
 // collector adapts a Sampler to prometheus.Collector.
 type collector struct{ sampler *Sampler }
@@ -110,8 +118,26 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 				// zero would read as an empty disk in every alert rule.
 				continue
 			}
+			// A stale mount keeps exporting, with a series that says so.
+			//
+			// Unlike an unavailable one it has a real measurement, only an old
+			// one — and `stale` is set as soon as a probe outlives its five
+			// second budget, which a network mount does routinely without
+			// anything being wrong. Dropping the series there would blank a
+			// dashboard for a disk that is fine and merely slow to answer.
+			// Re-exporting old numbers under a fresh scrape timestamp with
+			// nothing to qualify them is the other half of the problem, though:
+			// a fill alert would sit green forever on a mount that stopped
+			// answering at 40% and has been filling since. So the values ship
+			// with their staleness beside them, the same pairing the JSON
+			// surfaces carry, and an alert can read both.
+			stale := 0.0
+			if disk.Stale {
+				stale = 1
+			}
 			gauge(descDiskUsed, disk.UsedGB*bytesPerGB, disk.Role)
 			gauge(descDiskTotal, disk.TotalGB*bytesPerGB, disk.Role)
+			gauge(descDiskStale, stale, disk.Role)
 		}
 	}
 	const bytesPerMBFloat = float64(1024 * 1024)

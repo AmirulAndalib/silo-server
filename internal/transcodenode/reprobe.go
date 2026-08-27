@@ -80,6 +80,11 @@ func (s *Server) handleReprobeCapabilities(w http.ResponseWriter, r *http.Reques
 
 	playback.InvalidateHWProbeCache()
 	tonemap.InvalidateProbeCache()
+	// The resource sampler retires nvidia-smi after repeated failure, and a
+	// driver that was broken at start is exactly what a re-probe is called for.
+	// Without this the node re-verifies its encoders here and still reports no
+	// GPU utilization until the breaker's own retry interval comes round.
+	s.metrics.RetrySources()
 
 	// buildCapabilitySnapshotLocked owns the probe deadline, so a re-probe can
 	// never cost more than a cold capability fetch already may.

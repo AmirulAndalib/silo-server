@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 const nvidiaSMIOutput = "0, GPU-1234abcd, 00000000:03:00.0, 71, 63, 12, 812, 8192\n" +
@@ -321,5 +322,93 @@ func TestNVIDIACircuitBreakerResetsOnSuccess(t *testing.T) {
 	}
 	if calls != 2*(sourceFailureLimit-1)+1 {
 		t.Fatalf("nvidia-smi invoked %d times, want the failure count reset by the success", calls)
+	}
+}
+
+// Retiring a source until the process restarts confuses "this host has no
+// toolkit" with "this driver is resetting" — they look identical for the five
+// samples the limit counts. An NVENC node that hit a transient driver outage
+// would then report no utilization and no VRAM for as long as it stayed up.
+func TestNVIDIACircuitBreakerHalfOpensAfterItsRetryInterval(t *testing.T) {
+	tree := newProcTree(t)
+	clock := newFakeClock()
+	s := newTestSampler(t, tree, clock, Options{})
+	calls := 0
+	fail := true
+	s.runNVIDIASMI = func(context.Context) ([]byte, error) {
+		calls++
+		if fail {
+			return nil, errors.New("nvidia-smi: driver/library version mismatch")
+		}
+		return []byte(nvidiaSMIOutput), nil
+	}
+
+	for range sourceFailureLimit + 5 {
+		s.queryNVIDIA(context.Background())
+	}
+	if calls != sourceFailureLimit {
+		t.Fatalf("nvidia-smi invoked %d times, want it retired after %d failures", calls, sourceFailureLimit)
+	}
+
+	// Still retired just short of the interval: the point of the breaker is that
+	// a toolkit-less host stops paying for a subprocess every few seconds.
+	clock.advance(sourceRetryInterval - time.Second)
+	s.queryNVIDIA(context.Background())
+	if calls != sourceFailureLimit {
+		t.Fatalf("nvidia-smi invoked %d times before the retry interval elapsed, want %d", calls, sourceFailureLimit)
+	}
+
+	// One probationary query per interval, and a failure buys another interval
+	// rather than a burst.
+	clock.advance(2 * time.Second)
+	s.queryNVIDIA(context.Background())
+	s.queryNVIDIA(context.Background())
+	if calls != sourceFailureLimit+1 {
+		t.Fatalf("nvidia-smi invoked %d times, want exactly one probationary query", calls)
+	}
+
+	// The driver comes back. The probationary query that succeeds closes the
+	// breaker, and sampling resumes at its normal rate.
+	fail = false
+	clock.advance(sourceRetryInterval)
+	if gpus := s.queryNVIDIA(context.Background()); len(gpus) != 2 {
+		t.Fatalf("recovered query returned %d gpus, want 2", len(gpus))
+	}
+	if gpus := s.queryNVIDIA(context.Background()); len(gpus) != 2 {
+		t.Fatalf("query after recovery returned %d gpus, want the breaker closed", len(gpus))
+	}
+	if calls != sourceFailureLimit+3 {
+		t.Fatalf("nvidia-smi invoked %d times, want the breaker to stop gating once it answered", calls)
+	}
+}
+
+// A re-probe is an operator saying something changed underneath this node, so
+// it must not wait out the retry interval to find out.
+func TestRetrySourcesReturnsARetiredSourceImmediately(t *testing.T) {
+	tree := newProcTree(t)
+	clock := newFakeClock()
+	s := newTestSampler(t, tree, clock, Options{})
+	calls := 0
+	fail := true
+	s.runNVIDIASMI = func(context.Context) ([]byte, error) {
+		calls++
+		if fail {
+			return nil, errors.New("nvidia-smi: command not found")
+		}
+		return []byte(nvidiaSMIOutput), nil
+	}
+
+	for range sourceFailureLimit + 2 {
+		s.queryNVIDIA(context.Background())
+	}
+	if calls != sourceFailureLimit {
+		t.Fatalf("nvidia-smi invoked %d times, want it retired", calls)
+	}
+
+	// The toolkit is installed; the operator re-probes rather than waiting.
+	fail = false
+	s.RetrySources()
+	if gpus := s.queryNVIDIA(context.Background()); len(gpus) != 2 {
+		t.Fatalf("query after RetrySources returned %d gpus, want the source back in service", len(gpus))
 	}
 }

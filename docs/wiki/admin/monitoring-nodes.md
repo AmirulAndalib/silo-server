@@ -281,7 +281,24 @@ groups:
         for: 15m
         annotations:
           summary: "Silo node CPU pegged on {{ $labels.instance }} — check the GPU column for a failed probe"
+
+      - alert: SiloDiskMeasurementStale
+        expr: streamapp_node_disk_stale == 1
+        for: 15m
+        annotations:
+          summary: "Silo has not measured {{ $labels.mount }} on {{ $labels.instance }} for a while — its used/total figures are carried over"
 ```
+
+That last one matters more than it looks. A mount whose probe stops returning
+keeps exporting its last real used and total bytes, because dropping the series
+would blank the panel for a network mount that is merely slow to answer — which
+happens routinely. The numbers are genuine, only old, so `SiloScratchVolumeFilling`
+above still fires on a volume that was nearly full when measurement stopped. What
+it cannot do is notice a volume that stopped answering at 40% and has been
+filling since. `streamapp_node_disk_stale` is what closes that gap: it is `1`
+whenever the used and total beside it are carried over, and `0` when they are
+current. A mount Silo has never measured at all exports nothing — not even a
+staleness series, since there would be no numbers for it to qualify.
 
 A GPU nothing could measure exports no engine gauges at all rather than zeros —
 a Prometheus sample carries no `source` to qualify them, and a zero would read as
@@ -295,6 +312,14 @@ labeled by `device`. On Intel and AMD they measure Silo's own FFmpeg processes
 only, so a card shared with anything outside Silo reads as less busy than it is;
 on NVIDIA they come from `nvidia-smi` and are whole-GPU. A device that nothing
 could measure this interval publishes no VRAM series rather than a zero.
+
+If `nvidia-smi` fails five samples running, Silo stops calling it — a host
+without the NVIDIA toolkit would otherwise spawn a doomed subprocess every few
+seconds forever. It is not retired for good: one probationary call goes out every
+ten minutes, so a driver reset or a toolkit installed after startup is picked up
+on its own. `POST /api/v1/admin/nodes/{id}/reprobe` puts it back in service
+immediately, which is the faster path when you have just fixed the driver
+yourself.
 
 ## Source References
 
