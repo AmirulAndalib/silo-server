@@ -359,7 +359,7 @@ func TestCachedLibraryPathsDoesNotShareItsCachedSlice(t *testing.T) {
 	failing := cachedLibraryPaths(func(context.Context) ([]string, error) {
 		return nil, errors.New("boom")
 	})
-	if got := failing(context.Background()); got != nil && len(got) != 0 {
+	if got := failing(context.Background()); len(got) != 0 {
 		t.Fatalf("an empty cache returned %v", got)
 	}
 }
