@@ -5352,7 +5352,6 @@ func TestTerminalAllowsAlternateFileV3CoversSubtitleForcedRefusals(t *testing.T)
 		t.Fatal("a nil terminal must not trigger an alternate-version retry")
 	}
 }
-
 func TestPlaybackV3ToneMapBudgetsCoverColdNodeWork(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.PlaybackConfig = func() config.PlaybackConfig {
