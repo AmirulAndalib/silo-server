@@ -168,11 +168,16 @@ type GPUStats struct {
 	Sessions int `json:"sessions"`
 	// VideoBusyPct and RenderBusyPct are engine busy percentages over the last
 	// sample interval. From fdinfo they cover only our own processes.
-	VideoBusyPct  int `json:"video_busy_pct"`
-	RenderBusyPct int `json:"render_busy_pct"`
-	// TotalBusyPct is whole-GPU utilization including other tenants. It is a
-	// pointer because "no enrichment source" and "idle" are different facts and
-	// an operator must not read the first as the second.
+	VideoBusyPct  *int `json:"video_busy_pct,omitempty"`
+	RenderBusyPct *int `json:"render_busy_pct,omitempty"`
+	// TotalBusyPct is whole-GPU utilization including other tenants.
+	//
+	// Every measurement above and below is a pointer because availability is per
+	// field, not per device: a source answers for some columns and not others —
+	// nvidia-smi prints "[N/A]" for an engine a card cannot report while still
+	// giving real memory figures, and fdinfo has no reading at all until it has
+	// two samples to diff. "Nothing measured this" and "measured, and idle" are
+	// different facts, and an operator must not read the first as the second.
 	TotalBusyPct *int   `json:"total_busy_pct,omitempty"`
 	VRAMUsedMB   *int64 `json:"vram_used_mb,omitempty"`
 	VRAMTotalMB  *int64 `json:"vram_total_mb,omitempty"`

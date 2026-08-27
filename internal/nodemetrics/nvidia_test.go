@@ -23,23 +23,72 @@ func TestParseNVIDIASMI(t *testing.T) {
 	if first.PCIAddress != "0000:03:00.0" {
 		t.Fatalf("PCIAddress = %q, want the normalized sysfs form", first.PCIAddress)
 	}
-	if first.GPUUtil != 71 || first.EncoderUtil != 63 || first.DecoderUtil != 12 {
-		t.Fatalf("gpus[0] utilization = %+v", first)
+	if *first.GPUUtil != 71 || *first.EncoderUtil != 63 || *first.DecoderUtil != 12 {
+		t.Fatalf("gpus[0] utilization = %d/%d/%d", *first.GPUUtil, *first.EncoderUtil, *first.DecoderUtil)
 	}
-	if first.MemUsedMB != 812 || first.MemTotalMB != 8192 {
-		t.Fatalf("gpus[0] memory = %+v", first)
+	if *first.MemUsedMB != 812 || *first.MemTotalMB != 8192 {
+		t.Fatalf("gpus[0] memory = %d/%d", *first.MemUsedMB, *first.MemTotalMB)
 	}
 }
 
 // Drivers print "[N/A]" for a column a card does not support. One unsupported
-// column must not discard the whole row.
+// column must not discard the whole row — nor be read as a measured zero, which
+// would show an engine nobody can see as idle.
 func TestParseNVIDIASMIToleratesPlaceholders(t *testing.T) {
-	gpus := parseNVIDIASMI([]byte("0, GPU-x, 00000000:03:00.0, [N/A], [Not Supported], 4, 100, 8192\n"))
+	gpus := parseNVIDIASMI([]byte("0, GPU-x, 00000000:03:00.0, [N/A], [Not Supported], 4, 100, [N/A]\n"))
 	if len(gpus) != 1 {
 		t.Fatalf("gpus = %+v, want the row kept", gpus)
 	}
-	if gpus[0].GPUUtil != 0 || gpus[0].EncoderUtil != 0 || gpus[0].DecoderUtil != 4 {
-		t.Fatalf("gpus[0] = %+v, want placeholders read as zero and 4 preserved", gpus[0])
+	got := gpus[0]
+	if got.GPUUtil != nil || got.EncoderUtil != nil || got.MemTotalMB != nil {
+		t.Fatalf("gpus[0] = %+v, want the placeholder columns unset", got)
+	}
+	if got.DecoderUtil == nil || *got.DecoderUtil != 4 {
+		t.Fatalf("DecoderUtil = %v, want the reported 4 preserved", got.DecoderUtil)
+	}
+	if got.MemUsedMB == nil || *got.MemUsedMB != 100 {
+		t.Fatalf("MemUsedMB = %v, want the reported 100 preserved", got.MemUsedMB)
+	}
+	// One reported engine still gives a video reading; both missing gives none.
+	if video := got.videoUtil(); video == nil || *video != 4 {
+		t.Fatalf("videoUtil() = %v, want the one engine the driver did report", video)
+	}
+	if video := (nvidiaGPU{}).videoUtil(); video != nil {
+		t.Fatalf("videoUtil() = %d with neither engine reported, want none", *video)
+	}
+}
+
+// A card that reports memory but no video engines keeps the nvidia-smi source
+// for the columns it did answer, and simply carries no engine reading.
+func TestSampleGPUKeepsPartialNVIDIAReadings(t *testing.T) {
+	tree := newProcTree(t)
+	clock := newFakeClock()
+	tree.write("stat", "cpu  0 0 0 0 0 0 0 0\n")
+	tree.write("loadavg", "0 0 0 0/0 0\n")
+	tree.write("meminfo", "MemTotal: 1024 kB\n")
+	tree.write("net/dev", "")
+
+	s := newTestSampler(t, tree, clock, Options{})
+	s.runNVIDIASMI = func(context.Context) ([]byte, error) {
+		return []byte("0, GPU-x, 00000000:03:00.0, 71, [N/A], [N/A], 812, 8192\n"), nil
+	}
+	s.sample(context.Background())
+
+	gpu := s.Snapshot().GPU
+	if len(gpu) != 1 {
+		t.Fatalf("GPU = %+v, want one device", gpu)
+	}
+	if gpu[0].Source != SourceNVIDIASMI {
+		t.Fatalf("Source = %q, want %q for the columns it did measure", gpu[0].Source, SourceNVIDIASMI)
+	}
+	if gpu[0].VideoBusyPct != nil {
+		t.Fatalf("VideoBusyPct = %d, want no reading for engines the driver cannot see", *gpu[0].VideoBusyPct)
+	}
+	if gpu[0].TotalBusyPct == nil || *gpu[0].TotalBusyPct != 71 {
+		t.Fatalf("TotalBusyPct = %v, want the 71 nvidia-smi did report", gpu[0].TotalBusyPct)
+	}
+	if gpu[0].VRAMTotalMB == nil || *gpu[0].VRAMTotalMB != 8192 {
+		t.Fatalf("VRAMTotalMB = %v, want the 8192 nvidia-smi did report", gpu[0].VRAMTotalMB)
 	}
 }
 
@@ -76,8 +125,8 @@ func TestSampleGPUEnrichesWithNVIDIASMI(t *testing.T) {
 	if first.TotalBusyPct == nil || *first.TotalBusyPct != 71 {
 		t.Fatalf("TotalBusyPct = %v, want 71", first.TotalBusyPct)
 	}
-	if first.VideoBusyPct != 63 {
-		t.Fatalf("VideoBusyPct = %d, want the busier of encoder/decoder", first.VideoBusyPct)
+	if got := enginePct(t, first.VideoBusyPct); got != 63 {
+		t.Fatalf("VideoBusyPct = %d, want the busier of encoder/decoder", got)
 	}
 	if first.VRAMUsedMB == nil || *first.VRAMUsedMB != 812 {
 		t.Fatalf("VRAMUsedMB = %v, want 812", first.VRAMUsedMB)

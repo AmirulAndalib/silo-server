@@ -45,16 +45,37 @@ var runNVIDIASMI = func(ctx context.Context) ([]byte, error) {
 }
 
 // nvidiaGPU is one parsed nvidia-smi row.
+//
+// The measurement columns are optional because a successful row can still be
+// only partly measurable: a driver reports "[N/A]" or "[Not Supported]" per
+// column for engines or memory it cannot see, and coercing those to zero would
+// publish an unobservable video engine as idle and unsupported VRAM as 0 bytes
+// under an "nvidia-smi" source that claims they were measured.
 type nvidiaGPU struct {
 	Index       int
 	UUID        string
 	PCIAddress  string
-	GPUUtil     int
-	EncoderUtil int
-	DecoderUtil int
-	MemUsedMB   int64
-	MemTotalMB  int64
+	GPUUtil     *int
+	EncoderUtil *int
+	DecoderUtil *int
+	MemUsedMB   *int64
+	MemTotalMB  *int64
 }
+
+// videoUtil is the higher of the two fixed-function video engines, or nil when
+// the driver reported neither.
+func (g nvidiaGPU) videoUtil() *int {
+	switch {
+	case g.EncoderUtil != nil && g.DecoderUtil != nil:
+		return ptr(max(*g.EncoderUtil, *g.DecoderUtil))
+	case g.EncoderUtil != nil:
+		return g.EncoderUtil
+	default:
+		return g.DecoderUtil
+	}
+}
+
+func ptr[T any](value T) *T { return &value }
 
 // sourceBreaker retires an enrichment source after repeated failure.
 type sourceBreaker struct {
@@ -139,22 +160,28 @@ func parseNVIDIASMI(output []byte) []nvidiaGPU {
 			GPUUtil:     parseNVIDIAInt(fields[3]),
 			EncoderUtil: parseNVIDIAInt(fields[4]),
 			DecoderUtil: parseNVIDIAInt(fields[5]),
-			MemUsedMB:   int64(parseNVIDIAInt(fields[6])),
-			MemTotalMB:  int64(parseNVIDIAInt(fields[7])),
+			MemUsedMB:   parseNVIDIAInt64(fields[6]),
+			MemTotalMB:  parseNVIDIAInt64(fields[7]),
 		})
 	}
 	return gpus
 }
 
-// parseNVIDIAInt reads one numeric column, treating the driver's "[N/A]" and
-// "[Not Supported]" placeholders as zero.
-func parseNVIDIAInt(field string) int {
+// parseNVIDIAInt reads one numeric column, or nil for the driver's "[N/A]" and
+// "[Not Supported]" placeholders — which say the value was not measured, not
+// that it is zero.
+func parseNVIDIAInt(field string) *int {
 	value, err := strconv.Atoi(strings.TrimSpace(field))
-	if err != nil {
-		return 0
+	if err != nil || value < 0 {
+		return nil
 	}
-	if value < 0 {
-		return 0
+	return &value
+}
+
+func parseNVIDIAInt64(field string) *int64 {
+	value := parseNVIDIAInt(field)
+	if value == nil {
+		return nil
 	}
-	return value
+	return ptr(int64(*value))
 }

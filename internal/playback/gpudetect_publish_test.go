@@ -296,3 +296,62 @@ func TestInvalidateHWProbeCacheRequeriesNVIDIAIdentities(t *testing.T) {
 		t.Fatalf("identities = %v, want the re-probe to pick up the new uuid", got)
 	}
 }
+
+// On a mixed NVIDIA/Intel host NVENC stays a candidate through hasNVIDIADevice
+// even when the node is deliberately configured for QSV on a render node. Smoke
+// encoding CUDA against /dev/dri/renderD128 fails for a reason that has nothing
+// to do with the NVIDIA card, and a non-skipped failure latches a drift warning
+// that cannot clear while the QSV policy stands.
+func TestNVENCSkippedWhenTheConfiguredDeviceIsARenderPath(t *testing.T) {
+	env := setupHWAccelTest(t)
+	env.addRenderDevice(t, "renderD128", "0x8086")
+	env.addNVIDIADevice(t, "nvidia0")
+	ffmpeg := writeFakeFFmpeg(t, fullyCapableProbe())
+
+	info, err := DetectHWAccelWithFFmpegContextResult(
+		context.Background(), hwAccelAuto, ffmpeg.path, env.devicePath("renderD128"))
+	if err != nil {
+		t.Fatalf("DetectHWAccelWithFFmpegContextResult: %v", err)
+	}
+	for _, backend := range info.DetectedBackends {
+		if backend.Backend != transcodeHWNVENC {
+			continue
+		}
+		if !backend.Skipped {
+			t.Fatalf("nvenc = %+v, want it skipped rather than failed for a render-path device", backend)
+		}
+		if backend.Verified {
+			t.Fatalf("nvenc = %+v, want no verification claimed", backend)
+		}
+		return
+	}
+	t.Fatalf("no nvenc entry in %+v", info.DetectedBackends)
+}
+
+// A CUDA identity is still probed: skipping is about the device being the wrong
+// *kind* of name, not about avoiding NVENC.
+func TestNVENCProbedWhenTheConfiguredDeviceIsACUDAIdentity(t *testing.T) {
+	env := setupHWAccelTest(t)
+	env.addNVIDIADevice(t, "nvidia0")
+	ffmpeg := writeFakeFFmpeg(t, fullyCapableProbe())
+
+	for _, device := range []string{"0", "cuda:1", "GPU-a1b2c3d4"} {
+		t.Run(device, func(t *testing.T) {
+			InvalidateHWProbeCache()
+			info, err := DetectHWAccelWithFFmpegContextResult(context.Background(), hwAccelAuto, ffmpeg.path, device)
+			if err != nil {
+				t.Fatalf("DetectHWAccelWithFFmpegContextResult: %v", err)
+			}
+			for _, backend := range info.DetectedBackends {
+				if backend.Backend != transcodeHWNVENC {
+					continue
+				}
+				if backend.Skipped || !backend.Verified {
+					t.Fatalf("nvenc = %+v, want a CUDA identity probed and verified", backend)
+				}
+				return
+			}
+			t.Fatalf("no nvenc entry in %+v", info.DetectedBackends)
+		})
+	}
+}

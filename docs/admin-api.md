@@ -189,16 +189,23 @@ Each entry in `last_stats.gpu`:
 | `vendor` | string | `intel`, `nvidia` or `amd`. Omitted when sysfs names a vendor we do not recognize. |
 | `sessions` | int | GPU workloads this node currently has pinned to the device. It comes from the playback device balancer, so it is exact for Silo's own work and blind to any other tenant's. With no `playback.hw_device` configured the workload is counted against the render device the transcode will actually open — the one auto-detection verified the backend on, or the first available render node when the backend was named explicitly and no detection walk ran. It goes uncounted only on a host with no render device at all. |
 | `video_busy_pct`, `render_busy_pct` | int | Engine busy percentages over the sampling interval. |
-| `total_busy_pct` | int | Whole-GPU utilization *including other tenants*. Present only with an enrichment source — absent is not zero, and must not be rendered as an idle GPU. |
-| `vram_used_mb`, `vram_total_mb` | int | GPU memory, on the same terms as `total_busy_pct`. |
+| `total_busy_pct` | int | Whole-GPU utilization *including other tenants*. |
+| `vram_used_mb`, `vram_total_mb` | int | GPU memory. |
 | `source` | string | What produced the numbers: `fdinfo`, `nvidia-smi`, `fdinfo+nvidia-smi`, or `unavailable`. |
 
-`source` is what tells an operator how far to trust the busy percentages.
-`fdinfo` is the unprivileged DRM baseline and covers **only this node's own
-ffmpeg children** — a GPU shared with anything outside Silo reads as less busy
-than it is. `nvidia-smi` is whole-GPU. `unavailable` means nothing could measure
-the device this interval; its percentages are zeros with no measurement behind
-them.
+Every measurement field above is omitted when nothing measured it, and
+availability is per field rather than per device: absent is not zero and must
+not be rendered as an idle GPU. A card can answer for some columns and not
+others — `nvidia-smi` prints `[N/A]` for an engine a GPU cannot report while
+still giving real memory figures, and a device reached only through `nvidia-smi`
+has no render-engine reading at all — so read each field's presence, not the
+device's.
+
+`source` is what tells an operator how far to trust the busy percentages that
+are present. `fdinfo` is the unprivileged DRM baseline and covers **only this
+node's own ffmpeg children** — a GPU shared with anything outside Silo reads as
+less busy than it is. `nvidia-smi` is whole-GPU. `unavailable` means nothing
+could measure the device this interval, so it carries no percentages at all.
 
 A node reports these fields in its own `/health` and `/status`; the API stores
 them opaquely and parses only what it routes on. No GPU field is one of those —

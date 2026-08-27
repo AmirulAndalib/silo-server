@@ -15,6 +15,7 @@ func TestSystemResourcesReportsLocalSample(t *testing.T) {
 
 	sampledAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	total := 71
+	video, render := 63, 12
 	handler := &SystemHandler{}
 	handler.SetResourceSampler(nodemetrics.NewFixedSamplerForTest(nodemetrics.Snapshot{
 		Available: true,
@@ -27,7 +28,7 @@ func TestSystemResourcesReportsLocalSample(t *testing.T) {
 		},
 		GPU: []nodemetrics.GPUStats{{
 			Device: "/dev/dri/renderD128", Vendor: "intel", Sessions: 2,
-			VideoBusyPct: 63, RenderBusyPct: 12, TotalBusyPct: &total,
+			VideoBusyPct: &video, RenderBusyPct: &render, TotalBusyPct: &total,
 			Source: nodemetrics.SourceFdinfo,
 		}},
 	}))

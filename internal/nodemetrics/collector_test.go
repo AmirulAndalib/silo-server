@@ -58,7 +58,6 @@ func TestCollectorExposesSnapshot(t *testing.T) {
 		"streamapp_node_network_rx_bps",
 		"streamapp_node_network_tx_bps",
 		"streamapp_node_gpu_video_busy_percent",
-		"streamapp_node_gpu_render_busy_percent",
 		"streamapp_node_gpu_sessions",
 		"streamapp_node_gpu_vram_used_bytes",
 		"streamapp_node_gpu_vram_total_bytes",
@@ -67,6 +66,13 @@ func TestCollectorExposesSnapshot(t *testing.T) {
 			t.Fatalf("%s missing from the scrape (got %v)", name, values)
 		}
 	}
+	// nvidia-smi reports encoder and decoder but nothing for the render engine,
+	// and this card has no DRM counters to supply one. Exporting the missing
+	// column as 0 would draw an idle 3D engine for a GPU nobody measured.
+	if _, ok := values["streamapp_node_gpu_render_busy_percent"]; ok {
+		t.Fatalf("render busy exported for an nvidia-smi-only card: %v", values)
+	}
+
 	// Bytes on the wire, gibibytes in the JSON: the conversion has to survive.
 	if got := values["streamapp_node_disk_used_bytes"]; got != float64(100<<30) {
 		t.Fatalf("disk used = %v, want %v bytes", got, float64(100<<30))
@@ -270,7 +276,7 @@ func TestCollectorExportsMeasuredGPUEngineGauges(t *testing.T) {
 		System:    &SystemStats{},
 		GPU: []GPUStats{{
 			Device: "/dev/dri/renderD128", Sessions: 0,
-			VideoBusyPct: 0, RenderBusyPct: 0, Source: SourceFdinfo,
+			VideoBusyPct: ptr(0), RenderBusyPct: ptr(0), Source: SourceFdinfo,
 		}},
 	})
 

@@ -415,8 +415,11 @@ func (s *Sampler) sampleGPU(ctx context.Context, now time.Time) []GPUStats {
 			alias(pdev, path)
 		}
 		if elapsedNS > 0 {
-			entry.VideoBusyPct = engineBusyPercent(delta.videoNS, elapsedNS)
-			entry.RenderBusyPct = engineBusyPercent(delta.renderNS, elapsedNS)
+			// Before the second sample there is no interval to divide by, so the
+			// engines stay unset rather than reporting a freshly started node's
+			// unknown load as idle.
+			entry.VideoBusyPct = ptr(engineBusyPercent(delta.videoNS, elapsedNS))
+			entry.RenderBusyPct = ptr(engineBusyPercent(delta.renderNS, elapsedNS))
 		}
 		entry.Source = SourceFdinfo
 	}
@@ -445,18 +448,21 @@ func (s *Sampler) sampleGPU(ctx context.Context, now time.Time) []GPUStats {
 		// this entry.
 		alias(key, cudaName, gpu.UUID)
 		entry.Vendor = vendorNVIDIA
-		total := gpu.GPUUtil
-		entry.TotalBusyPct = &total
-		used, capacity := gpu.MemUsedMB, gpu.MemTotalMB
-		entry.VRAMUsedMB = &used
-		entry.VRAMTotalMB = &capacity
+		// Each column is carried only when the driver actually reported it: a
+		// successful row can still answer "[N/A]" for engines or memory it
+		// cannot see, and publishing those as zero would show an unobservable
+		// video engine as idle and unsupported VRAM as 0 bytes.
+		entry.TotalBusyPct = gpu.GPUUtil
+		entry.VRAMUsedMB = gpu.MemUsedMB
+		entry.VRAMTotalMB = gpu.MemTotalMB
 		if entry.Source == SourceFdinfo {
 			entry.Source = SourceFdinfoNVIDIASMI
 		} else {
 			entry.Source = SourceNVIDIASMI
 			// fdinfo is unimplemented by the proprietary driver, so the video
-			// engines only have an nvidia-smi reading.
-			entry.VideoBusyPct = max(gpu.EncoderUtil, gpu.DecoderUtil)
+			// engines only have an nvidia-smi reading — which stays unset when
+			// the driver answered "[N/A]" for both of them.
+			entry.VideoBusyPct = gpu.videoUtil()
 		}
 	}
 

@@ -196,7 +196,7 @@ func TestResolveDriftNoteKeepsNoteWhenAnUnrelatedGPUIsAdded(t *testing.T) {
 
 	standing := "render devices gone: /dev/dri/renderD128"
 	// The lost card, by every identity it answered to.
-	baseline := []byte(`{"devices":[["0000:03:00.0","/dev/dri/renderD128"]]}`)
+	baseline := []byte(`{"devices":[{"aliases":["0000:03:00.0","/dev/dri/renderD128"]}]}`)
 	payload := []byte(gained)
 	drift, parsed := computeCapabilityDrift(payload, payload)
 
@@ -221,7 +221,7 @@ func TestResolveDriftNoteClearsWhenTheLostCardReturnsRenumbered(t *testing.T) {
 		`"detected_backends":[{"backend":"vaapi","verified":true}]}`
 
 	standing := "render devices gone: /dev/dri/renderD128"
-	baseline := []byte(`{"devices":[["0000:03:00.0","/dev/dri/renderD128"]]}`)
+	baseline := []byte(`{"devices":[{"aliases":["0000:03:00.0","/dev/dri/renderD128"]}]}`)
 	payload := []byte(back)
 	drift, parsed := computeCapabilityDrift(payload, payload)
 
@@ -276,7 +276,7 @@ func TestResolveDriftNoteKeepsNoteWhileASiblingGPUIsStillMissing(t *testing.T) {
 		`"detected_backends":[{"backend":"vaapi","verified":true}]}`
 
 	standing := "render devices gone: /dev/dri/renderD129"
-	baseline := []byte(`{"devices":[["0000:04:00.0","/dev/dri/renderD129"]]}`)
+	baseline := []byte(`{"devices":[{"aliases":["0000:04:00.0","/dev/dri/renderD129"]}]}`)
 	payload := []byte(degraded)
 	// The next refetch is degraded-to-degraded: nothing newly lost, and every
 	// probe that ran passed, because the survivor is fine.
@@ -643,5 +643,44 @@ func TestResolveDriftNoteClearsALegacyNoteWithNoBaseline(t *testing.T) {
 
 	if got, _ := resolveDriftNote(&standing, nil, drift, parsed, payload); got != nil {
 		t.Fatalf("capability_drift = %q, want a baseline-less note cleared by a clean report", *got)
+	}
+}
+
+// A replacement card in the same slot inherits the PCI address and usually the
+// render path. Clearing on that would report the lost card as returned when a
+// different one arrived — the same false match the loss comparison already
+// refuses, applied to the recovery side.
+func TestResolveDriftNoteKeepsNoteWhenAReplacementCardTakesTheSlot(t *testing.T) {
+	const replaced = `{"resolved":"nvenc","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0","gpu_uuid":"GPU-new"}],` +
+		`"detected_backends":[{"backend":"nvenc","verified":true}]}`
+
+	standing := "render devices gone: /dev/dri/renderD128"
+	baseline := []byte(`{"devices":[{"uuid":"GPU-old","aliases":["GPU-old","0000:03:00.0","/dev/dri/renderD128"]}]}`)
+	payload := []byte(replaced)
+	drift, parsed := computeCapabilityDrift(payload, payload)
+
+	got, _ := resolveDriftNote(&standing, baseline, drift, parsed, payload)
+	if got == nil {
+		t.Fatal("capability_drift cleared because a different card took the slot")
+	}
+	if *got != standing {
+		t.Fatalf("capability_drift = %q, want the standing note %q", *got, standing)
+	}
+}
+
+// The original card returning does clear it, even under a renumbered path.
+func TestResolveDriftNoteClearsWhenTheSameCardReturnsByUUID(t *testing.T) {
+	const back = `{"resolved":"nvenc","render_devices":["/dev/dri/renderD131"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD131","pci_address":"0000:09:00.0","gpu_uuid":"GPU-old"}],` +
+		`"detected_backends":[{"backend":"nvenc","verified":true}]}`
+
+	standing := "render devices gone: /dev/dri/renderD128"
+	baseline := []byte(`{"devices":[{"uuid":"GPU-old","aliases":["GPU-old","0000:03:00.0","/dev/dri/renderD128"]}]}`)
+	payload := []byte(back)
+	drift, parsed := computeCapabilityDrift(payload, payload)
+
+	if got, _ := resolveDriftNote(&standing, baseline, drift, parsed, payload); got != nil {
+		t.Fatalf("capability_drift = %q, want the same uuid in a new slot to clear it", *got)
 	}
 }

@@ -689,9 +689,26 @@ func resolveDriftNote(stored *string, storedBaseline []byte, drift capabilityDri
 type driftBaseline struct {
 	// Backends must verify again.
 	Backends []string `json:"backends,omitempty"`
-	// Devices are alias sets: any one member reappearing identifies the card,
-	// so a renumbered render node or a pass without nvidia-smi still matches.
-	Devices [][]string `json:"devices,omitempty"`
+	// Devices are the cards that must reappear, each carrying every name it
+	// answered to so a renumbered render node — or a pass where nvidia-smi did
+	// not answer — still matches it.
+	Devices []driftBaselineDevice `json:"devices,omitempty"`
+}
+
+// driftBaselineDevice is one lost card's identity, in the same shape the loss
+// comparison uses so both sides apply the same matching rule.
+type driftBaselineDevice struct {
+	// UUID is the card's permanent identity where it published one. It is held
+	// apart from Aliases because it is the only name that can prove two devices
+	// are *different*: a replacement in the same slot inherits the slot and
+	// usually the render path, and matching on those would read as the lost
+	// card returning.
+	UUID    string   `json:"uuid,omitempty"`
+	Aliases []string `json:"aliases,omitempty"`
+}
+
+func (d driftBaselineDevice) matches(candidate renderDeviceAliases) bool {
+	return renderDeviceAliases{uuid: d.UUID, aliases: d.Aliases}.sameDevice(candidate)
 }
 
 func (b driftBaseline) empty() bool { return len(b.Backends) == 0 && len(b.Devices) == 0 }
@@ -718,14 +735,13 @@ func (b driftBaseline) recoveredBy(payload []byte) bool {
 			return false
 		}
 	}
-	present := make(map[string]bool)
-	for _, device := range renderDeviceAliasSets(current) {
-		for _, alias := range device.aliases {
-			present[alias] = true
-		}
-	}
-	for _, aliases := range b.Devices {
-		if !slices.ContainsFunc(aliases, func(alias string) bool { return present[alias] }) {
+	// Matched with sameDevice, not by any shared alias: a replacement card in
+	// the same slot shares the PCI address and usually the render path, and
+	// treating that as the lost card returning is exactly the false recovery
+	// the loss side already refuses to call a match.
+	currentDevices := renderDeviceAliasSets(current)
+	for _, device := range b.Devices {
+		if !slices.ContainsFunc(currentDevices, device.matches) {
 			return false
 		}
 	}
@@ -747,14 +763,15 @@ func mergeDriftBaseline(stored []byte, drift capabilityDrift) driftBaseline {
 		}
 	}
 	for _, device := range drift.lostDeviceAliases {
-		if slices.ContainsFunc(baseline.Devices, func(existing []string) bool {
-			return slices.ContainsFunc(existing, func(alias string) bool {
-				return slices.Contains(device.aliases, alias)
-			})
+		if slices.ContainsFunc(baseline.Devices, func(existing driftBaselineDevice) bool {
+			return existing.matches(device)
 		}) {
 			continue
 		}
-		baseline.Devices = append(baseline.Devices, slices.Clone(device.aliases))
+		baseline.Devices = append(baseline.Devices, driftBaselineDevice{
+			UUID:    device.uuid,
+			Aliases: slices.Clone(device.aliases),
+		})
 	}
 	slices.Sort(baseline.Backends)
 	return baseline

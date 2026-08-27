@@ -450,6 +450,7 @@ func TestNonLinuxHostReportsUnavailable(t *testing.T) {
 // endpoint, and the persisted last_stats column all carry this shape.
 func TestSnapshotJSONShape(t *testing.T) {
 	total := 71
+	video, render := 63, 12
 	vramUsed := int64(812)
 	vramTotal := int64(8192)
 	snapshot := Snapshot{
@@ -472,8 +473,8 @@ func TestSnapshotJSONShape(t *testing.T) {
 			Device:        "/dev/dri/renderD128",
 			Vendor:        "intel",
 			Sessions:      2,
-			VideoBusyPct:  63,
-			RenderBusyPct: 12,
+			VideoBusyPct:  &video,
+			RenderBusyPct: &render,
 			TotalBusyPct:  &total,
 			VRAMUsedMB:    &vramUsed,
 			VRAMTotalMB:   &vramTotal,
@@ -531,7 +532,7 @@ func TestSnapshotJSONShape(t *testing.T) {
 		t.Fatalf("system emitted when absent: %s", bare)
 	}
 	bareGPU := bareDecoded["gpu"].([]any)[0].(map[string]any)
-	for _, key := range []string{"total_busy_pct", "vram_used_mb", "vram_total_mb", "vendor"} {
+	for _, key := range []string{"video_busy_pct", "render_busy_pct", "total_busy_pct", "vram_used_mb", "vram_total_mb", "vendor"} {
 		if _, ok := bareGPU[key]; ok {
 			t.Fatalf("gpu.%s emitted when absent: %s", key, bare)
 		}

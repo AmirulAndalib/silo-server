@@ -152,8 +152,8 @@ func TestSampleGPUMapsPdevToDevicePathAndComputesBusy(t *testing.T) {
 	if first[0].Source != SourceFdinfo {
 		t.Fatalf("Source = %q, want %q", first[0].Source, SourceFdinfo)
 	}
-	if first[0].VideoBusyPct != 0 {
-		t.Fatalf("VideoBusyPct = %d on the first sample, want 0 (nothing to diff against)", first[0].VideoBusyPct)
+	if first[0].VideoBusyPct != nil {
+		t.Fatalf("VideoBusyPct = %d on the first sample, want it unset (nothing to diff against)", *first[0].VideoBusyPct)
 	}
 
 	// Over 4s of wall time: +2s of video engine, +1s of render engine.
@@ -167,11 +167,11 @@ drm-engine-video:	4000000000 ns
 	s.sample(context.Background())
 
 	second := s.Snapshot().GPU[0]
-	if second.VideoBusyPct != 50 {
-		t.Fatalf("VideoBusyPct = %d, want 50", second.VideoBusyPct)
+	if got := enginePct(t, second.VideoBusyPct); got != 50 {
+		t.Fatalf("VideoBusyPct = %d, want 50", got)
 	}
-	if second.RenderBusyPct != 25 {
-		t.Fatalf("RenderBusyPct = %d, want 25", second.RenderBusyPct)
+	if got := enginePct(t, second.RenderBusyPct); got != 25 {
+		t.Fatalf("RenderBusyPct = %d, want 25", got)
 	}
 	if second.TotalBusyPct != nil {
 		t.Fatal("TotalBusyPct set without an enrichment source")
@@ -215,7 +215,7 @@ drm-engine-video:	7000000000 ns
 	clock.advance(5 * time.Second)
 	s.sample(context.Background())
 
-	if got := s.Snapshot().GPU[0].VideoBusyPct; got != 100 {
+	if got := enginePct(t, s.Snapshot().GPU[0].VideoBusyPct); got != 100 {
 		t.Fatalf("VideoBusyPct = %d while the surviving transcode ran the engine flat out, want 100", got)
 	}
 }
@@ -251,8 +251,8 @@ drm-engine-video:	5000000000 ns
 	if len(gpu) != 1 {
 		t.Fatalf("GPU = %+v, want one device", gpu)
 	}
-	if gpu[0].VideoBusyPct != 0 || gpu[0].RenderBusyPct != 0 {
-		t.Fatalf("busy = %d/%d after a transcode exited, want 0/0", gpu[0].VideoBusyPct, gpu[0].RenderBusyPct)
+	if video, render := enginePct(t, gpu[0].VideoBusyPct), enginePct(t, gpu[0].RenderBusyPct); video != 0 || render != 0 {
+		t.Fatalf("busy = %d/%d after a transcode exited, want a measured 0/0", video, render)
 	}
 
 	// The reduced total is the new baseline: the surviving transcode's next
@@ -264,7 +264,7 @@ drm-engine-video:	3000000000 ns
 `)
 	clock.advance(10 * time.Second)
 	s.sample(context.Background())
-	if got := s.Snapshot().GPU[0].VideoBusyPct; got != 10 {
+	if got := enginePct(t, s.Snapshot().GPU[0].VideoBusyPct); got != 10 {
 		t.Fatalf("VideoBusyPct after re-baselining = %d, want 10", got)
 	}
 }
@@ -336,4 +336,14 @@ func TestDeviceEngineDeltasIgnoresCounterRegressions(t *testing.T) {
 	if got := deviceEngineDeltas(previous, current)["0000:00:02.0"].videoNS; got != 0 {
 		t.Fatalf("delta on a counter regression = %d, want 0", got)
 	}
+}
+
+// enginePct reads an engine percentage a test requires to be present, so a
+// missing measurement fails as itself rather than as a nil dereference.
+func enginePct(t *testing.T, got *int) int {
+	t.Helper()
+	if got == nil {
+		t.Fatal("engine percentage is unset, want a measurement")
+	}
+	return *got
 }

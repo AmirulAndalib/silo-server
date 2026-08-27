@@ -14,6 +14,7 @@ import (
 // newFakeSampler answers with a fixed reading so the handlers under test are
 // exercised without a Linux host beneath them.
 func newFakeSampler() *nodemetrics.Sampler {
+	video, render := 63, 12
 	return nodemetrics.NewFixedSamplerForTest(nodemetrics.Snapshot{
 		Available: true,
 		SampledAt: time.Now(),
@@ -25,7 +26,7 @@ func newFakeSampler() *nodemetrics.Sampler {
 		},
 		GPU: []nodemetrics.GPUStats{{
 			Device: "/dev/dri/renderD128", Vendor: "intel", Sessions: 2,
-			VideoBusyPct: 63, RenderBusyPct: 12, Source: nodemetrics.SourceFdinfo,
+			VideoBusyPct: &video, RenderBusyPct: &render, Source: nodemetrics.SourceFdinfo,
 		}},
 	})
 }

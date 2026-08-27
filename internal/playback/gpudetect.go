@@ -441,8 +441,8 @@ func verifyHWAccelBackend(ctx context.Context, backend, ffmpegPath string, candi
 			complete = false
 			break
 		}
-		if !candidates.deviceProbeable(backend, device) {
-			reasons = append(reasons, hwProbeFailureReason(len(devices), device, "device not accessible on this node"))
+		if reason, unprobeable := candidates.unprobeableReason(backend, device); unprobeable {
+			reasons = append(reasons, hwProbeFailureReason(len(devices), device, reason))
 			continue
 		}
 		probed = true
@@ -518,17 +518,46 @@ func verifiedHWDeviceKey(generation uint64, backend string) string {
 	return strconv.FormatUint(generation, 10) + "\x00" + backend
 }
 
-// deviceProbeable reports whether a candidate device may be smoke-encoded on.
+// unprobeableReason reports why a candidate cannot be smoke-encoded on, or
+// false when it can be.
 //
-// An empty device names no file, and a nil map means the candidate set came
-// from discovery, which is openable by construction. NVENC is exempt whatever
-// its device says: a CUDA index or GPU uuid is not a path, so failing to open it
-// is meaningless, and the smoke encode is the only thing that can answer.
-func (c hwCandidates) deviceProbeable(backend, device string) bool {
-	if device == "" || c.accessible == nil || backend == transcodeHWNVENC {
-		return true
+// Both reasons describe the *configuration*, not the hardware, which is why the
+// caller records them as skipped rather than failed: neither is evidence that a
+// card stopped working.
+func (c hwCandidates) unprobeableReason(backend, device string) (string, bool) {
+	if device == "" {
+		// NVENC's CUDA default, and the only shape a discovered candidate takes.
+		return "", false
 	}
-	return c.accessible[device]
+	if backend == transcodeHWNVENC {
+		// A render node path is a perfectly good hw_device for QSV or VAAPI and
+		// meaningless to CUDA. On a mixed host NVENC stays a candidate through
+		// hasNVIDIADevice even while the node is deliberately configured for
+		// QSV, and smoke-encoding CUDA against /dev/dri/renderD128 fails for a
+		// reason that has nothing to do with the NVIDIA card being fine.
+		if !isCUDADeviceIdentity(device) {
+			return "configured hw_device is a render node path, not a CUDA index or GPU uuid", true
+		}
+		// Otherwise unconditionally probeable: a CUDA index or uuid is not a
+		// file, so failing to open it is meaningless and only the smoke encode
+		// can answer.
+		return "", false
+	}
+	if c.accessible == nil {
+		// Discovered candidates are openable by construction.
+		return "", false
+	}
+	if c.accessible[device] {
+		return "", false
+	}
+	return "device not accessible on this node", true
+}
+
+// isCUDADeviceIdentity reports whether a configured device names a GPU the way
+// CUDA does — an index, a "cuda:N", or a GPU uuid — rather than a DRM render
+// node path.
+func isCUDADeviceIdentity(device string) bool {
+	return !strings.ContainsRune(device, '/')
 }
 
 // deviceOpenable mirrors the accessibility filter listRenderDevices applies to
