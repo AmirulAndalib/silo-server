@@ -115,6 +115,16 @@ type HWAccelInfo struct {
 	// render device's PCI address it distinguishes "same GPU, same boot" from
 	// "same device path on a host that rebooted or was replaced".
 	BootID string `json:"boot_id,omitempty"`
+	// NVIDIAGPUUUIDs lists every GPU nvidia-smi reports on this host, sorted.
+	//
+	// It exists because a card is not always reachable through a DRM render
+	// node. An NVIDIA container is routinely given /dev/nvidia* and the toolkit
+	// with no /dev/dri at all: NVENC works, RenderDeviceDetails is empty, and
+	// the whole host would otherwise contribute no hardware identity. Two such
+	// containers sharing one card would then look like two independent GPUs to
+	// the planner — which is precisely the deployment where GPU sharing is most
+	// common, and the placement mistake most expensive.
+	NVIDIAGPUUUIDs []string `json:"nvidia_gpu_uuids,omitempty"`
 	// CapabilityHash summarizes every hardware-identity and capability field
 	// below, so a reader can detect change without diffing the whole report.
 	// Set by the node that serves the report; see ComputeCapabilityHash.
@@ -199,6 +209,7 @@ func DetectHWAccelWithFFmpegContextResult(ctx context.Context, hwAccel, ffmpegPa
 		IntelDetected:       candidates.intelPresent,
 		DetectedBackends:    detected,
 		BootID:              detectBootID(),
+		NVIDIAGPUUUIDs:      nvidiaGPUUUIDList(),
 		Source:              "local",
 	}
 	if !complete {
@@ -1225,6 +1236,23 @@ func nvidiaGPUUUIDsByPCIAddress() map[string]string {
 	}
 	nvidiaGPUUUIDs.byPCI = parseNVIDIAGPUUUIDs(output)
 	return nvidiaGPUUUIDs.byPCI
+}
+
+// nvidiaGPUUUIDList returns every uuid nvidia-smi reports, sorted and
+// deduplicated, independent of whether the card has a readable render node.
+func nvidiaGPUUUIDList() []string {
+	byPCI := nvidiaGPUUUIDsByPCIAddress()
+	if len(byPCI) == 0 {
+		return nil
+	}
+	uuids := make([]string, 0, len(byPCI))
+	for _, uuid := range byPCI {
+		if uuid != "" && !slices.Contains(uuids, uuid) {
+			uuids = append(uuids, uuid)
+		}
+	}
+	slices.Sort(uuids)
+	return uuids
 }
 
 // parseNVIDIAGPUUUIDs reads "csv,noheader" rows of "<uuid>, <pci bus id>" and

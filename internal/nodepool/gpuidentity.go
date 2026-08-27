@@ -15,6 +15,12 @@ type gpuIdentityView struct {
 		PCIAddress string `json:"pci_address"`
 		GPUUUID    string `json:"gpu_uuid"`
 	} `json:"render_device_details"`
+	// NVIDIAGPUUUIDs covers cards with no readable DRM node, which is the
+	// ordinary shape of an NVIDIA container: /dev/nvidia* and the toolkit, no
+	// /dev/dri. NVENC works there and render_device_details is empty, so
+	// without this the host contributes no identity at all and two containers
+	// on one card read as two GPUs.
+	NVIDIAGPUUUIDs []string `json:"nvidia_gpu_uuids"`
 }
 
 // physicalGPUKeys derives one stable key per GPU a node can see, deduplicated
@@ -45,8 +51,19 @@ func physicalGPUKeys(capabilities []byte) []string {
 	if err := json.Unmarshal(capabilities, &identity); err != nil {
 		return nil
 	}
-	seen := make(map[string]struct{}, len(identity.RenderDeviceDetails))
-	keys := make([]string, 0, len(identity.RenderDeviceDetails))
+	total := len(identity.RenderDeviceDetails) + len(identity.NVIDIAGPUUUIDs)
+	seen := make(map[string]struct{}, total)
+	keys := make([]string, 0, total)
+	add := func(key string) {
+		if key == "" {
+			return
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
 	for _, device := range identity.RenderDeviceDetails {
 		key := device.GPUUUID
 		if key == "" {
@@ -55,11 +72,14 @@ func physicalGPUKeys(capabilities []byte) []string {
 			}
 			key = identity.BootID + "|" + device.PCIAddress
 		}
-		if _, duplicate := seen[key]; duplicate {
-			continue
-		}
-		seen[key] = struct{}{}
-		keys = append(keys, key)
+		add(key)
+	}
+	// A uuid is host-independent, so a card reported only through nvidia-smi
+	// keys the same way whether or not it also has a render node — which is
+	// what lets a container with /dev/dri and one without recognize the same
+	// physical GPU.
+	for _, uuid := range identity.NVIDIAGPUUUIDs {
+		add(uuid)
 	}
 	if len(keys) == 0 {
 		return nil

@@ -3827,6 +3827,12 @@ export interface NodeCapabilities {
   detected_backends?: NodeDetectedBackend[];
   /** Kernel boot identity (Linux only); scopes pci_address to one boot. */
   boot_id?: string;
+  /**
+   * Every GPU nvidia-smi reports, sorted. Independent of
+   * render_device_details: an NVIDIA container often has /dev/nvidia* and the
+   * toolkit but no /dev/dri, so this is the only identity such a host has.
+   */
+  nvidia_gpu_uuids?: string[];
   /** "sha256:<hex>" over the report's hardware identity and capabilities. */
   capability_hash?: string;
   source?: string;

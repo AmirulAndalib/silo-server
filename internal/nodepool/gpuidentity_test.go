@@ -58,6 +58,31 @@ func TestPhysicalGPUKeys(t *testing.T) {
 			capabilities: `{"render_device_details":[{"pci_address":"0000:03:00.0","gpu_uuid":"GPU-ddd"}]}`,
 			want:         []string{"GPU-ddd"},
 		},
+		{
+			// The ordinary NVIDIA container: /dev/nvidia* and the toolkit, no
+			// /dev/dri at all. NVENC works, render_device_details is empty, and
+			// without the uuid list the whole host contributes no identity — so
+			// two containers on one card read as two independent GPUs and the
+			// shared-GPU tie-break keeps piling work onto the same hardware.
+			name:         "cuda-only host keys by uuid with no render device",
+			capabilities: `{"boot_id":"boot-1","render_device_details":[],"nvidia_gpu_uuids":["GPU-eee","GPU-fff"]}`,
+			want:         []string{"GPU-eee", "GPU-fff"},
+		},
+		{
+			// A uuid is host-independent, so the card a container reaches only
+			// through nvidia-smi keys identically to the one its neighbor also
+			// sees through a render node. That identity is the whole point.
+			name: "a card reported both ways contributes one key",
+			capabilities: `{"boot_id":"boot-1","render_device_details":[
+				{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0","gpu_uuid":"GPU-ggg"}],
+				"nvidia_gpu_uuids":["GPU-ggg"]}`,
+			want: []string{"GPU-ggg"},
+		},
+		{
+			name:         "unparseable uuid list yields no keys",
+			capabilities: `{"nvidia_gpu_uuids":"nope"}`,
+			want:         nil,
+		},
 		{name: "no capabilities stored", capabilities: "", want: nil},
 		{name: "unparseable payload", capabilities: `not json`, want: nil},
 		{name: "payload of the wrong shape", capabilities: `{"render_device_details":"nope"}`, want: nil},

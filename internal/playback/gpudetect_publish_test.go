@@ -467,3 +467,43 @@ func TestEveryConfiguredDeviceThatPassesStaysInTheBalancer(t *testing.T) {
 		t.Fatalf("selected %v, want the workload spread across both verified cards", selected)
 	}
 }
+
+// An NVIDIA container is routinely given /dev/nvidia* and the toolkit with no
+// /dev/dri at all: NVENC works and render_device_details is empty. Without a
+// standalone uuid list the whole host contributes no hardware identity, so two
+// such containers on one card look like two independent GPUs to the planner —
+// which is the deployment where GPU sharing is most common and the placement
+// mistake most expensive.
+func TestCUDAOnlyHostPublishesItsGPUIdentities(t *testing.T) {
+	env := setupHWAccelTest(t)
+	env.addNVIDIADevice(t, "nvidia0")
+	previous := nvidiaSMIQuery
+	nvidiaSMIQuery = func(context.Context) ([]byte, error) {
+		return []byte("GPU-aaa, 00000000:03:00.0\nGPU-bbb, 00000000:04:00.0\n"), nil
+	}
+	t.Cleanup(func() {
+		nvidiaSMIQuery = previous
+		resetNVIDIAGPUUUIDs()
+	})
+	resetNVIDIAGPUUUIDs()
+	ffmpeg := writeFakeFFmpeg(t, successfulNVENCProbe())
+
+	info, err := DetectHWAccelWithFFmpegContextResult(context.Background(), hwAccelAuto, ffmpeg.path, "")
+	if err != nil {
+		t.Fatalf("DetectHWAccelWithFFmpegContextResult: %v", err)
+	}
+	if len(info.RenderDeviceDetails) != 0 {
+		t.Fatalf("render devices = %+v, want none on a container with no /dev/dri", info.RenderDeviceDetails)
+	}
+	if !slices.Equal(info.NVIDIAGPUUUIDs, []string{"GPU-aaa", "GPU-bbb"}) {
+		t.Fatalf("nvidia gpu uuids = %v, want both cards nvidia-smi reported", info.NVIDIAGPUUUIDs)
+	}
+
+	// A card appearing or disappearing has to move the hash, or a node that
+	// gained or lost one is never refetched.
+	withOne := info
+	withOne.NVIDIAGPUUUIDs = []string{"GPU-aaa"}
+	if ComputeCapabilityHash(info) == ComputeCapabilityHash(withOne) {
+		t.Fatal("capability hash ignores the GPU identity list; a lost card would never trigger a refetch")
+	}
+}

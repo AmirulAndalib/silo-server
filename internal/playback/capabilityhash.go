@@ -41,6 +41,7 @@ type canonicalCapability struct {
 	BootID              string                     `json:"boot_id"`
 	RenderDevices       []string                   `json:"render_devices"`
 	RenderDeviceDetails []canonicalRenderDevice    `json:"render_device_details"`
+	NVIDIAGPUUUIDs      []string                   `json:"nvidia_gpu_uuids"`
 	DetectedBackends    []canonicalDetectedBackend `json:"detected_backends"`
 	Transformations     []canonicalTransformation  `json:"transformations"`
 	ToneMapCapabilities []canonicalToneMap         `json:"tone_map_capabilities"`
@@ -85,6 +86,7 @@ func canonicalCapabilities(info HWAccelInfo) canonicalCapability {
 		BootID:              info.BootID,
 		RenderDevices:       sortedStrings(info.RenderDevices),
 		RenderDeviceDetails: canonicalRenderDevices(info.RenderDeviceDetails),
+		NVIDIAGPUUUIDs:      sortedStrings(info.NVIDIAGPUUUIDs),
 		DetectedBackends:    canonicalDetectedBackends(info.DetectedBackends),
 		Transformations:     canonicalTransformations(info.Transformations),
 		ToneMapCapabilities: canonicalToneMaps(info.ToneMapCapabilities),

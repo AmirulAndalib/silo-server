@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/cache"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/go-chi/chi/v5"
 )
@@ -460,5 +462,65 @@ func TestHandleUpdateNodeDoesNotReloadWithoutAnOverrideChange(t *testing.T) {
 	case <-reloaded:
 		t.Fatal("a rename asked the node to reload its configuration")
 	default:
+	}
+}
+
+// recordingEventBus captures publications so a test can assert the pool change
+// actually reached the other replicas.
+type recordingEventBus struct {
+	mu     sync.Mutex
+	events []cache.Event
+}
+
+func (b *recordingEventBus) Publish(_ context.Context, _ string, event cache.Event) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.events = append(b.events, event)
+	return nil
+}
+
+func (b *recordingEventBus) Subscribe(context.Context, string, cache.EventHandler) error { return nil }
+func (b *recordingEventBus) Close() error                                                { return nil }
+
+func (b *recordingEventBus) types() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	types := make([]string, 0, len(b.events))
+	for _, event := range b.events {
+		types = append(types, event.Type)
+	}
+	return types
+}
+
+// ctxAwareLister answers only for a live context, the way a database read does.
+type ctxAwareLister struct{ nodes []*nodepool.Node }
+
+func (l *ctxAwareLister) ListEnabled(ctx context.Context, _ string) ([]*nodepool.Node, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return l.nodes, nil
+}
+
+// The pool reload runs after the response is written, so the request context is
+// no longer the right lifetime: an admin whose browser gives up on a slow save
+// cancels it, and the reload would then fail its reads and never publish. The
+// row is already committed at that point, so this instance and every replica
+// would keep dispatching under the old acceleration policy indefinitely —
+// nothing else re-reads the column.
+func TestReloadPoolsSurvivesRequestCancellation(t *testing.T) {
+	bus := &recordingEventBus{}
+	lister := &ctxAwareLister{nodes: []*nodepool.Node{{ID: 1, URL: "http://node", Enabled: true}}}
+	handler := NewNodeHandler(&stubNodeRepository{}, nodepool.NewProxyPool(), nodepool.NewTranscodePool(), lister, bus, nil, "secret")
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	handler.reloadPools(canceled)
+
+	if got := bus.types(); len(got) != 1 || got[0] != string(cache.EventNodePoolChanged) {
+		t.Fatalf("published %v, want a single %q after a canceled request", got, cache.EventNodePoolChanged)
+	}
+	if got := handler.transcodePool.Nodes(); len(got) != 1 {
+		t.Fatalf("transcode pool holds %d nodes, want the reload to have landed", len(got))
 	}
 }

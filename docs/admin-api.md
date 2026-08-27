@@ -292,15 +292,22 @@ probe results are cached for its process lifetime. `POST
 
 ### `physical_gpu_keys`
 
-One key per render device in the stored report, deduplicated and sorted:
+One key per GPU in the stored report, deduplicated and sorted. From each render
+device:
 
 - the device's `gpu_uuid` when present (NVIDIA's permanent GPU identity, which
   follows the card between slots and hosts), otherwise
 - `<boot_id>|<pci_address>`, because a PCI slot only means the same hardware
   within one boot of one kernel.
 
-A device with neither contributes no key rather than a synthetic one, and so
-does a slot on a host that reported no `boot_id`: `boot_id` detection is
+Plus every entry in `nvidia_gpu_uuids`, which is what covers a card with no
+readable DRM node — the ordinary NVIDIA container, where NVENC works and
+`render_device_details` is empty. A uuid is host-independent, so a card reported
+both ways yields one key, and a container that sees only `/dev/nvidia*` and one
+that also sees `/dev/dri` recognize the same physical GPU.
+
+A device with neither identity contributes no key rather than a synthetic one,
+and so does a slot on a host that reported no `boot_id`: `boot_id` detection is
 best-effort, and an unscoped slot is not an identity, since every host with an
 Intel iGPU has one at `0000:00:02.0`. Two nodes sharing a key are backed by the
 same physical GPU — the case that makes per-node capacity accounting wrong, and
@@ -477,6 +484,7 @@ Top-level (and each node's own report):
 | `intel_detected` | bool | An Intel GPU is present in the inventory. |
 | `detected_backends` | object[] | One entry per backend that had candidate hardware, with the outcome of its FFmpeg verification (see below). |
 | `boot_id` | string | The host's kernel boot identity (Linux only). Pairs with a device's `pci_address` to distinguish the same GPU from the same slot after a reboot. |
+| `nvidia_gpu_uuids` | string[] | Every GPU `nvidia-smi` reports on this host, sorted. Independent of `render_device_details`, because a card is not always reachable through a DRM node — an NVIDIA container is routinely given `/dev/nvidia*` and the toolkit with no `/dev/dri` at all. Omitted where `nvidia-smi` is absent. |
 | `capability_hash` | string | `sha256:<hex>` over this report's hardware identity and capability fields — not over `source`, `node_url`, the probe budget, or itself. Two reports of unchanged hardware hash identically regardless of probe order. |
 | `source` | string | `local` for a probe of this host. |
 | `node_url` | string | Set on a node's report. |

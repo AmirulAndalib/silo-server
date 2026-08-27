@@ -211,7 +211,10 @@ func (h *NodeHandler) HandleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	// (QSV on a render node to NVENC on a CUDA index, say) gets up to a minute
 	// of requests pairing the new backend with the old device.
 	if nodeAccelerationChanged(previous, node) {
-		if !h.reloadNodeConfig(r.Context(), node) {
+		// Detached for the same reason reloadPools is: the response is already
+		// written, so a client that has gone away must not decide whether the
+		// worker hears about its new policy.
+		if !h.reloadNodeConfig(context.WithoutCancel(r.Context()), node) {
 			// The node did not confirm. Its backend now comes from this
 			// server's pool while its device still comes from its own
 			// configuration, so until its poll catches up (within 60s) a start
@@ -740,11 +743,27 @@ func (h *NodeHandler) HandleListSessions(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, sessionsResponse{Sessions: sessions})
 }
 
-// reloadPools refreshes the in-memory proxy and transcode pools from the database.
+// nodePostCommitTimeout bounds work that runs after the response is written and
+// therefore no longer has a client waiting on it.
+const nodePostCommitTimeout = 15 * time.Second
+
+// reloadPools refreshes the in-memory proxy and transcode pools from the
+// database and tells every replica to do the same.
+//
+// Every caller reaches here after its response is written, so the request
+// context is the wrong lifetime: a client that disconnects — or an admin who
+// navigates away from a slow save — cancels it, and this would then fail both
+// database reads and return without publishing EventNodePoolChanged. The row is
+// already committed at that point, so this instance and every replica would go
+// on dispatching under the old policy indefinitely; nothing else re-reads the
+// column. Detaching from that cancellation, bounded, is what makes the write and
+// its publication one outcome instead of two.
 func (h *NodeHandler) reloadPools(ctx context.Context) {
 	if h.lister == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), nodePostCommitTimeout)
+	defer cancel()
 	proxyNodes, proxyErr := h.lister.ListEnabled(ctx, nodepool.NodeTypeProxy)
 	transcodeNodes, tcErr := h.lister.ListEnabled(ctx, nodepool.NodeTypeTranscode)
 	if proxyErr != nil || tcErr != nil {
