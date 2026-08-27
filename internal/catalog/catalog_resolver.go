@@ -590,8 +590,13 @@ func (r *CatalogResolver) resolveCollectionWithEffectiveSort(
 ) (*CatalogResult, error) {
 	// A sort in the request is the viewer's live choice and always wins; only
 	// when there is none do the saved override and the collection's configured
-	// default come into play.
-	if req.UseSourceOrder {
+	// default come into play. A frozen sort from an earlier page of this request
+	// wins over both — see CatalogRequest.ResolvedSort.
+	switch {
+	case req.ResolvedSort != nil:
+		req.Query.Sort = *req.ResolvedSort
+		req.UseSourceOrder = req.Query.Sort.Field == ""
+	case req.UseSourceOrder:
 		if qs, ok := r.EffectiveCollectionSort(ctx, access, kind, collectionID, sortConfig); ok {
 			req.Query.Sort = qs
 			req.UseSourceOrder = false
@@ -691,6 +696,13 @@ func (r *CatalogResolver) resolvePersonalSource(ctx context.Context, req Catalog
 // order. An added_at preference stays on the exact source-order path because
 // loadPersonalSourceIDs orders it using the list entry timestamps.
 func (r *CatalogResolver) resolvePersonalSourceEffectiveSort(ctx context.Context, req CatalogRequest, access AccessFilter) CatalogRequest {
+	// A frozen sort was already resolved for an earlier page of this request;
+	// re-reading the preference here could order later pages differently.
+	if req.ResolvedSort != nil {
+		req.Query.Sort = *req.ResolvedSort
+		req.UseSourceOrder = req.Query.Sort.Field == "" || req.Query.Sort.Field == "added_at"
+		return req
+	}
 	if !req.UseSourceOrder || strings.TrimSpace(req.Query.Sort.Field) != "" {
 		return req
 	}

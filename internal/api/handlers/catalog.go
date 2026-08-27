@@ -298,9 +298,10 @@ func (h *CatalogHandler) resolveGroupedCatalogByWork(r *http.Request, req catalo
 	entries := make([]groupedCatalogEntry, 0, req.Limit+1)
 	groupIndex := 0
 	var snapshot time.Time
-	// Every page resolves the same saved/default sort, so the first page's
-	// EffectiveSort describes the whole grouped response. Without carrying it
-	// onto the result below, group=work would silently drop effective_sort even
+	// The first page resolves the saved/default sort; every later page is then
+	// pinned to it, so a preference edited mid-pagination cannot order the tail
+	// of this response differently than the head. Without carrying the sort onto
+	// the result below, group=work would also silently drop effective_sort even
 	// though the items came back in the saved order.
 	var effectiveSort catalog.QuerySort
 	firstPage := true
@@ -313,6 +314,8 @@ func (h *CatalogHandler) resolveGroupedCatalogByWork(r *http.Request, req catalo
 		if firstPage {
 			firstPage = false
 			effectiveSort = result.EffectiveSort
+			frozen := effectiveSort
+			fetchReq.ResolvedSort = &frozen
 		}
 		if snapshot.IsZero() {
 			snapshot = result.SnapshotAt

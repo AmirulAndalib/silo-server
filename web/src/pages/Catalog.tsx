@@ -184,7 +184,7 @@ function CatalogResults({
     };
   }, [effectiveSort, effectiveState, hasSavedSortPreference]);
 
-  const setCollectionSortPreference = useSetCollectionSortPreference();
+  const saveCollectionSortPreference = useSetCollectionSortPreference();
   const rememberCollectionSort = useCallback(
     (nextState: CatalogSearchState) => {
       const collectionId = nextState.collection_id?.trim();
@@ -213,7 +213,7 @@ function CatalogResults({
       const profileAuth = captureProfileRequestContext();
       if (!profileAuth) return;
       const [field, order] = nextValue ? nextValue.split(":") : ["", ""];
-      setCollectionSortPreference.mutate({
+      void saveCollectionSortPreference({
         collection_kind: collectionKind,
         collection_id: collectionId,
         field: field ?? "",
@@ -221,7 +221,7 @@ function CatalogResults({
         profileAuth,
       });
     },
-    [setCollectionSortPreference, sortedState],
+    [saveCollectionSortPreference, sortedState],
   );
 
   const canRequest = useCanRequest();
