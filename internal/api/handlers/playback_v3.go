@@ -4678,10 +4678,18 @@ func (h *PlaybackHandler) enqueueRouteEventV3(event playback.RouteEventRecordV3)
 	}
 	h.v3EventOnce.Do(func() {
 		h.v3EventQueue = make(chan playback.RouteEventRecordV3, 512)
+		// The store is captured with the queue rather than read per event. The
+		// goroutine below outlives the request that started it, so re-reading
+		// the field would be an unsynchronized read of handler state — harmless
+		// in production, where the router wires PlanStoreV3 once before serving,
+		// and a real data race against any caller that replaces it afterwards.
+		// Capturing also matches what the queue is: work batched for the store
+		// that existed when it was created.
+		store := h.PlanStoreV3
 		go func() {
 			for value := range h.v3EventQueue {
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				if err := h.PlanStoreV3.RecordRouteEvent(ctx, value); err != nil {
+				if err := store.RecordRouteEvent(ctx, value); err != nil {
 					slog.Warn("playback route event write failed", "error", err, "event", value.Event)
 				}
 				cancel()

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -548,11 +549,11 @@ func TestHWProbesInFlightCountsADetachedProbe(t *testing.T) {
 	ffmpeg := writeFakeFFmpeg(t, successfulVAAPIProbe())
 	device := env.devicePath("renderD128")
 
-	// Measured as a delta rather than against zero: a detached probe outliving
-	// its caller is the very thing under test, so an earlier one in this process
-	// may still be running.
-	baseline := HWProbesInFlight()
-
+	// Asserted as a floor rather than an exact count: the process-global counter
+	// is shared with any probe an earlier test detached, and those drain on
+	// their own schedule. What this test owns is that its own flight is counted
+	// while it runs and released when it lands.
+	//
 	// Decided by channel receipts, not a sleep: the flight parks inside the
 	// probe until this test has read the count.
 	started := make(chan struct{})
@@ -571,13 +572,69 @@ func TestHWProbesInFlightCountsADetachedProbe(t *testing.T) {
 	})
 
 	<-started
-	if got := HWProbesInFlight(); got != baseline+1 {
-		t.Fatalf("HWProbesInFlight() = %d while a smoke encode is running, want %d", got, baseline+1)
+	if got := HWProbesInFlight(); got < 1 {
+		t.Fatalf("HWProbesInFlight() = %d while a smoke encode is running, want at least 1", got)
 	}
 	close(release)
 	wg.Wait()
+	awaitNoProbesInFlight(t)
+}
 
-	if got := HWProbesInFlight(); got != baseline {
-		t.Fatalf("HWProbesInFlight() = %d after the probe finished, want %d", got, baseline)
+// The claim has to be taken on the calling goroutine, not inside the function
+// singleflight schedules. DoChan returns without waiting for that goroutine to
+// run, so a caller whose context is already done returns immediately — and a
+// component that released its own claim on the encoder when this call returned
+// would hand a re-probe a card that is about to be busy.
+//
+// Checked the instant the call returns, which is the only instant that matters:
+// that is when the caller's own claim goes away.
+func TestHWProbeClaimIsHeldBeforeAnAbandonedCallerReturns(t *testing.T) {
+	env := setupHWAccelTest(t)
+	env.addRenderDevice(t, "renderD128", "0x1002")
+	ffmpeg := writeFakeFFmpeg(t, successfulVAAPIProbe())
+	device := env.devicePath("renderD128")
+
+	// The flight parks so it cannot finish and decrement before the assertion.
+	release := make(chan struct{})
+	var released sync.Once
+	hwProbeFlightStarted = func() { <-release }
+	t.Cleanup(func() {
+		hwProbeFlightStarted = nil
+		released.Do(func() { close(release) })
+	})
+
+	awaitNoProbesInFlight(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if ok, _ := ffmpegSupportsBackendContext(ctx, transcodeHWVAAPI, ffmpeg.path, device); ok {
+		t.Fatal("an already-canceled probe reported success")
+	}
+
+	if got := HWProbesInFlight(); got < 1 {
+		t.Fatalf("HWProbesInFlight() = %d the moment the caller returned, want at least 1: "+
+			"the detached flight was unaccounted for", got)
+	}
+
+	released.Do(func() { close(release) })
+	// The claim comes back down once the flight lands, with no caller left to
+	// receive it.
+	awaitNoProbesInFlight(t)
+}
+
+// awaitNoProbesInFlight waits for every claim on the encoder to be released,
+// including ones detached from a caller that has already returned. Waiting on
+// the counter itself rather than on a fixed delay is what keeps these tests from
+// depending on how loaded the machine is.
+func awaitNoProbesInFlight(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if got := HWProbesInFlight(); got == 0 {
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("HWProbesInFlight() = %d, want every detached flight released", got)
+		}
+		runtime.Gosched()
 	}
 }

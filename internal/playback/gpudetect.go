@@ -716,6 +716,17 @@ func ffmpegSupportsBackendContext(ctx context.Context, backend, ffmpegPath, devi
 	}
 	hwProbeCache.Unlock()
 
+	// Raised here, on the calling goroutine, and not inside the function below.
+	// DoChan schedules that function on a new goroutine and returns without
+	// waiting for it to run, so a caller whose context is already done takes the
+	// ctx.Done() branch and returns while the probe has not reached its first
+	// line. Anything that released its own claim on the encoder when this call
+	// returned — the transcode node's capability build does exactly that — would
+	// then hand a re-probe an encoder that is about to be busy. Registering
+	// before the call closes the window: from here on the flight is counted
+	// whether or not it has started, and whether or not anyone still waits for
+	// it. See HWProbesInFlight.
+	hwProbesInFlight.Add(1)
 	resultCh := hwProbeCache.group.DoChan(cacheKey, func() (any, error) {
 		hwProbeCache.Lock()
 		cached, ok := hwProbeCache.entries[cacheKey]
@@ -723,15 +734,6 @@ func ffmpegSupportsBackendContext(ctx context.Context, backend, ffmpegPath, devi
 		if ok && hwProbeCacheEntryCurrent(cached, now()) {
 			return cached.result, nil
 		}
-		// Counted for the life of the smoke encode, not the life of the caller.
-		// probeCtx is deliberately rooted at Background so an abandoned caller
-		// does not kill work another request is waiting on, which means ffmpeg
-		// can still be on the GPU after every caller has returned. Anything that
-		// needs the encoder to itself has to see that; see HWProbesInFlight.
-		// Raised before the test seam below, so an observer parked in it sees
-		// the state this counter exists to report.
-		hwProbesInFlight.Add(1)
-		defer hwProbesInFlight.Add(-1)
 		if flightStarted != nil {
 			flightStarted()
 		}
@@ -749,8 +751,17 @@ func ffmpegSupportsBackendContext(ctx context.Context, backend, ffmpegPath, devi
 	})
 	select {
 	case <-ctx.Done():
+		// The flight outlives this caller by design, so the claim goes with it
+		// rather than with us. DoChan's channel is buffered and every registered
+		// waiter is served, so this receive always lands and the count always
+		// comes back down.
+		go func() {
+			<-resultCh
+			hwProbesInFlight.Add(-1)
+		}()
 		return false, ctx.Err().Error()
 	case shared := <-resultCh:
+		hwProbesInFlight.Add(-1)
 		if shared.Err != nil {
 			return false, shared.Err.Error()
 		}
@@ -766,8 +777,8 @@ func ffmpegSupportsBackendContext(ctx context.Context, backend, ffmpegPath, devi
 // ones whose caller has already given up on them.
 var hwProbesInFlight atomic.Int64
 
-// HWProbesInFlight reports how many hardware smoke encodes this process is
-// running.
+// HWProbesInFlight reports how many hardware smoke encodes this process has
+// claimed the encoder for.
 //
 // A probe outlives its caller by design: the singleflight task runs on a
 // background context so that a canceled request cannot kill work another
@@ -777,6 +788,13 @@ var hwProbesInFlight atomic.Int64
 // for it. Anything that needs the encoder exclusively must add this to whatever
 // else it counts as busy, or it will claim an encoder that is not free and
 // publish the collision as a hardware failure.
+//
+// It counts claims rather than running processes, and deliberately errs high:
+// the claim is taken before the probe is dispatched (so a caller can never
+// return while its flight is unaccounted for) and released when the result
+// lands, and callers that share one flight each hold one. A brief overcount
+// costs an operator a 409 and a retry; an undercount costs a false hardware
+// regression on a GPU that is fine.
 func HWProbesInFlight() int {
 	count := hwProbesInFlight.Load()
 	if count < 0 {
