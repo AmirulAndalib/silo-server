@@ -90,6 +90,13 @@ same `streamapp_node_*` gauges, with disk series labeled by role rather than by
 path). A sample larger than 32 KiB is dropped rather than stored — the health
 verdict is what routes streams, and no honest sample comes close to that.
 
+Cgroup correction alone is not always enough: a Docker container nested inside
+an LXC container sees no limit on its own cgroup (the LXC's cap lives on an
+ancestor cgroup outside its namespace), so `cpu_pct`, `cores`, `load1`, and the
+memory fields below read as the bare-metal host's totals unless the deployment
+bind-mounts lxcfs's virtualized `/proc` files in — see the LXC section of
+[docs/wiki/deployment/docker.md](wiki/deployment/docker.md#node-metrics).
+
 `last_stats.system`:
 
 | Field | Type | Meaning |

@@ -262,6 +262,34 @@ the API host. A mount that stops responding reports its last good numbers marked
 `stale` and never delays a health response; a path a node cannot see at all is
 reported `unavailable` rather than as an empty disk.
 
+**LXC hosts running Docker nested inside them.** The cgroup correction above
+only works when the limit is visible on *this* container's own cgroup. On an
+LXC host, a Docker container nested inside the LXC sees the raw kernel's
+`/proc/stat`, `/proc/loadavg`, and `/proc/meminfo` — the physical machine's
+totals, not the LXC's — while its own cgroup shows no limit at all, because the
+LXC's cap lives on an ancestor cgroup outside the nested container's namespace.
+lxcfs, which every LXC container mounts for exactly these files, virtualizes
+them to the LXC's own limits, so bind-mounting that virtualized view into the
+Docker container fixes it:
+
+```yaml
+volumes:
+  - /proc/meminfo:/host/proc/meminfo:ro
+  - /proc/stat:/host/proc/stat:ro
+  - /proc/loadavg:/host/proc/loadavg:ro
+```
+
+These three mounts are only useful when the Docker host is itself an LXC/lxcfs
+container — a bare-metal or VM Docker host has nothing extra to gain from them,
+since its own `/proc` is already correct or already cgroup-corrected. Without
+them, a node running nested this way reports the bare-metal host's CPU, memory,
+and load totals instead of its own.
+
+One caveat: lxcfs only virtualizes `/proc/loadavg` when it runs with loadavg
+accounting enabled (its `-l` flag; on Proxmox, `lxcfs` defaults to off). With
+it off, cores and memory are container-scoped but `load1` remains the physical
+host's — visibly higher than the container's core count under host contention.
+
 ## Optional Meilisearch
 
 PostgreSQL full-text search needs no extra service. To offer Meilisearch as an

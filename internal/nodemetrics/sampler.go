@@ -64,7 +64,11 @@ type Sampler struct {
 
 	// Path seams. Production values point at the real filesystem; tests point
 	// them at a fake /proc tree.
-	procDir          string
+	procDir string
+	// hostProcDir is where an LXC's lxcfs-virtualized /proc files can be
+	// bind-mounted when this sampler runs in Docker nested inside an LXC
+	// container. See procDirFor for why it takes priority when present.
+	hostProcDir      string
 	cgroupLimitPaths []string
 	cgroupUsagePaths []cgroupUsagePath
 	cgroupCPUPaths   []cgroupCPUPath
@@ -106,6 +110,7 @@ func NewSampler(opts Options) *Sampler {
 		now = time.Now
 	}
 	procDir := "/proc"
+	hostProcDir := "/host/proc"
 	ffmpegPIDs := opts.FFmpegChildren
 	if ffmpegPIDs == nil {
 		pid := os.Getpid()
@@ -121,6 +126,7 @@ func NewSampler(opts Options) *Sampler {
 		identities:       opts.DeviceIdentities,
 		ffmpegPIDs:       ffmpegPIDs,
 		procDir:          procDir,
+		hostProcDir:      hostProcDir,
 		cgroupLimitPaths: CgroupMemoryLimitPaths(),
 		cgroupUsagePaths: slices.Clone(cgroupMemoryUsagePaths),
 		cgroupCPUPaths:   slices.Clone(cgroupCPUPaths),
@@ -217,7 +223,7 @@ func (s *Sampler) sampleSystem(ctx context.Context, now time.Time) *SystemStats 
 
 	return &SystemStats{
 		CPUPct:     cpuPct,
-		Load1:      readLoad1(s.procDir),
+		Load1:      readLoad1(s.procDirFor("loadavg")),
 		Cores:      cores,
 		MemUsedMB:  bytesToMB(usedBytes),
 		MemTotalMB: bytesToMB(totalBytes),
@@ -236,7 +242,7 @@ func (s *Sampler) sampleSystem(ctx context.Context, now time.Time) *SystemStats 
 // — and a node pinned at its quota, which is the state worth alerting on, would
 // look nearly idle.
 func (s *Sampler) cpuStats(now time.Time) (busyPct, cores int) {
-	host, hostCores := readCPUTimes(s.procDir)
+	host, hostCores := readCPUTimes(s.procDirFor("stat"))
 	busyPct, _ = cpuBusyPercent(s.prevCPU, host)
 	if host.valid {
 		s.prevCPU = host

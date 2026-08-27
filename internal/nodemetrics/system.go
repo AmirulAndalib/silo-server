@@ -167,6 +167,29 @@ func netThroughputBps(previous, current netCounters) (rxBps, txBps int64, ok boo
 	return rate(previous.rx, current.rx), rate(previous.tx, current.tx), true
 }
 
+// procDirFor resolves which proc tree to read name ("stat", "loadavg", or
+// "meminfo") from — the three files a container's cgroup cannot itself
+// correct.
+//
+// On an LXC host running Docker nested inside it, this process's own /proc is
+// the raw kernel view: /proc/stat, /proc/loadavg, and /proc/meminfo describe
+// the physical machine rather than the LXC, and this nested container's own
+// cgroup shows no limit at all, because the LXC's cap lives on an ancestor
+// cgroup outside this container's namespace that it cannot see or read.
+// lxcfs, running on the LXC host, virtualizes those same three files to the
+// LXC's own limits; when an operator bind-mounts that virtualized view in at
+// hostProcDir/<name>, it is the only correct source, so it wins whenever
+// present. Otherwise procDir/<name> — the file this process actually sees —
+// is the only option, exactly as on plain Docker or bare metal.
+func (s *Sampler) procDirFor(name string) string {
+	if s.hostProcDir != "" {
+		if _, err := os.Stat(filepath.Join(s.hostProcDir, name)); err == nil {
+			return s.hostProcDir
+		}
+	}
+	return s.procDir
+}
+
 // memoryStats reports used and total bytes for this process's memory domain.
 //
 // /proc/meminfo describes the host even inside a container, so a cgroup limit —
@@ -174,7 +197,7 @@ func netThroughputBps(previous, current netCounters) (rxBps, txBps int64, ok boo
 // it, and cgroup usage (page cache excluded) wins over the host's own
 // used figure for the same reason.
 func (s *Sampler) memoryStats() (usedBytes, totalBytes int64) {
-	fields, err := ReadMeminfoBytes(filepath.Join(s.procDir, "meminfo"))
+	fields, err := ReadMeminfoBytes(filepath.Join(s.procDirFor("meminfo"), "meminfo"))
 	if err == nil {
 		totalBytes = fields["MemTotal"]
 		if available, ok := fields["MemAvailable"]; ok && totalBytes >= available {

@@ -58,6 +58,11 @@ func newTestSampler(t *testing.T, tree *procTree, clock *fakeClock, opts Options
 	s := NewSampler(opts)
 	s.goos = "linux"
 	s.procDir = tree.root
+	// Point hostProcDir at a path that does not exist by default so tests are
+	// deterministic regardless of whether the machine running them happens to
+	// have a real /host/proc; tests that exercise the lxcfs override set this
+	// explicitly to a tree that does.
+	s.hostProcDir = filepath.Join(tree.root, "no-such-host-proc")
 	s.cgroupLimitPaths = nil
 	s.cgroupUsagePaths = nil
 	s.cgroupCPUPaths = nil
@@ -529,6 +534,143 @@ func TestSnapshotJSONShape(t *testing.T) {
 		if _, ok := bareGPU[key]; ok {
 			t.Fatalf("gpu.%s emitted when absent: %s", key, bare)
 		}
+	}
+}
+
+// On an LXC host running Docker nested inside it, this process's own /proc
+// sees the raw kernel — the bare-metal core count, memory, and load — while
+// its own cgroup is unlimited, because the LXC's cap lives on an ancestor
+// cgroup outside its namespace. lxcfs virtualizes /proc/stat, /proc/loadavg,
+// and /proc/meminfo to the LXC's own limits, so when those are bind-mounted
+// in at hostProcDir, they must win over the container's raw /proc for exactly
+// those three files.
+func TestHostProcOverridesLxcfsScopedFiles(t *testing.T) {
+	tree := newProcTree(t)
+	hostTree := newProcTree(t)
+	clock := newFakeClock()
+
+	// The nested container's own /proc: a busy 8-core bare-metal host, 64 GiB
+	// of memory, and a load average that belongs to every other tenant on the
+	// box too.
+	tree.write("stat", "cpu  0 0 0 0 0 0 0 0\n"+
+		"cpu0 0 0 0 0 0 0 0 0\ncpu1 0 0 0 0 0 0 0 0\ncpu2 0 0 0 0 0 0 0 0\ncpu3 0 0 0 0 0 0 0 0\n"+
+		"cpu4 0 0 0 0 0 0 0 0\ncpu5 0 0 0 0 0 0 0 0\ncpu6 0 0 0 0 0 0 0 0\ncpu7 0 0 0 0 0 0 0 0\n")
+	tree.write("loadavg", "40.00 38.00 35.00 12/900 5555\n")
+	tree.write("meminfo", "MemTotal: 67108864 kB\nMemAvailable: 33554432 kB\n")
+	tree.write("net/dev", "Inter-|\n face |\n")
+
+	// lxcfs's view, bind-mounted at hostProcDir: the LXC is capped at 2 cores
+	// and 2 GiB, and its own load average.
+	hostTree.write("stat", "cpu  100 0 100 800 0 0 0 0\ncpu0 50 0 50 400 0 0 0 0\ncpu1 50 0 50 400 0 0 0 0\n")
+	hostTree.write("loadavg", "1.50 1.20 0.80 1/64 42\n")
+	hostTree.write("meminfo", "MemTotal: 2097152 kB\nMemAvailable: 1048576 kB\n")
+
+	s := newTestSampler(t, tree, clock, Options{})
+	s.hostProcDir = hostTree.root
+	s.sample(context.Background())
+
+	system := s.Snapshot().System
+	if system.Cores != 2 {
+		t.Fatalf("Cores = %d, want the lxcfs-scoped 2, not the host's 8", system.Cores)
+	}
+	if system.Load1 != 1.50 {
+		t.Fatalf("Load1 = %v, want the lxcfs-scoped 1.50, not the raw host's 40.00", system.Load1)
+	}
+	if system.MemTotalMB != 2048 {
+		t.Fatalf("MemTotalMB = %d, want the lxcfs-scoped 2048, not the raw host's 65536", system.MemTotalMB)
+	}
+	if system.MemUsedMB != 1024 {
+		t.Fatalf("MemUsedMB = %d, want 1024 (2048 total - 1024 available)", system.MemUsedMB)
+	}
+
+	// A second sample drives the CPU busy-percent delta off the lxcfs stat
+	// file too: 400 more busy jiffies out of 1000 more total.
+	hostTree.write("stat", "cpu  300 0 300 1400 0 0 0 0\ncpu0 150 0 150 700 0 0 0 0\ncpu1 150 0 150 700 0 0 0 0\n")
+	tree.write("stat", "cpu  99999 0 0 1 0 0 0 0\n") // the raw host is pegged; must not be read
+	clock.advance(5 * time.Second)
+	s.sample(context.Background())
+
+	system = s.Snapshot().System
+	if system.CPUPct != 40 {
+		t.Fatalf("CPUPct = %d, want 40 from the lxcfs stat deltas, not the raw host's near-100", system.CPUPct)
+	}
+	if system.Cores != 2 {
+		t.Fatalf("Cores = %d, want 2 on the second sample too", system.Cores)
+	}
+}
+
+// Without a bind-mounted lxcfs view — plain Docker, bare metal, or an LXC
+// deployment that has not mounted /host/proc — every reading must fall back
+// to the container's own /proc exactly as before this feature existed.
+func TestHostProcAbsentFallsBackToProcDir(t *testing.T) {
+	tree := newProcTree(t)
+	clock := newFakeClock()
+	tree.write("stat", "cpu  100 0 100 800 0 0 0 0\ncpu0 50 0 50 400 0 0 0 0\ncpu1 50 0 50 400 0 0 0 0\n")
+	tree.write("loadavg", "3.20 1.10 0.90 2/512 9\n")
+	tree.write("meminfo", "MemTotal: 8388608 kB\nMemAvailable: 6291456 kB\n")
+	tree.write("net/dev", "Inter-|\n face |\n")
+
+	// newTestSampler already points hostProcDir at a nonexistent path; this
+	// test just makes that fallback explicit and asserts on it.
+	s := newTestSampler(t, tree, clock, Options{})
+	s.sample(context.Background())
+
+	system := s.Snapshot().System
+	if system.Cores != 2 {
+		t.Fatalf("Cores = %d, want 2 from procDir", system.Cores)
+	}
+	if system.Load1 != 3.20 {
+		t.Fatalf("Load1 = %v, want 3.2 from procDir", system.Load1)
+	}
+	if system.MemTotalMB != 8192 {
+		t.Fatalf("MemTotalMB = %d, want 8192 from procDir", system.MemTotalMB)
+	}
+	if system.MemUsedMB != 2048 {
+		t.Fatalf("MemUsedMB = %d, want 2048 from procDir", system.MemUsedMB)
+	}
+}
+
+// Only stat, loadavg, and meminfo are host-proc aware. net/dev is per-netns
+// and must stay on the container's own /proc even when hostProcDir has its
+// own net/dev sitting right next to the other three files — otherwise a
+// nested node would report the LXC host's aggregate network traffic instead
+// of its own.
+func TestHostProcDoesNotAffectNetDev(t *testing.T) {
+	tree := newProcTree(t)
+	hostTree := newProcTree(t)
+	clock := newFakeClock()
+
+	tree.write("stat", "cpu  0 0 0 0 0 0 0 0\n")
+	tree.write("loadavg", "0 0 0 0/0 0\n")
+	tree.write("meminfo", "MemTotal: 1024 kB\n")
+	netDev := func(rx, tx int) string {
+		return "Inter-|   Receive                    |  Transmit\n" +
+			" face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n" +
+			"  eth0: " + itoa(rx) + " 1 0 0 0 0 0 0 " + itoa(tx) + " 1 0 0 0 0 0 0\n"
+	}
+	tree.write("net/dev", netDev(1000, 2000))
+
+	// hostTree has its own net/dev with very different counters. If it were
+	// ever consulted, the throughput computed below would not match.
+	hostTree.write("stat", "cpu  0 0 0 0 0 0 0 0\n")
+	hostTree.write("loadavg", "0 0 0 0/0 0\n")
+	hostTree.write("meminfo", "MemTotal: 1024 kB\n")
+	hostTree.write("net/dev", netDev(9_000_000, 9_000_000))
+
+	s := newTestSampler(t, tree, clock, Options{})
+	s.hostProcDir = hostTree.root
+	s.sample(context.Background())
+
+	tree.write("net/dev", netDev(6000, 12000))
+	clock.advance(5 * time.Second)
+	s.sample(context.Background())
+
+	system := s.Snapshot().System
+	if system.NetRxBps != 8000 { // 5000 bytes / 5s * 8, from tree's net/dev
+		t.Fatalf("NetRxBps = %d, want 8000 from procDir's net/dev, not hostProcDir's", system.NetRxBps)
+	}
+	if system.NetTxBps != 16000 { // 10000 bytes / 5s * 8
+		t.Fatalf("NetTxBps = %d, want 16000 from procDir's net/dev, not hostProcDir's", system.NetTxBps)
 	}
 }
 
