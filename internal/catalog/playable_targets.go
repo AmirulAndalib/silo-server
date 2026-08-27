@@ -197,17 +197,28 @@ func (r *PlayableTargetResolver) Resolve(ctx context.Context, q PlayableTargetQu
 			  AS requested(content_id, media_type, series_id, season_number, preferred_content_id, ord)
 		),
 		leaf_targets AS (
+			-- The movie and episode file checks are separate EXISTS branches
+			-- rather than one CASE expression: a CASE over both columns keeps
+			-- PostgreSQL from using either media_files index and forces a scan
+			-- of the whole table per requested card.
 			SELECT requested.ord, requested.content_id, requested.content_id AS play_content_id
 			FROM requested
-			WHERE requested.media_type IN ('movie', 'episode')
-			  AND EXISTS (
-				SELECT 1
-				FROM media_files mf
-				WHERE CASE
-					WHEN requested.media_type = 'movie' THEN mf.content_id = requested.content_id
-					ELSE mf.episode_id = requested.content_id
-				END
-				  AND %s
+			WHERE (
+				requested.media_type = 'movie'
+				AND EXISTS (
+					SELECT 1
+					FROM media_files mf
+					WHERE mf.content_id = requested.content_id
+					  AND %s
+				)
+			  ) OR (
+				requested.media_type = 'episode'
+				AND EXISTS (
+					SELECT 1
+					FROM media_files mf
+					WHERE mf.episode_id = requested.content_id
+					  AND %s
+				)
 			  )
 		),
 		candidate_episodes AS (
@@ -288,7 +299,7 @@ func (r *PlayableTargetResolver) Resolve(ctx context.Context, q PlayableTargetQu
 		         season_number,
 		         episode_number,
 		         play_content_id
-	`, strings.Join(fileConditions, " AND "), strings.Join(fileConditions, " AND "))
+	`, strings.Join(fileConditions, " AND "), strings.Join(fileConditions, " AND "), strings.Join(fileConditions, " AND "))
 
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
