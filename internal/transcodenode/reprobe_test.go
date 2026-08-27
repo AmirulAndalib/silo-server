@@ -319,3 +319,49 @@ func TestCapabilitySnapshotRefusedWhileReprobing(t *testing.T) {
 		t.Fatalf("stored hash = %q, want the previous report untouched", got)
 	}
 }
+
+// Every teardown path drops activeJobs before closing the session, so a stop is
+// reflected immediately — but Close waits for ffmpeg to exit, so the encoder
+// keeps its GPU session for the whole call. Without the gate holding it, that
+// live encoder is counted by neither activeJobs nor the gate, and a re-probe
+// landing in the gap smoke-encodes beside it and publishes the false hardware
+// failure the gate exists to prevent.
+func TestReprobeCapabilitiesRefusedWhileASessionIsStillClosing(t *testing.T) {
+	server := newTestServer(t)
+	server.storeCapabilityHash("sha256:previous")
+	server.activeJobs.Store(1)
+
+	var (
+		jobsDuringClose int32
+		reprobeAdmitted bool
+		busyDuringClose int
+	)
+	// Observed from inside the teardown, which is the only instant that matters.
+	err := server.retireGPUSession(func() error {
+		jobsDuringClose = server.activeJobs.Load()
+		busyDuringClose, reprobeAdmitted = server.gpu.beginReprobe(int(jobsDuringClose))
+		if reprobeAdmitted {
+			server.gpu.endReprobe()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("retireGPUSession: %v", err)
+	}
+
+	if jobsDuringClose != 0 {
+		t.Fatalf("active jobs = %d during Close, want the 0 that made this a gap", jobsDuringClose)
+	}
+	if reprobeAdmitted {
+		t.Fatal("re-probe admitted while a session was still closing its encoder")
+	}
+	if busyDuringClose != 1 {
+		t.Fatalf("busy = %d, want the closing session counted as GPU work", busyDuringClose)
+	}
+
+	// The hold is released with the teardown, so an idle node re-probes again.
+	if _, ok := server.gpu.beginReprobe(int(server.activeJobs.Load())); !ok {
+		t.Fatal("re-probe refused after the teardown completed")
+	}
+	server.gpu.endReprobe()
+}

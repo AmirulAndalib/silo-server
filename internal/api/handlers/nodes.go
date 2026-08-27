@@ -203,14 +203,15 @@ func (h *NodeHandler) HandleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, node)
-	// Order matters: the node has to adopt its new device before this server
-	// starts dispatching its new backend. reloadPools publishes the updated
-	// policy, and EffectiveHWAccel then names the new backend on every start
-	// request; the node itself only re-reads its row on the config watcher's
-	// 60s poll. Without the nudge, an operator switching both overlays at once
-	// (QSV on a render node to NVENC on a CUDA index, say) gets up to a minute
-	// of requests pairing the new backend with the old device.
-	if nodeAccelerationChanged(previous, node) {
+	// Order matters: the node has to adopt its policy before this server starts
+	// dispatching under it. reloadPools publishes the updated row, and
+	// EffectiveHWAccel then names its backend on every start request; the node
+	// itself only re-reads its row on the config watcher's 60s poll. Without the
+	// nudge, an operator switching both overlays at once (QSV on a render node
+	// to NVENC on a CUDA index, say) — or repointing the row at a worker that
+	// has been running on what it inherited — gets up to a minute of requests
+	// pairing one side's backend with the other side's device.
+	if nodePolicyTargetChanged(previous, node) {
 		// Detached for the same reason reloadPools is: the response is already
 		// written, so a client that has gone away must not decide whether the
 		// worker hears about its new policy.
@@ -246,20 +247,37 @@ func (h *NodeHandler) HandleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	h.reloadPools(r.Context())
 }
 
-// nodeAccelerationChanged reports whether this update actually moved either
-// acceleration override.
+// nodePolicyTargetChanged reports whether this update changed which effective
+// acceleration policy applies, or to which worker.
 //
-// The admin form submits both fields on every transcode-node save, so their
-// presence in the body is not evidence of a change — without this, renaming a
-// node or editing its capacity would nudge it too. An unreadable previous row
-// reports no change: the nudge is an optimization over the node's own config
-// poll, and skipping it costs at most that interval.
-func nodeAccelerationChanged(before, after *nodepool.Node) bool {
+// Two ways that happens, and both open the same window. The obvious one is an
+// override moving. The other is the row being repointed: the overrides may be
+// byte-identical, but they now describe a *different* worker, one that has been
+// running under whatever it inherited and will not learn otherwise until its own
+// 60s poll. reloadPools publishes the new URL immediately, so between those two
+// moments this server dispatches the row's overridden backend to a worker still
+// holding its inherited device — the same mismatch, reached by a different edit.
+//
+// The admin form submits every field on each save, so their presence in the body
+// is not evidence of a change; without this, renaming a node or editing its
+// capacity would nudge it too. An unreadable previous row reports no change: the
+// nudge is an optimization over the node's own config poll, and skipping it
+// costs at most that interval.
+func nodePolicyTargetChanged(before, after *nodepool.Node) bool {
 	if before == nil || after == nil {
 		return false
 	}
+	if !sameNodeURL(before.URL, after.URL) {
+		return true
+	}
 	return !sameOptionalString(before.HWAccelOverride, after.HWAccelOverride) ||
 		!sameOptionalString(before.HWDeviceOverride, after.HWDeviceOverride)
+}
+
+// sameNodeURL compares two stored node URLs the way the pools and the database
+// fences do, so a trailing slash is not a repoint.
+func sameNodeURL(a, b string) bool {
+	return strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
 }
 
 func sameOptionalString(a, b *string) bool {

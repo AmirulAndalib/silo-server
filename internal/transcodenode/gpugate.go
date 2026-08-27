@@ -47,6 +47,24 @@ func (g *gpuGate) beginWork() bool {
 	return true
 }
 
+// holdWork registers GPU work that is already running, and so cannot be
+// refused.
+//
+// The gate admits work at its start and the node counts it in activeJobs once
+// ffmpeg is up, which between them cover a session from admission to teardown —
+// except for teardown itself. TranscodeSession.Close waits for ffmpeg to exit,
+// so the encoder holds its GPU session for the whole call, while every teardown
+// path drops activeJobs first so a stop is reflected immediately. That leaves a
+// live encoder counted by neither, and a re-probe landing in the gap sees an
+// idle node and smoke-encodes beside it — publishing exactly the false hardware
+// failure this gate exists to prevent. Refusing here is not an option: a stop
+// must always proceed. Counting it is.
+func (g *gpuGate) holdWork() {
+	g.mu.Lock()
+	g.workers++
+	g.mu.Unlock()
+}
+
 // endWork releases one unit of admitted GPU work.
 func (g *gpuGate) endWork() {
 	g.mu.Lock()

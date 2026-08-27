@@ -524,3 +524,58 @@ func TestReloadPoolsSurvivesRequestCancellation(t *testing.T) {
 		t.Fatalf("transcode pool holds %d nodes, want the reload to have landed", len(got))
 	}
 }
+
+// Repointing a row at a different worker changes which machine those overrides
+// apply to, even when the values are byte-identical. reloadPools publishes the
+// new URL at once, so between that and the replacement's own 60s config poll
+// this server dispatches the row's overridden backend to a worker still running
+// on whatever it inherited — the same backend/device mismatch an override edit
+// causes, reached by a different edit.
+func TestHandleUpdateNodeReloadsTheReplacementWhenAURLMoves(t *testing.T) {
+	reloaded := make(chan string, 4)
+	replacement := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/admin/reload") {
+			reloaded <- r.URL.Path
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(replacement.Close)
+
+	qsv, device := "qsv", "/dev/dri/renderD128"
+	repo := &stubNodeRepository{
+		node: &nodepool.Node{
+			ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: "http://retired-worker",
+			HWAccelOverride: &qsv, HWDeviceOverride: &device,
+		},
+		updateResult: &nodepool.Node{
+			ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: replacement.URL,
+			HWAccelOverride: &qsv, HWDeviceOverride: &device,
+		},
+	}
+	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
+
+	body := `{"name":"gpu-1","url":"` + replacement.URL + `","hw_accel_override":"qsv","hw_device_override":"/dev/dri/renderD128"}`
+	handler.HandleUpdateNode(httptest.NewRecorder(), updateNodeRequest(t, body))
+
+	select {
+	case path := <-reloaded:
+		if path != "/admin/reload-config" {
+			t.Fatalf("nudged %q, want the non-destructive reload", path)
+		}
+	default:
+		t.Fatal("a repointed row left the replacement worker on its inherited policy")
+	}
+}
+
+// A trailing slash is not a repoint: the pools normalize URLs and the database
+// column does not, so treating it as one would nudge on every unrelated save.
+func TestNodePolicyTargetChangeIgnoresATrailingSlash(t *testing.T) {
+	qsv := "qsv"
+	before := &nodepool.Node{ID: 1, URL: "http://node/", HWAccelOverride: &qsv}
+	sameAccel := qsv
+	after := &nodepool.Node{ID: 1, URL: "http://node", HWAccelOverride: &sameAccel}
+
+	if nodePolicyTargetChanged(before, after) {
+		t.Fatal("a trailing-slash difference read as repointing the row")
+	}
+}

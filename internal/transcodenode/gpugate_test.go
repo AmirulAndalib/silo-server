@@ -78,3 +78,28 @@ func TestGPUGateEndWorkDoesNotUnderflow(t *testing.T) {
 		t.Fatal("re-probe admitted while one unit of work was outstanding")
 	}
 }
+
+// Teardown is GPU work too, and it cannot be refused: a stop must always
+// proceed. TranscodeSession.Close waits for ffmpeg to exit, so the encoder holds
+// its GPU session for the whole call while activeJobs has already dropped —
+// counted by neither unless the gate holds it.
+func TestGPUGateHoldWorkIsNeverRefusedAndKeepsReprobesOut(t *testing.T) {
+	var gate gpuGate
+
+	gate.holdWork()
+	if busy, ok := gate.beginReprobe(0); ok {
+		t.Fatal("re-probe admitted while a session was still closing")
+	} else if busy != 1 {
+		t.Fatalf("busy = %d, want the closing session counted", busy)
+	}
+
+	gate.endWork()
+	if _, ok := gate.beginReprobe(0); !ok {
+		t.Fatal("re-probe refused after the teardown finished")
+	}
+
+	// A re-probe already holding the encoder must not turn a stop into a hang or
+	// a refusal; the teardown is registered regardless.
+	gate.holdWork()
+	gate.endWork()
+}

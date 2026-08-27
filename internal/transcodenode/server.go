@@ -557,8 +557,7 @@ func (s *Server) reapSession(sessionID string, session *playback.TranscodeSessio
 	delete(s.lastAccess, sessionID)
 	s.mu.Unlock()
 
-	s.activeJobs.Add(-1)
-	if err := session.Close(); err != nil {
+	if err := s.closeSessionOffGPU(session); err != nil {
 		slog.Error("close idle transcode session", "component", "transcodenode", "error", err, "session", sessionID, "playback_session_id", sessionID)
 	}
 	if s.tracker != nil {
@@ -566,6 +565,30 @@ func (s *Server) reapSession(sessionID string, session *playback.TranscodeSessio
 	}
 	slog.Info("transcode node reaped idle session", "component", "transcodenode",
 		"session", sessionID, "playback_session_id", sessionID, "idle_ms", time.Since(last).Milliseconds())
+}
+
+// closeSessionOffGPU retires one session: it drops the node's job count and
+// closes the encoder, with the GPU gate holding the session as work for the
+// whole teardown.
+//
+// The two counters have to overlap here, the same way the gate and activeJobs
+// overlap when a session starts. Close waits for ffmpeg to exit, so the encoder
+// keeps its GPU session for the length of the call, while activeJobs has to drop
+// first for a stop to be reflected immediately. Without the hold, that live
+// encoder is counted by nothing and a re-probe admitted in the gap smoke-encodes
+// beside it.
+func (s *Server) closeSessionOffGPU(session *playback.TranscodeSession) error {
+	return s.retireGPUSession(session.Close)
+}
+
+// retireGPUSession drops the node's job count and runs one session's teardown
+// with the gate holding it as work throughout. The hold discipline is the same
+// whatever the teardown is, which is why it is separate from what it closes.
+func (s *Server) retireGPUSession(close func() error) error {
+	s.gpu.holdWork()
+	defer s.gpu.endWork()
+	s.activeJobs.Add(-1)
+	return close()
 }
 
 // recipeStore reads a remote transcode's reconstruction recipe written by central
@@ -1324,8 +1347,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		delete(s.sessions, req.SessionID)
 		delete(s.lastAccess, req.SessionID)
 		s.mu.Unlock()
-		s.activeJobs.Add(-1)
-		_ = old.Close()
+		_ = s.closeSessionOffGPU(old)
 		// Move the old segment directory aside and delete it in the
 		// background: removing a long session's segments can take seconds
 		// on slow disks, and the playback start that triggered this switch
@@ -1706,9 +1728,8 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	delete(s.sessions, sessionID)
 	delete(s.lastAccess, sessionID)
 	s.mu.Unlock()
-	s.activeJobs.Add(-1)
 
-	if err := session.Close(); err != nil {
+	if err := s.closeSessionOffGPU(session); err != nil {
 		slog.ErrorContext(r.Context(), "close transcode session", "component", "transcodenode", "error", err, "session", sessionID, "playback_session_id", sessionID)
 	}
 
@@ -1970,9 +1991,8 @@ func (s *Server) handleForceReload(w http.ResponseWriter, r *http.Request) {
 		delete(s.sessions, victim.id)
 		delete(s.lastAccess, victim.id)
 		s.mu.Unlock()
-		s.activeJobs.Add(-1)
 
-		victim.session.Close()
+		_ = s.closeSessionOffGPU(victim.session)
 		if err := os.RemoveAll(s.sessionOutputDir(victim.id)); err != nil {
 			slog.WarnContext(r.Context(), "remove transcode session directory during reload", "component", "transcodenode", "session", victim.id, "error", err)
 		}
