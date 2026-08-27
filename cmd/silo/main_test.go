@@ -15,6 +15,7 @@ import (
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-server/internal/api"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/plugins"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
@@ -398,7 +399,7 @@ func TestNodeCapabilityFetcherStoresTheNodesOwnBytes(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	payload, hash, err := nodeCapabilityFetcher("secret")(context.Background(), server.URL)
+	payload, hash, err := nodeCapabilityFetcher("secret", nodeCapabilityProbeBudget(nil))(context.Background(), server.URL)
 	if err != nil {
 		t.Fatalf("nodeCapabilityFetcher: %v", err)
 	}
@@ -415,5 +416,54 @@ func TestNodeCapabilityFetcherStoresTheNodesOwnBytes(t *testing.T) {
 	}
 	if stored["resolved"] != "nvenc" {
 		t.Fatalf("resolved = %v, want the report's own value", stored["resolved"])
+	}
+}
+
+// A cold node's answer runs the whole FFmpeg probe matrix, and that matrix grows
+// with the configured device count: a node with two render devices legitimately
+// advertises a request budget past two minutes. Bounding every fetch at a fixed
+// two minutes abandons such a node mid-probe and reports a failure for a node
+// operating inside its published contract.
+func TestNodeCapabilityProbeBudgetTracksTheConfiguredDevices(t *testing.T) {
+	single := &config.Config{}
+	single.Playback.HWAccel, single.Playback.HWDevice = "qsv", "/dev/dri/renderD128"
+	pair := &config.Config{}
+	pair.Playback.HWAccel, pair.Playback.HWDevice = "qsv", "/dev/dri/renderD128,/dev/dri/renderD129"
+
+	oneDevice := nodeCapabilityProbeBudget(func() *config.Config { return single })()
+	twoDevices := nodeCapabilityProbeBudget(func() *config.Config { return pair })()
+
+	if want := tonemap.ProbeRequestTimeout("qsv", pair.Playback.HWDevice); twoDevices != want {
+		t.Fatalf("two-device budget = %v, want the node's own advertised %v", twoDevices, want)
+	}
+	if twoDevices <= nodeCapabilityRequestTimeout {
+		t.Fatalf("two-device budget = %v, want more than the %v floor — that is the case that was being cut short",
+			twoDevices, nodeCapabilityRequestTimeout)
+	}
+	if twoDevices <= oneDevice {
+		t.Fatalf("two-device budget %v is not above the one-device %v; the budget does not track the matrix",
+			twoDevices, oneDevice)
+	}
+
+	// Nothing configured, or no live config at all, still gets a usable bound
+	// rather than zero.
+	if got := nodeCapabilityProbeBudget(nil)(); got < nodeCapabilityRequestTimeout {
+		t.Fatalf("budget with no configuration = %v, want at least the %v floor", got, nodeCapabilityRequestTimeout)
+	}
+	if got := nodeCapabilityProbeBudget(func() *config.Config { return nil })(); got < nodeCapabilityRequestTimeout {
+		t.Fatalf("budget with a nil config = %v, want at least the %v floor", got, nodeCapabilityRequestTimeout)
+	}
+}
+
+// The backstop the health sweep puts around the same fetch must never be the
+// thing that cuts it short, or the budget above is decorative.
+func TestCapabilityFetchBackstopExceedsTheAdvertisedBudget(t *testing.T) {
+	pair := &config.Config{}
+	pair.Playback.HWAccel, pair.Playback.HWDevice = "qsv", "/dev/dri/renderD128,/dev/dri/renderD129"
+	budget := nodeCapabilityProbeBudget(func() *config.Config { return pair })()
+
+	if nodepool.CapabilityRefreshTimeout <= budget {
+		t.Fatalf("health sweep backstop %v does not exceed the %v a two-device node advertises",
+			nodepool.CapabilityRefreshTimeout, budget)
 	}
 }

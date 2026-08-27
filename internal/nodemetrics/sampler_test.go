@@ -232,7 +232,7 @@ func TestMemoryCorrectedByCgroupLimitAndUsage(t *testing.T) {
 			usageBody:   "2147483648\n",
 			statFile:    "memory.stat",
 			statBody:    "total_inactive_file 1073741824\n",
-			inactiveKey: "total_inactive_file",
+			inactiveKey: cgroupInactiveFileKeyV1,
 			wantTotalMB: 4096,
 			wantUsedMB:  1024,
 		},

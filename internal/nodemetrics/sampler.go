@@ -133,25 +133,32 @@ func NewSampler(opts Options) *Sampler {
 	}
 	procDir := "/proc"
 	hostProcDir := "/host/proc"
+	// Read from this process's own /proc, never the lxcfs-mounted host view:
+	// the question is which cgroup *this* process belongs to.
+	cgroupSelf := cgroupRelativePaths(procDir)
 	ffmpegPIDs := opts.FFmpegChildren
 	if ffmpegPIDs == nil {
 		pid := os.Getpid()
 		ffmpegPIDs = func() []int { return defaultFFmpegChildren(procDir, pid) }
 	}
 	s := &Sampler{
-		interval:         interval,
-		now:              now,
-		goos:             runtime.GOOS,
-		scratchDir:       opts.ScratchDir,
-		mediaRoots:       opts.MediaRoots,
-		sessions:         opts.DeviceSessions,
-		identities:       opts.DeviceIdentities,
-		ffmpegPIDs:       ffmpegPIDs,
-		procDir:          procDir,
-		hostProcDir:      hostProcDir,
-		cgroupLimitPaths: CgroupMemoryLimitPaths(),
-		cgroupUsagePaths: slices.Clone(cgroupMemoryUsagePaths),
-		cgroupCPUPaths:   slices.Clone(cgroupCPUPaths),
+		interval:    interval,
+		now:         now,
+		goos:        runtime.GOOS,
+		scratchDir:  opts.ScratchDir,
+		mediaRoots:  opts.MediaRoots,
+		sessions:    opts.DeviceSessions,
+		identities:  opts.DeviceIdentities,
+		ffmpegPIDs:  ffmpegPIDs,
+		procDir:     procDir,
+		hostProcDir: hostProcDir,
+		// Each cgroup read is tried at this process's own cgroup before the
+		// mount root, so a systemd unit with CPUQuota= or MemoryMax= is
+		// measured against its limit rather than against the whole machine.
+		// See cgrouppath.go; a container is unaffected either way.
+		cgroupLimitPaths: withCgroupSelfPaths(cgroupSelf, CgroupMemoryLimitPaths()),
+		cgroupUsagePaths: withCgroupSelfUsagePaths(cgroupSelf, cgroupMemoryUsagePaths),
+		cgroupCPUPaths:   withCgroupSelfCPUPaths(cgroupSelf, cgroupCPUPaths),
 		prevGPU:          map[fdinfoClient]engineCounters{},
 		disks:            map[string]*diskEntry{},
 		statfs:           osStatfs,

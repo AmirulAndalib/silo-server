@@ -110,6 +110,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/taskmanager/tasks"
 	"github.com/Silo-Server/silo-server/internal/taskmanager/triggers"
 	"github.com/Silo-Server/silo-server/internal/telemetry"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 	"github.com/Silo-Server/silo-server/internal/usercollections"
 	"github.com/Silo-Server/silo-server/internal/userdb"
@@ -156,9 +157,18 @@ func resolveNodeIdentity() string {
 // The hash comes out of the payload itself, because only the node knows what it
 // hashed. A report without one is refused rather than given a synthetic hash,
 // which would make an old node look like it had capability tracking.
-func nodeCapabilityFetcher(jwtSecret string) nodepool.CapabilityFetcher {
-	client := &http.Client{Timeout: nodeCapabilityRequestTimeout}
+// The request bound comes from budget rather than a constant. A cold node's
+// answer runs the whole FFmpeg probe matrix, and the size of that matrix is a
+// function of how many hardware devices playback is configured with — a node
+// with two render devices legitimately advertises a budget past two minutes.
+// Bounding every fetch at a fixed two minutes abandons such a node mid-probe
+// and reports a fetch failure for a node operating inside its published
+// contract.
+func nodeCapabilityFetcher(jwtSecret string, budget func() time.Duration) nodepool.CapabilityFetcher {
+	client := &http.Client{}
 	return func(ctx context.Context, nodeURL string) ([]byte, string, error) {
+		ctx, cancel := context.WithTimeout(ctx, budget())
+		defer cancel()
 		info, payload, status, err := transcodenode.FetchHWCapabilitiesPayload(ctx, client, nodeURL, jwtSecret)
 		if err != nil {
 			return nil, "", err
@@ -223,11 +233,33 @@ func cachedLibraryPaths(query func(context.Context) ([]string, error)) func(cont
 // libraryPathQueryTimeout bounds the per-sample library root lookup.
 const libraryPathQueryTimeout = 2 * time.Second
 
-// nodeCapabilityRequestTimeout bounds one capability request. A cold node runs
-// ffmpeg probes to answer and advertises a probe budget of up to ~2 minutes;
-// the fetch runs detached from the health sweep, so matching that budget is
-// safe and lets a cold node's first report land instead of timing out.
+// nodeCapabilityRequestTimeout is the floor under one capability request.
+//
+// The real bound is the node's own advertised probe budget, which
+// nodeCapabilityProbeBudget computes from the configured hardware — that grows
+// with the device count and passes two minutes at two devices. This floor covers
+// the rest of what a fetch does (transport, a node answering from a warm cache
+// but under load) and keeps a misconfigured or unreadable setting from
+// producing an absurdly small bound. The fetch runs detached from the health
+// sweep, so a generous bound costs the sweep nothing and lets a cold node's
+// first report land instead of timing out.
 const nodeCapabilityRequestTimeout = 2 * time.Minute
+
+// nodeCapabilityProbeBudget reports how long to allow one capability fetch,
+// read from the live configuration on every call so an operator adding a second
+// render device does not have to restart the API for its fetches to stop being
+// cut short.
+func nodeCapabilityProbeBudget(live func() *config.Config) func() time.Duration {
+	return func() time.Duration {
+		hwAccel, hwDevice := "", ""
+		if live != nil {
+			if current := live(); current != nil {
+				hwAccel, hwDevice = current.Playback.HWAccel, current.Playback.HWDevice
+			}
+		}
+		return max(nodeCapabilityRequestTimeout, tonemap.ProbeRequestTimeout(hwAccel, hwDevice))
+	}
+}
 
 func clientIPResolverFromConfig(cfg *config.Config) (*clientip.Resolver, error) {
 	if cfg == nil {
@@ -1181,7 +1213,8 @@ func main() {
 		deps.NodePlanner = nodepool.NewPlanner(proxyPool, transcodePool)
 
 		healthChecker := nodepool.NewHealthChecker(proxyPool, transcodePool, nodeRepo)
-		healthChecker.SetCapabilityFetcher(nodeCapabilityFetcher(cfg.Auth.JWTSecret))
+		healthChecker.SetCapabilityFetcher(
+			nodeCapabilityFetcher(cfg.Auth.JWTSecret, nodeCapabilityProbeBudget(configWatcher.Config)))
 		deps.NodeHealthChecker = healthChecker
 		healthChecker.Start(appCtx)
 		slog.Info("node pools initialized", "proxy_nodes", len(proxyNodes), "transcode_nodes", len(transcodeNodes))

@@ -14,7 +14,12 @@ const bytesPerKB = int64(1024)
 // cgroupInactiveFileKeyV2 is the cgroup v2 memory.stat key for reclaimable
 // page cache. cgroup v1's memory.stat spells the same figure
 // "total_inactive_file".
-const cgroupInactiveFileKeyV2 = "inactive_file"
+const (
+	cgroupInactiveFileKeyV2 = "inactive_file"
+	// cgroupInactiveFileKeyV1 is the same quantity under cgroup v1, which
+	// prefixes its memory.stat totals.
+	cgroupInactiveFileKeyV1 = "total_inactive_file"
+)
 
 // CgroupMemoryLimitPaths returns the memory-limit files to consult, cgroup v2
 // first. A container that has a limit publishes it in exactly one of these; a
@@ -52,7 +57,7 @@ var cgroupMemoryUsagePaths = []cgroupUsagePath{
 	{
 		usage:        "/sys/fs/cgroup/memory/memory.usage_in_bytes",
 		stat:         "/sys/fs/cgroup/memory/memory.stat",
-		inactiveFile: "total_inactive_file",
+		inactiveFile: cgroupInactiveFileKeyV1,
 	},
 }
 

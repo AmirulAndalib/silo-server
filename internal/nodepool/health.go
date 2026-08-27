@@ -141,12 +141,19 @@ func trimJSONNull(raw json.RawMessage) json.RawMessage {
 // persisted.
 type CapabilityFetcher func(ctx context.Context, nodeURL string) (payload []byte, hash string, err error)
 
-// capabilityFetchTimeout bounds one capability fetch. Node-side capability
-// answers can involve ffmpeg probes on a cold cache — the node's own advertised
-// probe budget reaches ~2 minutes — and the fetch runs detached from the
-// health sweep, so the bound covers a genuinely cold node rather than
-// abandoning it every sweep.
-const capabilityFetchTimeout = 2 * time.Minute
+// capabilityFetchTimeout is the backstop on one capability fetch, not its
+// budget.
+//
+// The budget belongs to the fetcher, which knows the configured hardware and
+// sizes each request against the node's own advertised probe matrix; that grows
+// with the device count and passes two minutes at two devices, so a fixed bound
+// here would cut short a node operating well inside its published contract. What
+// this stops is the other failure: a fetcher that never returns pinning a
+// goroutine and a node's inventory forever. It is deliberately far above any
+// budget a real configuration produces — five minutes covers a node probing
+// roughly seven devices — because a backstop that trips during ordinary
+// operation is indistinguishable from the bug it was meant to catch.
+const capabilityFetchTimeout = 5 * time.Minute
 
 // CapabilityRefreshTimeout is the bound RefreshNodeCapabilities puts on the
 // fetch it performs. It is exported for the one caller that has to hold an HTTP
