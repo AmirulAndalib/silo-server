@@ -177,7 +177,7 @@ describe("OverlaySettings", () => {
 
     // The switch mock reports the value it would write, which is the negation
     // of the checked state it rendered with.
-    fireEvent.click(screen.getAllByTestId("overlay-switch")[0]);
+    fireEvent.click(screen.getAllByTestId("overlay-switch")[0]!);
 
     expect(mocks.setValue).toHaveBeenCalledWith("defaults.card_quick_actions_enabled", "true");
   });
