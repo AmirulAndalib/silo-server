@@ -15,6 +15,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAdminPluginInstallations } from "@/hooks/queries/admin/plugins";
+import { installationConfigReady } from "@/lib/pluginConfigReady";
+import { useReportUnsavedChanges } from "@/hooks/useUnsavedChanges";
 import {
   useMarkerProviders,
   useUpdateMarkerProvider,
@@ -57,25 +59,7 @@ function markerCredentialsReady(
     (candidate) => candidate.id === provider.plugin_installation_id,
   );
   if (!installation) return undefined;
-
-  const schema = installation.global_config_schema ?? [];
-  if (schema.length === 0) return true;
-
-  const saved = new Map((installation.global_configs ?? []).map((config) => [config.key, config]));
-  const filled = (key: string) => {
-    const config = saved.get(key);
-    if (!config) return false;
-    if ((config.configured_secrets ?? []).length > 0) return true;
-    return Object.values(config.value ?? {}).some((value) =>
-      typeof value === "string" ? value.trim() !== "" : value != null && value !== false,
-    );
-  };
-
-  // A plugin that takes configuration and has none saved is not set up, whether
-  // or not it marked a field required — several plugins declare everything
-  // optional and then fail every lookup without a key.
-  if (!schema.some((entry) => filled(entry.key))) return false;
-  return schema.filter((entry) => entry.required).every((entry) => filled(entry.key));
+  return installationConfigReady(installation);
 }
 
 /**
@@ -199,6 +183,9 @@ function MarkerProviderTile({
     provider.contribute_enabled !== contributeEnabled ||
     provider.contribute_auto_local !== autoLocal ||
     provider.contribute_min_confidence !== parsedMinConfidence;
+  // The tile's draft lives outside useSettingsForm, so the navigation guard
+  // and the reload prompt only see it if the tile reports it itself.
+  useReportUnsavedChanges(dirty);
 
   function save() {
     if (!priorityValid) {

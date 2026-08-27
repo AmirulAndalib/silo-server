@@ -23,6 +23,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { useReportUnsavedChanges } from "@/hooks/useUnsavedChanges";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
@@ -181,6 +182,11 @@ function SubtitleProviderTile({
   const configured = usesAccount ? config.has_credentials : config.has_api_key;
 
   const draft = usesAccount ? { username, password } : { api_key: apiKey };
+  // Tile drafts live outside useSettingsForm, so the navigation guard and
+  // the reload prompt only see them if the tile reports them itself.
+  useReportUnsavedChanges(
+    enabledDraft !== null || username !== "" || password !== "" || apiKey !== "",
+  );
 
   function resetDrafts() {
     setEnabledDraft(null);
@@ -370,6 +376,7 @@ function MDBListTile({
 
   const configured = sensitiveConfigured.includes("mdblist.api_key");
   const hasDraft = apiKey.trim() !== "";
+  useReportUnsavedChanges(hasDraft);
 
   async function save() {
     if (!hasDraft) {

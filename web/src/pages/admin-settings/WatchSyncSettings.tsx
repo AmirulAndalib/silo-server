@@ -22,6 +22,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { RestartServerButton } from "@/components/admin/RestartServerButton";
+import { installationConfigReady } from "@/lib/pluginConfigReady";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAdminPluginInstallations } from "@/hooks/queries/admin/plugins";
@@ -77,6 +78,8 @@ interface PluginWatchProvider {
   pluginId: string;
   name: string;
   enabled: boolean;
+  /** Whether the plugin's declared global config is actually filled in. */
+  configReady: boolean;
 }
 
 /**
@@ -98,6 +101,9 @@ function pluginWatchProviders(installations: PluginInstallation[]): PluginWatchP
         pluginId: installation.plugin_id,
         name: capability.display_name || installation.plugin_id,
         enabled: installation.enabled,
+        // "Connected" must mean the plugin could serve a configured request,
+        // not merely that the installation is switched on.
+        configReady: installationConfigReady(installation),
       });
     }
   }
@@ -302,12 +308,16 @@ export default function WatchSyncSettings() {
                 tagline="Watch provider plugin"
                 monogram={providerMonogram(provider.name)}
                 monogramClass="bg-violet-500/20 text-violet-700 dark:text-violet-300"
-                state={provider.enabled ? "connected" : "not_connected"}
-                statePill={provider.enabled ? "Enabled" : "Disabled"}
+                state={provider.enabled && provider.configReady ? "connected" : "not_connected"}
+                statePill={
+                  !provider.enabled ? "Disabled" : provider.configReady ? "Enabled" : "Needs setup"
+                }
                 primaryAction={{
                   label: "Configure",
                   onClick: () =>
-                    navigate(`/admin/plugins?installed_q=${encodeURIComponent(provider.pluginId)}`),
+                    navigate(
+                      `/admin/plugins?installed_q=${encodeURIComponent(provider.pluginId)}&configure=${encodeURIComponent(provider.pluginId)}`,
+                    ),
                 }}
               />
             ))}

@@ -225,6 +225,47 @@ describe("WatchSyncSettings", () => {
     );
   });
 
+  it("does not label an enabled plugin as connected until its required config is set", () => {
+    const capability = {
+      type: "watch_sync_provider.v1",
+      id: "anilist",
+      display_name: "AniList",
+    };
+    const schema = [{ key: "account", title: "Account", json_schema: "{}", required: true }];
+    pluginInstallations = [
+      {
+        id: 7,
+        plugin_id: "silo-plugin-watchsync-anilist",
+        enabled: true,
+        capabilities: [capability],
+        global_config_schema: schema,
+        global_configs: [],
+      },
+      {
+        id: 9,
+        plugin_id: "silo-plugin-watchsync-serializd",
+        enabled: true,
+        capabilities: [
+          { type: "watch_sync_provider.v1", id: "serializd", display_name: "Serializd" },
+        ],
+        global_config_schema: schema,
+        global_configs: [{ key: "account", value: {}, configured_secrets: ["api_key"] }],
+      },
+    ];
+
+    render(<WatchSyncSettings />);
+
+    // Enabled but keyless: the plugin cannot serve a request, so the tile must
+    // not read as set up.
+    const anilist = screen.getByRole("group", { name: "AniList" });
+    expect(anilist).toHaveAttribute("data-state", "not_connected");
+    expect(within(anilist).getByText("Needs setup")).toBeInTheDocument();
+
+    const serializd = screen.getByRole("group", { name: "Serializd" });
+    expect(serializd).toHaveAttribute("data-state", "connected");
+    expect(within(serializd).getByText("Enabled")).toBeInTheDocument();
+  });
+
   it("clears a connected provider behind a confirmation", async () => {
     const user = userEvent.setup();
     render(<WatchSyncSettings />);

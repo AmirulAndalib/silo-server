@@ -76,6 +76,11 @@ const useSettingsFormMock = vi.fn((_options?: { keys: string[] }) => ({
   buildConnectionCheckRequest: vi.fn(() => ({ values: {}, dirty_keys: [] })),
 }));
 
+const reportUnsavedMock = vi.fn();
+vi.mock("@/hooks/useUnsavedChanges", () => ({
+  useReportUnsavedChanges: (dirty: boolean) => reportUnsavedMock(dirty),
+}));
+
 vi.mock("@/hooks/useSettingsForm", () => ({
   useSettingsForm: (options: { keys: string[] }) => useSettingsFormMock(options),
 }));
@@ -204,6 +209,23 @@ describe("ProvidersSettings", () => {
       "data-state",
       "not_connected",
     );
+  });
+
+  it("reports a credential draft to the unsaved-changes registry", async () => {
+    const user = userEvent.setup();
+    render(<ProvidersSettings />);
+    reportUnsavedMock.mockClear();
+
+    await user.click(
+      within(screen.getByRole("group", { name: "OpenSubtitles" })).getByRole("button", {
+        name: /Manage|Connect|Set up/,
+      }),
+    );
+    await user.type(screen.getByLabelText(/Username/i), "user");
+
+    // Tile drafts live outside useSettingsForm; the navigation guard and the
+    // reload prompt only see them through this report.
+    expect(reportUnsavedMock).toHaveBeenLastCalledWith(true);
   });
 
   it("expands one tile in place and collapses it again", async () => {
