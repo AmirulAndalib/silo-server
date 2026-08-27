@@ -81,7 +81,9 @@ func (s *stubNodeRepository) Update(context.Context, int, nodepool.UpdateNodeInp
 
 func (s *stubNodeRepository) Delete(context.Context, int) error { return nil }
 
-func (s *stubNodeRepository) UpdateHealth(context.Context, int, bool, int, int) error { return nil }
+func (s *stubNodeRepository) UpdateHealth(context.Context, int, bool, int, int, []byte) error {
+	return nil
+}
 
 // The node list is the admin's inventory view, so it must carry the stored
 // capability report, its age, and the derived GPU identities beside the

@@ -30,6 +30,60 @@ Always `200 OK` with a JSON array.
 | `capabilities_hash` | string | Identity of that report, as computed by the node. Omitted with `capabilities`. |
 | `capabilities_refreshed_at` | RFC3339 string | When the report was fetched. This is the age of the *inventory*, not of the health check: an unchanged node keeps a report from hours ago. |
 | `physical_gpu_keys` | string[] | Stable identities of the GPUs behind this node, derived from `capabilities` (see below). Omitted when the node reports no identifiable GPU. |
+| `last_stats` | object | The node's most recent host resource sample — `{"system": …, "gpu": […]}` in the shape below. Omitted when the node reported none. |
+
+### `last_stats`
+
+Written by the same 30-second health check that writes `active_jobs`, so it is
+exactly as old as `last_health_check` and never fresher. It is the current
+sample only: nothing here is a time series, and operators who want history
+scrape the node's own `GET /metrics` (unauthenticated, on the node's listener,
+same `streamapp_node_*` gauges, with disk series labeled by role rather than by
+path). A sample larger than 32 KiB is dropped rather than stored — the health
+verdict is what routes streams, and no honest sample comes close to that.
+
+`last_stats.system`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `cpu_pct` | int | Aggregate busy percentage across all cores over the last sampling interval (5s), 0-100. Idle and iowait both count as not busy. Under a cgroup this is the container's own consumption against its own quota, not the host's. |
+| `load1` | float | 1-minute load average. Unlike `cpu_pct` it also counts tasks blocked on storage, so a node stuck on I/O looks idle in one and busy in the other. Always host-wide: the kernel keeps no per-cgroup load average. |
+| `cores` | int | CPUs this process may run on — the cgroup's CPU quota rounded up where one is set, otherwise every CPU the kernel reports. This is what `cpu_pct` is normalized against and what `load1` must be read relative to. |
+| `mem_used_mb`, `mem_total_mb` | int | Memory. Under a cgroup these are the cgroup's limit and working set (page cache excluded), not the host's. |
+| `disks` | object[] | Sampled mounts, transcode scratch first, deduplicated by filesystem and capped at 8 — unmeasurable paths included, so the array never grows with the library count. |
+| `net_rx_bps`, `net_tx_bps` | int | Aggregate throughput in **bits** per second, loopback excluded. In a container this is the container's own network namespace. |
+
+Each entry in `disks`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | string | The sampled path. |
+| `used_gb`, `total_gb` | float | Capacity in GiB. Used counts filesystem-reserved blocks, matching `df`. |
+| `stale` | bool | The numbers are real but carried over from an earlier pass because the current probe has not returned — the normal reading for a network mount whose server went away. Omitted when false. |
+| `unavailable` | bool | The path has never been measured on this node (it does not exist here, or the first probe is still hanging). `used_gb`/`total_gb` are meaningless. Omitted when false. |
+
+Each entry in `last_stats.gpu`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `device` | string | The render node path (`/dev/dri/renderD128`), or `cuda:N` for an NVIDIA GPU with no readable DRM node. |
+| `vendor` | string | `intel`, `nvidia` or `amd`. Omitted when sysfs names a vendor we do not recognize. |
+| `sessions` | int | GPU workloads this node currently has pinned to the device. It comes from the playback device balancer, so it is exact for Silo's own work and blind to any other tenant's. A workload started with no `playback.hw_device` configured under QSV/VAAPI has no device name until ffmpeg picks one, and is the one case not counted here. |
+| `video_busy_pct`, `render_busy_pct` | int | Engine busy percentages over the sampling interval. |
+| `total_busy_pct` | int | Whole-GPU utilization *including other tenants*. Present only with an enrichment source — absent is not zero, and must not be rendered as an idle GPU. |
+| `vram_used_mb`, `vram_total_mb` | int | GPU memory, on the same terms as `total_busy_pct`. |
+| `source` | string | What produced the numbers: `fdinfo`, `nvidia-smi`, `fdinfo+nvidia-smi`, or `unavailable`. |
+
+`source` is what tells an operator how far to trust the busy percentages.
+`fdinfo` is the unprivileged DRM baseline and covers **only this node's own
+ffmpeg children** — a GPU shared with anything outside Silo reads as less busy
+than it is. `nvidia-smi` is whole-GPU. `unavailable` means nothing could measure
+the device this interval; its percentages are zeros with no measurement behind
+them.
+
+A node reports these fields in its own `/health` and `/status`; the API stores
+them opaquely and never routes on them. Nothing in node selection reads
+`last_stats`.
 
 Capability reports are refreshed by the background health sweep, not by this
 read: a node advertises a `capabilities_hash` in its own health response, and
@@ -99,6 +153,9 @@ than as an error status. `404 Not Found` for an unknown id.
 | `active_jobs`, `egress_kbps` | int | What it reported. Zero when unhealthy. |
 | `capabilities_hash` | string | The hash the node advertised on this check. Omitted when the node reports none. |
 
+The check also persists the node's resource sample, so `last_stats` on the list
+response reflects this check immediately. The sample itself is not echoed here.
+
 This is the node's *current* hash, not the stored one. A value here that
 differs from the `capabilities_hash` in the list response means the background
 sweep has a refetch pending; this route does not fetch capabilities itself.
@@ -156,6 +213,34 @@ node's `resolved`, `render_devices` and `render_device_details`, or an `error`
 explaining why it could not be probed. The full report for one node — including
 `detected_backends`, `boot_id` and `capability_hash` — is what
 `GET /api/v1/admin/nodes` stores per node in `capabilities`.
+
+## `GET /api/v1/admin/system/resources`
+
+Reports the **API host's own** current resource sample — the counterpart to the
+per-node `last_stats` above.
+
+The API host is not a registered stream node, so without this route the one
+machine an operator cannot see is the machine serving the request (and, in
+integrated mode, doing the transcoding). Unlike a node, this host also samples
+the configured library roots: it is the process that knows what the library is,
+and its view of a media mount is the authoritative one.
+
+Always `200 OK`. It reads a snapshot the sampler already published, so it costs
+nothing and cannot hang regardless of what a mount or a GPU query is doing.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `available` | bool | This host can be sampled. False on a non-Linux host, before the first sample lands, or when no sampler is running — in which case the fields below are absent. |
+| `sampled_at` | RFC3339 string | When the sample was taken. Omitted when there is none. |
+| `system` | object | Same shape as `last_stats.system` above. |
+| `gpu` | object[] | Same shape as `last_stats.gpu` above. |
+
+Sampling is Linux-only: `available: false` on macOS or Windows is expected and
+is not an error. History and alerting are Prometheus's job — the same numbers
+are exposed as `streamapp_node_*` gauges on this process's existing `/metrics`
+endpoint, with one deliberate difference: `/metrics` is unauthenticated, so its
+disk series are labeled `mount="scratch"` / `mount="library-N"` and the library
+paths themselves appear only here, behind admin auth.
 
 ## `GET /api/v1/admin/stream-telemetry/parity`
 

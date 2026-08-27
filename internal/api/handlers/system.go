@@ -9,11 +9,17 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/buildinfo"
 	"github.com/Silo-Server/silo-server/internal/logredact"
+	"github.com/Silo-Server/silo-server/internal/nodemetrics"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 )
 
 const remoteNodeInventoryProbeTimeout = 5 * time.Second
+
+// resourceSampler is the read side of the local host's resource sampler.
+type resourceSampler interface {
+	Snapshot() nodemetrics.Snapshot
+}
 
 // SystemHandler serves read-only system inspection endpoints.
 type SystemHandler struct {
@@ -23,6 +29,7 @@ type SystemHandler struct {
 	hwAccel       string
 	hwDevice      string
 	buildInfo     buildinfo.Info
+	resources     resourceSampler
 }
 
 // NewSystemHandler creates a SystemHandler. hwAccel and hwDevice are the
@@ -37,6 +44,50 @@ func NewSystemHandler(transcodePool *nodepool.TranscodePool, jwtSecret, ffmpegPa
 		hwDevice:      hwDevice,
 		buildInfo:     buildinfo.Current(),
 	}
+}
+
+// SetResourceSampler wires the local host's resource sampler. Without one,
+// /admin/system/resources reports the host as unsampled rather than failing:
+// the endpoint's answer is "what does this host look like right now", and
+// "nothing is measuring it" is a valid answer to that.
+func (h *SystemHandler) SetResourceSampler(sampler resourceSampler) {
+	h.resources = sampler
+}
+
+// SystemResources is the local host's current resource sample.
+type SystemResources struct {
+	// Available is false on a host that cannot be sampled (non-Linux, or before
+	// the first sample lands), in which case the two fields below are absent.
+	Available bool                     `json:"available"`
+	SampledAt string                   `json:"sampled_at,omitempty"`
+	System    *nodemetrics.SystemStats `json:"system,omitempty"`
+	GPU       []nodemetrics.GPUStats   `json:"gpu,omitempty"`
+}
+
+// HandleSystemResources handles GET /admin/system/resources.
+//
+// This is the API host's own sample — the counterpart to the per-node
+// last_stats on /admin/nodes, which the Nodes page reads. The API host is not a
+// registered stream node, so without this route the machine actually serving
+// the request is the one machine an operator cannot see.
+//
+// It reads a snapshot the sampler already published, so it costs nothing and
+// cannot hang, no matter what a mount or a GPU query is doing.
+func (h *SystemHandler) HandleSystemResources(w http.ResponseWriter, _ *http.Request) {
+	if h.resources == nil {
+		writeJSON(w, http.StatusOK, SystemResources{})
+		return
+	}
+	snapshot := h.resources.Snapshot()
+	response := SystemResources{
+		Available: snapshot.Available,
+		System:    snapshot.System,
+		GPU:       snapshot.GPU,
+	}
+	if !snapshot.SampledAt.IsZero() {
+		response.SampledAt = snapshot.SampledAt.UTC().Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // NodeHWAccel reports one transcode node's GPU inventory.

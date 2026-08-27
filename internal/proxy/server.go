@@ -18,11 +18,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/downloadprepare"
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
+	"github.com/Silo-Server/silo-server/internal/nodemetrics"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
@@ -59,6 +61,10 @@ type Server struct {
 	// by /health without probing. Nil until the first snapshot or capability
 	// request completes.
 	capabilityHash atomic.Pointer[string]
+
+	// metrics samples host and GPU resources in the background. Nil until
+	// StartMetricsSampler runs, which leaves health exactly as it was before.
+	metrics *nodemetrics.Sampler
 }
 
 type remoteArtifactMissReporter interface {
@@ -160,6 +166,10 @@ func (s *Server) Handler() http.Handler {
 		MaxAge: 86400,
 	}))
 	r.Get("/api/v1/health", s.handleHealth)
+	// Unauthenticated, matching the API listener's own /metrics posture: a
+	// scrape target that needs a credential is a scrape target that goes
+	// unmonitored, and the exposure is host resource counters, not media.
+	r.Method(http.MethodGet, "/metrics", promhttp.Handler())
 	r.Group(func(r chi.Router) {
 		// Streaming and download bytes count toward the node's measured egress.
 		r.Use(s.meterEgress)
@@ -322,6 +332,12 @@ type healthResponse struct {
 	// cheap liveness answer, so it never triggers a probe — and is empty until
 	// the first background snapshot completes.
 	CapabilitiesHash string `json:"capabilities_hash,omitempty"`
+	// System and GPU are this proxy's last resource sample, read from the
+	// published snapshot for the same reason as the hash above. A proxy runs
+	// ffmpeg too (remux, Dolby Vision RPU strip), so it reports GPU usage on the
+	// same code path a transcode node does.
+	System *nodemetrics.SystemStats `json:"system,omitempty"`
+	GPU    []nodemetrics.GPUStats   `json:"gpu,omitempty"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -329,13 +345,55 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if s.tracker != nil {
 		activeJobs = s.tracker.ActiveCount()
 	}
+	snapshot := s.metrics.Snapshot()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(healthResponse{
 		Status:           "ok",
 		ActiveJobs:       activeJobs,
 		EgressKbps:       s.egress.RateKbps(),
 		CapabilitiesHash: s.storedCapabilityHash(),
+		System:           snapshot.System,
+		GPU:              snapshot.GPU,
 	})
+}
+
+// StartMetricsSampler begins background resource sampling until ctx is
+// canceled, and publishes the readings on /health, /status and /metrics.
+//
+// A proxy's only working directory is the subtitle/remux scratch under the
+// configured transcode dir, so that is the mount it samples; media roots belong
+// to the API host, which is the process that knows what the library is.
+func (s *Server) StartMetricsSampler(ctx context.Context) {
+	if s == nil || ctx == nil {
+		return
+	}
+	scratchDir := ""
+	if s.watcher != nil {
+		if cfg := s.watcher.Config(); cfg != nil {
+			scratchDir = strings.TrimSpace(cfg.Playback.TranscodeDir)
+		}
+	}
+	s.metrics = nodemetrics.NewSampler(nodemetrics.Options{
+		ScratchDir:       scratchDir,
+		DeviceSessions:   playback.HWDeviceLoadSnapshot,
+		DeviceIdentities: renderDeviceIdentities,
+	})
+	s.metrics.Start(ctx)
+}
+
+// renderDeviceIdentities adapts the playback hardware walk to what the sampler
+// needs, so the sampler itself stays free of any playback dependency.
+func renderDeviceIdentities() []nodemetrics.DeviceIdentity {
+	devices := playback.RenderDeviceIdentities()
+	identities := make([]nodemetrics.DeviceIdentity, 0, len(devices))
+	for _, device := range devices {
+		identities = append(identities, nodemetrics.DeviceIdentity{
+			Path:       device.Path,
+			PCIAddress: device.PCIAddress,
+			Vendor:     device.Vendor,
+		})
+	}
+	return identities
 }
 
 // requireBearer checks Authorization: Bearer {secret} for admin endpoints.
@@ -822,12 +880,17 @@ func (s *Server) handleForceReload(w http.ResponseWriter, r *http.Request) {
 }
 
 type statusResponse struct {
-	ActiveSessions int `json:"active_sessions"`
+	ActiveSessions int                      `json:"active_sessions"`
+	System         *nodemetrics.SystemStats `json:"system,omitempty"`
+	GPU            []nodemetrics.GPUStats   `json:"gpu,omitempty"`
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	snapshot := s.metrics.Snapshot()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(statusResponse{
 		ActiveSessions: s.tracker.ActiveCount(),
+		System:         snapshot.System,
+		GPU:            snapshot.GPU,
 	})
 }

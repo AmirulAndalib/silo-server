@@ -3805,6 +3805,12 @@ export interface NodeDetectedBackend {
   device?: string;
   /** Why verification failed, attributed per device when several were tried. */
   reason?: string;
+  /**
+   * No probe was attempted: none of the backend's candidate devices is
+   * accessible to this node (e.g. a proxy reading the cluster-wide hw_device).
+   * Not a driver failure; reason lists the skipped devices.
+   */
+  skipped?: boolean;
 }
 
 /**
@@ -3825,6 +3831,84 @@ export interface NodeCapabilities {
   capability_hash?: string;
   source?: string;
   node_url?: string;
+}
+
+/** One sampled mount inside a resource sample. */
+export interface HostDiskStats {
+  path?: string;
+  /** Capacity in GiB. Used counts filesystem-reserved blocks, matching `df`. */
+  used_gb?: number;
+  total_gb?: number;
+  /** Real numbers carried over from an earlier pass because the probe has not returned. */
+  stale?: boolean;
+  /** Never measured on this host: `used_gb`/`total_gb` are meaningless. */
+  unavailable?: boolean;
+}
+
+/**
+ * A host's CPU/memory/disk/network sample. Every field is optional: sampling is
+ * Linux-only, individual probes degrade independently, and a server predating
+ * resource sampling sends none of this.
+ */
+export interface HostSystemStats {
+  /**
+   * Aggregate busy percentage across all cores over the sampling interval, 0-100.
+   * Under a cgroup it is that container's own usage against its own quota.
+   */
+  cpu_pct?: number;
+  /** 1-minute load average; unlike cpu_pct it also counts tasks blocked on storage. */
+  load1?: number;
+  /** CPUs this host may use: the cgroup quota where one is set, otherwise the kernel's count. */
+  cores?: number;
+  mem_used_mb?: number;
+  mem_total_mb?: number;
+  /** Scratch dir first, then media roots; deduplicated by filesystem. */
+  disks?: HostDiskStats[] | null;
+  /** Aggregate throughput in *bits* per second, loopback excluded. */
+  net_rx_bps?: number;
+  net_tx_bps?: number;
+}
+
+/** One GPU's sample. */
+export interface HostGPUStats {
+  /** Render node path (/dev/dri/renderD128), a PCI address, or "cuda:N". */
+  device?: string;
+  vendor?: string;
+  /** Workloads this host has pinned to the device, from the playback balancer. */
+  sessions?: number;
+  /** Engine busy percentages over the sampling interval. */
+  video_busy_pct?: number;
+  render_busy_pct?: number;
+  /** Whole-GPU utilization including other tenants. Absent is not zero. */
+  total_busy_pct?: number | null;
+  vram_used_mb?: number | null;
+  vram_total_mb?: number | null;
+  /** "fdinfo", "nvidia-smi", "fdinfo+nvidia-smi", or "unavailable". */
+  source?: string;
+}
+
+/**
+ * A node's most recent resource sample, written by the same health check that
+ * writes `active_jobs` — so it is exactly as old as `last_health_check` and
+ * never fresher. Absent on a node that reports none, and on every server
+ * predating resource sampling.
+ */
+export interface NodeLastStats {
+  system?: HostSystemStats | null;
+  gpu?: HostGPUStats[] | null;
+}
+
+/**
+ * The API host's own sample (GET /admin/system/resources) — the counterpart to
+ * a node's `last_stats`. `available` is false on a host that cannot be sampled
+ * (non-Linux, no sampler, or before the first sample lands), in which case the
+ * rest is absent.
+ */
+export interface SystemResources {
+  available?: boolean;
+  sampled_at?: string;
+  system?: HostSystemStats | null;
+  gpu?: HostGPUStats[] | null;
 }
 
 export interface StreamNode {
@@ -3849,6 +3933,8 @@ export interface StreamNode {
   capabilities_refreshed_at?: string;
   /** Stable per-GPU identities; two nodes sharing one share hardware. */
   physical_gpu_keys?: string[];
+  /** The node's resource sample from the last health check. */
+  last_stats?: NodeLastStats | null;
 }
 
 export interface CreateNodeRequest {

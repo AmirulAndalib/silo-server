@@ -57,10 +57,10 @@ func (p *ProxyPool) Nodes() []*Node {
 
 // ApplyHealth records a health check result by swapping the node for an
 // updated copy, keeping published *Node values immutable.
-func (p *ProxyPool) ApplyHealth(id int, healthy bool, activeJobs, egressKbps int, checkedAt time.Time) {
+func (p *ProxyPool) ApplyHealth(id int, healthy bool, activeJobs, egressKbps int, lastStats []byte, checkedAt time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	applyNodeHealth(p.nodes, id, healthy, activeJobs, egressKbps, checkedAt)
+	applyNodeHealth(p.nodes, id, healthy, activeJobs, egressKbps, lastStats, checkedAt)
 }
 
 // ApplyCapabilities records a freshly fetched capability report by swapping the

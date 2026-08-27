@@ -44,6 +44,12 @@ type Node struct {
 	// CapabilitiesRefreshedAt is when Capabilities was last fetched — the age of
 	// the inventory, not of the last health check.
 	CapabilitiesRefreshedAt *time.Time `json:"capabilities_refreshed_at,omitempty"`
+	// LastStats is the node's resource sample from the last health check —
+	// {"system":…,"gpu":…} — kept opaque for the same reason as Capabilities.
+	// It is written by the same 30s health update that writes ActiveJobs, so it
+	// is exactly as fresh as LastHealthCheck and never fresher. Absent for a
+	// node that reports no sample.
+	LastStats json.RawMessage `json:"last_stats,omitempty"`
 }
 
 // CreateNodeInput holds the fields for creating a new node.
@@ -110,13 +116,13 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
-const nodeColumns = `id, name, type, url, enabled, healthy, active_jobs, node_group, max_jobs, max_bandwidth_kbps, egress_kbps, last_health_check, created_at, capabilities, capabilities_hash, capabilities_refreshed_at`
+const nodeColumns = `id, name, type, url, enabled, healthy, active_jobs, node_group, max_jobs, max_bandwidth_kbps, egress_kbps, last_health_check, created_at, capabilities, capabilities_hash, capabilities_refreshed_at, last_stats`
 
 func scanNode(row pgx.Row) (*Node, error) {
 	var n Node
 	// jsonb is scanned as raw bytes rather than into json.RawMessage directly so
 	// a NULL column stays nil instead of decoding through the JSON codec.
-	var capabilities []byte
+	var capabilities, lastStats []byte
 	err := row.Scan(
 		&n.ID, &n.Name, &n.Type, &n.URL,
 		&n.Enabled, &n.Healthy, &n.ActiveJobs,
@@ -124,12 +130,16 @@ func scanNode(row pgx.Row) (*Node, error) {
 		&n.MaxBandwidthKbps, &n.EgressKbps,
 		&n.LastHealthCheck, &n.CreatedAt,
 		&capabilities, &n.CapabilitiesHash, &n.CapabilitiesRefreshedAt,
+		&lastStats,
 	)
 	if err != nil {
 		return nil, err
 	}
 	if len(capabilities) > 0 {
 		n.Capabilities = json.RawMessage(capabilities)
+	}
+	if len(lastStats) > 0 {
+		n.LastStats = json.RawMessage(lastStats)
 	}
 	return &n, nil
 }
@@ -249,13 +259,18 @@ func (r *Repository) Delete(ctx context.Context, id int) error {
 	return nil
 }
 
-// UpdateHealth updates a node's health status, active job count, and
-// reported egress bandwidth.
-func (r *Repository) UpdateHealth(ctx context.Context, id int, healthy bool, activeJobs, egressKbps int) error {
+// UpdateHealth updates a node's health status, active job count, reported
+// egress bandwidth, and last resource sample.
+//
+// A nil lastStats writes NULL, which is what a node that reports no sample —
+// an older build, or a non-Linux host — must produce. Passing the previous
+// value through instead would leave a dead node's numbers on screen looking
+// current.
+func (r *Repository) UpdateHealth(ctx context.Context, id int, healthy bool, activeJobs, egressKbps int, lastStats []byte) error {
 	tag, err := r.pool.Exec(ctx,
-		`UPDATE stream_nodes SET healthy = $2, active_jobs = $3, egress_kbps = $4, last_health_check = NOW()
+		`UPDATE stream_nodes SET healthy = $2, active_jobs = $3, egress_kbps = $4, last_stats = $5, last_health_check = NOW()
 		 WHERE id = $1`,
-		id, healthy, activeJobs, egressKbps)
+		id, healthy, activeJobs, egressKbps, lastStats)
 	if err != nil {
 		return fmt.Errorf("update node health: %w", err)
 	}

@@ -82,10 +82,10 @@ func (p *TranscodePool) Nodes() []*Node {
 
 // ApplyHealth records a health check result by swapping the node for an
 // updated copy, keeping published *Node values immutable.
-func (p *TranscodePool) ApplyHealth(id int, healthy bool, activeJobs, egressKbps int, checkedAt time.Time) {
+func (p *TranscodePool) ApplyHealth(id int, healthy bool, activeJobs, egressKbps int, lastStats []byte, checkedAt time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	applyNodeHealth(p.nodes, id, healthy, activeJobs, egressKbps, checkedAt)
+	applyNodeHealth(p.nodes, id, healthy, activeJobs, egressKbps, lastStats, checkedAt)
 }
 
 // ApplyCapabilities records a freshly fetched capability report by swapping the
@@ -97,7 +97,7 @@ func (p *TranscodePool) ApplyCapabilities(id int, capabilities []byte, hash stri
 }
 
 // applyNodeHealth replaces the slice entry for id with an updated copy.
-func applyNodeHealth(nodes []*Node, id int, healthy bool, activeJobs, egressKbps int, checkedAt time.Time) {
+func applyNodeHealth(nodes []*Node, id int, healthy bool, activeJobs, egressKbps int, lastStats []byte, checkedAt time.Time) {
 	for i, n := range nodes {
 		if n.ID != id {
 			continue
@@ -107,6 +107,15 @@ func applyNodeHealth(nodes []*Node, id int, healthy bool, activeJobs, egressKbps
 		clone.ActiveJobs = activeJobs
 		clone.EgressKbps = egressKbps
 		clone.LastHealthCheck = &checkedAt
+		// A check that carried no stats clears them rather than keeping the
+		// previous sample: an unreachable node's five-minute-old CPU number
+		// looks live on a dashboard, which is worse than no number at all. The
+		// payload is cloned because the caller's buffer is a decoded HTTP body.
+		if len(lastStats) > 0 {
+			clone.LastStats = append(json.RawMessage(nil), lastStats...)
+		} else {
+			clone.LastStats = nil
+		}
 		nodes[i] = &clone
 		return
 	}

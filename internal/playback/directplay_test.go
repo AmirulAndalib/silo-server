@@ -20,12 +20,6 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
-const (
-	directPlayDarwinGOOS  = "darwin"
-	directPlayLinuxGOOS   = "linux"
-	directPlayWindowsGOOS = "windows"
-)
-
 func TestServeDirectPlayHTTPContract(t *testing.T) {
 	const content = "0123456789abcdefghijklmnopqrstuvwxyz"
 	filePath := filepath.Join(t.TempDir(), "fixture.mp4")

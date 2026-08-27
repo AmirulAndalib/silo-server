@@ -209,6 +209,59 @@ NVIDIA_GPU_COUNT=1
 
 Windows uses `;` instead of `:` between entries in `COMPOSE_FILE`.
 
+## Node metrics
+
+Every Silo process — the API host and each proxy or transcode node — samples its
+own CPU, memory, disk, network and GPU usage every five seconds. The numbers
+appear on the admin Nodes page, in each node's `/health` and `/status`
+responses, and as `streamapp_node_*` gauges on that process's `/metrics`
+endpoint. `/metrics` is unauthenticated on node listeners, matching the API
+listener; it exposes host resource counters, not media. Disk series are labeled
+by role — `mount="scratch"`, `mount="library-1"` — rather than by path, so an
+anonymous scrape cannot enumerate where your media lives. The paths themselves
+are reported by the admin-authenticated `GET /api/v1/admin/system/resources` and
+on the Nodes page.
+
+Sampling is current-sample only. Silo stores no history — point Prometheus at
+`/metrics` if you want trends or alerts.
+
+**Works out of the box.** System metrics and per-device GPU busyness need no
+extra packages, no privileges and no configuration. GPU usage comes from DRM
+fdinfo, which the kernel exposes for any process holding a `/dev/dri` device, so
+the standard VA-API overlay above is enough for Intel (i915, xe) and AMD
+(amdgpu). It measures Silo's own ffmpeg processes only: a GPU shared with
+something outside Silo will read as less busy than it is. Each device reports a
+`source` field saying which measurement it used.
+
+**NVIDIA needs the container toolkit.** The proprietary driver implements no
+fdinfo, so `nvidia-smi` is the only signal — and it is a whole-GPU one, so it
+also sees other tenants. It is already required for NVENC, so the NVIDIA overlay
+above gives you GPU utilization, encoder/decoder utilization and VRAM with no
+extra step. If the binary is missing or fails repeatedly, that device reports
+`source: unavailable` and nothing else degrades.
+
+**Whole-GPU Intel sampling is not implemented yet.** Reading Intel utilization
+across all tenants needs `intel_gpu_top`, which requires `CAP_PERFMON` (or root)
+plus a permissive `kernel.perf_event_paranoid` — privileges a plain `/dev/dri`
+passthrough container does not have and should not be given by default. Until
+that lands, Intel GPUs report the fdinfo baseline only, and `total_busy_pct` is
+absent rather than zero.
+
+**What the numbers mean inside a container.** `/proc/stat` and `/proc/meminfo`
+describe the *host*, not the container, so Silo corrects both against the
+container's cgroup. Memory reports the cgroup limit and working set (page cache
+excluded), which is what the kernel will OOM-kill against. CPU reports the
+cgroup's own consumption against its own quota, so a container limited to
+`cpus: 2` on a 64-core host reads 100% when it is pegged — not the 3% of the
+host machine that same work amounts to — and `cores` is the quota, not the
+host's core count. `/proc/net/dev` is
+already per-namespace, so network throughput is the container's own traffic.
+Disk figures come from `statfs` on the paths the container can see — the
+transcode scratch directory on every node, plus the configured library roots on
+the API host. A mount that stops responding reports its last good numbers marked
+`stale` and never delays a health response; a path a node cannot see at all is
+reported `unavailable` rather than as an empty disk.
+
 ## Optional Meilisearch
 
 PostgreSQL full-text search needs no extra service. To offer Meilisearch as an

@@ -80,6 +80,7 @@ import (
 	_ "github.com/Silo-Server/silo-server/internal/metadata/nfo"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
+	"github.com/Silo-Server/silo-server/internal/nodemetrics"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/noderecipe"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
@@ -161,6 +162,48 @@ func nodeCapabilityFetcher(jwtSecret string) nodepool.CapabilityFetcher {
 		}
 		return payload, info.CapabilityHash, nil
 	}
+}
+
+// libraryPathProvider adapts the folder repository to the sampler's media-root
+// provider.
+//
+// It runs on the sampling goroutine every interval, so it is bounded
+// separately from the caller's context: a database that has stopped answering
+// must cost one interval's disk sampling, not the sampler. A failed read
+// reports no roots for that pass rather than an error, because the previous
+// pass's mounts are still tracked and keep reporting.
+func libraryPathProvider(repo *catalog.FolderRepository) func(context.Context) []string {
+	if repo == nil {
+		return nil
+	}
+	return func(ctx context.Context) []string {
+		queryCtx, cancel := context.WithTimeout(ctx, libraryPathQueryTimeout)
+		defer cancel()
+		paths, err := repo.DistinctLibraryPaths(queryCtx)
+		if err != nil {
+			slog.DebugContext(ctx, "library paths unavailable for resource sampling", "component", "app", "error", err)
+			return nil
+		}
+		return paths
+	}
+}
+
+// libraryPathQueryTimeout bounds the per-sample library root lookup.
+const libraryPathQueryTimeout = 2 * time.Second
+
+// hostRenderDeviceIdentities adapts the playback hardware walk to what the
+// sampler needs, keeping the sampler free of any playback dependency.
+func hostRenderDeviceIdentities() []nodemetrics.DeviceIdentity {
+	devices := playback.RenderDeviceIdentities()
+	identities := make([]nodemetrics.DeviceIdentity, 0, len(devices))
+	for _, device := range devices {
+		identities = append(identities, nodemetrics.DeviceIdentity{
+			Path:       device.Path,
+			PCIAddress: device.PCIAddress,
+			Vendor:     device.Vendor,
+		})
+	}
+	return identities
 }
 
 // nodeCapabilityRequestTimeout bounds one capability request. A cold node runs
@@ -872,6 +915,9 @@ func main() {
 			// Keep the capability hash /health advertises current, so the API's
 			// sweep refetches this proxy's inventory only when it actually changed.
 			srv.StartCapabilitySnapshots(appCtx)
+			// Sample host and GPU resources so /health, /status and /metrics can
+			// report them without doing any work on the request.
+			srv.StartMetricsSampler(appCtx)
 			handler = srv.Handler()
 		} else {
 			srv := transcodenode.NewServer(watcher, tracker)
@@ -885,6 +931,9 @@ func main() {
 			// The first capability snapshot waits on warmup so it measures a
 			// primed encoder rather than racing it into a probe failure.
 			srv.StartCapabilitySnapshots(appCtx, srv.StartHardwareEncoderWarmup(appCtx))
+			// Sample host and GPU resources so /health, /status and /metrics can
+			// report them without doing any work on the request.
+			srv.StartMetricsSampler(appCtx)
 			// Reclaim orphaned transcode dirs at boot and hourly thereafter, bound
 			// to appCtx so it stops on shutdown.
 			srv.StartOrphanSweeper(appCtx)
@@ -1107,6 +1156,21 @@ func main() {
 		deps.NodeHealthChecker = healthChecker
 		healthChecker.Start(appCtx)
 		slog.Info("node pools initialized", "proxy_nodes", len(proxyNodes), "transcode_nodes", len(transcodeNodes))
+
+		// The API host runs the same sampler the nodes do. It is not a
+		// registered stream node, so without this the machine serving admin
+		// requests — and, in integrated mode, transcoding — is the one host with
+		// no resource visibility. Unlike a node it also samples library roots:
+		// it is the process that knows what the library is, and its own view of
+		// a media mount is the one that is authoritative.
+		resourceSampler := nodemetrics.NewSampler(nodemetrics.Options{
+			ScratchDir:       cfg.Playback.TranscodeDir,
+			MediaRoots:       libraryPathProvider(catalog.NewFolderRepository(pool)),
+			DeviceSessions:   playback.HWDeviceLoadSnapshot,
+			DeviceIdentities: hostRenderDeviceIdentities,
+		})
+		resourceSampler.Start(appCtx)
+		deps.ResourceSampler = resourceSampler
 
 		// Subscribe to node pool change events for multi-instance reload.
 		_ = eventBus.Subscribe(appCtx, cache.ChannelAdmin, func(event cache.Event) {

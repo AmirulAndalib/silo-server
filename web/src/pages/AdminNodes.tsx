@@ -26,12 +26,56 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Plus, Pencil, Trash2, RefreshCw, Info, AlertTriangle } from "lucide-react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { formatDateTime } from "@/lib/datetime";
-import { describeNodeGPU } from "./adminNodesPresentation";
+import { cn } from "@/lib/utils";
+import type { ResourceMetric } from "./adminNodesPresentation";
+import { describeNodeGPU, describeNodeSystem } from "./adminNodesPresentation";
 
 type NodeType = "proxy" | "transcode";
 
 function formatMbps(kbps: number): string {
   return (Math.round(kbps / 100) / 10).toString();
+}
+
+/** One derived reading in the System column: "CPU 42%", muted or tinted. */
+function NodeSystemMetric({ metric }: { metric: ResourceMetric }) {
+  return (
+    <span className="inline-flex items-baseline gap-1 whitespace-nowrap" title={metric.title}>
+      <span className="text-muted-foreground">{metric.label}</span>
+      <span
+        className={cn(
+          "tabular-nums",
+          metric.muted && "text-muted-foreground",
+          metric.warning && "text-warning font-medium",
+        )}
+      >
+        {metric.value}
+      </span>
+    </span>
+  );
+}
+
+function NodeSystemCell({ node }: { node: StreamNode }) {
+  const system = describeNodeSystem(node);
+  if (system.kind === "unreported") {
+    return (
+      <span className="text-muted-foreground text-sm" title={system.title}>
+        {system.label}
+      </span>
+    );
+  }
+
+  return (
+    <div className="space-y-0.5 text-xs">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+        <NodeSystemMetric metric={system.cpu} />
+        <NodeSystemMetric metric={system.memory} />
+      </div>
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+        <NodeSystemMetric metric={system.disk} />
+        <NodeSystemMetric metric={system.network} />
+      </div>
+    </div>
+  );
 }
 
 function NodeGPUCell({ node }: { node: StreamNode }) {
@@ -78,6 +122,19 @@ function NodeGPUCell({ node }: { node: StreamNode }) {
           {gpu.deviceSummary}
         </div>
       )}
+      {gpu.live.map((device) => (
+        <div
+          key={device.key}
+          className="text-muted-foreground flex flex-wrap items-baseline gap-x-1.5 text-xs"
+          title={device.title}
+        >
+          <span className="font-mono">{device.label}</span>
+          <span className={cn("tabular-nums", device.busyMuted ? "" : "text-foreground")}>
+            {device.busy}
+          </span>
+          <span>· {device.sessions}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -108,7 +165,7 @@ function NodeSection({
   checkingHealthId,
 }: NodeSectionProps) {
   const label = type === "proxy" ? "Proxy" : "Transcode";
-  const colCount = (showJobs ? 9 : 8) + (type === "proxy" ? 1 : 0);
+  const colCount = (showJobs ? 10 : 9) + (type === "proxy" ? 1 : 0);
 
   return (
     <div className="space-y-3">
@@ -134,6 +191,7 @@ function NodeSection({
               <TableHead>Status</TableHead>
               <TableHead>Health</TableHead>
               <TableHead>GPU</TableHead>
+              <TableHead>System</TableHead>
               {showJobs && <TableHead>{type === "proxy" ? "Streams" : "Jobs"}</TableHead>}
               {type === "proxy" && <TableHead>Egress</TableHead>}
               <TableHead>Last Check</TableHead>
@@ -191,6 +249,9 @@ function NodeSection({
                     </TableCell>
                     <TableCell>
                       <NodeGPUCell node={node} />
+                    </TableCell>
+                    <TableCell>
+                      <NodeSystemCell node={node} />
                     </TableCell>
                     {showJobs && (
                       <TableCell>

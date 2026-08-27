@@ -17,12 +17,14 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/Silo-Server/silo-server/internal/chapterthumbs"
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/downloadprepare"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
+	"github.com/Silo-Server/silo-server/internal/nodemetrics"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
@@ -121,6 +123,13 @@ type HealthResponse struct {
 	// cheap liveness answer, so it never triggers a probe — and is empty until
 	// the first background snapshot completes.
 	CapabilitiesHash string `json:"capabilities_hash,omitempty"`
+	// System and GPU are this node's last resource sample. Like the hash above
+	// they are read from a snapshot the sampler already published, never
+	// measured on the request: health is what the cluster routes on, so it must
+	// answer at the same speed whether or not a mount is hung or a GPU query is
+	// wedged. Both are omitted on a host that cannot be sampled.
+	System *nodemetrics.SystemStats `json:"system,omitempty"`
+	GPU    []nodemetrics.GPUStats   `json:"gpu,omitempty"`
 }
 
 // sessionIdleTTL is how long a job may go without a manifest or segment
@@ -203,6 +212,10 @@ type Server struct {
 	// by /health without probing. Nil until the first snapshot or capability
 	// request completes.
 	capabilityHash atomic.Pointer[string]
+
+	// metrics samples host and GPU resources in the background. Nil until
+	// StartMetricsSampler runs, which leaves health exactly as it was before.
+	metrics *nodemetrics.Sampler
 }
 
 // storedCapabilityHash returns the last published capability hash, or empty
@@ -574,6 +587,10 @@ func (s *Server) Handler() http.Handler {
 	s.startIdleReaper()
 	r := chi.NewRouter()
 	r.Get("/api/v1/health", s.handleHealth)
+	// Unauthenticated, matching the API listener's own /metrics posture: a
+	// scrape target that needs a credential is a scrape target that goes
+	// unmonitored, and the exposure is host resource counters, not media.
+	r.Method(http.MethodGet, "/metrics", promhttp.Handler())
 
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireBearer)
@@ -908,12 +925,50 @@ func (s *Server) trackDownloadPrepare(ctx context.Context, info nodesessions.Ses
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	snapshot := s.metrics.Snapshot()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(HealthResponse{
 		Status:           "ok",
 		ActiveJobs:       s.activeJobs.Load(),
 		CapabilitiesHash: s.storedCapabilityHash(),
+		System:           snapshot.System,
+		GPU:              snapshot.GPU,
 	})
+}
+
+// StartMetricsSampler begins background resource sampling until ctx is
+// canceled, and publishes the readings on /health, /status and /metrics.
+//
+// The scratch dir is the only mount a transcode node samples: it is the volume
+// that silently kills transcodes when it fills, and it is the one path the node
+// is guaranteed to be able to see. Media roots are the API host's to report,
+// because path visibility varies per node and a node cannot tell "root I cannot
+// see" from "root that does not exist".
+func (s *Server) StartMetricsSampler(ctx context.Context) {
+	if s == nil || ctx == nil {
+		return
+	}
+	s.metrics = nodemetrics.NewSampler(nodemetrics.Options{
+		ScratchDir:       s.transcodeDir,
+		DeviceSessions:   playback.HWDeviceLoadSnapshot,
+		DeviceIdentities: renderDeviceIdentities,
+	})
+	s.metrics.Start(ctx)
+}
+
+// renderDeviceIdentities adapts the playback hardware walk to what the sampler
+// needs, so the sampler itself stays free of any playback dependency.
+func renderDeviceIdentities() []nodemetrics.DeviceIdentity {
+	devices := playback.RenderDeviceIdentities()
+	identities := make([]nodemetrics.DeviceIdentity, 0, len(devices))
+	for _, device := range devices {
+		identities = append(identities, nodemetrics.DeviceIdentity{
+			Path:       device.Path,
+			PCIAddress: device.PCIAddress,
+			Vendor:     device.Vendor,
+		})
+	}
+	return identities
 }
 
 // buildCapabilitySnapshot runs the node's full capability detection: hardware
@@ -1840,15 +1895,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RUnlock()
 
+	snapshot := s.metrics.Snapshot()
 	w.Header().Set("Content-Type", "application/json")
 	type statusResponse struct {
-		Status     string   `json:"status"`
-		ActiveJobs int32    `json:"active_jobs"`
-		Sessions   []string `json:"sessions"`
+		Status     string                   `json:"status"`
+		ActiveJobs int32                    `json:"active_jobs"`
+		Sessions   []string                 `json:"sessions"`
+		System     *nodemetrics.SystemStats `json:"system,omitempty"`
+		GPU        []nodemetrics.GPUStats   `json:"gpu,omitempty"`
 	}
 	json.NewEncoder(w).Encode(statusResponse{
 		Status:     "ok",
 		ActiveJobs: s.activeJobs.Load(),
 		Sessions:   sessionIDs,
+		System:     snapshot.System,
+		GPU:        snapshot.GPU,
 	})
 }

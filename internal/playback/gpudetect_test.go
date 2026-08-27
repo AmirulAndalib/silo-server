@@ -180,6 +180,82 @@ func TestDetectHWAccelReportsHostInventoryBehindAPinnedDevice(t *testing.T) {
 	}
 }
 
+// A proxy node reads the cluster-wide hw_device meant for the transcode nodes:
+// the paths and their sysfs vendor entries are visible, but the devices cannot
+// be opened. Detection must skip the probes entirely — no ffmpeg spawn, no
+// alarming driver error — and say why.
+func TestDetectHWAccelSkipsConfiguredDevicesItCannotOpen(t *testing.T) {
+	env := setupHWAccelTest(t)
+	env.addRenderDevice(t, "renderD128", "0x8086")
+	env.addRenderDevice(t, "renderD129", "0x8086")
+	configured := filepath.Join(env.driDir, "renderD128") + "," + filepath.Join(env.driDir, "renderD129")
+	for _, name := range []string{"renderD128", "renderD129"} {
+		if err := os.Remove(filepath.Join(env.driDir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ffmpeg := writeFakeFFmpeg(t, fullyCapableProbe())
+
+	info := DetectHWAccelWithFFmpeg("auto", ffmpeg.path, configured)
+	if info.Resolved != HWAccelNone {
+		t.Fatalf("Resolved = %q, want none", info.Resolved)
+	}
+	if len(info.DetectedBackends) == 0 {
+		t.Fatal("DetectedBackends is empty, want skipped qsv/vaapi entries")
+	}
+	for _, backend := range info.DetectedBackends {
+		if !backend.Skipped {
+			t.Fatalf("backend %q Skipped = false, want true", backend.Backend)
+		}
+		if backend.Verified {
+			t.Fatalf("backend %q Verified = true, want false", backend.Backend)
+		}
+		if !strings.Contains(backend.Reason, "not accessible") {
+			t.Fatalf("backend %q Reason = %q, want an accessibility reason", backend.Backend, backend.Reason)
+		}
+	}
+	if logData, err := os.ReadFile(ffmpeg.logPath); err == nil && len(strings.TrimSpace(string(logData))) > 0 {
+		t.Fatalf("ffmpeg was spawned for inaccessible devices; log:\n%s", logData)
+	}
+}
+
+// One configured device is gone, the other works: the accessible one must
+// still be probed and win, and the missing one must not be smoke-encoded.
+func TestDetectHWAccelProbesOnlyTheAccessibleConfiguredDevices(t *testing.T) {
+	env := setupHWAccelTest(t)
+	env.addRenderDevice(t, "renderD128", "0x8086")
+	env.addRenderDevice(t, "renderD129", "0x8086")
+	if err := os.Remove(filepath.Join(env.driDir, "renderD128")); err != nil {
+		t.Fatal(err)
+	}
+	configured := filepath.Join(env.driDir, "renderD128") + "," + filepath.Join(env.driDir, "renderD129")
+	ffmpeg := writeFakeFFmpeg(t, successfulQSVProbe())
+
+	info := DetectHWAccelWithFFmpeg("auto", ffmpeg.path, configured)
+	if info.Resolved != "qsv" {
+		t.Fatalf("Resolved = %q, want qsv from the accessible device", info.Resolved)
+	}
+	var qsv *DetectedBackend
+	for i := range info.DetectedBackends {
+		if info.DetectedBackends[i].Backend == "qsv" {
+			qsv = &info.DetectedBackends[i]
+		}
+	}
+	if qsv == nil || qsv.Skipped || !qsv.Verified {
+		t.Fatalf("qsv entry = %+v, want verified and not skipped", qsv)
+	}
+	if qsv.Device != filepath.Join(env.driDir, "renderD129") {
+		t.Fatalf("qsv Device = %q, want the accessible renderD129", qsv.Device)
+	}
+	logData, err := os.ReadFile(ffmpeg.logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logData), filepath.Join(env.driDir, "renderD128")) {
+		t.Fatalf("probe touched the inaccessible device; log:\n%s", logData)
+	}
+}
+
 func TestResolveHWAccelWithFFmpegReturnsNoneWhenVAAPISmokeEncodeFails(t *testing.T) {
 	env := setupHWAccelTest(t)
 	env.addRenderDevice(t, "renderD128", "0x1002")

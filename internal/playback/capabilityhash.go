@@ -62,6 +62,7 @@ type canonicalDetectedBackend struct {
 	Devices  []string `json:"devices"`
 	Device   string   `json:"device"`
 	Reason   string   `json:"reason"`
+	Skipped  bool     `json:"skipped"`
 }
 
 type canonicalTransformation struct {
@@ -115,6 +116,7 @@ func canonicalDetectedBackends(backends []DetectedBackend) []canonicalDetectedBa
 			Devices:  sortedStrings(backend.Devices),
 			Device:   backend.Device,
 			Reason:   backend.Reason,
+			Skipped:  backend.Skipped,
 		})
 	}
 	slices.SortFunc(out, func(a, b canonicalDetectedBackend) int {

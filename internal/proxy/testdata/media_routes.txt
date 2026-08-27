@@ -4,6 +4,7 @@ GET /api/v1/health	non-media
 GET /downloads/file/{token}	media	transfer	viewer_egress	false	true
 HEAD /downloads/file/{token}	media	transfer	viewer_egress	false	true
 GET /hw-capabilities	non-media
+GET /metrics	non-media
 GET /status	non-media
 GET /stream/direct/{token}	media	playback	viewer_egress	true	true
 HEAD /stream/direct/{token}	media	playback	viewer_egress	true	true
@@ -27,6 +28,7 @@ GET /api/v1/health	non-media
 GET /downloads/file/{token}	media	transfer	viewer_egress	false	true
 HEAD /downloads/file/{token}	media	transfer	viewer_egress	false	true
 GET /hw-capabilities	non-media
+GET /metrics	non-media
 GET /status	non-media
 GET /stream/direct/{token}	media	playback	viewer_egress	true	true
 HEAD /stream/direct/{token}	media	playback	viewer_egress	true	true

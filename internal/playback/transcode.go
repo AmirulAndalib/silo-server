@@ -176,10 +176,11 @@ type TranscodeSession struct {
 	// written by a previous generation (or a previous session sharing the
 	// directory) and describes media this process has not produced yet.
 	generationStartedAt time.Time
-	// reserveHWDeviceOnRestart is true when StartTranscode selected and reserved
-	// one device from a multi-device QSV/VAAPI setting. Each replacement ffmpeg
-	// process reacquires that same concrete device.
-	reserveHWDeviceOnRestart bool
+	// hwWorkloadDevice is the device this session's GPU workload is counted
+	// against, or empty when it holds none. Each replacement ffmpeg process
+	// reacquires this same device rather than re-running selection, so a restart
+	// keeps its GPU affinity and stays visible in per-device reporting.
+	hwWorkloadDevice string
 }
 
 // NewTranscodeSessionForTest exposes only the output directory needed by tests
@@ -294,11 +295,11 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	if err := validateToneMapOpts(opts); err != nil {
 		return nil, err
 	}
-	configuredHWDevices := ParseHWDeviceSet(opts.HWDevice)
-	reserveHWDeviceOnRestart := configuredHWDevices.Multi() && hwAccelBalancesRenderDevices(opts.HWAccel)
 	// Resolve a multi-device hw_device list to one concrete GPU. Restarts reuse
 	// the selected device, but each ffmpeg process owns its own reservation.
-	hwDevice, releaseHWDevice := acquireHWDevice(opts.HWDevice, opts.HWAccel, opts.AvoidHWDevice)
+	// hwWorkloadDevice is whatever the allocator counted this workload under, so
+	// the rule for which workloads are counted lives in one place.
+	hwDevice, hwWorkloadDevice, releaseHWDevice := acquireHWDevice(opts.HWDevice, opts.HWAccel, opts.AvoidHWDevice)
 	opts.HWDevice = hwDevice
 	opts.AvoidHWDevice = ""
 	if err := validateToneMapSource(ctx, opts); err != nil {
@@ -321,14 +322,14 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	// transcode process outlives a disconnected manifest request.
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s := &TranscodeSession{
-		cancel:                   cancel,
-		opts:                     opts,
-		outputDir:                opts.OutputDir,
-		running:                  true,
-		done:                     make(chan struct{}),
-		stderr:                   newBoundedTailBuffer(stderrTailMaxBytes),
-		lastRequestedSegment:     opts.StartSegmentNumber,
-		reserveHWDeviceOnRestart: reserveHWDeviceOnRestart,
+		cancel:               cancel,
+		opts:                 opts,
+		outputDir:            opts.OutputDir,
+		running:              true,
+		done:                 make(chan struct{}),
+		stderr:               newBoundedTailBuffer(stderrTailMaxBytes),
+		lastRequestedSegment: opts.StartSegmentNumber,
+		hwWorkloadDevice:     hwWorkloadDevice,
 	}
 
 	args := buildFFmpegArgs(opts)
@@ -2613,7 +2614,7 @@ func (s *TranscodeSession) restart(
 		s.stderr.Reset()
 	}
 	s.restartCount++
-	reserveHWDevice := s.reserveHWDeviceOnRestart
+	hwWorkloadDevice := s.hwWorkloadDevice
 	s.mu.Unlock()
 
 	previousOpts := opts
@@ -2670,8 +2671,8 @@ func (s *TranscodeSession) restart(
 	// this session on the same concrete GPU while accounting for the replacement
 	// process as a new active workload.
 	releaseHWDevice := func() {}
-	if reserveHWDevice {
-		releaseHWDevice = reserveConcreteHWDevice(opts.HWDevice)
+	if hwWorkloadDevice != "" {
+		releaseHWDevice = reserveConcreteHWDevice(hwWorkloadDevice)
 	}
 
 	// As in StartTranscode, stamp the generation before the process can write.

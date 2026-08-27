@@ -18,6 +18,13 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// GOOS names this package and its tests compare runtime.GOOS against.
+const (
+	directPlayDarwinGOOS  = "darwin"
+	directPlayLinuxGOOS   = "linux"
+	directPlayWindowsGOOS = "windows"
+)
+
 var (
 	defaultDRIDir              = "/dev/dri"
 	defaultNVIDIAControlDevice = "/dev/nvidiactl"
@@ -64,6 +71,11 @@ type DetectedBackend struct {
 	Device string `json:"device,omitempty"`
 	// Reason explains a failure, attributed per device when several were tried.
 	Reason string `json:"reason,omitempty"`
+	// Skipped reports that no probe was attempted because none of the
+	// backend's candidate devices is accessible to this process — a proxy
+	// node reading a cluster-wide hw_device meant for the transcode nodes,
+	// not a driver failure. Reason still says which devices were skipped.
+	Skipped bool `json:"skipped,omitempty"`
 }
 
 // HWAccelInfo describes the detected hardware acceleration capability.
@@ -112,7 +124,7 @@ func NormalizeProbeRequestTimeout(millis int64, fallback time.Duration) time.Dur
 
 // DetectHWAccel probes this host's GPU hardware and returns structured info.
 func DetectHWAccel() HWAccelInfo {
-	return DetectHWAccelWithFFmpeg("auto", "", "")
+	return DetectHWAccelWithFFmpeg(hwAccelAuto, "", "")
 }
 
 // DetectHWAccelWithFFmpeg probes this host's GPU hardware and configured FFmpeg.
@@ -129,10 +141,10 @@ func DetectHWAccelWithFFmpegContext(ctx context.Context, hwAccel, ffmpegPath, hw
 	candidates := collectHWCandidates(hwDevice)
 	resolved := HWAccelNone
 	var detected []DetectedBackend
-	if currentGOOS == "linux" {
+	if currentGOOS == directPlayLinuxGOOS {
 		resolved, detected = walkHWAccelBackends(ctx, ffmpegPath, candidates, false)
 	}
-	if configured := strings.TrimSpace(hwAccel); configured != "" && configured != "auto" {
+	if configured := strings.TrimSpace(hwAccel); configured != "" && configured != hwAccelAuto {
 		resolved = configured
 	}
 	return HWAccelInfo{
@@ -176,7 +188,7 @@ func ResolveHWAccelWithFFmpeg(hwAccel, ffmpegPath, hwDevice string) string {
 // ResolveHWAccelWithFFmpegContext resolves auto hardware without allowing any
 // FFmpeg capability probe to outlive ctx.
 func ResolveHWAccelWithFFmpegContext(ctx context.Context, hwAccel, ffmpegPath, hwDevice string) string {
-	if hwAccel != "auto" {
+	if hwAccel != hwAccelAuto {
 		return hwAccel
 	}
 	if currentGOOS != "linux" {
@@ -185,6 +197,10 @@ func ResolveHWAccelWithFFmpegContext(ctx context.Context, hwAccel, ffmpegPath, h
 	resolved, _ := walkHWAccelBackends(ctx, ffmpegPath, collectHWCandidates(hwDevice), true)
 	return resolved
 }
+
+// hwAccelAuto is the configured hw_accel value that asks this package to pick
+// a backend by probing the host, rather than the operator naming one outright.
+const hwAccelAuto = "auto"
 
 // hwAccelPreferenceOrder is the auto-resolution order; the first backend whose
 // probe passes wins.
@@ -204,6 +220,11 @@ type hwCandidates struct {
 	nvidia        []string
 	intel         []string
 	vaapi         []string
+	// accessible records, for a configured probe set only, which devices this
+	// process can actually open. nil means the set came from discovery, which
+	// already filtered on openability. NVENC's empty device string never
+	// consults it — CUDA selects its GPU without a render-node path.
+	accessible    map[string]bool
 	nvidiaPresent bool
 	// intelPresent describes the inventory rather than the probe set, so a
 	// pinned non-Intel device does not hide an Intel GPU from operators.
@@ -220,6 +241,15 @@ func collectHWCandidates(configuredDevice string) hwCandidates {
 	probeDevices := ParseHWDeviceSet(configuredDevice).List()
 	if len(probeDevices) == 0 {
 		probeDevices = candidates.renderDevices
+	} else {
+		// A configured device this process cannot open can never pass a smoke
+		// encode, so it is classified for reporting but never probed. This is
+		// the normal state of a proxy node reading the cluster-wide hw_device
+		// meant for the transcode nodes.
+		candidates.accessible = make(map[string]bool, len(probeDevices))
+		for _, device := range probeDevices {
+			candidates.accessible[device] = deviceOpenable(device)
+		}
 	}
 	for _, device := range probeDevices {
 		switch {
@@ -299,12 +329,12 @@ func walkHWAccelBackends(ctx context.Context, ffmpegPath string, candidates hwCa
 		}
 		entry := verifyHWAccelBackend(ctx, backend, ffmpegPath, candidates)
 		if !entry.Verified {
-			slog.Warn("hw_accel=auto: candidate hardware failed its FFmpeg probe",
+			slog.WarnContext(ctx, "hw_accel=auto: candidate hardware failed its FFmpeg probe",
 				"backend", backend, "devices", entry.Devices,
 				"ffmpeg", normalizeFFmpegPath(ffmpegPath), "reason", entry.Reason)
 		} else if resolved == "" {
 			resolved = backend
-			slog.Info("hw_accel=auto: verified hardware backend", "backend", backend, "device", entry.Device)
+			slog.InfoContext(ctx, "hw_accel=auto: verified hardware backend", "backend", backend, "device", entry.Device)
 		}
 		detected = append(detected, entry)
 		if resolved != "" && stopAtFirstVerified {
@@ -312,7 +342,7 @@ func walkHWAccelBackends(ctx context.Context, ffmpegPath string, candidates hwCa
 		}
 	}
 	if resolved == "" {
-		slog.Info("hw_accel=auto: no verified hardware backend, using software encoding")
+		slog.InfoContext(ctx, "hw_accel=auto: no verified hardware backend, using software encoding")
 		return HWAccelNone, detected
 	}
 	return resolved, detected
@@ -325,10 +355,16 @@ func verifyHWAccelBackend(ctx context.Context, backend, ffmpegPath string, candi
 	devices := candidates.probeDevicesFor(backend)
 	entry := DetectedBackend{Backend: backend, Devices: candidates.devicesFor(backend)}
 	reasons := make([]string, 0, len(devices))
+	probed := false
 	for _, device := range devices {
 		if ctx.Err() != nil {
 			break
 		}
+		if !candidates.deviceProbeable(device) {
+			reasons = append(reasons, hwProbeFailureReason(len(devices), device, "device not accessible on this node"))
+			continue
+		}
+		probed = true
 		available, reason := ffmpegSupportsBackendContext(ctx, backend, ffmpegPath, device)
 		if available {
 			entry.Verified = true
@@ -340,8 +376,32 @@ func verifyHWAccelBackend(ctx context.Context, backend, ffmpegPath string, candi
 	if len(reasons) == 0 {
 		reasons = append(reasons, "hardware detection budget exhausted before probing "+backend)
 	}
+	entry.Skipped = !probed && len(devices) > 0 && ctx.Err() == nil
 	entry.Reason = strings.Join(reasons, "; ")
 	return entry
+}
+
+// deviceProbeable reports whether a candidate device may be smoke-encoded on.
+// The empty device is NVENC's — CUDA needs no render-node path — and a nil map
+// means the candidate set came from discovery, which is openable by
+// construction.
+func (c hwCandidates) deviceProbeable(device string) bool {
+	if device == "" || c.accessible == nil {
+		return true
+	}
+	return c.accessible[device]
+}
+
+// deviceOpenable mirrors the accessibility filter listRenderDevices applies to
+// discovered devices: a device this process cannot open cannot host a probe or
+// a transcode.
+func deviceOpenable(device string) bool {
+	f, err := os.Open(device)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
 }
 
 // hwProbeFailureReason attributes a failure to its device only when several
@@ -490,8 +550,8 @@ func probeFFmpegNVENCContext(ctx context.Context, ffmpegPath, device string, com
 
 	if output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath, "-hide_banner", "-encoders"); err != nil {
 		return hwProbeResult{reason: "encoders probe failed: " + FormatFFmpegProbeFailure(err, output)}
-	} else if !ffmpegOutputHasToken(output, "h264_nvenc") {
-		return hwProbeResult{reason: "h264_nvenc encoder unavailable"}
+	} else if !ffmpegOutputHasToken(output, encoderH264NVENC) {
+		return hwProbeResult{reason: encoderUnavailableReason(encoderH264NVENC)}
 	} else if !ffmpegOutputHasToken(output, "hevc_nvenc") {
 		return hwProbeResult{reason: "hevc_nvenc encoder unavailable"}
 	}
@@ -519,8 +579,8 @@ func probeFFmpegQSVContext(ctx context.Context, ffmpegPath, device string, comma
 
 	if output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath, "-hide_banner", "-encoders"); err != nil {
 		return hwProbeResult{reason: "encoders probe failed: " + FormatFFmpegProbeFailure(err, output)}
-	} else if !ffmpegOutputHasToken(output, "h264_qsv") {
-		return hwProbeResult{reason: "h264_qsv encoder unavailable"}
+	} else if !ffmpegOutputHasToken(output, encoderH264QSV) {
+		return hwProbeResult{reason: encoderUnavailableReason(encoderH264QSV)}
 	} else if !ffmpegOutputHasToken(output, "hevc_qsv") {
 		return hwProbeResult{reason: "hevc_qsv encoder unavailable"}
 	}
@@ -534,8 +594,8 @@ func probeFFmpegQSVContext(ctx context.Context, ffmpegPath, device string, comma
 func probeFFmpegVAAPIContext(ctx context.Context, ffmpegPath, device string, commandTimeout time.Duration) hwProbeResult {
 	if output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath, "-hide_banner", "-encoders"); err != nil {
 		return hwProbeResult{reason: "encoders probe failed: " + FormatFFmpegProbeFailure(err, output)}
-	} else if !ffmpegOutputHasToken(output, "h264_vaapi") {
-		return hwProbeResult{reason: "h264_vaapi encoder unavailable"}
+	} else if !ffmpegOutputHasToken(output, encoderH264VAAPI) {
+		return hwProbeResult{reason: encoderUnavailableReason(encoderH264VAAPI)}
 	}
 
 	return smokeEncodeResult(ctx, ffmpegPath, transcodeHWVAAPI, device, commandTimeout)
@@ -551,15 +611,28 @@ func smokeEncodeResult(ctx context.Context, ffmpegPath, backend, device string, 
 	return hwProbeResult{available: true}
 }
 
+// H.264 encoder names FFmpeg reports for each hardware backend.
+const (
+	encoderH264QSV   = "h264_qsv"
+	encoderH264VAAPI = "h264_vaapi"
+	encoderH264NVENC = "h264_nvenc"
+)
+
+// encoderUnavailableReason reports that a probe's -encoders listing did not
+// include the given encoder.
+func encoderUnavailableReason(encoder string) string {
+	return encoder + " encoder unavailable"
+}
+
 // hardwareEncoder returns the H.264 encoder paired with a backend.
 func hardwareEncoder(backend string) string {
 	switch backend {
 	case transcodeHWQSV:
-		return "h264_qsv"
+		return encoderH264QSV
 	case transcodeHWVAAPI:
-		return "h264_vaapi"
+		return encoderH264VAAPI
 	default:
-		return "h264_nvenc"
+		return encoderH264NVENC
 	}
 }
 
@@ -709,6 +782,57 @@ func readSysfsID(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// RenderDeviceIdentity is a render device's hardware identity, without the
+// probing that a full capability report performs.
+type RenderDeviceIdentity struct {
+	// Path is the render node, e.g. /dev/dri/renderD128.
+	Path string
+	// PCIAddress is the sysfs PCI slot, e.g. 0000:03:00.0.
+	PCIAddress string
+	// Vendor is "intel", "nvidia", "amd", or empty when sysfs names one we do
+	// not recognize.
+	Vendor string
+}
+
+// RenderDeviceIdentities enumerates this host's render devices with the sysfs
+// identity of each.
+//
+// It exists for callers that need to correlate a device across surfaces —
+// notably resource sampling, which learns about GPUs by PCI address from DRM
+// fdinfo and has to name them the way the rest of the server does. It runs no
+// ffmpeg probe and takes no lock: it is a sysfs read, cheap enough to call on a
+// sampling interval, unlike DetectHWAccelWithFFmpeg.
+func RenderDeviceIdentities() []RenderDeviceIdentity {
+	if currentGOOS != "linux" {
+		return nil
+	}
+	devices := listRenderDevices(defaultDRIDir)
+	identities := make([]RenderDeviceIdentity, 0, len(devices))
+	for _, device := range devices {
+		identities = append(identities, RenderDeviceIdentity{
+			Path:       device,
+			PCIAddress: renderDevicePCIAddress(device),
+			Vendor:     renderDeviceVendor(device),
+		})
+	}
+	return identities
+}
+
+// renderDeviceVendor maps a device's sysfs PCI vendor id to a short label.
+func renderDeviceVendor(renderDevPath string) string {
+	name := filepath.Base(renderDevPath)
+	switch readSysfsID(filepath.Join(sysClassDRMDir, name, "device", "vendor")) {
+	case "0x8086":
+		return "intel"
+	case "0x10de":
+		return "nvidia"
+	case "0x1002":
+		return "amd"
+	default:
+		return ""
+	}
 }
 
 // renderDeviceDetails describes every listed device.

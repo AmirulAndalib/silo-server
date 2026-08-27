@@ -1,0 +1,236 @@
+package nodemetrics
+
+import (
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// cpuTimes is one /proc/stat aggregate reading. Both fields are monotonic jiffy
+// counters; only differences between two readings mean anything.
+type cpuTimes struct {
+	busy  uint64
+	total uint64
+	valid bool
+}
+
+// netCounters is one /proc/net/dev aggregate reading, excluding loopback.
+type netCounters struct {
+	rx    uint64
+	tx    uint64
+	at    time.Time
+	valid bool
+}
+
+// readCPUTimes parses the aggregate "cpu" line of /proc/stat and counts the
+// per-core lines beneath it.
+//
+// Idle and iowait are both subtracted from busy: a core waiting on storage is
+// not doing work, and counting it as busy would make every node with a slow
+// disk look CPU-bound.
+func readCPUTimes(procDir string) (cpuTimes, int) {
+	raw, err := os.ReadFile(filepath.Join(procDir, "stat"))
+	if err != nil {
+		return cpuTimes{}, 0
+	}
+	var times cpuTimes
+	cores := 0
+	for line := range strings.Lines(string(raw)) {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || !strings.HasPrefix(fields[0], "cpu") {
+			continue
+		}
+		if fields[0] != "cpu" {
+			// "cpu0", "cpu1", … — one line per online core.
+			cores++
+			continue
+		}
+		if times.valid {
+			continue
+		}
+		var total, idle uint64
+		for i, field := range fields[1:] {
+			value, err := strconv.ParseUint(field, 10, 64)
+			if err != nil {
+				continue
+			}
+			// Columns are user, nice, system, idle, iowait, irq, softirq,
+			// steal, guest, guest_nice. guest time is already included in user,
+			// so summing past steal would double-count it.
+			if i >= 8 {
+				break
+			}
+			total += value
+			if i == 3 || i == 4 {
+				idle += value
+			}
+		}
+		if total == 0 {
+			continue
+		}
+		times = cpuTimes{busy: total - idle, total: total, valid: true}
+	}
+	return times, cores
+}
+
+// cpuBusyPercent converts two readings into a busy percentage.
+//
+// A counter that went backwards means the readings do not describe one
+// continuous run (a container was migrated, /proc was remounted, or a test
+// rewound the fixture), so the pair is unusable rather than negative.
+func cpuBusyPercent(previous, current cpuTimes) (int, bool) {
+	if !previous.valid || !current.valid {
+		return 0, false
+	}
+	if current.total <= previous.total || current.busy < previous.busy {
+		return 0, false
+	}
+	totalDelta := current.total - previous.total
+	busyDelta := current.busy - previous.busy
+	return clampPercent(int((busyDelta*100 + totalDelta/2) / totalDelta)), true
+}
+
+// readLoad1 parses the 1-minute load average from /proc/loadavg.
+func readLoad1(procDir string) float64 {
+	raw, err := os.ReadFile(filepath.Join(procDir, "loadavg"))
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) == 0 {
+		return 0
+	}
+	value, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
+}
+
+// readNetCounters sums received and transmitted bytes across every interface
+// except loopback, which would otherwise double-count traffic a node sends to
+// itself (health checks, the local proxy hop).
+func readNetCounters(procDir string, at time.Time) netCounters {
+	raw, err := os.ReadFile(filepath.Join(procDir, "net", "dev"))
+	if err != nil {
+		return netCounters{}
+	}
+	counters := netCounters{at: at}
+	for line := range strings.Lines(string(raw)) {
+		name, rest, ok := strings.Cut(line, ":")
+		if !ok {
+			// The two header lines carry no colon.
+			continue
+		}
+		if strings.TrimSpace(name) == "lo" {
+			continue
+		}
+		fields := strings.Fields(rest)
+		// Eight receive columns then eight transmit columns; bytes lead each.
+		if len(fields) < 9 {
+			continue
+		}
+		rx, rxErr := strconv.ParseUint(fields[0], 10, 64)
+		tx, txErr := strconv.ParseUint(fields[8], 10, 64)
+		if rxErr != nil || txErr != nil {
+			continue
+		}
+		counters.rx += rx
+		counters.tx += tx
+		counters.valid = true
+	}
+	return counters
+}
+
+// netThroughputBps converts two readings into bits per second.
+//
+// Interfaces disappearing (a container restarting its veth) drops the aggregate
+// counter, and a 32-bit counter on a busy link wraps; both show up as a
+// negative delta, and both are reported as zero rather than as a spike, since
+// an invented number here would land straight in an operator's bandwidth graph.
+func netThroughputBps(previous, current netCounters) (rxBps, txBps int64, ok bool) {
+	if !previous.valid || !current.valid {
+		return 0, 0, false
+	}
+	seconds := current.at.Sub(previous.at).Seconds()
+	if seconds <= 0 {
+		return 0, 0, false
+	}
+	rate := func(prev, cur uint64) int64 {
+		if cur < prev {
+			return 0
+		}
+		return int64(float64(cur-prev) * 8 / seconds)
+	}
+	return rate(previous.rx, current.rx), rate(previous.tx, current.tx), true
+}
+
+// memoryStats reports used and total bytes for this process's memory domain.
+//
+// /proc/meminfo describes the host even inside a container, so a cgroup limit —
+// which is what the kernel will actually OOM-kill against — always wins over
+// it, and cgroup usage (page cache excluded) wins over the host's own
+// used figure for the same reason.
+func (s *Sampler) memoryStats() (usedBytes, totalBytes int64) {
+	fields, err := ReadMeminfoBytes(filepath.Join(s.procDir, "meminfo"))
+	if err == nil {
+		totalBytes = fields["MemTotal"]
+		if available, ok := fields["MemAvailable"]; ok && totalBytes >= available {
+			usedBytes = totalBytes - available
+		}
+	}
+
+	for _, path := range s.cgroupLimitPaths {
+		limit, err := ReadCgroupMemoryLimit(path)
+		if err != nil || limit <= 0 {
+			continue
+		}
+		// A limit above the host's memory is not a limit worth reporting; it
+		// would only make a node look like it has headroom the kernel cannot
+		// give it.
+		if totalBytes == 0 || limit < totalBytes {
+			totalBytes = limit
+		}
+		break
+	}
+
+	if usage, ok := s.cgroupMemoryUsage(); ok {
+		usedBytes = usage
+	}
+	if totalBytes > 0 && usedBytes > totalBytes {
+		usedBytes = totalBytes
+	}
+	return usedBytes, totalBytes
+}
+
+// cgroupMemoryUsage returns the working set of this process's memory cgroup:
+// current charge minus reclaimable file pages.
+func (s *Sampler) cgroupMemoryUsage() (int64, bool) {
+	for _, paths := range s.cgroupUsagePaths {
+		usage, err := readCgroupSingleValue(paths.usage)
+		if err != nil {
+			continue
+		}
+		if inactive, err := readCgroupStatKey(paths.stat, paths.inactiveFile); err == nil && inactive > 0 && inactive <= usage {
+			usage -= inactive
+		}
+		return usage, true
+	}
+	return 0, false
+}
+
+func clampPercent(value int) int {
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+const bytesPerMB = int64(1024 * 1024)
+
+func bytesToMB(value int64) int64 { return value / bytesPerMB }

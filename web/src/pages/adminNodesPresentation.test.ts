@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { StreamNode } from "@/api/types";
-import { CAPABILITY_STALE_AFTER_MS, describeNodeGPU } from "./adminNodesPresentation";
+import type { HostSystemStats, StreamNode } from "@/api/types";
+import {
+  CAPABILITY_STALE_AFTER_MS,
+  DISK_FILL_WARNING_PCT,
+  describeGPUBusy,
+  describeNodeGPU,
+  describeNodeSystem,
+  describeResourceSample,
+  formatBitsPerSecond,
+} from "./adminNodesPresentation";
 
 const NOW = Date.parse("2026-08-26T12:00:00Z");
 
@@ -148,6 +156,37 @@ describe("describeNodeGPU", () => {
     ]);
   });
 
+  it("does not warn about skipped backends whose devices are inaccessible", () => {
+    const presentation = describeNodeGPU(
+      makeNode({
+        capabilities: {
+          resolved: "none",
+          detected_backends: [
+            {
+              backend: "qsv",
+              verified: false,
+              skipped: true,
+              reason: "/dev/dri/renderD128: device not accessible on this node",
+            },
+            {
+              backend: "vaapi",
+              verified: false,
+              skipped: true,
+              reason: "/dev/dri/renderD128: device not accessible on this node",
+            },
+          ],
+        },
+      }),
+      NOW,
+    );
+
+    expect(presentation.kind === "reported" && presentation.failures).toEqual([]);
+    expect(presentation.kind === "reported" && presentation.backend.label).toBe("SW");
+    expect(presentation.kind === "reported" && presentation.backend.title).toContain(
+      "not accessible on this node",
+    );
+  });
+
   it("falls back to software with no hardware backend resolved", () => {
     const presentation = describeNodeGPU(
       makeNode({
@@ -282,6 +321,152 @@ describe("describeNodeGPU", () => {
     expect(presentation).toMatchObject({ stale: false });
   });
 
+  it("reports no live devices for a node whose server sends no last_stats", () => {
+    const presentation = describeNodeGPU(makeNode({ capabilities: { resolved: "qsv" } }), NOW);
+
+    expect(presentation.kind === "reported" && presentation.live).toEqual([]);
+  });
+
+  it("matches a live reading to the inventory device it names", () => {
+    const presentation = describeNodeGPU(
+      makeNode({
+        capabilities: {
+          resolved: "qsv",
+          render_device_details: [{ path: "/dev/dri/renderD128", description: "Intel GPU" }],
+        },
+        last_stats: {
+          gpu: [
+            {
+              device: "/dev/dri/renderD128",
+              vendor: "intel",
+              sessions: 2,
+              video_busy_pct: 42,
+              render_busy_pct: 12,
+              source: "fdinfo",
+            },
+          ],
+        },
+      }),
+      NOW,
+    );
+
+    expect(presentation.kind === "reported" && presentation.live).toEqual([
+      {
+        key: "/dev/dri/renderD128",
+        label: "renderD128",
+        busy: "42%",
+        busyMuted: false,
+        sessions: "2 sessions",
+        title: ["/dev/dri/renderD128 — Intel GPU", "video 42% · render 12%", "source: fdinfo"].join(
+          "\n",
+        ),
+      },
+    ]);
+  });
+
+  it("matches a live reading by PCI address when the inventory has no matching path", () => {
+    const presentation = describeNodeGPU(
+      makeNode({
+        capabilities: {
+          resolved: "vaapi",
+          render_device_details: [
+            {
+              path: "/dev/dri/renderD129",
+              pci_address: "0000:03:00.0",
+              description: "AMD GPU",
+            },
+          ],
+        },
+        last_stats: {
+          gpu: [{ device: "0000:03:00.0", sessions: 1, video_busy_pct: 7, source: "fdinfo" }],
+        },
+      }),
+      NOW,
+    );
+
+    expect(presentation.kind === "reported" && presentation.live[0]).toMatchObject({
+      label: "0000:03:00.0",
+      sessions: "1 session",
+      title: expect.stringContaining("0000:03:00.0 — AMD GPU"),
+    });
+  });
+
+  it("keeps an unmatched device rather than dropping the reading", () => {
+    const presentation = describeNodeGPU(
+      makeNode({
+        capabilities: { resolved: "nvenc", render_device_details: [] },
+        last_stats: {
+          gpu: [
+            {
+              device: "cuda:0",
+              vendor: "nvidia",
+              sessions: 0,
+              video_busy_pct: 61,
+              total_busy_pct: 74,
+              vram_used_mb: 1024,
+              vram_total_mb: 8192,
+              source: "nvidia-smi",
+            },
+          ],
+        },
+      }),
+      NOW,
+    );
+
+    expect(presentation.kind === "reported" && presentation.live[0]).toEqual({
+      key: "cuda:0",
+      label: "cuda:0",
+      busy: "61%",
+      busyMuted: false,
+      sessions: "idle",
+      title: [
+        "cuda:0",
+        "video 61%",
+        "whole GPU 74% (all tenants)",
+        "VRAM 1.0 GiB of 8.0 GiB",
+        "source: nvidia-smi",
+      ].join("\n"),
+    });
+  });
+
+  // The zeros an unavailable source reports are placeholders, and an operator
+  // who reads them as an idle GPU draws the wrong conclusion.
+  it("mutes the busy percentage when nothing measured the device", () => {
+    const presentation = describeNodeGPU(
+      makeNode({
+        capabilities: { resolved: "qsv" },
+        last_stats: {
+          gpu: [{ device: "/dev/dri/renderD128", sessions: 1, source: "unavailable" }],
+        },
+      }),
+      NOW,
+    );
+
+    expect(presentation.kind === "reported" && presentation.live[0]).toMatchObject({
+      busy: "—",
+      busyMuted: true,
+      sessions: "1 session",
+      title: expect.stringContaining("No source could measure this device"),
+    });
+  });
+
+  it("drops live readings for an unhealthy node whose sample stopped moving", () => {
+    const presentation = describeNodeGPU(
+      makeNode({
+        healthy: false,
+        capabilities: { resolved: "qsv" },
+        last_stats: {
+          gpu: [
+            { device: "/dev/dri/renderD128", sessions: 3, video_busy_pct: 90, source: "fdinfo" },
+          ],
+        },
+      }),
+      NOW,
+    );
+
+    expect(presentation.kind === "reported" && presentation.live).toEqual([]);
+  });
+
   it("tolerates physical_gpu_keys without letting it change the presentation", () => {
     const capabilities = {
       resolved: "nvenc",
@@ -291,5 +476,240 @@ describe("describeNodeGPU", () => {
     expect(
       describeNodeGPU(makeNode({ capabilities, physical_gpu_keys: ["GPU-abc"] }), NOW),
     ).toEqual(describeNodeGPU(makeNode({ capabilities }), NOW));
+  });
+});
+
+const FULL_SAMPLE: HostSystemStats = {
+  cpu_pct: 42,
+  load1: 1.35,
+  cores: 8,
+  mem_used_mb: 12800,
+  mem_total_mb: 32000,
+  disks: [{ path: "/tmp/silo-transcode", used_gb: 435, total_gb: 500 }],
+  net_rx_bps: 12_400_000,
+  net_tx_bps: 3_100_000,
+};
+
+describe("describeNodeSystem", () => {
+  it("explains a healthy node that reports no sample at all", () => {
+    expect(describeNodeSystem(makeNode())).toEqual({
+      kind: "unreported",
+      label: "—",
+      title:
+        "This node reported no resource sample. Sampling is Linux-only, and a node running a build from before resource sampling reports none.",
+    });
+  });
+
+  it("blames the outage, not the sampler, when an unreachable node has no sample", () => {
+    expect(describeNodeSystem(makeNode({ healthy: false }))).toMatchObject({
+      kind: "unreported",
+      title: "This node is not answering health checks, so it has no current resource sample.",
+    });
+  });
+
+  // A frozen CPU percentage is indistinguishable from a live one on screen.
+  it("shows dashes for an unhealthy node still carrying an older sample", () => {
+    expect(
+      describeNodeSystem(makeNode({ healthy: false, last_stats: { system: FULL_SAMPLE } })),
+    ).toMatchObject({
+      kind: "unreported",
+      label: "—",
+      title: expect.stringContaining("no longer current"),
+    });
+  });
+
+  it("derives every reading from a complete sample", () => {
+    const system = describeNodeSystem(makeNode({ last_stats: { system: FULL_SAMPLE } }));
+
+    expect(system).toMatchObject({
+      kind: "reported",
+      cpu: { label: "CPU", value: "42%", detail: "8 cores · load 1.35", muted: false },
+      memory: {
+        label: "RAM",
+        value: "12.5 GiB of 31.3 GiB",
+        detail: "40% used",
+        muted: false,
+      },
+      disk: {
+        label: "Disk",
+        value: "87%",
+        detail: "/tmp/silo-transcode",
+        title: "/tmp/silo-transcode — 87% full (435.0 GiB of 500.0 GiB)",
+        muted: false,
+        warning: true,
+      },
+      network: { label: "Net", value: "↓ 12.4 Mbps · ↑ 3.1 Mbps", muted: false },
+    });
+  });
+
+  it("mutes only the readings a partial sample is missing", () => {
+    const system = describeNodeSystem(
+      makeNode({ last_stats: { system: { cpu_pct: 12, mem_total_mb: 0, disks: [] } } }),
+    );
+
+    expect(system).toMatchObject({
+      kind: "reported",
+      cpu: { value: "12%", detail: "", muted: false },
+      memory: { value: "—", muted: true, title: "This sample carries no memory reading." },
+      disk: { value: "—", muted: true, title: "This sample carries no disk reading." },
+      network: { value: "—", muted: true, title: "This sample carries no network reading." },
+    });
+  });
+
+  it("warns exactly at the disk fill threshold and not one point below", () => {
+    const atThreshold = describeNodeSystem(
+      makeNode({
+        last_stats: {
+          system: { disks: [{ path: "/scratch", used_gb: DISK_FILL_WARNING_PCT, total_gb: 100 }] },
+        },
+      }),
+    );
+    const below = describeNodeSystem(
+      makeNode({
+        last_stats: {
+          system: {
+            disks: [{ path: "/scratch", used_gb: DISK_FILL_WARNING_PCT - 1, total_gb: 100 }],
+          },
+        },
+      }),
+    );
+
+    expect(atThreshold).toMatchObject({ disk: { value: "85%", warning: true } });
+    expect(below).toMatchObject({ disk: { value: "84%", warning: false } });
+  });
+
+  it("reports the fullest mount and keeps every mount in the tooltip", () => {
+    const system = describeNodeSystem(
+      makeNode({
+        last_stats: {
+          system: {
+            disks: [
+              { path: "/tmp/silo-transcode", used_gb: 10, total_gb: 100 },
+              { path: "/media/movies", used_gb: 95, total_gb: 100, stale: true },
+              { path: "/media/gone", unavailable: true },
+            ],
+          },
+        },
+      }),
+    );
+
+    expect(system).toMatchObject({
+      disk: {
+        value: "95%",
+        detail: "/media/movies",
+        warning: true,
+        title: [
+          "/tmp/silo-transcode — 10% full (10.0 GiB of 100.0 GiB)",
+          "/media/movies — 95% full (95.0 GiB of 100.0 GiB), carried over from an earlier pass",
+          "/media/gone — unavailable on this host",
+        ].join("\n"),
+      },
+    });
+  });
+
+  it("names the mount that went away instead of showing a bare dash", () => {
+    const system = describeNodeSystem(
+      makeNode({ last_stats: { system: { disks: [{ path: "/media", unavailable: true }] } } }),
+    );
+
+    expect(system).toMatchObject({
+      disk: { value: "—", muted: true, title: "/media — unavailable on this host" },
+    });
+  });
+});
+
+describe("formatBitsPerSecond", () => {
+  it("scales a bits-per-second rate to the unit an operator reads", () => {
+    expect(formatBitsPerSecond(0)).toBe("0 bps");
+    expect(formatBitsPerSecond(940)).toBe("940 bps");
+    expect(formatBitsPerSecond(12_500)).toBe("13 kbps");
+    expect(formatBitsPerSecond(12_400_000)).toBe("12.4 Mbps");
+    expect(formatBitsPerSecond(2_500_000_000)).toBe("2.5 Gbps");
+  });
+
+  it("has nothing to say about an absent or impossible rate", () => {
+    expect(formatBitsPerSecond(undefined)).toBeNull();
+    expect(formatBitsPerSecond(null)).toBeNull();
+    expect(formatBitsPerSecond(-1)).toBeNull();
+    expect(formatBitsPerSecond(Number.NaN)).toBeNull();
+  });
+});
+
+describe("describeGPUBusy", () => {
+  it("reports nothing for a host with no GPU rather than an idle one", () => {
+    expect(describeGPUBusy([])).toBeNull();
+  });
+
+  it("reports the busiest video engine and the total pinned sessions", () => {
+    expect(
+      describeGPUBusy([
+        { device: "/dev/dri/renderD128", video_busy_pct: 42, sessions: 2, source: "fdinfo" },
+        { device: "cuda:0", video_busy_pct: 71, sessions: 1, source: "nvidia-smi" },
+      ]),
+    ).toMatchObject({
+      label: "GPU",
+      value: "71%",
+      detail: "busiest of 2 GPUs · 3 sessions",
+      muted: false,
+      title: [
+        "/dev/dri/renderD128 — video 42% · 2 sessions",
+        "cuda:0 — video 71% · 1 session",
+      ].join("\n"),
+    });
+  });
+
+  it("mutes the tile when no device could be measured", () => {
+    expect(
+      describeGPUBusy([{ device: "/dev/dri/renderD128", sessions: 0, source: "unavailable" }]),
+    ).toMatchObject({
+      value: "—",
+      muted: true,
+      title: "/dev/dri/renderD128 — not measured · 0 sessions",
+    });
+  });
+});
+
+describe("describeResourceSample", () => {
+  it("treats a server with no such endpoint as an unsampled host", () => {
+    expect(describeResourceSample(undefined)).toMatchObject({ kind: "unavailable" });
+  });
+
+  it("treats an explicit available:false the same way", () => {
+    expect(describeResourceSample({ available: false })).toMatchObject({ kind: "unavailable" });
+  });
+
+  it("does not claim a sample when available is true but the body carries none", () => {
+    expect(describeResourceSample({ available: true })).toMatchObject({ kind: "unavailable" });
+  });
+
+  it("derives the host readings and omits the GPU tile when there is no GPU", () => {
+    const sample = describeResourceSample({
+      available: true,
+      sampled_at: "2026-08-26T12:00:00Z",
+      system: FULL_SAMPLE,
+    });
+
+    expect(sample).toMatchObject({
+      kind: "sampled",
+      cpu: { value: "42%" },
+      memory: { value: "12.5 GiB of 31.3 GiB" },
+      disk: { value: "87%", warning: true },
+      gpu: null,
+      sampledAt: "2026-08-26T12:00:00Z",
+    });
+  });
+
+  it("carries the GPU reading through when the host reports one", () => {
+    const sample = describeResourceSample({
+      available: true,
+      system: FULL_SAMPLE,
+      gpu: [{ device: "/dev/dri/renderD128", video_busy_pct: 30, sessions: 1, source: "fdinfo" }],
+    });
+
+    expect(sample).toMatchObject({
+      kind: "sampled",
+      gpu: { value: "30%", detail: "video engine · 1 session" },
+      sampledAt: null,
+    });
   });
 });

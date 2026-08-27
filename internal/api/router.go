@@ -49,6 +49,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/metadata/tmdb"
 	metatrakt "github.com/Silo-Server/silo-server/internal/metadata/trakt"
 	metadatatranslation "github.com/Silo-Server/silo-server/internal/metadata/translation"
+	"github.com/Silo-Server/silo-server/internal/nodemetrics"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/noderecipe"
 	"github.com/Silo-Server/silo-server/internal/notifications"
@@ -124,6 +125,7 @@ type Dependencies struct {
 	TranscodePool             *nodepool.TranscodePool         // transcode node pool (may be nil)
 	NodePlanner               *nodepool.Planner               // group/cap-aware node selection (may be nil)
 	NodeHealthChecker         *nodepool.HealthChecker         // periodic node health/capability sweep (may be nil)
+	ResourceSampler           *nodemetrics.Sampler            // this host's own resource sampler (may be nil)
 	SessionSyncer             handlers.PlaybackSessionSyncer  // optional; immediate playback session sync trigger
 	EventBus                  cache.EventBus
 	AdminStatsProvider        handlers.AdminStatsSource
@@ -3186,9 +3188,13 @@ func NewRouter(deps Dependencies) chi.Router {
 									sysHWDevice = deps.Config.Playback.HWDevice
 								}
 								systemHandler := handlers.NewSystemHandler(deps.TranscodePool, sysJWTSecret, sysFFmpegPath, sysHWAccel, sysHWDevice)
+								if deps.ResourceSampler != nil {
+									systemHandler.SetResourceSampler(deps.ResourceSampler)
+								}
 								r.Route("/system", func(r chi.Router) {
 									r.Get("/build", systemHandler.HandleBuildInfo)
 									r.Get("/hw-accel", systemHandler.HandleHWAccel)
+									r.Get("/resources", systemHandler.HandleSystemResources)
 								})
 							}
 

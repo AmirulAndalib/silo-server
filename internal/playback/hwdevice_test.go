@@ -79,6 +79,41 @@ func TestAcquireHWDeviceSingleValuePassesThrough(t *testing.T) {
 	}
 }
 
+// The single-GPU node is the common deployment. Having nothing to balance is no
+// reason to leave its workloads uncounted: sessions would read 0 on a node
+// whose engine busy percentage says it is transcoding.
+func TestAcquireHWDeviceSingleRenderDeviceIsCounted(t *testing.T) {
+	for _, accel := range []string{"qsv", "vaapi"} {
+		t.Run(accel, func(t *testing.T) {
+			resetDeviceLoad(t)
+			fakeDeviceStat(t) // the device need not exist for the count to be right
+			_, releaseFirst := AcquireHWDevice("/dev/dri/renderD128", accel)
+			_, releaseSecond := AcquireHWDevice("/dev/dri/renderD128", accel)
+
+			if got := HWDeviceLoadSnapshot()["/dev/dri/renderD128"]; got != 2 {
+				t.Fatalf("snapshot count = %d, want both workloads counted (%v)", got, HWDeviceLoadSnapshot())
+			}
+			releaseFirst()
+			releaseSecond()
+			if got := HWDeviceLoadSnapshot(); len(got) != 0 {
+				t.Fatalf("snapshot after release = %v, want empty", got)
+			}
+		})
+	}
+}
+
+// With no device configured there is no name to count against: ffmpeg picks the
+// device downstream, and inventing a key would report sessions on a device the
+// sampler never names.
+func TestAcquireHWDeviceUnconfiguredRenderDeviceIsNotCounted(t *testing.T) {
+	resetDeviceLoad(t)
+	_, release := AcquireHWDevice("", "vaapi")
+	defer release()
+	if got := HWDeviceLoadSnapshot(); len(got) != 0 {
+		t.Fatalf("snapshot = %v, want no count for an unresolved device", got)
+	}
+}
+
 func TestAcquireHWDeviceBalancesAcrossList(t *testing.T) {
 	resetDeviceLoad(t)
 	fakeDeviceStat(t, "/dev/dri/renderD128", "/dev/dri/renderD129")
@@ -128,16 +163,98 @@ func TestAcquireHWDeviceAllMissingFallsBackToFirst(t *testing.T) {
 	}
 }
 
-func TestAcquireHWDeviceNVENCMultiListUsesFirstWithoutReserving(t *testing.T) {
+// NVENC is counted but never balanced: a multi-entry list still resolves to its
+// first entry, because CUDA indexes are not render-node paths and the balancer
+// has no way to compare them.
+func TestAcquireHWDeviceNVENCMultiListUsesFirstWithoutBalancing(t *testing.T) {
 	resetDeviceLoad(t)
 	fakeDeviceStat(t) // NVENC entries are CUDA indexes/UUIDs, never present as paths
-	device, release := AcquireHWDevice("0,1", "nvenc")
-	defer release()
-	if device != "0" {
-		t.Fatalf("device = %q, want first NVENC entry", device)
+	first, releaseFirst := AcquireHWDevice("0,1", "nvenc")
+	defer releaseFirst()
+	second, releaseSecond := AcquireHWDevice("0,1", "nvenc")
+	defer releaseSecond()
+
+	if first != "0" || second != "0" {
+		t.Fatalf("devices = %q, %q; want both on the first NVENC entry", first, second)
 	}
-	if got := hwDeviceActiveCount("0"); got != 0 {
-		t.Fatalf("active count = %d, want no reservation for NVENC", got)
+	// ffmpeg is handed the bare CUDA index, but the count is keyed the way
+	// resource sampling names that GPU — otherwise the join drops it.
+	if got := hwDeviceActiveCount("cuda:0"); got != 2 {
+		t.Fatalf("active count = %d, want both NVENC workloads counted under cuda:0", got)
+	}
+}
+
+// NVENC selects GPUs by CUDA index, and the sampler publishes them as "cuda:N".
+// Counting the raw configured value would report zero sessions on every
+// explicitly-selected NVIDIA GPU while it transcodes.
+func TestNVENCAccountingDeviceUsesSamplerNamespace(t *testing.T) {
+	for _, tc := range []struct{ configured, want string }{
+		{"", DefaultNVENCDevice},
+		{"0", "cuda:0"},
+		{"1", "cuda:1"},
+		{"1,0", "cuda:1"},
+		{"cuda:1", "cuda:1"},
+		{"GPU-1234abcd", "GPU-1234abcd"},
+		{"/dev/dri/renderD128", "/dev/dri/renderD128"},
+	} {
+		if got := nvencAccountingDevice(tc.configured); got != tc.want {
+			t.Fatalf("nvencAccountingDevice(%q) = %q, want %q", tc.configured, got, tc.want)
+		}
+	}
+}
+
+// An unconfigured NVENC workload lands on the CUDA default, which is what
+// ffmpeg will actually use, so per-device reporting is not blank on the most
+// common NVIDIA deployment.
+func TestAcquireHWDeviceNVENCUnconfiguredCountsCUDADefault(t *testing.T) {
+	resetDeviceLoad(t)
+	device, release := AcquireHWDevice("", "nvenc")
+	if device != "" {
+		t.Fatalf("device = %q, want empty so auto-detection applies", device)
+	}
+	if got := hwDeviceActiveCount(DefaultNVENCDevice); got != 1 {
+		t.Fatalf("active count = %d, want the workload counted against %s", got, DefaultNVENCDevice)
+	}
+	release()
+	if got := hwDeviceActiveCount(DefaultNVENCDevice); got != 0 {
+		t.Fatalf("active count after release = %d, want 0", got)
+	}
+}
+
+// The snapshot is what node metrics report per device; it must show live
+// workloads and drop devices back out once they are released.
+func TestHWDeviceLoadSnapshot(t *testing.T) {
+	resetDeviceLoad(t)
+	fakeDeviceStat(t, "/dev/dri/renderD128", "/dev/dri/renderD129")
+	_, releaseA := AcquireHWDevice("/dev/dri/renderD128,/dev/dri/renderD129", "qsv")
+	_, releaseB := AcquireHWDevice("/dev/dri/renderD128,/dev/dri/renderD129", "qsv")
+	_, releaseNVENC := AcquireHWDevice("", "nvenc")
+
+	snapshot := HWDeviceLoadSnapshot()
+	want := map[string]int{
+		"/dev/dri/renderD128": 1,
+		"/dev/dri/renderD129": 1,
+		DefaultNVENCDevice:    1,
+	}
+	if len(snapshot) != len(want) {
+		t.Fatalf("snapshot = %v, want %v", snapshot, want)
+	}
+	for device, count := range want {
+		if snapshot[device] != count {
+			t.Fatalf("snapshot[%q] = %d, want %d (snapshot %v)", device, snapshot[device], count, snapshot)
+		}
+	}
+
+	// The copy must not track later changes, or a reader would see counts move
+	// underneath a snapshot it already published.
+	releaseA()
+	releaseB()
+	releaseNVENC()
+	if snapshot["/dev/dri/renderD128"] != 1 {
+		t.Fatal("snapshot changed after release; it is not a copy")
+	}
+	if remaining := HWDeviceLoadSnapshot(); len(remaining) != 0 {
+		t.Fatalf("snapshot after all releases = %v, want empty", remaining)
 	}
 }
 
@@ -185,15 +302,18 @@ func TestAcquireHWDeviceAvoidsFailedRenderDeviceAndReservesAlternate(t *testing.
 	resetDeviceLoad(t)
 	fakeDeviceStat(t, "/dev/dri/renderD128", "/dev/dri/renderD129")
 	configured := "/dev/dri/renderD128,/dev/dri/renderD129"
-	got, release := acquireHWDevice(configured, "qsv", "/dev/dri/renderD128")
+	got, workload, release := acquireHWDevice(configured, "qsv", "/dev/dri/renderD128")
 	defer release()
 	if got != "/dev/dri/renderD129" {
 		t.Fatalf("alternate device = %q, want renderD129", got)
 	}
+	if workload != got {
+		t.Fatalf("workload device = %q, want the selected device %q", workload, got)
+	}
 	if active := hwDeviceActiveCount(got); active != 1 {
 		t.Fatalf("alternate device active count = %d, want 1", active)
 	}
-	if got, releaseNVENC := acquireHWDevice(configured, "nvenc", "/dev/dri/renderD128"); got != "/dev/dri/renderD128" {
+	if got, _, releaseNVENC := acquireHWDevice(configured, "nvenc", "/dev/dri/renderD128"); got != "/dev/dri/renderD128" {
 		releaseNVENC()
 		t.Fatalf("NVENC retry device = %q, want first configured device", got)
 	} else {

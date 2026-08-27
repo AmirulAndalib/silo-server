@@ -90,7 +90,7 @@ func TestProxyCapabilitiesRejectsIncompleteProbeWithoutPublishing(t *testing.T) 
 	server.refreshCapabilitySnapshot(context.Background())
 	published := decodeProxyHealth(t, server).CapabilitiesHash
 	if published == "" {
-		t.Fatal("no capability hash was published before the cancelled request")
+		t.Fatal("no capability hash was published before the canceled request")
 	}
 
 	canceled, cancel := context.WithCancel(context.Background())
