@@ -69,7 +69,18 @@ type SystemStats struct {
 
 // DiskStats is one sampled mount.
 type DiskStats struct {
-	Path    string  `json:"path"`
+	// Path is where the mount is, and is therefore deployment layout rather
+	// than a resource counter. It is present only on the surfaces that require
+	// a credential — a node's bearer-authed /status and the API's
+	// admin-authenticated /admin/system/resources. The unauthenticated /health
+	// and /metrics carry Role instead; see RedactPaths.
+	Path string `json:"path,omitempty"`
+	// Role names the mount by what it is for rather than where it is:
+	// "scratch" for the transcode working directory, "library-N" positionally
+	// for each media root. It is assigned when the sample is built, so every
+	// surface — health, metrics, the admin API — names a mount identically, and
+	// the index stays with the mount even when a probe cannot measure it.
+	Role    string  `json:"role,omitempty"`
 	UsedGB  float64 `json:"used_gb"`
 	TotalGB float64 `json:"total_gb"`
 	// Stale marks numbers carried over from an earlier pass because the current
@@ -88,6 +99,40 @@ type DiskStats struct {
 	// the scratch volume is deduplicated onto the scratch entry, which is
 	// reported first.
 	Scratch bool `json:"scratch,omitempty"`
+}
+
+// ScratchDiskRole is the Role of the transcode working directory's entry.
+const ScratchDiskRole = "scratch"
+
+// RedactPaths returns a copy of this snapshot with every filesystem path
+// removed, for a surface that answers without a credential.
+//
+// A node's /health is reachable by anyone who can reach the node, and its disk
+// entries would otherwise publish the transcode scratch directory and — on the
+// API host — every configured library root. That is deployment layout, not a
+// host resource counter: it is exactly what the admin-authenticated
+// /admin/system/resources exists to gate, and what /metrics already withholds
+// by labeling series with Role. Role survives here, so a reader still learns
+// which mount is the scratch volume and how full it is; only where it lives is
+// withheld.
+//
+// GPU device names are deliberately kept. A render node (/dev/dri/renderD128)
+// or a CUDA index is a hardware fact present on every Linux host, not a
+// property of this deployment, and /metrics already labels its per-GPU series
+// with the same value.
+func (s Snapshot) RedactPaths() Snapshot {
+	if s.System == nil || len(s.System.Disks) == 0 {
+		return s
+	}
+	system := *s.System
+	disks := make([]DiskStats, len(system.Disks))
+	for i, disk := range system.Disks {
+		disk.Path = ""
+		disks[i] = disk
+	}
+	system.Disks = disks
+	s.System = &system
+	return s
 }
 
 // vendorNVIDIA is the GPUStats.Vendor value nvidia-smi enrichment reports.

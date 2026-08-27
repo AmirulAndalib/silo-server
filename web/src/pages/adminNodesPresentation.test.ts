@@ -734,6 +734,38 @@ describe("describeNodeSystem", () => {
     });
   });
 
+  // A node's /health takes no credential, so it reports what a mount is for
+  // rather than where it is. That is the shape last_stats actually carries, so
+  // the page has to name mounts from it without a path.
+  it("names mounts by role when the sample carries no paths", () => {
+    const system = describeNodeSystem(
+      makeNode({
+        last_stats: {
+          system: {
+            disks: [
+              { role: "scratch", scratch: true, used_gb: 10, total_gb: 100 },
+              { role: "library-1", used_gb: 95, total_gb: 100 },
+              { role: "library-2", unavailable: true },
+            ],
+          },
+        },
+      }),
+    );
+
+    expect(system).toMatchObject({
+      disk: {
+        value: "95%",
+        detail: "library-1",
+        warning: true,
+        title: [
+          "scratch — 10% full (10.0 GiB of 100.0 GiB)",
+          "library-1 — 95% full (95.0 GiB of 100.0 GiB)",
+          "library-2 — unavailable on this host",
+        ].join("\n"),
+      },
+    });
+  });
+
   it("names the mount that went away instead of showing a bare dash", () => {
     const system = describeNodeSystem(
       makeNode({ last_stats: { system: { disks: [{ path: "/media", unavailable: true }] } } }),

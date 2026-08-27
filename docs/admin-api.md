@@ -106,14 +106,15 @@ bind-mounts lxcfs's virtualized `/proc` files in — see the LXC section of
 | `load1` | float | 1-minute load average. Unlike `cpu_pct` it also counts tasks blocked on storage, so a node stuck on I/O looks idle in one and busy in the other. Always host-wide: the kernel keeps no per-cgroup load average. |
 | `cores` | int | CPUs this process may run on — the cgroup's CPU quota rounded up where one is set, otherwise every CPU the kernel reports. This is what `cpu_pct` is normalized against and what `load1` must be read relative to. |
 | `mem_used_mb`, `mem_total_mb` | int | Memory. Under a cgroup these are the cgroup's limit and working set (page cache excluded), not the host's. |
-| `disks` | object[] | Sampled mounts, transcode scratch first, deduplicated by filesystem and capped at 8 — unmeasurable paths included, so the array never grows with the library count. |
+| `disks` | object[] | Sampled mounts, transcode scratch first, deduplicated by filesystem and capped at 8 — unmeasurable paths included, so the array never grows with the library count. The cap is on what is *probed*, not only on what is reported: each mount costs a `statfs` goroutine per interval that a dead network mount parks indefinitely. Roots past the cap are not sampled, and the omission is logged (`component=nodemetrics`) rather than left to look like a clean bill of health. |
 | `net_rx_bps`, `net_tx_bps` | int | Aggregate throughput in **bits** per second, loopback excluded. In a container this is the container's own network namespace. |
 
 Each entry in `disks`:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `path` | string | The sampled path. |
+| `path` | string | Where the mount is. Absent from a node's `last_stats`: the node reports it on its own bearer-authed `/status`, and the API host reports its own on `GET /admin/system/resources`, but a node's `/health` takes no credential and withholds it. Use `role`. |
+| `role` | string | What the mount is for: `scratch`, or `library-N` positionally per media root. Assigned when the sample is built, so it names the same mount on `/health`, `/status`, `/admin/system/resources` and the `streamapp_node_disk_*` series, and it stays with the mount even when a probe cannot measure it. |
 | `used_gb`, `total_gb` | float | Capacity in GiB. Used counts filesystem-reserved blocks, matching `df`. |
 | `stale` | bool | The numbers are real but carried over from an earlier pass because the current probe has not returned — the normal reading for a network mount whose server went away. Omitted when false. |
 | `unavailable` | bool | The path has never been measured on this node (it does not exist here, or the first probe is still hanging). `used_gb`/`total_gb` are meaningless. Omitted when false. |
@@ -174,6 +175,12 @@ A node reports these fields in its own `/health` and `/status`; the API stores
 them opaquely and parses only what it routes on. No GPU field is one of those —
 nothing in node selection reads `last_stats.gpu`. The one part that is read is
 the `scratch` disk entry, described under "Scratch admission" above.
+
+`last_stats` comes from `/health`, which takes no credential, so it carries no
+filesystem paths — disk entries are named by `role`. GPU `device` values are
+kept: a render node or a CUDA index is a fact about the hardware rather than
+about this deployment, and the unauthenticated `/metrics` already labels its
+per-GPU series with the same value.
 
 Capability reports are refreshed by the background health sweep, not by this
 read: a node advertises a `capabilities_hash` in its own health response, and

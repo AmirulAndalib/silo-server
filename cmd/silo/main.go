@@ -191,21 +191,6 @@ func libraryPathProvider(repo *catalog.FolderRepository) func(context.Context) [
 // libraryPathQueryTimeout bounds the per-sample library root lookup.
 const libraryPathQueryTimeout = 2 * time.Second
 
-// hostRenderDeviceIdentities adapts the playback hardware walk to what the
-// sampler needs, keeping the sampler free of any playback dependency.
-func hostRenderDeviceIdentities() []nodemetrics.DeviceIdentity {
-	devices := playback.RenderDeviceIdentities()
-	identities := make([]nodemetrics.DeviceIdentity, 0, len(devices))
-	for _, device := range devices {
-		identities = append(identities, nodemetrics.DeviceIdentity{
-			Path:       device.Path,
-			PCIAddress: device.PCIAddress,
-			Vendor:     device.Vendor,
-		})
-	}
-	return identities
-}
-
 // nodeCapabilityRequestTimeout bounds one capability request. A cold node runs
 // ffmpeg probes to answer and advertises a probe budget of up to ~2 minutes;
 // the fetch runs detached from the health sweep, so matching that budget is
@@ -1179,7 +1164,7 @@ func main() {
 			ScratchDir:       cfg.Playback.TranscodeDir,
 			MediaRoots:       libraryPathProvider(catalog.NewFolderRepository(pool)),
 			DeviceSessions:   playback.HWDeviceLoadSnapshot,
-			DeviceIdentities: hostRenderDeviceIdentities,
+			DeviceIdentities: playback.SamplerDeviceIdentities,
 		})
 		resourceSampler.Start(appCtx)
 		deps.ResourceSampler = resourceSampler

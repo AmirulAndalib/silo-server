@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/nodemetrics"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"golang.org/x/sync/singleflight"
 )
@@ -944,6 +945,28 @@ func RenderDeviceIdentities() []RenderDeviceIdentity {
 			Path:       device,
 			PCIAddress: renderDevicePCIAddress(device),
 			Vendor:     renderDeviceVendor(device),
+		})
+	}
+	return identities
+}
+
+// SamplerDeviceIdentities is RenderDeviceIdentities in the shape the resource
+// sampler consumes, ready to hand to nodemetrics.Options.DeviceIdentities.
+//
+// It lives here rather than beside each caller because the conversion is one
+// fact, not three: every process that samples resources — the API host and both
+// node types — needs the same translation, and three copies would drift the
+// moment DeviceIdentity gains a field. The dependency points this way on
+// purpose: nodemetrics stays free of any playback import, which is why it takes
+// the identities as a provider in the first place.
+func SamplerDeviceIdentities() []nodemetrics.DeviceIdentity {
+	devices := RenderDeviceIdentities()
+	identities := make([]nodemetrics.DeviceIdentity, 0, len(devices))
+	for _, device := range devices {
+		identities = append(identities, nodemetrics.DeviceIdentity{
+			Path:       device.Path,
+			PCIAddress: device.PCIAddress,
+			Vendor:     device.Vendor,
 		})
 	}
 	return identities

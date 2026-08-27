@@ -2,7 +2,6 @@ package nodemetrics
 
 import (
 	"log/slog"
-	"strconv"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -105,21 +104,14 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 		gauge(descNetworkRx, float64(system.NetRxBps))
 		gauge(descNetworkTx, float64(system.NetTxBps))
 		const bytesPerGB = float64(1024 * 1024 * 1024)
-		libraries := 0
 		for _, disk := range system.Disks {
-			// The positional index has to advance for every non-scratch entry,
-			// measurable or not. Skipping first would renumber the mounts after
-			// an unavailable one, so an alert rule keyed on mount="library-1"
-			// would silently start reporting a different volume with no gap in
-			// the series to show it happened.
-			label := diskSeriesLabel(disk, &libraries)
-			if disk.Unavailable {
+			if disk.Unavailable || disk.Role == "" {
 				// A path this node cannot measure has no value to report, and a
 				// zero would read as an empty disk in every alert rule.
 				continue
 			}
-			gauge(descDiskUsed, disk.UsedGB*bytesPerGB, label)
-			gauge(descDiskTotal, disk.TotalGB*bytesPerGB, label)
+			gauge(descDiskUsed, disk.UsedGB*bytesPerGB, disk.Role)
+			gauge(descDiskTotal, disk.TotalGB*bytesPerGB, disk.Role)
 		}
 	}
 	const bytesPerMBFloat = float64(1024 * 1024)
@@ -136,7 +128,7 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
-// diskSeriesLabel names a mount for Prometheus without disclosing where it is.
+// Disk series are labeled by DiskStats.Role rather than by path.
 //
 // /metrics is deliberately unauthenticated on the same listener that serves the
 // API and the SPA, so anything labeled here is public. A library root's path is
@@ -145,16 +137,8 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 // what the admin-authenticated /admin/system/resources exists to gate. Roles
 // keep the series useful — scratch is the volume that kills transcodes when it
 // fills, and library ordering is stable for a given configuration — while the
-// paths themselves stay behind auth.
-//
-// libraries counts the non-scratch mounts already labeled in this scrape.
-func diskSeriesLabel(disk DiskStats, libraries *int) string {
-	if disk.Scratch {
-		return "scratch"
-	}
-	*libraries++
-	return "library-" + strconv.Itoa(*libraries)
-}
+// paths themselves stay behind auth. The role is assigned once when the sample
+// is built, so this scrape and the node's /health name a mount identically.
 
 // collectorRegistration keeps the default registry to one node collector.
 // Integrated mode constructs one sampler, but a test — or a future deployment

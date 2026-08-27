@@ -848,11 +848,11 @@ export function describeWorstDisk(disks: readonly HostDiskStats[]): ResourceMetr
   }
 
   const worst = measured.reduce((a, b) => (b.fill > a.fill ? b : a));
-  const path = worst.disk.path?.trim() ?? "";
+  const name = diskName(worst.disk);
   return {
     label: "Disk",
     value: `${worst.fill}%`,
-    detail: path === "" ? "full" : path,
+    detail: name === "" ? "full" : name,
     title,
     muted: false,
     warning: worst.fill >= DISK_FILL_WARNING_PCT,
@@ -963,8 +963,22 @@ export function describeGPUBusy(gpu: readonly HostGPUStats[]): ResourceMetric | 
   };
 }
 
+/**
+ * Name a mount for display: its path where the surface carried one, otherwise
+ * its role.
+ *
+ * A node's `/health` takes no credential, so it reports what a mount is for and
+ * not where it is — the same reason `/metrics` labels its disk series by role.
+ * Everything the Nodes page draws comes from `last_stats`, which is that
+ * response, so "scratch" or "library-2" is what an operator sees there; the
+ * paths are on the admin-authenticated resources endpoint.
+ */
+function diskName(disk: HostDiskStats): string {
+  return disk.path?.trim() || disk.role?.trim() || "";
+}
+
 function describeDiskLine(disk: HostDiskStats): string {
-  const path = disk.path?.trim() || "(unknown path)";
+  const path = diskName(disk) || "(unknown mount)";
   if (disk.unavailable) {
     return `${path} — unavailable on this host`;
   }

@@ -158,6 +158,7 @@ func (s *Sampler) diskStats(paths []string, now time.Time) []DiskStats {
 
 	out := make([]DiskStats, 0, min(len(s.diskOrder), maxSampledDisks))
 	seenFS := make(map[string]bool, len(s.diskOrder))
+	libraries := 0
 	for _, path := range s.diskOrder {
 		if !wanted[path] {
 			continue
@@ -167,11 +168,21 @@ func (s *Sampler) diskStats(paths []string, now time.Time) []DiskStats {
 			continue
 		}
 		scratch := s.scratchDir != "" && path == s.scratchDir
+		// The role is assigned before the measurability check, so the index
+		// belongs to the mount rather than to its luck this pass. Numbering
+		// only the measurable ones would slide every library root up a place
+		// the moment one went unavailable, and a Prometheus alert keyed on
+		// library-1 would silently follow a different volume.
+		role := ScratchDiskRole
+		if !scratch {
+			libraries++
+			role = "library-" + strconv.Itoa(libraries)
+		}
 		if !entry.haveGood {
 			// Report it rather than hiding it: a media root this node cannot
 			// see is a deployment fact an operator needs, and silently dropping
 			// it looks identical to the path not being configured.
-			out = append(out, DiskStats{Path: path, Unavailable: true, Scratch: scratch})
+			out = append(out, DiskStats{Path: path, Role: role, Unavailable: true, Scratch: scratch})
 		} else {
 			if entry.good.FSID != "" {
 				if seenFS[entry.good.FSID] {
@@ -181,6 +192,7 @@ func (s *Sampler) diskStats(paths []string, now time.Time) []DiskStats {
 			}
 			out = append(out, DiskStats{
 				Path:    path,
+				Role:    role,
 				UsedGB:  bytesToGB(entry.good.UsedBytes),
 				TotalGB: bytesToGB(entry.good.TotalBytes),
 				Stale:   entry.stale(now, s.interval),

@@ -2,6 +2,7 @@ package nodemetrics
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"runtime"
 	"slices"
@@ -84,6 +85,9 @@ type Sampler struct {
 	prevGPU       map[fdinfoClient]engineCounters
 	prevGPUAt     time.Time
 	prevCgroupCPU cgroupCPUSample
+	// droppedRoots is how many configured media roots the last pass left
+	// unsampled because of the maxSampledDisks cap; see noteDroppedRoots.
+	droppedRoots int
 
 	// Disk probe state, shared with detached probe goroutines.
 	diskMu    sync.Mutex
@@ -272,7 +276,20 @@ func (s *Sampler) cpuStats(now time.Time) (busyPct, cores int) {
 	return cgroupPct, cores
 }
 
-// diskPaths lists the mounts to sample, scratch dir first.
+// diskPaths lists the mounts to sample, scratch dir first, bounded at
+// maxSampledDisks.
+//
+// The bound is on what is *probed*, not only on what is published, because a
+// probe is not free and cannot be taken back. Each path gets its own statfs
+// goroutine every interval, and statfs on a dead network mount is
+// uninterruptible — the goroutine parks until the mount recovers or the process
+// exits. A deployment with forty library roots would otherwise start forty
+// probes every five seconds to fill eight slots, and every unreachable root
+// would leave a goroutine parked forever. Capping the input makes the worst
+// case a fixed eight parked goroutines regardless of library count.
+//
+// The scratch dir is always first and so is never the entry dropped: it is the
+// one mount admission control reads.
 func (s *Sampler) diskPaths(ctx context.Context) []string {
 	var paths []string
 	if s.scratchDir != "" {
@@ -285,7 +302,32 @@ func (s *Sampler) diskPaths(ctx context.Context) []string {
 			}
 		}
 	}
-	return paths
+	if len(paths) <= maxSampledDisks {
+		s.noteDroppedRoots(0)
+		return paths
+	}
+	s.noteDroppedRoots(len(paths) - maxSampledDisks)
+	return paths[:maxSampledDisks]
+}
+
+// noteDroppedRoots reports that the disk sample does not cover every configured
+// media root, so the omission is a log line rather than a silent truncation an
+// operator would read as "every mount is fine".
+//
+// Logged on transitions only: the sampling loop runs every few seconds, and a
+// library count is a standing property, not an event. Called from the sampling
+// goroutine, which owns this field.
+func (s *Sampler) noteDroppedRoots(dropped int) {
+	if dropped == s.droppedRoots {
+		return
+	}
+	s.droppedRoots = dropped
+	if dropped == 0 {
+		slog.Info("node metrics disk sampling now covers every configured root", "component", "nodemetrics")
+		return
+	}
+	slog.Info("node metrics disk sampling is capped; the roots past the cap are not reported",
+		"component", "nodemetrics", "sampled", maxSampledDisks, "not_sampled", dropped)
 }
 
 // sampleGPU merges three independent views of the host's GPUs: the hardware

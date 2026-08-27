@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -279,7 +280,8 @@ func TestDiskStatsReportsUnseenPathAsUnavailable(t *testing.T) {
 }
 
 // A deployment with dozens of library roots must not grow the health response
-// without bound.
+// without bound. Only the capped set is probed, so that is also how many probe
+// completions this can wait for.
 func TestDiskStatsCapsMountCount(t *testing.T) {
 	paths := make([]string, 0, 12)
 	for i := range 12 {
@@ -290,8 +292,8 @@ func TestDiskStatsCapsMountCount(t *testing.T) {
 		f.answer(path, fsStats{UsedBytes: 1 << 30, TotalBytes: 10 << 30, FSID: "fs:" + itoa(i)})
 	}
 
-	f.sampleAndSettle(t, len(paths))
-	disks := f.sampleAndSettle(t, len(paths))
+	f.sampleAndSettle(t, maxSampledDisks)
+	disks := f.sampleAndSettle(t, maxSampledDisks)
 
 	if len(disks) != maxSampledDisks {
 		t.Fatalf("len(disks) = %d, want the cap of %d", len(disks), maxSampledDisks)
@@ -311,8 +313,8 @@ func TestDiskStatsCapsUnavailableMountsToo(t *testing.T) {
 	// Only the scratch dir can be measured; every library root fails statfs.
 	f.answer(paths[0], fsStats{UsedBytes: 1 << 30, TotalBytes: 10 << 30, FSID: "a:1"})
 
-	f.sampleAndSettle(t, len(paths))
-	disks := f.sampleAndSettle(t, len(paths))
+	f.sampleAndSettle(t, maxSampledDisks)
+	disks := f.sampleAndSettle(t, maxSampledDisks)
 
 	if len(disks) != maxSampledDisks {
 		t.Fatalf("len(disks) = %d, want the cap of %d even when the mounts are unavailable", len(disks), maxSampledDisks)
@@ -407,5 +409,56 @@ func TestOSStatfsOnUnsupportedPlatformIsNotFatal(t *testing.T) {
 		t.Fatal("statfs on a missing path returned no error")
 	} else if errors.Is(err, errors.ErrUnsupported) {
 		t.Log("platform has no statfs; sampler correctly reports paths unavailable")
+	}
+}
+
+// A mount's role is what the unauthenticated surfaces name it by, so it has to
+// be assigned to the mount rather than to its luck this pass: numbering only the
+// measurable entries would slide every library root up a place the moment one
+// went unavailable.
+func TestDiskStatsAssignsPositionalRoles(t *testing.T) {
+	f := newDiskFixture(t, "/transcode", "/media/movies", "/media/shows")
+	f.answer("/transcode", fsStats{UsedBytes: 1 << 30, TotalBytes: 10 << 30, FSID: "a:1"})
+	// /media/movies is never answered, so it stays unavailable.
+	f.answer("/media/shows", fsStats{UsedBytes: 3 << 30, TotalBytes: 30 << 30, FSID: "c:1"})
+
+	f.sampleAndSettle(t, 3)
+	disks := f.sampleAndSettle(t, 3)
+
+	got := map[string]string{}
+	for _, disk := range disks {
+		got[disk.Path] = disk.Role
+	}
+	want := map[string]string{
+		"/transcode":    ScratchDiskRole,
+		"/media/movies": "library-1",
+		"/media/shows":  "library-2",
+	}
+	for path, role := range want {
+		if got[path] != role {
+			t.Fatalf("role for %s = %q, want %q (all: %v)", path, got[path], role, got)
+		}
+	}
+}
+
+// statfs on a dead network mount is uninterruptible, so every probe started is a
+// goroutine that may never return. Bounding only the published output would let
+// a deployment with forty library roots start forty probes every interval to
+// fill eight slots.
+func TestDiskPathsAreBoundedByTheSampleCap(t *testing.T) {
+	roots := make([]string, 0, maxSampledDisks+4)
+	for i := range maxSampledDisks + 4 {
+		roots = append(roots, "/media/root-"+strconv.Itoa(i))
+	}
+	f := newDiskFixture(t, append([]string{"/transcode"}, roots...)...)
+
+	paths := f.sampler.diskPaths(context.Background())
+	if len(paths) != maxSampledDisks {
+		t.Fatalf("probed paths = %d, want the cap of %d", len(paths), maxSampledDisks)
+	}
+	// The scratch dir is what admission control reads, so it is never the entry
+	// the cap drops.
+	if paths[0] != "/transcode" {
+		t.Fatalf("first probed path = %q, want the scratch dir", paths[0])
 	}
 }

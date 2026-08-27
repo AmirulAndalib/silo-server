@@ -210,11 +210,19 @@ is host resource counters, not media.
 
 Disk series are labeled by **role**, not by path — `mount="scratch"` and
 `mount="library-1"`, `library-2`, ... — so an anonymous scrape cannot enumerate
-where your media lives. The real paths are behind admin authentication on
-`GET /api/v1/admin/system/resources` and on the Nodes page. Library ordering is
-stable for a given configuration, but it is positional: adding a library root can
-renumber the series after it, so alert on `mount="scratch"` by name and on the
-library mounts by aggregate.
+where your media lives. A node's `/health` is unauthenticated for the same
+reason and reports the same roles without paths, which is what the Nodes page
+draws from. The real paths are behind admin authentication on
+`GET /api/v1/admin/system/resources` and behind a bearer token on each node's
+`/status`. Library ordering is stable for a given configuration, but it is
+positional: adding a library root can renumber the series after it, so alert on
+`mount="scratch"` by name and on the library mounts by aggregate. A mount that
+goes unavailable keeps its number rather than renumbering the ones after it.
+
+At most eight mounts are sampled per host, scratch first. The cap bounds
+probing, not just reporting — an unresponsive network mount parks a `statfs`
+call that cannot be interrupted — so roots past it are not sampled, and the
+process logs which ones (`component=nodemetrics`).
 
 A minimal scrape config, with one job per role:
 

@@ -347,6 +347,10 @@ type healthResponse struct {
 	// published snapshot for the same reason as the hash above. A proxy runs
 	// ffmpeg too (remux, Dolby Vision RPU strip), so it reports GPU usage on the
 	// same code path a transcode node does.
+	//
+	// This route takes no credential, so the sample is path-free: disk entries
+	// carry their role and their fill, never where they are mounted. See
+	// nodemetrics.Snapshot.RedactPaths.
 	System *nodemetrics.SystemStats `json:"system,omitempty"`
 	GPU    []nodemetrics.GPUStats   `json:"gpu,omitempty"`
 }
@@ -356,7 +360,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if s.tracker != nil {
 		activeJobs = s.tracker.ActiveCount()
 	}
-	snapshot := s.metrics.Snapshot()
+	snapshot := s.metrics.Snapshot().RedactPaths()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(healthResponse{
 		Status:           "ok",
@@ -387,24 +391,9 @@ func (s *Server) StartMetricsSampler(ctx context.Context) {
 	s.metrics = nodemetrics.NewSampler(nodemetrics.Options{
 		ScratchDir:       scratchDir,
 		DeviceSessions:   playback.HWDeviceLoadSnapshot,
-		DeviceIdentities: renderDeviceIdentities,
+		DeviceIdentities: playback.SamplerDeviceIdentities,
 	})
 	s.metrics.Start(ctx)
-}
-
-// renderDeviceIdentities adapts the playback hardware walk to what the sampler
-// needs, so the sampler itself stays free of any playback dependency.
-func renderDeviceIdentities() []nodemetrics.DeviceIdentity {
-	devices := playback.RenderDeviceIdentities()
-	identities := make([]nodemetrics.DeviceIdentity, 0, len(devices))
-	for _, device := range devices {
-		identities = append(identities, nodemetrics.DeviceIdentity{
-			Path:       device.Path,
-			PCIAddress: device.PCIAddress,
-			Vendor:     device.Vendor,
-		})
-	}
-	return identities
 }
 
 // requireBearer checks Authorization: Bearer {secret} for admin endpoints.

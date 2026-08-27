@@ -3835,7 +3835,19 @@ export interface NodeCapabilities {
 
 /** One sampled mount inside a resource sample. */
 export interface HostDiskStats {
+  /**
+   * Where the mount is. Present only on credentialed surfaces — a node's
+   * `/status` and `GET /admin/system/resources`. A node's `/health` takes no
+   * credential and therefore omits it, so anything rendered from `last_stats`
+   * must fall back to `role`.
+   */
   path?: string;
+  /**
+   * What the mount is for: `scratch` for the transcode working directory,
+   * `library-N` positionally for each media root. Assigned server-side when the
+   * sample is built, so it names the same mount on every surface.
+   */
+  role?: string;
   /** Capacity in GiB. Used counts filesystem-reserved blocks, matching `df`. */
   used_gb?: number;
   total_gb?: number;

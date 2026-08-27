@@ -218,9 +218,16 @@ responses, and as `streamapp_node_*` gauges on that process's `/metrics`
 endpoint. `/metrics` is unauthenticated on node listeners, matching the API
 listener; it exposes host resource counters, not media. Disk series are labeled
 by role — `mount="scratch"`, `mount="library-1"` — rather than by path, so an
-anonymous scrape cannot enumerate where your media lives. The paths themselves
-are reported by the admin-authenticated `GET /api/v1/admin/system/resources` and
-on the Nodes page.
+anonymous scrape cannot enumerate where your media lives. A node's `/health` is
+unauthenticated for the same reason and withholds paths on the same terms. The
+paths themselves are reported by the admin-authenticated
+`GET /api/v1/admin/system/resources` and by each node's bearer-authed `/status`.
+
+At most eight mounts are sampled per host — the transcode scratch directory
+first, then library roots in order. The cap bounds probing, not just reporting:
+each mount costs a `statfs` call per interval, and one on an unresponsive
+network mount cannot be interrupted. A deployment with more roots than that logs
+which ones go unsampled rather than quietly reporting a subset.
 
 Sampling is current-sample only. Silo stores no history — point Prometheus at
 `/metrics` if you want trends or alerts.
