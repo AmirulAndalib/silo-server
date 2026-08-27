@@ -392,11 +392,11 @@ export function buildCatalogApiSearchParams(state: CatalogSearchState): URLSearc
     state.query_definition.sort.field &&
     (state.query_definition.sort.field !== "added_at" ||
       (state.source === "query" && effectiveLibraryID != null) ||
-      // Watchlist defaults to source order, so an explicit Date Added pick
+      // These sources default to source order, so an explicit Date Added pick
       // must be sent to distinguish it (the server maps it to list added-at).
-      state.source === "watchlist" ||
-      state.source === "library_collection" ||
-      state.source === "user_collection")
+      // Dropping it would round-trip back through parse as source order and
+      // save the wrong browse preference.
+      catalogSourceSupportsSourceOrder(state.source))
   ) {
     params.set("sort", state.query_definition.sort.field);
     if (state.query_definition.sort.order) {
