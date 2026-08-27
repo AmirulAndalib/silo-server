@@ -126,8 +126,12 @@ Reuse these instead of adding a bespoke variant per page:
   component, or a per-page expand/collapse toggle.
 - `SecretField` — the one credential control: an always-editable password
   input whose masked placeholder stands in for the saved value. Typing stages
-  a replacement; emptying the input keeps the saved secret (never clears it —
-  clearing is a page-level action like Disconnect or Clear credentials).
+  a replacement; emptying the input keeps the saved secret, so no ordinary save
+  erases one by accident. Clearing is always a deliberate act, and every
+  surface has exactly one way to do it: either a page-level action (Disconnect,
+  Clear credentials) or, where the page has none, the field's own opt-in
+  `onClear`/`cleared` affordance, which stages the empty write for the save bar
+  and can be taken back with "Keep saved value" or Discard.
 - `LimitField` — the one "Unlimited" checkbox pattern, replacing "0 = unlimited"
   hint text conventions.
 - A restart badge on `SettingField` itself, sourced from

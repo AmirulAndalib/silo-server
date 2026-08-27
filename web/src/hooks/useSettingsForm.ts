@@ -109,6 +109,15 @@ export function useSettingsForm({ keys }: UseSettingsFormOptions) {
 
   const isDirty = useCallback((key: string) => dirty.has(key), [dirty]);
 
+  // A staged clear is a dirty empty value: the save batch writes "" and the
+  // server drops the stored value. This is what `SecretField`'s own clear
+  // affordance stages, and the one thing that distinguishes it from the
+  // "leave blank to keep the saved secret" default.
+  const isClearStaged = useCallback(
+    (key: string) => dirty.has(key) && getValue(key) === "",
+    [dirty, getValue],
+  );
+
   const buildConnectionCheckRequest = useCallback(
     (selectedKeys: string[] = keys): AdminSettingsConnectionCheckRequest => ({
       values: Object.fromEntries(
@@ -176,6 +185,7 @@ export function useSettingsForm({ keys }: UseSettingsFormOptions) {
     dirtyCount,
     dirtyKeys,
     isDirty,
+    isClearStaged,
     save,
     discard,
     isSaving: updateSettings.isPending,

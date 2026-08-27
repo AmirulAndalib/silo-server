@@ -49,6 +49,7 @@ import { useUpdateServerSettings } from "@/hooks/queries/admin/settings";
 import { useRestartKeys } from "@/hooks/useRestartKeys";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
 import { useReportUnsavedChanges } from "@/hooks/useUnsavedChanges";
+import { emailReady } from "@/lib/emailReadiness";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 import { FieldGroup } from "./FieldGroup";
@@ -953,10 +954,14 @@ export default function NotificationsAdminSettings() {
   const allowPrivate =
     form.getValue("notifications.webhooks.allow_private_destinations") === "true";
 
-  // Mail is only usable when the outbound switch is on and a server is set.
-  const mailServerSet = form.getValue("email.smtp_host").trim() !== "";
-  const outboundMailOn = form.getValue("email.enabled") === "true";
-  const mailReady = mailServerSet && outboundMailOn;
+  // Mail readiness mirrors the server's rule (shared with the overview tile):
+  // the outbound switch, a server, AND a sender address — legacy rows and
+  // single-key writes can store enabled-without-sender, which cannot send.
+  const mailReady = emailReady(
+    form.getValue("email.enabled") === "true",
+    form.getValue("email.smtp_host"),
+    form.getValue("email.from_address"),
+  );
   // The Discord application is configured in the Discord channel card below,
   // next to the delivery settings it gates. "Configured" mirrors the server's
   // own rule (DiscordConfigured): client id, client secret, AND bot token —
@@ -1214,6 +1219,10 @@ export default function NotificationsAdminSettings() {
                 value={form.getValue("email.smtp_password")}
                 configured={form.sensitiveConfigured.includes("email.smtp_password")}
                 onKeep={() => form.resetValue("email.smtp_password")}
+                // The username above can be emptied for a relay that needs no
+                // sign-in; without this the password could not follow it.
+                onClear={() => form.setValue("email.smtp_password", "")}
+                cleared={form.isClearStaged("email.smtp_password")}
                 onChange={(v) => form.setValue("email.smtp_password", v)}
                 restartRequired={needsRestart("email.smtp_password")}
               />

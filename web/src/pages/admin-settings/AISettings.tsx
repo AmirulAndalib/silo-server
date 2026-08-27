@@ -270,11 +270,13 @@ function TextModelTile({
   chatModel,
   apiKeyValue,
   apiKeyConfigured,
+  apiKeyCleared,
   ready,
   dirty,
   restartKeys,
   onChange,
   onReset,
+  onClearApiKey,
   onTest,
   isTesting,
   test,
@@ -286,11 +288,13 @@ function TextModelTile({
   chatModel: string;
   apiKeyValue: string;
   apiKeyConfigured: boolean;
+  apiKeyCleared: boolean;
   ready: boolean;
   dirty: boolean;
   restartKeys: RestartKeyMatcher;
   onChange: (key: string, value: string) => void;
   onReset: (key: string) => void;
+  onClearApiKey: () => void;
   onTest: () => void;
   isTesting: boolean;
   test: AITestState | undefined;
@@ -351,6 +355,10 @@ function TextModelTile({
         // Without this, "Keep saved value" would stage an empty string and the
         // next save would erase the stored key.
         onKeep={() => onReset("ai.api_key")}
+        // A local endpoint that needs no key has to be able to get back to
+        // having none, and nothing else on this page erases one.
+        onClear={onClearApiKey}
+        cleared={apiKeyCleared}
         hint="Empty for a local endpoint that needs none."
         restartRequired={restartKeys.has("ai.api_key")}
       />
@@ -374,6 +382,7 @@ function SpeechModelTile({
   asrModel,
   apiKeyValue,
   apiKeyConfigured,
+  apiKeyCleared,
   usesTextEndpoint,
   compatible,
   ready,
@@ -382,6 +391,7 @@ function SpeechModelTile({
   restartKeys,
   onChange,
   onReset,
+  onClearApiKey,
   onTest,
   isTesting,
   test,
@@ -393,6 +403,7 @@ function SpeechModelTile({
   asrModel: string;
   apiKeyValue: string;
   apiKeyConfigured: boolean;
+  apiKeyCleared: boolean;
   usesTextEndpoint: boolean;
   compatible: boolean;
   ready: boolean;
@@ -401,6 +412,7 @@ function SpeechModelTile({
   restartKeys: RestartKeyMatcher;
   onChange: (key: string, value: string) => void;
   onReset: (key: string) => void;
+  onClearApiKey: () => void;
   onTest: () => void;
   isTesting: boolean;
   test: AITestState | undefined;
@@ -501,6 +513,10 @@ function SpeechModelTile({
         configured={apiKeyConfigured}
         onChange={(next) => onChange("ai.asr_api_key", next)}
         onKeep={() => onReset("ai.asr_api_key")}
+        // Empty is a real configuration here, not just "unset": it is how the
+        // speech endpoint goes back to borrowing the text model's key.
+        onClear={onClearApiKey}
+        cleared={apiKeyCleared}
         hint="Empty reuses the text model key."
         restartRequired={restartKeys.has("ai.asr_api_key")}
       />
@@ -688,11 +704,19 @@ export default function AISettings() {
                 form.sensitiveConfigured.includes("ai.api_key") ||
                 form.sensitiveConfigured.includes("subtitle_ai.api_key")
               }
+              apiKeyCleared={form.isClearStaged("ai.api_key")}
               ready={textReady}
               dirty={textDirty}
               restartKeys={restartKeys}
               onChange={setValue}
               onReset={form.resetValue}
+              // The legacy key goes with it: an empty `ai.api_key` falls back
+              // to `subtitle_ai.api_key`, so clearing only the modern one would
+              // leave the old secret in force on an upgraded server.
+              onClearApiKey={() => {
+                setValue("ai.api_key", "");
+                setValue("subtitle_ai.api_key", "");
+              }}
               onTest={() => void checkTextConnection()}
               isTesting={textCheck.isPending}
               test={textResult}
@@ -707,6 +731,7 @@ export default function AISettings() {
               asrModel={asrModel}
               apiKeyValue={value("ai.asr_api_key")}
               apiKeyConfigured={form.sensitiveConfigured.includes("ai.asr_api_key")}
+              apiKeyCleared={form.isClearStaged("ai.asr_api_key")}
               usesTextEndpoint={speechUsesTextEndpoint}
               compatible={speechCompatible}
               ready={speechReady}
@@ -715,6 +740,7 @@ export default function AISettings() {
               restartKeys={restartKeys}
               onChange={setValue}
               onReset={form.resetValue}
+              onClearApiKey={() => setValue("ai.asr_api_key", "")}
               onTest={() => void checkSpeechConnection()}
               isTesting={speechCheck.isPending}
               test={speechResult}

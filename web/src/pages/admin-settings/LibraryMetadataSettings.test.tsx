@@ -42,6 +42,7 @@ function makeForm(values: Record<string, string>, dirty: string[] = []) {
     setValue: vi.fn(),
     resetValue: vi.fn(),
     isDirty: (key: string) => dirtySet.has(key),
+    isClearStaged: (key: string) => dirtySet.has(key) && (values[key] ?? "") === "",
     dirtyCount: dirtySet.size,
     save: vi.fn(),
     discard: vi.fn(),

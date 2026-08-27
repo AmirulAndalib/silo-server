@@ -74,6 +74,7 @@ function makeForm(overrides: Record<string, string> = {}) {
     dirtyCount: 0,
     dirtyKeys: [],
     isDirty: vi.fn((_key: string) => false),
+    isClearStaged: vi.fn((_key: string) => false),
     save: vi.fn(() => Promise.resolve()),
     discard: vi.fn(),
     isSaving: false,
@@ -214,7 +215,12 @@ describe("NotificationsAdminSettings", () => {
   it("configures the mail server inside the Email channel card", async () => {
     restartKeysMock.mockReturnValue(new Set(["email.smtp_host"]));
     useSettingsFormMock.mockReturnValue(
-      makeForm({ "email.smtp_host": "smtp.example.com", "email.enabled": "true" }),
+      makeForm({
+        "email.smtp_host": "smtp.example.com",
+        "email.enabled": "true",
+        // Readiness mirrors the server rule: no sender address, not ready.
+        "email.from_address": "silo@example.com",
+      }),
     );
 
     render(renderPage());

@@ -1,17 +1,31 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import InfrastructureSettings from "./InfrastructureSettings";
 import { OPSLOG_BUCKET_POLICIES_KEY } from "./logRetentionPolicy";
 
-const useSettingsFormMock = vi.fn();
+const settingsFormMock = vi.fn();
 const useCheckAdminSettingsConnectionMock = vi.fn();
 
-vi.mock("@/hooks/useSettingsForm", () => ({
-  useSettingsForm: (...args: unknown[]) => useSettingsFormMock(...args),
+// Most cases drive the page from a hand-written form so a single render can
+// describe any staged state. The cases that have to prove a value reaches the
+// server flip this and run the real hook instead.
+const { realForm, serverSettings, sensitiveStatus, updateSettingsMock } = vi.hoisted(() => ({
+  realForm: { enabled: false },
+  serverSettings: { current: {} as Record<string, string> },
+  sensitiveStatus: { current: { configured: [] as string[], managed_by_env: [] as string[] } },
+  updateSettingsMock: vi.fn(),
 }));
+
+vi.mock("@/hooks/useSettingsForm", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/hooks/useSettingsForm")>();
+  return {
+    useSettingsForm: (options: { keys: string[] }) =>
+      realForm.enabled ? actual.useSettingsForm(options) : settingsFormMock(options),
+  };
+});
 
 vi.mock("@/hooks/useRestartKeys", () => ({
   useRestartKeys: () => new Set<string>(["redis.url"]),
@@ -20,6 +34,9 @@ vi.mock("@/hooks/useRestartKeys", () => ({
 vi.mock("@/hooks/queries/admin/settings", () => ({
   useCheckAdminSettingsConnection: (...args: unknown[]) =>
     useCheckAdminSettingsConnectionMock(...args),
+  useAdminServerSettings: () => ({ data: serverSettings.current, isLoading: false }),
+  useAdminSensitiveStatus: () => ({ data: sensitiveStatus.current, isError: false }),
+  useUpdateServerSettings: () => ({ mutateAsync: updateSettingsMock, isPending: false }),
 }));
 
 useCheckAdminSettingsConnectionMock.mockReturnValue({ isPending: false, mutateAsync: vi.fn() });
@@ -35,6 +52,7 @@ function mockForm(overrides: FormOverrides = {}) {
     dirtyCount: 0,
     dirtyKeys: [],
     isDirty: () => false,
+    isClearStaged: () => false,
     save: vi.fn(),
     discard: vi.fn(),
     isSaving: false,
@@ -46,7 +64,7 @@ function mockForm(overrides: FormOverrides = {}) {
     buildConnectionCheckRequest: vi.fn(),
     ...overrides,
   };
-  useSettingsFormMock.mockReturnValue(form);
+  settingsFormMock.mockReturnValue(form);
   return form;
 }
 
@@ -103,7 +121,7 @@ describe("InfrastructureSettings", () => {
 
     renderToStaticMarkup(<InfrastructureSettings />);
 
-    const calls = useSettingsFormMock.mock.calls as [{ keys: string[] }][];
+    const calls = settingsFormMock.mock.calls as [{ keys: string[] }][];
     const keys = calls[calls.length - 1]?.[0].keys ?? [];
     expect(keys).toEqual(expect.arrayContaining(["redis.url", "database.max_connections"]));
     expect(keys).toEqual(
@@ -255,5 +273,64 @@ describe("InfrastructureSettings", () => {
     await userEvent.click(screen.getByRole("button", { name: /Remove metadata rule/ }));
 
     expect(setValue).toHaveBeenCalledWith(OPSLOG_BUCKET_POLICIES_KEY, "[]");
+  });
+
+  describe("clearing a stored credential", () => {
+    beforeEach(() => {
+      realForm.enabled = true;
+      serverSettings.current = { "s3.public_url_auth": "presigned" };
+      sensitiveStatus.current = { configured: ["s3.public_access_key"], managed_by_env: [] };
+      updateSettingsMock.mockReset();
+      updateSettingsMock.mockResolvedValue({ values: {}, restart_required: false });
+    });
+
+    afterEach(() => {
+      realForm.enabled = false;
+    });
+
+    it("stages the clear in the save bar and saves it as an empty value", async () => {
+      render(<InfrastructureSettings />);
+
+      const publicGroup = within(screen.getByRole("group", { name: "Public storage" }));
+      await userEvent.click(publicGroup.getByRole("button", { name: "Clear saved value" }));
+
+      expect(screen.getByText("1 unsaved change")).toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+      await waitFor(() =>
+        expect(updateSettingsMock).toHaveBeenCalledWith({ "s3.public_access_key": "" }),
+      );
+    });
+
+    it("takes the clear back out of the save bar when the saved value is kept", async () => {
+      render(<InfrastructureSettings />);
+
+      const publicGroup = within(screen.getByRole("group", { name: "Public storage" }));
+      await userEvent.click(publicGroup.getByRole("button", { name: "Clear saved value" }));
+      await userEvent.click(publicGroup.getByRole("button", { name: "Keep saved value" }));
+
+      expect(screen.queryByText("1 unsaved change")).not.toBeInTheDocument();
+      expect(publicGroup.getByLabelText("Access Key")).toHaveAttribute(
+        "placeholder",
+        "••••••••••••",
+      );
+    });
+
+    it("leaves an env-managed credential without a clear action", async () => {
+      serverSettings.current = { "redis.url": "" };
+      sensitiveStatus.current = {
+        configured: ["redis.url"],
+        managed_by_env: ["redis.url"],
+      };
+
+      render(<InfrastructureSettings />);
+
+      const redisGroup = within(screen.getByRole("group", { name: "Redis" }));
+      expect(redisGroup.getByLabelText("Connection URL")).toBeDisabled();
+      expect(
+        redisGroup.queryByRole("button", { name: "Clear saved value" }),
+      ).not.toBeInTheDocument();
+    });
   });
 });

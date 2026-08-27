@@ -104,10 +104,12 @@ function countDirty(form: SettingsForm, keys: string[]): number {
 /**
  * Shared credential-draft helpers for every secret on the page. Every editor
  * is frozen while a save is in flight so a late keystroke cannot ride along
- * with it; emptying an input reverts to the saved value (`keepSaved`).
+ * with it; emptying an input reverts to the saved value (`keepSaved`), and
+ * erasing one for real takes the explicit `clearSaved` action.
  */
 interface SecretEditors {
   keepSaved: (key: string) => void;
+  clearSaved: (key: string) => void;
   setSecret: (key: string, value: string) => void;
   disabled: boolean;
 }
@@ -176,6 +178,10 @@ function RedisGroup({
       />
       {enabled && (
         <>
+          {/*
+            No `onClear` here: the Use Redis switch above already stages the
+            empty URL, and one clear per surface is the rule.
+          */}
           <SecretField
             label="Connection URL"
             value={redisUrl}
@@ -291,11 +297,19 @@ function S3Group({
           </div>
         </div>
       )}
+      {/*
+        The access and secret keys must stay configured together, so clearing
+        one alone is refused at save time. Both carry the action, which is what
+        lets an admin stage the pair and hand this bucket back to anonymous or
+        instance-role access.
+      */}
       <SecretField
         label="Access Key"
         value={form.getValue(key("access_key"))}
         configured={form.sensitiveConfigured.includes(key("access_key"))}
         onKeep={() => secrets.keepSaved(key("access_key"))}
+        onClear={() => secrets.clearSaved(key("access_key"))}
+        cleared={form.isClearStaged(key("access_key"))}
         onChange={(v) => secrets.setSecret(key("access_key"), v)}
         disabled={secrets.disabled}
         restartRequired={restartKeys.has(key("access_key"))}
@@ -305,6 +319,8 @@ function S3Group({
         value={form.getValue(key("secret_key"))}
         configured={form.sensitiveConfigured.includes(key("secret_key"))}
         onKeep={() => secrets.keepSaved(key("secret_key"))}
+        onClear={() => secrets.clearSaved(key("secret_key"))}
+        cleared={form.isClearStaged(key("secret_key"))}
         onChange={(v) => secrets.setSecret(key("secret_key"), v)}
         disabled={secrets.disabled}
         restartRequired={restartKeys.has(key("secret_key"))}
@@ -369,11 +385,18 @@ function S3Group({
             )}
             {urlAuth === "cloudflare_token" && (
               <>
+                {/*
+                  Cloudflare token auth requires this secret, so a clear only
+                  saves alongside a switch back to another mode — the one order
+                  that works, since the field is hidden in those modes.
+                */}
                 <SecretField
                   label="Token Secret"
                   value={form.getValue("s3.public_token_secret")}
                   configured={form.sensitiveConfigured.includes("s3.public_token_secret")}
                   onKeep={() => secrets.keepSaved("s3.public_token_secret")}
+                  onClear={() => secrets.clearSaved("s3.public_token_secret")}
+                  cleared={form.isClearStaged("s3.public_token_secret")}
                   onChange={(v) => secrets.setSecret("s3.public_token_secret", v)}
                   hint="Signing key configured in Cloudflare"
                   disabled={secrets.disabled}
@@ -698,6 +721,10 @@ export default function InfrastructureSettings() {
     keepSaved: (key) => {
       if (saveInProgressRef.current) return;
       form.resetValue(key);
+    },
+    clearSaved: (key) => {
+      if (saveInProgressRef.current) return;
+      form.setValue(key, "");
     },
     setSecret: (key, value) => {
       if (saveInProgressRef.current) return;

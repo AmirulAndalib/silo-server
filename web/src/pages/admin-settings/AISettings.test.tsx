@@ -44,6 +44,8 @@ const DEFAULT_VALUES: Record<string, string> = {
 
 let dirtyCount = 0;
 let dirtyKeys: string[] = [];
+const DEFAULT_SENSITIVE_CONFIGURED = ["subtitle_ai.api_key"];
+let sensitiveConfigured: string[] = DEFAULT_SENSITIVE_CONFIGURED;
 
 const useSettingsFormMock = vi.fn((_options?: { keys: string[] }) => ({
   isLoading: false,
@@ -53,11 +55,12 @@ const useSettingsFormMock = vi.fn((_options?: { keys: string[] }) => ({
   dirtyCount,
   dirtyKeys,
   isDirty: (key: string) => dirtyKeys.includes(key),
+  isClearStaged: (key: string) => dirtyKeys.includes(key) && (values[key] ?? "") === "",
   save: mocks.save,
   discard: mocks.discard,
   isSaving: false,
   restartRequired: false,
-  sensitiveConfigured: ["subtitle_ai.api_key"],
+  sensitiveConfigured,
   sensitiveManagedByEnv: [],
   sensitiveStatusReady: true,
   sensitiveStatusError: false,
@@ -98,6 +101,7 @@ describe("AISettings", () => {
     localStorage.clear();
     dirtyCount = 0;
     dirtyKeys = [];
+    sensitiveConfigured = DEFAULT_SENSITIVE_CONFIGURED;
     for (const mock of Object.values(mocks)) mock.mockReset();
     for (const key of Object.keys(values)) delete values[key];
     Object.assign(values, DEFAULT_VALUES);
@@ -371,5 +375,40 @@ describe("AISettings", () => {
     // Staging "" would erase the stored key on the next save.
     expect(mocks.setValue).not.toHaveBeenCalledWith("ai.api_key", "");
     expect(mocks.resetValue).toHaveBeenCalledWith("ai.api_key");
+  });
+
+  it("clears the legacy key alongside the modern one", async () => {
+    const user = userEvent.setup();
+    render(<AISettings />);
+    const tile = await openTile(user, "Text model");
+
+    await user.click(within(tile).getByRole("button", { name: "Clear saved value" }));
+
+    // An empty `ai.api_key` falls back to `subtitle_ai.api_key`, so clearing
+    // only the modern key would leave the old secret in force.
+    expect(mocks.setValue).toHaveBeenCalledWith("ai.api_key", "");
+    expect(mocks.setValue).toHaveBeenCalledWith("subtitle_ai.api_key", "");
+  });
+
+  it("says what a staged clear of the speech key will do", async () => {
+    const user = userEvent.setup();
+    dirtyKeys = ["ai.asr_api_key"];
+    dirtyCount = 1;
+    values["ai.asr_api_key"] = "";
+    sensitiveConfigured = ["ai.asr_api_key"];
+
+    render(<AISettings />);
+    const tile = screen.getByRole("group", { name: "Speech-to-text" });
+
+    // A staged edit holds its tile open, so no expansion step is needed.
+    expect(within(tile).getByLabelText("API key")).toHaveAttribute(
+      "placeholder",
+      "Will be cleared on save",
+    );
+    expect(
+      within(tile).getByText("Save clears the stored value; type to set a new one instead."),
+    ).toBeInTheDocument();
+    await user.click(within(tile).getByRole("button", { name: "Keep saved value" }));
+    expect(mocks.resetValue).toHaveBeenCalledWith("ai.asr_api_key");
   });
 });

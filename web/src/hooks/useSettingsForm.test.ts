@@ -142,6 +142,30 @@ describe("useSettingsForm save()", () => {
   });
 });
 
+describe("useSettingsForm isClearStaged()", () => {
+  it("separates a staged clear from an untouched or replaced value", () => {
+    const { result } = renderHook(() => useSettingsForm({ keys: KEYS }));
+
+    // An untouched empty key is not a clear: nothing would be written.
+    expect(result.current.isClearStaged("email.smtp_password")).toBe(false);
+
+    act(() => {
+      result.current.setValue("branding.server_name", "");
+    });
+    expect(result.current.isClearStaged("branding.server_name")).toBe(true);
+
+    act(() => {
+      result.current.setValue("branding.server_name", "Casa");
+    });
+    expect(result.current.isClearStaged("branding.server_name")).toBe(false);
+
+    act(() => {
+      result.current.resetValue("branding.server_name");
+    });
+    expect(result.current.isClearStaged("branding.server_name")).toBe(false);
+  });
+});
+
 describe("useSettingsForm unsaved-changes guard", () => {
   function fireBeforeUnload(): Event {
     // jsdom has no BeforeUnloadEvent, and its legacy `returnValue` is a

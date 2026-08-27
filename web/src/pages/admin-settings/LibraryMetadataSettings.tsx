@@ -255,6 +255,10 @@ export default function LibraryMetadataSettings() {
                 configured={form.sensitiveConfigured.includes(MEILI_API_KEY)}
                 onChange={(value) => form.setValue(MEILI_API_KEY, value)}
                 onKeep={() => form.resetValue(MEILI_API_KEY)}
+                // Nothing else on this page can empty the stored key, and a
+                // Meilisearch instance without a master key needs it empty.
+                onClear={() => form.setValue(MEILI_API_KEY, "")}
+                cleared={form.isClearStaged(MEILI_API_KEY)}
                 hint="Master key, or one that can read and write the index."
                 disabled={!meiliEnabled}
                 restartRequired={restartKeys.has(MEILI_API_KEY)}

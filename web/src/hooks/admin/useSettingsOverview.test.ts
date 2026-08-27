@@ -238,11 +238,25 @@ describe("buildSettingsOverview health tiles", () => {
     expect(pending.action).toBeUndefined();
   });
 
-  it("only calls email ready when it is on and has a host", () => {
+  it("only calls email ready when it is on with a host and a sender address", () => {
     expect(tile({ settings: { "email.enabled": "true" } }, "email").stateText).toBe("Not set up");
+    // The server refuses to enable email without a from-address, but legacy
+    // rows and single-key writes can still store this state — it cannot send.
     expect(
       tile(
         { settings: { "email.enabled": "true", "email.smtp_host": "smtp.example.com" } },
+        "email",
+      ).stateText,
+    ).toBe("Not set up");
+    expect(
+      tile(
+        {
+          settings: {
+            "email.enabled": "true",
+            "email.smtp_host": "smtp.example.com",
+            "email.from_address": "silo@example.com",
+          },
+        },
         "email",
       ).stateText,
     ).toBe("Ready");

@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 
 import type { AdminServerStatus } from "@/api/types";
+import { emailReady } from "@/lib/emailReadiness";
 import { useBranding } from "@/hooks/useBranding";
 import {
   useAdminSensitiveStatus,
@@ -247,8 +248,12 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
         : "info";
 
   const emailHost = readText(settings, "email.smtp_host");
-  const emailReady = readBool(settings, "email.enabled") && emailHost !== "";
-  const emailState: OverviewState = emailReady ? "ok" : "off";
+  const mailReady = emailReady(
+    readBool(settings, "email.enabled"),
+    emailHost,
+    readText(settings, "email.from_address"),
+  );
+  const emailState: OverviewState = mailReady ? "ok" : "off";
 
   return [
     {
@@ -311,8 +316,8 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
       id: "email",
       label: "Email",
       state: emailState,
-      stateText: emailReady ? "Ready" : "Not set up",
-      detail: emailReady ? `SMTP · ${emailHost}` : "Invites and resets can't send",
+      stateText: mailReady ? "Ready" : "Not set up",
+      detail: mailReady ? `SMTP · ${emailHost}` : "Invites and resets can't send",
       action: tileAction(emailState, "notifications"),
     },
   ];
