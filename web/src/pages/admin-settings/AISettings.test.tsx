@@ -1,8 +1,14 @@
-import { render, screen, within } from "@testing-library/react";
+import { render as renderDOM, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import AISettings from "./AISettings";
+
+// The page links to Recommendations with a router <Link>, so it needs a router.
+function render(ui: React.ReactElement) {
+  return renderDOM(<MemoryRouter>{ui}</MemoryRouter>);
+}
 
 const mocks = vi.hoisted(() => ({
   checkConnection: vi.fn(),
@@ -309,6 +315,18 @@ describe("AISettings", () => {
       "subtitle_ai.asr_chunk_seconds",
       "120seconds",
       "Transcription chunk length must be between 60 and 600 seconds.",
+    ],
+    // parseInt would stop at the first non-digit and let "5abc" through as 5,
+    // saving a quota nobody typed.
+    [
+      "subtitle_ai.transcribe_quota_jobs",
+      "5abc",
+      "Transcription limit must be zero or a positive whole number.",
+    ],
+    [
+      "subtitle_ai.transcribe_quota_jobs",
+      "1.5",
+      "Transcription limit must be zero or a positive whole number.",
     ],
   ])("rejects malformed integer input for %s", async (key, malformedValue, message) => {
     const user = userEvent.setup();

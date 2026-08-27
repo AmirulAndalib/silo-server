@@ -6,20 +6,38 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useCatalogSearchStatus } from "@/hooks/queries/admin/settings";
 import { formatDateTime } from "@/lib/datetime";
 
+import { SettingFieldStatus } from "./SettingField";
+
 /**
  * Read-only view of the catalog search index: which provider is answering
  * queries, how much of the catalog is indexed, and links to the rebuild/sync
  * tasks. Diagnostics, not settings — it lives behind a disclosure.
  */
 export function SearchStatusPanel() {
-  const { data: status, isLoading } = useCatalogSearchStatus();
+  const { data: status, isLoading, isError, error } = useCatalogSearchStatus();
 
-  if (isLoading || !status) {
+  if (isLoading) {
     return (
       <div className="space-y-3 py-3">
         <Skeleton className="h-5 w-56" />
         <Skeleton className="h-5 w-72" />
         <Skeleton className="h-5 w-48" />
+      </div>
+    );
+  }
+
+  // A failed status request used to leave the skeletons up forever, which reads
+  // as "still loading" — the one thing a diagnostics panel must never imply
+  // about a request that already came back. Say so, and keep the rebuild/sync
+  // links reachable: they are exactly what an admin wants when the index is in
+  // a bad enough state that the status endpoint is failing.
+  if (isError || !status) {
+    return (
+      <div className="space-y-3 py-3">
+        <SettingFieldStatus tone="warn">
+          {`Couldn't load search status${error instanceof Error && error.message ? `: ${error.message}` : "."}`}
+        </SettingFieldStatus>
+        <SearchTaskLinks />
       </div>
     );
   }
@@ -113,14 +131,21 @@ export function SearchStatusPanel() {
       {status.meilisearch.last_fallback && (
         <StatusRow label="Last fallback" value={status.meilisearch.last_fallback} />
       )}
-      <div className="flex flex-wrap gap-2 py-3">
-        <Button asChild size="sm" variant="outline">
-          <Link to="/admin/tasks/rebuild_catalog_search_index">Rebuild index</Link>
-        </Button>
-        <Button asChild size="sm" variant="ghost">
-          <Link to="/admin/tasks/sync_catalog_search_index">Sync history</Link>
-        </Button>
-      </div>
+      <SearchTaskLinks />
+    </div>
+  );
+}
+
+/** The two index maintenance tasks. Shown whether or not the status resolved. */
+function SearchTaskLinks() {
+  return (
+    <div className="flex flex-wrap gap-2 py-3">
+      <Button asChild size="sm" variant="outline">
+        <Link to="/admin/tasks/rebuild_catalog_search_index">Rebuild index</Link>
+      </Button>
+      <Button asChild size="sm" variant="ghost">
+        <Link to="/admin/tasks/sync_catalog_search_index">Sync history</Link>
+      </Button>
     </div>
   );
 }

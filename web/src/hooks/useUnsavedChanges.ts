@@ -17,7 +17,27 @@ import { useEffect, useId, useSyncExternalStore } from "react";
 const dirtySources = new Set<string>();
 const listeners = new Set<() => void>();
 
+function handleBeforeUnload(event: BeforeUnloadEvent) {
+  event.preventDefault();
+  // Chrome still requires returnValue to be set for the prompt to appear.
+  event.returnValue = "";
+}
+
+// The router guard covers in-app navigation; reload and tab close never reach
+// the router, so the registry arms the browser's own prompt whenever anything
+// is dirty. Registering the same handler twice is a no-op, so this can run on
+// every change.
+function syncBeforeUnload() {
+  if (typeof window === "undefined") return;
+  if (dirtySources.size > 0) {
+    window.addEventListener("beforeunload", handleBeforeUnload);
+  } else {
+    window.removeEventListener("beforeunload", handleBeforeUnload);
+  }
+}
+
 function emit() {
+  syncBeforeUnload();
   for (const listener of listeners) {
     listener();
   }

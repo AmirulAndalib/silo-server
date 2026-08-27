@@ -16,29 +16,7 @@ import {
 import ConnectionsPanel from "@/pages/admin/autoscan/ConnectionsPanel";
 import ActivityPanel from "@/pages/admin/autoscan/ActivityPanel";
 import SourcesPanel from "@/pages/admin/autoscan/SourcesPanel";
-
-// ---------------------------------------------------------------------------
-// Tab routing helpers
-// ---------------------------------------------------------------------------
-
-const AUTOSCAN_TABS = ["sources", "activity"] as const;
-type AutoscanTab = (typeof AUTOSCAN_TABS)[number];
-
-/**
- * Connections and settings used to be peer tabs, which read as "set these up
- * first" — most operators never needed either. They now live in an Advanced
- * section on the Sources view, so their old deep links land on Sources with
- * that section already open rather than 404-ing into a missing tab.
- */
-const LEGACY_ADVANCED_TABS = new Set(["connections", "settings"]);
-
-function normalizeTab(value: string | null): AutoscanTab {
-  return AUTOSCAN_TABS.includes(value as AutoscanTab) ? (value as AutoscanTab) : "sources";
-}
-
-function isLegacyAdvancedTab(value: string | null): boolean {
-  return value !== null && LEGACY_ADVANCED_TABS.has(value);
-}
+import { isLegacyAdvancedTab, normalizeTab } from "@/pages/autoscanSearchParams";
 
 // ---------------------------------------------------------------------------
 // Settings tab

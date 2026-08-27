@@ -55,6 +55,7 @@ import {
   buildQueryCatalogHref,
   buildUserCollectionCatalogHref,
 } from "@/pages/catalogSearchParams";
+import { buildLegacyAutoscanRedirectTarget } from "@/pages/autoscanSearchParams";
 import { buildLegacyWebhookSyncRedirectTarget } from "@/lib/webhookSync";
 import { toast } from "sonner";
 import { prewarmCodecDetection } from "@/player/hooks/useCodecDetection";
@@ -387,6 +388,16 @@ function LegacyWebhookSyncRedirect() {
   return <Navigate to={buildLegacyWebhookSyncRedirectTarget(search)} replace />;
 }
 
+/**
+ * `/admin/autoscan` → the Autoscan tab on Libraries. The old query has to be
+ * translated, not dropped: the panel's own view moved from `tab` to `view`
+ * because `tab` now names the Libraries tab hosting it.
+ */
+function LegacyAutoscanRedirect() {
+  const { search } = useLocation();
+  return <Navigate to={buildLegacyAutoscanRedirectTarget(search)} replace />;
+}
+
 function LegacyPersonalCatalogRedirect({
   source,
 }: {
@@ -491,10 +502,7 @@ function AppRoutes() {
                   <Route path="collections/:id/edit" element={<AdminCollectionEditor />} />
                   <Route path="requests" element={<AdminRequests />} />
                   {/* Autoscan is a tab on Libraries now; keep old links working. */}
-                  <Route
-                    path="autoscan"
-                    element={<Navigate to="/admin/libraries?tab=autoscan" replace />}
-                  />
+                  <Route path="autoscan" element={<LegacyAutoscanRedirect />} />
                   <Route path="history" element={<AdminPlaybackHistory />} />
                   <Route path="marker-history" element={<AdminMarkerHistory />} />
                   <Route path="history-import" element={<AdminHistoryImport />} />

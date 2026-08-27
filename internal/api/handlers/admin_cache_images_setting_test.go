@@ -101,12 +101,14 @@ func TestCacheImagesEnableRequiresPublicBucket(t *testing.T) {
 		}
 	})
 
+	// The batch is validated inside the settings transaction, so it reads the
+	// stored values but must not write any of them.
 	t.Run("batch with no bucket anywhere", func(t *testing.T) {
 		settings := &fakeServerSettingsStore{values: map[string]string{}}
 		rec := updateCacheImagesBatch(cacheImagesHandler(settings, false), cacheImagesTrue)
 		assertStorageUnavailable(t, rec)
-		if settings.setManyCalls != 0 || settings.atomicCalls != 0 {
-			t.Fatalf("write attempted: setMany=%d atomic=%d", settings.setManyCalls, settings.atomicCalls)
+		if settings.setManyCalls != 0 || settings.setCalls != 0 {
+			t.Fatalf("write attempted: setMany=%d set=%d", settings.setManyCalls, settings.setCalls)
 		}
 		if _, stored := settings.values["metadata.cache_images"]; stored {
 			t.Fatalf("stored values = %#v", settings.values)
@@ -119,6 +121,85 @@ func TestCacheImagesEnableRequiresPublicBucket(t *testing.T) {
 		rec := updateCacheImagesBatch(cacheImagesHandler(settings, false),
 			cacheImagesTrue+`,"s3.public_bucket":""`)
 		assertStorageUnavailable(t, rec)
+	})
+
+	// The batch persists atomically, so a bucket it clears is gone even though
+	// the store — and the process still running on it — have one right now.
+	t.Run("batch clearing a stored bucket while enabling", func(t *testing.T) {
+		settings := &fakeServerSettingsStore{values: map[string]string{"s3.public_bucket": "silo-public"}}
+		rec := updateCacheImagesBatch(cacheImagesHandler(settings, true),
+			cacheImagesTrue+`,"s3.public_bucket":""`)
+		assertStorageUnavailable(t, rec)
+		if settings.setManyCalls != 0 || settings.setCalls != 0 {
+			t.Fatalf("write attempted: setMany=%d set=%d", settings.setManyCalls, settings.setCalls)
+		}
+		if settings.values["s3.public_bucket"] != "silo-public" {
+			t.Fatalf("stored values = %#v", settings.values)
+		}
+	})
+
+	// The dual: caching is already on and the batch never resubmits it, so only
+	// the complete prospective state catches the storage disappearing.
+	t.Run("batch clearing the bucket while caching stays on", func(t *testing.T) {
+		settings := &fakeServerSettingsStore{values: map[string]string{
+			"metadata.cache_images": "true",
+			"s3.public_bucket":      "silo-public",
+		}}
+		rec := updateCacheImagesBatch(cacheImagesHandler(settings, true), `"s3.public_bucket":""`)
+		assertStorageUnavailable(t, rec)
+		if settings.values["s3.public_bucket"] != "silo-public" {
+			t.Fatalf("stored values = %#v", settings.values)
+		}
+	})
+
+	t.Run("batch clearing the public endpoint and bucket while caching stays on", func(t *testing.T) {
+		settings := &fakeServerSettingsStore{values: map[string]string{
+			"metadata.cache_images": "true",
+			"s3.public_endpoint":    "https://s3.example.com",
+			"s3.public_bucket":      "silo-public",
+		}}
+		rec := updateCacheImagesBatch(cacheImagesHandler(settings, true),
+			`"s3.public_endpoint":"","s3.public_bucket":""`)
+		assertStorageUnavailable(t, rec)
+		if settings.values["s3.public_bucket"] != "silo-public" {
+			t.Fatalf("stored values = %#v", settings.values)
+		}
+	})
+
+	// Turning caching off in the same batch is the documented way out.
+	t.Run("batch disabling caching while clearing the bucket", func(t *testing.T) {
+		settings := &fakeServerSettingsStore{values: map[string]string{
+			"metadata.cache_images": "true",
+			"s3.public_endpoint":    "https://s3.example.com",
+			"s3.public_bucket":      "silo-public",
+		}}
+		rec := updateCacheImagesBatch(cacheImagesHandler(settings, true),
+			`"metadata.cache_images":"false","s3.public_endpoint":"","s3.public_bucket":""`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if settings.values["metadata.cache_images"] != "false" ||
+			settings.values["s3.public_bucket"] != "" {
+			t.Fatalf("stored values = %#v", settings.values)
+		}
+	})
+
+	// LoadFromDB falls back to the pre-rename bucket key, so clearing only the
+	// canonical one still leaves the cacher a bucket.
+	t.Run("batch clearing the bucket while the legacy bucket remains", func(t *testing.T) {
+		settings := &fakeServerSettingsStore{values: map[string]string{
+			"metadata.cache_images": "true",
+			"s3.public_endpoint":    "https://s3.example.com",
+			"s3.public_bucket":      "silo-public",
+			"s3.operational_bucket": "silo-legacy",
+		}}
+		rec := updateCacheImagesBatch(cacheImagesHandler(settings, true), `"s3.public_bucket":""`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if settings.values["s3.public_bucket"] != "" {
+			t.Fatalf("stored values = %#v", settings.values)
+		}
 	})
 
 	t.Run("batch disable with no bucket", func(t *testing.T) {

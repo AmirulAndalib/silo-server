@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -251,7 +252,7 @@ func TestSetFFmpegPathEmptyDisablesCopySafetyScan(t *testing.T) {
 	if ensurer.NeedsCopySafetyScan(file) {
 		t.Fatal("NeedsCopySafetyScan() = true after the path was cleared, want false")
 	}
-	if _, _, err := ensurer.ScanCopySafety(context.Background(), file); err != errCopySafetyScanUnavailable {
+	if _, _, err := ensurer.ScanCopySafety(context.Background(), file); !errors.Is(err, errCopySafetyScanUnavailable) {
 		t.Fatalf("ScanCopySafety() error = %v, want errCopySafetyScanUnavailable", err)
 	}
 }

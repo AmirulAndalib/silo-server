@@ -587,9 +587,9 @@ export default function ProvidersSettings() {
           </ProviderTileGrid>
           <p className="text-muted-foreground text-xs">
             TMDB and TheTVDB connect from{" "}
-            <a href="/admin/plugins" className="underline underline-offset-2">
+            <Link to="/admin/plugins" className="underline underline-offset-2">
               Plugins
-            </a>
+            </Link>
             .
           </p>
         </div>

@@ -86,16 +86,14 @@ describe("createCatalogInvalidationScheduler", () => {
     expect(invalidatedLibraries(queryClient, [1, 3])).toEqual([1, 3]);
   });
 
-  it("leaves home sections alone for a library-scoped sweep", async () => {
+  it("still invalidates the touched library's own sections on a scoped sweep", async () => {
     const queryClient = new QueryClient();
-    queryClient.setQueryData(sectionKeys.homeItems("recent"), { section: { items: [] } });
     queryClient.setQueryData(sectionKeys.libraryLayout(3), { sections: [] });
     const scheduler = createCatalogInvalidationScheduler(queryClient, WINDOW_MS);
 
     scheduler.schedule({ libraryId: 3, allowDashboardRefetch: false });
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(queryClient.getQueryState(sectionKeys.homeItems("recent"))?.isInvalidated).toBe(false);
     expect(queryClient.getQueryState(sectionKeys.libraryLayout(3))?.isInvalidated).toBe(true);
   });
 
@@ -118,6 +116,25 @@ describe("createCatalogInvalidationScheduler", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(invalidatedLibraries(queryClient, [3])).toEqual([3]);
+  });
+
+  it("marks home section data stale (without refetching) on a library-scoped sweep", async () => {
+    const queryClient = new QueryClient();
+    const homeItemsKey = sectionKeys.homeItems("recently-added");
+    queryClient.setQueryData(sectionKeys.homeLayout(), { sections: [] });
+    queryClient.setQueryData(homeItemsKey, { items: [] });
+    const scheduler = createCatalogInvalidationScheduler(queryClient, WINDOW_MS);
+
+    scheduler.schedule({ libraryId: 3, allowDashboardRefetch: false });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Stale, so the throttled home queue reset fetches real data instead of
+    // re-rendering the fresh-but-outdated cache…
+    expect(queryClient.getQueryState(sectionKeys.homeLayout())?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(homeItemsKey)?.isInvalidated).toBe(true);
+    // …but the sweep itself never refetches them (no observers here, and the
+    // invalidation is refetchType "none").
+    expect(queryClient.isFetching()).toBe(0);
   });
 });
 

@@ -43,6 +43,10 @@ const ArtworkStorageReconcileCheckpointKey = "s3.public_storage_reconcile_checkp
 // readers that own each setting. The UI must never invent a second set of
 // defaults: an untouched form should describe the behavior the server is
 // actually running.
+// Setting keys and default values are a data table; naming each repeated
+// literal would bury what the table says.
+//
+//nolint:goconst
 var adminSettingDefaults = map[string]string{
 	"auth.access_token_expiry":  "8h",
 	"auth.refresh_token_expiry": "30d",

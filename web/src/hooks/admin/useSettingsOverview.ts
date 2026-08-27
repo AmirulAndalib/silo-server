@@ -180,6 +180,8 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
   const { settings } = input;
   const configured = new Set(input.sensitiveConfigured ?? []);
 
+  const restartPending = settingsRestartPending(input.serverStatus);
+
   const publicBucket = readText(settings, "s3.public_bucket");
   const privateBucket = readText(settings, "s3.private_bucket");
   const storageReady = input.storageAvailable === true;
@@ -188,13 +190,17 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
     : publicBucket
       ? `S3 · ${publicBucket}`
       : "No bucket configured";
-  const storageState: OverviewState = storageReady ? "ok" : "off";
+  // `storage_available` is decided when the S3 client is built at boot, so the
+  // save that first configures a bucket cannot flip it — only the restart that
+  // save already asked for can. Reporting "Not set up" in that window tells an
+  // admin who just did the work that it did not take.
+  const storageRestartPending = !storageReady && publicBucket !== "" && restartPending;
+  const storageState: OverviewState = storageReady ? "ok" : storageRestartPending ? "warn" : "off";
 
   const maxConnections = readInt(settings, "database.max_connections");
   const redisConfigured = configured.has("redis.url") || readText(settings, "redis.url") !== "";
 
   const transcodeEnabled = readBool(settings, "playback.transcode_enabled");
-  const restartPending = settingsRestartPending(input.serverStatus);
   const transcodeMode = transcodeModeLabel(readText(settings, "playback.hw_accel"), input.hwAccel);
   const renderDevice = input.hwAccel?.render_devices?.[0] ?? "";
   const transcodeState: OverviewState = restartPending ? "warn" : transcodeEnabled ? "ok" : "off";
@@ -224,8 +230,16 @@ function buildTiles(input: SettingsOverviewInput): OverviewTile[] {
       id: "storage",
       label: "Storage",
       state: storageState,
-      stateText: storageReady ? "Healthy" : "Not set up",
-      detail: storageReady ? bucketDetail : "Artwork and uploads have nowhere to go",
+      stateText: storageReady
+        ? "Healthy"
+        : storageRestartPending
+          ? "Restart pending"
+          : "Not set up",
+      detail: storageReady
+        ? bucketDetail
+        : storageRestartPending
+          ? `${bucketDetail} · applies after a restart`
+          : "Artwork and uploads have nowhere to go",
       action: tileAction(storageState, "infrastructure"),
     },
     {

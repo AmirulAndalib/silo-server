@@ -12,8 +12,12 @@ type adminServerStatusResponse struct {
 	RestartRequired       bool       `json:"restart_required"`
 	RestartRequiredAt     *time.Time `json:"restart_required_at,omitempty"`
 	RestartRequiredReason string     `json:"restart_required_reason,omitempty"`
-	RestartRequested      bool       `json:"restart_requested"`
-	RestartRequestedAt    *time.Time `json:"restart_requested_at,omitempty"`
+	// RestartMarkCount increments on every restart-required save. The boolean
+	// above latches for the process lifetime, so this is the client's only
+	// signal that a NEW requirement arrived after one was dismissed.
+	RestartMarkCount   int        `json:"restart_mark_count"`
+	RestartRequested   bool       `json:"restart_requested"`
+	RestartRequestedAt *time.Time `json:"restart_requested_at,omitempty"`
 }
 
 // HandleGetServerStatus handles GET /admin/server/status.
@@ -24,6 +28,7 @@ func (h *AdminHandler) HandleGetServerStatus(w http.ResponseWriter, r *http.Requ
 		RestartRequired:       snapshot.RestartRequired,
 		RestartRequiredAt:     snapshot.RestartRequiredAt,
 		RestartRequiredReason: snapshot.RestartRequiredReason,
+		RestartMarkCount:      snapshot.RestartMarkCount,
 		RestartRequested:      snapshot.RestartRequested,
 		RestartRequestedAt:    snapshot.RestartRequestedAt,
 	}

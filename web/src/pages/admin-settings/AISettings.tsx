@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
-import { AudioLines, CircleAlert, ExternalLink, Languages } from "lucide-react";
+import { Link } from "react-router";
+import { AudioLines, CircleAlert, Languages } from "lucide-react";
 import { toast } from "sonner";
 
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
@@ -634,7 +635,7 @@ export default function AISettings() {
     const batchSize = parseStrictInteger(value("subtitle_ai.batch_size", "40"));
     const contextLines = parseStrictInteger(value("subtitle_ai.context_neighbors", "2"));
     const chunkSeconds = parseStrictInteger(value("subtitle_ai.asr_chunk_seconds", "600"));
-    const quotaJobs = Number.parseInt(value("subtitle_ai.transcribe_quota_jobs", "0"), 10);
+    const quotaJobs = parseStrictInteger(value("subtitle_ai.transcribe_quota_jobs", "0"));
     const maxConcurrent = parseStrictInteger(
       effectiveValue("ai.max_concurrent_jobs", "subtitle_ai.max_concurrent_jobs", "2"),
     );
@@ -659,7 +660,7 @@ export default function AISettings() {
       toast.error("Transcription chunk length must be between 60 and 600 seconds.");
       return;
     }
-    if (!Number.isInteger(quotaJobs) || quotaJobs < 0) {
+    if (quotaJobs === null || quotaJobs < 0) {
       toast.error("Transcription limit must be zero or a positive whole number.");
       return;
     }
@@ -870,13 +871,12 @@ export default function AISettings() {
 
       <p className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
         Recommendation embeddings use their own models.
-        <a
-          href="/admin/recommendations"
+        <Link
+          to="/admin/recommendations"
           className="text-primary inline-flex shrink-0 items-center gap-1 font-medium hover:underline"
         >
           Open Recommendations
-          <ExternalLink className="size-3.5" />
-        </a>
+        </Link>
       </p>
 
       <SaveBar

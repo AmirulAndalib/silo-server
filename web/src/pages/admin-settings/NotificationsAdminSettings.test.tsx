@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
@@ -10,6 +10,20 @@ import NotificationsAdminSettings from "./NotificationsAdminSettings";
 const useSettingsFormMock = vi.fn();
 const restartKeysMock = vi.fn(() => new Set<string>());
 const updateSettingsMock = vi.fn(() => Promise.resolve({ values: {}, restart_required: false }));
+
+const mocks = vi.hoisted(() => ({
+  copyTextToClipboard: vi.fn(),
+  toastError: vi.fn(),
+  toastSuccess: vi.fn(),
+}));
+
+vi.mock("@/lib/clipboard", () => ({
+  copyTextToClipboard: (...args: unknown[]) => mocks.copyTextToClipboard(...args),
+}));
+
+vi.mock("sonner", () => ({
+  toast: { error: mocks.toastError, success: mocks.toastSuccess },
+}));
 
 vi.mock("@/hooks/queries/admin/settings", () => ({
   useUpdateServerSettings: () => ({ mutateAsync: updateSettingsMock, isPending: false }),
@@ -100,6 +114,10 @@ describe("NotificationsAdminSettings", () => {
     localStorage.clear();
     restartKeysMock.mockReturnValue(new Set<string>());
     updateSettingsMock.mockClear();
+    mocks.copyTextToClipboard.mockReset();
+    mocks.copyTextToClipboard.mockResolvedValue(undefined);
+    mocks.toastError.mockReset();
+    mocks.toastSuccess.mockReset();
   });
 
   it("registers Silo Push Relay settings with the shared settings form", () => {
@@ -247,6 +265,38 @@ describe("NotificationsAdminSettings", () => {
     // Delivery and appearance stay here.
     expect(screen.getByText("Artwork")).toBeInTheDocument();
     expect(screen.getByText("Let people pick a DM per episode")).toBeInTheDocument();
+  });
+
+  it("confirms the invite link copy only once it has actually happened", async () => {
+    useSettingsFormMock.mockReturnValue(makeForm({ "discord.client_id": "1234567890" }));
+
+    render(renderPage());
+    await openChannel(DISCORD_CHANNEL);
+    await userEvent.click(screen.getByRole("button", { name: /Copy link/ }));
+
+    expect(mocks.copyTextToClipboard).toHaveBeenCalledWith(
+      expect.stringContaining("client_id=1234567890"),
+    );
+    await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith("Invite link copied"));
+    expect(mocks.toastError).not.toHaveBeenCalled();
+  });
+
+  it("says so when the invite link could not be copied", async () => {
+    // Denied permission, or a browser that only exposes the clipboard on a
+    // secure origin — which a LAN server reached over plain HTTP is not.
+    mocks.copyTextToClipboard.mockRejectedValue(new Error("clipboard blocked"));
+    useSettingsFormMock.mockReturnValue(makeForm({ "discord.client_id": "1234567890" }));
+
+    render(renderPage());
+    await openChannel(DISCORD_CHANNEL);
+    await userEvent.click(screen.getByRole("button", { name: /Copy link/ }));
+
+    await waitFor(() =>
+      expect(mocks.toastError).toHaveBeenCalledWith(
+        "Couldn't copy the invite link — select it and copy it manually",
+      ),
+    );
+    expect(mocks.toastSuccess).not.toHaveBeenCalled();
   });
 
   it("saves the Discord application on its own, not through the page save bar", async () => {

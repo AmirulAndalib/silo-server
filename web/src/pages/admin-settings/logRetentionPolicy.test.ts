@@ -151,7 +151,7 @@ describe("logRetentionPolicy bucket rows", () => {
     expect(rows).toEqual(recommendedBucketRows());
   });
 
-  it("adds, edits and removes rows without reusing an id", () => {
+  it("numbers a new row after the highest id still present", () => {
     let rows = bucketRowsFromRaw("").rows;
     rows = appendBucketRow(rows);
     rows = appendBucketRow(rows);
@@ -162,6 +162,11 @@ describe("logRetentionPolicy bucket rows", () => {
     expect(rows[0]?.component).toBe("scanner");
     expect(rows[0]?.max_rows).toBe(0);
 
+    // Ids are max-of-remaining + 1, not a monotonic counter: removing the last
+    // row frees its id for the next one. That is safe because an id only has to
+    // be unique among the rows currently on screen — it is a React key and the
+    // handle the editor's own update/remove calls use, and it is stripped before
+    // the rows are serialized.
     rows = removeBucketRow(rows, "2");
     rows = appendBucketRow(rows);
     expect(rows.map((row) => row.id)).toEqual(["1", "2"]);

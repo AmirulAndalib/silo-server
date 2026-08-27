@@ -15,8 +15,13 @@ type ServerRestartStatusTracker struct {
 	restartRequired       bool
 	restartRequiredAt     time.Time
 	restartRequiredReason string
-	restartRequested      bool
-	restartRequestedAt    time.Time
+	// restartMarkCount increments on every MarkRequired call. restartRequired
+	// latches true for the life of the process, so this counter is the only
+	// signal that a NEW restart-required save happened — the admin UI keys its
+	// banner re-arm (after "Later") on it.
+	restartMarkCount   int
+	restartRequested   bool
+	restartRequestedAt time.Time
 }
 
 type ServerRestartStatusSnapshot struct {
@@ -24,6 +29,7 @@ type ServerRestartStatusSnapshot struct {
 	RestartRequired       bool
 	RestartRequiredAt     *time.Time
 	RestartRequiredReason string
+	RestartMarkCount      int
 	RestartRequested      bool
 	RestartRequestedAt    *time.Time
 }
@@ -49,6 +55,7 @@ func (s *ServerRestartStatusTracker) MarkRequired(reason string) {
 		s.restartRequired = true
 		s.restartRequiredAt = now
 	}
+	s.restartMarkCount++
 	if reason != "" {
 		s.restartRequiredReason = reason
 	}
@@ -96,6 +103,7 @@ func (s *ServerRestartStatusTracker) Snapshot() ServerRestartStatusSnapshot {
 		RestartRequired:       s.restartRequired,
 		RestartRequiredAt:     restartRequiredAt,
 		RestartRequiredReason: s.restartRequiredReason,
+		RestartMarkCount:      s.restartMarkCount,
 		RestartRequested:      s.restartRequested,
 		RestartRequestedAt:    restartRequestedAt,
 	}

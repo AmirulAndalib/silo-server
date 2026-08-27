@@ -21,6 +21,7 @@ import {
 import { useRateLimitConfig, useUpdateRateLimitConfig } from "@/hooks/queries/admin/rateLimits";
 import { useRestartKeys } from "@/hooks/useRestartKeys";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
+import { useReportUnsavedChanges } from "@/hooks/useUnsavedChanges";
 import { cn } from "@/lib/utils";
 import { FieldGroup } from "./FieldGroup";
 import { SaveBar } from "./SaveBar";
@@ -262,6 +263,10 @@ export default function SecurityAccessSettings() {
   }
 
   const rateLimitsDirty = JSON.stringify(config) !== hydratedKey;
+  // The rate-limit draft lives outside useSettingsForm, so it has to announce
+  // itself to the unsaved-changes registry on its own — otherwise the
+  // navigation guard and the reload prompt only know about the batched keys.
+  useReportUnsavedChanges(rateLimitsDirty);
   // Everything except the on/off switch lives in the disclosure, so compare the
   // two with `enabled` normalised away to decide whether to force it open.
   const advancedDirty =
@@ -270,9 +275,26 @@ export default function SecurityAccessSettings() {
   const advancedCount =
     2 + 3 + Object.keys(TIER_LABELS).length * 3 + Object.keys(AUTH_ENDPOINT_LABELS).length * 2;
 
+  /**
+   * One Save, two writers — and they are ordered, not concurrent. The
+   * rate-limit endpoint validates `backend: redis` against the *persisted*
+   * settings, so firing it alongside the settings batch means it can be judged
+   * against the state the admin is in the middle of replacing.
+   *
+   * A failed writer keeps its own staged edits (neither mutation clears them on
+   * error) and toasts the server's message, so the admin can fix the cause and
+   * hit Save again. The batch failing skips the rate-limit PUT for the same
+   * reason it goes first: the settings it would be validated against are not
+   * the ones on screen.
+   */
   async function handleSave() {
-    if (rateLimitsDirty) updateConfig.mutate(config);
-    if (form.dirtyCount > 0) await form.save();
+    try {
+      if (form.dirtyCount > 0) await form.save();
+      if (rateLimitsDirty) await updateConfig.mutateAsync(config);
+    } catch {
+      // Both mutations already surface the failure as a toast; swallowing here
+      // only stops it becoming an unhandled rejection out of the save bar.
+    }
   }
 
   function handleDiscard() {
@@ -499,7 +521,7 @@ export default function SecurityAccessSettings() {
 
       <SaveBar
         dirtyCount={form.dirtyCount + (rateLimitsDirty ? 1 : 0)}
-        onSave={handleSave}
+        onSave={() => void handleSave()}
         onDiscard={handleDiscard}
         isSaving={form.isSaving || savingRateLimits}
       />

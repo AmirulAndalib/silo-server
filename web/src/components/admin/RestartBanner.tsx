@@ -12,6 +12,13 @@ export interface RestartBannerProps {
    * rather than queried again here — one caller, one query, one banner.
    */
   restartRequired?: boolean;
+  /**
+   * Opaque value that changes whenever a NEW restart-required save lands
+   * (`restart_mark_count` from the same status response). The boolean latches
+   * true for the life of the process, so this is the only signal that another
+   * requirement arrived after a "Later" — a changed signal un-dismisses.
+   */
+  restartSignal?: string | number;
   /** One-line explanation under the title. */
   description?: ReactNode;
   className?: string;
@@ -34,19 +41,23 @@ const DEFAULT_RESTART_DESCRIPTION =
  */
 export function RestartBanner({
   restartRequired = false,
+  restartSignal,
   description,
   className,
 }: RestartBannerProps) {
   const pending = restartRequired;
-  const [dismissed, setDismissed] = useState(false);
-  const visible = pending && !dismissed;
-
-  // A fresh reason to restart outranks an earlier "Later".
-  const [wasPending, setWasPending] = useState(pending);
-  if (pending !== wasPending) {
-    setWasPending(pending);
-    if (pending) setDismissed(false);
+  // "Later" records what was pending at the time, not a boolean: the server's
+  // restart_required flag never clears while the process lives, so a fresh
+  // restart-required save only shows up as a change in the signal. A
+  // dismissal therefore holds exactly until the signature it silenced changes.
+  const signature = String(restartSignal ?? "");
+  const [dismissedSignature, setDismissedSignature] = useState<string | null>(null);
+  // Forgotten entirely once nothing is owed (a restart happened), so the next
+  // requirement always prompts again even with an identical key list.
+  if (!pending && dismissedSignature !== null) {
+    setDismissedSignature(null);
   }
+  const visible = pending && dismissedSignature !== signature;
 
   if (!visible) return null;
 
@@ -72,7 +83,7 @@ export function RestartBanner({
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-2">
-        <Button variant="ghost" size="sm" onClick={() => setDismissed(true)}>
+        <Button variant="ghost" size="sm" onClick={() => setDismissedSignature(signature)}>
           Later
         </Button>
         <RestartServerButton label="Restart server" />

@@ -2,6 +2,7 @@ import { useEffect, useId, useRef } from "react";
 import { Search, X } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
+import { searchShortcutLabel } from "@/lib/keyboardShortcut";
 import { cn } from "@/lib/utils";
 
 interface SettingsSearchInputProps {
@@ -34,10 +35,7 @@ export function SettingsSearchInput({
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const hasQuery = value.trim().length > 0;
-  const shortcutHint =
-    typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.userAgent)
-      ? "⌘ K"
-      : "Ctrl K";
+  const shortcutHint = searchShortcutLabel();
   // Idle shows nothing: a "12 settings pages" style count under an untouched
   // box is noise. The line only speaks while a query is filtering.
   const status = hasQuery

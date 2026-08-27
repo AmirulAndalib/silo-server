@@ -48,6 +48,7 @@ import { useServerNotificationChannels } from "@/hooks/queries/admin/serverNotif
 import { useUpdateServerSettings } from "@/hooks/queries/admin/settings";
 import { useRestartKeys } from "@/hooks/useRestartKeys";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 import { FieldGroup } from "./FieldGroup";
 import { SaveBar } from "./SaveBar";
@@ -615,6 +616,21 @@ function InviteBotRow({ clientId }: { clientId: string }) {
   const [copied, setCopied] = useState(false);
   const trimmed = clientId.trim();
 
+  // The copy can genuinely fail — a denied permission, or a browser that only
+  // exposes the async clipboard on a secure origin, which a LAN server reached
+  // over plain HTTP is not. Claiming success there sends the admin off to paste
+  // an invite link they do not have.
+  async function copyInviteLink() {
+    try {
+      await copyTextToClipboard(discordInviteUrl(trimmed));
+      setCopied(true);
+      toast.success("Invite link copied");
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error("Couldn't copy the invite link — select it and copy it manually");
+    }
+  }
+
   return (
     <div className="space-y-2 py-2">
       <div className="flex flex-wrap gap-1.5">
@@ -633,12 +649,7 @@ function InviteBotRow({ clientId }: { clientId: string }) {
           variant="outline"
           size="sm"
           disabled={!trimmed}
-          onClick={() => {
-            void navigator.clipboard.writeText(discordInviteUrl(trimmed));
-            setCopied(true);
-            toast.success("Invite link copied");
-            window.setTimeout(() => setCopied(false), 2000);
-          }}
+          onClick={() => void copyInviteLink()}
         >
           {copied ? (
             <Check className="mr-1.5 h-3.5 w-3.5" />

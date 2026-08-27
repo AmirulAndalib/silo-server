@@ -63,6 +63,35 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe("AdminLayout search shortcut hint", () => {
+  function stubUserAgent(value: string) {
+    vi.spyOn(window.navigator, "userAgent", "get").mockReturnValue(value);
+  }
+
+  // The dialog opens on Cmd or Ctrl, so the advertised hint has to name the key
+  // this keyboard actually has — a hardcoded ⌘ is a dead instruction on Windows
+  // and Linux, which is most self-hosters.
+  it("names Ctrl off Apple platforms", () => {
+    stubUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+    renderAdmin();
+
+    const [search] = screen.getAllByRole("button", { name: "Search admin sections" });
+    expect(search).toHaveAttribute("title", "Search admin sections (Ctrl K)");
+    expect(screen.getByText("Ctrl K")).toBeInTheDocument();
+    expect(screen.queryByText(/⌘/)).not.toBeInTheDocument();
+  });
+
+  it("names the command glyph on Apple platforms", () => {
+    stubUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15");
+    renderAdmin();
+
+    const [search] = screen.getAllByRole("button", { name: "Search admin sections" });
+    expect(search).toHaveAttribute("title", "Search admin sections (⌘ K)");
+    expect(screen.getByText("⌘ K")).toBeInTheDocument();
+  });
 });
 
 describe("AdminLayout restart banner", () => {

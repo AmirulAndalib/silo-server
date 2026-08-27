@@ -4393,6 +4393,8 @@ export interface AdminServerStatus {
   restart_required: boolean;
   restart_required_at?: string;
   restart_required_reason?: string;
+  /** Increments on every restart-required save; re-arms the dismissed banner. */
+  restart_mark_count?: number;
   restart_requested: boolean;
   restart_requested_at?: string;
 }

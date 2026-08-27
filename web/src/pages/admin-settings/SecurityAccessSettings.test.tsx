@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -27,6 +27,11 @@ const updateRateLimitMock = vi.fn();
 
 vi.mock("@/hooks/useSettingsForm", () => ({
   useSettingsForm: (...args: unknown[]) => useSettingsFormMock(...args),
+}));
+
+const reportUnsavedMock = vi.fn();
+vi.mock("@/hooks/useUnsavedChanges", () => ({
+  useReportUnsavedChanges: (dirty: boolean) => reportUnsavedMock(dirty),
 }));
 
 vi.mock("@/hooks/useRestartKeys", () => ({
@@ -93,7 +98,22 @@ describe("SecurityAccessSettings", () => {
     useSettingsFormMock.mockReset();
     useSettingsFormMock.mockReturnValue(makeForm());
     rateLimitConfigMock.mockReturnValue({ data: SERVER_CONFIG, isLoading: false });
-    updateRateLimitMock.mockReturnValue({ mutate: vi.fn(), isPending: false, data: undefined });
+    updateRateLimitMock.mockReturnValue({
+      mutateAsync: vi.fn().mockResolvedValue(undefined),
+      isPending: false,
+      data: undefined,
+    });
+  });
+
+  it("reports a rate-limit-only draft to the unsaved-changes registry", async () => {
+    render(<SecurityAccessSettings />);
+    expect(reportUnsavedMock).toHaveBeenLastCalledWith(false);
+
+    await userEvent.click(screen.getByRole("switch", { name: /Enable rate limiting/i }));
+
+    // The guard and the reload prompt read the registry, not the SaveBar, so
+    // the separate rate-limit draft has to announce itself there too.
+    expect(reportUnsavedMock).toHaveBeenLastCalledWith(true);
   });
 
   it("renders every field group", () => {
@@ -146,11 +166,16 @@ describe("SecurityAccessSettings", () => {
     expect(screen.getByText("1 unsaved change")).toBeInTheDocument();
   });
 
-  it("counts an edited rate limit toward the shared save bar and saves both writers", async () => {
-    const save = vi.fn();
-    const mutate = vi.fn();
+  it("counts an edited rate limit toward the shared save bar and saves both writers in order", async () => {
+    const order: string[] = [];
+    const save = vi.fn(async () => {
+      order.push("settings");
+    });
+    const mutateAsync = vi.fn(async () => {
+      order.push("rate-limits");
+    });
     useSettingsFormMock.mockReturnValue(makeForm({ dirtyCount: 1, save }));
-    updateRateLimitMock.mockReturnValue({ mutate, isPending: false, data: undefined });
+    updateRateLimitMock.mockReturnValue({ mutateAsync, isPending: false, data: undefined });
 
     render(<SecurityAccessSettings />);
 
@@ -159,8 +184,32 @@ describe("SecurityAccessSettings", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /^Save$/i }));
 
-    expect(mutate).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }));
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith(expect.objectContaining({ enabled: false })),
+    );
     expect(save).toHaveBeenCalled();
+    // PUT /admin/rate-limits/config validates `backend: redis` against the
+    // persisted settings, so running the two writers concurrently lets the
+    // limiter be judged against the state this very save is replacing.
+    expect(order).toEqual(["settings", "rate-limits"]);
+  });
+
+  it("leaves the rate-limit write alone when the settings batch fails", async () => {
+    const save = vi.fn().mockRejectedValue(new Error("invalid duration"));
+    const mutateAsync = vi.fn();
+    useSettingsFormMock.mockReturnValue(makeForm({ dirtyCount: 1, save }));
+    updateRateLimitMock.mockReturnValue({ mutateAsync, isPending: false, data: undefined });
+
+    render(<SecurityAccessSettings />);
+
+    await userEvent.click(screen.getByRole("switch", { name: /Enable rate limiting/i }));
+    await userEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    expect(mutateAsync).not.toHaveBeenCalled();
+    // The staged rate-limit edit survives so the admin can fix the cause and
+    // save again; both mutations toast their own failure.
+    expect(screen.getByText("2 unsaved changes")).toBeInTheDocument();
   });
 
   it("offers the Redis backend when the server reports Redis configured", async () => {

@@ -18,6 +18,7 @@ import { usePolicyCapability } from "@/hooks/queries/admin/policy";
 import { useAdminServerStatus } from "@/hooks/queries/admin/settings";
 import { buildAdminCommandNavSections } from "@/lib/adminNavigation";
 import { resolveAdminDocumentTitle } from "@/lib/documentTitle";
+import { searchShortcutLabel } from "@/lib/keyboardShortcut";
 import { cn } from "@/lib/utils";
 import { Menu, Search, X } from "lucide-react";
 import { useWatchPlaybackController } from "@/playback/watchPlaybackContext";
@@ -165,7 +166,11 @@ export default function AdminLayout() {
               it. `lg:mt-7` clears the fixed Search/activity controls in the
               top-right corner (top-5, h-9 → they end 3.5rem down), which would
               otherwise float over the banner's buttons. */}
-          <RestartBanner restartRequired={serverStatus?.restart_required} className="lg:mt-7" />
+          <RestartBanner
+            restartRequired={serverStatus?.restart_required}
+            restartSignal={serverStatus?.restart_mark_count}
+            className="lg:mt-7"
+          />
           <Outlet />
         </div>
       </main>
@@ -182,12 +187,16 @@ function AdminSearchButton({
   className?: string;
   showShortcut?: boolean;
 }) {
+  // Advertised, not hardcoded: the dialog opens on either modifier, so the hint
+  // has to name the one this keyboard actually has.
+  const shortcut = searchShortcutLabel();
+
   return (
     <button
       type="button"
       onClick={onClick}
       aria-label="Search admin sections"
-      title="Search admin sections (⌘K)"
+      title={`Search admin sections (${shortcut})`}
       className={cn(
         "text-muted-foreground hover:text-foreground hover:bg-accent/60 focus-visible:ring-ring/60 border-border/70 bg-surface/70 flex h-9 items-center justify-center gap-2 rounded-xl border px-2.5 transition-colors focus-visible:ring-[3px] focus-visible:outline-none",
         className,
@@ -197,8 +206,8 @@ function AdminSearchButton({
       {showShortcut ? (
         <>
           <span className="hidden text-[13px] font-medium xl:inline">Search</span>
-          <kbd className="border-border/70 pointer-events-none rounded border px-1.5 py-0.5 font-mono text-[10px] select-none">
-            ⌘K
+          <kbd className="border-border/70 pointer-events-none rounded border px-1.5 py-0.5 font-mono text-[10px] whitespace-nowrap select-none">
+            {shortcut}
           </kbd>
         </>
       ) : null}

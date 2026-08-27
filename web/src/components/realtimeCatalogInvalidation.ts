@@ -1,5 +1,5 @@
 import type { QueryClient } from "@tanstack/react-query";
-import { adminKeys, libraryKeys } from "@/hooks/queries/keys";
+import { adminKeys, libraryKeys, sectionKeys } from "@/hooks/queries/keys";
 import { invalidateMediaSurfaceQueries } from "@/hooks/queries/mediaSurfaceRefresh";
 import { bumpHomeRefreshSignal } from "@/pages/homeSurfaceRefresh";
 
@@ -15,6 +15,15 @@ export function invalidateCatalogState(
   options: CatalogInvalidationOptions,
 ) {
   const { itemId, libraryId, allowDashboardRefetch, includeLibraryLists = true } = options;
+  // Library-scoped sweeps leave home section queries out (see
+  // activeSectionQueryMatchesLibrary) so a scan cannot storm them — but the
+  // refresh-signal bump below still reloads Home's rows through fetchQuery,
+  // which would happily serve the fresh-but-outdated cache. Mark home data
+  // stale without refetching, so only the (already throttled) queue reset
+  // fetches, and it fetches real data.
+  if (libraryId !== undefined) {
+    void queryClient.invalidateQueries({ queryKey: sectionKeys.home(), refetchType: "none" });
+  }
   void invalidateMediaSurfaceQueries(queryClient, { itemId, libraryId }).then(() => {
     bumpHomeRefreshSignal(queryClient);
   });

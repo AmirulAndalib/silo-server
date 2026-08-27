@@ -54,6 +54,68 @@ describe("buildSettingsOverview health tiles", () => {
     expect(storage.detail).toBe("S3 · public + private");
   });
 
+  it("says a restart is pending once the first bucket is saved", () => {
+    // `storage_available` is settled when the S3 client is built at boot, so
+    // the save that configures the first bucket cannot flip it. "Not set up"
+    // there tells an admin who just did the work that it did not take.
+    const storage = tile(
+      {
+        storageAvailable: false,
+        settings: { "s3.public_bucket": "silo-art" },
+        serverStatus: {
+          started_at: "2026-01-01T00:00:00Z",
+          restart_required: true,
+          restart_required_reason: "server_settings",
+          restart_requested: false,
+        },
+      },
+      "storage",
+    );
+
+    expect(storage.state).toBe("warn");
+    expect(storage.stateText).toBe("Restart pending");
+    expect(storage.detail).toBe("S3 · silo-art · applies after a restart");
+    expect(storage.action).toEqual({ label: "Fix", page: "infrastructure" });
+  });
+
+  it("still calls storage unconfigured when no bucket is saved", () => {
+    // A restart owed by some other save says nothing about storage.
+    const storage = tile(
+      {
+        storageAvailable: false,
+        serverStatus: {
+          started_at: "2026-01-01T00:00:00Z",
+          restart_required: true,
+          restart_required_reason: "server_settings",
+          restart_requested: false,
+        },
+      },
+      "storage",
+    );
+
+    expect(storage.state).toBe("off");
+    expect(storage.stateText).toBe("Not set up");
+    expect(storage.action).toEqual({ label: "Set up", page: "infrastructure" });
+  });
+
+  it("does not read a restart another subsystem asked for as pending storage", () => {
+    const storage = tile(
+      {
+        storageAvailable: false,
+        settings: { "s3.public_bucket": "silo-art" },
+        serverStatus: {
+          started_at: "2026-01-01T00:00:00Z",
+          restart_required: true,
+          restart_required_reason: "jellyfin_compat",
+          restart_requested: false,
+        },
+      },
+      "storage",
+    );
+
+    expect(storage.stateText).toBe("Not set up");
+  });
+
   it("reports the detected accelerator on the transcoding tile", () => {
     const transcoding = tile(
       {
