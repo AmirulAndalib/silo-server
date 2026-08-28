@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,13 +16,33 @@ import (
 
 const (
 	cacheMetadataImagesIntervalMs = int64(60 * 1000)
-	// Claim only work that can start immediately. Claiming a large queue page
-	// stamps one lease on every row up front; with two workers, the unstarted
-	// tail could expire and be reclaimed before this execution reaches it.
-	cacheMetadataImagesClaimLimit = 2
-	cacheMetadataImagesWorkers    = 2
 	cacheMetadataImagesMaxRuntime = 10 * time.Minute
 )
+
+// imageCacheWorkerCount sizes the image-cache worker pool for the host. Each
+// job downloads an original (30s timeout in imagecache) and runs a libvips
+// WEBP encode ladder, so the work is a CPU/network mix: 4× the scheduler's
+// CPU count keeps cores busy while other workers wait on downloads, and the
+// cap keeps a many-core server from monopolizing provider connections. The
+// previous fixed pool of 2 measured roughly 60 images/minute on a ~600k-item
+// library; 48 workers measured roughly 2,900/minute over a 60-minute window
+// (RXWatcher/silo-server@3b377f5c2).
+func imageCacheWorkerCount(numCPU int) int {
+	return min(48, 4*max(numCPU, 1))
+}
+
+var cacheMetadataImagesWorkers = imageCacheWorkerCount(runtime.GOMAXPROCS(0))
+
+// cacheMetadataImagesClaimLimit is the queue page stamped with one lease up
+// front. processClaimedJobs dispatches the page through a semaphore, so a page
+// larger than the worker count keeps the pool saturated instead of waiting on
+// every straggler in a worker-sized batch before the next page can be claimed.
+// The 15-minute lease stamped at claim (imageCacheLeaseDuration) is the
+// ceiling on page size: at 10 jobs per worker the page drains within ten times
+// the worst single job, and the slowest realistic job — a download at the full
+// 30-second timeout plus encode and uploads — keeps that comfortably inside
+// the lease even before the 10-minute task runtime cap stops new claims.
+var cacheMetadataImagesClaimLimit = 10 * cacheMetadataImagesWorkers
 
 type MetadataImageCacheRunner interface {
 	DrainUntilIdle(ctx context.Context, workerID string, claimLimit int, concurrency int, maxRuntime time.Duration, reportProgress metadata.ImageCacheRunProgressReporter) (metadata.ImageCacheRunStats, error)
