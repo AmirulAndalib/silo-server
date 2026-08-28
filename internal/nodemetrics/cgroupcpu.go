@@ -93,15 +93,8 @@ var cgroupCPUSetPaths = []string{
 // needs no walk of its own; where only the pre-intersection file exists, the
 // per-level candidates cover the same ground.
 //
-// hostCores is how many CPUs the machine has, and a cpuset that spans all of
-// them is not a restriction — it is what every unconstrained container and
-// service publishes, because the effective set is inherited from a root that
-// holds every online CPU. Counting it as a cap would be worse than ignoring it:
-// cgroupCPU treats any cpuset as binding when nothing else caps CPU, so the
-// reading would move to this cgroup's own usage, and a nearly idle Silo on a
-// saturated shared host would report a few percent instead of the host's load.
-// A host size of 0 means /proc/stat could not be counted, and an unknown host
-// is no reason to discard a cpuset that may well be real.
+// A cpuset that spans the whole host is no cpuset at all — see cgroupCapBinds,
+// which is the rule, and which applies to the CFS quota the same way.
 func cgroupCPUSetCores(paths []string, hostCores int) int {
 	for _, path := range paths {
 		raw, err := os.ReadFile(path)
@@ -112,7 +105,7 @@ func cgroupCPUSetCores(paths []string, hostCores int) int {
 		if count <= 0 {
 			continue
 		}
-		if hostCores > 0 && count >= hostCores {
+		if !cgroupCapBinds(float64(count), hostCores) {
 			// The effective set is the intersection with every ancestor, so no
 			// file later in the list can narrow what this one just said was the
 			// whole machine.
@@ -121,6 +114,29 @@ func cgroupCPUSetCores(paths []string, hostCores int) int {
 		return count
 	}
 	return 0
+}
+
+// cgroupCapBinds reports whether a CPU cap of the given size in cores actually
+// restricts a process on a host with hostCores CPUs.
+//
+// A cap as large as the machine restricts nothing, and it is not a rare
+// misconfiguration: every unconstrained container and service publishes an
+// effective cpuset holding every online CPU, because it inherits one from a root
+// that does, and a deployment sized to "the whole box" writes a quota to match.
+//
+// Reading such a cap as binding is worse than ignoring it. The cap decides which
+// cgroup's usage is measured, not just what it is divided by, so an idle Silo
+// beside a saturated neighbor on a shared host would report its own few percent
+// as the machine's load — the exact misreport this whole correction exists to
+// prevent, arrived at from the other direction.
+//
+// A host size of 0 means /proc/stat could not be counted, and an unknown host is
+// no reason to discard a cap that may well be real.
+func cgroupCapBinds(cores float64, hostCores int) bool {
+	if cores <= 0 {
+		return false
+	}
+	return hostCores <= 0 || cores < float64(hostCores)
 }
 
 // countCPUSetEntries counts the CPUs in a Linux cpu list ("0-3,8,12-13").

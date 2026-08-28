@@ -113,8 +113,16 @@ good numbers rather than blocking the health response; a path the node cannot se
 at all is reported as unmeasurable rather than as an empty disk.
 
 In a container these numbers are the *container's*, corrected against its cgroup
-— except on an LXC host running Docker nested inside it, which needs three
-bind-mounts to read its own limits instead of the physical machine's. See the LXC
+— but only where the cgroup actually caps something. A CPU quota or cpuset the
+size of the whole machine restricts nothing, and both are ordinary: an
+unconstrained container inherits a cpuset holding every online CPU, and a
+deployment sized to the box writes a matching quota. Silo reads those as
+uncapped and keeps reporting the host, because on a shared machine the CPU a
+neighbor burns is CPU this node cannot have. A real cap — two cores of a
+sixty-four core host — switches both the busy figure and the core count to the
+cgroup's. This is also true on an LXC host running Docker nested inside it, which
+needs three bind-mounts to read its own limits instead of the physical
+machine's. See the LXC
 notes in [Deploy Silo with Docker](../deployment/docker.md#node-metrics),
 including the caveat that lxcfs only virtualizes `/proc/loadavg` when it runs
 with loadavg accounting enabled (`lxcfs -l`; off by default on Proxmox), so

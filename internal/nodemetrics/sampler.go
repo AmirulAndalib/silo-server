@@ -302,7 +302,7 @@ func (s *Sampler) cpuStats(now time.Time) (busyPct, cores int) {
 	// cgroupCPU decides that, because the answer also settles which cgroup's
 	// usage the reading comes from.
 	sample, quota := s.cgroupCPU(now, cgroupCPUSetCores(s.cgroupCPUSetPaths, hostCores))
-	if quota <= 0 {
+	if !cgroupCapBinds(quota, hostCores) {
 		// Nothing caps this process, so its own cgroup is the wrong domain to
 		// measure: the leaf accounts for Silo alone, and Silo idling beside a
 		// saturated neighbor is not an idle machine. Uncapped, the CPU a
@@ -310,6 +310,11 @@ func (s *Sampler) cpuStats(now time.Time) (busyPct, cores int) {
 		// /proc/stat reports — and under lxcfs that file is already narrowed to
 		// the container, so this stays right there too. The next pass to find a
 		// cap starts a fresh pair rather than differencing across the switch.
+		//
+		// A quota the size of the machine counts as nothing capping it, for the
+		// same reason a cpuset spanning the machine does: it cannot restrict this
+		// process beyond what the machine already does, and treating it as a cap
+		// moves the measurement to a domain that answers a different question.
 		s.prevCgroupCPU = cgroupCPUSample{}
 		return busyPct, cores
 	}
@@ -317,21 +322,17 @@ func (s *Sampler) cpuStats(now time.Time) (busyPct, cores int) {
 	if !sample.valid {
 		return busyPct, cores
 	}
-	// The budget is capped at what the host can actually give, the same way the
-	// reported core count is. A quota above the machine's core count is not a
-	// limit — a 128-core quota on a 64-core host cannot be spent — so dividing
-	// by it reports a workload saturating every CPU it has as fifty percent
-	// busy. cores has already been through that cap; budget has to agree with
-	// it or the percentage and the denominator describe different machines.
-	budget := quota
-	if hostCores > 0 && budget > float64(hostCores) {
-		budget = float64(hostCores)
-	}
+	// No clamp against the host's capacity here: a quota that reached this far
+	// is one cgroupCapBinds accepted, which means it is smaller than the machine.
+	// A quota the machine cannot supply took the branch above and is reported
+	// from /proc/stat instead, which is the same answer without dividing one
+	// population's CPU time by another's capacity.
+	//
 	// Once the cgroup can be read it is the only honest source, so its answer
 	// stands even when this pass cannot derive one (the first sample, or a
 	// counter reset). Falling back to the host figure would silently mix two
 	// different machines' busyness across intervals.
-	cgroupPct, _ := cgroupCPUPercent(s.prevCgroupCPU, sample, budget)
+	cgroupPct, _ := cgroupCPUPercent(s.prevCgroupCPU, sample, quota)
 	s.prevCgroupCPU = sample
 	return cgroupPct, cores
 }

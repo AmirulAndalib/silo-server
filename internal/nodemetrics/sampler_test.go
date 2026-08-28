@@ -1064,11 +1064,12 @@ func TestMemoryLimitEqualToHostRAMIsNotALimit(t *testing.T) {
 	}
 }
 
-// A quota above the machine's core count is not a limit — a 128-core quota on a
-// 64-core host cannot be spent. cgroupQuotaCores already caps the reported core
-// count at the host's; the normalization budget has to agree with it, or a
-// workload saturating every CPU it has reports fifty percent busy.
-func TestCPUQuotaAboveHostCapacityNormalizesAgainstTheHost(t *testing.T) {
+// A quota the machine cannot supply is not a limit — a 128-core quota on a
+// 64-core host cannot be spent — so it must not move the measurement into the
+// cgroup either. It is the same rule a cpuset spanning the host gets: an idle
+// Silo beside a saturated neighbor would otherwise report its own few percent
+// as the machine's load, from a quota that restricts it in no way at all.
+func TestCPUQuotaAboveHostCapacityReportsTheHost(t *testing.T) {
 	tree := newProcTree(t)
 	clock := newFakeClock()
 	tree.write("loadavg", "0 0 0 0/0 0\n")
@@ -1082,7 +1083,7 @@ func TestCPUQuotaAboveHostCapacityNormalizesAgainstTheHost(t *testing.T) {
 		}
 		return line
 	}
-	tree.write("stat", hostStat(100, 9900))
+	tree.write("stat", hostStat(100, 900))
 
 	dir := t.TempDir()
 	usage := filepath.Join(dir, "cpu.stat")
@@ -1104,10 +1105,10 @@ func TestCPUQuotaAboveHostCapacityNormalizesAgainstTheHost(t *testing.T) {
 	}}
 	s.sample(context.Background())
 
-	// 20 seconds of CPU over 5 seconds of wall time: every one of the four CPUs
-	// the host has, saturated.
-	writeUsage(20_000_000)
-	tree.write("stat", hostStat(200, 19800))
+	// Silo spends 5 of the interval's 20 core-seconds — a quarter of the host —
+	// while the host itself is three quarters busy with someone else's work.
+	writeUsage(5_000_000)
+	tree.write("stat", hostStat(850, 1150))
 	clock.advance(5 * time.Second)
 	s.sample(context.Background())
 
@@ -1115,8 +1116,8 @@ func TestCPUQuotaAboveHostCapacityNormalizesAgainstTheHost(t *testing.T) {
 	if system.Cores != 4 {
 		t.Fatalf("Cores = %d, want the host's 4 — an 8-core quota is not a limit here", system.Cores)
 	}
-	if system.CPUPct != 100 {
-		t.Fatalf("CPUPct = %d, want 100 — the node has spent every CPU it can", system.CPUPct)
+	if system.CPUPct != 75 {
+		t.Fatalf("CPUPct = %d, want the host's 75 rather than this process's 25", system.CPUPct)
 	}
 }
 
@@ -1182,5 +1183,86 @@ func TestCPUIgnoresACpusetSpanningTheWholeHost(t *testing.T) {
 	}
 	if system.Cores != 8 {
 		t.Fatalf("Cores = %d, want the host's 8", system.Cores)
+	}
+}
+
+// A quota sized to the whole box is the ordinary way a deployment says "use this
+// machine", and it restricts nothing. The boundary matters on its own: the
+// over-capacity case is a misconfiguration, while quota == host cores is
+// deliberate and common, and reading it as a cap moves the measurement into the
+// cgroup exactly where the machine is shared.
+func TestCPUQuotaEqualToTheHostReportsTheHost(t *testing.T) {
+	tree := newProcTree(t)
+	clock := newFakeClock()
+	tree.write("loadavg", "0 0 0 0/0 0\n")
+	tree.write("meminfo", "MemTotal: 1024 kB\n")
+	tree.write("net/dev", "")
+	hostStat := func(busy, idle int) string {
+		line := "cpu  " + itoa(busy) + " 0 0 " + itoa(idle) + " 0 0 0 0\n"
+		for i := range 4 {
+			line += "cpu" + itoa(i) + " 0 0 0 0 0 0 0 0\n"
+		}
+		return line
+	}
+	tree.write("stat", hostStat(100, 900))
+
+	dir := t.TempDir()
+	usage := filepath.Join(dir, "cpu.stat")
+	writeUsage := func(micros int) {
+		if err := os.WriteFile(usage, []byte("usage_usec "+itoa(micros)+"\n"), 0o644); err != nil {
+			t.Fatalf("write cgroup usage: %v", err)
+		}
+	}
+	writeUsage(0)
+	quota := filepath.Join(dir, "cpu.max")
+	// Exactly the host's four cores.
+	if err := os.WriteFile(quota, []byte("400000 100000\n"), 0o644); err != nil {
+		t.Fatalf("write cgroup quota: %v", err)
+	}
+
+	s := newTestSampler(t, tree, clock, Options{})
+	s.cgroupCPUPaths = []cgroupCPUPath{{
+		usage: usage, usageKey: cgroupCPUUsageKey, usageUnit: time.Microsecond, quota: quota,
+	}}
+	s.sample(context.Background())
+
+	// Silo is nearly idle; the machine it shares is three quarters busy.
+	writeUsage(200_000)
+	tree.write("stat", hostStat(850, 1150))
+	clock.advance(5 * time.Second)
+	s.sample(context.Background())
+
+	system := s.Snapshot().System
+	if system.CPUPct != 75 {
+		t.Fatalf("CPUPct = %d, want the host's 75 — a whole-machine quota caps nothing", system.CPUPct)
+	}
+	if system.Cores != 4 {
+		t.Fatalf("Cores = %d, want the host's 4", system.Cores)
+	}
+}
+
+// The rule is one predicate, and it is the boundary that carries it: strictly
+// smaller than the machine binds, as large as the machine does not, and an
+// unknown machine is no reason to discard a cap.
+func TestCgroupCapBindsOnlyBelowTheHostSize(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		cores     float64
+		hostCores int
+		want      bool
+	}{
+		{name: "half the host", cores: 2, hostCores: 4, want: true},
+		{name: "just under the host", cores: 3.5, hostCores: 4, want: true},
+		{name: "the whole host", cores: 4, hostCores: 4, want: false},
+		{name: "more than the host", cores: 8, hostCores: 4, want: false},
+		{name: "no cap", cores: 0, hostCores: 4, want: false},
+		{name: "unknown host keeps a cap", cores: 2, hostCores: 0, want: true},
+		{name: "unknown host still has no cap to keep", cores: 0, hostCores: 0, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := cgroupCapBinds(test.cores, test.hostCores); got != test.want {
+				t.Fatalf("cgroupCapBinds(%v, %d) = %v, want %v", test.cores, test.hostCores, got, test.want)
+			}
+		})
 	}
 }
