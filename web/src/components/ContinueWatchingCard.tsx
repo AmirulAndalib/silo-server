@@ -116,6 +116,8 @@ export default function ContinueWatchingCard(props: ContinueWatchingCardProps) {
   const progressPercent =
     card.durationSeconds > 0 ? (card.positionSeconds / card.durationSeconds) * 100 : 0;
   const hasPartialProgress = progressPercent > 0 && progressPercent < 100;
+  // Drives both the bar itself and the overlay row's clearance above it.
+  const showProgressBar = !isNextUp && progressPercent > 0;
   const hasEpisodeMeta = card.seasonNumber != null && card.episodeNumber != null;
   // A manga chapter is an ebook item that carries its owning series; the card
   // presents the series (heading, links) since the chapter's own item detail
@@ -252,6 +254,7 @@ export default function ContinueWatchingCard(props: ContinueWatchingCardProps) {
                 data={overlayDataFromSectionItem(props.sectionItem)}
                 prefs={props.overlayPrefs}
                 variant={variant}
+                hasProgressBar={showProgressBar}
               />
             )}
 
@@ -260,7 +263,7 @@ export default function ContinueWatchingCard(props: ContinueWatchingCardProps) {
 
             {/* Progress bar — inset pill so a full bar doesn't read as a
                 stray edge along the artwork */}
-            {!isNextUp && progressPercent > 0 && (
+            {showProgressBar && (
               <div className="absolute inset-x-2.5 bottom-2 h-[3px] overflow-hidden rounded-full bg-black/40">
                 <div
                   className="h-full rounded-full transition-all duration-300"
