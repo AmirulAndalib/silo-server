@@ -8,6 +8,7 @@ import MediaItemMenu from "@/components/MediaItemMenu";
 import CardOverlays from "@/components/overlays/CardOverlays";
 import { useOverlayPrefs } from "@/hooks/useOverlayPrefs";
 import { usePrefetchCatalogItemDetail } from "@/hooks/queries/catalogRead";
+import { useDwellPrefetch } from "@/hooks/useDwellPrefetch";
 import { useGridRowCap } from "@/hooks/useGridRowCap";
 import type { CardQuickActionMode } from "@/lib/cardQuickActions";
 import { overlayDataFromEpisodeListItem, type CardOverlayPrefs } from "@/lib/overlays";
@@ -87,6 +88,7 @@ function SeasonEpisodeCard({
   onPrefetch: () => void;
 }) {
   const cardRef = useRef<HTMLDivElement>(null);
+  const prefetchHandlers = useDwellPrefetch(onPrefetch);
   const hasPartialProgress =
     !episode.user_data?.played &&
     (episode.user_data?.position_seconds ?? 0) > 0 &&
@@ -94,13 +96,7 @@ function SeasonEpisodeCard({
   const episodeTitle = episode.title || `Episode ${episode.episode_number}`;
 
   return (
-    <div
-      ref={cardRef}
-      className="group/card media-card media-card-longpress"
-      onMouseEnter={onPrefetch}
-      onFocus={onPrefetch}
-      onTouchStart={onPrefetch}
-    >
+    <div ref={cardRef} className="group/card media-card media-card-longpress" {...prefetchHandlers}>
       <div className="relative">
         <Link to={`/item/${episode.content_id}`} state={episodeLinkState} className="group block">
           <div className="media-card-image relative aspect-video">
@@ -108,6 +104,7 @@ function SeasonEpisodeCard({
               <img
                 src={episode.still_url}
                 alt={episodeTitle}
+                decoding="async"
                 className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
                 loading="lazy"
               />
