@@ -35,6 +35,13 @@ interface OverlayConfig {
   quick_actions_default?: string;
 }
 
+// Overlay booleans are inherit-with-override, not a policy gate: the server
+// setting is only the default for profiles that have not chosen, and an
+// explicit profile choice wins in either direction.
+function inheritBoolean(userValue: unknown, serverDefault: boolean): boolean {
+  return typeof userValue === "boolean" ? userValue : serverDefault;
+}
+
 // The server-wide overlay defaults live in server_settings, not the
 // user-settings contract, so this endpoint stays alongside the canonical
 // values API.
@@ -68,6 +75,9 @@ export function useOverlayPrefs() {
 
   const setProfileValue = useCallback(
     (key: SettingKey, value: unknown) => {
+      // Writing a stored value back unchanged is a no-op: skip the network
+      // round-trip and the downstream re-render cascade.
+      if (effective?.[key]?.value === value) return;
       queryClient.setQueryData<EffectiveSettingsMap>(effectiveQueryKey, (current) => ({
         ...current,
         [key]: { key, value, source: "profile", scope: "profile" },
@@ -88,7 +98,7 @@ export function useOverlayPrefs() {
         },
       );
     },
-    [effectiveQueryKey, queryClient, setSettingValue],
+    [effective, effectiveQueryKey, queryClient, setSettingValue],
   );
 
   // The contract default is null — "no preference expressed" — which is what
@@ -105,24 +115,13 @@ export function useOverlayPrefs() {
     return parseOverlayPrefs(source);
   }, [userValue, config?.defaults]);
 
-  // Overlay badges are inherit-with-override, not a policy gate: the server
-  // setting is only the default for profiles that have not chosen, and an
-  // explicit profile choice wins in either direction. Absent server config
-  // (including while it loads) means on, which is the shipped default.
-  const overlaysDefaultEnabled = config?.enabled !== false;
-  const overlaysEnabled =
-    typeof overlaysEnabledUserValue === "boolean"
-      ? overlaysEnabledUserValue
-      : overlaysDefaultEnabled;
-  // Quick actions are inherit-with-override, not a policy gate: the server
-  // setting is only the default for profiles that have not chosen, and an
-  // explicit profile choice wins in either direction. Absent server config
-  // (including while it loads) means off.
-  const quickActionsDefaultEnabled = config?.quick_actions_enabled === true;
-  const quickActionsEnabled =
-    typeof quickActionsEnabledUserValue === "boolean"
-      ? quickActionsEnabledUserValue
-      : quickActionsDefaultEnabled;
+  // Absent server config (including while it loads), overlays are on — the
+  // shipped default — and quick actions are off.
+  const overlaysEnabled = inheritBoolean(overlaysEnabledUserValue, config?.enabled !== false);
+  const quickActionsEnabled = inheritBoolean(
+    quickActionsEnabledUserValue,
+    config?.quick_actions_enabled === true,
+  );
   const configuredQuickActionMode = normalizeCardQuickActionMode(
     quickActionUserValue ?? config?.quick_actions_default,
   );
@@ -144,13 +143,8 @@ export function useOverlayPrefs() {
   );
 
   const setOverlaysEnabled = useCallback(
-    (next: boolean) => {
-      if (typeof overlaysEnabledUserValue === "boolean" && overlaysEnabledUserValue === next) {
-        return;
-      }
-      setProfileValue(SETTING_KEYS.UI_CARD_OVERLAYS_ENABLED, next);
-    },
-    [overlaysEnabledUserValue, setProfileValue],
+    (next: boolean) => setProfileValue(SETTING_KEYS.UI_CARD_OVERLAYS_ENABLED, next),
+    [setProfileValue],
   );
 
   const setQuickActionMode = useCallback(
@@ -165,16 +159,8 @@ export function useOverlayPrefs() {
   );
 
   const setQuickActionsEnabled = useCallback(
-    (next: boolean) => {
-      if (
-        typeof quickActionsEnabledUserValue === "boolean" &&
-        quickActionsEnabledUserValue === next
-      ) {
-        return;
-      }
-      setProfileValue(SETTING_KEYS.UI_CARD_QUICK_ACTIONS_ENABLED, next);
-    },
-    [quickActionsEnabledUserValue, setProfileValue],
+    (next: boolean) => setProfileValue(SETTING_KEYS.UI_CARD_QUICK_ACTIONS_ENABLED, next),
+    [setProfileValue],
   );
 
   // While either query is in flight, report null prefs instead of built-in

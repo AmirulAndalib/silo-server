@@ -17,6 +17,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/cache"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
+	"github.com/Silo-Server/silo-server/internal/settingskeys"
 	"github.com/Silo-Server/silo-server/internal/settingsmigrate"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
@@ -1201,11 +1202,27 @@ func (h *SettingsHandler) resolveEffectiveSetting(
 	return resolved, nil
 }
 
-const (
-	defaultCardQuickActionMode   = "both"
-	cardQuickActionModeFavorites = "favorites"
-	cardQuickActionModeWatched   = "watched"
-)
+const defaultCardQuickActionMode = "both"
+
+// isCardQuickActionMode reports whether v is one of the ui.card_quick_actions
+// enum members, read from the settings contract so a new mode never has to be
+// re-listed here.
+func isCardQuickActionMode(v string) bool {
+	contract, err := settingscontract.Load()
+	if err != nil {
+		return false
+	}
+	def, ok := contract.Lookup(settingskeys.UiCardQuickActions)
+	if !ok {
+		return false
+	}
+	for _, member := range def.ValueSchema.Values {
+		if member.Value == v {
+			return true
+		}
+	}
+	return false
+}
 
 // overlayConfigResponse is returned by GET /settings/overlay-config.
 type overlayConfigResponse struct {
@@ -1237,11 +1254,8 @@ func (h *SettingsHandler) HandleGetOverlayConfig(w http.ResponseWriter, r *http.
 		if v, _ := h.serverSettings.Get(r.Context(), "defaults.card_quick_actions_enabled"); v == "true" {
 			resp.QuickActionsEnabled = true
 		}
-		if v, _ := h.serverSettings.Get(r.Context(), "defaults.card_quick_actions"); v != "" {
-			switch v {
-			case defaultCardQuickActionMode, cardQuickActionModeFavorites, cardQuickActionModeWatched:
-				resp.QuickActionsDefault = v
-			}
+		if v, _ := h.serverSettings.Get(r.Context(), "defaults.card_quick_actions"); isCardQuickActionMode(v) {
+			resp.QuickActionsDefault = v
 		}
 	}
 

@@ -29,13 +29,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { CARD_QUICK_ACTION_OPTIONS, normalizeCardQuickActionMode } from "@/lib/cardQuickActions";
+import { OVERLAY_CONFIG_SERVER_KEYS } from "@/hooks/queries/admin/settings";
 
-const KEYS = [
-  "defaults.card_quick_actions_enabled",
-  "defaults.card_quick_actions",
-  "overlays.enabled",
-  "defaults.card_overlays",
-];
+const KEYS = [...OVERLAY_CONFIG_SERVER_KEYS];
 
 interface DefaultsEditorProps {
   value: string;

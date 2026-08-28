@@ -1340,19 +1340,12 @@
   /* Home/library pages can contain hundreds of cards across off-screen rows.
      Let supporting engines skip layout and paint for those rows until they
      approach the viewport. Browsers without content-visibility ignore this
-     and keep the existing rendering path. The placeholder height is the row
-     header plus a 2:3 poster at the profile's configured card width plus the
-     tallest caption; underestimating makes the scrollbar jump as rows render
-     on approach. */
+     and keep the existing rendering path. MediaCarousel sets the placeholder
+     height from carouselIntrinsicHeight(), which owns the per-card-size
+     values alongside the card widths they derive from. */
   .media-carousel {
     content-visibility: auto;
     contain-intrinsic-size: auto var(--carousel-intrinsic-h, 23rem);
-  }
-  .media-carousel[data-poster-size="compact"] {
-    --carousel-intrinsic-h: 21rem;
-  }
-  .media-carousel[data-poster-size="large"] {
-    --carousel-intrinsic-h: 27rem;
   }
 
   /* Card actions stay hidden at rest so touch devices get clean artwork; a

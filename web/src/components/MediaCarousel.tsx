@@ -1,10 +1,11 @@
 import { Children } from "react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { Link } from "react-router";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useCarouselEmbla } from "@/hooks/useCarouselEmbla";
 import { useUICustomization } from "@/hooks/useUICustomization";
+import { carouselIntrinsicHeight } from "@/lib/uiCustomization";
 
 interface MediaCarouselProps {
   title: string;
@@ -57,7 +58,11 @@ export default function MediaCarousel({
   return (
     <section
       className="section-row media-carousel group/carousel relative isolate"
-      data-poster-size={cardPresentation.poster_size}
+      style={
+        {
+          "--carousel-intrinsic-h": carouselIntrinsicHeight(cardPresentation.poster_size),
+        } as CSSProperties
+      }
     >
       <div className={`mb-5 flex items-end justify-between gap-4${headerPadX}`}>
         <div className="flex items-center gap-2">

@@ -14,18 +14,11 @@ vi.mock("@/api/client", () => ({
   api: mocks.api,
 }));
 
-vi.mock("@/hooks/queries/settingValues", () => ({
-  effectiveSettingsQueryKey: ({ keys }: { keys?: readonly string[] }) => [
-    "settings",
-    "values",
-    "effective",
-    mocks.profileId,
-    "",
-    keys ? [...keys].sort().join(",") : "*",
-    "",
-    "",
-  ],
-  isDefinitiveSettingMutationRejection: () => true,
+// Keep the real query-key builder and error taxonomy so the hook's optimistic
+// cache writes are exercised against the actual key shape; only the two hooks
+// that reach the network are replaced.
+vi.mock("@/hooks/queries/settingValues", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/queries/settingValues")>()),
   useEffectiveSettings: () => ({ data: mocks.effective, isLoading: false }),
   useSetSettingValue: () => ({ mutate: mocks.setValue }),
 }));
