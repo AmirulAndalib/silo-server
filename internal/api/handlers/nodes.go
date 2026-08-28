@@ -66,6 +66,10 @@ type NodeHandler struct {
 	// inventory. nil outside integrated mode, where there is no playback handler
 	// holding one.
 	invalidateCapabilityCache func(nodeURL string)
+	// afterNodeUpdate fires once the post-commit work an update kicks off has
+	// finished. Tests wait on it rather than on a sleep; production leaves it
+	// nil.
+	afterNodeUpdate func()
 }
 
 // SetCapabilityInvalidator wires the planning-cache drop used after a node's
@@ -125,7 +129,9 @@ type checkNodeResult struct {
 //
 // The stored rows are served as they are: physical_gpu_keys is derived by the
 // node store when a row is scanned, so the same identities the planner routes
-// on are the ones an operator sees.
+// on are the ones an operator sees. The one thing added is the hash each node
+// advertised on its last health check, which lives only in the pools — see
+// overlayAdvertisedHashes.
 func (h *NodeHandler) HandleListNodes(w http.ResponseWriter, r *http.Request) {
 	nodes, err := h.repo.List(r.Context())
 	if err != nil {
@@ -136,7 +142,39 @@ func (h *NodeHandler) HandleListNodes(w http.ResponseWriter, r *http.Request) {
 	if nodes == nil {
 		nodes = []*nodepool.Node{}
 	}
+	h.overlayAdvertisedHashes(nodes)
 	writeJSON(w, http.StatusOK, nodes)
+}
+
+// overlayAdvertisedHashes copies each node's last advertised capability hash
+// from the pools onto the rows this endpoint serves.
+//
+// The hash is an observation from the health sweep rather than stored state, so
+// it exists only on the pool's copy of a node while the row comes from the
+// database. Without this the field is always absent and the admin page cannot
+// tell a report the node has already contradicted from a current one — the very
+// case a recent last_health_check cannot rule out, because that check keeps
+// succeeding while the refetch behind it fails.
+func (h *NodeHandler) overlayAdvertisedHashes(nodes []*nodepool.Node) {
+	advertised := make(map[int]string, len(nodes))
+	collect := func(pooled []*nodepool.Node) {
+		for _, n := range pooled {
+			if n != nil && n.AdvertisedCapabilitiesHash != "" {
+				advertised[n.ID] = n.AdvertisedCapabilitiesHash
+			}
+		}
+	}
+	if h.proxyPool != nil {
+		collect(h.proxyPool.Nodes())
+	}
+	if h.transcodePool != nil {
+		collect(h.transcodePool.Nodes())
+	}
+	for _, n := range nodes {
+		if n != nil {
+			n.AdvertisedCapabilitiesHash = advertised[n.ID]
+		}
+	}
 }
 
 // HandleCreateNode handles POST /admin/nodes.
@@ -217,40 +255,55 @@ func (h *NodeHandler) HandleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	// to NVENC on a CUDA index, say) — or repointing the row at a worker that
 	// has been running on what it inherited — gets up to a minute of requests
 	// pairing one side's backend with the other side's device.
-	if nodePolicyTargetChanged(previous, node) {
-		// Detached for the same reason reloadPools is: the response is already
-		// written, so a client that has gone away must not decide whether the
-		// worker hears about its new policy.
-		if !h.reloadNodeConfig(context.WithoutCancel(r.Context()), node) {
-			// The node did not confirm. Its backend now comes from this
-			// server's pool while its device still comes from its own
-			// configuration, so until its poll catches up (within 60s) a start
-			// request can pair the new backend with the old device and fail.
-			//
-			// The policy is published anyway. Withholding it would leave an
-			// override an operator has saved and can see stored never reaching
-			// dispatch at all — nothing else re-reads the column — which is a
-			// silent permanent misconfiguration rather than a loud, bounded,
-			// self-healing one. Closing the window properly means sending the
-			// effective device alongside the backend so both come from one
-			// source; that is a change to the node start contract, not
-			// something to slip into a policy edit.
-			slog.WarnContext(r.Context(), "node has not adopted its new acceleration policy yet; transcodes dispatched to it may fail until its next config poll",
-				"component", "api", "node_id", node.ID, "name", node.Name)
+	// Off the request goroutine, not merely detached from its context.
+	//
+	// writeJSON above does not end the response — the handler returning does —
+	// so anything after it is latency the operator waits through. The node nudge
+	// alone is bounded at ten seconds against a worker that may be unreachable,
+	// which is long enough for the admin form to sit in "Saving..." and time out
+	// after a database write that already succeeded. The row is committed at
+	// this point; none of what follows can change the answer already written, so
+	// none of it belongs in front of the client.
+	policyChanged := nodePolicyTargetChanged(previous, node)
+	ctx := context.WithoutCancel(r.Context())
+	go func() {
+		if policyChanged {
+			if !h.reloadNodeConfig(ctx, node) {
+				// The node did not confirm. Its backend now comes from this
+				// server's pool while its device still comes from its own
+				// configuration, so until its poll catches up (within 60s) a
+				// start request can pair the new backend with the old device
+				// and fail.
+				//
+				// The policy is published anyway. Withholding it would leave an
+				// override an operator has saved and can see stored never
+				// reaching dispatch at all — nothing else re-reads the column —
+				// which is a silent permanent misconfiguration rather than a
+				// loud, bounded, self-healing one. Closing the window properly
+				// means sending the effective device alongside the backend so
+				// both come from one source; that is a change to the node start
+				// contract, not something to slip into a policy edit.
+				slog.WarnContext(ctx, "node has not adopted its new acceleration policy yet; transcodes dispatched to it may fail until its next config poll",
+					"component", "api", "node_id", node.ID, "name", node.Name)
+			}
+			// And drop what this server believes the node can do. The v3
+			// planning cache holds the tone-map executors and transformation
+			// inventory the *old* backend advertised, and it stays valid for
+			// its own TTL — so without this a session started in the next
+			// minute is planned against the previous backend's filters and then
+			// rejected by the worker that has already moved on. Dropped before
+			// the pool reload, for the same reason the worker is nudged first:
+			// nothing should dispatch under the new policy while stale
+			// capabilities are still readable.
+			if h.invalidateCapabilityCache != nil {
+				h.invalidateCapabilityCache(node.URL)
+			}
 		}
-		// And drop what this server believes the node can do. The v3 planning
-		// cache holds the tone-map executors and transformation inventory the
-		// *old* backend advertised, and it stays valid for its own TTL — so
-		// without this a session started in the next minute is planned against
-		// the previous backend's filters and then rejected by the worker that
-		// has already moved on. Dropped before the pool reload, for the same
-		// reason the worker is nudged first: nothing should dispatch under the
-		// new policy while stale capabilities are still readable.
-		if h.invalidateCapabilityCache != nil {
-			h.invalidateCapabilityCache(node.URL)
+		h.reloadPools(ctx)
+		if h.afterNodeUpdate != nil {
+			h.afterNodeUpdate()
 		}
-	}
-	h.reloadPools(r.Context())
+	}()
 }
 
 // nodePolicyTargetChanged reports whether this update changed which effective

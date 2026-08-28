@@ -136,7 +136,7 @@ func TestHandleUpdateNodeRejectsUnknownHWAccelOverride(t *testing.T) {
 	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
 
 	recorder := httptest.NewRecorder()
-	handler.HandleUpdateNode(recorder, updateNodeRequest(t, `{"hw_accel_override":"videotoolbox"}`))
+	awaitNodeUpdate(t, handler, recorder, `{"hw_accel_override":"videotoolbox"}`)
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
@@ -183,7 +183,7 @@ func TestHandleUpdateNodeAcceptsAndClearsHWOverrides(t *testing.T) {
 			handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
 
 			recorder := httptest.NewRecorder()
-			handler.HandleUpdateNode(recorder, updateNodeRequest(t, test.body))
+			awaitNodeUpdate(t, handler, recorder, test.body)
 
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
@@ -247,7 +247,7 @@ func TestHandleUpdateNodeReloadsTheNodeAfterAnOverrideChange(t *testing.T) {
 	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
 
 	recorder := httptest.NewRecorder()
-	handler.HandleUpdateNode(recorder, updateNodeRequest(t, `{"hw_accel_override":"nvenc"}`))
+	awaitNodeUpdate(t, handler, recorder, `{"hw_accel_override":"nvenc"}`)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
@@ -315,7 +315,7 @@ func TestHandleUpdateNodeInvalidatesCapabilityCacheAfterAnOverrideChange(t *test
 	invalidated := make(chan string, 4)
 	handler.SetCapabilityInvalidator(func(url string) { invalidated <- url })
 
-	handler.HandleUpdateNode(httptest.NewRecorder(), updateNodeRequest(t, `{"hw_accel_override":"nvenc"}`))
+	awaitNodeUpdate(t, handler, httptest.NewRecorder(), `{"hw_accel_override":"nvenc"}`)
 
 	select {
 	case url := <-invalidated:
@@ -368,7 +368,7 @@ func TestHandleUpdateNodePublishesPolicyEvenWhenTheNodeDoesNotConfirm(t *testing
 	handler.SetCapabilityInvalidator(func(url string) { invalidated <- url })
 
 	recorder := httptest.NewRecorder()
-	handler.HandleUpdateNode(recorder, updateNodeRequest(t, `{"hw_accel_override":"nvenc"}`))
+	awaitNodeUpdate(t, handler, recorder, `{"hw_accel_override":"nvenc"}`)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want the update to succeed anyway", recorder.Code)
@@ -395,7 +395,7 @@ func TestHandleUpdateNodeKeepsCapabilityCacheWithoutAnOverrideChange(t *testing.
 	invalidated := make(chan string, 4)
 	handler.SetCapabilityInvalidator(func(url string) { invalidated <- url })
 
-	handler.HandleUpdateNode(httptest.NewRecorder(), updateNodeRequest(t, `{"name":"gpu-one"}`))
+	awaitNodeUpdate(t, handler, httptest.NewRecorder(), `{"name":"gpu-one"}`)
 
 	select {
 	case url := <-invalidated:
@@ -431,7 +431,7 @@ func TestHandleUpdateNodeDoesNotReloadWhenOverridesAreUnchanged(t *testing.T) {
 	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
 
 	body := `{"name":"gpu-1","hw_accel_override":"qsv","hw_device_override":"/dev/dri/renderD128"}`
-	handler.HandleUpdateNode(httptest.NewRecorder(), updateNodeRequest(t, body))
+	awaitNodeUpdate(t, handler, httptest.NewRecorder(), body)
 
 	select {
 	case <-reloaded:
@@ -456,7 +456,7 @@ func TestHandleUpdateNodeDoesNotReloadWithoutAnOverrideChange(t *testing.T) {
 	repo := &stubNodeRepository{updateResult: stored, node: stored}
 	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
 
-	handler.HandleUpdateNode(httptest.NewRecorder(), updateNodeRequest(t, `{"name":"gpu-one"}`))
+	awaitNodeUpdate(t, handler, httptest.NewRecorder(), `{"name":"gpu-one"}`)
 
 	select {
 	case <-reloaded:
@@ -555,7 +555,7 @@ func TestHandleUpdateNodeReloadsTheReplacementWhenAURLMoves(t *testing.T) {
 	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
 
 	body := `{"name":"gpu-1","url":"` + replacement.URL + `","hw_accel_override":"qsv","hw_device_override":"/dev/dri/renderD128"}`
-	handler.HandleUpdateNode(httptest.NewRecorder(), updateNodeRequest(t, body))
+	awaitNodeUpdate(t, handler, httptest.NewRecorder(), body)
 
 	select {
 	case path := <-reloaded:
@@ -608,7 +608,7 @@ func TestHandleUpdateNodeReloadsOnAURLOnlyRepoint(t *testing.T) {
 	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
 
 	// Only the url: no acceleration field in the body at all.
-	handler.HandleUpdateNode(httptest.NewRecorder(), updateNodeRequest(t, `{"url":"`+replacement.URL+`"}`))
+	awaitNodeUpdate(t, handler, httptest.NewRecorder(), `{"url":"`+replacement.URL+`"}`)
 
 	select {
 	case path := <-reloaded:
@@ -617,5 +617,83 @@ func TestHandleUpdateNodeReloadsOnAURLOnlyRepoint(t *testing.T) {
 		}
 	default:
 		t.Fatal("a url-only repoint left the replacement worker on its inherited policy")
+	}
+}
+
+// awaitNodeUpdate runs one update and waits for the post-commit work it starts.
+//
+// HandleUpdateNode answers as soon as the row is committed and does the node
+// nudge, cache drop and pool reload on their own goroutine — the nudge alone is
+// bounded at ten seconds against a worker that may be unreachable, and an
+// operator should not wait through that. Tests therefore wait on the handler's
+// own completion signal rather than on the call returning.
+func awaitNodeUpdate(t *testing.T, handler *NodeHandler, recorder *httptest.ResponseRecorder, body string) {
+	t.Helper()
+	done := make(chan struct{})
+	handler.afterNodeUpdate = func() { close(done) }
+	handler.HandleUpdateNode(recorder, updateNodeRequest(t, body))
+	if recorder.Code < 200 || recorder.Code > 299 {
+		// A rejected update commits nothing and starts no post-commit work, so
+		// there is no signal coming; the test is asserting on the refusal.
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for the post-commit node update work")
+	}
+}
+
+// The advertised hash lives only on the pools — it is an observation from the
+// health sweep, not stored state — while this endpoint serves database rows. If
+// it is not carried across, the field is always absent and the admin page has
+// no way to tell a report the node has already contradicted from a current one.
+func TestHandleListNodesCarriesTheAdvertisedHashFromThePools(t *testing.T) {
+	stored := "sha256:stored"
+	repo := &stubNodeRepository{nodes: []*nodepool.Node{
+		{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: "http://gpu-1", CapabilitiesHash: &stored},
+		{ID: 2, Name: "proxy-1", Type: nodepool.NodeTypeProxy, URL: "http://proxy-1"},
+		{ID: 3, Name: "quiet", Type: nodepool.NodeTypeTranscode, URL: "http://quiet"},
+	}}
+	transcodes := nodepool.NewTranscodePool()
+	transcodes.SetNodes([]*nodepool.Node{
+		{ID: 1, URL: "http://gpu-1", Enabled: true},
+		{ID: 3, URL: "http://quiet", Enabled: true},
+	})
+	proxies := nodepool.NewProxyPool()
+	proxies.SetNodes([]*nodepool.Node{{ID: 2, URL: "http://proxy-1", Enabled: true}})
+	// The sweep learns each node's advertised hash on its health check.
+	transcodes.ApplyHealth(1, "http://gpu-1", true, 0, 0, "sha256:newer", nil, time.Now())
+	proxies.ApplyHealth(2, "http://proxy-1", true, 0, 0, "sha256:proxy", nil, time.Now())
+
+	handler := NewNodeHandler(repo, proxies, transcodes, nil, nil, nil, "secret")
+	recorder := httptest.NewRecorder()
+	handler.HandleListNodes(recorder, httptest.NewRequest(http.MethodGet, "/admin/nodes", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	var listed []struct {
+		ID         int    `json:"id"`
+		Hash       string `json:"capabilities_hash"`
+		Advertised string `json:"advertised_capabilities_hash"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode: %v (%s)", err, recorder.Body.String())
+	}
+	byID := map[int]string{}
+	for _, node := range listed {
+		byID[node.ID] = node.Advertised
+	}
+	if byID[1] != "sha256:newer" {
+		t.Fatalf("transcode advertised hash = %q, want the sweep's observation", byID[1])
+	}
+	if byID[2] != "sha256:proxy" {
+		t.Fatalf("proxy advertised hash = %q, want the sweep's observation", byID[2])
+	}
+	// A node that has not been checked since this process started carries none,
+	// and the field is omitted rather than reported as a mismatch.
+	if byID[3] != "" {
+		t.Fatalf("unchecked node advertised hash = %q, want it absent", byID[3])
 	}
 }
