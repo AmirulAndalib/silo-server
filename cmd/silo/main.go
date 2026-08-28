@@ -1134,6 +1134,7 @@ func main() {
 		OpsLogRepo:                   opsRepo,
 		FFmpegLogSink:                playback.NewSlogFFmpegLogSink(slog.Default(), nodeID),
 		PublicURL:                    os.Getenv("SILO_PUBLIC_URL"),
+		CatalogSearchSettings:        new(catalogSearchStartupSettings),
 		RequestServerRestart: func(context.Context) error {
 			if !restartRequested.CompareAndSwap(false, true) {
 				return handlers.ErrServerRestartAlreadyRequested
@@ -2382,7 +2383,7 @@ func main() {
 				metadata.NewArtworkRevisionGarbageCollector(deps.DB, deps.S3Public),
 			))
 		}
-		catalogSearchIndexer := catalog.NewCatalogSearchIndexer(deps.DB, settingsRepo)
+		catalogSearchIndexer := catalog.NewCatalogSearchIndexerFromSettings(deps.DB, settingsRepo, catalogSearchStartupSettings)
 		taskMgr.Register(tasks.NewSyncCatalogSearchIndexTask(catalogSearchIndexer))
 		taskMgr.Register(tasks.NewRebuildCatalogSearchIndexTask(catalogSearchIndexer))
 		taskMgr.Register(tasks.NewCatalogSearchEventRetentionTask(catalog.NewSearchIndexEventRepository(deps.DB)))
@@ -2961,9 +2962,8 @@ func main() {
 			if watchProviderService != nil {
 				compatDeps.WatchScrobbler = watchProviderService
 			}
-			compatSearchService := catalog.NewCatalogSearchService(
-				appCtx,
-				settingsRepo,
+			compatSearchService := catalog.NewCatalogSearchServiceFromSettings(
+				catalogSearchStartupSettings,
 				itemRepo,
 				catalog.NewSearchIndexEventRepository(deps.DB),
 				deps.CatalogSearchVectorizer,

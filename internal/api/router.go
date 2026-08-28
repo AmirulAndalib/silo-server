@@ -136,6 +136,9 @@ type Dependencies struct {
 	Recommender               recommendations.Recommender // nil when disabled
 	RecWorker                 *recommendations.Worker     // nil when disabled
 	CatalogSearchVectorizer   catalog.CatalogSearchQueryVectorizer
+	// CatalogSearchSettings is the process-lifetime startup snapshot shared by
+	// every native/jellycompat provider and the index maintenance worker.
+	CatalogSearchSettings     *catalog.CatalogSearchSettings
 	RatingsRepo               *catalog.RatingsRepo
 	PersonRepo                *catalog.PersonRepository
 	PersonRefreshQueue        handlers.PersonRefreshQueue
@@ -603,13 +606,22 @@ func NewRouter(deps Dependencies) chi.Router {
 		browseRepo := catalog.NewBrowseRepository(deps.DB)
 		itemRepo = catalog.NewItemRepository(deps.DB)
 		searchIndexEvents := catalog.NewSearchIndexEventRepository(deps.DB)
-		catalogSearchService = catalog.NewCatalogSearchService(
-			context.Background(),
-			settingsRepo,
-			itemRepo,
-			searchIndexEvents,
-			deps.CatalogSearchVectorizer,
-		)
+		if deps.CatalogSearchSettings != nil {
+			catalogSearchService = catalog.NewCatalogSearchServiceFromSettings(
+				*deps.CatalogSearchSettings,
+				itemRepo,
+				searchIndexEvents,
+				deps.CatalogSearchVectorizer,
+			)
+		} else {
+			catalogSearchService = catalog.NewCatalogSearchService(
+				context.Background(),
+				settingsRepo,
+				itemRepo,
+				searchIndexEvents,
+				deps.CatalogSearchVectorizer,
+			)
+		}
 		if catalogSearchService != nil {
 			catalogSearchService.StartCoverageRefresh(deps.AppContext)
 		}

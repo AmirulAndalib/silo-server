@@ -109,6 +109,124 @@ func TestStaleCatalogSearchIndexUIDs(t *testing.T) {
 	}
 }
 
+func TestCatalogSearchIndexRequiresRebuild(t *testing.T) {
+	const expected = 123
+	tests := []struct {
+		name  string
+		state SearchIndexState
+		want  bool
+	}{
+		{name: "missing index", state: SearchIndexState{SchemaVersion: expected}, want: true},
+		{name: "stale schema", state: SearchIndexState{ActiveIndexUID: "index", SchemaVersion: expected - 1}, want: true},
+		{name: "current", state: SearchIndexState{ActiveIndexUID: "index", SchemaVersion: expected}, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := catalogSearchIndexRequiresRebuild(tc.state, expected); got != tc.want {
+				t.Fatalf("catalogSearchIndexRequiresRebuild() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCatalogSearchIndexerFreezesRuntimeSettings(t *testing.T) {
+	settings := DefaultCatalogSearchSettings()
+	settings.Provider = SearchProviderMeilisearch
+	settings.MeilisearchURL = "http://meilisearch-at-startup:7700"
+	settings.IndexTypes = []string{"movie"}
+	indexer := NewCatalogSearchIndexerFromSettings(nil, nil, settings)
+
+	settings.MeilisearchURL = "http://changed-after-startup:7700"
+	settings.IndexTypes[0] = "series"
+	got, configured, err := indexer.loadMeilisearchRuntime(t.Context())
+	if err != nil {
+		t.Fatalf("loadMeilisearchRuntime() error = %v", err)
+	}
+	if !configured {
+		t.Fatal("loadMeilisearchRuntime() configured = false, want true")
+	}
+	if got.MeilisearchURL != "http://meilisearch-at-startup:7700" {
+		t.Fatalf("MeilisearchURL = %q, want startup value", got.MeilisearchURL)
+	}
+	if len(got.IndexTypes) != 1 || got.IndexTypes[0] != "movie" {
+		t.Fatalf("IndexTypes = %#v, want startup copy", got.IndexTypes)
+	}
+}
+
+func TestCatalogSearchIndexerWaitsForRestartBeforeUsingSavedSchemaSettings(t *testing.T) {
+	startup := DefaultCatalogSearchSettings()
+	startup.Provider = SearchProviderMeilisearch
+	startup.MeilisearchURL = "http://meilisearch:7700"
+	store := &memSettings{m: map[string]string{
+		SearchSettingProvider:                    SearchProviderMeilisearch,
+		SearchSettingMeilisearchURL:              startup.MeilisearchURL,
+		SearchSettingMeilisearchSemanticEnabled:  "true",
+		SearchSettingMeilisearchRebuildBatchSize: "17",
+	}}
+	indexer := NewCatalogSearchIndexerFromSettings(nil, store, startup)
+
+	runtime, configured, err := indexer.loadMeilisearchRuntime(t.Context())
+	if err != nil {
+		t.Fatalf("loadMeilisearchRuntime() error = %v", err)
+	}
+	if !configured {
+		t.Fatal("loadMeilisearchRuntime() configured = false, want true")
+	}
+	if runtime.SemanticEnabled {
+		t.Fatal("saved semantic enablement became active before restart")
+	}
+	if runtime.RebuildBatchSize != 17 {
+		t.Fatalf("RebuildBatchSize = %d, want hot-reloaded 17", runtime.RebuildBatchSize)
+	}
+	matches, err := indexer.runtimeMatchesDesiredSettings(t.Context(), runtime)
+	if err != nil {
+		t.Fatalf("runtimeMatchesDesiredSettings() error = %v", err)
+	}
+	if matches {
+		t.Fatal("saved schema settings should fence rebuilds until restart")
+	}
+}
+
+func TestCatalogSearchMaintenanceTargetEqual(t *testing.T) {
+	startup := DefaultCatalogSearchSettings()
+	startup.Provider = SearchProviderMeilisearch
+	startup.MeilisearchURL = "http://meilisearch:7700"
+	startup.IndexTypes = []string{"movie", "series"}
+
+	tuningOnly := startup
+	tuningOnly.SyncBatchSize++
+	tuningOnly.RebuildBatchSize++
+	tuningOnly.RebuildQueueDepth++
+	if !catalogSearchMaintenanceTargetEqual(startup, tuningOnly) {
+		t.Fatal("hot-reloadable maintenance tuning must not require a restart fence")
+	}
+
+	desired := startup
+	desired.SemanticEnabled = true
+	if catalogSearchMaintenanceTargetEqual(startup, desired) {
+		t.Fatal("semantic setting change must wait for the startup configuration")
+	}
+
+	desired = startup
+	desired.IndexTypes = []string{"movie"}
+	if catalogSearchMaintenanceTargetEqual(startup, desired) {
+		t.Fatal("index scope change must wait for the startup configuration")
+	}
+}
+
+func TestCatalogSearchIndexHasNewerSchema(t *testing.T) {
+	newer := SearchIndexState{
+		ActiveIndexUID: "new-index",
+		SchemaVersion:  (SearchMeilisearchSchemaVersion + 1) * 1_000_000,
+	}
+	if !catalogSearchIndexHasNewerSchema(newer) {
+		t.Fatal("newer schema should fence an older server from rebuilding")
+	}
+	if catalogSearchIndexHasNewerSchema(SearchIndexState{ActiveIndexUID: "index", SchemaVersion: SearchMeilisearchSchemaVersion * 1_000_000}) {
+		t.Fatal("current schema generation should not be treated as newer")
+	}
+}
+
 func TestRebuildIndexingPercent(t *testing.T) {
 	if got := rebuildIndexingPercent(0, 0); got != 50 {
 		t.Fatalf("unknown total should report midpoint, got %v", got)
