@@ -2424,6 +2424,10 @@ func main() {
 			if deps.NodeRepo != nil {
 				preparer.SetOriginLookup(deps.NodeRepo)
 			}
+			// Prepared downloads cache a node's inventory separately from
+			// protocol-v3 planning, so the router's invalidation has to reach
+			// both. Set before NewRouter, which composes them.
+			deps.NodeCapabilityInvalidator = preparer.InvalidateNodeCapabilities
 			artifactMgr := downloads.NewArtifactManager(
 				downloads.NewArtifactRepository(deps.DB),
 				downloads.NewRepository(deps.DB),

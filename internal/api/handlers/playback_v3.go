@@ -320,6 +320,7 @@ func (h *PlaybackHandler) localToneMapProbeTimeoutV3() time.Duration {
 // minutes, short of the ~136 seconds a two-device node legitimately asks for,
 // so protocol-v3 planning lost its inventory precisely after an invalidation.
 func (h *PlaybackHandler) remoteToneMapProbeTimeoutV3(nodeURL string) time.Duration {
+	nodeURL = nodepool.NormalizeNodeURL(nodeURL)
 	h.v3NodeCapabilitiesMu.Lock()
 	budget := h.v3NodeProbeBudgets[nodeURL]
 	h.v3NodeCapabilitiesMu.Unlock()
@@ -416,6 +417,10 @@ func (h *PlaybackHandler) lookupRemoteTransformationsV3(ctx context.Context, nod
 // lookupRemoteCapabilitiesV3 fetches and jointly caches a node's transformation
 // and tone-map inventory, optionally reusing short-lived fetch failures.
 func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeURL string, honorCachedFailure bool) (v3NodeCapabilityCache, error) {
+	// Canonical here and in RefreshNodeCapabilitiesV3, which are the two ways
+	// into these maps; everything below is reached from one of them and so is
+	// already keyed the same way.
+	nodeURL = nodepool.NormalizeNodeURL(nodeURL)
 	now := time.Now()
 	h.v3NodeCapabilitiesMu.Lock()
 	entry, ok := h.v3NodeCapabilities[nodeURL]
@@ -532,6 +537,12 @@ func (h *PlaybackHandler) RefreshNodeCapabilitiesV3(nodeURL string) {
 	if h == nil || nodeURL == "" {
 		return
 	}
+	// Every map here is keyed by the node's canonical address. This entry point
+	// is reached from the admin route with the URL exactly as the row stores it,
+	// which may carry a trailing slash the pools have already dropped — and then
+	// the entry this deletes is not the entry planning reads, so a node keeps
+	// serving the backend it was just moved off until the old key expires.
+	nodeURL = nodepool.NormalizeNodeURL(nodeURL)
 	h.v3NodeCapabilitiesMu.Lock()
 	delete(h.v3NodeCapabilities, nodeURL)
 	if h.v3NodeCapabilityInvalidations == nil {

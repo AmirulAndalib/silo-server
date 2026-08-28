@@ -276,7 +276,7 @@ func (p *NodeAwarePreparer) ToneMapModeAvailable(ctx context.Context, mode tonem
 	capable := make(map[string]struct{})
 	for nodeURL, capabilities := range byNode {
 		if capabilities.Supports(mode, kind) {
-			capable[strings.TrimRight(nodeURL, "/")] = struct{}{}
+			capable[nodepool.NormalizeNodeURL(nodeURL)] = struct{}{}
 		}
 	}
 	available := selector.TranscodeWorkAvailableWith(func(candidate *nodepool.Node) bool {
@@ -334,7 +334,7 @@ func (p *NodeAwarePreparer) audioBoostCapableNodeURLs(ctx context.Context) map[s
 }
 
 func (p *NodeAwarePreparer) audioBoostCapabilityForNode(ctx context.Context, nodeURL string) (bool, error) {
-	nodeURL = strings.TrimRight(nodeURL, "/")
+	nodeURL = nodepool.NormalizeNodeURL(nodeURL)
 	if entry, ok := p.cachedRemoteCapabilitiesForNode(nodeURL, time.Now()); ok {
 		return supportsAudioBoostTransformation(entry.transformations), entry.err
 	}
@@ -397,7 +397,7 @@ func (p *NodeAwarePreparer) toneMapCapabilitiesByNode(ctx context.Context) (map[
 // toneMapCapabilitiesForNode returns a defensive copy of a fresh cached
 // inventory or retrieves the node's authenticated hardware capabilities.
 func (p *NodeAwarePreparer) toneMapCapabilitiesForNode(ctx context.Context, nodeURL string) (tonemap.Capabilities, error) {
-	nodeURL = strings.TrimRight(nodeURL, "/")
+	nodeURL = nodepool.NormalizeNodeURL(nodeURL)
 	if capabilities, err, ok := p.cachedToneMapCapabilitiesForNode(nodeURL, time.Now()); ok {
 		return capabilities, err
 	}
@@ -486,7 +486,7 @@ func (p *NodeAwarePreparer) ToneMapCapabilityTimeout() time.Duration {
 }
 
 func (p *NodeAwarePreparer) remoteToneMapProbeTimeout(nodeURL string) time.Duration {
-	nodeURL = strings.TrimRight(nodeURL, "/")
+	nodeURL = nodepool.NormalizeNodeURL(nodeURL)
 	p.capabilityMu.Lock()
 	timeout := p.capabilities[nodeURL].probeRequestTimeout
 	p.capabilityMu.Unlock()
@@ -537,10 +537,37 @@ type transcodeNodeLookup interface {
 	TranscodeNodeByURL(nodeURL string) (*nodepool.Node, bool)
 }
 
+// InvalidateNodeCapabilities drops one node's cached inventory so the next
+// prepared download reads it again.
+//
+// It exists for the same reason the playback-v3 cache has one: an operator
+// changing a node's acceleration policy, or the health sweep noticing the node's
+// capability hash move, makes this cache wrong the moment it lands — and a
+// download planned from it selects the node for a tone-map executor it no longer
+// has, so the reconfigured worker rejects the recipe or the download falls back
+// locally for no reason. A minute of TTL is a minute of that.
+//
+// The learned probe budget survives, exactly as it does across a failure: how
+// long this node takes to answer has not changed, and the read the invalidation
+// triggers is the cold one that most needs the real number.
+func (p *NodeAwarePreparer) InvalidateNodeCapabilities(nodeURL string) {
+	if p == nil || nodeURL == "" {
+		return
+	}
+	nodeURL = nodepool.NormalizeNodeURL(nodeURL)
+	p.capabilityMu.Lock()
+	defer p.capabilityMu.Unlock()
+	entry, ok := p.capabilities[nodeURL]
+	if !ok {
+		return
+	}
+	p.capabilities[nodeURL] = remoteToneMapCapabilities{probeRequestTimeout: entry.probeRequestTimeout}
+}
+
 // cacheToneMapCapabilityFailure negatively caches an unreachable or invalid
 // node briefly so repeated artifact planning does not amplify the failure.
 func (p *NodeAwarePreparer) cacheToneMapCapabilityFailure(nodeURL string, err error) {
-	nodeURL = strings.TrimRight(nodeURL, "/")
+	nodeURL = nodepool.NormalizeNodeURL(nodeURL)
 	p.capabilityMu.Lock()
 	if p.capabilities == nil {
 		p.capabilities = make(map[string]remoteToneMapCapabilities)

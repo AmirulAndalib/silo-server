@@ -114,19 +114,23 @@ type Dependencies struct {
 	StreamTelemetry              *streamtelemetry.Registry     // local observation-only stream telemetry (may be nil)
 	// StreamTelemetryViewCache serves the merged global view with bounded
 	// staleness so the admin parity endpoint never rebuilds it per request.
-	StreamTelemetryViewCache  *streamtelemetry.ViewCache
-	SkippedRootRepo           *metadata.SkippedRootRepository  // skipped root repository (may be nil)
-	StaleIDRepo               *metadata.StaleMediaIDRepository // stale media ID repository (may be nil)
-	MovieMatchQueueRepo       *metadata.MovieMatchQueueRepository
-	SeriesRootMatchQueueRepo  *metadata.SeriesRootMatchQueueRepository
-	Refresher                 handlers.AdminMetadataRefresher // metadata refresher (may be nil)
-	NodeRepo                  *nodepool.Repository            // stream node repository (may be nil)
-	ProxyPool                 *nodepool.ProxyPool             // proxy node pool (may be nil)
-	TranscodePool             *nodepool.TranscodePool         // transcode node pool (may be nil)
-	NodePlanner               *nodepool.Planner               // group/cap-aware node selection (may be nil)
-	NodeHealthChecker         *nodepool.HealthChecker         // periodic node health/capability sweep (may be nil)
-	ResourceSampler           *nodemetrics.Sampler            // this host's own resource sampler (may be nil)
-	SessionSyncer             handlers.PlaybackSessionSyncer  // optional; immediate playback session sync trigger
+	StreamTelemetryViewCache *streamtelemetry.ViewCache
+	SkippedRootRepo          *metadata.SkippedRootRepository  // skipped root repository (may be nil)
+	StaleIDRepo              *metadata.StaleMediaIDRepository // stale media ID repository (may be nil)
+	MovieMatchQueueRepo      *metadata.MovieMatchQueueRepository
+	SeriesRootMatchQueueRepo *metadata.SeriesRootMatchQueueRepository
+	Refresher                handlers.AdminMetadataRefresher // metadata refresher (may be nil)
+	NodeRepo                 *nodepool.Repository            // stream node repository (may be nil)
+	ProxyPool                *nodepool.ProxyPool             // proxy node pool (may be nil)
+	TranscodePool            *nodepool.TranscodePool         // transcode node pool (may be nil)
+	NodePlanner              *nodepool.Planner               // group/cap-aware node selection (may be nil)
+	NodeHealthChecker        *nodepool.HealthChecker         // periodic node health/capability sweep (may be nil)
+	// NodeCapabilityInvalidator drops one node's cached capability inventory
+	// outside the playback handler — the prepared-download preparer holds its
+	// own. nil where downloads are not wired; set before NewRouter runs.
+	NodeCapabilityInvalidator func(nodeURL string)
+	ResourceSampler           *nodemetrics.Sampler           // this host's own resource sampler (may be nil)
+	SessionSyncer             handlers.PlaybackSessionSyncer // optional; immediate playback session sync trigger
 	EventBus                  cache.EventBus
 	AdminStatsProvider        handlers.AdminStatsSource
 	Recommender               recommendations.Recommender // nil when disabled
@@ -224,6 +228,24 @@ func (d *Dependencies) CurrentConfig() *config.Config {
 // NewRouter creates a chi.Router with all middleware and routes mounted
 // under /api/v1/. ABS-compat routes (/abs/*, /login, /socket.io/*) are
 // mounted at the root level when deps.ABSHandler is non-nil.
+// invalidateNodeCapabilities drops every cached view of one node's hardware.
+//
+// There is more than one: protocol-v3 planning holds an inventory, and prepared
+// downloads hold their own with its own TTL. A policy edit or a capability hash
+// change invalidates the node itself, not one reader of it, so anything that
+// caches the answer has to be told — otherwise a QSV-to-NVENC edit keeps
+// selecting the node for a tone-map executor it no longer has, and the
+// reconfigured worker rejects the recipe or the download falls back locally for
+// no reason.
+func (deps Dependencies) invalidateNodeCapabilities(playbackHandler *handlers.PlaybackHandler) func(nodeURL string) {
+	return func(nodeURL string) {
+		playbackHandler.RefreshNodeCapabilitiesV3(nodeURL)
+		if deps.NodeCapabilityInvalidator != nil {
+			deps.NodeCapabilityInvalidator(nodeURL)
+		}
+	}
+}
+
 func NewRouter(deps Dependencies) chi.Router {
 	declareNativeMediaRoutes()
 	r := chi.NewRouter()
@@ -1038,7 +1060,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		// The health sweep sees a node's capability hash change long before this
 		// cache would expire, so let it invalidate directly. Wired here rather
 		// than at checker construction because the handler does not exist yet.
-		deps.NodeHealthChecker.SetCapabilitiesChangedCallback(playbackHandler.RefreshNodeCapabilitiesV3)
+		deps.NodeHealthChecker.SetCapabilitiesChangedCallback(deps.invalidateNodeCapabilities(playbackHandler))
 
 		realtimeHub := deps.PlaybackRealtimeHub
 		if realtimeHub == nil {
@@ -3172,7 +3194,7 @@ func NewRouter(deps Dependencies) chi.Router {
 								// server's cached view of the node wrong the
 								// moment it lands; the same invalidation the
 								// health sweep uses drops it.
-								nodeHandler.SetCapabilityInvalidator(playbackHandler.RefreshNodeCapabilitiesV3)
+								nodeHandler.SetCapabilityInvalidator(deps.invalidateNodeCapabilities(playbackHandler))
 								// A node with no override of its own runs the
 								// cluster's acceleration policy, and how many
 								// devices that names is what decides how long its

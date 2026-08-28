@@ -100,6 +100,16 @@ func (p *TranscodePool) ApplyCapabilities(id int, fetchedFrom string, capabiliti
 	applyNodeCapabilities(p.nodes, id, fetchedFrom, capabilities, hash, refreshedAt, drift, driftBaseline)
 }
 
+// NormalizeNodeURL is how a node's address is written wherever it is used as an
+// identity: a map key, a comparison, or the base of a request.
+//
+// A stored URL may carry a trailing slash and mean the same worker, so anything
+// that keys by the raw value ends up with two entries for one node — and the
+// one an invalidation deletes is not the one a lookup finds.
+func NormalizeNodeURL(nodeURL string) string {
+	return normalizeNodeURL(nodeURL)
+}
+
 // NodeEndpoint joins a stored node URL with one of the node's own routes.
 //
 // A stored URL may carry a trailing slash — an operator pasting a base URL is

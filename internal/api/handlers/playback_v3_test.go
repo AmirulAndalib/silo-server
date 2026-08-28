@@ -5677,3 +5677,31 @@ func TestPlaybackV3KeepsALearnedBudgetLargerThanThePolicyPrice(t *testing.T) {
 		t.Fatalf("probe timeout = %s, want the node's own larger measurement %s", got, learned)
 	}
 }
+
+// The admin route invalidates with the URL exactly as the row stores it, which
+// may carry a trailing slash the pools have already dropped. Keyed verbatim, the
+// entry this deletes is not the entry planning reads, so the node keeps serving
+// the backend it was just moved off until the old key expires.
+func TestRefreshNodeCapabilitiesV3NormalizesTheCacheKey(t *testing.T) {
+	const nodeURL = "https://gpu-5.example"
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.v3NodeCapabilitiesMu.Lock()
+	if handler.v3NodeCapabilities == nil {
+		handler.v3NodeCapabilities = map[string]v3NodeCapabilityCache{}
+	}
+	handler.v3NodeCapabilities[nodeURL] = v3NodeCapabilityCache{expiresAt: time.Now().Add(time.Hour)}
+	handler.v3NodeCapabilitiesMu.Unlock()
+
+	handler.RefreshNodeCapabilitiesV3(nodeURL + "/")
+
+	handler.v3NodeCapabilitiesMu.Lock()
+	_, present := handler.v3NodeCapabilities[nodeURL]
+	invalidations := handler.v3NodeCapabilityInvalidations[nodeURL]
+	handler.v3NodeCapabilitiesMu.Unlock()
+	if present {
+		t.Fatal("the canonical entry survived an invalidation made with a trailing slash")
+	}
+	if invalidations == 0 {
+		t.Fatal("the invalidation was counted under a different key than planning reads")
+	}
+}

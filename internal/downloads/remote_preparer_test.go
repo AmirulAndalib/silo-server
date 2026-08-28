@@ -1138,3 +1138,32 @@ func TestNodeAwarePreparerKeepsALearnedBudgetLargerThanThePolicyPrice(t *testing
 		t.Fatalf("probe timeout = %s, want the node's own larger measurement %s", got, learned)
 	}
 }
+
+// A policy edit or a capability-hash change makes this cache wrong the moment it
+// lands. Left for its TTL, a download planned from it selects the node for a
+// tone-map executor it no longer has, and the reconfigured worker rejects the
+// recipe or the download falls back locally for no reason.
+func TestNodeAwarePreparerInvalidateNodeCapabilitiesDropsTheInventory(t *testing.T) {
+	const nodeURL = "https://node.example"
+	preparer := NewNodeAwarePreparer(nil, nil, nil)
+	preparer.capabilities[nodeURL] = remoteToneMapCapabilities{
+		capabilities:        tonemap.Capabilities{{Mode: tonemap.ModeHardware, Backend: tonemap.BackendQSV}},
+		probeRequestTimeout: 161 * time.Second,
+		expiresAt:           time.Now().Add(time.Minute),
+	}
+
+	// The stored URL carries a trailing slash the pools have already dropped; it
+	// still has to reach the entry planning reads.
+	preparer.InvalidateNodeCapabilities(nodeURL + "/")
+
+	entry := preparer.capabilities[nodeURL]
+	if len(entry.capabilities) != 0 || !entry.expiresAt.IsZero() {
+		t.Fatalf("inventory survived the invalidation: %+v", entry)
+	}
+	// The budget describes how long the node takes to answer, which a policy
+	// change does not alter — and the read this invalidation triggers is the
+	// cold one that most needs the real number.
+	if entry.probeRequestTimeout != 161*time.Second {
+		t.Fatalf("probe budget = %s, want the learned 161s preserved", entry.probeRequestTimeout)
+	}
+}
