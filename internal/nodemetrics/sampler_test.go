@@ -180,6 +180,58 @@ func TestNetworkThroughputExcludesLoopbackAndClampsResets(t *testing.T) {
 	}
 }
 
+// An interface entering the namespace mid-run — a veth or tunnel moved into a
+// running container — arrives carrying its lifetime totals. With an aggregate
+// baseline those totals would read as one interval's traffic; per-interface
+// pairing gives the newcomer this reading as its baseline and counts it from
+// the next interval, while an interface leaving takes only its own baseline
+// with it instead of masking the survivors behind a shrunken aggregate.
+func TestNetworkThroughputSurvivesInterfaceChurn(t *testing.T) {
+	tree := newProcTree(t)
+	clock := newFakeClock()
+	tree.write("stat", "cpu  0 0 0 0 0 0 0 0\n")
+	tree.write("loadavg", "0 0 0 0/0 0\n")
+	tree.write("meminfo", "MemTotal: 1024 kB\n")
+	header := "Inter-|   Receive                    |  Transmit\n" +
+		" face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n"
+	iface := func(name string, rx, tx int) string {
+		return "  " + name + ": " + itoa(rx) + " 1 0 0 0 0 0 0 " + itoa(tx) + " 1 0 0 0 0 0 0\n"
+	}
+
+	tree.write("net/dev", header+iface("eth0", 1000, 2000))
+	s := newTestSampler(t, tree, clock, Options{})
+	s.sample(context.Background())
+
+	// tailscale0 appears between readings carrying 40 GB of lifetime history;
+	// eth0 moves by its usual 5000/10000. Only eth0's delta may appear.
+	tree.write("net/dev", header+iface("eth0", 6000, 12000)+iface("tailscale0", 40_000_000_000, 40_000_000_000))
+	clock.advance(5 * time.Second)
+	s.sample(context.Background())
+	system := s.Snapshot().System
+	if system.NetRxBps != 8000 || system.NetTxBps != 16000 {
+		t.Fatalf("throughput with a newborn interface = %d/%d, want 8000/16000", system.NetRxBps, system.NetTxBps)
+	}
+
+	// From its second reading the newcomer has a baseline and counts.
+	tree.write("net/dev", header+iface("eth0", 11000, 22000)+iface("tailscale0", 40_000_005_000, 40_000_010_000))
+	clock.advance(5 * time.Second)
+	s.sample(context.Background())
+	system = s.Snapshot().System
+	if system.NetRxBps != 16000 || system.NetTxBps != 32000 {
+		t.Fatalf("throughput once the newcomer has a baseline = %d/%d, want 16000/32000", system.NetRxBps, system.NetTxBps)
+	}
+
+	// The newcomer vanishes again. Its departure must not hide eth0's real
+	// traffic, even though the aggregate across interfaces plummeted.
+	tree.write("net/dev", header+iface("eth0", 16000, 32000))
+	clock.advance(5 * time.Second)
+	s.sample(context.Background())
+	system = s.Snapshot().System
+	if system.NetRxBps != 8000 || system.NetTxBps != 16000 {
+		t.Fatalf("throughput after an interface left = %d/%d, want 8000/16000", system.NetRxBps, system.NetTxBps)
+	}
+}
+
 func TestMemoryFromMeminfo(t *testing.T) {
 	tree := newProcTree(t)
 	clock := newFakeClock()

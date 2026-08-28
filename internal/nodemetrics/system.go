@@ -16,12 +16,23 @@ type cpuTimes struct {
 	valid bool
 }
 
-// netCounters is one /proc/net/dev aggregate reading, excluding loopback.
+// ifaceCounters is one interface's monotonic byte counters.
+type ifaceCounters struct {
+	rx uint64
+	tx uint64
+}
+
+// netCounters is one /proc/net/dev reading, excluding loopback.
+//
+// Counters are kept per interface rather than pre-summed because deltas are
+// only meaningful per interface: an interface that enters the namespace
+// mid-run (a veth or tunnel moved into a running container) arrives carrying
+// its lifetime totals, and an aggregate baseline would report all of that
+// history as one interval's traffic.
 type netCounters struct {
-	rx    uint64
-	tx    uint64
-	at    time.Time
-	valid bool
+	interfaces map[string]ifaceCounters
+	at         time.Time
+	valid      bool
 }
 
 // readCPUTimes parses the aggregate "cpu" line of /proc/stat and counts the
@@ -117,14 +128,15 @@ func readNetCounters(procDir string, at time.Time) netCounters {
 	if err != nil {
 		return netCounters{}
 	}
-	counters := netCounters{at: at}
+	counters := netCounters{at: at, interfaces: map[string]ifaceCounters{}}
 	for line := range strings.Lines(string(raw)) {
 		name, rest, ok := strings.Cut(line, ":")
 		if !ok {
 			// The two header lines carry no colon.
 			continue
 		}
-		if strings.TrimSpace(name) == "lo" {
+		iface := strings.TrimSpace(name)
+		if iface == "lo" {
 			continue
 		}
 		fields := strings.Fields(rest)
@@ -137,19 +149,24 @@ func readNetCounters(procDir string, at time.Time) netCounters {
 		if rxErr != nil || txErr != nil {
 			continue
 		}
-		counters.rx += rx
-		counters.tx += tx
+		counters.interfaces[iface] = ifaceCounters{rx: rx, tx: tx}
 		counters.valid = true
 	}
 	return counters
 }
 
-// netThroughputBps converts two readings into bits per second.
+// netThroughputBps converts two readings into bits per second, summing only
+// per-interface deltas between interfaces present in both readings.
 //
-// Interfaces disappearing (a container restarting its veth) drops the aggregate
-// counter, and a 32-bit counter on a busy link wraps; both show up as a
-// negative delta, and both are reported as zero rather than as a spike, since
-// an invented number here would land straight in an operator's bandwidth graph.
+// The pairing is what keeps every kind of interface churn out of an
+// operator's bandwidth graph. An interface that appears between readings
+// arrives with its lifetime totals — history, not this interval's traffic —
+// so it contributes nothing until the next reading gives it a baseline. One
+// that disappears takes only its own baseline with it, so the remaining
+// interfaces keep measuring instead of being masked by a shrunken aggregate.
+// And a single counter that runs backwards (a 32-bit counter on a busy link
+// wrapping, or a device slot reused) zeroes only that interface's delta,
+// since an invented number is worse than a missing one.
 func netThroughputBps(previous, current netCounters) (rxBps, txBps int64, ok bool) {
 	if !previous.valid || !current.valid {
 		return 0, 0, false
@@ -158,13 +175,20 @@ func netThroughputBps(previous, current netCounters) (rxBps, txBps int64, ok boo
 	if seconds <= 0 {
 		return 0, 0, false
 	}
-	rate := func(prev, cur uint64) int64 {
-		if cur < prev {
-			return 0
+	var rxDelta, txDelta uint64
+	for name, cur := range current.interfaces {
+		prev, seen := previous.interfaces[name]
+		if !seen {
+			continue
 		}
-		return int64(float64(cur-prev) * 8 / seconds)
+		if cur.rx >= prev.rx {
+			rxDelta += cur.rx - prev.rx
+		}
+		if cur.tx >= prev.tx {
+			txDelta += cur.tx - prev.tx
+		}
 	}
-	return rate(previous.rx, current.rx), rate(previous.tx, current.tx), true
+	return int64(float64(rxDelta) * 8 / seconds), int64(float64(txDelta) * 8 / seconds), true
 }
 
 // procDirFor resolves which proc tree to read name ("stat", "loadavg", or
