@@ -409,6 +409,36 @@ func CapabilityEndpointTimeout(hwAccel, hwDevice string) time.Duration {
 		tonemap.ProbeEndpointTimeout(hwAccel, hwDevice)
 }
 
+// RegistryCapabilityEndpointTimeout is how long a capability endpoint that
+// probes only the transformation registry may take to answer — a proxy's
+// snapshot, which reports what its ffmpeg can do and deliberately walks no
+// hardware.
+//
+// It is composed from the same two halves as CapabilityEndpointTimeout, so the
+// two cannot drift apart, but with an empty candidate set rather than the host's
+// own: no backend has candidates, so the walk falls to its one-command floor,
+// and the tone-map half is asked for the software backend, which budgets no
+// per-device matrix.
+//
+// Host-independence is the point, not an incidental saving. This value is
+// advertised on the report and covered by its capability hash, so deriving it
+// from /dev/dri would put the host's device count inside a proxy's identity: a
+// GPU appearing on a machine that also runs a proxy would move that proxy's
+// hash, cost the API a refetch and a planning-cache drop, and announce a change
+// to capabilities that are by construction the same.
+func RegistryCapabilityEndpointTimeout() time.Duration {
+	return hwAccelWalkTimeout(hwCandidates{}) +
+		tonemap.ProbeEndpointTimeout(HWAccelNone, "")
+}
+
+// RegistryCapabilityRequestTimeout is RegistryCapabilityEndpointTimeout plus the
+// transport margin a remote caller needs, mirroring CapabilityRequestTimeout. It
+// is what a registry-only node advertises and what a caller of its capability
+// endpoint must allow.
+func RegistryCapabilityRequestTimeout() time.Duration {
+	return RegistryCapabilityEndpointTimeout() + tonemap.ProbeRequestSlack
+}
+
 // HWAccelWalkTimeout is how long a hardware detection walk of this host takes at
 // worst, for the configured device set.
 //

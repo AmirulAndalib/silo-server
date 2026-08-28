@@ -226,12 +226,18 @@ func (s *Server) Handler() http.Handler {
 // whether the proxy it just picked can run the transformations a plan froze, so
 // a pool whose proxies carry a different ffmpeg build (a rolling upgrade, a
 // custom image) would fail at stream time rather than at selection time.
+//
+// The report is deliberately hardware-free. A proxy relays bytes and runs
+// identity/remux recipes; it never executes a hardware transcode, and nothing
+// on the API side reads a proxy's acceleration fields. Probing them anyway cost
+// every proxy a full GPU smoke-encode matrix every 15 minutes to produce an
+// answer no planner consults.
 func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
 	info, err := s.buildCapabilitySnapshot(r.Context())
 	if err != nil {
-		// An incomplete probe would hash differently from the same hardware
-		// probed successfully, so serving it would announce a hardware change
-		// that did not happen.
+		// An incomplete probe would hash differently from the same ffmpeg probed
+		// successfully, so serving it would announce a capability change that did
+		// not happen.
 		slog.WarnContext(r.Context(), "proxy capability probe incomplete", "component", "proxy", "error", err)
 		http.Error(w, "capability probe unavailable", http.StatusServiceUnavailable)
 		return
@@ -250,8 +256,8 @@ func (s *Server) handleHWCapabilities(w http.ResponseWriter, r *http.Request) {
 // and the background snapshot, so the hash a health response advertises always
 // describes the payload the endpoint would serve.
 //
-// An error means the probes did not finish — a caller that gave up, or an
-// ffmpeg slower than a probe deadline — not that the proxy lost hardware. The
+// An error means the probe did not finish — a caller that gave up, or an ffmpeg
+// slower than the probe deadline — not that the proxy lost a capability. The
 // caller must keep the previous hash rather than publish the partial report,
 // exactly as a transcode node does.
 func (s *Server) buildCapabilitySnapshot(ctx context.Context) (playback.HWAccelInfo, error) {
@@ -266,48 +272,58 @@ func (s *Server) buildCapabilitySnapshot(ctx context.Context) (playback.HWAccelI
 // with.
 func (s *Server) buildCapabilitySnapshotLocked(ctx context.Context) (playback.HWAccelInfo, error) {
 	ffmpegPath := ""
-	hwAccel := playback.HWAccelNone
-	hwDevice := ""
 	if cfg := s.watcher.Config(); cfg != nil {
 		ffmpegPath = cfg.Playback.FFmpegPath
-		hwAccel = cfg.Playback.HWAccel
-		hwDevice = cfg.Playback.HWDevice
 	}
-	// One hardware-aware deadline over both probes, matching the transcode
-	// node: each has its own internal bound, but only a shared budget keeps the
+	// Hardware acceleration is not probed here, and the report says so rather
+	// than leaving the fields unset by accident. A proxy relays streams and runs
+	// identity/remux recipes on ffmpeg; it never executes a hardware transcode,
+	// and the only field anything reads off this report is Transformations —
+	// planIdentityProxySessionV3 filters proxies by their advertised
+	// transformations and consults nothing else. So there is no inventory to
+	// report and nothing a GPU smoke-encode matrix could tell the planner.
+	//
+	// The consequence worth stating: the hash now tracks only what this proxy
+	// can *do*. A reboot, a renumbered render node, or a card appearing on the
+	// host no longer moves it, so the API refetches a proxy's report exactly
+	// when its ffmpeg's abilities changed. Nothing derived from the host may
+	// enter this report, the advertised budget below included — see
+	// playback.RegistryCapabilityEndpointTimeout.
+	info := playback.HWAccelInfo{
+		Resolved: playback.HWAccelNone,
+		Source:   "local",
+	}
+	// One deadline over the registry probe, matching the transcode node: it has
+	// its own internal per-command bounds, but only a shared budget keeps the
 	// whole rebuild inside the window a caller was told to allow, and only a
 	// deadline the builder owns bounds the background snapshot, whose context
-	// lives as long as the process.
-	ctx, cancel := context.WithTimeout(ctx, playback.CapabilityEndpointTimeout(hwAccel, hwDevice))
+	// lives as long as the process. It is the registry-only budget — the same
+	// formula the transcode node uses, with no hardware in it — and the same one
+	// advertised below, so a caller's allowance and this deadline cannot drift.
+	ctx, cancel := context.WithTimeout(ctx, playback.RegistryCapabilityEndpointTimeout())
 	defer cancel()
-	// A walk that ran out of budget is refused rather than published: it marks
-	// unprobed backends Verified=false, which is byte-identical to a real
-	// hardware failure, so hashing it would announce a change that did not
-	// happen and cost this proxy its stored inventory.
-	info, err := playback.DetectHWAccelWithFFmpegContextResult(ctx, hwAccel, ffmpegPath, hwDevice)
-	if err != nil {
-		return playback.HWAccelInfo{}, err
-	}
+	// A registry probe that ran out of budget is refused rather than published:
+	// it marks transformations unavailable, which is byte-identical to an ffmpeg
+	// that genuinely cannot run them, so hashing it would announce a change that
+	// did not happen and drop this proxy out of remux eligibility.
 	registry, err := playback.ProbeTransformationRegistryWithToneMapV3Result(ctx, ffmpegPath, nil)
 	if err != nil {
 		return playback.HWAccelInfo{}, err
 	}
 	info.Transformations = registry.Advertised()
 	// Advertised before the hash is taken, because it is part of what the hash
-	// covers. A proxy runs the same hardware walk a transcode node does, so
-	// with enough configured devices its cold read outlives every caller's
-	// fallback — and a caller that cancels mid-walk leaves the proxy's stored
-	// inventory as far behind as a failure would.
-	info.ProbeRequestTimeoutMillis = playback.CapabilityRequestTimeout(hwAccel, hwDevice).Milliseconds()
+	// covers: a build that needs longer reaches the sweep rather than sitting
+	// behind an unchanged identity.
+	info.ProbeRequestTimeoutMillis = playback.RegistryCapabilityRequestTimeout().Milliseconds()
 	info.CapabilityHash = playback.ComputeCapabilityHash(info)
 	return info, nil
 }
 
 // capabilitySnapshotInterval is how often the proxy recomputes its capability
-// snapshot. It exists to notice hardware or ffmpeg changing underneath a
-// long-running proxy without waiting for a restart. The hardware walk is
-// cached, but the transformation registry re-execs ffmpeg every time, which is
-// the other reason a snapshot that did not finish must not be published.
+// snapshot. It exists to notice the ffmpeg underneath a long-running proxy
+// changing — a swapped binary, a rolling image upgrade — without waiting for a
+// restart. The transformation registry re-execs ffmpeg every time, which is the
+// other reason a snapshot that did not finish must not be published.
 const capabilitySnapshotInterval = 15 * time.Minute
 
 // StartCapabilitySnapshots keeps the capability hash published by /health
@@ -334,9 +350,9 @@ func (s *Server) StartCapabilitySnapshots(ctx context.Context) {
 func (s *Server) refreshCapabilitySnapshot(ctx context.Context) {
 	info, err := s.buildCapabilitySnapshot(ctx)
 	if err != nil {
-		// Keep the previous hash: a failed probe is not evidence the hardware
-		// changed, and republishing a degraded one would make the API refetch
-		// this proxy's inventory and store a report it did not lose anything to.
+		// Keep the previous hash: a failed probe is not evidence this proxy's
+		// ffmpeg changed, and republishing a degraded one would make the API
+		// refetch a report that lost nothing.
 		slog.WarnContext(ctx, "proxy capability snapshot incomplete", "component", "proxy", "error", err)
 		return
 	}

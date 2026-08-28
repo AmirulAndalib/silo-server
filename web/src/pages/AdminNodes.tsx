@@ -53,6 +53,7 @@ import {
   filterNodesByGroup,
   nodeHWDevicePaths,
   nodeHasHWDeviceInventory,
+  nodeReportsAcceleration,
   hwDeviceSyntaxChanges,
   nodeUsesCUDADevices,
   parseHWDeviceOverride,
@@ -541,6 +542,9 @@ function NodeUnit({
   isReprobing,
 }: NodeUnitProps) {
   const state = nodeState(node);
+  // See nodeReportsAcceleration: a proxy reports no hardware, so it has neither
+  // an acceleration block to draw nor hardware to re-probe.
+  const showsAcceleration = nodeReportsAcceleration(node);
 
   return (
     <div
@@ -611,20 +615,22 @@ function NodeUnit({
               aria-hidden="true"
             />
           </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            disabled={isReprobing}
-            aria-label={`Re-probe hardware on ${node.name}`}
-            title="Re-verify this node's hardware against live devices. Use after a driver or device change; it can take a couple of minutes, and is refused while the node is transcoding."
-            onClick={() => onReprobe(node)}
-          >
-            <ScanSearch
-              className={`h-3 w-3 ${isReprobing ? "animate-pulse" : ""}`}
-              aria-hidden="true"
-            />
-          </Button>
+          {showsAcceleration && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              disabled={isReprobing}
+              aria-label={`Re-probe hardware on ${node.name}`}
+              title="Re-verify this node's hardware against live devices. Use after a driver or device change; it can take a couple of minutes, and is refused while the node is transcoding."
+              onClick={() => onReprobe(node)}
+            >
+              <ScanSearch
+                className={`h-3 w-3 ${isReprobing ? "animate-pulse" : ""}`}
+                aria-hidden="true"
+              />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="icon"
@@ -646,8 +652,18 @@ function NodeUnit({
         </div>
       </div>
 
-      <div className="border-border/50 mt-4 grid gap-x-8 gap-y-5 border-t pt-4 sm:grid-cols-2 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,0.85fr)]">
-        <NodeAccelerationBlock node={node} allNodes={allNodes} />
+      {/* Two blocks on a proxy, three on a transcode node. The track list is
+          picked to match, so the survivors fill the row rather than leaving a
+          column-shaped hole where acceleration used to be. */}
+      <div
+        className={cn(
+          "border-border/50 mt-4 grid gap-x-8 gap-y-5 border-t pt-4 sm:grid-cols-2",
+          showsAcceleration
+            ? "xl:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,0.85fr)]"
+            : "xl:grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)]",
+        )}
+      >
+        {showsAcceleration && <NodeAccelerationBlock node={node} allNodes={allNodes} />}
         <NodeLoadBlock node={node} />
         <NodeCapacityBlock node={node} showEgress={showEgress} />
       </div>

@@ -9,8 +9,10 @@ import (
 )
 
 // A proxy runs ffmpeg for remux recipes, so it gets the same escape hatch a
-// transcode node has: re-probe now, publish the result, and let health advertise
-// it immediately instead of at the next 15-minute tick.
+// transcode node has: re-probe that binary now, publish the result, and let
+// health advertise it immediately instead of at the next 15-minute tick. It is
+// not a hardware re-verification — a proxy reports no hardware — but the route
+// and its publishing contract are unchanged.
 func TestProxyReprobeCapabilitiesRecomputesAndStoresHash(t *testing.T) {
 	const secret = "capability-secret"
 	server := newCapabilityProxyServer(t, secret)
@@ -37,7 +39,7 @@ func TestProxyReprobeCapabilitiesRecomputesAndStoresHash(t *testing.T) {
 }
 
 // A re-probe that cannot finish must answer 503 and keep the published hash: an
-// unfinished probe is not evidence the proxy lost hardware.
+// unfinished probe is not evidence the proxy's ffmpeg lost anything.
 func TestProxyReprobeCapabilitiesKeepsHashOnIncompleteProbe(t *testing.T) {
 	const secret = "capability-secret"
 	server := newCapabilityProxyServer(t, secret)
@@ -73,11 +75,11 @@ func TestProxyReprobeCapabilitiesRequiresBearer(t *testing.T) {
 }
 
 // A probe outlives its caller by design, so a capability request abandoned
-// mid-probe releases capabilityBuildMu while ffmpeg is still encoding. A
-// re-probe arriving then would start a second smoke-encode matrix beside the
-// first, and two contending for one card publish a hardware failure for
-// hardware that is fine — the same false verdict the transcode node's gate
-// prevents, which does not care which kind of node it is on.
+// mid-probe releases capabilityBuildMu while ffmpeg is still running. A
+// re-probe arriving then would start a second matrix beside the first, and two
+// contending for one card publish a hardware failure for hardware that is fine.
+// A proxy no longer starts the walk that made this expensive, but the gate is
+// the shared contract with the transcode node's route and still holds here.
 func TestProxyReprobeCapabilitiesRefusedWhileProbesAreRunning(t *testing.T) {
 	const secret = "capability-secret"
 	server := newCapabilityProxyServer(t, secret)
