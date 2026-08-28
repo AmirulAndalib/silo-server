@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -35,6 +36,34 @@ func itemPosterSurface(t *testing.T) artworkSweepSurface {
 // fixtures. The test database may be shared and populated, so each test
 // snapshots every pre-existing row its reset would touch and restores those
 // rows on cleanup; only the seeded fixtures are asserted on.
+
+// restoreImageLadderState snapshots the image-ladder backfill singleton and
+// restores it on cleanup. Inserting rows with local cached poster paths fires
+// the reopen_image_ladder_backfill_v2 trigger, which on a database that has
+// completed ladder v2 lowers backfilled_version — durable state a test
+// fixture must not leave behind on a shared database.
+func restoreImageLadderState(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	var version int
+	var lastAttempt *time.Time
+	err := pool.QueryRow(ctx,
+		`SELECT backfilled_version, last_attempt_at FROM image_ladder_backfill_state WHERE id = 1`).
+		Scan(&version, &lastAttempt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return
+		}
+		t.Fatalf("snapshot image ladder state: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := pool.Exec(ctx,
+			`UPDATE image_ladder_backfill_state SET backfilled_version = $1, last_attempt_at = $2, updated_at = NOW() WHERE id = 1`,
+			version, lastAttempt); err != nil {
+			t.Errorf("restore image ladder state: %v", err)
+		}
+	})
+}
 
 func restorePreexistingPosterRows(t *testing.T, pool *pgxpool.Pool, seededPrefix string) {
 	t.Helper()
@@ -119,6 +148,7 @@ func TestBulkResetSurfaceBatches(t *testing.T) {
 	shrinkBulkBatchSize(t, 3)
 
 	prefix := fmt.Sprintf("bulkreset-%d", time.Now().UnixNano())
+	restoreImageLadderState(t, pool)
 	restorePreexistingPosterRows(t, pool, prefix)
 	const requeueRows, clearRows = 7, 5
 	sourceURL := func(i int) string {
@@ -266,6 +296,7 @@ func TestBulkResetSurfacePartialFailureKeepsCounts(t *testing.T) {
 	shrinkBulkBatchSize(t, 2)
 
 	prefix := fmt.Sprintf("bulkpartial-%d", time.Now().UnixNano())
+	restoreImageLadderState(t, pool)
 	restorePreexistingPosterRows(t, pool, prefix)
 
 	const requeueRows = 5
