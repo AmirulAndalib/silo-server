@@ -267,15 +267,16 @@ func nodeCapabilityProbeBudget(live func() *config.Config) func(*nodepool.Node) 
 				hwAccel, hwDevice = current.Playback.HWAccel, current.Playback.HWDevice
 			}
 		}
-		if node != nil {
-			if node.HWAccelOverride != nil && *node.HWAccelOverride != "" {
-				hwAccel = *node.HWAccelOverride
-			}
-			if node.HWDeviceOverride != nil && *node.HWDeviceOverride != "" {
-				hwDevice = *node.HWDeviceOverride
-			}
-		}
-		return max(nodeCapabilityRequestTimeout, playback.CapabilityRequestTimeout(hwAccel, hwDevice))
+		// The same ladder every other caller prices a node's capability read
+		// with — its own advertisement, then its own policy, then this floor —
+		// so the sweep, the re-probe, and the two planning paths cannot end up
+		// allowing different amounts of time for one node's matrix.
+		return playback.ColdCapabilityRequestTimeout(
+			node.StoredCapabilities(),
+			node.EffectiveHWAccel(hwAccel),
+			node.EffectiveHWDevice(hwDevice),
+			nodeCapabilityRequestTimeout,
+		)
 	}
 }
 

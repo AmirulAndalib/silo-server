@@ -667,6 +667,29 @@ func (h *NodeHandler) nodeReprobeTimeout(n *nodepool.Node) time.Duration {
 	)
 }
 
+// capabilityRefreshBound is how long the refresh after a re-probe may run for
+// this node, asked of the thing that will enforce it.
+//
+// The bound is derived from the node's own advertised probe budget, so it is
+// node-specific and routinely past the exported floor — a node with a large
+// device set asks for well over five minutes. Computing it here from a second
+// rule would be the same number derived twice, and the two would disagree
+// exactly where it matters. Without a refresher wired there is no refresh to
+// wait for, so the floor is all this can promise.
+func (h *NodeHandler) capabilityRefreshBound(n *nodepool.Node) time.Duration {
+	if bounder, ok := h.capabilities.(nodeCapabilityRefreshBounder); ok {
+		return bounder.CapabilityRefreshBound(n)
+	}
+	return nodepool.CapabilityRefreshTimeout
+}
+
+// nodeCapabilityRefreshBounder reports how long a refresh of one node may take.
+// Optional on NodeCapabilityRefresher, like the other collaborators here;
+// *nodepool.HealthChecker implements it.
+type nodeCapabilityRefreshBounder interface {
+	CapabilityRefreshBound(n *nodepool.Node) time.Duration
+}
+
 // nodeReprobeWriteSlack covers the repository round trips and the JSON write
 // that bracket the two long calls this handler makes.
 const nodeReprobeWriteSlack = 15 * time.Second
@@ -683,8 +706,10 @@ const nodeReprobeWriteSlack = 15 * time.Second
 // the UI toasts a failure for an action that succeeded, and the obvious response
 // is to run the whole cold FFmpeg matrix again. The diagnostics upload route
 // extends its deadlines for exactly the same reason.
-func extendReprobeWriteDeadline(w http.ResponseWriter, r *http.Request, probeBudget time.Duration) {
-	budget := probeBudget + nodepool.CapabilityRefreshTimeout + nodeReprobeWriteSlack
+func (h *NodeHandler) extendReprobeWriteDeadline(
+	w http.ResponseWriter, r *http.Request, n *nodepool.Node, probeBudget time.Duration,
+) {
+	budget := probeBudget + h.capabilityRefreshBound(n) + nodeReprobeWriteSlack
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(budget)); err != nil {
 		// A ResponseWriter that cannot carry a deadline (a test recorder, a
 		// wrapper that does not unwrap) is not a reason to refuse the action.
@@ -733,7 +758,7 @@ func (h *NodeHandler) HandleReprobeNode(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	extendReprobeWriteDeadline(w, r, h.nodeReprobeTimeout(node))
+	h.extendReprobeWriteDeadline(w, r, node, h.nodeReprobeTimeout(node))
 
 	result := ReprobeNodeResult{NodeID: node.ID, NodeName: node.Name, Status: "ok"}
 	reprobed, err := h.reprobeNode(r.Context(), node)

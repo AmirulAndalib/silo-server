@@ -168,11 +168,29 @@ const capabilityFetchTimeout = 5 * time.Minute
 // fires first and the failure an operator sees names the probe rather than this.
 const capabilityFetchSlack = time.Minute
 
-// CapabilityRefreshTimeout is the bound RefreshNodeCapabilities puts on the
-// fetch it performs. It is exported for the one caller that has to hold an HTTP
-// connection open across that fetch and must therefore size its own write
-// deadline to include it.
+// CapabilityRefreshTimeout is the floor under that bound, and all a caller can
+// assume when it has no health checker to ask. It is exported for the one caller
+// that has to hold an HTTP connection open across a refresh and must therefore
+// size its own write deadline to include it — see CapabilityRefreshBound, which
+// is the number that caller should actually use.
 const CapabilityRefreshTimeout = capabilityFetchTimeout
+
+// CapabilityRefreshBound is how long RefreshNodeCapabilities may take for this
+// node, which is the same backstop the sweep's own fetches run under.
+//
+// It is exported because a caller holding an HTTP connection open across a
+// refresh has to reserve the real number, not the floor: the backstop is derived
+// from the node's advertised probe budget, and a node with a large device set
+// asks for well past five minutes. Reserving the floor there means the
+// connection's write deadline can fire after the refresh succeeded but before
+// its response is written, and the operator is told an action failed that has
+// already changed the node.
+func (hc *HealthChecker) CapabilityRefreshBound(n *Node) time.Duration {
+	if hc == nil {
+		return capabilityFetchTimeout
+	}
+	return hc.capabilityFetchBackstop(n)
+}
 
 // HealthChecker runs periodic health checks on all nodes in both pools,
 // updating in-memory state and optionally persisting to the database.
