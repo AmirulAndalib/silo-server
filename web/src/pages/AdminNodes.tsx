@@ -16,14 +16,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   Select,
@@ -35,10 +27,12 @@ import {
 import { Plus, Pencil, Trash2, RefreshCw, ScanSearch, Info, AlertTriangle } from "lucide-react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { formatDateTime } from "@/lib/datetime";
+import { formatRelativeTime } from "@/lib/date";
 import { toggleHWDevice } from "@/lib/hwDevices";
 import { cn } from "@/lib/utils";
 import type {
   NodeCapabilityStaleReason,
+  NodeGPULiveDevice,
   NodeHWDeviceRow,
   ResourceMetric,
 } from "./adminNodesPresentation";
@@ -49,7 +43,9 @@ import {
   describeCapabilityDrift,
   describeEffectiveAcceleration,
   describeNodeAccelerationOverride,
+  describeNodeEgress,
   describeNodeGPU,
+  describeNodeJobs,
   describeNodeSystem,
   describeSharedGPU,
   nodeHWDevicePaths,
@@ -61,47 +57,156 @@ import {
 
 type NodeType = "proxy" | "transcode";
 
-function formatMbps(kbps: number): string {
-  return (Math.round(kbps / 100) / 10).toString();
+/**
+ * Whether a node is in the rotation, and why not when it is out of it.
+ *
+ * Enabled and healthy are two separate facts, but an operator reading the rack
+ * asks one question — can this node take work — so they resolve to one state.
+ * Disabled wins over unhealthy: a node somebody switched off is not a node
+ * that is failing, however its last health check went.
+ */
+type NodeState = "healthy" | "unhealthy" | "disabled";
+
+function nodeState(node: StreamNode): NodeState {
+  if (!node.enabled) {
+    return "disabled";
+  }
+  return node.healthy ? "healthy" : "unhealthy";
 }
 
-/** One derived reading in the System column: "CPU 42%", muted or tinted. */
-function NodeSystemMetric({ metric }: { metric: ResourceMetric }) {
+const NODE_STATE_LABEL: Record<NodeState, string> = {
+  healthy: "Healthy",
+  unhealthy: "Unhealthy",
+  disabled: "Disabled",
+};
+
+/**
+ * Status-rail tint. The rail runs down the left edge of every unit, so a rack
+ * of nodes is scannable as a column of state before any of it is read.
+ */
+const NODE_STATE_RAIL: Record<NodeState, string> = {
+  healthy: "bg-success/70",
+  unhealthy: "bg-destructive",
+  disabled: "bg-muted-foreground/30",
+};
+
+const NODE_STATE_DOT: Record<NodeState, string> = {
+  healthy: "bg-success",
+  unhealthy: "bg-destructive",
+  disabled: "bg-muted-foreground",
+};
+
+/** Micro-caps block label inside a node unit; the app's existing eyebrow idiom. */
+function UnitLabel({ children }: { children: ReactNode }) {
+  return <p className="hero-eyebrow mb-2.5 text-[0.62rem]">{children}</p>;
+}
+
+/**
+ * A load bar, and the fixed-height slot it sits in so rows stay aligned whether
+ * or not they have one.
+ *
+ * A null fill draws no bar at all. `ResourceMetric.fill` is null both when
+ * nothing measured the reading and when it has no ceiling to measure against,
+ * and a bar at zero for either would read as "measured and idle" — the mistake
+ * every dash on this page exists to avoid. A measured zero does still draw, as
+ * a stub, so that it stays distinguishable from no measurement.
+ */
+function LoadMeter({ fill, warning }: { fill: number | null; warning?: boolean }) {
   return (
-    <span className="inline-flex items-baseline gap-1 whitespace-nowrap" title={metric.title}>
-      <span className="text-muted-foreground">{metric.label}</span>
-      <span
-        className={cn(
-          "tabular-nums",
-          metric.muted && "text-muted-foreground",
-          metric.warning && "text-warning font-medium",
-        )}
-      >
-        {metric.value}
-      </span>
-    </span>
+    <div className="h-[3px]" aria-hidden="true">
+      {fill !== null && (
+        <div className="bg-border/70 h-full overflow-hidden rounded-full">
+          <div
+            className={cn(
+              // The table polls every 30s, so the width change is the only thing
+              // on the page that shows a node's load moving rather than just
+              // being different. motion-safe, because that is also the only
+              // reason anyone would want it off.
+              "h-full min-w-[3px] rounded-full motion-safe:transition-[width]",
+              warning ? "bg-warning" : "bg-foreground/55",
+            )}
+            style={{ width: `${Math.min(100, Math.max(0, fill))}%` }}
+          />
+        </div>
+      )}
+    </div>
   );
 }
 
-function NodeSystemCell({ node }: { node: StreamNode }) {
-  const system = describeNodeSystem(node);
-  if (system.kind === "unreported") {
-    return (
-      <span className="text-muted-foreground text-sm" title={system.title}>
-        {system.label}
-      </span>
-    );
-  }
+/**
+ * The grid every reading inside a unit is laid out on: a name, a bar, a value.
+ *
+ * One grid per block rather than one per row, so the browser sizes the name and
+ * value columns to the widest of each and the bars all start and end on the
+ * same two lines. Bars of different lengths cannot be compared by eye, which is
+ * the only reason to draw them.
+ */
+const METRIC_GRID = "grid grid-cols-[auto_minmax(2rem,1fr)_auto] items-center gap-x-3 gap-y-2.5";
 
+/** One derived reading, as three cells of the enclosing metric grid. */
+function NodeMetricRow({ metric }: { metric: ResourceMetric }) {
   return (
-    <div className="space-y-0.5 text-xs">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-        <NodeSystemMetric metric={system.cpu} />
-        <NodeSystemMetric metric={system.memory} />
-      </div>
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-        <NodeSystemMetric metric={system.disk} />
-        <NodeSystemMetric metric={system.network} />
+    <>
+      <span className="text-muted-foreground text-[11px]" title={metric.title}>
+        {metric.label}
+      </span>
+      <LoadMeter fill={metric.fill} warning={metric.warning} />
+      <span
+        className={cn(
+          "text-right font-mono text-[11px] tabular-nums",
+          metric.muted && "text-muted-foreground",
+          metric.warning && "text-warning font-medium",
+        )}
+        title={metric.title}
+      >
+        {metric.value}
+      </span>
+    </>
+  );
+}
+
+function NodeLoadBlock({ node }: { node: StreamNode }) {
+  const system = describeNodeSystem(node);
+  return (
+    <div>
+      <UnitLabel>Load</UnitLabel>
+      {system.kind === "unreported" ? (
+        <p className="text-muted-foreground text-xs" title={system.title}>
+          No resource sample
+        </p>
+      ) : (
+        <div className={METRIC_GRID}>
+          <NodeMetricRow metric={system.cpu} />
+          <NodeMetricRow metric={system.memory} />
+          <NodeMetricRow metric={system.disk} />
+          <NodeMetricRow metric={system.network} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NodeCapacityBlock({ node, showEgress }: { node: StreamNode; showEgress: boolean }) {
+  return (
+    <div>
+      <UnitLabel>Capacity</UnitLabel>
+      <div className={METRIC_GRID}>
+        <NodeMetricRow metric={describeNodeJobs(node)} />
+        {showEgress && <NodeMetricRow metric={describeNodeEgress(node)} />}
+        {/*
+          Relative, because the question this answers is "is anything still
+          talking to this node", and an absolute wall-clock stamp makes the
+          reader do that subtraction on every unit. The stamp stays in the title
+          for when the exact moment matters.
+        */}
+        <span className="text-muted-foreground text-[11px]">Checked</span>
+        <span />
+        <span
+          className="text-right font-mono text-[11px] tabular-nums"
+          title={node.last_health_check ? formatDateTime(node.last_health_check) : undefined}
+        >
+          {formatRelativeTime(node.last_health_check) ?? "Never"}
+        </span>
       </div>
     </div>
   );
@@ -182,69 +287,252 @@ function staleInventoryTitle(reason: NodeCapabilityStaleReason, node: StreamNode
   }
 }
 
-function NodeGPUCell({ node, allNodes }: { node: StreamNode; allNodes: StreamNode[] }) {
+/**
+ * One GPU's video engine: which device, how hard it is working, what is on it.
+ *
+ * The bar is the point of the row. Per-device busy percentages are the reading
+ * an operator opens this page for when transcodes start queueing, and as four
+ * lines of near-identical text they have to be read one at a time instead of
+ * compared at a glance.
+ */
+function NodeEngineRow({ device }: { device: NodeGPULiveDevice }) {
+  return (
+    <>
+      <span
+        className="text-muted-foreground max-w-[7rem] truncate font-mono text-[11px]"
+        title={device.title}
+      >
+        {device.label}
+      </span>
+      <LoadMeter fill={device.busyFill} />
+      <span
+        className={cn(
+          "text-right font-mono text-[11px] tabular-nums",
+          device.busyMuted ? "text-muted-foreground" : "text-foreground",
+        )}
+        title={device.title}
+      >
+        {device.busy}
+      </span>
+      <span className="text-muted-foreground text-right text-[10px] whitespace-nowrap">
+        {device.sessions}
+      </span>
+    </>
+  );
+}
+
+function NodeAccelerationBlock({ node, allNodes }: { node: StreamNode; allNodes: StreamNode[] }) {
   const gpu = describeNodeGPU(node);
   if (gpu.kind === "awaiting") {
     return (
-      <div className="space-y-1">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-muted-foreground text-sm" title={gpu.title}>
-            {gpu.label}
-          </span>
-          <NodeDriftBadge node={node} />
+      <div>
+        <UnitLabel>Acceleration</UnitLabel>
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-muted-foreground text-xs" title={gpu.title}>
+              {gpu.label}
+            </span>
+            <NodeDriftBadge node={node} />
+          </div>
+          <NodeOverrideLine node={node} />
         </div>
-        <NodeOverrideLine node={node} />
       </div>
     );
   }
 
   return (
-    <div className="space-y-1">
-      <div className="flex flex-wrap items-center gap-1.5">
-        <Badge variant="outline" className={gpu.backend.badgeClass} title={gpu.backend.title}>
-          {gpu.backend.label}
-        </Badge>
-        <NodeDriftBadge node={node} />
-        <NodeSharedGPUBadge node={node} allNodes={allNodes} />
-        {gpu.failures.length > 0 && (
-          <span
-            className="text-warning inline-flex"
-            title={gpu.failures.map((failure) => `${failure.label}: ${failure.reason}`).join("\n")}
-          >
-            <AlertTriangle
-              className="h-3.5 w-3.5"
-              aria-label={`${gpu.failures.length} hardware backend probe failure(s) on ${node.name}`}
-            />
-          </span>
+    <div>
+      <UnitLabel>Acceleration</UnitLabel>
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge variant="outline" className={gpu.backend.badgeClass} title={gpu.backend.title}>
+            {gpu.backend.label}
+          </Badge>
+          <NodeDriftBadge node={node} />
+          <NodeSharedGPUBadge node={node} allNodes={allNodes} />
+          {gpu.failures.length > 0 && (
+            <span
+              className="text-warning inline-flex"
+              title={gpu.failures
+                .map((failure) => `${failure.label}: ${failure.reason}`)
+                .join("\n")}
+            >
+              <AlertTriangle
+                className="h-3.5 w-3.5"
+                aria-label={`${gpu.failures.length} hardware backend probe failure(s) on ${node.name}`}
+              />
+            </span>
+          )}
+          {gpu.stale && (
+            <span
+              className="text-muted-foreground text-xs"
+              title={staleInventoryTitle(gpu.stale, node)}
+            >
+              stale
+            </span>
+          )}
+        </div>
+        {gpu.deviceSummary && (
+          <p className="text-muted-foreground text-xs" title={gpu.deviceTitle ?? undefined}>
+            {gpu.deviceSummary}
+          </p>
         )}
-        {gpu.stale && (
-          <span
-            className="text-muted-foreground text-xs"
-            title={staleInventoryTitle(gpu.stale, node)}
-          >
-            stale
-          </span>
+        <NodeOverrideLine node={node} />
+        {gpu.live.length > 0 && (
+          <div className="grid grid-cols-[auto_minmax(2rem,1fr)_auto_auto] items-center gap-x-3 gap-y-2 pt-0.5">
+            {gpu.live.map((device) => (
+              <NodeEngineRow key={device.key} device={device} />
+            ))}
+          </div>
         )}
       </div>
-      {gpu.deviceSummary && (
-        <div className="text-muted-foreground text-xs" title={gpu.deviceTitle ?? undefined}>
-          {gpu.deviceSummary}
-        </div>
+    </div>
+  );
+}
+
+interface NodeUnitProps {
+  node: StreamNode;
+  /**
+   * Every node of both types. Shared-GPU detection needs it: a proxy and a
+   * transcode node on one host share that host's card, and each section holds
+   * only half of that pair.
+   */
+  allNodes: StreamNode[];
+  /** Proxy nodes relay bytes and are capped on egress; transcode nodes are not. */
+  showEgress: boolean;
+  onEdit: (node: StreamNode) => void;
+  onDelete: (node: StreamNode) => void;
+  onToggle: (node: StreamNode) => void;
+  onCheckHealth: (node: StreamNode) => void;
+  isChecking: boolean;
+  onReprobe: (node: StreamNode) => void;
+  isReprobing: boolean;
+}
+
+/**
+ * One node, as one unit.
+ *
+ * What a node reports is two-dimensional — a backend and its devices, four host
+ * readings, a load against a cap — and a row of eleven columns could only hold
+ * that by scrolling sideways and flattening every reading into the same 11px
+ * grey. A unit gives the node a header worth scanning and three labelled blocks
+ * under it, and it reflows on a narrow screen instead of scrolling off one.
+ */
+function NodeUnit({
+  node,
+  allNodes,
+  showEgress,
+  onEdit,
+  onDelete,
+  onToggle,
+  onCheckHealth,
+  isChecking,
+  onReprobe,
+  isReprobing,
+}: NodeUnitProps) {
+  const state = nodeState(node);
+
+  return (
+    <div
+      className={cn(
+        "surface-panel relative overflow-hidden rounded-2xl border-0 p-4 pl-5 sm:p-5 sm:pl-6",
+        // A disabled node is out of the rotation, and every number on it is
+        // whatever it was when it left. Dimming says that once, for the whole
+        // unit, instead of qualifying each reading.
+        state === "disabled" && "opacity-65",
       )}
-      <NodeOverrideLine node={node} />
-      {gpu.live.map((device) => (
-        <div
-          key={device.key}
-          className="text-muted-foreground flex flex-wrap items-baseline gap-x-1.5 text-xs"
-          title={device.title}
-        >
-          <span className="font-mono">{device.label}</span>
-          <span className={cn("tabular-nums", device.busyMuted ? "" : "text-foreground")}>
-            {device.busy}
-          </span>
-          <span>· {device.sessions}</span>
+    >
+      <span
+        aria-hidden="true"
+        className={cn("absolute inset-y-4 left-0 w-[3px] rounded-full", NODE_STATE_RAIL[state])}
+      />
+
+      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+            <h3 className="text-[15px] leading-tight font-semibold tracking-tight">{node.name}</h3>
+            <span className="inline-flex items-center gap-1.5">
+              <span
+                aria-hidden="true"
+                className={cn("h-1.5 w-1.5 rounded-full", NODE_STATE_DOT[state])}
+              />
+              <span className="text-muted-foreground text-xs">{NODE_STATE_LABEL[state]}</span>
+            </span>
+            {node.group && (
+              <Badge variant="outline" className="font-mono text-[10px] font-normal">
+                {node.group}
+              </Badge>
+            )}
+          </div>
+          {/* The URL is the node's machine identity, so it is set in the mono
+              face along with the device paths and the readings — everything on
+              this page a person did not name. */}
+          <p className="text-muted-foreground mt-1 truncate font-mono text-xs" title={node.url}>
+            {node.url}
+          </p>
         </div>
-      ))}
+
+        <div className="flex shrink-0 items-center gap-1">
+          {/* Out of the table, this switch has no column header to name it. */}
+          <Switch
+            checked={node.enabled}
+            aria-label={`Enable ${node.name}`}
+            onCheckedChange={() => onToggle(node)}
+          />
+          <span aria-hidden="true" className="bg-border/70 mx-1.5 h-5 w-px" />
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            disabled={isChecking}
+            aria-label={`Check health of ${node.name}`}
+            onClick={() => onCheckHealth(node)}
+          >
+            <RefreshCw
+              className={`h-3 w-3 ${isChecking ? "animate-spin" : ""}`}
+              aria-hidden="true"
+            />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            disabled={isReprobing}
+            aria-label={`Re-probe hardware on ${node.name}`}
+            title="Re-verify this node's hardware against live devices. Use after a driver or device change; it can take a couple of minutes, and is refused while the node is transcoding."
+            onClick={() => onReprobe(node)}
+          >
+            <ScanSearch
+              className={`h-3 w-3 ${isReprobing ? "animate-pulse" : ""}`}
+              aria-hidden="true"
+            />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            aria-label={`Edit ${node.name}`}
+            onClick={() => onEdit(node)}
+          >
+            <Pencil className="h-3 w-3" aria-hidden="true" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            aria-label={`Delete ${node.name}`}
+            onClick={() => onDelete(node)}
+          >
+            <Trash2 className="h-3 w-3" aria-hidden="true" />
+          </Button>
+        </div>
+      </div>
+
+      <div className="border-border/50 mt-4 grid gap-x-8 gap-y-5 border-t pt-4 sm:grid-cols-2 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,0.85fr)]">
+        <NodeAccelerationBlock node={node} allNodes={allNodes} />
+        <NodeLoadBlock node={node} />
+        <NodeCapacityBlock node={node} showEgress={showEgress} />
+      </div>
     </div>
   );
 }
@@ -252,14 +540,9 @@ function NodeGPUCell({ node, allNodes }: { node: StreamNode; allNodes: StreamNod
 interface NodeSectionProps {
   type: NodeType;
   nodes: StreamNode[];
-  /**
-   * Every node of both types. Shared-GPU detection needs it: a proxy and a
-   * transcode node on one host share that host's card, and each table only
-   * holds half of that pair.
-   */
+  /** Every node of both types; see `NodeUnitProps.allNodes`. */
   allNodes: StreamNode[];
   infoBanner: ReactNode;
-  showJobs: boolean;
   onAdd: () => void;
   onEdit: (node: StreamNode) => void;
   onDelete: (node: StreamNode) => void;
@@ -275,7 +558,6 @@ function NodeSection({
   nodes,
   allNodes,
   infoBanner,
-  showJobs,
   onAdd,
   onEdit,
   onDelete,
@@ -286,10 +568,9 @@ function NodeSection({
   reprobingId,
 }: NodeSectionProps) {
   const label = type === "proxy" ? "Proxy" : "Transcode";
-  const colCount = (showJobs ? 10 : 9) + (type === "proxy" ? 1 : 0);
 
   return (
-    <div className="space-y-3">
+    <section className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <h2 className="text-lg font-semibold">{label} Nodes</h2>
@@ -302,159 +583,37 @@ function NodeSection({
 
       {infoBanner}
 
-      <div className="surface-panel overflow-x-auto rounded-xl border-0">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>URL</TableHead>
-              <TableHead>Group</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Health</TableHead>
-              <TableHead>GPU</TableHead>
-              <TableHead>System</TableHead>
-              {showJobs && <TableHead>{type === "proxy" ? "Streams" : "Jobs"}</TableHead>}
-              {type === "proxy" && <TableHead>Egress</TableHead>}
-              <TableHead>Last Check</TableHead>
-              <TableHead className="w-40">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {nodes.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={colCount} className="text-muted-foreground py-8 text-center">
-                  <div className="space-y-2">
-                    <p>
-                      {type === "proxy"
-                        ? "No proxy nodes configured. Add a proxy node to enable distributed stream delivery."
-                        : "No transcode nodes configured. Add a transcode node to offload video transcoding from the main server."}
-                    </p>
-                    <Button variant="outline" size="sm" onClick={onAdd}>
-                      <Plus className="mr-1 h-4 w-4" /> Add {label}
-                    </Button>
-                  </div>
-                </TableCell>
-              </TableRow>
-            ) : (
-              nodes.map((node) => {
-                const isChecking = checkingHealthId === node.id;
-                const isReprobing = reprobingId === node.id;
-                return (
-                  <TableRow key={node.id}>
-                    <TableCell className="font-medium">{node.name}</TableCell>
-                    <TableCell className="font-mono text-sm">{node.url}</TableCell>
-                    <TableCell>
-                      {node.group ? (
-                        <Badge variant="outline">{node.group}</Badge>
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <Switch checked={node.enabled} onCheckedChange={() => onToggle(node)} />
-                    </TableCell>
-                    <TableCell>
-                      <span className="flex items-center gap-1.5">
-                        <span
-                          className={`h-2.5 w-2.5 rounded-full ${
-                            !node.enabled
-                              ? "bg-muted-foreground"
-                              : node.healthy
-                                ? "bg-success"
-                                : "bg-destructive"
-                          }`}
-                        />
-                        <span className="text-muted-foreground text-sm">
-                          {!node.enabled ? "Disabled" : node.healthy ? "Healthy" : "Unhealthy"}
-                        </span>
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <NodeGPUCell node={node} allNodes={allNodes} />
-                    </TableCell>
-                    <TableCell>
-                      <NodeSystemCell node={node} />
-                    </TableCell>
-                    {showJobs && (
-                      <TableCell>
-                        {node.active_jobs}
-                        {node.max_jobs != null && (
-                          <span className="text-muted-foreground"> / {node.max_jobs}</span>
-                        )}
-                      </TableCell>
-                    )}
-                    {type === "proxy" && (
-                      <TableCell className="text-sm whitespace-nowrap">
-                        {formatMbps(node.egress_kbps)}
-                        {node.max_bandwidth_kbps != null && (
-                          <span className="text-muted-foreground">
-                            {" "}
-                            / {formatMbps(node.max_bandwidth_kbps)}
-                          </span>
-                        )}{" "}
-                        Mbps
-                      </TableCell>
-                    )}
-                    <TableCell className="text-muted-foreground text-xs">
-                      {node.last_health_check ? formatDateTime(node.last_health_check) : "Never"}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          disabled={isChecking}
-                          aria-label={`Check health of ${node.name}`}
-                          onClick={() => onCheckHealth(node)}
-                        >
-                          <RefreshCw
-                            className={`h-3 w-3 ${isChecking ? "animate-spin" : ""}`}
-                            aria-hidden="true"
-                          />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          disabled={isReprobing}
-                          aria-label={`Re-probe hardware on ${node.name}`}
-                          title="Re-verify this node's hardware against live devices. Use after a driver or device change; it can take a couple of minutes, and is refused while the node is transcoding."
-                          onClick={() => onReprobe(node)}
-                        >
-                          <ScanSearch
-                            className={`h-3 w-3 ${isReprobing ? "animate-pulse" : ""}`}
-                            aria-hidden="true"
-                          />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          aria-label={`Edit ${node.name}`}
-                          onClick={() => onEdit(node)}
-                        >
-                          <Pencil className="h-3 w-3" aria-hidden="true" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          aria-label={`Delete ${node.name}`}
-                          onClick={() => onDelete(node)}
-                        >
-                          <Trash2 className="h-3 w-3" aria-hidden="true" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                );
-              })
-            )}
-          </TableBody>
-        </Table>
-      </div>
-    </div>
+      {nodes.length === 0 ? (
+        <div className="surface-panel-subtle space-y-3 rounded-xl px-4 py-10 text-center">
+          <p className="text-muted-foreground mx-auto max-w-md text-sm">
+            {type === "proxy"
+              ? "No proxy nodes yet. Add one to deliver streams from somewhere other than this server."
+              : "No transcode nodes yet. Add one to move transcoding off this server."}
+          </p>
+          <Button variant="outline" size="sm" onClick={onAdd}>
+            <Plus className="mr-1 h-4 w-4" /> Add {label}
+          </Button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {nodes.map((node) => (
+            <NodeUnit
+              key={node.id}
+              node={node}
+              allNodes={allNodes}
+              showEgress={type === "proxy"}
+              onEdit={onEdit}
+              onDelete={onDelete}
+              onToggle={onToggle}
+              onCheckHealth={onCheckHealth}
+              isChecking={checkingHealthId === node.id}
+              onReprobe={onReprobe}
+              isReprobing={reprobingId === node.id}
+            />
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -876,7 +1035,6 @@ export default function AdminNodes() {
         type="proxy"
         nodes={proxyNodes}
         allNodes={nodes}
-        showJobs={true}
         onAdd={() => handleAdd("proxy")}
         onEdit={handleEdit}
         onDelete={handleDelete}
@@ -897,7 +1055,6 @@ export default function AdminNodes() {
         type="transcode"
         nodes={transcodeNodes}
         allNodes={nodes}
-        showJobs={true}
         onAdd={() => handleAdd("transcode")}
         onEdit={handleEdit}
         onDelete={handleDelete}

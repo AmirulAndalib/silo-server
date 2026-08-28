@@ -9,7 +9,9 @@ import {
   describeEffectiveAcceleration,
   describeGPUBusy,
   describeNodeAccelerationOverride,
+  describeNodeEgress,
   describeNodeGPU,
+  describeNodeJobs,
   describeNodeSystem,
   describeReprobeOutcome,
   describeResourceSample,
@@ -367,6 +369,7 @@ describe("describeNodeGPU", () => {
         key: "/dev/dri/renderD128",
         label: "renderD128",
         busy: "42%",
+        busyFill: 42,
         busyMuted: false,
         sessions: "2 sessions",
         title: ["/dev/dri/renderD128 — Intel GPU", "video 42% · render 12%", "source: fdinfo"].join(
@@ -429,6 +432,7 @@ describe("describeNodeGPU", () => {
       key: "cuda:0",
       label: "cuda:0",
       busy: "61%",
+      busyFill: 61,
       busyMuted: false,
       sessions: "idle",
       title: [
@@ -1311,5 +1315,125 @@ describe("capability report staleness from an unconfirmed hash", () => {
     expect(fresh.kind === "reported" && fresh.stale).toBe(null);
     const aged = describeNodeGPU(node, Date.parse("2026-08-28T00:20:00Z"));
     expect(aged.kind === "reported" && aged.stale).toBe("unconfirmed");
+  });
+});
+
+// Everything the redesigned page draws a bar from. A bar is a stronger claim
+// than a number: it says "this much of what is available", so every reading
+// that has no denominator — or that nothing measured — has to arrive with no
+// fill at all rather than a fill of zero, which on screen is an idle node.
+describe("load meter fills", () => {
+  it("derives a fill for every reading that has a ceiling", () => {
+    const system = describeNodeSystem(makeNode({ last_stats: { system: FULL_SAMPLE } }));
+
+    expect(system).toMatchObject({
+      kind: "reported",
+      cpu: { fill: 42 },
+      memory: { fill: 40 },
+      disk: { fill: 87 },
+      // Throughput has no ceiling in the sample: the sampler reports bytes
+      // moved, never the link's negotiated speed.
+      network: { fill: null },
+    });
+  });
+
+  it("gives an unmeasured reading no fill rather than a fill of zero", () => {
+    const system = describeNodeSystem(
+      makeNode({ last_stats: { system: { cpu_pct: 0, mem_total_mb: 0, disks: [] } } }),
+    );
+
+    expect(system).toMatchObject({
+      kind: "reported",
+      // A real zero still fills — it was measured, and the node is idle.
+      cpu: { value: "0%", muted: false, fill: 0 },
+      memory: { muted: true, fill: null },
+      disk: { muted: true, fill: null },
+    });
+  });
+
+  it("gives a GPU nothing could measure no engine fill", () => {
+    const capabilities = {
+      resolved: "vaapi",
+      render_devices: ["/dev/dri/renderD128", "/dev/dri/renderD129"],
+    };
+    const presentation = describeNodeGPU(
+      makeNode({
+        capabilities,
+        last_stats: {
+          gpu: [
+            { device: "/dev/dri/renderD128", video_busy_pct: 0, source: "fdinfo" },
+            { device: "/dev/dri/renderD129", video_busy_pct: 0, source: "unavailable" },
+          ],
+        },
+      }),
+      NOW,
+    );
+
+    expect(presentation.kind === "reported" && presentation.live.map((d) => d.busyFill)).toEqual([
+      0,
+      null,
+    ]);
+  });
+});
+
+describe("describeNodeJobs", () => {
+  it("reports a capped node against its cap", () => {
+    expect(describeNodeJobs(makeNode({ active_jobs: 3, max_jobs: 4 }))).toMatchObject({
+      label: "Transcodes",
+      value: "3 / 4",
+      warning: false,
+      fill: 75,
+    });
+  });
+
+  it("warns once a capped node is full", () => {
+    expect(describeNodeJobs(makeNode({ active_jobs: 4, max_jobs: 4 }))).toMatchObject({
+      value: "4 / 4",
+      warning: true,
+      fill: 100,
+    });
+  });
+
+  // Both spellings of "unlimited" the API uses, and the reason neither draws a
+  // bar: there is no ceiling, so any bar would be measured against a number
+  // this page made up.
+  it("draws no meter for an uncapped node", () => {
+    expect(describeNodeJobs(makeNode({ active_jobs: 7, max_jobs: null }))).toMatchObject({
+      value: "7",
+      detail: "no cap",
+      warning: false,
+      fill: null,
+    });
+    expect(describeNodeJobs(makeNode({ active_jobs: 7, max_jobs: 0 })).fill).toBe(null);
+  });
+
+  it("names a proxy node's concurrency for what it carries", () => {
+    expect(describeNodeJobs(makeNode({ type: "proxy" })).label).toBe("Streams");
+  });
+});
+
+describe("describeNodeEgress", () => {
+  it("reports measured egress against a cap", () => {
+    expect(
+      describeNodeEgress(
+        makeNode({ type: "proxy", egress_kbps: 250_000, max_bandwidth_kbps: 500_000 }),
+      ),
+    ).toMatchObject({ value: "250 / 500 Mbps", warning: false, fill: 50 });
+  });
+
+  it("warns once measured egress reaches the cap", () => {
+    expect(
+      describeNodeEgress(
+        makeNode({ type: "proxy", egress_kbps: 500_000, max_bandwidth_kbps: 500_000 }),
+      ),
+    ).toMatchObject({ warning: true, fill: 100 });
+  });
+
+  it("draws no meter for an uncapped node", () => {
+    expect(
+      describeNodeEgress(
+        makeNode({ type: "proxy", egress_kbps: 12_340, max_bandwidth_kbps: null }),
+      ),
+    ).toMatchObject({ value: "12.3 Mbps", detail: "no cap", fill: null });
   });
 });

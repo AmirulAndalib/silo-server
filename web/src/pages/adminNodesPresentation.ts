@@ -87,6 +87,12 @@ export interface NodeGPULiveDevice {
   label: string;
   /** Video-engine busy percentage, or a dash when nothing measured it. */
   busy: string;
+  /**
+   * The number behind `busy`, 0–100, for the engine meter — null when nothing
+   * measured it. Null rather than 0 on purpose: a meter drawn at zero is read
+   * as an idle GPU, which is the one thing an unmeasured device is not.
+   */
+  busyFill: number | null;
   /** No measurement behind `busy`: render it muted, since it is not a zero. */
   busyMuted: boolean;
   /** "2 sessions", or "idle" for none. */
@@ -162,6 +168,7 @@ function describeLiveGPU(
     key: device || (detail?.path ?? "gpu"),
     label: shortDeviceLabel(device, detail),
     busy: measured && video != null ? `${clampPercent(video)}%` : DASH,
+    busyFill: measured && video != null ? clampPercent(video) : null,
     busyMuted: !measured || video == null,
     sessions: sessions === 1 ? "1 session" : sessions === 0 ? "idle" : `${sessions} sessions`,
     title: liveGPUTitle(stats, detail, device, measured),
@@ -814,6 +821,16 @@ export interface ResourceMetric {
   muted: boolean;
   /** Past an attention threshold; render with the warning tint. */
   warning: boolean;
+  /**
+   * 0–100 for a load meter, or null when this reading has no meter to draw.
+   *
+   * Null covers two different cases that must render the same way: nothing
+   * measured the reading, and the reading has no ceiling to measure against
+   * (throughput, or a node with no configured cap). Both get an empty track
+   * rather than a bar at zero, because a bar at zero is read as "measured and
+   * idle" — the same reason `muted` values render as a dash and never a 0.
+   */
+  fill: number | null;
 }
 
 export type NodeSystemPresentation =
@@ -906,7 +923,15 @@ function describeCPU(system: HostSystemStats): ResourceMetric {
     .filter((part): part is string => part !== null)
     .join(" ");
 
-  return { label: "CPU", value: `${percent}%`, detail, title, muted: false, warning: false };
+  return {
+    label: "CPU",
+    value: `${percent}%`,
+    detail,
+    title,
+    muted: false,
+    warning: false,
+    fill: percent,
+  };
 }
 
 function describeMemory(system: HostSystemStats): ResourceMetric {
@@ -925,6 +950,7 @@ function describeMemory(system: HostSystemStats): ResourceMetric {
     title: `${value} used (${percent}%). Under a cgroup this is the container's limit and working set, not the host's.`,
     muted: false,
     warning: false,
+    fill: percent,
   };
 }
 
@@ -955,6 +981,7 @@ export function describeWorstDisk(disks: readonly HostDiskStats[]): ResourceMetr
     title,
     muted: false,
     warning: worst.fill >= DISK_FILL_WARNING_PCT,
+    fill: worst.fill,
   };
 }
 
@@ -972,6 +999,10 @@ function describeNetwork(system: HostSystemStats): ResourceMetric {
     title: `Aggregate throughput with loopback excluded: ${rx ?? DASH} in, ${tx ?? DASH} out. In a container this is the container's own network namespace.`,
     muted: false,
     warning: false,
+    // A link's throughput has no ceiling this sample knows: the sampler reports
+    // bytes moved, never the interface's negotiated speed, so there is nothing
+    // honest to draw a bar against.
+    fill: null,
   };
 }
 
@@ -1059,7 +1090,74 @@ export function describeGPUBusy(gpu: readonly HostGPUStats[]): ResourceMetric | 
     title,
     muted: false,
     warning: false,
+    fill: clampPercent(busiest),
   };
+}
+
+// --- Node capacity ---------------------------------------------------------
+//
+// What a node is carrying against what it was allowed to carry. Both readings
+// are ResourceMetrics so they render with the same meter as CPU and disk: an
+// operator deciding whether a node can take another stream is asking the same
+// question of all four.
+
+/**
+ * Fraction of a cap that is in use, or null when there is no cap. An uncapped
+ * node is the default and the common case, and it genuinely has no meter: the
+ * count is real, but drawing it against a ceiling this page invented would
+ * report a node as nearly full on the strength of a made-up number.
+ */
+function capacityFill(used: number, cap: number | null): number | null {
+  return cap != null && cap > 0 ? clampPercent((used / cap) * 100) : null;
+}
+
+/** Concurrency: transcodes on a transcode node, relayed streams on a proxy. */
+export function describeNodeJobs(node: StreamNode): ResourceMetric {
+  const label = node.type === "proxy" ? "Streams" : "Transcodes";
+  const active = Math.max(0, Math.trunc(finiteNumber(node.active_jobs) ?? 0));
+  // A cap at or below zero is how the API spells "unlimited", which is also
+  // what an absent one means.
+  const cap = finiteNumber(node.max_jobs);
+  const capped = cap != null && cap > 0 ? cap : null;
+
+  return {
+    label,
+    value: capped == null ? `${active}` : `${active} / ${capped}`,
+    detail: capped == null ? "no cap" : "in use",
+    title:
+      capped == null
+        ? `${active} running. This node has no concurrency cap, so the planner places work on it by load alone.`
+        : `${active} of ${capped} running. New work goes elsewhere once this node is full.`,
+    muted: false,
+    warning: capped != null && active >= capped,
+    fill: capacityFill(active, capped),
+  };
+}
+
+/** Measured egress against a proxy node's bandwidth cap. */
+export function describeNodeEgress(node: StreamNode): ResourceMetric {
+  const kbps = Math.max(0, finiteNumber(node.egress_kbps) ?? 0);
+  const cap = finiteNumber(node.max_bandwidth_kbps);
+  const capped = cap != null && cap > 0 ? cap : null;
+  const used = formatMbps(kbps);
+
+  return {
+    label: "Egress",
+    value: capped == null ? `${used} Mbps` : `${used} / ${formatMbps(capped)} Mbps`,
+    detail: capped == null ? "no cap" : "of cap",
+    title:
+      capped == null
+        ? `Measured egress ${used} Mbps. This node has no bandwidth cap.`
+        : `Measured egress ${used} Mbps of ${formatMbps(capped)} Mbps. New streams are routed elsewhere once this node's egress plus the new stream's expected bitrate would exceed the cap; streams already running are never interrupted.`,
+    muted: false,
+    warning: capped != null && kbps >= capped,
+    fill: capacityFill(kbps, capped),
+  };
+}
+
+/** Kilobits per second as Mbps to one decimal, trailing zero dropped. */
+function formatMbps(kbps: number): string {
+  return (Math.round(kbps / 100) / 10).toString();
 }
 
 /**
@@ -1151,7 +1249,7 @@ function gibibytesToBytes(value: number): number {
 }
 
 function mutedMetric(label: string, title: string): ResourceMetric {
-  return { label, value: DASH, detail: "", title, muted: true, warning: false };
+  return { label, value: DASH, detail: "", title, muted: true, warning: false, fill: null };
 }
 
 function finiteNumber(value: number | null | undefined): number | null {
