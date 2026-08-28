@@ -56,16 +56,16 @@ func imageCacheWorkerCount(numCPU int, memoryBytes int64) int {
 
 // detectImageCacheMemoryBytes returns the tightest memory bound the process
 // can see, or 0 when none is detectable (macOS dev boxes, bare Linux without
-// cgroups): an explicit GOMEMLIMIT first, then the container's cgroup limit,
-// then total system memory.
+// cgroups): an explicit GOMEMLIMIT first, then the tightest cgroup limit in
+// force on this process — own cgroup, ancestors, and root, so a systemd
+// MemoryMax= or an inherited pod/slice limit binds, not just a namespaced
+// container's root files — then total system memory.
 func detectImageCacheMemoryBytes() int64 {
 	if limit := debug.SetMemoryLimit(-1); limit > 0 && limit < math.MaxInt64 {
 		return limit
 	}
-	for _, path := range nodemetrics.CgroupMemoryLimitPaths() {
-		if mem, err := nodemetrics.ReadCgroupMemoryLimit(path); err == nil && mem > 0 {
-			return mem
-		}
+	if limit := nodemetrics.EffectiveMemoryLimitBytes(); limit > 0 {
+		return limit
 	}
 	if mem, err := nodemetrics.ReadMeminfoTotalBytes("/proc/meminfo"); err == nil && mem > 0 {
 		return mem
@@ -82,12 +82,18 @@ var cacheMetadataImagesWorkers = imageCacheWorkerCount(runtime.GOMAXPROCS(0), de
 // be claimed.
 //
 // The page must drain inside metadata.ImageCacheLeaseDuration (15 minutes) or
-// another worker reclaims the unstarted tail and duplicates it. Every job is
-// hard-bounded by metadata.ImageCacheJobTimeout (2 minutes), so a page of N
-// jobs per worker fully drains within N × that timeout: 5 × 2 = 10 minutes,
-// leaving a third of the lease as margin. TestImageCacheWorkerCount asserts
-// this arithmetic against the exported constants.
-const cacheMetadataImagesClaimPerWorker = 5
+// another worker reclaims the unstarted tail and duplicates it. Every job runs
+// under metadata.ImageCacheJobTimeout (2 minutes), but that context cannot
+// preempt the synchronous decode/encode segment (imageutil.Thumbhash,
+// GenerateVariants take no context) — it only stops the job at the next
+// context-aware step. That segment operates on inputs capped at 25 MiB
+// (imagecache's download limit), so its overshoot is bounded by CPU speed,
+// not by the network; 4 jobs per worker budgets the worst chain at
+// 4 × (timeout + overshoot), which stays inside the lease with a generous
+// overshoot allowance of nearly two minutes per job.
+// TestImageCacheWorkerCount asserts the timeout part of this arithmetic
+// against the exported constants.
+const cacheMetadataImagesClaimPerWorker = 4
 
 var cacheMetadataImagesClaimLimit = cacheMetadataImagesClaimPerWorker * cacheMetadataImagesWorkers
 

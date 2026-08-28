@@ -359,10 +359,13 @@ func TestImageCacheWorkerCount(t *testing.T) {
 	}
 	// A claimed page is stamped with one lease up front, so it must fully
 	// drain before the lease expires or another worker reclaims the tail.
-	// Every job is bounded by metadata.ImageCacheJobTimeout, so the page's
-	// worst-case drain is jobs-per-worker times that timeout.
-	if drain := time.Duration(cacheMetadataImagesClaimPerWorker) * metadata.ImageCacheJobTimeout; drain >= metadata.ImageCacheLeaseDuration {
-		t.Errorf("worst-case page drain %s must stay under the %s claim lease", drain, metadata.ImageCacheLeaseDuration)
+	// The job timeout cannot preempt the synchronous decode/encode segment,
+	// so the timeout-based drain must leave real headroom under the lease
+	// for that bounded overshoot — at least one extra timeout per job.
+	drain := time.Duration(cacheMetadataImagesClaimPerWorker) * metadata.ImageCacheJobTimeout
+	overshootBudget := time.Duration(cacheMetadataImagesClaimPerWorker) * metadata.ImageCacheJobTimeout / 2
+	if drain+overshootBudget > metadata.ImageCacheLeaseDuration {
+		t.Errorf("page drain %s plus overshoot budget %s must stay within the %s claim lease", drain, overshootBudget, metadata.ImageCacheLeaseDuration)
 	}
 	if cacheMetadataImagesClaimLimit != cacheMetadataImagesClaimPerWorker*cacheMetadataImagesWorkers {
 		t.Errorf("claim limit = %d, want %d per worker (%d)", cacheMetadataImagesClaimLimit, cacheMetadataImagesClaimPerWorker, cacheMetadataImagesClaimPerWorker*cacheMetadataImagesWorkers)
