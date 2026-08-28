@@ -256,6 +256,47 @@ func TestBulkResetChapterThumbnailsBatches(t *testing.T) {
 	}
 }
 
+// TestBulkResetSurfacePartialFailureKeepsCounts interrupts bulkResetSurface
+// after its requeue phase by giving the clear phase a broken SET clause.
+// Batches commit as they go and the task serializes stats on failure, so the
+// rows the requeue phase durably changed must be counted despite the error.
+func TestBulkResetSurfacePartialFailureKeepsCounts(t *testing.T) {
+	pool := localArtworkTestPool(t)
+	ctx := context.Background()
+	shrinkBulkBatchSize(t, 2)
+
+	prefix := fmt.Sprintf("bulkpartial-%d", time.Now().UnixNano())
+	restorePreexistingPosterRows(t, pool, prefix)
+
+	const requeueRows = 5
+	for i := 0; i < requeueRows; i++ {
+		contentID := fmt.Sprintf("%s-%d", prefix, i)
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO media_items (content_id, type, title, status, genres, poster_path, poster_source_path)
+			VALUES ($1, 'movie', 'Bulk Partial Test', 'matched', '{}'::text[], $2, $3)
+		`, contentID, fmt.Sprintf("metadata/movie/%s/poster/original.webp", contentID),
+			fmt.Sprintf("https://image.example.org/t/p/original/%s-%d.jpg", prefix, i)); err != nil {
+			t.Fatalf("seed item %d: %v", i, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id LIKE $1`, prefix+"-%")
+	})
+
+	surface := itemPosterSurface(t)
+	surface.clearSet = `nonexistent_bulk_partial_column = ''`
+
+	r := &ArtworkCacheReconciler{pool: pool}
+	var stats ArtworkReconcileStats
+	err := r.bulkResetSurface(ctx, surface, &stats)
+	if err == nil {
+		t.Fatal("bulkResetSurface succeeded, want the clear phase to fail")
+	}
+	if stats.Requeued < requeueRows {
+		t.Errorf("stats.Requeued = %d after clear-phase failure, want >= %d committed requeues", stats.Requeued, requeueRows)
+	}
+}
+
 func TestRetryOnDeadlock(t *testing.T) {
 	prevBackoff := artworkReconcileDeadlockBaseBackoff
 	artworkReconcileDeadlockBaseBackoff = time.Millisecond

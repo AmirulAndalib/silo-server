@@ -786,23 +786,26 @@ func (r *ArtworkCacheReconciler) objectExistsWithRetry(ctx context.Context, buck
 // manual backfill can cache them again. Rows without one are cleared so their
 // owning pipeline can refill them.
 func (r *ArtworkCacheReconciler) bulkResetSurface(ctx context.Context, s artworkSweepSurface, stats *ArtworkReconcileStats) error {
+	// Counts are recorded before the error check: batches commit as they go,
+	// and the task serializes stats on failure, so an interrupted reset must
+	// still report the rows it durably changed.
 	if s.sourceCol != "" {
 		requeued, err := r.bulkUpdateInBatches(ctx, s, s.resetSet(),
 			fmt.Sprintf(`%s AND %s`, s.cachedPredicate(), s.remoteSourcePredicate()))
+		stats.Requeued += requeued
+		stats.Checked += requeued
 		if err != nil {
 			return fmt.Errorf("artwork reconcile: bulk reset %s: %w", s.name, err)
 		}
-		stats.Requeued += requeued
-		stats.Checked += requeued
 	}
 
 	cleared, err := r.bulkUpdateInBatches(ctx, s, s.clearSet,
 		fmt.Sprintf(`%s AND NOT (%s)`, s.cachedPredicate(), s.remoteSourcePredicate()))
+	stats.Cleared += cleared
+	stats.Checked += cleared
 	if err != nil {
 		return fmt.Errorf("artwork reconcile: bulk clear %s: %w", s.name, err)
 	}
-	stats.Cleared += cleared
-	stats.Checked += cleared
 	return nil
 }
 
