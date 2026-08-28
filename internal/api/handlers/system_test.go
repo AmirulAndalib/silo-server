@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -95,6 +96,37 @@ func TestSystemBuildInfoUnavailableResponseShape(t *testing.T) {
 		if got, ok := raw[key]; !ok || got != want {
 			t.Fatalf("response[%q] = %#v (present=%v), want %#v", key, got, ok, want)
 		}
+	}
+}
+
+// The inventory fetch is bounded per node by that node's own cold probe
+// budget. A node whose caches were just invalidated — a widened device
+// override is the common case — legitimately walks past the flat floor, and
+// cutting it off reported the node as failed on the Playback settings page
+// while it was still inside its own advertised budget.
+func TestRemoteInventoryTimeoutScalesWithTheNodeBudget(t *testing.T) {
+	t.Parallel()
+
+	advertisedMillis := (90 * time.Second).Milliseconds()
+	report := json.RawMessage(fmt.Sprintf(`{"probe_request_timeout_ms":%d}`, advertisedMillis))
+	node := &nodepool.Node{URL: "http://node:8082", Capabilities: report}
+
+	handler := &SystemHandler{}
+	// Derivation-guard: the expected budget is what the shared pricing rule
+	// answers, asserted to exceed the flat floor so the test cannot pass
+	// vacuously if the fixture stops out-pricing it.
+	want := playback.ColdCapabilityRequestTimeout(report, "", "", remoteNodeInventoryProbeTimeout)
+	if want <= remoteNodeInventoryProbeTimeout {
+		t.Fatalf("fixture no longer out-prices the floor: got %v, floor %v", want, remoteNodeInventoryProbeTimeout)
+	}
+	if got := handler.remoteInventoryTimeout(node); got != want {
+		t.Fatalf("remoteInventoryTimeout() = %v, want the node's cold budget %v", got, want)
+	}
+
+	// A node with no report and no override prices from the cluster policy
+	// over the floor — never below it.
+	if got := handler.remoteInventoryTimeout(&nodepool.Node{URL: "http://bare:8082"}); got < remoteNodeInventoryProbeTimeout {
+		t.Fatalf("remoteInventoryTimeout(bare node) = %v, below the %v floor", got, remoteNodeInventoryProbeTimeout)
 	}
 }
 

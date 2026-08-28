@@ -135,6 +135,18 @@ func (h *SystemHandler) HandleHWAccel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The fan-out waits for its slowest node, whose budget can pass the API
+	// listener's write timeout — the same reason the local walk extends the
+	// deadline. Sized to the largest per-node budget, since the fetches run
+	// concurrently.
+	maxBudget := time.Duration(0)
+	for _, node := range healthy {
+		if budget := h.remoteInventoryTimeout(node); budget > maxBudget {
+			maxBudget = budget
+		}
+	}
+	extendWriteDeadlineBy(w, r, maxBudget+hwAccelWriteSlack)
+
 	inventory := HWAccelInventory{Nodes: make([]NodeHWAccel, len(healthy))}
 	infos := make([]playback.HWAccelInfo, len(healthy))
 	errs := make([]error, len(healthy))
@@ -207,7 +219,10 @@ const hwAccelWriteSlack = 15 * time.Second
 // that is about to succeed. The re-probe route extends its deadline for exactly
 // the same reason.
 func extendHWAccelWriteDeadline(w http.ResponseWriter, r *http.Request, hwDevice string) {
-	budget := playback.HWAccelWalkTimeout(hwDevice) + hwAccelWriteSlack
+	extendWriteDeadlineBy(w, r, playback.HWAccelWalkTimeout(hwDevice)+hwAccelWriteSlack)
+}
+
+func extendWriteDeadlineBy(w http.ResponseWriter, r *http.Request, budget time.Duration) {
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(budget)); err != nil {
 		// A ResponseWriter that cannot carry a deadline (a test recorder, a
 		// wrapper that does not unwrap) is not a reason to refuse the probe.
@@ -222,9 +237,30 @@ func (h *SystemHandler) HandleBuildInfo(w http.ResponseWriter, _ *http.Request) 
 }
 
 func (h *SystemHandler) fetchRemoteHWAccel(ctx context.Context, node *nodepool.Node) (playback.HWAccelInfo, error) {
-	// Inventory is an interactive admin request, so a stalled healthy node must
-	// fail quickly and surface through the node entry's existing Error field.
-	requestCtx, cancel := context.WithTimeout(ctx, remoteNodeInventoryProbeTimeout)
+	requestCtx, cancel := context.WithTimeout(ctx, h.remoteInventoryTimeout(node))
 	defer cancel()
 	return fetchRemoteTranscodeCapabilities(requestCtx, node.URL, h.jwtSecret)
+}
+
+// remoteInventoryTimeout bounds one node's inventory fetch by that node's own
+// cold probe budget — its stored report and its effective override, exactly
+// how the playback and download paths price a cold read. A warm node answers
+// from cache in milliseconds either way; what this sizes is the node whose
+// caches were just invalidated (a widened device override is the common case),
+// whose full walk legitimately takes past the old flat five seconds — cutting
+// it off reported the node as failed on the Playback settings page while it
+// was still inside its own advertised budget. The flat constant survives as
+// the floor, so a node the cluster prices at nothing still gets a real chance
+// to answer, and it is the whole bound only when nothing is known at all.
+func (h *SystemHandler) remoteInventoryTimeout(node *nodepool.Node) time.Duration {
+	var hwAccel, hwDevice string
+	if h.playback != nil {
+		_, hwAccel, hwDevice = h.playback()
+	}
+	return playback.ColdCapabilityRequestTimeout(
+		node.StoredCapabilities(),
+		node.EffectiveHWAccel(hwAccel),
+		node.EffectiveHWDevice(hwDevice),
+		remoteNodeInventoryProbeTimeout,
+	)
 }

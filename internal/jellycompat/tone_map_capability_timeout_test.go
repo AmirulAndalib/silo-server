@@ -17,6 +17,7 @@ type compatTimeoutPlanner struct {
 	transcodes []string
 	proxies    []string
 	nodes      map[string]*nodepool.Node
+	proxyNodes map[string]*nodepool.Node
 }
 
 func (p compatTimeoutPlanner) PlanSession(string, string, bool, int) nodepool.Plan {
@@ -29,6 +30,11 @@ func (p compatTimeoutPlanner) ProxyNodeURLs() []string { return p.proxies }
 
 func (p compatTimeoutPlanner) TranscodeNodeByURL(nodeURL string) (*nodepool.Node, bool) {
 	node, ok := p.nodes[nodeURL]
+	return node, ok
+}
+
+func (p compatTimeoutPlanner) ProxyNodeByURL(nodeURL string) (*nodepool.Node, bool) {
+	node, ok := p.proxyNodes[nodeURL]
 	return node, ok
 }
 
@@ -102,16 +108,40 @@ func TestToneMapCapabilityTimeoutFallsBackWithoutAPool(t *testing.T) {
 	}
 }
 
-// Proxy nodes answer the audio-boost sweep under the same deadline, so a
-// pooled proxy the lookup cannot resolve still prices at the floor instead of
-// shrinking or failing the sweep.
-func TestToneMapCapabilityTimeoutCountsProxyNodesAtTheFloor(t *testing.T) {
+// Proxy nodes answer the audio-boost sweep under the same deadline, resolved
+// through their own pool: a proxy whose stored report out-prices the fallback
+// raises the sweep exactly as a transcode node's would.
+func TestToneMapCapabilityTimeoutPricesProxyNodesFromTheirRecords(t *testing.T) {
+	advertisedMillis := (3 * time.Minute).Milliseconds()
+	report := json.RawMessage(fmt.Sprintf(`{"probe_request_timeout_ms":%d}`, advertisedMillis))
+
+	want := playback.ColdCapabilityRequestTimeout(report, "", "", compatRemoteNodeProbeFallbackTimeout)
+	if want <= compatRemoteNodeProbeFallbackTimeout {
+		t.Fatalf("fixture no longer out-prices the fallback: got %v, fallback %v", want, compatRemoteNodeProbeFallbackTimeout)
+	}
+
+	handler := &PlaybackHandler{
+		NodePlanner: compatTimeoutPlanner{
+			proxies: []string{"http://proxy:8083"},
+			proxyNodes: map[string]*nodepool.Node{
+				"http://proxy:8083": {URL: "http://proxy:8083", Capabilities: report},
+			},
+		},
+	}
+	if got := handler.toneMapCapabilityTimeout(); got != want {
+		t.Fatalf("toneMapCapabilityTimeout() = %v, want the proxy's cold budget %v", got, want)
+	}
+}
+
+// A pooled proxy the lookup cannot resolve still prices at the floor instead
+// of shrinking or failing the sweep.
+func TestToneMapCapabilityTimeoutCountsUnresolvedProxyNodesAtTheFloor(t *testing.T) {
 	want := playback.ColdCapabilityRequestTimeout(nil, "", "", compatRemoteNodeProbeFallbackTimeout)
 
 	handler := &PlaybackHandler{
 		NodePlanner: compatTimeoutPlanner{proxies: []string{"http://proxy:8083"}},
 	}
 	if got := handler.toneMapCapabilityTimeout(); got != want {
-		t.Fatalf("toneMapCapabilityTimeout() with a proxy-only pool = %v, want %v", got, want)
+		t.Fatalf("toneMapCapabilityTimeout() with an unresolved proxy = %v, want %v", got, want)
 	}
 }

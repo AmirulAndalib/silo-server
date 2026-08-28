@@ -52,6 +52,20 @@ func (p *ProxyPool) Pick() *Node {
 	return nil
 }
 
+// FindByURL returns the node with the given URL, or nil if not found. Same
+// contract as the transcode pool's: the caller has already selected the URL,
+// so enabled and healthy are not filtered here.
+func (p *ProxyPool) FindByURL(url string) *Node {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, n := range p.nodes {
+		if n.URL == url {
+			return n
+		}
+	}
+	return nil
+}
+
 // Nodes returns a copy of the current node list.
 func (p *ProxyPool) Nodes() []*Node {
 	p.mu.RLock()

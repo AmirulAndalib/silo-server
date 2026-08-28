@@ -153,6 +153,16 @@ type compatTranscodeNodeLookup interface {
 	TranscodeNodeByURL(nodeURL string) (*nodepool.Node, bool)
 }
 
+// compatProxyNodeLookup resolves the pooled record behind a proxy node URL, so
+// capability-budget pricing can read a proxy's stored report and overrides —
+// the transcode lookup above answers nothing for a proxy URL, and pricing
+// proxies from the cluster policy alone undersizes a sweep whose slowest
+// member is a cold proxy. Optional for the same reason. *nodepool.Planner
+// implements it.
+type compatProxyNodeLookup interface {
+	ProxyNodeByURL(nodeURL string) (*nodepool.Node, bool)
+}
+
 // transcodeStreamDetailsSetter is implemented by the native SessionManager.
 // Optional (like sessionStarterContext) so lightweight test fakes don't have
 // to; without it the session keeps transport-level defaults only.
@@ -592,17 +602,10 @@ func (h *PlaybackHandler) toneMapCapabilityTimeout() time.Duration {
 	// policy; this is also the whole answer when no pool is reachable.
 	budget := playback.ColdCapabilityRequestTimeout(nil, h.HWAccel, hwDevice, compatRemoteNodeProbeFallbackTimeout)
 
-	lookup, canLookup := h.NodePlanner.(compatTranscodeNodeLookup)
-	price := func(nodeURL string) {
-		var node *nodepool.Node
-		if canLookup {
-			if found, ok := lookup.TranscodeNodeByURL(nodeURL); ok {
-				node = found
-			}
-		}
-		// A URL the lookup cannot resolve — a proxy node, or a record that
-		// left the pool — prices as a nil node: cluster policy over the
-		// fallback, which is the pre-derivation behavior.
+	// A URL its lookup cannot resolve — a record that left the pool, or a
+	// planner without the lookup at all — prices as a nil node: cluster policy
+	// over the fallback, which is the pre-derivation behavior.
+	price := func(node *nodepool.Node) {
 		cold := playback.ColdCapabilityRequestTimeout(
 			node.StoredCapabilities(),
 			node.EffectiveHWAccel(h.HWAccel),
@@ -614,15 +617,28 @@ func (h *PlaybackHandler) toneMapCapabilityTimeout() time.Duration {
 		}
 	}
 	if enumerator, ok := h.NodePlanner.(compatTranscodeNodeEnumerator); ok {
+		lookup, canLookup := h.NodePlanner.(compatTranscodeNodeLookup)
 		for _, nodeURL := range enumerator.TranscodeNodeURLs() {
-			price(nodeURL)
+			var node *nodepool.Node
+			if canLookup {
+				node, _ = lookup.TranscodeNodeByURL(nodeURL)
+			}
+			price(node)
 		}
 	}
 	// Proxy nodes answer the audio-boost recipe sweep under this same
-	// deadline, so they are counted even though they price at the floor today.
+	// deadline, resolved through their own pool: the transcode lookup answers
+	// nothing for a proxy URL, and a cold proxy whose report or override
+	// out-prices the fallback would otherwise be canceled inside its own
+	// budget and dropped from planning.
 	if enumerator, ok := h.NodePlanner.(compatProxyNodeEnumerator); ok {
+		lookup, canLookup := h.NodePlanner.(compatProxyNodeLookup)
 		for _, nodeURL := range enumerator.ProxyNodeURLs() {
-			price(nodeURL)
+			var node *nodepool.Node
+			if canLookup {
+				node, _ = lookup.ProxyNodeByURL(nodeURL)
+			}
+			price(node)
 		}
 	}
 	return budget

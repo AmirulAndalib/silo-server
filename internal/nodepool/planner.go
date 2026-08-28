@@ -156,6 +156,22 @@ func (p *Planner) TranscodeNodeByURL(nodeURL string) (*Node, bool) {
 	return node, true
 }
 
+// ProxyNodeByURL returns the pooled record for a proxy node URL, under the
+// same contract as TranscodeNodeByURL. Capability-budget pricing needs it:
+// a proxy's stored report and overrides say how long its own cold probe may
+// take, and a caller that can only resolve transcode nodes prices every proxy
+// from the cluster policy instead.
+func (p *Planner) ProxyNodeByURL(nodeURL string) (*Node, bool) {
+	if p == nil || p.proxies == nil || nodeURL == "" {
+		return nil, false
+	}
+	node := p.proxies.FindByURL(normalizeNodeURL(nodeURL))
+	if node == nil {
+		return nil, false
+	}
+	return node, true
+}
+
 // TranscodeNodeHealthy reports whether the pooled transcode node serving a URL
 // is currently healthy and enabled. Remote-start adoption gates its redirect
 // on this: a recipe another API server published is only trustworthy while
