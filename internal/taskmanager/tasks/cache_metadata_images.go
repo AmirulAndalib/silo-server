@@ -56,21 +56,29 @@ func imageCacheWorkerCount(numCPU int, memoryBytes int64) int {
 
 // detectImageCacheMemoryBytes returns the tightest memory bound the process
 // can see, or 0 when none is detectable (macOS dev boxes, bare Linux without
-// cgroups): an explicit GOMEMLIMIT first, then the tightest cgroup limit in
-// force on this process — own cgroup, ancestors, and root, so a systemd
+// cgroups). Every source is consulted and the smallest wins, because none
+// implies the others: GOMEMLIMIT can be set looser than a cgroup limit, and
+// the effective cgroup limit — own cgroup, ancestors, and root, so a systemd
 // MemoryMax= or an inherited pod/slice limit binds, not just a namespaced
-// container's root files — then total system memory.
+// container's root files — can sit above or below host memory.
 func detectImageCacheMemoryBytes() int64 {
-	if limit := debug.SetMemoryLimit(-1); limit > 0 && limit < math.MaxInt64 {
-		return limit
+	goLimit := int64(0)
+	if limit := debug.SetMemoryLimit(-1); limit < math.MaxInt64 {
+		goLimit = limit
 	}
-	if limit := nodemetrics.EffectiveMemoryLimitBytes(); limit > 0 {
-		return limit
+	hostTotal, _ := nodemetrics.ReadMeminfoTotalBytes("/proc/meminfo")
+	return tightestMemoryLimit(goLimit, nodemetrics.EffectiveMemoryLimitBytes(), hostTotal)
+}
+
+// tightestMemoryLimit returns the smallest positive limit, or 0 when none is.
+func tightestMemoryLimit(limits ...int64) int64 {
+	tightest := int64(0)
+	for _, limit := range limits {
+		if limit > 0 && (tightest == 0 || limit < tightest) {
+			tightest = limit
+		}
 	}
-	if mem, err := nodemetrics.ReadMeminfoTotalBytes("/proc/meminfo"); err == nil && mem > 0 {
-		return mem
-	}
-	return 0
+	return tightest
 }
 
 var cacheMetadataImagesWorkers = imageCacheWorkerCount(runtime.GOMAXPROCS(0), detectImageCacheMemoryBytes())

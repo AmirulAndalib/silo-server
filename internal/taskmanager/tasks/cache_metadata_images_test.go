@@ -344,7 +344,10 @@ func TestImageCacheWorkerCount(t *testing.T) {
 		{numCPU: 16, memory: 0, want: 48}, // cap: more cores must not monopolize providers
 		{numCPU: 64, memory: 0, want: 48},
 		// A many-core container with a small memory limit is bounded by
-		// memory, never below the original pool of 2.
+		// memory, never below the original pool of 2 — a sub-1GiB deployment
+		// already ran 2 workers before this change, so 2 is the floor, not 1.
+		{numCPU: 16, memory: 256 << 20, want: 2},
+		{numCPU: 16, memory: 512 << 20, want: 2},
 		{numCPU: 16, memory: 1 * gib, want: 2},
 		{numCPU: 16, memory: 2 * gib, want: 4},
 		{numCPU: 16, memory: 8 * gib, want: 16},
@@ -369,5 +372,26 @@ func TestImageCacheWorkerCount(t *testing.T) {
 	}
 	if cacheMetadataImagesClaimLimit != cacheMetadataImagesClaimPerWorker*cacheMetadataImagesWorkers {
 		t.Errorf("claim limit = %d, want %d per worker (%d)", cacheMetadataImagesClaimLimit, cacheMetadataImagesClaimPerWorker, cacheMetadataImagesClaimPerWorker*cacheMetadataImagesWorkers)
+	}
+}
+
+// Conflicting memory bounds resolve to the smallest positive one: GOMEMLIMIT
+// can be set looser than the cgroup limit and the cgroup limit can sit above
+// host memory, so no single source can be preferred outright.
+func TestTightestMemoryLimit(t *testing.T) {
+	const gib = int64(1) << 30
+	cases := []struct {
+		limits []int64
+		want   int64
+	}{
+		{limits: []int64{4 * gib, 2 * gib, 8 * gib}, want: 2 * gib}, // smallest wins
+		{limits: []int64{0, 2 * gib, 0}, want: 2 * gib},             // zeros mean "no bound", not zero bytes
+		{limits: []int64{0, 0, 0}, want: 0},                         // nothing detectable
+		{limits: []int64{6 * gib}, want: 6 * gib},
+	}
+	for _, tc := range cases {
+		if got := tightestMemoryLimit(tc.limits...); got != tc.want {
+			t.Errorf("tightestMemoryLimit(%v) = %d, want %d", tc.limits, got, tc.want)
+		}
 	}
 }
