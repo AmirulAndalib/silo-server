@@ -999,3 +999,27 @@ func TestProxyNodeByURLNormalizesStoredAndLookupURLs(t *testing.T) {
 		}
 	}
 }
+
+// ClientURL is what every client-facing URL builder joins paths onto: the
+// public URL when set, the backend URL otherwise. The fallback is what keeps
+// every deployment registered before the split — and every flat network —
+// byte-identical.
+func TestClientURLPrefersThePublicURL(t *testing.T) {
+	public := "https://cdn.example.com/"
+	blank := "   "
+	cases := []struct {
+		name string
+		node *Node
+		want string
+	}{
+		{"nil node", nil, ""},
+		{"no public url", &Node{URL: "http://10.0.0.5:8083/"}, "http://10.0.0.5:8083"},
+		{"public url set", &Node{URL: "http://10.0.0.5:8083", PublicURL: &public}, "https://cdn.example.com"},
+		{"blank public url falls back", &Node{URL: "http://10.0.0.5:8083", PublicURL: &blank}, "http://10.0.0.5:8083"},
+	}
+	for _, tc := range cases {
+		if got := tc.node.ClientURL(); got != tc.want {
+			t.Fatalf("%s: ClientURL() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

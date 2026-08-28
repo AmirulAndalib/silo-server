@@ -1112,19 +1112,19 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 
 	switch method {
 	case string(playback.PlayDirect):
-		return nodepool.NodeEndpoint(proxyNode.URL, "/stream/direct/"+token), nil
+		return nodepool.NodeEndpoint(proxyNode.ClientURL(), "/stream/direct/"+token), nil
 	case string(playback.PlayRemux):
 		remuxPath := "/stream/remux/"
 		if claims.PlayMethod == streamtoken.PlayMethodAudioDownmixRemux {
 			remuxPath = "/stream/remux/audio-v2/"
 		}
-		redirectURL := proxyNode.URL + remuxPath + token
+		redirectURL := nodepool.NodeEndpoint(proxyNode.ClientURL(), remuxPath+token)
 		if seekSeconds > 0 {
 			redirectURL += "?seek=" + strconv.FormatFloat(seekSeconds, 'f', -1, 64)
 		}
 		return redirectURL, nil
 	case string(playback.PlayTranscode):
-		return nodepool.NodeEndpoint(proxyNode.URL,
+		return nodepool.NodeEndpoint(proxyNode.ClientURL(),
 			"/stream/transcode/"+token+"/master.m3u8?"+playback.SourceTimelineQueryParam+"=1"), nil
 	default:
 		return "", fmt.Errorf("unsupported proxy method %q", method)

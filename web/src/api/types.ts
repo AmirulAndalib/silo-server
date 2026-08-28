@@ -3955,6 +3955,12 @@ export interface StreamNode {
   name: string;
   type: string;
   url: string;
+  /**
+   * Client-facing base URL when it differs from `url`. `url` is the backend
+   * address the server and nodes dial; this is what stream and download URLs
+   * are built on for proxy nodes. Absent or null means clients use `url`.
+   */
+  public_url?: string | null;
   enabled: boolean;
   healthy: boolean;
   active_jobs: number;
@@ -4006,6 +4012,8 @@ export interface CreateNodeRequest {
   name: string;
   type: string;
   url: string;
+  // Client-facing base URL, proxy nodes only; empty means clients use `url`.
+  public_url?: string;
   group?: string;
   max_jobs?: number;
   max_bandwidth_kbps?: number;
@@ -4014,6 +4022,9 @@ export interface CreateNodeRequest {
 export interface UpdateNodeRequest {
   name?: string;
   url?: string;
+  // An omitted public_url leaves the stored value alone; an explicit null (or
+  // an empty string) sends clients back to `url`.
+  public_url?: string | null;
   enabled?: boolean;
   // Empty string clears the group; 0 clears the caps (unlimited).
   group?: string;

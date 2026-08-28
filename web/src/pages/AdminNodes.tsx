@@ -580,6 +580,14 @@ function NodeUnit({
           <p className="text-muted-foreground mt-1 truncate font-mono text-xs" title={node.url}>
             {node.url}
           </p>
+          {node.public_url && (
+            <p
+              className="text-muted-foreground truncate font-mono text-xs"
+              title={`Streaming clients connect here; the server uses the address above.`}
+            >
+              public: {node.public_url}
+            </p>
+          )}
         </div>
 
         <div className="flex shrink-0 items-center gap-1">
@@ -830,6 +838,7 @@ function NodeForm({
 }) {
   const [name, setName] = useState(node?.name ?? "");
   const [url, setUrl] = useState(node?.url ?? "");
+  const [publicUrl, setPublicUrl] = useState(node?.public_url ?? "");
   const [group, setGroup] = useState(node?.group ?? defaultGroup);
   const [maxJobs, setMaxJobs] = useState(node?.max_jobs?.toString() ?? "");
   const [maxBandwidthMbps, setMaxBandwidthMbps] = useState(
@@ -897,6 +906,12 @@ function NodeForm({
       // nodes, so a proxy edit must omit both keys rather than send null —
       // sending null here would clear an existing value the form never showed.
       const body: UpdateNodeRequest = { ...fields };
+      if (nodeType === "proxy") {
+        // Same shape as the overrides: null clears, so an emptied field sends
+        // clients back to the backend URL rather than silently keeping the
+        // old public one.
+        body.public_url = publicUrl.trim() || null;
+      }
       if (nodeType === "transcode") {
         const overrideDevices = parseHWDeviceOverride(hwDeviceOverride);
         body.hw_accel_override = hwAccelOverride === HW_ACCEL_INHERIT ? null : hwAccelOverride;
@@ -905,6 +920,9 @@ function NodeForm({
       updateMutation.mutate({ id: node.id, body }, { onSuccess: onClose });
     } else {
       const body: CreateNodeRequest = { type: nodeType, ...fields };
+      if (nodeType === "proxy" && publicUrl.trim() !== "") {
+        body.public_url = publicUrl.trim();
+      }
       createMutation.mutate(body, { onSuccess: onClose });
     }
   }
@@ -943,10 +961,30 @@ function NodeForm({
           </p>
         ) : (
           <p className="text-muted-foreground text-sm">
-            Must be publicly accessible by streaming clients.
+            How the server reaches this node — health checks and capability fetches use it, so a
+            private/internal address is fine and keeps that traffic off the public network. Without
+            a Public URL below, streaming clients use this address too, so it must then be publicly
+            accessible.
           </p>
         )}
       </div>
+
+      {nodeType === "proxy" && (
+        <div className="space-y-2">
+          <Label>Public URL</Label>
+          <Input
+            value={publicUrl}
+            onChange={(e) => setPublicUrl(e.target.value)}
+            placeholder="Same as URL"
+          />
+          <p className="text-muted-foreground text-sm">
+            Optional. What streaming clients connect to, when it differs from the URL above — a CDN
+            or load-balancer hostname in front of this node. Stream and download links are built on
+            it; everything the server does keeps using the URL above. Leave empty to give clients
+            the URL above.
+          </p>
+        </div>
+      )}
 
       <div className="space-y-2">
         <Label>Group</Label>

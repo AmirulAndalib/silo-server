@@ -23,11 +23,18 @@ const (
 
 // Node represents a stream node in the database.
 type Node struct {
-	ID               int        `json:"id"`
-	Name             string     `json:"name"`
-	Type             string     `json:"type"`
-	URL              string     `json:"url"`
-	Enabled          bool       `json:"enabled"`
+	ID      int    `json:"id"`
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	URL     string `json:"url"`
+	Enabled bool   `json:"enabled"`
+	// PublicURL is the base URL streaming clients are given for this node,
+	// when it differs from URL. URL is the backend address — what the server
+	// and other nodes dial — so on a split network a proxy carries its
+	// private address in URL and its client-facing one here. Nil means
+	// clients use URL. Only ever read for proxy nodes: clients never talk to
+	// transcode nodes.
+	PublicURL        *string    `json:"public_url,omitempty"`
 	Healthy          bool       `json:"healthy"`
 	ActiveJobs       int        `json:"active_jobs"`
 	Group            *string    `json:"group"`              // co-location group; nil = ungrouped
@@ -117,6 +124,22 @@ func (n *Node) EffectiveHWAccel(clusterHWAccel string) string {
 	return clusterHWAccel
 }
 
+// ClientURL is the base URL to hand streaming clients for this node: the
+// public URL when one is set, otherwise the backend URL — which is every node
+// registered before the split and every deployment with one flat network.
+// Normalized like every other node URL so builders can join paths directly.
+func (n *Node) ClientURL() string {
+	if n == nil {
+		return ""
+	}
+	if n.PublicURL != nil {
+		if public := strings.TrimSpace(*n.PublicURL); public != "" {
+			return normalizeNodeURL(public)
+		}
+	}
+	return normalizeNodeURL(n.URL)
+}
+
 // StoredCapabilities returns this node's last stored capability report, nil-safe
 // like the Effective* accessors so a caller whose lookup came up empty prices a
 // missing node and a missing report through one path.
@@ -146,9 +169,13 @@ func (n *Node) EffectiveHWDevice(clusterHWDevice string) string {
 
 // CreateNodeInput holds the fields for creating a new node.
 type CreateNodeInput struct {
-	Name             string `json:"name"`
-	Type             string `json:"type"`
-	URL              string `json:"url"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+	URL  string `json:"url"`
+	// PublicURL is meaningful for proxy nodes only; see Node.PublicURL.
+	// Accepted on any node for symmetry with the acceleration overrides,
+	// which are likewise scoped by what reads them rather than rejected.
+	PublicURL        string `json:"public_url"`
 	Group            string `json:"group"`              // empty = ungrouped
 	MaxJobs          *int   `json:"max_jobs"`           // nil or <= 0 = unlimited
 	MaxBandwidthKbps *int   `json:"max_bandwidth_kbps"` // nil or <= 0 = unlimited
@@ -174,8 +201,11 @@ func (i CreateNodeInput) Validate() error {
 // HWDeviceOverride restores inheritance of the cluster-wide setting, and a
 // non-positive MaxJobs or MaxBandwidthKbps clears that cap.
 type UpdateNodeInput struct {
-	Name             *string `json:"name,omitempty"`
-	URL              *string `json:"url,omitempty"`
+	Name *string `json:"name,omitempty"`
+	URL  *string `json:"url,omitempty"`
+	// PublicURL follows the override convention: empty string (or JSON null)
+	// clears the column, so clients go back to using the backend URL.
+	PublicURL        *string `json:"public_url,omitempty"`
 	Enabled          *bool   `json:"enabled,omitempty"`
 	Group            *string `json:"group,omitempty"`
 	MaxJobs          *int    `json:"max_jobs,omitempty"`
@@ -205,6 +235,9 @@ func (i *UpdateNodeInput) UnmarshalJSON(data []byte) error {
 	}
 	if isJSONNull(raw["hw_device_override"]) {
 		i.HWDeviceOverride = new(string)
+	}
+	if isJSONNull(raw["public_url"]) {
+		i.PublicURL = new(string)
 	}
 	return nil
 }
@@ -303,7 +336,7 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
-const nodeColumns = `id, name, type, url, enabled, healthy, active_jobs, node_group, max_jobs, max_bandwidth_kbps, egress_kbps, last_health_check, created_at, capabilities, capabilities_hash, capabilities_refreshed_at, last_stats, hw_accel_override, hw_device_override, capability_drift, capability_drift_baseline`
+const nodeColumns = `id, name, type, url, public_url, enabled, healthy, active_jobs, node_group, max_jobs, max_bandwidth_kbps, egress_kbps, last_health_check, created_at, capabilities, capabilities_hash, capabilities_refreshed_at, last_stats, hw_accel_override, hw_device_override, capability_drift, capability_drift_baseline`
 
 func scanNode(row pgx.Row) (*Node, error) {
 	var n Node
@@ -311,7 +344,7 @@ func scanNode(row pgx.Row) (*Node, error) {
 	// a NULL column stays nil instead of decoding through the JSON codec.
 	var capabilities, lastStats, driftBaselineBytes []byte
 	err := row.Scan(
-		&n.ID, &n.Name, &n.Type, &n.URL,
+		&n.ID, &n.Name, &n.Type, &n.URL, &n.PublicURL,
 		&n.Enabled, &n.Healthy, &n.ActiveJobs,
 		&n.Group, &n.MaxJobs,
 		&n.MaxBandwidthKbps, &n.EgressKbps,
@@ -396,10 +429,10 @@ func (r *Repository) Create(ctx context.Context, input CreateNodeInput) (*Node, 
 		return nil, err
 	}
 	row := r.pool.QueryRow(ctx,
-		`INSERT INTO stream_nodes (name, type, url, node_group, max_jobs, max_bandwidth_kbps)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO stream_nodes (name, type, url, public_url, node_group, max_jobs, max_bandwidth_kbps)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING `+nodeColumns,
-		input.Name, input.Type, input.URL, normalizeGroup(input.Group),
+		input.Name, input.Type, input.URL, normalizeOverride(input.PublicURL), normalizeGroup(input.Group),
 		normalizeCap(input.MaxJobs), normalizeCap(input.MaxBandwidthKbps))
 	return scanNode(row)
 }
@@ -429,6 +462,10 @@ func (r *Repository) Update(ctx context.Context, id int, input UpdateNodeInput) 
 	if input.HWDeviceOverride != nil {
 		hwDeviceOverride = normalizeOverride(*input.HWDeviceOverride)
 	}
+	var publicURL *string
+	if input.PublicURL != nil {
+		publicURL = normalizeOverride(*input.PublicURL)
+	}
 	row := r.pool.QueryRow(ctx,
 		`UPDATE stream_nodes SET
 			name = COALESCE($2, name),
@@ -439,6 +476,7 @@ func (r *Repository) Update(ctx context.Context, id int, input UpdateNodeInput) 
 			max_bandwidth_kbps = CASE WHEN $9::boolean THEN $10::integer ELSE max_bandwidth_kbps END,
 			hw_accel_override = CASE WHEN $11::boolean THEN $12::text ELSE hw_accel_override END,
 			hw_device_override = CASE WHEN $13::boolean THEN $14::text ELSE hw_device_override END,
+			public_url = CASE WHEN $15::boolean THEN $16::text ELSE public_url END,
 			-- Everything below describes the worker the old URL addressed, so
 			-- repointing the row at a different machine has to drop it. The
 			-- caller publishes the returned row to the pools immediately, and
@@ -461,7 +499,8 @@ func (r *Repository) Update(ctx context.Context, id int, input UpdateNodeInput) 
 		input.MaxJobs != nil, maxJobs,
 		input.MaxBandwidthKbps != nil, maxBandwidth,
 		input.HWAccelOverride != nil, hwAccelOverride,
-		input.HWDeviceOverride != nil, hwDeviceOverride)
+		input.HWDeviceOverride != nil, hwDeviceOverride,
+		input.PublicURL != nil, publicURL)
 	n, err := scanNode(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNodeNotFound

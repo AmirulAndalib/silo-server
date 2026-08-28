@@ -85,7 +85,8 @@ Always `200 OK` with a JSON array.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `id`, `name`, `type`, `url` | int, string, string, string | Identity. `type` is `proxy` or `transcode`. |
+| `id`, `name`, `type`, `url` | int, string, string, string | Identity. `type` is `proxy` or `transcode`. `url` is the backend address: what the API server dials for health checks, capability fetches, and dispatch, and what a proxy dials to reach a transcode node — a private/internal address is fine and keeps that traffic off the public network. |
+| `public_url` | string \| null | Client-facing base URL, when it differs from `url`. Stream and download URLs handed to players are built on it. Only meaningful on proxy nodes — clients never talk to transcode nodes. Absent or `null` means clients use `url`, which must then be publicly reachable. |
 | `enabled` | bool | Whether the node is eligible for selection at all. |
 | `healthy` | bool | Result of the last health check. |
 | `active_jobs`, `egress_kbps` | int | Last health-reported load. `egress_kbps` is a rolling average and is currently non-zero for proxy nodes only. |
@@ -130,9 +131,11 @@ against `stream_nodes.url`, ignoring a trailing slash on either side. Set
 multi-node deployment can be a different machine's policy.
 
 If the URL does not match, the node falls back to `NODE_NAME` against the
-registered name. This covers split-horizon topologies, where the API reaches
-a node at a public URL that is registered in `stream_nodes.url`, but the
-node's own `NODE_URL` is an internal address that never equals it. `name`
+registered name. This covers split-horizon topologies where `stream_nodes.url`
+was registered as a public address the node's own `NODE_URL` never equals —
+with `public_url` carrying the client-facing address, `url` can simply be the
+node's internal address and match `NODE_URL` directly, which is the
+recommended shape. `name`
 carries no unique constraint, so an ambiguous match — more than one row
 sharing that name — identifies nothing and adopts neither row's overrides;
 registered names should be unique per node, and `NODE_NAME` should equal the
@@ -403,8 +406,9 @@ selection, which is round-robin and does no GPU work.
 ## `POST /api/v1/admin/nodes`
 
 Registers a node. Body: `name`, `type` (`proxy` or `transcode`), `url`, and the
-optional `group`, `max_jobs`, `max_bandwidth_kbps`. A non-positive cap and an
-empty group mean "unlimited" and "ungrouped".
+optional `public_url`, `group`, `max_jobs`, `max_bandwidth_kbps`. A
+non-positive cap and an empty group mean "unlimited" and "ungrouped"; an empty
+`public_url` means clients use `url`.
 
 `201 Created` with the created node in the same shape as one list entry (with
 no capability fields yet — nothing has been fetched). `400 Bad Request` when a
@@ -416,6 +420,10 @@ node pools are reloaded afterwards.
 Updates a node's mutable fields. Every field is optional; an omitted field is
 left unchanged. An empty-string `group` clears the group, and a non-positive
 `max_jobs` or `max_bandwidth_kbps` clears that cap.
+
+`public_url` follows the same convention as the overrides below: `null` or an
+empty string clears it, sending clients back to `url`; an omitted field leaves
+it alone.
 
 `hw_accel_override` and `hw_device_override` are writable here. Either `null`
 or an empty string clears one, restoring inheritance of the cluster-wide
