@@ -212,6 +212,12 @@ func queryAdminTopActivity(ctx context.Context, pool *pgxpool.Pool, days, limit 
 	// abandoned after a minute. A title that was only ever marked watched has
 	// no session rows and reports 0 seconds.
 	//
+	// watched_seconds records the final absolute position, not elapsed viewing
+	// time, so a session resumed at the one-hour mark would claim the first
+	// hour again; each session's contribution is therefore capped at its
+	// wall-clock length. Still an estimate — recording true elapsed playback
+	// needs a session start position, which does not exist yet.
+	//
 	// The ranking is computed and limited first so the title lookup and the
 	// watched-seconds aggregate only run over the rows that survive.
 	titleRows, err := pool.Query(ctx, `
@@ -229,7 +235,8 @@ func queryAdminTopActivity(ctx context.Context, pool *pgxpool.Pool, days, limit 
 		),
 		watched AS (
 			SELECT COALESCE(ep.series_id, p.media_item_id) AS item_id,
-			       SUM(p.watched_seconds) AS total_seconds
+			       SUM(LEAST(GREATEST(p.watched_seconds, 0),
+			                 GREATEST(EXTRACT(EPOCH FROM (p.ended_at - p.started_at)), 0))) AS total_seconds
 			FROM playback_history_admin p
 			LEFT JOIN episodes ep ON ep.content_id = p.media_item_id
 			WHERE p.started_at >= now() - make_interval(days => $1)
@@ -294,7 +301,8 @@ func queryAdminTopActivity(ctx context.Context, pool *pgxpool.Pool, days, limit 
 		watched AS (
 			SELECT p.user_id,
 			       p.profile_id,
-			       SUM(p.watched_seconds) AS total_seconds
+			       SUM(LEAST(GREATEST(p.watched_seconds, 0),
+			                 GREATEST(EXTRACT(EPOCH FROM (p.ended_at - p.started_at)), 0))) AS total_seconds
 			FROM playback_history_admin p
 			WHERE p.started_at >= now() - make_interval(days => $1)
 			  AND EXISTS (

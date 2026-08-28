@@ -4703,6 +4703,11 @@ export interface AdminPlaybackReliability {
 export interface AdminPlaybackActivity {
   hours: number;
   bucket_seconds: number;
+  // The window on the server's clock; the chart anchors its bucket grid on
+  // `to` so client clock skew cannot misplace the boundary buckets. Optional
+  // because responses predating the fields lack them.
+  from?: string;
+  to?: string;
   buckets: AdminPlaybackActivityBucket[];
   reliability: AdminPlaybackReliability;
   profiles_active_24h: number;

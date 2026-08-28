@@ -20,9 +20,18 @@ export function PlaybackActivityWidget() {
   const hours = rangeHours(range);
   const query = useAdminPlaybackActivity(hours);
   const bucketSeconds = query.data?.bucket_seconds || DEFAULT_PLAYBACK_BUCKET_SECONDS;
+  // The grid anchors on the server's window end when the response carries it:
+  // the buckets were cut on the database clock, and a browser clock a minute
+  // behind it around a boundary would discard the newest bucket.
+  const serverNow = query.data?.to ? Date.parse(query.data.to) : Number.NaN;
   const columns = useMemo(
-    () => buildPlaybackActivityColumns(query.data?.buckets, { hours, bucketSeconds }),
-    [query.data, hours, bucketSeconds],
+    () =>
+      buildPlaybackActivityColumns(query.data?.buckets, {
+        hours,
+        bucketSeconds,
+        ...(Number.isFinite(serverNow) ? { now: serverNow } : {}),
+      }),
+    [query.data, hours, bucketSeconds, serverNow],
   );
   const total = columns.reduce(
     (sum, column) => sum + column.segments.reduce((columnSum, value) => columnSum + value, 0),

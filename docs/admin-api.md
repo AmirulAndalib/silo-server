@@ -870,6 +870,11 @@ not under-counted. A live session cannot already be in history, so nothing is
 counted twice. Live sessions with no recorded start — reconstructed after a
 restart — are dated by their last update instead.
 
+`from` and `to` are the queried window on the database clock — the clock the
+bucket filter ran against. Clients should anchor their zero-fill grid on `to`
+rather than their own clock: a browser a minute behind the server around a
+boundary would otherwise discard the newest bucket.
+
 `buckets` contains only buckets that saw a session; the client zero-fills the
 window on the `bucket_seconds` grid so a quiet server draws empty columns rather
 than a shorter chart. Everything in `reliability` is computed over the whole
@@ -894,6 +899,8 @@ absent rather than approximated.
 {
   "hours": 24,
   "bucket_seconds": 3600,
+  "from": "2026-08-25T10:41:03Z",
+  "to": "2026-08-26T10:41:03Z",
   "buckets": [{ "hour": "2026-08-26T10:00:00Z", "direct": 4, "remux": 1, "transcode": 2 }],
   "reliability": {
     "sessions_started": 42,
@@ -929,7 +936,10 @@ one show and a title's `media_item_id` is a series content id for TV.
 the runtime of what was played. Watch history records the media's full duration,
 so summing that would report three hours for a movie someone abandoned after a
 minute. An entry that was only ever marked watched has no sessions and reports
-`0`.
+`0`. Because `watched_seconds` records a session's final absolute position, a
+resumed session would claim the already-watched stretch again, so each
+session's contribution is capped at its wall-clock length; the figure is an
+estimate until playback records true elapsed viewing time.
 
 Profile display names live in the per-user stores rather than in watch history,
 so they are read back from that profile's most recent `playback_history_admin`

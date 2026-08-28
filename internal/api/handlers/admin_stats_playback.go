@@ -93,8 +93,15 @@ type AdminPlaybackReliability struct {
 // answers "who watched today", which does not become "who watched this month"
 // because a chart next to it got wider.
 type AdminPlaybackActivity struct {
-	Hours             int                           `json:"hours"`
-	BucketSeconds     int                           `json:"bucket_seconds"`
+	Hours         int `json:"hours"`
+	BucketSeconds int `json:"bucket_seconds"`
+	// From/To are the window on the database clock, which is the clock the
+	// bucket filter ran against. The dashboard anchors its bucket grid on To
+	// rather than the browser clock: a few seconds of client/server skew
+	// around an hour or day boundary would otherwise discard the newest
+	// bucket and show a stale one.
+	From              time.Time                     `json:"from"`
+	To                time.Time                     `json:"to"`
 	Buckets           []AdminPlaybackActivityBucket `json:"buckets"`
 	Reliability       AdminPlaybackReliability      `json:"reliability"`
 	ProfilesActive24h int64                         `json:"profiles_active_24h"`
@@ -273,11 +280,11 @@ func completionRate(completed, finalized int64) float64 {
 // after a restart, hence the COALESCE onto updated_at.
 const adminPlaybackSessionsCTE = `
 	WITH sessions AS (
-		SELECT started_at, play_method, completed, profile_id, FALSE AS live
+		SELECT started_at, play_method, completed, user_id, profile_id, FALSE AS live
 		FROM playback_history_admin
 		WHERE started_at >= now() - make_interval(hours => $1)
 		UNION ALL
-		SELECT COALESCE(started_at, updated_at) AS started_at, play_method, FALSE, profile_id, TRUE
+		SELECT COALESCE(started_at, updated_at) AS started_at, play_method, FALSE, user_id, profile_id, TRUE
 		FROM playback_sessions_sync
 		WHERE COALESCE(started_at, updated_at) >= now() - make_interval(hours => $1)
 	)`
@@ -336,7 +343,7 @@ func queryAdminPlaybackActivity(ctx context.Context, pool *pgxpool.Pool, hours i
 				COUNT(*) FILTER (WHERE play_method = 'transcode')::bigint AS transcode_starts,
 				COUNT(*) FILTER (WHERE NOT live)::bigint AS finalized_sessions,
 				COUNT(*) FILTER (WHERE NOT live AND completed)::bigint AS completed_sessions,
-				COUNT(DISTINCT profile_id)::bigint AS unique_profiles
+				COUNT(DISTINCT (user_id, profile_id))::bigint AS unique_profiles
 			FROM sessions
 		),
 		active_profiles AS (
@@ -351,7 +358,9 @@ func queryAdminPlaybackActivity(ctx context.Context, pool *pgxpool.Pool, hours i
 			reliability.finalized_sessions,
 			reliability.completed_sessions,
 			reliability.unique_profiles,
-			active_profiles.profiles_active_24h
+			active_profiles.profiles_active_24h,
+			now() - make_interval(hours => $1) AS window_from,
+			now() AS window_to
 		FROM reliability
 		CROSS JOIN active_profiles
 	`, hours)
@@ -362,9 +371,13 @@ func queryAdminPlaybackActivity(ctx context.Context, pool *pgxpool.Pool, hours i
 		&activity.Reliability.CompletedSessions,
 		&activity.Reliability.UniqueProfiles,
 		&activity.ProfilesActive24h,
+		&activity.From,
+		&activity.To,
 	); err != nil {
 		return nil, fmt.Errorf("querying playback reliability: %w", err)
 	}
+	activity.From = activity.From.UTC()
+	activity.To = activity.To.UTC()
 	activity.Reliability.CompletionRate = completionRate(
 		activity.Reliability.CompletedSessions,
 		activity.Reliability.FinalizedSessions,
