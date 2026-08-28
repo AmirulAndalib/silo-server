@@ -1,7 +1,7 @@
 ---
 title: Monitoring Stream Nodes
 description: How to read the admin Nodes page, when to re-probe a node's hardware, and how scratch-disk pressure affects transcode placement.
-summary: What each Nodes-page column means, the GPU re-probe action, scratch admission, and scraping node metrics with Prometheus.
+summary: How to read a node's Acceleration, Load, and Capacity blocks, the GPU re-probe action, scratch admission, and scraping node metrics with Prometheus.
 tags:
   - silo
   - docs
@@ -21,7 +21,7 @@ related:
 
 **Settings -> Nodes** lists every registered proxy and transcode node with its
 current health, its verified GPU capability, and its host resource usage. This
-page explains what the columns mean, which of them affect where playback is
+page explains what each reading means, which of them affect where playback is
 placed, and what to do when the page disagrees with the hardware you know is in
 the machine.
 
@@ -29,26 +29,43 @@ Everything here applies to a distributed deployment. A single-node install has n
 registered nodes, and its own resource usage appears on the admin dashboard
 instead.
 
-## The columns
+## Reading a node
 
-### Status and Health
+Each node renders as one unit: a header naming the node, its state, its
+co-location group, and its URL — with the enable switch and the actions beside
+them — over three labelled blocks. **Acceleration** is what the node's FFmpeg
+verified it can do, **Load** is the host underneath it, and **Capacity** is what
+it is carrying against any caps it was given. Readings measured against a
+ceiling draw a meter; a reading with no ceiling, or one nothing measured, draws
+none — a bar at zero would read as "measured and idle", which is the one thing
+an unmeasured value is not.
 
-**Status** is whether the node is *enabled* — an administrator's switch. A
-disabled node is in no pool and is never selected, and it stops counting against
-its co-location group.
+When any node carries a group label, a **Groups** chip row above the sections
+filters both of them at once — a group's proxy sits in one section and its
+transcode nodes in the other, and the filter is how to see the pairing. A
+group's chip carries an amber dot while an enabled member is unhealthy, because
+that takes the whole group out of service: its transcode nodes stop taking
+work, and a group with proxies of its own never falls back to another group's.
 
-**Health** is the result of the last check. Every node is polled every 30
-seconds; a node that does not answer is routed around immediately, and existing
-streams on it fail over on their next segment request. **Last Check** is when
-that poll ran.
+### State
+
+The rail on a unit's left edge, the dot in its header, and one label carry the
+node's state. **Disabled** is the administrator's switch: a disabled node is in
+no pool, is never selected, stops counting against its co-location group, and
+renders dimmed — its readings are whatever they were when it left the rotation.
+**Healthy** and **Unhealthy** are the result of the last check. Every node is
+polled every 30 seconds; a node that does not answer is routed around
+immediately, and existing streams on it fail over on their next segment
+request. **Checked**, in the Capacity block, is how long ago that poll ran —
+hover for the exact time.
 
 Health and capability are independent. A node whose GPU driver broke stays
 perfectly healthy: it still answers, it just encodes in software now. That is
-what the GPU column and the drift badge exist to surface.
+what the Acceleration block and the drift badge exist to surface.
 
-### GPU
+### Acceleration
 
-The GPU column reports what the node's FFmpeg could actually *do* the last time
+The Acceleration block reports what the node's FFmpeg could actually *do* the last time
 it was asked, not what its configuration names. Silo verifies hardware by running
 a real single-frame encode on each candidate device, so the states are evidence,
 not guesses:
@@ -62,9 +79,10 @@ not guesses:
 | **SW**, "devices not accessible" on hover | Every candidate device was *skipped* rather than probed, because this process cannot open any of them. This is the normal reading for a proxy node reading a cluster-wide `playback.hw_device` that points at the transcode nodes' cards. It is not a driver failure. |
 
 Below the badge, each render device the node can see is listed with its live
-engine busyness where a measurement source exists.
+video-engine busyness — a meter and a session count per device — where a
+measurement source exists; an unmeasured device shows a dash and no meter.
 
-**`stale`** on the GPU cell means no health check has *confirmed* this inventory
+**`stale`** in the Acceleration block means no health check has *confirmed* this inventory
 for more than ten minutes. Checks run every 30 seconds and every response carries
 the node's current capability hash, so roughly twenty checks in a row have to go
 missing before the marker appears — it says the confirming sweep stopped, not
@@ -95,12 +113,21 @@ return. Re-probing the node is the
 direct way to ask whether it is still true. It is a warning, not a routing input
 — nothing in node selection reads it.
 
-### System
+### Load and Capacity
 
-CPU, memory, the fullest sampled disk, and network throughput, sampled by the
-node itself every five seconds and carried on its health response. It is the
-current sample only; Silo keeps no history (see [Scraping node
-metrics](#scraping-node-metrics) below).
+**Load** is CPU, memory, the fullest sampled disk, and network throughput,
+sampled by the node itself every five seconds and carried on its health
+response. It is the current sample only; Silo keeps no history (see [Scraping
+node metrics](#scraping-node-metrics) below). Network draws no meter: the
+sampler reports bytes moved, never the link's speed, so there is no ceiling to
+draw it against.
+
+**Capacity** is the node's concurrency (transcodes, or relayed streams on a
+proxy) and, on proxy nodes, measured egress — each against its configured cap
+where one is set. An uncapped reading shows the bare number and no meter, since
+any bar would be measured against a ceiling the page invented. The readings
+tint once a cap is reached, which is when the planner routes new work
+elsewhere.
 
 An unhealthy node shows a dash rather than its last numbers: the sample predates
 the check that failed, and a frozen CPU percentage looks exactly like a live one.
@@ -130,7 +157,7 @@ with loadavg accounting enabled (`lxcfs -l`; off by default on Proxmox), so
 
 ## Re-probing a node's hardware
 
-Each node row has a **Re-probe** action beside Check. It tells that node to throw
+Each node's header has a **Re-probe** action beside Check. It tells that node to throw
 away its cached hardware verdicts, re-verify against live hardware, and hand the
 fresh inventory straight back to the server.
 
@@ -288,7 +315,7 @@ groups:
         expr: streamapp_node_cpu_percent > 90
         for: 15m
         annotations:
-          summary: "Silo node CPU pegged on {{ $labels.instance }} — check the GPU column for a failed probe"
+          summary: "Silo node CPU pegged on {{ $labels.instance }} — check the Acceleration block for a failed probe"
 
       - alert: SiloDiskMeasurementStale
         expr: streamapp_node_disk_stale == 1
@@ -342,6 +369,6 @@ yourself.
 - `internal/nodemetrics` — host and GPU sampling, and the `streamapp_node_*`
   collector.
 - `internal/playback/gpudetect.go` — the hardware verification probes behind the
-  GPU column.
+  Acceleration block.
 - [Admin API](../../admin-api.md) — the `GET /api/v1/admin/nodes` field table and
   the re-probe endpoint.
