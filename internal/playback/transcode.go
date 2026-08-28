@@ -1379,9 +1379,10 @@ const stereoDownmixBoostFilterV3 = "aresample=out_chlayout=stereo:async=1,alimit
 // the source channels before FFmpeg sums them would still allow the final
 // stereo signal to clip. The limiter's input gain is +6.0206 dB; its -2 dBFS
 // sample ceiling leaves headroom for lossy-codec and inter-sample overshoot.
-// async=1 removes sub-frame input timestamp jitter while retaining the source
-// clock and first packet timestamp. Without it, fixed-duration AAC packets can
-// carry small PTS gaps that Firefox renders as audible zero-fill crackle.
+// async=1 enables FFmpeg's timestamp-matching fill/trim behavior while
+// retaining the source clock and first packet timestamp. On the affected
+// inputs, the resulting fixed-duration AAC packets no longer carry the small
+// PTS gaps that Firefox renders as audible zero-fill crackle.
 func appendStereoDownmixBoostArgs(args []string, sourceChannels, outputChannels int) []string {
 	if sourceChannels <= 2 || outputChannels != 2 {
 		return args
