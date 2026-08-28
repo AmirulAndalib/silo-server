@@ -15,14 +15,14 @@ func TestGPUGateRefusesReprobeWhileWorkIsAdmitted(t *testing.T) {
 	}
 	// activeJobs is still 0 here: the counter only moves once ffmpeg is running,
 	// which is exactly the window a point-in-time check missed.
-	if busy, ok := gate.beginReprobe(0, 0); ok {
+	if busy, ok := gate.beginReprobe(otherWork(0)); ok {
 		t.Fatal("re-probe admitted while a transcode was starting")
 	} else if busy != 1 {
 		t.Fatalf("busy = %d, want the admitted work counted", busy)
 	}
 
 	gate.endWork()
-	if _, ok := gate.beginReprobe(0, 0); !ok {
+	if _, ok := gate.beginReprobe(otherWork(0)); !ok {
 		t.Fatal("re-probe refused after the work finished")
 	}
 }
@@ -32,7 +32,7 @@ func TestGPUGateRefusesReprobeWhileWorkIsAdmitted(t *testing.T) {
 func TestGPUGateRefusesReprobeWhileJobsAreActive(t *testing.T) {
 	var gate gpuGate
 
-	busy, ok := gate.beginReprobe(2, 0)
+	busy, ok := gate.beginReprobe(otherWork(2))
 	if ok {
 		t.Fatal("re-probe admitted on a node running transcodes")
 	}
@@ -47,13 +47,13 @@ func TestGPUGateRefusesReprobeWhileJobsAreActive(t *testing.T) {
 func TestGPUGateRefusesWorkWhileReprobing(t *testing.T) {
 	var gate gpuGate
 
-	if _, ok := gate.beginReprobe(0, 0); !ok {
+	if _, ok := gate.beginReprobe(otherWork(0)); !ok {
 		t.Fatal("re-probe refused on an idle gate")
 	}
 	if gate.beginWork() {
 		t.Fatal("GPU work admitted while a re-probe held the encoder")
 	}
-	if _, ok := gate.beginReprobe(0, 0); ok {
+	if _, ok := gate.beginReprobe(otherWork(0)); ok {
 		t.Fatal("a second concurrent re-probe was admitted")
 	}
 
@@ -74,7 +74,7 @@ func TestGPUGateEndWorkDoesNotUnderflow(t *testing.T) {
 	if !gate.beginWork() {
 		t.Fatal("beginWork refused after unbalanced releases")
 	}
-	if _, ok := gate.beginReprobe(0, 0); ok {
+	if _, ok := gate.beginReprobe(otherWork(0)); ok {
 		t.Fatal("re-probe admitted while one unit of work was outstanding")
 	}
 }
@@ -87,14 +87,14 @@ func TestGPUGateHoldWorkIsNeverRefusedAndKeepsReprobesOut(t *testing.T) {
 	var gate gpuGate
 
 	gate.holdWork()
-	if busy, ok := gate.beginReprobe(0, 0); ok {
+	if busy, ok := gate.beginReprobe(otherWork(0)); ok {
 		t.Fatal("re-probe admitted while a session was still closing")
 	} else if busy != 1 {
 		t.Fatalf("busy = %d, want the closing session counted", busy)
 	}
 
 	gate.endWork()
-	if _, ok := gate.beginReprobe(0, 0); !ok {
+	if _, ok := gate.beginReprobe(otherWork(0)); !ok {
 		t.Fatal("re-probe refused after the teardown finished")
 	}
 
@@ -113,7 +113,7 @@ func TestGPUGateHoldWorkIsNeverRefusedAndKeepsReprobesOut(t *testing.T) {
 func TestGPUGateRefusesReprobeWhileADetachedProbeRuns(t *testing.T) {
 	var gate gpuGate
 
-	busy, ok := gate.beginReprobe(0, 1)
+	busy, ok := gate.beginReprobe(otherWork(1))
 	if ok {
 		t.Fatal("re-probe admitted while a detached smoke encode was still running")
 	}
@@ -121,7 +121,7 @@ func TestGPUGateRefusesReprobeWhileADetachedProbeRuns(t *testing.T) {
 		t.Fatalf("busy = %d, want the detached probe counted", busy)
 	}
 
-	if _, ok := gate.beginReprobe(0, 0); !ok {
+	if _, ok := gate.beginReprobe(otherWork(0)); !ok {
 		t.Fatal("re-probe refused once no probe was in flight")
 	}
 }
@@ -132,11 +132,44 @@ func TestGPUGateRefusesReprobeWhileADetachedProbeRuns(t *testing.T) {
 func TestGPUGateCountsEveryDetachedProbeSource(t *testing.T) {
 	var gate gpuGate
 
-	busy, ok := gate.beginReprobe(0, 2)
+	busy, ok := gate.beginReprobe(otherWork(2))
 	if ok {
 		t.Fatal("re-probe admitted while detached smoke encodes were still running")
 	}
 	if busy != 2 {
 		t.Fatalf("busy = %d, want both detached probe sources counted", busy)
+	}
+}
+
+// otherWork builds the callback beginReprobe reads under its own lock, for
+// tests that want a fixed count.
+func otherWork(count int) func() int { return func() int { return count } }
+
+// The count has to be read under the lock that grants the claim, not sampled
+// before it. A request descheduled between reading zero and acquiring the lock
+// would otherwise claim an encoder that a capability build has since started
+// and abandoned, leaving that build's background probe running.
+func TestGPUGateReadsOtherWorkUnderTheClaimLock(t *testing.T) {
+	var gate gpuGate
+
+	// Whatever this reports at the moment of the claim is what decides it: a
+	// probe that starts between the caller's own check and the lock is seen.
+	appeared := false
+	busy, ok := gate.beginReprobe(func() int {
+		appeared = true
+		return 1
+	})
+	if !appeared {
+		t.Fatal("beginReprobe did not consult the count while holding the lock")
+	}
+	if ok {
+		t.Fatal("re-probe admitted despite work appearing at claim time")
+	}
+	if busy != 1 {
+		t.Fatalf("busy = %d, want the work counted at claim time", busy)
+	}
+
+	if _, ok := gate.beginReprobe(nil); !ok {
+		t.Fatal("re-probe refused with nothing else to count")
 	}
 }

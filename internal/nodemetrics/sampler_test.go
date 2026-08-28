@@ -1057,3 +1057,59 @@ func TestMemoryLimitEqualToHostRAMIsNotALimit(t *testing.T) {
 		t.Fatalf("used = %d, want the host's used figure %d rather than the cgroup working set", used, want)
 	}
 }
+
+// A quota above the machine's core count is not a limit — a 128-core quota on a
+// 64-core host cannot be spent. cgroupQuotaCores already caps the reported core
+// count at the host's; the normalization budget has to agree with it, or a
+// workload saturating every CPU it has reports fifty percent busy.
+func TestCPUQuotaAboveHostCapacityNormalizesAgainstTheHost(t *testing.T) {
+	tree := newProcTree(t)
+	clock := newFakeClock()
+	tree.write("loadavg", "0 0 0 0/0 0\n")
+	tree.write("meminfo", "MemTotal: 1024 kB\n")
+	tree.write("net/dev", "")
+	// A four-core host.
+	hostStat := func(busy, idle int) string {
+		line := "cpu  " + itoa(busy) + " 0 0 " + itoa(idle) + " 0 0 0 0\n"
+		for i := range 4 {
+			line += "cpu" + itoa(i) + " 0 0 0 0 0 0 0 0\n"
+		}
+		return line
+	}
+	tree.write("stat", hostStat(100, 9900))
+
+	dir := t.TempDir()
+	usage := filepath.Join(dir, "cpu.stat")
+	writeUsage := func(micros int) {
+		if err := os.WriteFile(usage, []byte("usage_usec "+itoa(micros)+"\n"), 0o644); err != nil {
+			t.Fatalf("write cgroup usage: %v", err)
+		}
+	}
+	writeUsage(0)
+	quota := filepath.Join(dir, "cpu.max")
+	// Eight cores of quota on a four-core host.
+	if err := os.WriteFile(quota, []byte("800000 100000\n"), 0o644); err != nil {
+		t.Fatalf("write cgroup quota: %v", err)
+	}
+
+	s := newTestSampler(t, tree, clock, Options{})
+	s.cgroupCPUPaths = []cgroupCPUPath{{
+		usage: usage, usageKey: cgroupCPUUsageKey, usageUnit: time.Microsecond, quota: quota,
+	}}
+	s.sample(context.Background())
+
+	// 20 seconds of CPU over 5 seconds of wall time: every one of the four CPUs
+	// the host has, saturated.
+	writeUsage(20_000_000)
+	tree.write("stat", hostStat(200, 19800))
+	clock.advance(5 * time.Second)
+	s.sample(context.Background())
+
+	system := s.Snapshot().System
+	if system.Cores != 4 {
+		t.Fatalf("Cores = %d, want the host's 4 — an 8-core quota is not a limit here", system.Cores)
+	}
+	if system.CPUPct != 100 {
+		t.Fatalf("CPUPct = %d, want 100 — the node has spent every CPU it can", system.CPUPct)
+	}
+}

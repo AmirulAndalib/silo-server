@@ -294,7 +294,16 @@ func (s *Sampler) cpuStats(now time.Time) (busyPct, cores int) {
 	if !sample.valid {
 		return busyPct, cores
 	}
+	// The budget is capped at what the host can actually give, the same way the
+	// reported core count is. A quota above the machine's core count is not a
+	// limit — a 128-core quota on a 64-core host cannot be spent — so dividing
+	// by it reports a workload saturating every CPU it has as fifty percent
+	// busy. cores has already been through that cap; budget has to agree with
+	// it or the percentage and the denominator describe different machines.
 	budget := quota
+	if hostCores > 0 && budget > float64(hostCores) {
+		budget = float64(hostCores)
+	}
 	if budget <= 0 {
 		budget = float64(cores)
 	}
