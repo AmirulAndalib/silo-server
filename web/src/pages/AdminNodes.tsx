@@ -33,6 +33,7 @@ import { cn } from "@/lib/utils";
 import type {
   NodeCapabilityStaleReason,
   NodeGPULiveDevice,
+  NodeGroupOption,
   NodeHWDeviceRow,
   ResourceMetric,
 } from "./adminNodesPresentation";
@@ -45,9 +46,11 @@ import {
   describeNodeAccelerationOverride,
   describeNodeEgress,
   describeNodeGPU,
+  describeNodeGroups,
   describeNodeJobs,
   describeNodeSystem,
   describeSharedGPU,
+  filterNodesByGroup,
   nodeHWDevicePaths,
   nodeHasHWDeviceInventory,
   hwDeviceSyntaxChanges,
@@ -390,6 +393,113 @@ function NodeAccelerationBlock({ node, allNodes }: { node: StreamNode; allNodes:
   );
 }
 
+/**
+ * One bucket in the group filter.
+ *
+ * A button rather than a link or a select: the whole point of the control is
+ * that the options are visible side by side, because the question it answers —
+ * which nodes belong to each other — is answered by seeing the buckets, not by
+ * opening a menu to read them one at a time.
+ */
+function GroupChip({
+  label,
+  count,
+  active,
+  degraded,
+  title,
+  onClick,
+}: {
+  label: string;
+  count: number;
+  active: boolean;
+  degraded?: boolean;
+  title?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      title={title}
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs transition-colors",
+        // The selected chip is filled, not tinted. A 10% wash over this page's
+        // surfaces is the kind of difference that reads on a designer's monitor
+        // and nowhere else, and a filter whose current setting has to be hunted
+        // for is worse than no filter: the list looks wrong rather than narrowed.
+        active
+          ? "border-primary bg-primary text-primary-foreground"
+          : "border-border text-muted-foreground hover:bg-surface-hover hover:text-foreground",
+      )}
+    >
+      {degraded && (
+        <span
+          aria-hidden="true"
+          className="bg-warning h-1.5 w-1.5 shrink-0 rounded-full"
+          // The dot is decoration; the group's own title says what it means, and
+          // the unhealthy member is already spelled out on its own unit.
+        />
+      )}
+      <span className={cn(active && "font-medium")}>{label}</span>
+      <span
+        className={cn(
+          "font-mono text-[10px] tabular-nums",
+          active ? "opacity-70" : "text-muted-foreground",
+        )}
+      >
+        {count}
+      </span>
+    </button>
+  );
+}
+
+/**
+ * The group filter, shown above both sections because a group spans them: its
+ * proxy and its transcode node are the pair, and each section holds one half.
+ *
+ * Absent when there is only one bucket. A filter that can only be switched
+ * between "all" and "all" is a control that does nothing.
+ */
+function NodeGroupFilter({
+  options,
+  active,
+  total,
+  onSelect,
+}: {
+  options: NodeGroupOption[];
+  active: string | null;
+  total: number;
+  onSelect: (group: string | null) => void;
+}) {
+  if (options.length < 2) {
+    return null;
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <p className="hero-eyebrow mr-1 text-[0.62rem]">Groups</p>
+      <GroupChip
+        label="All"
+        count={total}
+        active={active === null}
+        title="Every node, grouped or not."
+        onClick={() => onSelect(null)}
+      />
+      {options.map((option) => (
+        <GroupChip
+          key={option.value}
+          label={option.label}
+          count={option.count}
+          active={active === option.value}
+          degraded={option.degraded}
+          title={option.title}
+          onClick={() => onSelect(option.value)}
+        />
+      ))}
+    </div>
+  );
+}
+
 interface NodeUnitProps {
   node: StreamNode;
   /**
@@ -543,6 +653,9 @@ interface NodeSectionProps {
   /** Every node of both types; see `NodeUnitProps.allNodes`. */
   allNodes: StreamNode[];
   infoBanner: ReactNode;
+  /** The group `nodes` was narrowed to, or null when it was not narrowed. */
+  activeGroup: string | null;
+  onClearGroup: () => void;
   onAdd: () => void;
   onEdit: (node: StreamNode) => void;
   onDelete: (node: StreamNode) => void;
@@ -558,6 +671,8 @@ function NodeSection({
   nodes,
   allNodes,
   infoBanner,
+  activeGroup,
+  onClearGroup,
   onAdd,
   onEdit,
   onDelete,
@@ -585,14 +700,31 @@ function NodeSection({
 
       {nodes.length === 0 ? (
         <div className="surface-panel-subtle space-y-3 rounded-xl px-4 py-10 text-center">
+          {/*
+            Under a filter the section is empty because of the filter, not
+            because the cluster has none of this kind — and for a transcode
+            node that is worth reading rather than dismissing: a group with no
+            proxy of its own has its transcodes served by any proxy in the
+            cluster instead of staying on one LAN.
+          */}
           <p className="text-muted-foreground mx-auto max-w-md text-sm">
-            {type === "proxy"
-              ? "No proxy nodes yet. Add one to deliver streams from somewhere other than this server."
-              : "No transcode nodes yet. Add one to move transcoding off this server."}
+            {activeGroup !== null
+              ? type === "proxy"
+                ? "No proxy node in this group. Transcodes here are served by any proxy in the cluster rather than staying on one LAN."
+                : "No transcode node in this group. Nothing is pinned to its proxies."
+              : type === "proxy"
+                ? "No proxy nodes yet. Add one to deliver streams from somewhere other than this server."
+                : "No transcode nodes yet. Add one to move transcoding off this server."}
           </p>
-          <Button variant="outline" size="sm" onClick={onAdd}>
-            <Plus className="mr-1 h-4 w-4" /> Add {label}
-          </Button>
+          {activeGroup !== null ? (
+            <Button variant="outline" size="sm" onClick={onClearGroup}>
+              Show all groups
+            </Button>
+          ) : (
+            <Button variant="outline" size="sm" onClick={onAdd}>
+              <Plus className="mr-1 h-4 w-4" /> Add {label}
+            </Button>
+          )}
         </div>
       ) : (
         <div className="space-y-3">
@@ -682,15 +814,23 @@ function NodeDevicePicker({
 function NodeForm({
   node,
   nodeType,
+  defaultGroup,
   onClose,
 }: {
   node: StreamNode | null;
   nodeType: NodeType;
+  /**
+   * Group to start a new node in: the one the list is filtered to, so a node
+   * added from a filtered view lands in the group being looked at rather than
+   * disappearing out of it the moment it is saved. Ignored when editing, where
+   * the node's own group is the answer.
+   */
+  defaultGroup: string;
   onClose: () => void;
 }) {
   const [name, setName] = useState(node?.name ?? "");
   const [url, setUrl] = useState(node?.url ?? "");
-  const [group, setGroup] = useState(node?.group ?? "");
+  const [group, setGroup] = useState(node?.group ?? defaultGroup);
   const [maxJobs, setMaxJobs] = useState(node?.max_jobs?.toString() ?? "");
   const [maxBandwidthMbps, setMaxBandwidthMbps] = useState(
     node?.max_bandwidth_kbps ? (node.max_bandwidth_kbps / 1000).toString() : "",
@@ -958,13 +1098,27 @@ export default function AdminNodes() {
   const [editingNode, setEditingNode] = useState<StreamNode | null>(null);
   const [addingNodeType, setAddingNodeType] = useState<NodeType | null>(null);
   const [confirmDeleteNode, setConfirmDeleteNode] = useState<StreamNode | null>(null);
+  const [groupFilter, setGroupFilter] = useState<string | null>(null);
   const deleteMutation = useDeleteNode();
   const checkHealthMutation = useCheckNodeHealth();
   const reprobeMutation = useReprobeNode();
   const toggleMutation = useToggleNode();
 
-  const proxyNodes = nodes.filter((n) => n.type === "proxy");
-  const transcodeNodes = nodes.filter((n) => n.type === "transcode");
+  const groupOptions = describeNodeGroups(nodes);
+  // Derived rather than reset in an effect: the selected group can stop
+  // existing without anything on this page doing it — the last node in it is
+  // deleted, regrouped from another tab, or the poll simply arrives with a
+  // different cluster. Falling back here means the list can never be filtered
+  // to a bucket that is gone, and re-selecting the group heals it if it comes
+  // back, which a one-shot effect that cleared the state would not.
+  const activeGroup =
+    groupFilter !== null && groupOptions.some((option) => option.value === groupFilter)
+      ? groupFilter
+      : null;
+  const visibleNodes = filterNodesByGroup(nodes, activeGroup);
+
+  const proxyNodes = visibleNodes.filter((n) => n.type === "proxy");
+  const transcodeNodes = visibleNodes.filter((n) => n.type === "transcode");
 
   const checkingHealthId =
     checkHealthMutation.isPending && checkHealthMutation.variables
@@ -1016,6 +1170,13 @@ export default function AdminNodes() {
         </div>
       </div>
 
+      <NodeGroupFilter
+        options={groupOptions}
+        active={activeGroup}
+        total={nodes.length}
+        onSelect={setGroupFilter}
+      />
+
       <ConfirmDialog
         open={confirmDeleteNode !== null}
         onOpenChange={(open) => {
@@ -1035,6 +1196,8 @@ export default function AdminNodes() {
         type="proxy"
         nodes={proxyNodes}
         allNodes={nodes}
+        activeGroup={activeGroup}
+        onClearGroup={() => setGroupFilter(null)}
         onAdd={() => handleAdd("proxy")}
         onEdit={handleEdit}
         onDelete={handleDelete}
@@ -1055,6 +1218,8 @@ export default function AdminNodes() {
         type="transcode"
         nodes={transcodeNodes}
         allNodes={nodes}
+        activeGroup={activeGroup}
+        onClearGroup={() => setGroupFilter(null)}
         onAdd={() => handleAdd("transcode")}
         onEdit={handleEdit}
         onDelete={handleDelete}
@@ -1087,6 +1252,7 @@ export default function AdminNodes() {
           <NodeForm
             node={editingNode}
             nodeType={resolvedNodeType}
+            defaultGroup={activeGroup ?? ""}
             onClose={() => handleDialogChange(false)}
           />
         </DialogContent>

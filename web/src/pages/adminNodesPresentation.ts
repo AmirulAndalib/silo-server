@@ -1094,6 +1094,143 @@ export function describeGPUBusy(gpu: readonly HostGPUStats[]): ResourceMetric | 
   };
 }
 
+// --- Groups ----------------------------------------------------------------
+//
+// A group is not a label an operator hangs on a node; it is a co-location
+// contract the planner enforces. `internal/nodepool` pairs a transcode node
+// with a proxy from its own group so transcoded bytes never cross the LAN
+// twice, and it holds that pairing strictly: a grouped transcode node takes
+// work only while its whole group is healthy, and a group that has proxies of
+// its own never spills onto another group's.
+//
+// So "which nodes belong to each other" is the same question as "which nodes
+// fail together", and everything derived here answers both.
+
+/** A node's group bucket: its trimmed label, or "" when it has none. */
+export function nodeGroupOf(node: StreamNode): string {
+  return node.group?.trim() ?? "";
+}
+
+/** One bucket in the group filter. */
+export interface NodeGroupOption {
+  /** The stored group label, or "" for the ungrouped bucket. */
+  value: string;
+  label: string;
+  count: number;
+  proxies: number;
+  transcodes: number;
+  /**
+   * An enabled member is unhealthy, so the planner has taken this group out of
+   * service: its transcode nodes stop being selected, and because a group
+   * holding proxies never falls back to another group's, nothing covers for
+   * them. Disabled members do not count against it — the pools only hold
+   * enabled nodes.
+   *
+   * Always false for the ungrouped bucket, which is not a group and has no
+   * pairing to lose.
+   */
+  degraded: boolean;
+  /** Hover text: what is in the bucket, and what that means for routing. */
+  title: string;
+}
+
+/**
+ * Bucket every node by group, in the order the filter offers them: groups
+ * alphabetically, then the ungrouped bucket, which is a leftover rather than a
+ * group and so never sorts among them.
+ *
+ * A bucket exists only because a node is in it, so there are no empty ones and
+ * no configured-but-unused group can appear — the node list is the only place
+ * a group is recorded.
+ */
+export function describeNodeGroups(nodes: readonly StreamNode[]): NodeGroupOption[] {
+  const buckets = new Map<string, StreamNode[]>();
+  for (const node of nodes) {
+    const key = nodeGroupOf(node);
+    const existing = buckets.get(key);
+    if (existing) {
+      existing.push(node);
+    } else {
+      buckets.set(key, [node]);
+    }
+  }
+
+  return [...buckets.entries()]
+    .map(([value, members]) => describeNodeGroup(value, members))
+    .sort((a, b) => {
+      if (a.value === "") return 1;
+      if (b.value === "") return -1;
+      return a.label.localeCompare(b.label);
+    });
+}
+
+function describeNodeGroup(value: string, members: readonly StreamNode[]): NodeGroupOption {
+  const proxies = members.filter((node) => node.type === "proxy").length;
+  const transcodes = members.filter((node) => node.type === "transcode").length;
+  // Enabled members only, matching nodepool's groupHealth: the pools hold no
+  // disabled nodes, so switching one off takes it out of the group rather than
+  // holding the group down.
+  const degraded = value !== "" && members.some((node) => node.enabled && !node.healthy);
+
+  const lines = [describeGroupComposition(proxies, transcodes)];
+  if (value === "") {
+    lines.push(
+      "These nodes have no group, so each is selected on its own: the least-loaded transcode node, and any proxy in the cluster.",
+    );
+  } else if (proxies > 0 && transcodes > 0) {
+    lines.push(
+      "Transcodes on this group's nodes are served by a proxy in the same group, so the stream stays on one LAN.",
+    );
+  } else if (transcodes > 0) {
+    lines.push(
+      "No proxy in this group, so transcodes here are served by any proxy in the cluster.",
+    );
+  } else {
+    lines.push("No transcode node in this group, so nothing is pinned to these proxies.");
+  }
+  if (degraded) {
+    lines.push(
+      "Out of service: an enabled member is not healthy, so transcode nodes in this group stop taking work — and a group with its own proxies never falls back to another group's.",
+    );
+  }
+
+  return {
+    value,
+    label: value === "" ? "Ungrouped" : value,
+    count: members.length,
+    proxies,
+    transcodes,
+    degraded,
+    title: lines.join("\n"),
+  };
+}
+
+function describeGroupComposition(proxies: number, transcodes: number): string {
+  const parts = [
+    proxies > 0 ? (proxies === 1 ? "1 proxy node" : `${proxies} proxy nodes`) : null,
+    transcodes > 0
+      ? transcodes === 1
+        ? "1 transcode node"
+        : `${transcodes} transcode nodes`
+      : null,
+  ].filter((part): part is string => part !== null);
+  return `${parts.join(", ")}.`;
+}
+
+/**
+ * Narrow a node list to one group. A null group is no filter at all, which is
+ * a different thing from the ungrouped bucket ("").
+ */
+export function filterNodesByGroup(
+  nodes: readonly StreamNode[],
+  group: string | null,
+): StreamNode[] {
+  if (group === null) {
+    return [...nodes];
+  }
+  return nodes.filter((node) => nodeGroupOf(node) === group);
+}
+
 // --- Node capacity ---------------------------------------------------------
 //
 // What a node is carrying against what it was allowed to carry. Both readings

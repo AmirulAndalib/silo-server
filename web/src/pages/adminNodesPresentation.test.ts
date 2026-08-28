@@ -11,11 +11,13 @@ import {
   describeNodeAccelerationOverride,
   describeNodeEgress,
   describeNodeGPU,
+  describeNodeGroups,
   describeNodeJobs,
   describeNodeSystem,
   describeReprobeOutcome,
   describeResourceSample,
   describeSharedGPU,
+  filterNodesByGroup,
   formatBitsPerSecond,
   nodeHWDevicePaths,
   nodeHasHWDeviceInventory,
@@ -1435,5 +1437,119 @@ describe("describeNodeEgress", () => {
         makeNode({ type: "proxy", egress_kbps: 12_340, max_bandwidth_kbps: null }),
       ),
     ).toMatchObject({ value: "12.3 Mbps", detail: "no cap", fill: null });
+  });
+});
+
+// A group is a co-location contract the planner enforces, not a label: a
+// grouped transcode node takes work only while its whole group is healthy, and
+// a group holding proxies of its own never falls back to another group's. So
+// the filter's buckets are also failure domains, and these cover the parts an
+// operator would act on.
+describe("describeNodeGroups", () => {
+  function grouped(id: number, group: string | null, overrides: Partial<StreamNode> = {}) {
+    return makeNode({ id, name: `node-${id}`, group, ...overrides });
+  }
+
+  it("buckets by group, alphabetically, with the ungrouped leftover last", () => {
+    const groups = describeNodeGroups([
+      grouped(1, "rack-2"),
+      grouped(2, null),
+      grouped(3, "rack-1"),
+      grouped(4, "rack-2"),
+    ]);
+
+    expect(groups.map((g) => [g.label, g.count])).toEqual([
+      ["rack-1", 1],
+      ["rack-2", 2],
+      ["Ungrouped", 1],
+    ]);
+  });
+
+  // The API trims a group before storing it, so two spellings that differ only
+  // in whitespace are one group there and have to be one bucket here.
+  it("treats whitespace-only differences as the same group", () => {
+    const groups = describeNodeGroups([grouped(1, "rack-1"), grouped(2, "  rack-1  ")]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.count).toBe(2);
+  });
+
+  // Blank and null both mean ungrouped to the API; neither is a group label.
+  it("folds a blank group into the ungrouped bucket", () => {
+    const groups = describeNodeGroups([grouped(1, "   "), grouped(2, null)]);
+    expect(groups.map((g) => [g.value, g.count])).toEqual([["", 2]]);
+  });
+
+  it("counts each type, because a group's capacity is bounded by its proxies", () => {
+    const [group] = describeNodeGroups([
+      grouped(1, "rack-1", { type: "proxy" }),
+      grouped(2, "rack-1", { type: "transcode" }),
+      grouped(3, "rack-1", { type: "transcode" }),
+    ]);
+
+    expect(group).toMatchObject({ proxies: 1, transcodes: 2, count: 3 });
+    expect(group?.title).toContain("1 proxy node, 2 transcode nodes.");
+    expect(group?.title).toContain("stays on one LAN");
+  });
+
+  it("marks a group whose enabled member is unhealthy as out of service", () => {
+    const [group] = describeNodeGroups([
+      grouped(1, "rack-1", { type: "proxy" }),
+      grouped(2, "rack-1", { type: "transcode", healthy: false }),
+    ]);
+
+    expect(group?.degraded).toBe(true);
+    expect(group?.title).toContain("Out of service");
+  });
+
+  // nodepool's groupHealth runs over the pools, which hold only enabled nodes:
+  // switching a node off takes it out of the group rather than holding the
+  // whole group down.
+  it("does not hold a group down for a member that is switched off", () => {
+    const [group] = describeNodeGroups([
+      grouped(1, "rack-1", { type: "proxy" }),
+      grouped(2, "rack-1", { type: "transcode", enabled: false, healthy: false }),
+    ]);
+
+    expect(group?.degraded).toBe(false);
+  });
+
+  // The ungrouped bucket is a leftover, not a group: its nodes are selected
+  // individually, so there is no pairing for an unhealthy one to take down.
+  it("never marks the ungrouped bucket degraded", () => {
+    const [group] = describeNodeGroups([grouped(1, null, { healthy: false })]);
+    expect(group).toMatchObject({ value: "", degraded: false });
+    expect(group?.title).toContain("no group");
+  });
+
+  it("says a transcode-only group falls back to any proxy in the cluster", () => {
+    const [group] = describeNodeGroups([grouped(1, "rack-1", { type: "transcode" })]);
+    expect(group?.title).toContain("No proxy in this group");
+  });
+
+  it("says nothing is pinned to a proxy-only group", () => {
+    const [group] = describeNodeGroups([grouped(1, "rack-1", { type: "proxy" })]);
+    expect(group?.title).toContain("nothing is pinned");
+  });
+});
+
+describe("filterNodesByGroup", () => {
+  const nodes = [
+    makeNode({ id: 1, group: "rack-1" }),
+    makeNode({ id: 2, group: "rack-2" }),
+    makeNode({ id: 3, group: null }),
+  ];
+
+  it("returns every node when no group is selected", () => {
+    expect(filterNodesByGroup(nodes, null).map((n) => n.id)).toEqual([1, 2, 3]);
+  });
+
+  it("narrows to one group", () => {
+    expect(filterNodesByGroup(nodes, "rack-1").map((n) => n.id)).toEqual([1]);
+  });
+
+  // "" is the ungrouped bucket, which is a different selection from null — no
+  // filter at all. Collapsing the two would make "Ungrouped" show everything.
+  it("treats the empty group as the ungrouped bucket, not as no filter", () => {
+    expect(filterNodesByGroup(nodes, "").map((n) => n.id)).toEqual([3]);
   });
 });
