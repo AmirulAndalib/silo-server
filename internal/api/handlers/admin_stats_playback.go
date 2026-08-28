@@ -274,19 +274,25 @@ func completionRate(completed, finalized int64) float64 {
 // adminPlaybackSessionsCTE is the union both activity queries aggregate over.
 //
 // playback_history_admin only gains a row when a session finalizes, so the
-// current hour would be under-counted without the live sessions; a live session
-// is by definition not in history yet, so the union double-counts nothing.
-// playback_sessions_sync.started_at is nullable for sessions reconstructed
-// after a restart, hence the COALESCE onto updated_at.
+// current hour would be under-counted without the live sessions. A finalizing
+// session briefly exists on both sides — history is written before the sync
+// row is deleted, and the deletion can fail until stale-session cleanup — so
+// live rows whose session already reached history are excluded rather than
+// counted twice. playback_sessions_sync.started_at is nullable for sessions
+// reconstructed after a restart, hence the COALESCE onto updated_at.
 const adminPlaybackSessionsCTE = `
-	WITH sessions AS (
-		SELECT started_at, play_method, completed, user_id, profile_id, FALSE AS live
+	WITH history AS (
+		SELECT session_id, started_at, play_method, completed, user_id, profile_id, FALSE AS live
 		FROM playback_history_admin
 		WHERE started_at >= now() - make_interval(hours => $1)
+	),
+	sessions AS (
+		SELECT started_at, play_method, completed, user_id, profile_id, live FROM history
 		UNION ALL
-		SELECT COALESCE(started_at, updated_at) AS started_at, play_method, FALSE, user_id, profile_id, TRUE
-		FROM playback_sessions_sync
-		WHERE COALESCE(started_at, updated_at) >= now() - make_interval(hours => $1)
+		SELECT COALESCE(s.started_at, s.updated_at) AS started_at, s.play_method, FALSE, s.user_id, s.profile_id, TRUE
+		FROM playback_sessions_sync s
+		WHERE COALESCE(s.started_at, s.updated_at) >= now() - make_interval(hours => $1)
+		  AND NOT EXISTS (SELECT 1 FROM history h WHERE h.session_id = s.session_id)
 	)`
 
 func queryAdminPlaybackActivity(ctx context.Context, pool *pgxpool.Pool, hours int) (*AdminPlaybackActivity, error) {
@@ -350,7 +356,7 @@ func queryAdminPlaybackActivity(ctx context.Context, pool *pgxpool.Pool, hours i
 			SELECT COUNT(DISTINCT (user_id, profile_id))::bigint AS profiles_active_24h
 			FROM user_watch_history
 			WHERE watched_at >= now() - interval '24 hours'
-			  AND COALESCE(source, 'legacy') NOT IN ('import', 'trakt', 'simkl', 'mdblist')
+			  AND COALESCE(source, 'legacy') IN ('legacy', 'manual', 'playback', 'jellycompat')
 		)
 		SELECT
 			reliability.sessions_started,

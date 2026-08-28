@@ -930,11 +930,14 @@ every source — so a chart drawn from it alone stays truthful.
 offline and direct downloads, ebook reads, and ABS file fetches, measured as
 the actual bytes each API process wrote (including partial range-request
 bodies). Node egress cannot be split and counts entirely outside the subset.
-The sampler keeps the subset ≤ the total per minute and both take their
-per-bucket peak over the same minutes, so a client charting the split as
-`download_egress_kbps` versus `egress_kbps - download_egress_kbps` never sees
-a negative value. Samples written before the split report `0` — read that as
-"not measured yet", not "no downloads".
+The sampler keeps the subset ≤ the total per minute, and each field takes its
+own per-bucket peak, so neither can exceed the total and their difference is
+never negative. But past the two-hour display resolution the two maxima are
+preserved independently and may come from different minutes: subtracting them
+does not yield any minute's playback rate. Chart the total and the download
+subset as separate series rather than deriving a playback series. Samples
+written before the split report `0` — read that as "not measured yet", not
+"no downloads".
 
 A bucket with no sample in it is absent from `points` rather than zero — a gap
 (a restart, a stopped server) and an idle bucket are different facts. Stream

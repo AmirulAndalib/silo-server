@@ -138,7 +138,7 @@ func (s *Sampler) sampleOnce(ctx context.Context, at time.Time) {
 	s.lastBucket = bucket
 
 	s.sampleShared(ctx)
-	s.sampleProcessEgress(ctx, at, bucket)
+	s.sampleProcessEgress(ctx, at)
 
 	// Retention runs in-band rather than as its own timer: the table is tiny
 	// and one DELETE an hour costs less than another goroutine.
@@ -168,13 +168,14 @@ func (s *Sampler) sampleShared(ctx context.Context) {
 }
 
 // sampleProcessEgress records the viewer egress this process served since the
-// previous tick. The row is keyed on the same locally-computed bucket the
-// dedup guard in sampleOnce uses — keying on the DB clock instead could map
-// two guard-distinct ticks onto one DB minute under clock skew, and the
-// ON CONFLICT discard would silently drop the egress delta the second tick
-// carried. The proc source is written only by this process, so the DB clock
-// buys nothing here (unlike the shared row, where it arbitrates replicas).
-func (s *Sampler) sampleProcessEgress(ctx context.Context, at time.Time, bucket time.Time) {
+// previous tick. The row is bucketed on the database clock — the same clock the
+// shared row and the read window use — so a skewed host cannot land streams and
+// their egress in adjacent minutes, or write a "future" row the dashboard's
+// server-anchored grid would drop. Two ticks that map onto one DB minute merge
+// by GREATEST, which keeps the peak (the read side is peak-preserving anyway)
+// instead of silently discarding the second delta; taking each column's max
+// independently preserves download <= total because it holds per row.
+func (s *Sampler) sampleProcessEgress(ctx context.Context, at time.Time) {
 	if s.telemetry == nil {
 		return
 	}
@@ -201,9 +202,11 @@ func (s *Sampler) sampleProcessEgress(ctx context.Context, at time.Time, bucket 
 	downloadKbps := min(egressKbps(delta.Download, elapsed), totalKbps)
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO dashboard_metric_samples (bucket, source, egress_kbps, download_egress_kbps)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (bucket, source) DO NOTHING
-	`, bucket, s.source, totalKbps, downloadKbps)
+		VALUES (date_trunc('minute', now()), $1, $2, $3)
+		ON CONFLICT (bucket, source) DO UPDATE
+		SET egress_kbps = GREATEST(dashboard_metric_samples.egress_kbps, EXCLUDED.egress_kbps),
+		    download_egress_kbps = GREATEST(dashboard_metric_samples.download_egress_kbps, EXCLUDED.download_egress_kbps)
+	`, s.source, totalKbps, downloadKbps)
 	if err != nil {
 		slog.WarnContext(ctx, "failed to sample process egress", "component", component, "source", s.source, "error", err)
 	}

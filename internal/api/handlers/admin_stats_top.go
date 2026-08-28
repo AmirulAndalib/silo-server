@@ -25,11 +25,14 @@ const (
 	adminTopActivityMaxLimit     = 25
 )
 
-// adminTopActivityWatchSourceFilter excludes history that was imported or
-// synced in from a watch provider, so the leaderboards describe what people
-// actually played here. `manual` (marked-watched) rows stay in: they are
-// on-server actions.
-const adminTopActivityWatchSourceFilter = `COALESCE(h.source, 'legacy') NOT IN ('import', 'trakt', 'simkl', 'mdblist')`
+// adminTopActivityWatchSourceFilter keeps only history that originated on this
+// server, so the leaderboards describe what people actually played here.
+// `manual` (marked-watched) stays in as an on-server action, and `jellycompat`
+// is real playback through the Jellyfin surface. This is an allowlist rather
+// than a denylist of known providers because plugin watch providers store
+// their own arbitrary keys in `source` — a denylist would silently count any
+// newly installed provider's imported backlog as local plays.
+const adminTopActivityWatchSourceFilter = `COALESCE(h.source, 'legacy') IN ('legacy', 'manual', 'playback', 'jellycompat')`
 
 // AdminTopTitle is one row of the most-watched-titles list. Episodes are rolled
 // up to their series, so media_item_id is a series content id for TV.
