@@ -388,12 +388,15 @@ func TestCPUCorrectedByCgroupQuotaAndUsage(t *testing.T) {
 	}
 }
 
-// An unconstrained cgroup still measures this process's domain, but there is no
-// quota to normalize against, so the host's core count is the right divisor.
-func TestCPUWithoutCgroupQuotaUsesHostCores(t *testing.T) {
+// An unconstrained cgroup measures this process alone, which is not what a node
+// competes for: uncapped, the CPU a neighbor burns is CPU this node cannot have.
+// So with no quota the host's own busyness stands, even though the cgroup could
+// be read — here Silo uses a quarter of the machine while the machine is at
+// three quarters.
+func TestCPUWithoutCgroupQuotaReportsTheHost(t *testing.T) {
 	tree := newProcTree(t)
 	clock := newFakeClock()
-	tree.write("stat", "cpu  0 0 0 0 0 0 0 0\ncpu0 0 0 0 0 0 0 0 0\ncpu1 0 0 0 0 0 0 0 0\n")
+	tree.write("stat", "cpu  100 0 0 900 0 0 0 0\ncpu0 0 0 0 0 0 0 0 0\ncpu1 0 0 0 0 0 0 0 0\n")
 	tree.write("loadavg", "0 0 0 0/0 0\n")
 	tree.write("meminfo", "MemTotal: 1024 kB\n")
 	tree.write("net/dev", "")
@@ -416,16 +419,19 @@ func TestCPUWithoutCgroupQuotaUsesHostCores(t *testing.T) {
 	}}
 	s.sample(context.Background())
 
-	// 5 seconds of CPU over 5 seconds of wall time across 2 cores: half busy.
+	// 5 seconds of CPU over 5 seconds of wall time across 2 cores: half of what
+	// this process could use, and a quarter of the two-core machine.
 	if err := os.WriteFile(usage, []byte("usage_usec 5000000\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// The host meanwhile spent 750 of the interval's 1000 ticks busy.
+	tree.write("stat", "cpu  850 0 0 1150 0 0 0 0\ncpu0 0 0 0 0 0 0 0 0\ncpu1 0 0 0 0 0 0 0 0\n")
 	clock.advance(5 * time.Second)
 	s.sample(context.Background())
 
 	system := s.Snapshot().System
-	if system.CPUPct != 50 {
-		t.Fatalf("CPUPct = %d, want 50", system.CPUPct)
+	if system.CPUPct != 75 {
+		t.Fatalf("CPUPct = %d, want the host's 75 rather than this process's 25", system.CPUPct)
 	}
 	if system.Cores != 2 {
 		t.Fatalf("Cores = %d, want the host's 2 with no quota set", system.Cores)
@@ -1111,5 +1117,70 @@ func TestCPUQuotaAboveHostCapacityNormalizesAgainstTheHost(t *testing.T) {
 	}
 	if system.CPUPct != 100 {
 		t.Fatalf("CPUPct = %d, want 100 — the node has spent every CPU it can", system.CPUPct)
+	}
+}
+
+// Every unconstrained container and systemd service publishes an effective
+// cpuset holding every online CPU, because it inherits the root's. Reading that
+// as a two-CPU-style restriction would move the CPU reading to this cgroup's own
+// usage on a host where nothing caps it, and Silo idling beside a saturated
+// neighbor would report Silo's few percent as the machine's load.
+func TestCPUIgnoresACpusetSpanningTheWholeHost(t *testing.T) {
+	tree := newProcTree(t)
+	clock := newFakeClock()
+	tree.write("loadavg", "0 0 0 0/0 0\n")
+	tree.write("meminfo", "MemTotal: 1024 kB\n")
+	tree.write("net/dev", "")
+	hostStat := func(busy, idle int) string {
+		line := "cpu  " + itoa(busy) + " 0 0 " + itoa(idle) + " 0 0 0 0\n"
+		for i := range 8 {
+			line += "cpu" + itoa(i) + " 0 0 0 0 0 0 0 0\n"
+		}
+		return line
+	}
+	tree.write("stat", hostStat(100, 900))
+
+	dir := t.TempDir()
+	// All eight of the host's CPUs — what an unrestricted cgroup reports.
+	cpuset := filepath.Join(dir, "cpuset.cpus.effective")
+	if err := os.WriteFile(cpuset, []byte("0-7\n"), 0o644); err != nil {
+		t.Fatalf("write cpuset: %v", err)
+	}
+	usage := filepath.Join(dir, "cpu.stat")
+	writeUsage := func(micros int) {
+		if err := os.WriteFile(usage, []byte("usage_usec "+itoa(micros)+"\n"), 0o644); err != nil {
+			t.Fatalf("write cgroup usage: %v", err)
+		}
+	}
+	writeUsage(0)
+	quota := filepath.Join(dir, "cpu.max")
+	if err := os.WriteFile(quota, []byte("max 100000\n"), 0o644); err != nil {
+		t.Fatalf("write cgroup quota: %v", err)
+	}
+
+	if got := cgroupCPUSetCores([]string{cpuset}, 8); got != 0 {
+		t.Fatalf("cgroupCPUSetCores() = %d for a cpuset holding every host CPU, want 0", got)
+	}
+
+	s := newTestSampler(t, tree, clock, Options{})
+	s.cgroupCPUPaths = []cgroupCPUPath{{
+		usage: usage, usageKey: cgroupCPUUsageKey, usageUnit: time.Microsecond, quota: quota,
+	}}
+	s.cgroupCPUSetPaths = []string{cpuset}
+	s.sample(context.Background())
+
+	// The host spends 750 of the interval's 1000 ticks busy; Silo uses 2 of its
+	// 40 available core-seconds, which is 5%.
+	writeUsage(2_000_000)
+	tree.write("stat", hostStat(850, 1150))
+	clock.advance(5 * time.Second)
+	s.sample(context.Background())
+
+	system := s.Snapshot().System
+	if system.CPUPct != 75 {
+		t.Fatalf("CPUPct = %d, want the host's 75 — nothing caps this process", system.CPUPct)
+	}
+	if system.Cores != 8 {
+		t.Fatalf("Cores = %d, want the host's 8", system.Cores)
 	}
 }

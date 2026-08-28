@@ -19,9 +19,11 @@ import (
 // cumulative usage is the busy signal, and its quota is what that usage is
 // normalized against.
 //
-// A host with no cgroup limit reads its root cgroup, which accounts for every
-// process on the machine, so an unconstrained deployment reports what it always
-// did.
+// The correction applies only where something actually caps CPU. A cgroup
+// imposes no limit far more often than it imposes one — every unconstrained
+// container and systemd service has one — and its usage then describes Silo
+// alone rather than the machine, so an uncapped deployment keeps reading
+// /proc/stat and reports the load it is really competing with.
 
 // cgroupCPUPath locates one cgroup version's CPU accounting.
 type cgroupCPUPath struct {
@@ -90,15 +92,33 @@ var cgroupCPUSetPaths = []string{
 // The effective file already accounts for ancestors, so unlike the quota this
 // needs no walk of its own; where only the pre-intersection file exists, the
 // per-level candidates cover the same ground.
-func cgroupCPUSetCores(paths []string) int {
+//
+// hostCores is how many CPUs the machine has, and a cpuset that spans all of
+// them is not a restriction — it is what every unconstrained container and
+// service publishes, because the effective set is inherited from a root that
+// holds every online CPU. Counting it as a cap would be worse than ignoring it:
+// cgroupCPU treats any cpuset as binding when nothing else caps CPU, so the
+// reading would move to this cgroup's own usage, and a nearly idle Silo on a
+// saturated shared host would report a few percent instead of the host's load.
+// A host size of 0 means /proc/stat could not be counted, and an unknown host
+// is no reason to discard a cpuset that may well be real.
+func cgroupCPUSetCores(paths []string, hostCores int) int {
 	for _, path := range paths {
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
-		if count := countCPUSetEntries(string(raw)); count > 0 {
-			return count
+		count := countCPUSetEntries(string(raw))
+		if count <= 0 {
+			continue
 		}
+		if hostCores > 0 && count >= hostCores {
+			// The effective set is the intersection with every ancestor, so no
+			// file later in the list can narrow what this one just said was the
+			// whole machine.
+			return 0
+		}
+		return count
 	}
 	return 0
 }

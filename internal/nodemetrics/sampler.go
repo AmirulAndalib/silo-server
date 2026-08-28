@@ -266,11 +266,12 @@ func (s *Sampler) sampleSystem(ctx context.Context, now time.Time) *SystemStats 
 // cpuStats reports busy percentage and the core count that percentage is
 // normalized against.
 //
-// Under a cgroup both come from the cgroup, not the host: /proc/stat is
-// host-wide even in a container, so a node capped at two cores of a busy
-// 64-core machine would otherwise report the machine's load instead of its own
-// — and a node pinned at its quota, which is the state worth alerting on, would
-// look nearly idle.
+// Under a cgroup that caps CPU both come from the cgroup, not the host:
+// /proc/stat is host-wide even in a container, so a node capped at two cores of
+// a busy 64-core machine would otherwise report the machine's load instead of
+// its own — and a node pinned at its quota, which is the state worth alerting
+// on, would look nearly idle. Where no cap is in force the host figure stands,
+// because then the machine's load is the load this node competes with.
 func (s *Sampler) cpuStats(now time.Time) (busyPct, cores int) {
 	host, hostCores := readCPUTimes(s.procDirFor("stat"))
 	busyPct, _ = cpuBusyPercent(s.prevCPU, host)
@@ -287,10 +288,19 @@ func (s *Sampler) cpuStats(now time.Time) (busyPct, cores int) {
 	// host. Whichever cap is tighter is the one it actually runs under, and
 	// cgroupCPU decides that, because the answer also settles which cgroup's
 	// usage the reading comes from.
-	sample, quota := s.cgroupCPU(now, cgroupCPUSetCores(s.cgroupCPUSetPaths))
-	if quota > 0 {
-		cores = cgroupQuotaCores(quota, hostCores)
+	sample, quota := s.cgroupCPU(now, cgroupCPUSetCores(s.cgroupCPUSetPaths, hostCores))
+	if quota <= 0 {
+		// Nothing caps this process, so its own cgroup is the wrong domain to
+		// measure: the leaf accounts for Silo alone, and Silo idling beside a
+		// saturated neighbor is not an idle machine. Uncapped, the CPU a
+		// neighbor burns is CPU this node cannot have, which is exactly what
+		// /proc/stat reports — and under lxcfs that file is already narrowed to
+		// the container, so this stays right there too. The next pass to find a
+		// cap starts a fresh pair rather than differencing across the switch.
+		s.prevCgroupCPU = cgroupCPUSample{}
+		return busyPct, cores
 	}
+	cores = cgroupQuotaCores(quota, hostCores)
 	if !sample.valid {
 		return busyPct, cores
 	}
@@ -303,9 +313,6 @@ func (s *Sampler) cpuStats(now time.Time) (busyPct, cores int) {
 	budget := quota
 	if hostCores > 0 && budget > float64(hostCores) {
 		budget = float64(hostCores)
-	}
-	if budget <= 0 {
-		budget = float64(cores)
 	}
 	// Once the cgroup can be read it is the only honest source, so its answer
 	// stands even when this pass cannot derive one (the first sample, or a
