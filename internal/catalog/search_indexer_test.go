@@ -3,6 +3,8 @@ package catalog
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"slices"
 	"sort"
@@ -109,21 +111,81 @@ func TestStaleCatalogSearchIndexUIDs(t *testing.T) {
 	}
 }
 
-func TestCatalogSearchIndexRequiresRebuild(t *testing.T) {
+func TestCatalogSearchIndexStateRequiresRebuild(t *testing.T) {
 	const expected = 123
 	tests := []struct {
-		name  string
-		state SearchIndexState
-		want  bool
+		name        string
+		state       SearchIndexState
+		indexPrefix string
+		want        bool
 	}{
-		{name: "missing index", state: SearchIndexState{SchemaVersion: expected}, want: true},
-		{name: "stale schema", state: SearchIndexState{ActiveIndexUID: "index", SchemaVersion: expected - 1}, want: true},
-		{name: "current", state: SearchIndexState{ActiveIndexUID: "index", SchemaVersion: expected}, want: false},
+		{name: "missing index", state: SearchIndexState{SchemaVersion: expected}, indexPrefix: "index", want: true},
+		{name: "stale schema", state: SearchIndexState{ActiveIndexUID: "index", SchemaVersion: expected - 1}, indexPrefix: "index", want: true},
+		{name: "changed prefix", state: SearchIndexState{ActiveIndexUID: "old_rebuild_123", SchemaVersion: expected}, indexPrefix: "new", want: true},
+		{name: "current legacy uid", state: SearchIndexState{ActiveIndexUID: "index", SchemaVersion: expected}, indexPrefix: "index", want: false},
+		{name: "current rebuild uid", state: SearchIndexState{ActiveIndexUID: "index_rebuild_123", SchemaVersion: expected}, indexPrefix: "index", want: false},
+		{name: "similar prefix", state: SearchIndexState{ActiveIndexUID: "index_rebuild_rebuild_123", SchemaVersion: expected}, indexPrefix: "index", want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := catalogSearchIndexRequiresRebuild(tc.state, expected); got != tc.want {
-				t.Fatalf("catalogSearchIndexRequiresRebuild() = %t, want %t", got, tc.want)
+			if got := catalogSearchIndexStateRequiresRebuild(tc.state, expected, tc.indexPrefix); got != tc.want {
+				t.Fatalf("catalogSearchIndexStateRequiresRebuild() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCatalogSearchIndexRequiresRebuildWhenActiveUIDIsMissingFromTarget(t *testing.T) {
+	const (
+		expectedSchema = 123
+		indexPrefix    = "index"
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/indexes/index_rebuild_123/stats":
+			_, _ = w.Write([]byte(`{"numberOfDocuments":42}`))
+		case "/indexes/index_rebuild_456/stats":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Index not found.","code":"index_not_found"}`))
+		case "/indexes/index_rebuild_789/stats":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"message":"Unavailable.","code":"internal"}`))
+		default:
+			t.Errorf("unexpected Meilisearch request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newMeilisearchClient(server.URL, "", time.Second)
+	if err != nil {
+		t.Fatalf("newMeilisearchClient() error = %v", err)
+	}
+	tests := []struct {
+		name    string
+		uid     string
+		want    bool
+		wantErr bool
+	}{
+		{name: "active uid exists", uid: "index_rebuild_123", want: false},
+		{name: "active uid missing after target move", uid: "index_rebuild_456", want: true},
+		{name: "target temporarily unavailable", uid: "index_rebuild_789", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := catalogSearchIndexRequiresRebuildOnTarget(
+				t.Context(),
+				client,
+				SearchIndexState{ActiveIndexUID: tc.uid, SchemaVersion: expectedSchema},
+				expectedSchema,
+				indexPrefix,
+			)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("catalogSearchIndexRequiresRebuildOnTarget() error = %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("catalogSearchIndexRequiresRebuildOnTarget() = %t, want %t", got, tc.want)
 			}
 		})
 	}

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -106,11 +107,25 @@ func (i *CatalogSearchIndexer) ShouldSyncRun(ctx context.Context) (bool, error) 
 	if err != nil || !ok || settings.Provider != SearchProviderMeilisearch {
 		return false, err
 	}
+	client, err := newMeilisearchClient(settings.MeilisearchURL, settings.MeilisearchAPIKey, settings.Timeout)
+	if err != nil {
+		return false, err
+	}
 	state, err := i.events.GetState(ctx, SearchProviderMeilisearch)
 	if err != nil {
 		return false, err
 	}
-	if catalogSearchIndexRequiresRebuild(state, catalogSearchMeilisearchSchemaVersion(settings.Embedder, settings.IndexTypes, settings.SemanticEnabled, settings.BinaryQuantized)) {
+	rebuildRequired, err := catalogSearchIndexRequiresRebuildOnTarget(
+		ctx,
+		client,
+		state,
+		catalogSearchMeilisearchSchemaVersion(settings.Embedder, settings.IndexTypes, settings.SemanticEnabled, settings.BinaryQuantized),
+		settings.MeilisearchIndex,
+	)
+	if err != nil {
+		return false, err
+	}
+	if rebuildRequired {
 		if catalogSearchIndexHasNewerSchema(state) {
 			return false, nil
 		}
@@ -164,7 +179,17 @@ func (i *CatalogSearchIndexer) SyncOutbox(ctx context.Context, progress SearchIn
 	if err != nil {
 		return stats, err
 	}
-	if catalogSearchIndexRequiresRebuild(state, catalogSearchMeilisearchSchemaVersion(settings.Embedder, settings.IndexTypes, settings.SemanticEnabled, settings.BinaryQuantized)) {
+	rebuildRequired, err := catalogSearchIndexRequiresRebuildOnTarget(
+		ctx,
+		client,
+		state,
+		catalogSearchMeilisearchSchemaVersion(settings.Embedder, settings.IndexTypes, settings.SemanticEnabled, settings.BinaryQuantized),
+		settings.MeilisearchIndex,
+	)
+	if err != nil {
+		return stats, err
+	}
+	if rebuildRequired {
 		if catalogSearchIndexHasNewerSchema(state) {
 			stats.Skipped = true
 			stats.Reason = "active search index was built by a newer server version"
@@ -289,8 +314,49 @@ func (i *CatalogSearchIndexer) SyncOutbox(ctx context.Context, progress SearchIn
 	return stats, nil
 }
 
-func catalogSearchIndexRequiresRebuild(state SearchIndexState, expectedSchemaVersion int) bool {
-	return state.ActiveIndexUID == "" || state.SchemaVersion != expectedSchemaVersion
+func catalogSearchIndexRequiresRebuildOnTarget(
+	ctx context.Context,
+	client *meilisearchClient,
+	state SearchIndexState,
+	expectedSchemaVersion int,
+	indexPrefix string,
+) (bool, error) {
+	if catalogSearchIndexStateRequiresRebuild(state, expectedSchemaVersion, indexPrefix) {
+		return true, nil
+	}
+	if client == nil {
+		return false, fmt.Errorf("checking active Meilisearch index %q: client is not configured", state.ActiveIndexUID)
+	}
+	if _, err := client.Stats(ctx, state.ActiveIndexUID); err != nil {
+		if isMeilisearchIndexNotFound(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("checking active Meilisearch index %q: %w", state.ActiveIndexUID, err)
+	}
+	return false, nil
+}
+
+func catalogSearchIndexStateRequiresRebuild(state SearchIndexState, expectedSchemaVersion int, indexPrefix string) bool {
+	return state.ActiveIndexUID == "" ||
+		state.SchemaVersion != expectedSchemaVersion ||
+		!catalogSearchIndexUIDBelongsToPrefix(state.ActiveIndexUID, indexPrefix)
+}
+
+func catalogSearchIndexUIDBelongsToPrefix(uid, indexPrefix string) bool {
+	uid = strings.TrimSpace(uid)
+	indexPrefix = strings.TrimSpace(indexPrefix)
+	if uid == "" || indexPrefix == "" {
+		return false
+	}
+	if uid == indexPrefix {
+		return true
+	}
+	suffix, ok := strings.CutPrefix(uid, indexPrefix+"_rebuild_")
+	if !ok || suffix == "" {
+		return false
+	}
+	timestamp, err := strconv.ParseInt(suffix, 10, 64)
+	return err == nil && timestamp > 0
 }
 
 func catalogSearchIndexHasNewerSchema(state SearchIndexState) bool {

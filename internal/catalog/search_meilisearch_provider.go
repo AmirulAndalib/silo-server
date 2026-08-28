@@ -252,8 +252,8 @@ func (p *MeilisearchSearchProvider) Search(ctx context.Context, req CatalogSearc
 }
 
 func isMeilisearchIndexNotFound(err error) bool {
-	var httpErr *meilisearchHTTPError
-	return errors.As(err, &httpErr) &&
+	httpErr, ok := errors.AsType[*meilisearchHTTPError](err)
+	return ok &&
 		(httpErr.StatusCode == http.StatusNotFound || strings.EqualFold(strings.TrimSpace(httpErr.Code), "index_not_found"))
 }
 
