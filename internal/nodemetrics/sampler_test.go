@@ -988,3 +988,72 @@ func TestNewTestSamplerReadsNoRealCgroupPaths(t *testing.T) {
 		}
 	}
 }
+
+// Two cgroups publishing the same memory limit are not equivalent: the
+// ancestor's is shared with siblings that can fill it, so it is the one whose
+// usage says how much is left. Reading the leaf instead shows headroom right up
+// until the parent OOMs — the mirror of the CPU quota tie-break.
+func TestMemoryLimitPrefersTheOuterCgroupOnATie(t *testing.T) {
+	tree := newProcTree(t)
+	tree.write("meminfo", "MemTotal: 67108864 kB\nMemAvailable: 33554432 kB\n")
+	s := newTestSampler(t, tree, newFakeClock(), Options{})
+
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		full := filepath.Join(dir, name)
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		return full
+	}
+	const twoGiB = "2147483648\n"
+	stat := write("memory.stat", "inactive_file 0\n")
+	s.cgroupUsagePaths = []cgroupUsagePath{
+		{
+			limit: write("leaf.max", twoGiB), usage: write("leaf.current", "536870912\n"),
+			stat: stat, inactiveFile: cgroupInactiveFileKeyV2,
+		},
+		{
+			limit: write("slice.max", twoGiB), usage: write("slice.current", "1879048192\n"),
+			stat: stat, inactiveFile: cgroupInactiveFileKeyV2,
+		},
+	}
+
+	used, total := s.memoryStats()
+	if total != 2147483648 {
+		t.Fatalf("total = %d, want the 2 GiB both levels publish", total)
+	}
+	if want := int64(1879048192); used != want {
+		t.Fatalf("used = %d, want the %d charged to the shared parent, not this service's own", used, want)
+	}
+}
+
+// A cgroup limit that merely equals the host's memory is no limit at all, and
+// must not start reading cgroup usage just because the tie-break loosened.
+func TestMemoryLimitEqualToHostRAMIsNotALimit(t *testing.T) {
+	tree := newProcTree(t)
+	tree.write("meminfo", "MemTotal: 65536 kB\nMemAvailable: 1024 kB\n")
+	s := newTestSampler(t, tree, newFakeClock(), Options{})
+
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		full := filepath.Join(dir, name)
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		return full
+	}
+	s.cgroupUsagePaths = []cgroupUsagePath{{
+		limit: write("memory.max", "67108864\n"), // exactly MemTotal
+		usage: write("memory.current", "1048576\n"),
+		stat:  write("memory.stat", "inactive_file 0\n"), inactiveFile: cgroupInactiveFileKeyV2,
+	}}
+
+	used, total := s.memoryStats()
+	if total != 65536*1024 {
+		t.Fatalf("total = %d, want the host's MemTotal", total)
+	}
+	if want := int64(64512 * 1024); used != want {
+		t.Fatalf("used = %d, want the host's used figure %d rather than the cgroup working set", used, want)
+	}
+}

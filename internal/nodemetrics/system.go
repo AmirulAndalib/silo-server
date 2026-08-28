@@ -212,15 +212,26 @@ func (s *Sampler) memoryStats() (usedBytes, totalBytes int64) {
 	// the level it came from is kept, because the usage that fills it is
 	// everything charged to that cgroup, not just this process's own.
 	var binding *cgroupUsagePath
+	hostTotal := totalBytes
 	for i, level := range s.cgroupUsagePaths {
 		limit, err := ReadCgroupMemoryLimit(level.limit)
 		if err != nil || limit <= 0 {
 			continue
 		}
-		// A limit above the host's memory is not a limit worth reporting; it
-		// would only make a node look like it has headroom the kernel cannot
+		// A limit at or above the host's memory is not a limit worth reporting;
+		// it would only make a node look like it has headroom the kernel cannot
 		// give it.
-		if totalBytes == 0 || limit < totalBytes {
+		if hostTotal > 0 && limit >= hostTotal {
+			continue
+		}
+		// Ties go to the outer level, which the list reaches later. Two cgroups
+		// publishing the same limit are not equivalent: the ancestor's is shared
+		// with siblings that can fill it, so it is the one whose usage says how
+		// much of it is left. Reading the leaf instead shows headroom right up
+		// until the parent OOMs. Compared against the running choice rather than
+		// against the host figure, so a cgroup limit that merely equals host RAM
+		// still reads as no limit at all.
+		if binding == nil || limit <= totalBytes {
 			totalBytes = limit
 			binding = &s.cgroupUsagePaths[i]
 		}

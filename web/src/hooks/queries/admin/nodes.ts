@@ -8,16 +8,35 @@ import type {
   ReprobeNodeResult,
 } from "@/api/types";
 import { adminKeys } from "../keys";
+import { usePageActivity } from "@/hooks/usePageActivity";
 import { describeReprobeOutcome } from "@/pages/adminNodesPresentation";
 import { toast } from "sonner";
 
 const ADMIN_STALE_TIME = 30_000;
 
+/**
+ * Polled on the node health cadence, because this row now carries live
+ * readings rather than configuration.
+ *
+ * `staleTime` alone marks data old; it does not schedule anything. Without an
+ * interval the GPU, disk and health columns froze at whatever they were when
+ * the page mounted, refreshing only on focus, reconnect or a mutation — so an
+ * operator watching a node saturate, a scratch volume fill, or a health check
+ * start failing would see none of it. The server persists a fresh sample every
+ * 30 seconds, so asking more often only costs requests.
+ *
+ * Gated on page activity: a backgrounded or frozen tab has nobody reading it,
+ * and polling every admin tab a browser has open is how a small deployment
+ * ends up serving its own dashboard.
+ */
 export function useAdminNodes() {
+  const pageActivity = usePageActivity();
+
   return useQuery({
     queryKey: adminKeys.nodes(),
     queryFn: () => api<StreamNode[]>("/admin/nodes").then((d) => d ?? []),
     staleTime: ADMIN_STALE_TIME,
+    refetchInterval: pageActivity.canApplyRealtimeUpdates ? ADMIN_STALE_TIME : false,
   });
 }
 
