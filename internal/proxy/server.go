@@ -29,7 +29,6 @@ import (
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
-	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 // Server is the HTTP handler for proxy mode.
@@ -279,7 +278,7 @@ func (s *Server) buildCapabilitySnapshotLocked(ctx context.Context) (playback.HW
 	// whole rebuild inside the window a caller was told to allow, and only a
 	// deadline the builder owns bounds the background snapshot, whose context
 	// lives as long as the process.
-	ctx, cancel := context.WithTimeout(ctx, tonemap.ProbeEndpointTimeout(hwAccel, hwDevice))
+	ctx, cancel := context.WithTimeout(ctx, playback.CapabilityEndpointTimeout(hwAccel, hwDevice))
 	defer cancel()
 	// A walk that ran out of budget is refused rather than published: it marks
 	// unprobed backends Verified=false, which is byte-identical to a real

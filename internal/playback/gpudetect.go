@@ -205,7 +205,7 @@ func NormalizeProbeRequestTimeout(millis int64, fallback time.Duration) time.Dur
 	if millis < probeRequestMinTimeout.Milliseconds() {
 		return probeRequestMinTimeout
 	}
-	if ceiling := tonemap.MaxProbeRequestTimeout(); millis > ceiling.Milliseconds() {
+	if ceiling := MaxCapabilityRequestTimeout(); millis > ceiling.Milliseconds() {
 		return ceiling
 	}
 	return time.Duration(millis) * time.Millisecond
@@ -387,6 +387,37 @@ func hwAccelWalkTimeout(candidates hwCandidates) time.Duration {
 		commands = 1
 	}
 	return time.Duration(commands)*hwProbeCommandTimeout + hwAccelWalkSlack
+}
+
+// CapabilityEndpointTimeout is how long one capability endpoint may take to
+// answer: the hardware detection walk plus the tone-map matrix and the overhead
+// around it.
+//
+// Both halves scale with the configured device set, and they live in different
+// packages — tonemap cannot see the walk, because playback imports tonemap and
+// not the reverse. Composing them here is what stops the two from drifting: a
+// constant standing in for one of them inside the other has to be raised by
+// hand whenever it grows, and the first time the walk grew, it was not.
+func CapabilityEndpointTimeout(hwAccel, hwDevice string) time.Duration {
+	return hwAccelWalkTimeout(collectHWCandidates(hwDevice)) +
+		tonemap.ProbeEndpointTimeout(hwAccel, hwDevice)
+}
+
+// CapabilityRequestTimeout is CapabilityEndpointTimeout plus the transport
+// margin a remote caller needs. It is what a node advertises and what a caller
+// of that node's capability endpoint must allow.
+func CapabilityRequestTimeout(hwAccel, hwDevice string) time.Duration {
+	return CapabilityEndpointTimeout(hwAccel, hwDevice) + tonemap.ProbeRequestSlack
+}
+
+// MaxCapabilityRequestTimeout is the largest budget a node may advertise and be
+// believed, derived from the same composition at the device cap.
+func MaxCapabilityRequestTimeout() time.Duration {
+	devices := make([]string, 0, tonemap.MaxProbedDevices)
+	for i := range tonemap.MaxProbedDevices {
+		devices = append(devices, defaultDRIDir+"/renderD"+strconv.Itoa(128+i))
+	}
+	return CapabilityRequestTimeout(hwAccelAuto, strings.Join(devices, ","))
 }
 
 // hwCandidates groups the candidate render devices by the backend each one can

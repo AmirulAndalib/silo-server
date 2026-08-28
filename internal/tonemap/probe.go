@@ -293,6 +293,11 @@ func ProbeEndpointTimeout(hardwareBackend, hardwareDevice string) time.Duration 
 	return ProbeTotalTimeout(backend, hardwareDevice) + probeEndpointSlack
 }
 
+// ProbeRequestSlack is the transport and response margin a remote caller adds
+// on top of a node's endpoint budget. Exported so playback can compose the same
+// request budget without duplicating the number.
+const ProbeRequestSlack = probeRequestSlack
+
 // MaxProbedDevices is the device count the ceiling on an advertised probe
 // budget is derived from.
 //

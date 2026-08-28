@@ -149,7 +149,7 @@ func TestComputeCapabilityHashOfEmptyReport(t *testing.T) {
 // nine-device node's legitimate 311 seconds, so the API canceled that node's
 // re-probe before its own deadline every time and its inventory never landed.
 func TestNormalizeProbeRequestTimeoutAdmitsALargeButRealBudget(t *testing.T) {
-	nineDevices := tonemap.ProbeRequestTimeout(tonemap.BackendQSV,
+	nineDevices := CapabilityRequestTimeout(tonemap.BackendQSV,
 		"/dev/dri/renderD128,/dev/dri/renderD129,/dev/dri/renderD130,/dev/dri/renderD131,"+
 			"/dev/dri/renderD132,/dev/dri/renderD133,/dev/dri/renderD134,/dev/dri/renderD135,/dev/dri/renderD136")
 
@@ -161,7 +161,7 @@ func TestNormalizeProbeRequestTimeoutAdmitsALargeButRealBudget(t *testing.T) {
 	// It is still a ceiling: the value comes off the wire from a worker, and a
 	// caller holds a connection open for it.
 	absurd := 24 * time.Hour
-	if got := NormalizeProbeRequestTimeout(absurd.Milliseconds(), time.Minute); got != tonemap.MaxProbeRequestTimeout() {
-		t.Fatalf("normalized = %v for an absurd advertisement, want the %v ceiling", got, tonemap.MaxProbeRequestTimeout())
+	if got := NormalizeProbeRequestTimeout(absurd.Milliseconds(), time.Minute); got != MaxCapabilityRequestTimeout() {
+		t.Fatalf("normalized = %v for an absurd advertisement, want the %v ceiling", got, MaxCapabilityRequestTimeout())
 	}
 }

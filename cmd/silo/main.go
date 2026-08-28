@@ -110,7 +110,6 @@ import (
 	"github.com/Silo-Server/silo-server/internal/taskmanager/tasks"
 	"github.com/Silo-Server/silo-server/internal/taskmanager/triggers"
 	"github.com/Silo-Server/silo-server/internal/telemetry"
-	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 	"github.com/Silo-Server/silo-server/internal/usercollections"
 	"github.com/Silo-Server/silo-server/internal/userdb"
@@ -276,7 +275,7 @@ func nodeCapabilityProbeBudget(live func() *config.Config) func(*nodepool.Node) 
 				hwDevice = *node.HWDeviceOverride
 			}
 		}
-		return max(nodeCapabilityRequestTimeout, tonemap.ProbeRequestTimeout(hwAccel, hwDevice))
+		return max(nodeCapabilityRequestTimeout, playback.CapabilityRequestTimeout(hwAccel, hwDevice))
 	}
 }
 

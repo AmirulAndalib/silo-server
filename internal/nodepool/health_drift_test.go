@@ -684,3 +684,57 @@ func TestResolveDriftNoteClearsWhenTheSameCardReturnsByUUID(t *testing.T) {
 		t.Fatalf("capability_drift = %q, want the same uuid in a new slot to clear it", *got)
 	}
 }
+
+// A mixed host can carry a backend that has never worked — VAAPI failing beside
+// a working QSV is ordinary. Requiring every backend to verify before clearing
+// meant a note about a lost render device latched forever, long after that
+// device came back and the backend that used it verified again.
+func TestResolveDriftNoteClearsDespiteAnUnrelatedFailingBackend(t *testing.T) {
+	const recovered = `{"resolved":"qsv","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],` +
+		`"detected_backends":[{"backend":"qsv","verified":true},{"backend":"vaapi","verified":false,"reason":"no driver"}]}`
+
+	standing := "render devices gone: /dev/dri/renderD128"
+	baseline := []byte(`{"backends":["qsv"],"devices":[{"aliases":["0000:03:00.0","/dev/dri/renderD128"]}]}`)
+	payload := []byte(recovered)
+	drift, parsed := computeCapabilityDrift(payload, payload)
+
+	if got, _ := resolveDriftNote(&standing, baseline, drift, parsed, payload); got != nil {
+		t.Fatalf("capability_drift = %q, want it cleared: the lost device is back and qsv verifies", *got)
+	}
+}
+
+// The baseline still decides. A backend the note is waiting on that has not come
+// back keeps it latched, however healthy the rest of the report looks.
+func TestResolveDriftNoteKeepsNoteWhenTheBaselineBackendIsStillFailing(t *testing.T) {
+	const stillBroken = `{"resolved":"vaapi","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],` +
+		`"detected_backends":[{"backend":"qsv","verified":false,"reason":"no driver"},{"backend":"vaapi","verified":true}]}`
+
+	standing := "backends no longer verifying: qsv"
+	baseline := []byte(`{"backends":["qsv"]}`)
+	payload := []byte(stillBroken)
+	drift, parsed := computeCapabilityDrift(payload, payload)
+
+	got, _ := resolveDriftNote(&standing, baseline, drift, parsed, payload)
+	if got == nil {
+		t.Fatal("capability_drift cleared while the backend it names is still failing")
+	}
+}
+
+// A report with nothing probed is not evidence of anything. Every backend
+// skipped means the node could not open its configured devices, which says
+// nothing about the hardware the note is waiting on.
+func TestResolveDriftNoteKeepsNoteWhenEveryBackendWasSkipped(t *testing.T) {
+	const allSkipped = `{"resolved":"none","render_devices":[],` +
+		`"detected_backends":[{"backend":"qsv","skipped":true},{"backend":"vaapi","skipped":true}]}`
+
+	standing := "render devices gone: /dev/dri/renderD128"
+	baseline := []byte(`{"devices":[{"aliases":["/dev/dri/renderD128"]}]}`)
+	payload := []byte(allSkipped)
+	drift, parsed := computeCapabilityDrift(payload, payload)
+
+	if got, _ := resolveDriftNote(&standing, baseline, drift, parsed, payload); got == nil {
+		t.Fatal("capability_drift cleared on a report where nothing was probed")
+	}
+}

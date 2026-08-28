@@ -302,7 +302,10 @@ func (h *PlaybackHandler) localToneMapCapabilitiesForTransportV3(ctx context.Con
 
 func (h *PlaybackHandler) localToneMapProbeTimeoutV3() time.Duration {
 	cfg := h.playbackConfig()
-	return tonemap.ProbeEndpointTimeout(cfg.HWAccel, cfg.HWDevice)
+	// The whole read, not its tone-map half: localToneMapCapabilitiesV3 resolves
+	// the backend first, and on Linux that is a full hardware walk whose cost
+	// scales with the configured device set.
+	return playback.CapabilityEndpointTimeout(cfg.HWAccel, cfg.HWDevice)
 }
 
 // remoteToneMapProbeTimeoutV3 returns how long to allow one capability read of

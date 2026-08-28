@@ -845,7 +845,7 @@ func resolveToneMapRecipe(ctx context.Context, opts *playback.TranscodeOpts) err
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	resolveCtx, cancel := context.WithTimeout(ctx, tonemap.ProbeEndpointTimeout(opts.HWAccel, opts.HWDevice))
+	resolveCtx, cancel := context.WithTimeout(ctx, playback.CapabilityEndpointTimeout(opts.HWAccel, opts.HWDevice))
 	defer cancel()
 	if err := resolveCtx.Err(); err != nil {
 		return err
@@ -1085,7 +1085,7 @@ func (s *Server) buildCapabilitySnapshotLocked(ctx context.Context) (playback.HW
 	if err != nil {
 		return playback.HWAccelInfo{}, err
 	}
-	info.ProbeRequestTimeoutMillis = tonemap.ProbeRequestTimeout(configuredHWAccel, hwDevice).Milliseconds()
+	info.ProbeRequestTimeoutMillis = playback.CapabilityRequestTimeout(configuredHWAccel, hwDevice).Milliseconds()
 	capabilities, err := tonemap.Probe(resolveCtx, playback.ResolveFFmpegPath(ffmpegPath), info.Resolved, hwDevice)
 	if err != nil {
 		return playback.HWAccelInfo{}, err
@@ -1166,7 +1166,7 @@ func (s *Server) refreshCapabilitySnapshot(ctx context.Context) {
 }
 
 func toneMapCapabilityResolveTimeout(hardwareBackend, hardwareDevice string) time.Duration {
-	return tonemap.ProbeEndpointTimeout(hardwareBackend, hardwareDevice)
+	return playback.CapabilityEndpointTimeout(hardwareBackend, hardwareDevice)
 }
 
 func (s *Server) handleChapterThumbnailExtract(w http.ResponseWriter, r *http.Request) {

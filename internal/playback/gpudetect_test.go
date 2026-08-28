@@ -479,7 +479,7 @@ func TestNormalizeProbeRequestTimeout(t *testing.T) {
 			name:     "too large",
 			millis:   (24 * time.Hour).Milliseconds(),
 			fallback: 2 * time.Minute,
-			want:     tonemap.MaxProbeRequestTimeout(),
+			want:     MaxCapabilityRequestTimeout(),
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

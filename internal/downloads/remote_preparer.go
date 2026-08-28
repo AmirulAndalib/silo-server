@@ -495,9 +495,11 @@ func (p *NodeAwarePreparer) remoteToneMapProbeTimeout(nodeURL string) time.Durat
 	}
 	cfg := p.config()
 	if cfg == nil {
-		return tonemap.ProbeRequestTimeout("", "")
+		return playback.CapabilityRequestTimeout("", "")
 	}
-	return tonemap.ProbeRequestTimeout(cfg.Playback.HWAccel, cfg.Playback.HWDevice)
+	// The whole capability read, not just its tone-map half: the node runs a
+	// hardware walk first, and that walk scales with the configured device set.
+	return playback.CapabilityRequestTimeout(cfg.Playback.HWAccel, cfg.Playback.HWDevice)
 }
 
 // cacheToneMapCapabilityFailure negatively caches an unreachable or invalid

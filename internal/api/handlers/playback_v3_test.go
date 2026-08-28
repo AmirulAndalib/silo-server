@@ -5398,7 +5398,7 @@ func TestPlaybackV3ToneMapBudgetsCoverColdNodeWork(t *testing.T) {
 		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/dev/dri/renderD128"}
 	}
 
-	if got, want := handler.localToneMapProbeTimeoutV3(), tonemap.ProbeEndpointTimeout(tonemap.BackendQSV, "/dev/dri/renderD128"); got != want {
+	if got, want := handler.localToneMapProbeTimeoutV3(), playback.CapabilityEndpointTimeout(tonemap.BackendQSV, "/dev/dri/renderD128"); got != want {
 		t.Fatalf("local tone-map probe timeout = %s, want %s", got, want)
 	}
 	if got, want := handler.remoteToneMapProbeTimeoutV3("https://unknown.example"), remoteNodeProbeFallbackTimeout; got != want {
@@ -5544,7 +5544,7 @@ func TestRemoteToneMapProbeTimeoutUsesTargetNodeBudget(t *testing.T) {
 	// Still bounded — the value comes off the wire from a worker — but at the
 	// ceiling the probe formula produces rather than a round number that a real
 	// nine-device node already exceeds.
-	if got, want := handler.remoteToneMapProbeTimeoutV3(remote.URL), tonemap.MaxProbeRequestTimeout(); got != want {
+	if got, want := handler.remoteToneMapProbeTimeoutV3(remote.URL), playback.MaxCapabilityRequestTimeout(); got != want {
 		t.Fatalf("bounded remote probe timeout = %s, want %s", got, want)
 	}
 }

@@ -769,8 +769,13 @@ func resolveDriftNote(stored *string, storedBaseline []byte, drift capabilityDri
 	if stored == nil || strings.TrimSpace(*stored) == "" {
 		return nil, nil
 	}
-	if !parsed || !hardwareProbesClean(payload) {
+	if !parsed || !hardwareProbesEvidenced(payload) {
 		// Nothing new was lost, but this report is not evidence of recovery.
+		return stored, marshalDriftBaseline(outstanding)
+	}
+	if outstanding.empty() && !hardwareProbesClean(payload) {
+		// A note written before baselines existed names nothing to wait for, so
+		// a wholly clean report is the only evidence available for it.
 		return stored, marshalDriftBaseline(outstanding)
 	}
 	if !outstanding.recoveredBy(payload) {
@@ -918,6 +923,30 @@ func hardwareProbesClean(payload []byte) bool {
 		probed = true
 	}
 	return probed
+}
+
+// hardwareProbesEvidenced reports whether this report contains probe evidence at
+// all: at least one backend that was actually probed rather than skipped.
+//
+// It is the weaker of the two, and it is what a note with a baseline is judged
+// against. Requiring every backend to verify latches a note forever on a node
+// that carries one which has never worked — VAAPI failing beside a working QSV
+// is an ordinary mixed host — even after the render device the note is about
+// comes back and the backend that used it verifies again. Which backends had to
+// return is the baseline's question, and recoveredBy answers it precisely; this
+// only rules out the empty report, where a loop over no backends finds no
+// failure and would otherwise read as recovery.
+func hardwareProbesEvidenced(payload []byte) bool {
+	var current capabilityDriftView
+	if json.Unmarshal(payload, &current) != nil {
+		return false
+	}
+	for _, backend := range current.DetectedBackends {
+		if !backend.Skipped {
+			return true
+		}
+	}
+	return false
 }
 
 // computeCapabilityDrift compares the report a node just served against the one

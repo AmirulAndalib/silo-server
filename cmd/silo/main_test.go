@@ -435,7 +435,7 @@ func TestNodeCapabilityProbeBudgetTracksTheConfiguredDevices(t *testing.T) {
 	oneDevice := nodeCapabilityProbeBudget(func() *config.Config { return single })(clusterNode)
 	twoDevices := nodeCapabilityProbeBudget(func() *config.Config { return pair })(clusterNode)
 
-	if want := tonemap.ProbeRequestTimeout("qsv", pair.Playback.HWDevice); twoDevices != want {
+	if want := playback.CapabilityRequestTimeout("qsv", pair.Playback.HWDevice); twoDevices != want {
 		t.Fatalf("two-device budget = %v, want the node's own advertised %v", twoDevices, want)
 	}
 	if twoDevices <= nodeCapabilityRequestTimeout {
