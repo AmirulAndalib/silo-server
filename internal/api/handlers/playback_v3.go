@@ -323,16 +323,21 @@ func (h *PlaybackHandler) remoteToneMapProbeTimeoutV3(nodeURL string) time.Durat
 	h.v3NodeCapabilitiesMu.Lock()
 	budget := h.v3NodeProbeBudgets[nodeURL]
 	h.v3NodeCapabilitiesMu.Unlock()
-	if budget > 0 {
-		return budget
+	// Never less than what this node currently describes, whatever was learned
+	// from it before.
+	//
+	// A learned budget is kept across invalidations on purpose — an invalidation
+	// is the moment the next read is coldest and slowest, so dropping the budget
+	// with the inventory would fall back to a figure short of what the node
+	// needs. But a per-node policy edit invalidates through the same path, and
+	// widening hw_device_override is precisely a change that makes the learned
+	// number too small: the node reloads, walks four devices instead of one, and
+	// gets canceled at the one-device deadline. Nothing recovers from that on its
+	// own, because a budget is only ever learned from a read that completes.
+	if cold := h.coldNodeProbeTimeoutV3(nodeURL); cold > budget {
+		return cold
 	}
-	// Nothing learned from this node yet, which is every node after an API
-	// restart and any node registered since. The durable report holds what it
-	// last advertised, and its override holds what it would advertise; the flat
-	// fallback below is shorter than a two-device node's matrix legitimately
-	// takes, so reaching for it first would cancel exactly the multi-GPU nodes
-	// this path most wants to keep.
-	return h.coldNodeProbeTimeoutV3(nodeURL)
+	return budget
 }
 
 // coldNodeProbeTimeoutV3 prices one capability read of a node this process has

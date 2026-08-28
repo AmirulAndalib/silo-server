@@ -415,29 +415,39 @@ func CapabilityRequestTimeout(hwAccel, hwDevice string) time.Duration {
 // node this process has not read successfully yet.
 //
 // Cold is when the read is slowest — every probe cache on the node is empty and
-// the whole matrix runs — so it is exactly the wrong moment to guess low, and
-// there are three progressively worse sources to guess from:
+// the whole matrix runs — so it is exactly the wrong moment to guess low.
+// Getting it low does not slow the read down, it cancels it: the node drops out
+// of the capability map mid-matrix and playback plans without it.
 //
-//   - The budget the node itself advertised in the report stored for it. That
-//     is the node's own measurement of its own matrix, it survives an API
-//     restart because it is persisted with the report, and it is right even
-//     when this replica has never spoken to the node.
-//   - The node's effective acceleration policy — its own override where it has
-//     one, the cluster setting otherwise — priced here. This is what a node
-//     registered a minute ago has, and the override matters: a cluster
-//     configured for one device says nothing about a node overridden onto four.
-//   - The caller's fallback, for a node with neither.
+// Two sources describe the same node and neither dominates, so the answer is
+// the larger:
 //
-// Getting this low does not slow anything down, it cancels the read: the node
-// is dropped from the capability map mid-matrix and playback plans without it.
+//   - What the node advertised in the report stored for it. That is the node's
+//     own measurement of its own matrix, it survives an API restart because it
+//     is persisted with the report, and it is right even when this replica has
+//     never spoken to the node. It is also as old as the report: an operator who
+//     has just widened the node's device set has invalidated it.
+//   - What the node's effective acceleration policy prices — its own override
+//     where it has one, the cluster setting otherwise. This moves the moment an
+//     operator edits the node, before any refetch can land, which is exactly
+//     when the stored figure is wrong. But it is priced *here*, on an API
+//     replica that does not have the node's cards, so device classification
+//     falls back to the cheapest backend and it reads as a floor rather than as
+//     the truth.
+//
+// The fallback covers a node with neither: no stored report and no policy.
 func ColdCapabilityRequestTimeout(storedReport json.RawMessage, hwAccel, hwDevice string, fallback time.Duration) time.Duration {
+	budget := time.Duration(0)
 	if millis := AdvertisedProbeBudgetMillis(storedReport); millis > 0 {
-		return NormalizeProbeRequestTimeout(millis, fallback)
+		budget = NormalizeProbeRequestTimeout(millis, fallback)
 	}
-	if budget := CapabilityRequestTimeout(hwAccel, hwDevice); budget > 0 {
-		return budget
+	if priced := CapabilityRequestTimeout(hwAccel, hwDevice); priced > budget {
+		budget = priced
 	}
-	return fallback
+	if budget <= 0 {
+		return fallback
+	}
+	return budget
 }
 
 // AdvertisedProbeBudgetMillis reads the probe budget out of a stored capability

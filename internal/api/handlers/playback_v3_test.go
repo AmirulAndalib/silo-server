@@ -5524,11 +5524,17 @@ func TestRemoteToneMapProbeTimeoutUsesTargetNodeBudget(t *testing.T) {
 	defer remote.Close()
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.PlaybackConfig = func() config.PlaybackConfig {
-		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/central/device/one,/central/device/two"}
+		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/central/device/one"}
 	}
 
 	if _, err := handler.lookupRemoteCapabilitiesV3(context.Background(), remote.URL, false); err != nil {
 		t.Fatal(err)
+	}
+	// The node's own figure is what this path exists to use. It has to exceed
+	// what the cluster setting prices, or the floor below it would be answering
+	// and this would pass without the target node being consulted at all.
+	if cluster := playback.CapabilityRequestTimeout(tonemap.BackendQSV, "/central/device/one"); cluster >= 137*time.Second {
+		t.Fatalf("fixture is inert: the cluster price %s must stay under the node's 137s", cluster)
 	}
 	if got, want := handler.remoteToneMapProbeTimeoutV3(remote.URL), 137*time.Second; got != want {
 		t.Fatalf("remote probe timeout = %s, want target node budget %s", got, want)
@@ -5615,5 +5621,59 @@ func TestPlaybackV3ColdNodeProbeBudgetFollowsTheOverrideWithoutAReport(t *testin
 	}
 	if cluster := playback.CapabilityRequestTimeout(tonemap.BackendQSV, "/dev/dri/renderD128"); want <= cluster {
 		t.Fatalf("fixture is inert: the override budget %s must exceed the cluster's %s", want, cluster)
+	}
+}
+
+// A per-node policy edit invalidates the inventory through the same path a
+// hardware change does, and the learned budget deliberately survives that. But
+// widening hw_device_override is exactly the change that makes the learned
+// number too small: the node reloads, walks four devices instead of one, and is
+// canceled at the one-device deadline on every retry — with no way back, since a
+// budget is only learned from a read that completes.
+func TestPlaybackV3RepricesALearnedBudgetAfterTheDeviceSetGrows(t *testing.T) {
+	const nodeURL = "https://gpu-3.example"
+	devices := "/dev/dri/renderD128,/dev/dri/renderD129,/dev/dri/renderD130,/dev/dri/renderD131"
+	backend := tonemap.BackendQSV
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/dev/dri/renderD128"}
+	}
+	handler.NodePlanner = &v3NodeLookupPlanner{node: &nodepool.Node{
+		ID: 3, URL: nodeURL, HWAccelOverride: &backend, HWDeviceOverride: &devices,
+	}}
+	// Learned while the node was still on the cluster's single device.
+	learned := playback.CapabilityRequestTimeout(backend, "/dev/dri/renderD128")
+	handler.v3NodeCapabilitiesMu.Lock()
+	handler.rememberNodeProbeBudgetLockedV3(nodeURL, learned)
+	handler.v3NodeCapabilitiesMu.Unlock()
+
+	handler.RefreshNodeCapabilitiesV3(nodeURL)
+
+	want := playback.CapabilityRequestTimeout(backend, devices)
+	if got := handler.remoteToneMapProbeTimeoutV3(nodeURL); got != want {
+		t.Fatalf("probe timeout after the override grew = %s, want the four-device %s", got, want)
+	}
+	if want <= learned {
+		t.Fatalf("fixture is inert: the four-device budget %s must exceed the learned %s", want, learned)
+	}
+}
+
+// The reverse must still hold: a node whose own measurement exceeds what this
+// replica can price keeps its measurement, which is the whole reason the learned
+// budget survives an invalidation.
+func TestPlaybackV3KeepsALearnedBudgetLargerThanThePolicyPrice(t *testing.T) {
+	const nodeURL = "https://gpu-4.example"
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/dev/dri/renderD128"}
+	}
+	handler.NodePlanner = &v3NodeLookupPlanner{node: &nodepool.Node{ID: 4, URL: nodeURL}}
+	learned := playback.MaxCapabilityRequestTimeout()
+	handler.v3NodeCapabilitiesMu.Lock()
+	handler.rememberNodeProbeBudgetLockedV3(nodeURL, learned)
+	handler.v3NodeCapabilitiesMu.Unlock()
+
+	if got := handler.remoteToneMapProbeTimeoutV3(nodeURL); got != learned {
+		t.Fatalf("probe timeout = %s, want the node's own larger measurement %s", got, learned)
 	}
 }

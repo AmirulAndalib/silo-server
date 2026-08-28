@@ -490,15 +490,21 @@ func (p *NodeAwarePreparer) remoteToneMapProbeTimeout(nodeURL string) time.Durat
 	p.capabilityMu.Lock()
 	timeout := p.capabilities[nodeURL].probeRequestTimeout
 	p.capabilityMu.Unlock()
-	if timeout > 0 {
-		return timeout
-	}
-	// Cold. The cluster setting describes the cluster, not this node: a node
-	// overridden onto four devices walks four, and pricing it at the cluster's
-	// one cancels its matrix before its own deadline — which drops it from the
-	// capability map and sends the download local, or fails it outright where
-	// local fallback is off. Its own stored report and its own override are
-	// what describe it.
+	// The larger of what was learned from this node and what it currently
+	// describes; neither dominates.
+	//
+	// A learned budget is preserved across failures on purpose, so a cold retry
+	// is not cut short by a fallback — but it describes the node as it was, and
+	// an operator who widens hw_device_override leaves one behind that prices a
+	// smaller device set than the node now walks. Every retry would be canceled
+	// at that deadline, and since a budget is only ever learned from a read that
+	// completes, nothing would replace it.
+	//
+	// What the node currently describes is its own stored report and its own
+	// override — not the cluster setting, which says nothing about a node
+	// overridden onto four devices. Pricing four at the cluster's one cancels the
+	// matrix mid-walk, which drops the node from the capability map and sends the
+	// download local, or fails it outright where local fallback is off.
 	var node *nodepool.Node
 	if lookup, ok := p.planner.(transcodeNodeLookup); ok {
 		if found, ok := lookup.TranscodeNodeByURL(nodeURL); ok {
@@ -511,12 +517,16 @@ func (p *NodeAwarePreparer) remoteToneMapProbeTimeout(nodeURL string) time.Durat
 	}
 	// The whole capability read, not just its tone-map half: the node runs a
 	// hardware walk first, and that walk scales with the device set it walks.
-	return playback.ColdCapabilityRequestTimeout(
+	cold := playback.ColdCapabilityRequestTimeout(
 		node.StoredCapabilities(),
 		node.EffectiveHWAccel(hwAccel),
 		node.EffectiveHWDevice(hwDevice),
 		playback.CapabilityRequestTimeout(hwAccel, hwDevice),
 	)
+	if cold > timeout {
+		return cold
+	}
+	return timeout
 }
 
 // transcodeNodeLookup resolves the pooled record behind a transcode node URL,

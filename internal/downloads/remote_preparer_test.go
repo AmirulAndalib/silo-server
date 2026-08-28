@@ -1072,10 +1072,10 @@ func TestNodeAwarePreparerColdProbeBudgetFollowsTheNodeOverride(t *testing.T) {
 	}
 }
 
-// What the node last advertised beats what its policy would be priced at: it is
-// the node's own measurement of its own matrix, and it survives an API restart
-// because it is stored with the report.
-func TestNodeAwarePreparerColdProbeBudgetPrefersTheStoredAdvertisement(t *testing.T) {
+// What the node last advertised is its own measurement of its own matrix, and it
+// survives an API restart because it is stored with the report — so where it
+// exceeds what this replica can price, it is the answer.
+func TestNodeAwarePreparerColdProbeBudgetTakesTheStoredAdvertisement(t *testing.T) {
 	const nodeURL = "https://node.example"
 	planner := &nodeLookupPlanner{node: &nodepool.Node{
 		ID: 1, URL: nodeURL,
@@ -1086,5 +1086,55 @@ func TestNodeAwarePreparerColdProbeBudgetPrefersTheStoredAdvertisement(t *testin
 
 	if got, want := preparer.remoteToneMapProbeTimeout(nodeURL), 161*time.Second; got != want {
 		t.Fatalf("cold probe timeout = %s, want the advertised %s", got, want)
+	}
+}
+
+// A budget learned before an operator widened the node's device set describes
+// the node as it was. Keeping it would cancel every cold retry at the old
+// one-device deadline — and a budget is only ever learned from a read that
+// completes, so nothing would replace it.
+func TestNodeAwarePreparerRepricesALearnedBudgetAfterTheDeviceSetGrows(t *testing.T) {
+	const nodeURL = "https://node.example"
+	devices := "/dev/dri/renderD128,/dev/dri/renderD129,/dev/dri/renderD130,/dev/dri/renderD131"
+	backend := tonemap.BackendQSV
+	planner := &nodeLookupPlanner{node: &nodepool.Node{
+		ID: 1, URL: nodeURL, HWAccelOverride: &backend, HWDeviceOverride: &devices,
+	}}
+	cfg := &config.Config{}
+	cfg.Playback.HWAccel = tonemap.BackendQSV
+	cfg.Playback.HWDevice = "/dev/dri/renderD128"
+	preparer := NewNodeAwarePreparer(nil, planner, func() *config.Config { return cfg })
+	// What the node advertised while it was still on one device.
+	learned := playback.CapabilityRequestTimeout(backend, "/dev/dri/renderD128")
+	preparer.capabilities[nodeURL] = remoteToneMapCapabilities{
+		probeRequestTimeout: learned,
+		expiresAt:           time.Now().Add(-time.Second),
+	}
+
+	want := playback.CapabilityRequestTimeout(backend, devices)
+	if got := preparer.remoteToneMapProbeTimeout(nodeURL); got != want {
+		t.Fatalf("probe timeout after the override grew = %s, want the four-device %s", got, want)
+	}
+	if want <= learned {
+		t.Fatalf("fixture is inert: the four-device budget %s must exceed the learned %s", want, learned)
+	}
+}
+
+// The other direction: a node whose own measurement exceeds what this replica
+// can price for it keeps that measurement. An API replica has none of the node's
+// cards, so its pricing is a floor rather than the truth.
+func TestNodeAwarePreparerKeepsALearnedBudgetLargerThanThePolicyPrice(t *testing.T) {
+	const nodeURL = "https://node.example"
+	planner := &nodeLookupPlanner{node: &nodepool.Node{ID: 1, URL: nodeURL}}
+	cfg := &config.Config{}
+	preparer := NewNodeAwarePreparer(nil, planner, func() *config.Config { return cfg })
+	learned := playback.MaxCapabilityRequestTimeout()
+	preparer.capabilities[nodeURL] = remoteToneMapCapabilities{
+		probeRequestTimeout: learned,
+		expiresAt:           time.Now().Add(-time.Second),
+	}
+
+	if got := preparer.remoteToneMapProbeTimeout(nodeURL); got != learned {
+		t.Fatalf("probe timeout = %s, want the node's own larger measurement %s", got, learned)
 	}
 }
