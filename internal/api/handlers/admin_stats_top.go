@@ -213,7 +213,10 @@ func queryAdminTopActivity(ctx context.Context, pool *pgxpool.Pool, days, limit 
 	// sessions — user_watch_history.duration_seconds is the media's full
 	// runtime, so summing it would report three hours for a movie someone
 	// abandoned after a minute. A title that was only ever marked watched has
-	// no session rows and reports 0 seconds.
+	// no session rows and reports 0 seconds. Sessions are windowed on ended_at
+	// — the same stop instant watched_at records — so a session that started
+	// before the cutoff but stopped inside the window counts toward both plays
+	// and watch time rather than only the former.
 	//
 	// watched_seconds records the final absolute position, not elapsed viewing
 	// time, so a session resumed at the one-hour mark would claim the first
@@ -242,7 +245,7 @@ func queryAdminTopActivity(ctx context.Context, pool *pgxpool.Pool, days, limit 
 			                 GREATEST(EXTRACT(EPOCH FROM (p.ended_at - p.started_at)), 0))) AS total_seconds
 			FROM playback_history_admin p
 			LEFT JOIN episodes ep ON ep.content_id = p.media_item_id
-			WHERE p.started_at >= now() - make_interval(days => $1)
+			WHERE p.ended_at >= now() - make_interval(days => $1)
 			  AND COALESCE(ep.series_id, p.media_item_id) IN (SELECT item_id FROM ranked)
 			GROUP BY 1
 		)
@@ -307,7 +310,7 @@ func queryAdminTopActivity(ctx context.Context, pool *pgxpool.Pool, days, limit 
 			       SUM(LEAST(GREATEST(p.watched_seconds, 0),
 			                 GREATEST(EXTRACT(EPOCH FROM (p.ended_at - p.started_at)), 0))) AS total_seconds
 			FROM playback_history_admin p
-			WHERE p.started_at >= now() - make_interval(days => $1)
+			WHERE p.ended_at >= now() - make_interval(days => $1)
 			  AND EXISTS (
 				SELECT 1 FROM ranked r
 				WHERE r.user_id = p.user_id AND r.profile_id = p.profile_id

@@ -1050,8 +1050,9 @@ as a play. Episodes are rolled up to their series, so a season binge reads as
 one show and a title's `media_item_id` is a series content id for TV.
 
 `total_seconds` is **watched time**, summed from finalized playback sessions
-(`playback_history_admin.watched_seconds`) started inside the same window — not
-the runtime of what was played. Watch history records the media's full duration,
+(`playback_history_admin.watched_seconds`) that *ended* inside the same window
+— the same stop instant `watched_at` records, so plays and watch time see the
+same sessions — not the runtime of what was played. Watch history records the media's full duration,
 so summing that would report three hours for a movie someone abandoned after a
 minute. An entry that was only ever marked watched has no sessions and reports
 `0`. Because `watched_seconds` records a session's final absolute position, a

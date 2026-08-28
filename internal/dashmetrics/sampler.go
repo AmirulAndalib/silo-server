@@ -44,6 +44,10 @@ const (
 	// sampleInterval matches the minute resolution of the samples table.
 	sampleInterval = time.Minute
 
+	// sampleTickTimeout bounds one tick's database work, comfortably under the
+	// interval so a wedged pool costs missed minutes, not a stuck sampler.
+	sampleTickTimeout = 30 * time.Second
+
 	// retentionDays is how much history the charts can show — a month, so the
 	// dashboard's widest range has samples to draw. 1440 minutes a day times 31
 	// days is ~45k rows per source, and sources are (1 + replicas), so the table
@@ -130,12 +134,21 @@ func (s *Sampler) Stop() {
 }
 
 // sampleOnce writes this minute's rows and, once an hour, prunes expired ones.
+//
+// Every tick's database work runs under its own deadline: the sampler is one
+// goroutine, and an Exec left on the lifetime context during a wedged pool
+// would block it — and with it every later sample and the retention prune —
+// for as long as the outage lasts. A bounded tick turns that into a bounded
+// gap in the chart instead.
 func (s *Sampler) sampleOnce(ctx context.Context, at time.Time) {
 	bucket := sampleBucket(at)
 	if bucket.Equal(s.lastBucket) {
 		return
 	}
 	s.lastBucket = bucket
+
+	ctx, cancel := context.WithTimeout(ctx, sampleTickTimeout)
+	defer cancel()
 
 	s.sampleShared(ctx)
 	s.sampleProcessEgress(ctx, at)
@@ -180,7 +193,12 @@ func (s *Sampler) sampleProcessEgress(ctx context.Context, at time.Time) {
 		return
 	}
 
-	delta, next := computeEgressDelta(s.prevBytes, s.telemetry.Snapshot())
+	// Sweep rather than Snapshot: Snapshot reports byte totals as of the last
+	// telemetry sweep, and a sweep interval configured above one minute would
+	// make ticks in between read zero growth and the next one attribute
+	// several minutes of bytes to a single minute — a spike that never
+	// happened. Sweep collects the live counters now.
+	delta, next := computeEgressDelta(s.prevBytes, s.telemetry.Sweep())
 	previous, previousAt := s.prevBytes, s.lastEgressAt
 	s.prevBytes, s.lastEgressAt = next, at
 
