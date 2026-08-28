@@ -23,6 +23,7 @@ function Harness() {
     <div>
       <output>{`${layout.columnCount}:${layout.rowHeight}`}</output>
       <div
+        data-testid="grid"
         ref={(element) => {
           containerRef.current = element;
           if (element && !mounted.current) {
@@ -62,6 +63,27 @@ describe("useGridLayout", () => {
     containerWidth = 360;
     act(() => notifyResize?.([], {} as ResizeObserver));
     expect(screen.getByRole("status")).toHaveTextContent("2:292.5");
+  });
+
+  it("measures immediately when a resize crosses a column breakpoint", () => {
+    render(<Harness />);
+    expect(screen.getByRole("status")).toHaveTextContent("2:322.5");
+
+    // Begin a drag. The leading edge measures, so later frames coalesce.
+    containerWidth = 360;
+    act(() => notifyResize?.([], {} as ResizeObserver));
+    expect(screen.getByRole("status")).toHaveTextContent("2:292.5");
+
+    // Mid-drag CSS reflows to three columns. `columnCount` slices the item list
+    // (`startIndex = row * columnCount`), so holding the stale 2 until the drag
+    // stopped would omit or duplicate cards for the rest of the gesture — this
+    // one notification must not be coalesced.
+    containerWidth = 340;
+    act(() => {
+      screen.getByTestId("grid").style.gridTemplateColumns = "100px 100px 100px";
+      notifyResize?.([], {} as ResizeObserver);
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("3:190");
   });
 
   it("reconciles once more after a continuous resize settles", () => {
