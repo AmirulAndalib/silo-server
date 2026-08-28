@@ -897,6 +897,14 @@ export default function NotificationsAdminSettings() {
   const { data: serverChannels } = useServerNotificationChannels();
   // Local draft for the relay URL; null means "show the saved value".
   const [pushRelayURLDraft, setPushRelayURLDraft] = useState<string | null>(null);
+  // The relay URL draft lives outside useSettingsForm (only registration
+  // persists it), so the navigation guard and reload prompt only see it
+  // through this report. Above the loading return: hooks must be unconditional.
+  useReportUnsavedChanges(
+    pushRelayURLDraft !== null &&
+      pushRelayURLDraft !==
+        (form.getValue("notifications.push_relay_url") || DEFAULT_PUSH_RELAY_URL),
+  );
 
   if (form.isLoading) {
     return (
