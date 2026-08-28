@@ -140,18 +140,33 @@ type cgroupCPUSample struct {
 
 // cgroupCPU returns this process's cgroup CPU reading for the given instant,
 // and the CPU budget in cores that reading must be normalized against (0 when
-// the cgroup imposes no quota).
-func (s *Sampler) cgroupCPU(now time.Time) (cgroupCPUSample, float64) {
+// nothing caps it).
+//
+// pinned is the size of this process's cpuset, or 0 when it is not restricted
+// to a subset. It is a second kind of cap and it belongs here rather than at the
+// caller, because which constraint binds decides which cgroup's usage the
+// reading has to come from — and the two answers are different populations.
+func (s *Sampler) cgroupCPU(now time.Time, pinned int) (cgroupCPUSample, float64) {
 	for _, paths := range s.cgroupCPUPaths {
 		if _, err := readCgroupCPUUsage(paths); err != nil {
 			continue
 		}
-		binding, quota := effectiveCgroupCPUQuota(paths)
 		// Usage comes from whichever level supplied the binding quota, not from
 		// the leaf. They are one measurement: a quota shared with sibling
 		// services throttles on their CPU time too, so dividing only this
 		// process's by it reports ten percent for a group that is saturated and
 		// being throttled — the same pairing error the memory path had.
+		binding, quota := effectiveCgroupCPUQuota(paths)
+
+		// A cpuset applies to this cgroup, not to the ancestor that owns the
+		// quota. So when it is the tighter cap the measurement moves back down
+		// with it: the ancestor's usage counts siblings that do not share this
+		// cpuset, and dividing that by a smaller private budget pins the node at
+		// a hundred percent while Silo is idle.
+		if pinned > 0 && (quota <= 0 || float64(pinned) < quota) {
+			binding, quota = paths, float64(pinned)
+		}
+
 		usage, err := readCgroupCPUUsage(binding)
 		if err != nil {
 			continue

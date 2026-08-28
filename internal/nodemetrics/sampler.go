@@ -282,15 +282,12 @@ func (s *Sampler) cpuStats(now time.Time) (busyPct, cores int) {
 		cores = runtime.NumCPU()
 	}
 
-	sample, quota := s.cgroupCPU(now)
-	// A cpuset caps CPU without setting a quota, so a process pinned to two
-	// CPUs reads cpu.max = "max" and would otherwise be measured against the
-	// whole host. Whichever cap is tighter is the one it actually runs under.
-	if pinned := cgroupCPUSetCores(s.cgroupCPUSetPaths); pinned > 0 {
-		if quota <= 0 || float64(pinned) < quota {
-			quota = float64(pinned)
-		}
-	}
+	// A cpuset caps CPU without setting a quota, so a process pinned to two CPUs
+	// reads cpu.max = "max" and would otherwise be measured against the whole
+	// host. Whichever cap is tighter is the one it actually runs under, and
+	// cgroupCPU decides that, because the answer also settles which cgroup's
+	// usage the reading comes from.
+	sample, quota := s.cgroupCPU(now, cgroupCPUSetCores(s.cgroupCPUSetPaths))
 	if quota > 0 {
 		cores = cgroupQuotaCores(quota, hostCores)
 	}

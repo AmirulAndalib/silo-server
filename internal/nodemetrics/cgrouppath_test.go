@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeSelfCgroup lays down a <procDir>/self/cgroup with the given body.
@@ -398,5 +399,67 @@ func TestEffectiveCgroupCPUQuotaReturnsTheLevelThatBinds(t *testing.T) {
 	}
 	if want := filepath.Join(leaf, "cpu.stat"); binding.usage != want {
 		t.Fatalf("binding usage = %q, want the leaf's own %q", binding.usage, want)
+	}
+}
+
+// A quota on a shared ancestor and a tighter cpuset on the leaf are caps on
+// different populations. Taking the ancestor's usage — which counts every
+// sibling under that quota — and dividing it by this process's smaller private
+// cpuset pins the node at a hundred percent while Silo is idle.
+func TestCgroupCPUMovesUsageDownWhenTheCpusetBinds(t *testing.T) {
+	root := t.TempDir()
+	previousRoot := cgroupMountRoot
+	cgroupMountRoot = root
+	t.Cleanup(func() { cgroupMountRoot = previousRoot })
+
+	leaf := filepath.Join(root, "silo.service")
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatalf("create %s: %v", leaf, err)
+	}
+	write := func(dir, name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s/%s: %v", dir, name, err)
+		}
+	}
+	// The slice allows eight cores and has burned a lot of CPU across every
+	// service under it; this one has burned very little and may use two CPUs.
+	write(root, "cpu.max", "800000 100000\n")
+	write(root, "cpu.stat", "usage_usec 9000000\n")
+	write(leaf, "cpu.max", "max 100000\n")
+	write(leaf, "cpu.stat", "usage_usec 1000000\n")
+
+	s := &Sampler{cgroupCPUPaths: []cgroupCPUPath{{
+		usage:     filepath.Join(leaf, "cpu.stat"),
+		usageKey:  cgroupCPUUsageKey,
+		usageUnit: time.Microsecond,
+		quota:     filepath.Join(leaf, "cpu.max"),
+	}}}
+
+	// No cpuset: the slice's quota binds, so its usage is the right numerator.
+	sample, quota := s.cgroupCPU(time.Now(), 0)
+	if quota != 8 {
+		t.Fatalf("quota = %v, want the slice's 8 cores", quota)
+	}
+	if want := int64(9_000_000) * int64(time.Microsecond); sample.usageNS != want {
+		t.Fatalf("usage = %d, want the slice's %d", sample.usageNS, want)
+	}
+
+	// A two-CPU cpuset is tighter, and it applies to this cgroup — so the
+	// measurement moves back down with it.
+	sample, quota = s.cgroupCPU(time.Now(), 2)
+	if quota != 2 {
+		t.Fatalf("quota = %v, want the cpuset's 2", quota)
+	}
+	if want := int64(1_000_000) * int64(time.Microsecond); sample.usageNS != want {
+		t.Fatalf("usage = %d, want this cgroup's own %d, not the slice's", sample.usageNS, want)
+	}
+
+	// A cpuset looser than the quota changes nothing.
+	sample, quota = s.cgroupCPU(time.Now(), 32)
+	if quota != 8 {
+		t.Fatalf("quota = %v, want the slice's 8 to still bind", quota)
+	}
+	if want := int64(9_000_000) * int64(time.Microsecond); sample.usageNS != want {
+		t.Fatalf("usage = %d, want the slice's %d", sample.usageNS, want)
 	}
 }

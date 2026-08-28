@@ -73,6 +73,9 @@ type Server struct {
 	// invalidation generation is what makes the re-probe honest — so without
 	// this they would genuinely run at once.
 	capabilityBuildMu sync.Mutex
+	// countProbesInFlight overrides the detached-probe count the re-probe route
+	// refuses on. Tests set it; production leaves it nil.
+	countProbesInFlight func() int
 }
 
 type remoteArtifactMissReporter interface {

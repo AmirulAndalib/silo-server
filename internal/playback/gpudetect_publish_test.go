@@ -638,3 +638,57 @@ func awaitNoProbesInFlight(t *testing.T) {
 		runtime.Gosched()
 	}
 }
+
+// Clearing the VideoToolbox cache does not supersede a probe already running:
+// that call stays registered under its key, so a rebuild joins it rather than
+// starting a cold one, and its completion repopulates the map — the re-probe
+// then publishes the verdict it was asked to discard. The generation in the key
+// is what moves the rebuild onto a fresh flight.
+func TestInvalidateHWProbeCacheSupersedesAnInFlightVideoToolboxProbe(t *testing.T) {
+	setupHWAccelTest(t)
+	currentGOOS = darwinGOOS
+	ffmpeg := writeFakeFFmpeg(t, successfulVideoToolboxProbe())
+
+	// The first flight parks inside the probe and stays there while the second
+	// call is made, so "did the second start its own flight" is decided by
+	// channel receipts rather than by how the two happen to be scheduled.
+	var starts atomic.Int32
+	blocked := make(chan struct{})
+	firstStarted := make(chan struct{})
+	previous := videoToolboxProbeStarted
+	videoToolboxProbeStarted = func() {
+		if starts.Add(1) == 1 {
+			close(firstStarted)
+			<-blocked
+		}
+	}
+	t.Cleanup(func() { videoToolboxProbeStarted = previous })
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		if result := cachedVideoToolboxProbe(ffmpeg.path); !result.available {
+			t.Errorf("in-flight probe failed: %s", result.reason)
+		}
+	})
+	<-firstStarted
+
+	InvalidateHWProbeCache()
+
+	second := make(chan hardwareProbeResult, 1)
+	wg.Go(func() { second <- cachedVideoToolboxProbe(ffmpeg.path) })
+
+	// The second call must reach its own flight while the first is still parked.
+	deadline := time.Now().Add(5 * time.Second)
+	for starts.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("the re-probe joined the flight it was supposed to supersede")
+		}
+		runtime.Gosched()
+	}
+
+	close(blocked)
+	if result := <-second; !result.available {
+		t.Fatalf("post-invalidation probe failed: %s", result.reason)
+	}
+	wg.Wait()
+}

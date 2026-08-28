@@ -71,3 +71,37 @@ func TestProxyReprobeCapabilitiesRequiresBearer(t *testing.T) {
 		t.Fatalf("status = %d, want 401 without a bearer token", recorder.Code)
 	}
 }
+
+// A probe outlives its caller by design, so a capability request abandoned
+// mid-probe releases capabilityBuildMu while ffmpeg is still encoding. A
+// re-probe arriving then would start a second smoke-encode matrix beside the
+// first, and two contending for one card publish a hardware failure for
+// hardware that is fine — the same false verdict the transcode node's gate
+// prevents, which does not care which kind of node it is on.
+func TestProxyReprobeCapabilitiesRefusedWhileProbesAreRunning(t *testing.T) {
+	const secret = "capability-secret"
+	server := newCapabilityProxyServer(t, secret)
+	server.storeCapabilityHash("sha256:previous")
+	server.countProbesInFlight = func() int { return 1 }
+
+	request := httptest.NewRequest(http.MethodPost, "/admin/reprobe-capabilities", nil)
+	request.Header.Set("Authorization", "Bearer "+secret)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 while a probe is still running", recorder.Code)
+	}
+	if got := server.storedCapabilityHash(); got != "sha256:previous" {
+		t.Fatalf("stored hash = %q, want the previous report untouched", got)
+	}
+
+	// And it is not a permanent refusal: once the detached probe lands, the
+	// re-probe an operator asked for goes through.
+	server.countProbesInFlight = func() int { return 0 }
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d after the probes finished, want 200", recorder.Code)
+	}
+}

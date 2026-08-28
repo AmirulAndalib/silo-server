@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -28,9 +29,11 @@ type reprobeCapabilitiesResponse struct {
 // of this handler for the full reasoning. A rebuild that does not finish keeps
 // the previously published hash.
 //
-// Unlike the transcode node this does not refuse while busy. That guard is about
-// encoder sessions: a proxy's jobs are remuxes and RPU strips, which hold no
-// encoder slot for a probe's smoke encode to lose a race against.
+// Unlike the transcode node this does not refuse while *jobs* are running. That
+// guard is about encoder sessions: a proxy's jobs are remuxes and RPU strips,
+// which hold no encoder slot for a probe's smoke encode to lose a race against.
+// It does refuse while another probe is running, which is a different thing —
+// see below.
 func (s *Server) handleReprobeCapabilities(w http.ResponseWriter, r *http.Request) {
 	// Held across the invalidation and the rebuild together: discarding the
 	// verdicts and recomputing them has to be one step, or the scheduled
@@ -38,6 +41,23 @@ func (s *Server) handleReprobeCapabilities(w http.ResponseWriter, r *http.Reques
 	// same GPU at the same time.
 	s.capabilityBuildMu.Lock()
 	defer s.capabilityBuildMu.Unlock()
+
+	// The mutex is not enough on its own. A probe outlives its caller by
+	// design — both singleflights run on background contexts so a canceled
+	// request cannot kill work another request is waiting on — so a capability
+	// request abandoned mid-probe releases this mutex while ffmpeg is still
+	// encoding. Invalidating then starts a second matrix beside the first, and
+	// two smoke encodes contending for one card publish a hardware failure for
+	// hardware that is fine. That is the same false verdict the transcode node's
+	// gate exists to prevent, and it does not care which kind of node it is on.
+	if busy := s.probesInFlight(); busy > 0 {
+		slog.InfoContext(r.Context(), "proxy capability re-probe refused while probes are still running",
+			"component", "proxy", "probes_in_flight", busy)
+		http.Error(w, fmt.Sprintf(
+			"node is running %d hardware probe(s); a re-probe smoke-encodes on the GPU and two at once would report working hardware as failed. Retry shortly.",
+			busy), http.StatusConflict)
+		return
+	}
 
 	playback.InvalidateHWProbeCache()
 	tonemap.InvalidateProbeCache()
@@ -67,4 +87,14 @@ func (s *Server) handleReprobeCapabilities(w http.ResponseWriter, r *http.Reques
 	}); err != nil {
 		slog.WarnContext(r.Context(), "encode proxy re-probe result", "component", "proxy", "error", err)
 	}
+}
+
+// probesInFlight counts the hardware and tone-map probes this process has
+// claimed the encoder for. It is a method so a test can drive the refusal
+// without reaching into either package's unexported singleflight.
+func (s *Server) probesInFlight() int {
+	if s.countProbesInFlight != nil {
+		return s.countProbesInFlight()
+	}
+	return playback.HWProbesInFlight() + tonemap.ProbesInFlight()
 }

@@ -129,6 +129,11 @@ type DetectedBackend struct {
 // the process lifetime; successful fully-capable probes are cached forever.
 var videoToolboxProbeRetryDelay = time.Minute
 
+// videoToolboxProbeStarted is a test seam: it fires inside a VideoToolbox probe
+// flight so a test can order an invalidation against it by channel receipt
+// rather than by sleeping. Production leaves it nil.
+var videoToolboxProbeStarted func()
+
 type videoToolboxProbeEntry struct {
 	result    hardwareProbeResult
 	expiresAt time.Time // zero: cached for the process lifetime
@@ -998,7 +1003,11 @@ func cachedVideoToolboxProbeContext(ctx context.Context, ffmpegPath string) hard
 
 	commandTimeout := hwProbeCommandTimeout
 	retryDelay := videoToolboxProbeRetryDelay
+	started := videoToolboxProbeStarted
 	go func() {
+		if started != nil {
+			started()
+		}
 		probeCtx, cancel := context.WithTimeout(context.Background(), 4*commandTimeout+time.Second)
 		defer cancel()
 		result := probeFFmpegVideoToolboxContext(probeCtx, execPath, commandTimeout)
@@ -1026,8 +1035,16 @@ func cachedVideoToolboxProbeContext(ctx context.Context, ffmpegPath string) hard
 // invalidating a cached verdict when that spelling resolves to a replaced
 // executable. This matters for Homebrew upgrades that swap a symlink target
 // while Silo remains running.
+//
+// The invalidation generation leads it, for the same reason the other hardware
+// probes bake it into theirs: clearing the cache alone does not supersede a
+// probe that is already running. That call stays registered under its key, the
+// rebuild joins it instead of starting a cold one, and its completion
+// repopulates the map — so an operator's re-probe publishes the very verdict it
+// was asked to discard. Moving the key leaves the old flight writing somewhere
+// nobody will read.
 func videoToolboxProbeCacheKey(execPath string) string {
-	return execPath + "\x00" + ffmpegIdentityKey(execPath)
+	return strconv.FormatUint(hwProbeGeneration(), 10) + "\x00" + execPath + "\x00" + ffmpegIdentityKey(execPath)
 }
 
 // StartupRetryHWAccel returns the acceleration for the single retry after a
