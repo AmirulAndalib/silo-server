@@ -2,8 +2,12 @@ package playback
 
 import (
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
+
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
 
 // fakeDeviceStat installs a stat function that reports only the given paths as
@@ -434,5 +438,38 @@ func TestAcquireHWDeviceConcurrentStartsBalanceExactly(t *testing.T) {
 	// could pile concurrent starts onto one device.
 	if counts["/dev/dri/renderD128"] != workloads/2 || counts["/dev/dri/renderD129"] != workloads/2 {
 		t.Fatalf("concurrent workload split = %v, want exact %d/%d", counts, workloads/2, workloads/2)
+	}
+}
+
+// The probe matrix stops at a ceiling, so past it there is no verdict to
+// dispatch on. Balancing over the full configured list would hand a share of the
+// node's transcodes to a device the walk never reached, and the failure would
+// land after the session started — while the published capabilities say nothing
+// about that device either way.
+func TestAcquireHWDeviceNeverSelectsPastTheProbeCeiling(t *testing.T) {
+	resetDeviceLoad(t)
+	devices := make([]string, 0, tonemap.MaxProbedDevices+1)
+	for i := range tonemap.MaxProbedDevices + 1 {
+		devices = append(devices, "/dev/dri/renderD"+strconv.Itoa(128+i))
+	}
+	fakeDeviceStat(t, devices...)
+	beyond := devices[tonemap.MaxProbedDevices]
+	configured := strings.Join(devices, ",")
+
+	// Every probed device has to be handed a workload before the one past the
+	// ceiling could come up, so run enough starts to cover the whole list twice.
+	var releases []func()
+	t.Cleanup(func() {
+		for _, release := range releases {
+			release()
+		}
+	})
+	for range len(devices) * 2 {
+		selected, release := AcquireHWDevice(configured, "qsv")
+		releases = append(releases, release)
+		if selected == beyond {
+			t.Fatalf("workload dispatched to %q, which is past the %d-device probe ceiling",
+				beyond, tonemap.MaxProbedDevices)
+		}
 	}
 }

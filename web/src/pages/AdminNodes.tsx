@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useAdminServerSettings } from "@/hooks/queries/admin/settings";
 import type { FormEvent, ReactNode } from "react";
 import type { StreamNode, CreateNodeRequest, UpdateNodeRequest } from "@/api/types";
 import {
@@ -543,7 +544,25 @@ function NodeForm({
   // to be settable on a node this server has not heard from yet.
   // NVENC names GPUs by CUDA index or UUID, so the render-path picker is
   // meaningless for it — the same rule the cluster-wide Playback form applies.
-  const usesCUDADevices = nodeUsesCUDADevices(node, hwAccelOverride);
+  // The cluster setting is read because "inherit" means running what the
+  // cluster names, which this node's current resolution does not describe.
+  const { data: serverSettings } = useAdminServerSettings();
+  const clusterHWAccel = serverSettings?.["playback.hw_accel"];
+  const usesCUDADevices = nodeUsesCUDADevices(node, hwAccelOverride, clusterHWAccel);
+  // A device override written for one syntax means nothing in the other: a
+  // render path is not a CUDA identity and neither is settable as the other. So
+  // when the selection moves between them the stored value is dropped rather
+  // than carried into a policy it cannot express — but only on a change made
+  // here, never on the first render, which would wipe a valid override just for
+  // opening the form.
+  const previousUsesCUDA = useRef(usesCUDADevices);
+  useEffect(() => {
+    if (previousUsesCUDA.current === usesCUDADevices) {
+      return;
+    }
+    previousUsesCUDA.current = usesCUDADevices;
+    setHwDeviceOverride("");
+  }, [usesCUDADevices]);
   const hasDeviceInventory = nodeHasHWDeviceInventory(node) && !usesCUDADevices;
   const deviceRows = buildNodeHWDeviceRows(node, hwDeviceOverride);
   const devicePaths = nodeHWDevicePaths(node);

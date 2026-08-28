@@ -284,7 +284,11 @@ func acquireHWDevice(configured, resolvedHWAccel, avoidDevice string) (device, w
 	}
 	// Select and reserve in one critical section so concurrent workload starts
 	// observe each other's reservations instead of piling onto one device.
-	present := verifiedHWDevices(resolvedHWAccel, presentHWDevices(set.List()))
+	// The same ceiling the probe matrix stops at: nothing past it has a verdict
+	// behind it, so nothing past it takes work. Applied to the parsed list in
+	// the order it was configured, which is the order the walk probed, so both
+	// sides keep exactly the same devices.
+	present := verifiedHWDevices(resolvedHWAccel, presentHWDevices(UsableHWDevices(set.List())))
 	if len(present) > 1 && avoidDevice != "" {
 		eligible := make([]string, 0, len(present)-1)
 		for _, device := range present {

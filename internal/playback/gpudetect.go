@@ -512,6 +512,30 @@ func maxHWAccelWalkTimeout() time.Duration {
 	return time.Duration(commands)*hwProbeCommandTimeout + hwAccelWalkSlack
 }
 
+// UsableHWDevices truncates a configured device list to the ceiling this host
+// will actually use, which is the same ceiling the probe matrix is capped at.
+//
+// Past it the walk costs more than the budget every caller allows, so probing
+// further guarantees the capability request is canceled rather than finished.
+// The cap therefore has to bind selection too, not only probing: a device the
+// matrix never reached has no verdict behind it, and dispatching a transcode
+// there means finding out whether it works after the session has started, on a
+// node whose published capabilities say nothing about it. Truncating in one
+// place and balancing over the full list in another is only accidentally safe —
+// it holds while a walk has recorded verified devices to narrow against, and
+// stops holding in a process that has not walked yet.
+//
+// The devices past the ceiling are still reported in the inventory, so an
+// operator can see what was configured, and the omission is logged rather than
+// folded silently into a shorter answer.
+func UsableHWDevices(devices []string) []string {
+	if len(devices) <= tonemap.MaxProbedDevices {
+		return devices
+	}
+	noteHWProbeDevicesTruncated(len(devices))
+	return devices[:tonemap.MaxProbedDevices]
+}
+
 // hwProbeDevicesTruncatedLogged latches the truncation warning to one line per
 // process: a device list is standing configuration, not an event.
 var hwProbeDevicesTruncatedLogged sync.Once
@@ -565,16 +589,7 @@ func collectHWCandidates(configuredDevice string) hwCandidates {
 	if len(probeDevices) == 0 {
 		probeDevices = candidates.renderDevices
 	}
-	if len(probeDevices) > tonemap.MaxProbedDevices {
-		// The same ceiling the tone-map matrix is capped at, for the same
-		// reason: past it the walk costs more than the budget every caller
-		// allows, so probing further guarantees the capability request is
-		// canceled rather than finished. The devices that are probed get real
-		// verdicts; the rest are still reported in the inventory, and the
-		// omission is logged rather than folded silently into a shorter answer.
-		noteHWProbeDevicesTruncated(len(probeDevices))
-		probeDevices = probeDevices[:tonemap.MaxProbedDevices]
-	}
+	probeDevices = UsableHWDevices(probeDevices)
 	if len(configured.List()) > 0 {
 		// A configured device this process cannot open can never pass a smoke
 		// encode, so it is classified for reporting but never probed. This is

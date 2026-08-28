@@ -1153,10 +1153,38 @@ describe("nodeUsesCUDADevices", () => {
     expect(nodeUsesCUDADevices(makeNode({}), "nvenc")).toBe(true);
   });
 
-  it("follows what the node resolves to when the backend is inherited", () => {
+  it("follows what the node resolves to when the cluster names no backend", () => {
     const node = makeNode({ capabilities: { resolved: "nvenc" } });
     expect(nodeUsesCUDADevices(node, HW_ACCEL_INHERIT)).toBe(true);
     expect(nodeUsesCUDADevices(node, "auto")).toBe(true);
+    expect(nodeUsesCUDADevices(node, HW_ACCEL_INHERIT, "auto")).toBe(true);
+  });
+
+  // Inheriting means running what the cluster names. A node overriding QSV
+  // under an NVENC cluster still resolves qsv today, and following that would
+  // keep the render-path picker while inheritance is selected — leaving no way
+  // to type the CUDA identity and letting /dev/dri/… be saved as an NVENC
+  // policy that cannot work.
+  it("follows the cluster backend when inheritance is selected", () => {
+    const node = makeNode({
+      capabilities: { resolved: "qsv" },
+      hw_accel_override: "qsv",
+      hw_device_override: "/dev/dri/renderD128",
+    });
+    expect(nodeUsesCUDADevices(node, HW_ACCEL_INHERIT, "nvenc")).toBe(true);
+  });
+
+  it("uses render paths when the cluster names a render-device backend", () => {
+    const node = makeNode({ capabilities: { resolved: "nvenc" } });
+    expect(nodeUsesCUDADevices(node, HW_ACCEL_INHERIT, "qsv")).toBe(false);
+    expect(nodeUsesCUDADevices(node, HW_ACCEL_INHERIT, "vaapi")).toBe(false);
+  });
+
+  // The node's own selection still wins: it is what that node will run.
+  it("keeps an explicit override ahead of the cluster backend", () => {
+    const node = makeNode({ capabilities: { resolved: "qsv" } });
+    expect(nodeUsesCUDADevices(node, "nvenc", "qsv")).toBe(true);
+    expect(nodeUsesCUDADevices(node, "qsv", "nvenc")).toBe(false);
   });
 
   // An explicit render-device backend wins over whatever the stale report says.
