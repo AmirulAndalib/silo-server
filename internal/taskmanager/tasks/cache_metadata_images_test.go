@@ -331,25 +331,40 @@ func TestBackfillMetadataImagesTaskProgressDoesNotFallWhenDiscoveryWidensTheRun(
 }
 
 func TestImageCacheWorkerCount(t *testing.T) {
+	const gib = int64(1) << 30
 	cases := []struct {
 		numCPU int
+		memory int64
 		want   int
 	}{
-		{numCPU: 0, want: 4}, // defensive floor; GOMAXPROCS never reports < 1
-		{numCPU: 1, want: 4}, // small household box: modest but no longer crippled
-		{numCPU: 4, want: 16},
-		{numCPU: 12, want: 48},
-		{numCPU: 16, want: 48}, // cap: more cores must not monopolize providers
-		{numCPU: 64, want: 48},
+		{numCPU: 0, memory: 0, want: 4}, // defensive floor; GOMAXPROCS never reports < 1
+		{numCPU: 1, memory: 0, want: 4}, // small household box: modest but no longer crippled
+		{numCPU: 4, memory: 0, want: 16},
+		{numCPU: 12, memory: 0, want: 48},
+		{numCPU: 16, memory: 0, want: 48}, // cap: more cores must not monopolize providers
+		{numCPU: 64, memory: 0, want: 48},
+		// A many-core container with a small memory limit is bounded by
+		// memory, never below the original pool of 2.
+		{numCPU: 16, memory: 1 * gib, want: 2},
+		{numCPU: 16, memory: 2 * gib, want: 4},
+		{numCPU: 16, memory: 8 * gib, want: 16},
+		{numCPU: 16, memory: 64 * gib, want: 48},
+		// Plenty of memory but few cores: CPU stays the binding cap.
+		{numCPU: 2, memory: 64 * gib, want: 8},
 	}
 	for _, tc := range cases {
-		if got := imageCacheWorkerCount(tc.numCPU); got != tc.want {
-			t.Errorf("imageCacheWorkerCount(%d) = %d, want %d", tc.numCPU, got, tc.want)
+		if got := imageCacheWorkerCount(tc.numCPU, tc.memory); got != tc.want {
+			t.Errorf("imageCacheWorkerCount(%d, %d) = %d, want %d", tc.numCPU, tc.memory, got, tc.want)
 		}
 	}
-	// The claim page must always drain inside the 15-minute claim lease: 10
-	// jobs per worker at the ~60s worst realistic job is 10 minutes.
-	if cacheMetadataImagesClaimLimit != 10*cacheMetadataImagesWorkers {
-		t.Errorf("claim limit = %d, want 10x workers (%d)", cacheMetadataImagesClaimLimit, 10*cacheMetadataImagesWorkers)
+	// A claimed page is stamped with one lease up front, so it must fully
+	// drain before the lease expires or another worker reclaims the tail.
+	// Every job is bounded by metadata.ImageCacheJobTimeout, so the page's
+	// worst-case drain is jobs-per-worker times that timeout.
+	if drain := time.Duration(cacheMetadataImagesClaimPerWorker) * metadata.ImageCacheJobTimeout; drain >= metadata.ImageCacheLeaseDuration {
+		t.Errorf("worst-case page drain %s must stay under the %s claim lease", drain, metadata.ImageCacheLeaseDuration)
+	}
+	if cacheMetadataImagesClaimLimit != cacheMetadataImagesClaimPerWorker*cacheMetadataImagesWorkers {
+		t.Errorf("claim limit = %d, want %d per worker (%d)", cacheMetadataImagesClaimLimit, cacheMetadataImagesClaimPerWorker, cacheMetadataImagesClaimPerWorker*cacheMetadataImagesWorkers)
 	}
 }

@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/Silo-Server/silo-server/internal/metadata"
+	"github.com/Silo-Server/silo-server/internal/nodemetrics"
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
 )
 
@@ -18,6 +21,16 @@ const (
 	cacheMetadataImagesIntervalMs = int64(60 * 1000)
 	cacheMetadataImagesMaxRuntime = 10 * time.Minute
 )
+
+// imageCacheWorkerMemoryBudget is the memory reserved per concurrent image
+// job when sizing the pool against a detected memory bound. A job can hold
+// the compressed download (capped at 25 MiB in imagecache), the libvips
+// working set for the variant ladder, and — today — a full Go-heap decode of
+// the original for thumbhash, which for a large provider poster reaches the
+// low hundreds of MiB. 512 MiB per worker keeps even a burst of worst-case
+// originals from consuming the whole budget, since the baseline server also
+// lives inside it.
+const imageCacheWorkerMemoryBudget = 512 << 20
 
 // imageCacheWorkerCount sizes the image-cache worker pool for the host. Each
 // job downloads an original (30s timeout in imagecache) and runs a libvips
@@ -27,22 +40,56 @@ const (
 // previous fixed pool of 2 measured roughly 60 images/minute on a ~600k-item
 // library; 48 workers measured roughly 2,900/minute over a 60-minute window
 // (RXWatcher/silo-server@3b377f5c2).
-func imageCacheWorkerCount(numCPU int) int {
-	return min(48, 4*max(numCPU, 1))
+//
+// memoryBytes, when positive, is the tightest detected memory bound for this
+// process (GOMEMLIMIT, cgroup limit, or system memory) and caps the pool at
+// one worker per imageCacheWorkerMemoryBudget so a many-core container with a
+// small memory limit cannot be OOM-killed by concurrent decodes. The floor of
+// 2 is the pool size this task shipped with.
+func imageCacheWorkerCount(numCPU int, memoryBytes int64) int {
+	workers := min(48, 4*max(numCPU, 1))
+	if memoryBytes > 0 {
+		workers = min(workers, max(int(memoryBytes/imageCacheWorkerMemoryBudget), 2))
+	}
+	return workers
 }
 
-var cacheMetadataImagesWorkers = imageCacheWorkerCount(runtime.GOMAXPROCS(0))
+// detectImageCacheMemoryBytes returns the tightest memory bound the process
+// can see, or 0 when none is detectable (macOS dev boxes, bare Linux without
+// cgroups): an explicit GOMEMLIMIT first, then the container's cgroup limit,
+// then total system memory.
+func detectImageCacheMemoryBytes() int64 {
+	if limit := debug.SetMemoryLimit(-1); limit > 0 && limit < math.MaxInt64 {
+		return limit
+	}
+	for _, path := range nodemetrics.CgroupMemoryLimitPaths() {
+		if mem, err := nodemetrics.ReadCgroupMemoryLimit(path); err == nil && mem > 0 {
+			return mem
+		}
+	}
+	if mem, err := nodemetrics.ReadMeminfoTotalBytes("/proc/meminfo"); err == nil && mem > 0 {
+		return mem
+	}
+	return 0
+}
 
-// cacheMetadataImagesClaimLimit is the queue page stamped with one lease up
-// front. processClaimedJobs dispatches the page through a semaphore, so a page
-// larger than the worker count keeps the pool saturated instead of waiting on
-// every straggler in a worker-sized batch before the next page can be claimed.
-// The 15-minute lease stamped at claim (imageCacheLeaseDuration) is the
-// ceiling on page size: at 10 jobs per worker the page drains within ten times
-// the worst single job, and the slowest realistic job — a download at the full
-// 30-second timeout plus encode and uploads — keeps that comfortably inside
-// the lease even before the 10-minute task runtime cap stops new claims.
-var cacheMetadataImagesClaimLimit = 10 * cacheMetadataImagesWorkers
+var cacheMetadataImagesWorkers = imageCacheWorkerCount(runtime.GOMAXPROCS(0), detectImageCacheMemoryBytes())
+
+// cacheMetadataImagesClaimPerWorker sizes the queue page stamped with one
+// lease up front. processClaimedJobs dispatches the page through a semaphore,
+// so a page larger than the worker count keeps the pool saturated instead of
+// waiting on every straggler in a worker-sized batch before the next page can
+// be claimed.
+//
+// The page must drain inside metadata.ImageCacheLeaseDuration (15 minutes) or
+// another worker reclaims the unstarted tail and duplicates it. Every job is
+// hard-bounded by metadata.ImageCacheJobTimeout (2 minutes), so a page of N
+// jobs per worker fully drains within N × that timeout: 5 × 2 = 10 minutes,
+// leaving a third of the lease as margin. TestImageCacheWorkerCount asserts
+// this arithmetic against the exported constants.
+const cacheMetadataImagesClaimPerWorker = 5
+
+var cacheMetadataImagesClaimLimit = cacheMetadataImagesClaimPerWorker * cacheMetadataImagesWorkers
 
 type MetadataImageCacheRunner interface {
 	DrainUntilIdle(ctx context.Context, workerID string, claimLimit int, concurrency int, maxRuntime time.Duration, reportProgress metadata.ImageCacheRunProgressReporter) (metadata.ImageCacheRunStats, error)
