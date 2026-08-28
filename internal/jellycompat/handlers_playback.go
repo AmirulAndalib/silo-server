@@ -1045,7 +1045,7 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 
 	switch method {
 	case string(playback.PlayDirect):
-		return proxyNode.URL + "/stream/direct/" + token, nil
+		return nodepool.NodeEndpoint(proxyNode.URL, "/stream/direct/"+token), nil
 	case string(playback.PlayRemux):
 		remuxPath := "/stream/remux/"
 		if claims.PlayMethod == streamtoken.PlayMethodAudioDownmixRemux {
@@ -1057,7 +1057,8 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 		}
 		return redirectURL, nil
 	case string(playback.PlayTranscode):
-		return proxyNode.URL + "/stream/transcode/" + token + "/master.m3u8?" + playback.SourceTimelineQueryParam + "=1", nil
+		return nodepool.NodeEndpoint(proxyNode.URL,
+			"/stream/transcode/"+token+"/master.m3u8?"+playback.SourceTimelineQueryParam+"=1"), nil
 	default:
 		return "", fmt.Errorf("unsupported proxy method %q", method)
 	}
@@ -1291,7 +1292,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		}
 		requestCtx, cancel := context.WithTimeout(ctx, h.remoteTranscodeStartTimeout(request, nodeProbeTimeoutMillis))
 		defer cancel()
-		httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, transcodeNodeURL+"/transcode/start", strings.NewReader(string(body)))
+		httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, nodepool.NodeEndpoint(transcodeNodeURL, "/transcode/start"), strings.NewReader(string(body)))
 		if err != nil {
 			return transcodenode.TranscodeStartResponse{}, 0, false, fmt.Errorf("build transcode request: %w", logredact.SanitizeURLError(err))
 		}

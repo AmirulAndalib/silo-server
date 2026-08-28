@@ -354,3 +354,29 @@ func (d *deadlineRecorder) SetWriteDeadline(at time.Time) error {
 	d.deadline = at
 	return nil
 }
+
+// The route an operator triggers has to reach a node stored with a trailing
+// slash, which the pools and the repository already treat as the same worker.
+func TestHandleReprobeNodeReachesATrailingSlashBaseURL(t *testing.T) {
+	var path string
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		writeJSON(w, http.StatusOK, map[string]any{"resolved": "qsv", "capability_hash": "sha256:x"})
+	}))
+	defer node.Close()
+
+	repo := &stubNodeRepository{node: &nodepool.Node{
+		ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL + "/", Enabled: true,
+	}}
+	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
+
+	recorder := httptest.NewRecorder()
+	handler.HandleReprobeNode(recorder, reprobeRequest(t))
+
+	if path != "/admin/reprobe-capabilities" {
+		t.Fatalf("node was asked for %q, want /admin/reprobe-capabilities", path)
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}

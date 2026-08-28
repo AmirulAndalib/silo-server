@@ -100,6 +100,18 @@ func (p *TranscodePool) ApplyCapabilities(id int, fetchedFrom string, capabiliti
 	applyNodeCapabilities(p.nodes, id, fetchedFrom, capabilities, hash, refreshedAt, drift, driftBaseline)
 }
 
+// NodeEndpoint joins a stored node URL with one of the node's own routes.
+//
+// A stored URL may carry a trailing slash — an operator pasting a base URL is
+// the usual way, and everything here already treats the two forms as the same
+// worker. Concatenating a route onto it produces "//admin/…", which the node's
+// router does not have: the request 404s, and the operator's action fails
+// against a node that is running and reachable. The normalization that makes
+// the two forms equal for comparison has to make them equal for addressing too.
+func NodeEndpoint(nodeURL, path string) string {
+	return normalizeNodeURL(nodeURL) + path
+}
+
 // sameNodeURL compares two node addresses the way the pools store them, so a
 // trailing slash on one side is not a different worker.
 func sameNodeURL(a, b string) bool {

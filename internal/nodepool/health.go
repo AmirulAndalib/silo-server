@@ -58,7 +58,7 @@ func CheckNode(ctx context.Context, n *Node) (healthy bool, activeJobs, egressKb
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, n.URL+"/api/v1/health", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, NodeEndpoint(n.URL, "/api/v1/health"), nil)
 	if err != nil {
 		return false, 0, 0, "", nil
 	}

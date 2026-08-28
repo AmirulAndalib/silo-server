@@ -392,7 +392,7 @@ func (h *NodeHandler) reloadNodeConfig(ctx context.Context, node *nodepool.Node)
 	}
 	ctx, cancel := context.WithTimeout(ctx, nodeConfigReloadTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, node.URL+"/admin/reload-config", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, nodepool.NodeEndpoint(node.URL, "/admin/reload-config"), nil)
 	if err != nil {
 		return false
 	}
@@ -529,7 +529,7 @@ func (h *NodeHandler) HandleForceReloadNodes(w http.ResponseWriter, r *http.Requ
 			defer wg.Done()
 			result := ForceReloadResult{NodeID: node.ID, NodeName: node.Name}
 			client := &http.Client{Timeout: 10 * time.Second}
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, node.URL+"/admin/force-reload", nil)
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, nodepool.NodeEndpoint(node.URL, "/admin/force-reload"), nil)
 			if err != nil {
 				result.Status = "error"
 				result.Error = err.Error()
@@ -578,7 +578,7 @@ func (h *NodeHandler) HandleForceReloadNode(w http.ResponseWriter, r *http.Reque
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, node.URL+"/admin/force-reload", nil)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, nodepool.NodeEndpoint(node.URL, "/admin/force-reload"), nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -804,7 +804,7 @@ func (h *NodeHandler) reprobeNode(ctx context.Context, node *nodepool.Node) (nod
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, node.URL+"/admin/reprobe-capabilities", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, nodepool.NodeEndpoint(node.URL, "/admin/reprobe-capabilities"), nil)
 	if err != nil {
 		return nodeReprobeResponse{}, err
 	}

@@ -1811,7 +1811,7 @@ func (h *PlaybackHandler) buildProxyManifestURL(card playback.RecipeCard, proxyN
 	if proxyNode == nil || token == "" {
 		return appendStreamToken(localURL, token)
 	}
-	return proxyNode.URL + "/stream/transcode/" + token + "/master.m3u8"
+	return nodepool.NodeEndpoint(proxyNode.URL, "/stream/transcode/"+token+"/master.m3u8")
 }
 
 // proxyToTranscodeNode forwards a request to the remote transcode node.
