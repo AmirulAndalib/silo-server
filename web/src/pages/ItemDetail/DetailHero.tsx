@@ -141,7 +141,7 @@ export default function DetailHero({
             ? // min-height (not fixed height) below lg: bottom-justified content
               // taller than the hero would otherwise overflow out the top, under
               // the floating back button.
-              "min-h-[max(35vh,300px)] pt-20 lg:h-[42vh]"
+              "min-h-[max(35vh,300px)] pt-20 lg:min-h-[42vh]"
             : "min-h-[60dvh] pt-28 lg:min-h-[72dvh]"
         }`}
       >
