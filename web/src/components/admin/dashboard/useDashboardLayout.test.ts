@@ -692,6 +692,10 @@ describe("useDashboardLayout account scoping", () => {
     mocks.reset.mockReset();
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("does not show one admin's cached layout to another on the same browser", () => {
     writeStored([{ id: "users", span: 5, rows: 6 }], ADMIN_USER_ID);
 
@@ -720,6 +724,40 @@ describe("useDashboardLayout account scoping", () => {
     expect(readStored(OTHER_ADMIN_USER_ID).entries.some((entry) => entry.id === "users")).toBe(
       false,
     );
+  });
+
+  // Impersonation can swap the account while the dashboard stays mounted; the
+  // hook must drop the old account's state — including any queued save, which
+  // would otherwise upload the old arrangement under the new account — and
+  // become adoptable again for the new account's server layout.
+  it("resets to the new account's layout when the user changes while mounted", () => {
+    vi.useFakeTimers();
+    writeStored([{ id: "users", span: 4, rows: 4 }], OTHER_ADMIN_USER_ID);
+
+    const { result, rerender } = renderHook(() => useDashboardLayout());
+    act(() => {
+      result.current.resizeWidget("users", { span: 8 });
+    });
+
+    mocks.userId = OTHER_ADMIN_USER_ID;
+    rerender();
+
+    expect(result.current.entries.find((entry) => entry.id === "users")).toMatchObject({
+      span: 4,
+      rows: 4,
+    });
+    act(() => {
+      vi.advanceTimersByTime(DASHBOARD_LAYOUT_SAVE_DEBOUNCE_MS + 1);
+    });
+    expect(mocks.save).not.toHaveBeenCalled();
+
+    // The new account's server layout is still adoptable after the switch.
+    serverLayout([{ id: "users", span: 6, rows: 5 }]);
+    rerender();
+    expect(result.current.entries.find((entry) => entry.id === "users")).toMatchObject({
+      span: 6,
+      rows: 5,
+    });
   });
 
   // The unscoped key cannot be attributed to an account, so it is deleted

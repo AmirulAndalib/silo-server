@@ -79,13 +79,13 @@ func (h *AdminHandler) HandleGetServerStatus(w http.ResponseWriter, r *http.Requ
 		RestartRequestedAt:     snapshot.RestartRequestedAt,
 	}
 
+	// Settings live in Postgres, so this lookup fails in exactly the outage the
+	// health object below exists to report. A failure therefore skips the
+	// jellycompat restart derivation instead of aborting the response — a 500
+	// here would hide postgres.ok:false from the one page built to show it.
 	if h.SettingsRepo != nil {
 		settings, err := h.SettingsRepo.GetAll(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load settings")
-			return
-		}
-		if jellycompat.WebComponentStatusForConfig(h.Config, settings).RestartRequired {
+		if err == nil && jellycompat.WebComponentStatusForConfig(h.Config, settings).RestartRequired {
 			resp.RestartRequired = true
 			if resp.RestartRequiredReason == "" {
 				resp.RestartRequiredReason = "jellyfin_compat"

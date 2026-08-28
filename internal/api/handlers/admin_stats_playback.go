@@ -289,8 +289,12 @@ func queryAdminPlaybackActivity(ctx context.Context, pool *pgxpool.Pool, hours i
 
 	bucketSeconds := playbackActivityBucketSeconds(hours)
 
+	// Truncation is pinned to UTC: date_trunc otherwise cuts on the session
+	// TimeZone's boundaries, and the dashboard zero-fills on epoch-aligned UTC
+	// buckets — a daily bucket cut in another zone would land in the wrong
+	// column (or between columns) client-side.
 	rows, err := pool.Query(ctx, adminPlaybackSessionsCTE+`
-		SELECT date_trunc($2, started_at) AS bucket,
+		SELECT date_trunc($2, started_at, 'UTC') AS bucket,
 		       COALESCE(play_method, '') AS play_method,
 		       COUNT(*)::bigint AS sessions
 		FROM sessions

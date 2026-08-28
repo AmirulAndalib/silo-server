@@ -277,6 +277,22 @@ export function useDashboardLayout(): DashboardLayout {
   // Send a queued write before this page goes away rather than dropping it.
   useEffect(() => flushSave, [flushSave]);
 
+  // A different account while the hook stays mounted (impersonation starts or
+  // ends without a remount) must not inherit the previous account's state: its
+  // queued save would upload the old arrangement under the new account, and
+  // the settled flag would block adopting the new account's server layout.
+  const accountRef = useRef(userId);
+  useEffect(() => {
+    if (accountRef.current === userId) {
+      return;
+    }
+    accountRef.current = userId;
+    cancelPendingSave();
+    settledRef.current = false;
+    editedRef.current = false;
+    setEntries(loadStoredLayout(userId));
+  }, [userId, cancelPendingSave]);
+
   const remoteData = remote.data;
   const remoteSettled = remote.isSuccess;
 

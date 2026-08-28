@@ -27,6 +27,10 @@ export function HealthStripWidget() {
 
   const status = statusQuery.data;
   const health = status?.health;
+  // Only a successful response may claim "none": while the node list is
+  // loading or failed, node status is unknown, and "this server transcodes"
+  // would be an invented answer.
+  const nodesReady = nodesQuery.isSuccess;
   const nodes = nodesQuery.data ?? [];
   // A disabled node is not expected to be healthy, so it belongs in neither
   // half of the ratio: counting it in the denominator would report a warning
@@ -71,9 +75,23 @@ export function HealthStripWidget() {
         <HealthCell
           icon={Server}
           label="Nodes"
-          value={enabledNodes.length === 0 ? "none" : `${healthyNodes}/${enabledNodes.length}`}
-          detail={enabledNodes.length === 0 ? "this server transcodes" : "healthy"}
-          tone={healthyNodes < enabledNodes.length ? "warn" : undefined}
+          value={
+            !nodesReady
+              ? "—"
+              : enabledNodes.length === 0
+                ? "none"
+                : `${healthyNodes}/${enabledNodes.length}`
+          }
+          detail={
+            !nodesReady
+              ? nodesQuery.isError
+                ? "unavailable"
+                : undefined
+              : enabledNodes.length === 0
+                ? "this server transcodes"
+                : "healthy"
+          }
+          tone={nodesReady && healthyNodes < enabledNodes.length ? "warn" : undefined}
         />
         <HealthCell
           icon={AlertTriangle}

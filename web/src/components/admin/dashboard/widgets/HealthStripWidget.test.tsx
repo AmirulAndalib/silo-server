@@ -98,7 +98,13 @@ describe("HealthStripWidget", () => {
     mocks.useBuildInfo.mockReset();
     mocks.useAdminNodes.mockReset();
     mocks.useBuildInfo.mockReturnValue({ data: { display: "v0.9.1" } });
-    mocks.useAdminNodes.mockReturnValue({ data: [], isLoading: false, error: null });
+    mocks.useAdminNodes.mockReturnValue({
+      data: [],
+      isLoading: false,
+      isSuccess: true,
+      isError: false,
+      error: null,
+    });
   });
 
   it("composes version, uptime, dependencies and error count", () => {
@@ -110,6 +116,8 @@ describe("HealthStripWidget", () => {
     mocks.useAdminNodes.mockReturnValue({
       data: [node(), node({ id: 2, name: "node-2", healthy: false })],
       isLoading: false,
+      isSuccess: true,
+      isError: false,
       error: null,
     });
 
@@ -155,6 +163,8 @@ describe("HealthStripWidget", () => {
     mocks.useAdminNodes.mockReturnValue({
       data: [node({ enabled: false, healthy: false })],
       isLoading: false,
+      isSuccess: true,
+      isError: false,
       error: null,
     });
 
@@ -174,6 +184,8 @@ describe("HealthStripWidget", () => {
     mocks.useAdminNodes.mockReturnValue({
       data: [node(), node({ id: 2, name: "node-2", enabled: false, healthy: false })],
       isLoading: false,
+      isSuccess: true,
+      isError: false,
       error: null,
     });
 
@@ -194,6 +206,48 @@ describe("HealthStripWidget", () => {
 
     expect(screen.getByText("none")).toBeTruthy();
     expect(screen.getByText("this server transcodes")).toBeTruthy();
+  });
+
+  // "none" is a claim about the deployment; an unresolved query cannot back
+  // it. Loading shows a placeholder, a failure says the list is unavailable.
+  it("does not claim no nodes while the node list is loading", () => {
+    mocks.useAdminServerStatus.mockReturnValue({
+      data: status(),
+      isLoading: false,
+      error: null,
+    });
+    mocks.useAdminNodes.mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      isSuccess: false,
+      isError: false,
+      error: null,
+    });
+
+    renderStrip();
+
+    expect(screen.queryByText("none")).toBeNull();
+    expect(screen.queryByText("this server transcodes")).toBeNull();
+  });
+
+  it("marks the node ratio unavailable when the node query fails", () => {
+    mocks.useAdminServerStatus.mockReturnValue({
+      data: status(),
+      isLoading: false,
+      error: null,
+    });
+    mocks.useAdminNodes.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isSuccess: false,
+      isError: true,
+      error: new Error("boom"),
+    });
+
+    renderStrip();
+
+    expect(screen.queryByText("none")).toBeNull();
+    expect(screen.getByText("unavailable")).toBeTruthy();
   });
 
   it("surfaces a failed status load", () => {

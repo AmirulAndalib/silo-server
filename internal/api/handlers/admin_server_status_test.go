@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -171,6 +172,42 @@ func TestAdminServerStatusHealthWithUnreachablePostgres(t *testing.T) {
 	}
 	if body.Health.Errors24h != 0 || body.Health.Warnings24h != 0 {
 		t.Fatalf("log counts = %d/%d, want 0/0 when the query fails", body.Health.Errors24h, body.Health.Warnings24h)
+	}
+}
+
+// failingSettingsStore models the settings table during a Postgres outage.
+type failingSettingsStore struct {
+	fakeServerSettingsStore
+}
+
+func (f *failingSettingsStore) GetAll(context.Context) (map[string]string, error) {
+	return nil, fmt.Errorf("settings storage is down")
+}
+
+// A settings lookup that fails — Postgres being down — must not 500 the status
+// endpoint: the health object in this response is where that outage is
+// supposed to become visible.
+func TestAdminServerStatusAnswersWhenSettingsStorageIsDown(t *testing.T) {
+	t.Parallel()
+
+	handler := &AdminHandler{
+		RestartStatus: NewServerRestartStatusTracker(),
+		SettingsRepo:  &failingSettingsStore{},
+	}
+	rec := httptest.NewRecorder()
+	handler.HandleGetServerStatus(rec, httptest.NewRequest(http.MethodGet, "/admin/server/status", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Health adminServerHealth `json:"health"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Health.Postgres.Configured {
+		t.Fatal("postgres configured = true, want false with no pool")
 	}
 }
 
