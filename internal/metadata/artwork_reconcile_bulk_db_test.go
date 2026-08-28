@@ -1,0 +1,240 @@
+package metadata
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+// shrinkBulkBatchSize forces the bulk-reset loops through multiple batches with
+// a handful of seeded rows instead of thousands.
+func shrinkBulkBatchSize(t *testing.T, size int) {
+	t.Helper()
+	prev := artworkReconcileBulkBatchSize
+	artworkReconcileBulkBatchSize = size
+	t.Cleanup(func() { artworkReconcileBulkBatchSize = prev })
+}
+
+func itemPosterSurface(t *testing.T) artworkSweepSurface {
+	t.Helper()
+	for _, s := range artworkSweepSurfaces() {
+		if s.name == "item posters" {
+			return s
+		}
+	}
+	t.Fatal("item posters surface not found")
+	return artworkSweepSurface{}
+}
+
+// TestBulkResetSurfaceBatches drives bulkResetSurface across several batches
+// and verifies both halves: rows with a remote source are requeued (path reset
+// to the source URL), rows without one are cleared. Assertions are scoped to
+// the seeded rows because the reset sweeps the whole table and the test
+// database may hold rows from other tests.
+func TestBulkResetSurfaceBatches(t *testing.T) {
+	pool := localArtworkTestPool(t)
+	ctx := context.Background()
+	shrinkBulkBatchSize(t, 3)
+
+	prefix := fmt.Sprintf("bulkreset-%d", time.Now().UnixNano())
+	const requeueRows, clearRows = 7, 5
+	sourceURL := func(i int) string {
+		return fmt.Sprintf("https://image.example.org/t/p/original/%s-%d.jpg", prefix, i)
+	}
+
+	var seeded []string
+	for i := 0; i < requeueRows+clearRows; i++ {
+		contentID := fmt.Sprintf("%s-%d", prefix, i)
+		source := ""
+		if i < requeueRows {
+			source = sourceURL(i)
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO media_items (content_id, type, title, status, genres, poster_path, poster_source_path, last_refreshed)
+			VALUES ($1, 'movie', 'Bulk Reset Test', 'matched', '{}'::text[], $2, $3, NOW())
+		`, contentID, fmt.Sprintf("metadata/movie/%s/poster/original.webp", contentID), source); err != nil {
+			t.Fatalf("seed item %d: %v", i, err)
+		}
+		seeded = append(seeded, contentID)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id LIKE $1`, prefix+"-%")
+	})
+
+	r := &ArtworkCacheReconciler{pool: pool}
+	var stats ArtworkReconcileStats
+	if err := r.bulkResetSurface(ctx, itemPosterSurface(t), &stats); err != nil {
+		t.Fatalf("bulkResetSurface: %v", err)
+	}
+	if stats.Requeued < requeueRows {
+		t.Errorf("stats.Requeued = %d, want >= %d", stats.Requeued, requeueRows)
+	}
+	if stats.Cleared < clearRows {
+		t.Errorf("stats.Cleared = %d, want >= %d", stats.Cleared, clearRows)
+	}
+
+	for i, contentID := range seeded {
+		var posterPath string
+		var lastRefreshed *time.Time
+		if err := pool.QueryRow(ctx,
+			`SELECT poster_path, last_refreshed FROM media_items WHERE content_id = $1`,
+			contentID).Scan(&posterPath, &lastRefreshed); err != nil {
+			t.Fatalf("read back item %d: %v", i, err)
+		}
+		if i < requeueRows {
+			if posterPath != sourceURL(i) {
+				t.Errorf("row %d: poster_path = %q, want requeued source %q", i, posterPath, sourceURL(i))
+			}
+		} else {
+			if posterPath != "" {
+				t.Errorf("row %d: poster_path = %q, want cleared", i, posterPath)
+			}
+			if lastRefreshed != nil {
+				t.Errorf("row %d: last_refreshed = %v, want NULL after clear", i, lastRefreshed)
+			}
+		}
+	}
+}
+
+// TestBulkResetChapterThumbnailsBatches drives the chapter-thumbnail reset
+// across several batches and verifies the JSONB rewrite: cached thumbnail
+// elements are emptied and stripped of retry state, elements without a
+// thumbnail survive untouched, and the loop terminates once no row matches.
+func TestBulkResetChapterThumbnailsBatches(t *testing.T) {
+	pool := localArtworkTestPool(t)
+	ctx := context.Background()
+	shrinkBulkBatchSize(t, 2)
+
+	suffix := time.Now().UnixNano()
+	var folderID int
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO media_folders (type, name)
+		VALUES ('movies', $1)
+		RETURNING id`, fmt.Sprintf("bulk-chapter-test-%d", suffix)).Scan(&folderID); err != nil {
+		t.Fatalf("seed media folder: %v", err)
+	}
+	const fileRows = 5
+	fileIDs := make([]int, fileRows)
+	for i := range fileIDs {
+		chapters := fmt.Sprintf(`[
+			{"title": "c1", "thumbnail_path": "chapters/%d-%d/1.webp", "thumbnail_thumbhash": "aa", "thumbnail_retry_after": "2026-01-01T00:00:00Z", "thumbnail_failed_at": "2026-01-01T00:00:00Z", "thumbnail_last_error": "boom"},
+			{"title": "c2"}
+		]`, suffix, i)
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO media_files (media_folder_id, file_path, chapters, chapter_thumbnail_retry_after)
+			VALUES ($1, $2, $3::jsonb, NOW())
+			RETURNING id`, folderID, fmt.Sprintf("/bulk-chapter-test/%d-%d.mkv", suffix, i), chapters).Scan(&fileIDs[i]); err != nil {
+			t.Fatalf("seed media file %d: %v", i, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM media_files WHERE id = ANY($1)`, fileIDs)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_folders WHERE id = $1`, folderID)
+	})
+
+	r := &ArtworkCacheReconciler{pool: pool}
+	var stats ArtworkReconcileStats
+	if err := r.bulkResetChapterThumbnails(ctx, &stats); err != nil {
+		t.Fatalf("bulkResetChapterThumbnails: %v", err)
+	}
+	if stats.Cleared < fileRows {
+		t.Errorf("stats.Cleared = %d, want >= %d", stats.Cleared, fileRows)
+	}
+
+	for i, id := range fileIDs {
+		var first, second map[string]any
+		var retryAfter *time.Time
+		if err := pool.QueryRow(ctx,
+			`SELECT chapters->0, chapters->1, chapter_thumbnail_retry_after FROM media_files WHERE id = $1`,
+			id).Scan(&first, &second, &retryAfter); err != nil {
+			t.Fatalf("read back file %d: %v", i, err)
+		}
+		if got := first["thumbnail_path"]; got != "" {
+			t.Errorf("file %d: thumbnail_path = %v, want emptied", i, got)
+		}
+		if got := first["thumbnail_thumbhash"]; got != "" {
+			t.Errorf("file %d: thumbnail_thumbhash = %v, want emptied", i, got)
+		}
+		for _, key := range []string{"thumbnail_retry_after", "thumbnail_failed_at", "thumbnail_last_error"} {
+			if _, ok := first[key]; ok {
+				t.Errorf("file %d: %s survived the reset", i, key)
+			}
+		}
+		if got := second["title"]; got != "c2" {
+			t.Errorf("file %d: untouched element title = %v, want c2", i, got)
+		}
+		if _, ok := second["thumbnail_path"]; ok {
+			t.Errorf("file %d: element without a thumbnail gained thumbnail_path", i)
+		}
+		if retryAfter != nil {
+			t.Errorf("file %d: chapter_thumbnail_retry_after = %v, want NULL", i, retryAfter)
+		}
+	}
+}
+
+func TestRetryOnDeadlock(t *testing.T) {
+	prevBackoff := artworkReconcileDeadlockBaseBackoff
+	artworkReconcileDeadlockBaseBackoff = time.Millisecond
+	t.Cleanup(func() { artworkReconcileDeadlockBaseBackoff = prevBackoff })
+
+	deadlock := &pgconn.PgError{Code: "40P01"}
+	ctx := context.Background()
+
+	t.Run("retries deadlocks until success", func(t *testing.T) {
+		calls := 0
+		err := retryOnDeadlock(ctx, func() error {
+			calls++
+			if calls < 3 {
+				return fmt.Errorf("exec: %w", deadlock)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("retryOnDeadlock: %v", err)
+		}
+		if calls != 3 {
+			t.Errorf("calls = %d, want 3", calls)
+		}
+	})
+
+	t.Run("gives up after max attempts", func(t *testing.T) {
+		calls := 0
+		err := retryOnDeadlock(ctx, func() error {
+			calls++
+			return deadlock
+		})
+		if !errors.Is(err, deadlock) {
+			t.Fatalf("err = %v, want the deadlock error", err)
+		}
+		if calls != artworkReconcileDeadlockMaxAttempts {
+			t.Errorf("calls = %d, want %d", calls, artworkReconcileDeadlockMaxAttempts)
+		}
+	})
+
+	t.Run("returns other errors immediately", func(t *testing.T) {
+		calls := 0
+		boom := errors.New("boom")
+		if err := retryOnDeadlock(ctx, func() error {
+			calls++
+			return boom
+		}); !errors.Is(err, boom) {
+			t.Fatalf("err = %v, want boom", err)
+		}
+		if calls != 1 {
+			t.Errorf("calls = %d, want 1", calls)
+		}
+	})
+
+	t.Run("honors cancellation between attempts", func(t *testing.T) {
+		canceled, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := retryOnDeadlock(canceled, func() error { return deadlock })
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	})
+}
