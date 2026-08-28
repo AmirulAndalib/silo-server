@@ -573,8 +573,59 @@ func compatSupportsAudioBoost(transformations []playback.TransformationV3) bool 
 	return false
 }
 
+// toneMapCapabilityTimeout bounds one capability sweep. Every caller wraps a
+// single deadline around concurrent per-node fetches (plus the local probe),
+// so the budget has to cover the slowest node in the fan-out, not a typical
+// one: each pooled node is priced the way the v3 and download paths price a
+// cold read — ColdCapabilityRequestTimeout over its stored report and its
+// effective override — and the sweep takes the maximum, with the fixed
+// fallback as the floor for the local probe and for nodes this process cannot
+// resolve. Without the derivation, a node with enough configured devices to
+// out-price two minutes was canceled while still inside its own advertised
+// probe budget, and HDR or audio-boost planning excluded it for no fault.
 func (h *PlaybackHandler) toneMapCapabilityTimeout() time.Duration {
-	return compatRemoteNodeProbeFallbackTimeout
+	hwDevice := ""
+	if h.cfg != nil {
+		hwDevice = h.cfg.Playback.HWDevice
+	}
+	// The local probe runs under the same deadline, priced by the cluster
+	// policy; this is also the whole answer when no pool is reachable.
+	budget := playback.ColdCapabilityRequestTimeout(nil, h.HWAccel, hwDevice, compatRemoteNodeProbeFallbackTimeout)
+
+	lookup, canLookup := h.NodePlanner.(compatTranscodeNodeLookup)
+	price := func(nodeURL string) {
+		var node *nodepool.Node
+		if canLookup {
+			if found, ok := lookup.TranscodeNodeByURL(nodeURL); ok {
+				node = found
+			}
+		}
+		// A URL the lookup cannot resolve — a proxy node, or a record that
+		// left the pool — prices as a nil node: cluster policy over the
+		// fallback, which is the pre-derivation behavior.
+		cold := playback.ColdCapabilityRequestTimeout(
+			node.StoredCapabilities(),
+			node.EffectiveHWAccel(h.HWAccel),
+			node.EffectiveHWDevice(hwDevice),
+			compatRemoteNodeProbeFallbackTimeout,
+		)
+		if cold > budget {
+			budget = cold
+		}
+	}
+	if enumerator, ok := h.NodePlanner.(compatTranscodeNodeEnumerator); ok {
+		for _, nodeURL := range enumerator.TranscodeNodeURLs() {
+			price(nodeURL)
+		}
+	}
+	// Proxy nodes answer the audio-boost recipe sweep under this same
+	// deadline, so they are counted even though they price at the floor today.
+	if enumerator, ok := h.NodePlanner.(compatProxyNodeEnumerator); ok {
+		for _, nodeURL := range enumerator.ProxyNodeURLs() {
+			price(nodeURL)
+		}
+	}
+	return budget
 }
 
 func (h *PlaybackHandler) remoteTranscodeStartTimeout(request transcodenode.TranscodeStartRequest, nodeProbeTimeoutMillis int64) time.Duration {
