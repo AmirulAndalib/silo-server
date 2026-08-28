@@ -1266,7 +1266,16 @@ func main() {
 		// it is the process that knows what the library is, and its own view of
 		// a media mount is the one that is authoritative.
 		resourceSampler := nodemetrics.NewSampler(nodemetrics.Options{
-			ScratchDir:       cfg.Playback.TranscodeDir,
+			// Read per sample rather than captured: in integrated mode this host
+			// is the one transcoding, and playback.transcode_dir is
+			// hot-reloadable. A startup snapshot would keep reporting headroom on
+			// the volume it used to write to while the new one fills unwatched.
+			ScratchDir: func() string {
+				if live := configWatcher.Config(); live != nil {
+					return live.Playback.TranscodeDir
+				}
+				return cfg.Playback.TranscodeDir
+			},
 			MediaRoots:       libraryPathProvider(catalog.NewFolderRepository(pool)),
 			DeviceSessions:   playback.HWDeviceLoadSnapshot,
 			DeviceIdentities: playback.SamplerDeviceIdentities,

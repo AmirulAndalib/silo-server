@@ -64,7 +64,7 @@ func newDiskFixture(t *testing.T, paths ...string) *diskFixture {
 		scratch, roots = roots[0], roots[1:]
 	}
 	f.sampler = newTestSampler(t, tree, clock, Options{
-		ScratchDir: scratch,
+		ScratchDir: staticScratch(scratch),
 		MediaRoots: func(context.Context) []string { return roots },
 	})
 	f.sampler.diskProbeDone = f.done
@@ -366,7 +366,7 @@ func TestDiskStatsForgetsPathsNoLongerConfigured(t *testing.T) {
 	done := make(chan string, 16)
 
 	s := newTestSampler(t, tree, clock, Options{
-		ScratchDir: "/transcode",
+		ScratchDir: staticScratch("/transcode"),
 		MediaRoots: func(context.Context) []string { return roots },
 	})
 	s.diskProbeDone = done
@@ -502,7 +502,7 @@ func TestDiskProbesAreBoundedAcrossReconfiguration(t *testing.T) {
 func TestRefreshDisksRotatesProbesPastAWedgedRetiredMount(t *testing.T) {
 	tree := newProcTree(t)
 	clock := newFakeClock()
-	s := newTestSampler(t, tree, clock, Options{ScratchDir: "/transcode"})
+	s := newTestSampler(t, tree, clock, Options{ScratchDir: staticScratch("/transcode")})
 	done := make(chan string, 64)
 	s.diskProbeDone = done
 
@@ -557,7 +557,10 @@ func TestRefreshDisksRotatesProbesPastAWedgedRetiredMount(t *testing.T) {
 func TestRefreshDisksAlwaysOffersScratchFirst(t *testing.T) {
 	tree := newProcTree(t)
 	clock := newFakeClock()
-	s := newTestSampler(t, tree, clock, Options{ScratchDir: "/transcode"})
+	s := newTestSampler(t, tree, clock, Options{ScratchDir: staticScratch("/transcode")})
+	// Which mount is the scratch one is resolved once per pass, so the ordering
+	// below is asking a question a pass has to have asked first.
+	s.diskPaths(context.Background())
 
 	candidates := []*diskEntry{{path: "/transcode"}, {path: "/a"}, {path: "/b"}, {path: "/c"}}
 	for pass := range 6 {
@@ -604,4 +607,54 @@ func TestFSCapacityExcludesBlocksReservedFromThisProcess(t *testing.T) {
 	if got := fsCapacity(10, 20, 5, block); got.UsedBytes != 0 {
 		t.Fatalf("UsedBytes = %d for free > total, want 0", got.UsedBytes)
 	}
+}
+
+// staticScratch is the provider for a host whose scratch dir never moves, which
+// is every test but the one covering a hot-reloaded one.
+func staticScratch(path string) func() string {
+	return func() string { return path }
+}
+
+// playback.transcode_dir is hot-reloadable, and in integrated mode this host is
+// the one transcoding. A sampler that captured the directory at startup would
+// keep reporting headroom on a volume nothing writes to while the new one fills
+// unwatched — and the scratch role is what transcode admission reads.
+func TestScratchDirFollowsAHotReloadedTranscodeDir(t *testing.T) {
+	f := newDiskFixture(t, "/transcode-old")
+	f.answer("/transcode-old", fsStats{UsedBytes: 10 << 30, TotalBytes: 500 << 30, FSID: "a:1"})
+	f.answer("/transcode-new", fsStats{UsedBytes: 490 << 30, TotalBytes: 500 << 30, FSID: "b:2"})
+	current := "/transcode-old"
+	f.sampler.scratchDirFn = func() string { return current }
+
+	f.sampleAndSettle(t, 1)
+	f.sampleAndSettle(t, 1)
+	scratch := scratchDisk(t, f.sampler)
+	if scratch.Path != "/transcode-old" {
+		t.Fatalf("scratch = %q, want the configured /transcode-old", scratch.Path)
+	}
+
+	// An operator repoints the setting at a nearly full volume.
+	current = "/transcode-new"
+	f.sampleAndSettle(t, 1)
+	f.sampleAndSettle(t, 1)
+	scratch = scratchDisk(t, f.sampler)
+	if scratch.Path != "/transcode-new" {
+		t.Fatalf("scratch = %q, want the reloaded /transcode-new", scratch.Path)
+	}
+	if scratch.UsedGB < 400 {
+		t.Fatalf("scratch used = %v GiB, want the new volume's near-full reading", scratch.UsedGB)
+	}
+}
+
+// scratchDisk returns the disk carrying the scratch role, which is the one
+// transcode admission reads.
+func scratchDisk(t *testing.T, s *Sampler) DiskStats {
+	t.Helper()
+	for _, disk := range s.Snapshot().System.Disks {
+		if disk.Role == ScratchDiskRole {
+			return disk
+		}
+	}
+	t.Fatalf("no disk carried the scratch role: %+v", s.Snapshot().System.Disks)
+	return DiskStats{}
 }

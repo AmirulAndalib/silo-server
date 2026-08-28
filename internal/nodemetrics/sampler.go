@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,9 +25,16 @@ const DefaultInterval = 5 * time.Second
 // means that dimension simply is not reported, which is the correct behavior
 // for a proxy node with no scratch dir or a host with no GPU.
 type Options struct {
-	// ScratchDir is the transcode working directory. It is sampled first
+	// ScratchDir returns the transcode working directory. It is sampled first
 	// because it is the volume whose filling up silently kills transcodes.
-	ScratchDir string
+	//
+	// A provider rather than a value because playback.transcode_dir is
+	// hot-reloadable: a host that captured it at startup would keep measuring
+	// the volume it used to transcode onto, reporting ample headroom on a disk
+	// nothing writes to while the one filling up goes unwatched. Called on the
+	// sampling goroutine each pass, so it must be cheap; a nil provider means
+	// this host has no scratch dir, which is the right answer for a proxy.
+	ScratchDir func() string
 	// MediaRoots returns library folder paths to sample alongside the scratch
 	// dir. It is called on the sampling goroutine each pass, so it must be cheap
 	// and must respect ctx; a nil provider samples the scratch dir only.
@@ -63,14 +71,19 @@ type Options struct {
 // either atomic (the published snapshot) or explicitly guarded (the disk
 // entries, which detached probe goroutines also write).
 type Sampler struct {
-	interval   time.Duration
-	now        func() time.Time
-	goos       string
-	scratchDir string
-	mediaRoots func(ctx context.Context) []string
-	sessions   func() map[string]int
-	identities func() []DeviceIdentity
-	ffmpegPIDs func() []int
+	interval time.Duration
+	now      func() time.Time
+	goos     string
+	// scratchDirFn is the live source; scratchDir is what it answered for the
+	// pass in flight, resolved once in diskPaths so the three readers below
+	// cannot disagree about which mount is the scratch one mid-pass. Owned by
+	// the sampling goroutine.
+	scratchDirFn func() string
+	scratchDir   string
+	mediaRoots   func(ctx context.Context) []string
+	sessions     func() map[string]int
+	identities   func() []DeviceIdentity
+	ffmpegPIDs   func() []int
 
 	// Path seams. Production values point at the real filesystem; tests point
 	// them at a fake /proc tree.
@@ -143,16 +156,16 @@ func NewSampler(opts Options) *Sampler {
 		ffmpegPIDs = func() []int { return defaultFFmpegChildren(procDir, pid) }
 	}
 	s := &Sampler{
-		interval:    interval,
-		now:         now,
-		goos:        runtime.GOOS,
-		scratchDir:  opts.ScratchDir,
-		mediaRoots:  opts.MediaRoots,
-		sessions:    opts.DeviceSessions,
-		identities:  opts.DeviceIdentities,
-		ffmpegPIDs:  ffmpegPIDs,
-		procDir:     procDir,
-		hostProcDir: hostProcDir,
+		interval:     interval,
+		now:          now,
+		goos:         runtime.GOOS,
+		scratchDirFn: opts.ScratchDir,
+		mediaRoots:   opts.MediaRoots,
+		sessions:     opts.DeviceSessions,
+		identities:   opts.DeviceIdentities,
+		ffmpegPIDs:   ffmpegPIDs,
+		procDir:      procDir,
+		hostProcDir:  hostProcDir,
 		// Each cgroup read is tried at this process's own cgroup before the
 		// mount root, so a systemd unit with CPUQuota= or MemoryMax= is
 		// measured against its limit rather than against the whole machine.
@@ -338,6 +351,10 @@ func (s *Sampler) cpuStats(now time.Time) (busyPct, cores int) {
 // The scratch dir is always first and so is never the entry dropped: it is the
 // one mount admission control reads.
 func (s *Sampler) diskPaths(ctx context.Context) []string {
+	s.scratchDir = ""
+	if s.scratchDirFn != nil {
+		s.scratchDir = strings.TrimSpace(s.scratchDirFn())
+	}
 	var paths []string
 	if s.scratchDir != "" {
 		paths = append(paths, s.scratchDir)

@@ -408,11 +408,18 @@ func (s *Server) StartMetricsSampler(ctx context.Context) {
 	if s == nil || ctx == nil {
 		return
 	}
-	scratchDir := ""
-	if s.watcher != nil {
-		if cfg := s.watcher.Config(); cfg != nil {
-			scratchDir = strings.TrimSpace(cfg.Playback.TranscodeDir)
+	// Read per sample, not captured here: playback.transcode_dir is
+	// hot-reloadable, and a proxy that snapshotted it at startup would go on
+	// measuring a volume nothing writes to.
+	scratchDir := func() string {
+		if s.watcher == nil {
+			return ""
 		}
+		cfg := s.watcher.Config()
+		if cfg == nil {
+			return ""
+		}
+		return cfg.Playback.TranscodeDir
 	}
 	s.metrics = nodemetrics.NewSampler(nodemetrics.Options{
 		ScratchDir:       scratchDir,

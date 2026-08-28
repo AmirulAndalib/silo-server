@@ -1017,7 +1017,10 @@ func (s *Server) StartMetricsSampler(ctx context.Context) {
 		return
 	}
 	s.metrics = nodemetrics.NewSampler(nodemetrics.Options{
-		ScratchDir:       s.transcodeDir,
+		// Fixed for this process: a node writes every session under the
+		// directory it resolved at startup, so a later config edit does not move
+		// the volume this one is filling.
+		ScratchDir:       func() string { return s.transcodeDir },
 		DeviceSessions:   playback.HWDeviceLoadSnapshot,
 		DeviceIdentities: playback.SamplerDeviceIdentities,
 	})

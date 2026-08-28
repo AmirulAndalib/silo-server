@@ -783,3 +783,40 @@ func TestHWProbesInFlightCountsADetachedVideoToolboxProbe(t *testing.T) {
 	released.Do(func() { close(release) })
 	awaitNoProbesInFlight(t)
 }
+
+// A scheduled capability snapshot is how a long-running node notices its
+// hardware changing, and on an NVIDIA-only node — /dev/nvidia* and the toolkit,
+// no /dev/dri — a card's uuid is the only trace of it in the report. A listing
+// cached past the walk that took it would republish a hot-removed card in every
+// snapshot until someone re-probed by hand.
+func TestCapabilityWalkRequeriesNVIDIAIdentities(t *testing.T) {
+	previous := nvidiaSMIQuery
+	answer := "GPU-aaa, 00000000:03:00.0\n"
+	queries := 0
+	nvidiaSMIQuery = func(context.Context) ([]byte, error) {
+		queries++
+		return []byte(answer), nil
+	}
+	t.Cleanup(func() {
+		nvidiaSMIQuery = previous
+		resetNVIDIAGPUUUIDs()
+	})
+	resetNVIDIAGPUUUIDs()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	first, _ := DetectHWAccelWithFFmpegContextResult(ctx, hwAccelAuto, "", "")
+	if !slices.Contains(first.NVIDIAGPUUUIDs, "GPU-aaa") {
+		t.Fatalf("first walk reported %v, want the card nvidia-smi named", first.NVIDIAGPUUUIDs)
+	}
+
+	// The card is hot-removed. Nothing else in this node's report mentions it.
+	answer = ""
+	second, _ := DetectHWAccelWithFFmpegContextResult(ctx, hwAccelAuto, "", "")
+	if slices.Contains(second.NVIDIAGPUUUIDs, "GPU-aaa") {
+		t.Fatalf("second walk still reported %v for a card that is gone", second.NVIDIAGPUUUIDs)
+	}
+	if queries < 2 {
+		t.Fatalf("nvidia-smi queried %d times across two walks, want one per walk", queries)
+	}
+}

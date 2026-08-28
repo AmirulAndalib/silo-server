@@ -250,6 +250,11 @@ var ErrHardwareDetectionIncomplete = errors.New("hardware detection did not comp
 // the node capability endpoints and their background snapshots — must use this
 // form and refuse to publish on ErrHardwareDetectionIncomplete.
 func DetectHWAccelWithFFmpegContextResult(ctx context.Context, hwAccel, ffmpegPath, hwDevice string) (HWAccelInfo, error) {
+	// One listing per walk: the identities below are re-read here, while the
+	// probe verdicts they accompany stay cached. That asymmetry is deliberate —
+	// a probe is several ffmpeg execs and a listing is one cheap query, and it
+	// is the listing that answers "is this card still here".
+	resetNVIDIAGPUUUIDs()
 	candidates := collectHWCandidates(hwDevice)
 	resolved := HWAccelNone
 	var detected []DetectedBackend
@@ -1088,10 +1093,10 @@ func InvalidateHWProbeCache() {
 	hwProbeCache.generation++
 	hwProbeCache.entries = make(map[string]hwProbeCacheEntry)
 	hwProbeCache.verifiedDevices = make(map[string][]string)
-	// The GPU identity listing goes too. A re-probe is exactly when nvidia-smi
-	// may have become available, or a card in the same slot may have been
-	// replaced, and both of those change identities the drift comparison and
-	// shared-GPU placement read.
+	// The GPU identity listing goes too. A detection walk drops it on its own,
+	// but this is exported and nothing here can require that a walk follows —
+	// the sampler reads identities every few seconds between walks, and an
+	// operator who re-probes has asked for that to be current now.
 	resetNVIDIAGPUUUIDs()
 	// VideoToolbox keeps its own cache, keyed by the FFmpeg binary's identity
 	// rather than by generation, so it has to be cleared rather than superseded.
@@ -1717,13 +1722,16 @@ var nvidiaSMIQuery = runNVIDIASMIQuery
 // probe caches a second query could only cost a subprocess to learn the same
 // answer, since GPU identities do not change under a running kernel.
 //
-// It is not cached for the process lifetime, though, which a sync.Once would
-// make it. Two things invalidate it and both are exactly what the operator
-// re-probe exists for: an nvidia-smi that was missing or broken at first call
-// would otherwise never be asked again, leaving every NVIDIA card without its
-// permanent id; and a card swapped into the same PCI slot would keep answering
-// to its predecessor's uuid. Both feed drift detection and shared-GPU
-// placement, so a stale answer here is a wrong answer there.
+// It lives for one detection walk, not for the process, which a sync.Once would
+// make it. Everything that reads it is asking what hardware this host has right
+// now: drift detection compares one walk's answer against the last one, and
+// shared-GPU placement groups nodes by it. A listing that outlives its walk
+// makes all of those describe a machine that no longer exists — an nvidia-smi
+// missing or broken at first call is never asked again, a card swapped into the
+// same slot keeps answering to its predecessor's uuid, and a card hot-removed
+// from an NVIDIA-only node goes on being reported by every scheduled snapshot
+// until someone re-probes by hand. On such a node that uuid is the card's only
+// identity, so nothing else in the report would show it gone.
 var nvidiaGPUUUIDs struct {
 	mu     sync.Mutex
 	loaded bool
