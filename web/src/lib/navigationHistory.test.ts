@@ -3,9 +3,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   hasEarlierEntry,
   markNavigationDirection,
-  recordNavigation,
+  resolveCommittedDirection,
   resetNavigationHistory,
-  resolvePopDirection,
 } from "./navigationHistory";
 
 /** Stands in for the browser having committed the entry at `idx`. */
@@ -17,7 +16,7 @@ function commit(idx: number) {
 function pushAll(depth: number) {
   for (let idx = 0; idx < depth; idx += 1) {
     commit(idx);
-    recordNavigation();
+    resolveCommittedDirection();
   }
 }
 
@@ -51,52 +50,52 @@ describe("markNavigationDirection", () => {
   });
 });
 
-describe("resolvePopDirection", () => {
+describe("resolveCommittedDirection", () => {
   it("reads back and forward off the committed history index", () => {
     pushAll(3);
 
     commit(1);
-    expect(resolvePopDirection()).toBe("back");
+    expect(resolveCommittedDirection()).toBe("back");
 
     commit(2);
-    expect(resolvePopDirection()).toBe("forward");
+    expect(resolveCommittedDirection()).toBe("forward");
   });
 
   it("reports a multi-entry jump as back", () => {
     pushAll(4);
 
     commit(0);
-    expect(resolvePopDirection()).toBe("back");
+    expect(resolveCommittedDirection()).toBe("back");
   });
 
   it("compares against the entry we came from, not the last one recorded", () => {
     pushAll(2);
 
     commit(0);
-    expect(resolvePopDirection()).toBe("back");
+    expect(resolveCommittedDirection()).toBe("back");
     // Without advancing the tracked index on every pop, returning to idx 1
     // would compare 1 against 1 and lose the direction.
     commit(1);
-    expect(resolvePopDirection()).toBe("forward");
+    expect(resolveCommittedDirection()).toBe("forward");
   });
 
   it("returns null for a pop that lands on the same index", () => {
     pushAll(1);
 
     commit(0);
-    expect(resolvePopDirection()).toBeNull();
+    expect(resolveCommittedDirection()).toBeNull();
   });
 
   it("returns null when nothing has stamped an index yet", () => {
     commit(3);
-    expect(resolvePopDirection()).toBeNull();
+    expect(resolveCommittedDirection()).toBeNull();
   });
 
   it("returns null for an entry the router never indexed", () => {
     pushAll(2);
 
     window.history.replaceState({}, "");
-    expect(resolvePopDirection()).toBeNull();
+    expect(resolveCommittedDirection()).toBeNull();
   });
 });
 
@@ -138,7 +137,7 @@ describe("unindexed entries", () => {
     pushAll(2);
 
     window.history.replaceState(null, "");
-    expect(resolvePopDirection()).toBeNull();
+    expect(resolveCommittedDirection()).toBeNull();
     expect(hasEarlierEntry()).toBe(false);
   });
 });

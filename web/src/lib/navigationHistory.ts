@@ -62,35 +62,34 @@ export function markNavigationDirection(direction: NavigationDirection | null): 
 }
 
 /**
- * Direction of the POP the browser has just committed, and null when it cannot
- * be derived — an entry from before this page load, an index the router never
- * stamped, or a same-index pop such as a bare hash change.
+ * Direction of the navigation React Router has just committed, and null when it
+ * cannot be derived — an entry from before this page load, an index the router
+ * never stamped, or a same-index commit such as a replace or a bare hash change.
  *
- * Advances the tracked index, so it must be called once per popstate: the
- * comparison is against the entry we came from, not against the last entry
- * React Router happened to commit.
+ * Advances the tracked index, so it must be called exactly once per commit: the
+ * comparison is against the entry we came from, not against the last entry the
+ * router happened to commit.
+ *
+ * This is the ONLY writer of the tracked index, and it is called from the
+ * location effect rather than from a `popstate` listener. That is not a
+ * preference. `popstate` is a discrete event, so React flushes the router's
+ * state update synchronously inside the router's own listener — and the router
+ * registers that listener when it is created, where ours can only be registered
+ * later, from an effect. A second writer therefore always lost the race: the
+ * location effect advanced the index to the destination before the listener
+ * could read the origin, so every pop compared an index against itself,
+ * resolved to null, and browser Back silently fell back to the neutral
+ * animation. One writer removes the ordering question entirely.
  *
  * An unindexed entry in the stack degrades this to null — no attribute, neutral
- * motion — rather than to a wrong answer, which is why the index is safe to use
- * for direction even though it was not safe to use for deltas.
+ * motion — rather than to a wrong answer.
  */
-export function resolvePopDirection(): NavigationDirection | null {
+export function resolveCommittedDirection(): NavigationDirection | null {
   const destination = readHistoryIndex();
   const origin = trackedIndex;
   trackedIndex = destination;
   if (destination === null || origin === null || destination === origin) return null;
   return destination < origin ? "back" : "forward";
-}
-
-/**
- * Records the index React Router has just committed, so the next popstate has
- * something to compare against. Safe to call from a location effect: the history
- * entry exists by the time the router notifies subscribers.
- */
-export function recordNavigation(): void {
-  const idx = readHistoryIndex();
-  if (idx === null) return;
-  trackedIndex = idx;
 }
 
 /**

@@ -4,7 +4,7 @@ import { MemoryRouter } from "react-router";
 import type { To } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { recordNavigation, resetNavigationHistory } from "@/lib/navigationHistory";
+import { resetNavigationHistory, resolveCommittedDirection } from "@/lib/navigationHistory";
 
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
@@ -97,7 +97,7 @@ describe("useViewTransitionNavigate", () => {
 
   it("pushes an `up` target, stamping only the direction", async () => {
     commit(0);
-    recordNavigation();
+    resolveCommittedDirection();
 
     render(<Harness to="/item/series" options={{ up: true }} />);
     await go();

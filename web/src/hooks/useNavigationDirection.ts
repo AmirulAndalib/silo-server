@@ -1,11 +1,7 @@
 import { useEffect } from "react";
-import { useLocation } from "react-router";
+import { useLocation, useNavigationType } from "react-router";
 
-import {
-  markNavigationDirection,
-  recordNavigation,
-  resolvePopDirection,
-} from "@/lib/navigationHistory";
+import { markNavigationDirection, resolveCommittedDirection } from "@/lib/navigationHistory";
 
 /**
  * Keeps `html[data-navigation-direction]` in step with the browser. Mount once,
@@ -13,37 +9,31 @@ import {
  * transitions outside `Layout`, and the tracked index has to survive the
  * auth-gated routes that unmount it.
  *
- * Push direction comes from the caller, at click time. Back/forward direction
- * cannot: React Router swaps currentLocation and nextLocation on a reverse POP,
- * so both legs of a back-and-forth produce the byte-identical pair and
- * `useViewTransitionState` is blind to direction by construction. The delta
- * only exists inside the router's private history, so an app-level popstate
- * listener recomputing it from the previous index is the only source.
+ * Push direction comes from the caller, at click time, because only the caller
+ * knows whether a link is a descent or a step back up the hierarchy. Back and
+ * forward cannot come from there: React Router swaps currentLocation and
+ * nextLocation on a reverse POP, so both legs of a back-and-forth produce the
+ * byte-identical pair and `useViewTransitionState` is blind to direction by
+ * construction. The committed history index is the only signal left.
  *
- * The race is not close. React Router's own popstate handler is registered
- * during App's first render, so this one runs second, and from there every path
- * to `startViewTransition` goes through an awaited loader pass and two React
- * commits. The synchronous branch needs `flushSync`, which a POP never carries.
+ * Deriving it from the location effect rather than from a `popstate` listener is
+ * what makes it work at all — see `resolveCommittedDirection`. A listener cannot
+ * be registered before the router's, and the router's runs React's state update
+ * synchronously, so by the time a listener fires, the index it needed to compare
+ * against has already been advanced.
  */
 export function useNavigationDirection(): void {
   const location = useLocation();
+  const navigationType = useNavigationType();
 
   useEffect(() => {
-    const handlePopState = () => {
-      // Null clears the attribute rather than leaving the last push's direction
-      // standing — an unknowable direction gets the neutral transition.
-      markNavigationDirection(resolvePopDirection());
-    };
-    window.addEventListener("popstate", handlePopState);
-    return () => window.removeEventListener("popstate", handlePopState);
-  }, []);
-
-  useEffect(() => {
-    // Index bookkeeping only, so the next popstate has something to compare
-    // against. This must never touch the direction attribute: passive effects
-    // for the new location flush before React Router's commit barrier resolves,
-    // and therefore before the browser captures the new snapshot, so clearing
-    // here would erase the direction mid-transition.
-    recordNavigation();
-  }, [location]);
+    const direction = resolveCommittedDirection();
+    // A push or replace was already stamped at click time by whoever knew the
+    // intent; re-deriving it here would only ever agree, or — for a replace,
+    // which does not move the index — wrongly clear it. A POP has no click to
+    // have stamped it, so this is the only chance, including when the answer is
+    // null: that takes the attribute off and plays the neutral transition
+    // rather than leaving the previous navigation's direction standing.
+    if (navigationType === "POP") markNavigationDirection(direction);
+  }, [location, navigationType]);
 }

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, useLocation, useNavigationType } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { recordNavigation, resetNavigationHistory } from "@/lib/navigationHistory";
+import { resetNavigationHistory, resolveCommittedDirection } from "@/lib/navigationHistory";
 import SidebarItemNavigationProvider from "./SidebarItemNavigationProvider";
 import ViewTransitionLink from "./ViewTransitionLink";
 
@@ -200,7 +200,7 @@ describe("ViewTransitionLink direction", () => {
 
   it("keeps an `up` link a real anchor so modified clicks are the browser's", () => {
     commit(0);
-    recordNavigation();
+    resolveCommittedDirection();
     commit(1);
 
     render(
