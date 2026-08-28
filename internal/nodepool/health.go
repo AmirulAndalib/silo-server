@@ -285,7 +285,7 @@ func (hc *HealthChecker) Start(ctx context.Context) {
 }
 
 // applyHealthFunc is a pool's copy-on-write health writer.
-type applyHealthFunc func(id int, checkedURL string, healthy bool, activeJobs, egressKbps int, lastStats []byte, checkedAt time.Time)
+type applyHealthFunc func(id int, checkedURL string, healthy bool, activeJobs, egressKbps int, advertisedHash string, lastStats []byte, checkedAt time.Time)
 
 // applyCapabilitiesFunc is a pool's copy-on-write capability writer.
 type applyCapabilitiesFunc func(id int, fetchedFrom string, capabilities []byte, hash string, refreshedAt time.Time, drift *string, driftBaseline []byte)
@@ -300,7 +300,7 @@ func (hc *HealthChecker) checkAll(ctx context.Context) {
 			// a Node struct mutated in place (the pool swaps in a copy). Fenced
 			// on the checked URL, like the database write below: the pool can be
 			// reloaded with a different worker on this id while the check runs.
-			applyHealth(n.ID, n.URL, healthy, activeJobs, egressKbps, lastStats, time.Now())
+			applyHealth(n.ID, n.URL, healthy, activeJobs, egressKbps, capabilitiesHash, lastStats, time.Now())
 
 			if n.Healthy && !healthy {
 				slog.WarnContext(ctx, "stream node unhealthy", "component", "nodepool", "id", n.ID, "name", n.Name, "url", n.URL)
@@ -761,10 +761,14 @@ func truncateDriftNote(note string) string {
 // clears it.
 func resolveDriftNote(stored *string, storedBaseline []byte, drift capabilityDrift, parsed bool, payload []byte) (*string, []byte) {
 	outstanding := mergeDriftBaseline(storedBaseline, drift)
-	if note := drift.persistedNote(); note != nil {
-		// A fresh loss extends whatever was already outstanding rather than
-		// replacing it: two GPUs going one at a time must both have to return.
-		return note, marshalDriftBaseline(outstanding)
+	if drift.regressed() {
+		// The note names everything still outstanding, not just this pass's
+		// delta. Both accumulate, and if only the baseline did, two GPUs going
+		// one at a time would leave the operator reading about the second while
+		// the note stayed latched — after that one returned — for a first loss
+		// nothing on screen ever mentioned.
+		note := outstanding.note(drift)
+		return &note, marshalDriftBaseline(outstanding)
 	}
 	if stored == nil || strings.TrimSpace(*stored) == "" {
 		return nil, nil
@@ -818,6 +822,50 @@ func (d driftBaselineDevice) matches(candidate renderDeviceAliases) bool {
 }
 
 func (b driftBaseline) empty() bool { return len(b.Backends) == 0 && len(b.Devices) == 0 }
+
+// note renders what this baseline is still waiting on, plus the resolution
+// change this pass saw.
+//
+// The hardware half comes from the baseline so the visible text and the latch
+// agree: an operator watching the note disappear should be watching the same
+// thing the clearing rule is watching. The resolution transition comes from the
+// delta, because "qsv -> none" describes this refresh rather than a standing
+// debt, and the previous pass's transition is stale once another has happened.
+func (b driftBaseline) note(drift capabilityDrift) string {
+	parts := make([]string, 0, 3)
+	if len(b.Backends) > 0 {
+		parts = append(parts, "verified hardware backends lost: "+strings.Join(b.Backends, ", "))
+	}
+	if names := b.deviceNames(); len(names) > 0 {
+		parts = append(parts, "render devices gone: "+strings.Join(names, ", "))
+	}
+	if drift.previousResolved != drift.resolved {
+		parts = append(parts, "resolved backend "+drift.previousResolved+" -> "+drift.resolved)
+	}
+	return truncateDriftNote(strings.Join(parts, "; "))
+}
+
+// deviceNames picks one readable name per outstanding device: the render path an
+// operator would recognize, else the uuid, else whatever alias there is.
+func (b driftBaseline) deviceNames() []string {
+	names := make([]string, 0, len(b.Devices))
+	for _, device := range b.Devices {
+		name := device.UUID
+		for _, alias := range device.Aliases {
+			if strings.HasPrefix(alias, "/dev/") {
+				name = alias
+				break
+			}
+			if name == "" {
+				name = alias
+			}
+		}
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
 
 // recoveredBy reports whether every backend and device the note is waiting on is
 // accounted for in this report.

@@ -420,6 +420,17 @@ func MaxCapabilityRequestTimeout() time.Duration {
 	return CapabilityRequestTimeout(hwAccelAuto, strings.Join(devices, ","))
 }
 
+// hwProbeDevicesTruncatedLogged latches the truncation warning to one line per
+// process: a device list is standing configuration, not an event.
+var hwProbeDevicesTruncatedLogged sync.Once
+
+func noteHWProbeDevicesTruncated(configured int) {
+	hwProbeDevicesTruncatedLogged.Do(func() {
+		slog.Warn("hardware detection covers only the first configured devices; the rest are not verified",
+			"component", "playback", "configured", configured, "probed", tonemap.MaxProbedDevices)
+	})
+}
+
 // hwCandidates groups the candidate render devices by the backend each one can
 // plausibly drive, before any FFmpeg verification.
 type hwCandidates struct {
@@ -461,7 +472,18 @@ func collectHWCandidates(configuredDevice string) hwCandidates {
 	probeDevices := configured.List()
 	if len(probeDevices) == 0 {
 		probeDevices = candidates.renderDevices
-	} else {
+	}
+	if len(probeDevices) > tonemap.MaxProbedDevices {
+		// The same ceiling the tone-map matrix is capped at, for the same
+		// reason: past it the walk costs more than the budget every caller
+		// allows, so probing further guarantees the capability request is
+		// canceled rather than finished. The devices that are probed get real
+		// verdicts; the rest are still reported in the inventory, and the
+		// omission is logged rather than folded silently into a shorter answer.
+		noteHWProbeDevicesTruncated(len(probeDevices))
+		probeDevices = probeDevices[:tonemap.MaxProbedDevices]
+	}
+	if len(configured.List()) > 0 {
 		// A configured device this process cannot open can never pass a smoke
 		// encode, so it is classified for reporting but never probed. This is
 		// the normal state of a proxy node reading the cluster-wide hw_device

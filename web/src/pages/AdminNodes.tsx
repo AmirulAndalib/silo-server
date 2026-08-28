@@ -195,8 +195,12 @@ function NodeGPUCell({ node, allNodes }: { node: StreamNode; allNodes: StreamNod
           <span
             className="text-muted-foreground text-xs"
             title={
-              `No health check has confirmed this inventory since ${formatDateTime(node.last_health_check ?? "")}. ` +
-              `It was last refreshed ${formatDateTime(node.capabilities_refreshed_at ?? "")}.`
+              node.advertised_capabilities_hash &&
+              node.advertised_capabilities_hash !== node.capabilities_hash
+                ? `This node reports hardware different from what is stored, and the refetch has not landed. ` +
+                  `The inventory below was last refreshed ${formatDateTime(node.capabilities_refreshed_at ?? "")}.`
+                : `No health check has confirmed this inventory since ${formatDateTime(node.last_health_check ?? "")}. ` +
+                  `It was last refreshed ${formatDateTime(node.capabilities_refreshed_at ?? "")}.`
             }
           >
             stale

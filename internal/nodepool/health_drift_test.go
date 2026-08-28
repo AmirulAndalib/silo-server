@@ -738,3 +738,50 @@ func TestResolveDriftNoteKeepsNoteWhenEveryBackendWasSkipped(t *testing.T) {
 		t.Fatal("capability_drift cleared on a report where nothing was probed")
 	}
 }
+
+// Two GPUs going one at a time: the note and the latch have to name the same
+// thing. Built from the delta alone, the second loss replaced the first in the
+// text while the baseline still waited for both — so after the visible GPU came
+// back the warning stayed, naming hardware the operator could no longer see.
+func TestResolveDriftNoteNamesEveryOutstandingLoss(t *testing.T) {
+	const both = `{"resolved":"qsv","render_devices":["/dev/dri/renderD130"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD130","pci_address":"0000:05:00.0"}],` +
+		`"detected_backends":[{"backend":"qsv","verified":true}]}`
+
+	standing := "render devices gone: /dev/dri/renderD128"
+	firstLoss := []byte(`{"devices":[{"aliases":["0000:03:00.0","/dev/dri/renderD128"]}]}`)
+	// A second card goes while the first is still missing.
+	const before = `{"resolved":"qsv","render_devices":["/dev/dri/renderD129","/dev/dri/renderD130"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD129","pci_address":"0000:04:00.0"},` +
+		`{"path":"/dev/dri/renderD130","pci_address":"0000:05:00.0"}],` +
+		`"detected_backends":[{"backend":"qsv","verified":true}]}`
+	drift, parsed := computeCapabilityDrift([]byte(before), []byte(both))
+	if !parsed {
+		t.Fatal("drift not parsed")
+	}
+
+	note, baseline := resolveDriftNote(&standing, firstLoss, drift, parsed, []byte(both))
+	if note == nil {
+		t.Fatal("capability_drift cleared while two cards are missing")
+	}
+	for _, want := range []string{"/dev/dri/renderD128", "/dev/dri/renderD129"} {
+		if !strings.Contains(*note, want) {
+			t.Fatalf("capability_drift = %q, want it to name %s — the baseline is still waiting on it", *note, want)
+		}
+	}
+
+	// And the note keeps agreeing with the latch: the first card returning is
+	// not enough, and what remains is still named.
+	const firstBack = `{"resolved":"qsv","render_devices":["/dev/dri/renderD128","/dev/dri/renderD130"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"},` +
+		`{"path":"/dev/dri/renderD130","pci_address":"0000:05:00.0"}],` +
+		`"detected_backends":[{"backend":"qsv","verified":true}]}`
+	drift, parsed = computeCapabilityDrift([]byte(firstBack), []byte(firstBack))
+	still, _ := resolveDriftNote(note, baseline, drift, parsed, []byte(firstBack))
+	if still == nil {
+		t.Fatal("capability_drift cleared with the second card still missing")
+	}
+	if !strings.Contains(*still, "/dev/dri/renderD129") {
+		t.Fatalf("capability_drift = %q, want the still-missing card named", *still)
+	}
+}

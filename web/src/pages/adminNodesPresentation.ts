@@ -328,6 +328,15 @@ function isCapabilityReportStale(node: StreamNode, now: number): boolean {
   if (Number.isNaN(Date.parse(node.capabilities_refreshed_at ?? ""))) {
     return false;
   }
+  // The node says its hardware is something other than what is stored. The
+  // sweep refetches on that mismatch, so seeing it here means the refetch has
+  // not landed — and a health check that keeps succeeding every 30 seconds
+  // would otherwise present a report we already know is obsolete as current.
+  // This is the one staleness a timestamp cannot see.
+  const advertised = node.advertised_capabilities_hash?.trim();
+  if (advertised && advertised !== node.capabilities_hash?.trim()) {
+    return true;
+  }
   // Measured against the health check, not against the report's own age: the
   // check is what re-confirms the report, and it is the only one of the two
   // that moves on a node whose hardware never changes.

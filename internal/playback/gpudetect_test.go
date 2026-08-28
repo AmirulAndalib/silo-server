@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1365,5 +1366,44 @@ func TestHWAccelWalkTimeoutScalesWithTheDeviceSet(t *testing.T) {
 	// A host with nothing to probe still gets a usable, non-zero deadline.
 	if got := hwAccelWalkTimeout(hwCandidates{}); got <= 0 {
 		t.Fatalf("empty walk timeout = %v, want a positive bound", got)
+	}
+}
+
+// The walk is capped at the same device ceiling the tone-map matrix is, because
+// the budget every caller allows is derived from that ceiling. Probing past it
+// would guarantee the capability request is canceled before the walk finishes.
+func TestCollectHWCandidatesCapsTheProbedDeviceSet(t *testing.T) {
+	env := setupHWAccelTest(t)
+	configured := make([]string, 0, tonemap.MaxProbedDevices+3)
+	for i := range tonemap.MaxProbedDevices + 3 {
+		name := "renderD" + strconv.Itoa(128+i)
+		env.addRenderDevice(t, name, "0x8086")
+		configured = append(configured, env.devicePath(name))
+	}
+
+	candidates := collectHWCandidates(strings.Join(configured, ","))
+	if got := len(candidates.probeDevicesFor(transcodeHWQSV)); got != tonemap.MaxProbedDevices {
+		t.Fatalf("qsv probe devices = %d, want the %d cap", got, tonemap.MaxProbedDevices)
+	}
+
+	// The walk therefore stays inside the budget its callers allow, which is the
+	// property the cap exists for.
+	if walk, ceiling := hwAccelWalkTimeout(candidates), MaxCapabilityRequestTimeout(); walk >= ceiling {
+		t.Fatalf("walk budget %v is not below the %v callers allow", walk, ceiling)
+	}
+
+	// Every configured device is still reported, capped or not: the inventory is
+	// what an operator reads, and truncating it would hide hardware that exists.
+	if got := len(candidates.devicesFor(transcodeHWQSV)); got != tonemap.MaxProbedDevices {
+		t.Fatalf("qsv reported devices = %d, want the probed set", got)
+	}
+	if got := len(candidates.renderDevices); got != len(configured) {
+		t.Fatalf("render devices = %d, want all %d enumerated", got, len(configured))
+	}
+
+	// A set inside the cap is untouched.
+	small := configured[:3]
+	if got := len(collectHWCandidates(strings.Join(small, ",")).probeDevicesFor(transcodeHWQSV)); got != 3 {
+		t.Fatalf("qsv probe devices = %d, want the 3 configured", got)
 	}
 }

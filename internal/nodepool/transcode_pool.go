@@ -86,10 +86,10 @@ func (p *TranscodePool) Nodes() []*Node {
 
 // ApplyHealth records a health check result by swapping the node for an
 // updated copy, keeping published *Node values immutable.
-func (p *TranscodePool) ApplyHealth(id int, checkedURL string, healthy bool, activeJobs, egressKbps int, lastStats []byte, checkedAt time.Time) {
+func (p *TranscodePool) ApplyHealth(id int, checkedURL string, healthy bool, activeJobs, egressKbps int, advertisedHash string, lastStats []byte, checkedAt time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	applyNodeHealth(p.nodes, id, checkedURL, healthy, activeJobs, egressKbps, lastStats, checkedAt)
+	applyNodeHealth(p.nodes, id, checkedURL, healthy, activeJobs, egressKbps, advertisedHash, lastStats, checkedAt)
 }
 
 // ApplyCapabilities records a freshly fetched capability report by swapping the
@@ -114,7 +114,7 @@ func sameNodeURL(a, b string) bool {
 // by id alone would then write one worker's health — and the scratch fill
 // transcode admission reads — onto the replacement, and the database fence
 // downstream cannot undo that. The pool would stay wrong until a later sweep.
-func applyNodeHealth(nodes []*Node, id int, checkedURL string, healthy bool, activeJobs, egressKbps int, lastStats []byte, checkedAt time.Time) {
+func applyNodeHealth(nodes []*Node, id int, checkedURL string, healthy bool, activeJobs, egressKbps int, advertisedHash string, lastStats []byte, checkedAt time.Time) {
 	for i, n := range nodes {
 		if n.ID != id || !sameNodeURL(n.URL, checkedURL) {
 			continue
@@ -124,6 +124,7 @@ func applyNodeHealth(nodes []*Node, id int, checkedURL string, healthy bool, act
 		clone.ActiveJobs = activeJobs
 		clone.EgressKbps = egressKbps
 		clone.LastHealthCheck = &checkedAt
+		clone.AdvertisedCapabilitiesHash = advertisedHash
 		// A check that carried no stats clears them rather than keeping the
 		// previous sample: an unreachable node's five-minute-old CPU number
 		// looks live on a dashboard, which is worse than no number at all. The

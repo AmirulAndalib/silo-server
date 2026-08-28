@@ -147,13 +147,13 @@ func TestApplyHealthClearsStatsWhenACheckCarriesNone(t *testing.T) {
 	pool := NewTranscodePool()
 	pool.SetNodes([]*Node{{ID: 1, URL: "http://node", Enabled: true}})
 
-	pool.ApplyHealth(1, "http://node", true, 1, 0, []byte(`{"system":{"cpu_pct":41}}`), time.Now())
+	pool.ApplyHealth(1, "http://node", true, 1, 0, "", []byte(`{"system":{"cpu_pct":41}}`), time.Now())
 	stored := pool.Nodes()[0]
 	if len(stored.LastStats) == 0 {
 		t.Fatal("stats were not published to the pool")
 	}
 
-	pool.ApplyHealth(1, "http://node", false, 0, 0, nil, time.Now())
+	pool.ApplyHealth(1, "http://node", false, 0, 0, "", nil, time.Now())
 	if got := pool.Nodes()[0].LastStats; got != nil {
 		t.Fatalf("LastStats = %s after a failed check, want nil", got)
 	}
@@ -166,7 +166,7 @@ func TestApplyHealthClonesStats(t *testing.T) {
 	pool.SetNodes([]*Node{{ID: 1, URL: "http://node", Enabled: true}})
 
 	buffer := []byte(`{"system":{"cpu_pct":41}}`)
-	pool.ApplyHealth(1, "http://node", true, 0, 0, buffer, time.Now())
+	pool.ApplyHealth(1, "http://node", true, 0, 0, "", buffer, time.Now())
 	copy(buffer, []byte(`{"system":{"cpu_pct":99}}`))
 
 	if got := string(pool.Nodes()[0].LastStats); got != `{"system":{"cpu_pct":41}}` {
@@ -183,7 +183,7 @@ func TestApplyHealthIgnoresAResultForAReplacedWorker(t *testing.T) {
 	pool := NewTranscodePool()
 	pool.SetNodes([]*Node{{ID: 1, URL: "http://replacement", Enabled: true}})
 
-	pool.ApplyHealth(1, "http://original", true, 7, 0, []byte(`{"system":{"cpu_pct":41}}`), time.Now())
+	pool.ApplyHealth(1, "http://original", true, 7, 0, "", []byte(`{"system":{"cpu_pct":41}}`), time.Now())
 
 	stored := pool.Nodes()[0]
 	if stored.ActiveJobs != 0 || len(stored.LastStats) != 0 || stored.LastHealthCheck != nil {
@@ -197,7 +197,7 @@ func TestApplyHealthAcceptsATrailingSlashDifference(t *testing.T) {
 	pool := NewTranscodePool()
 	pool.SetNodes([]*Node{{ID: 1, URL: "http://node/", Enabled: true}})
 
-	pool.ApplyHealth(1, "http://node", true, 3, 0, nil, time.Now())
+	pool.ApplyHealth(1, "http://node", true, 3, 0, "", nil, time.Now())
 
 	if stored := pool.Nodes()[0]; stored.ActiveJobs != 3 {
 		t.Fatalf("active jobs = %d, want the result applied despite the trailing slash", stored.ActiveJobs)

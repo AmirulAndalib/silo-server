@@ -1172,3 +1172,48 @@ describe("nodeUsesCUDADevices", () => {
     expect(nodeUsesCUDADevices(null, HW_ACCEL_INHERIT)).toBe(false);
   });
 });
+
+describe("capability report staleness from an unconfirmed hash", () => {
+  const base = {
+    id: 1,
+    name: "gpu-1",
+    type: "transcode",
+    url: "http://gpu-1",
+    enabled: true,
+    healthy: true,
+    created_at: "2026-08-28T00:00:00Z",
+    last_health_check: "2026-08-28T00:00:00Z",
+    capabilities_refreshed_at: "2026-08-28T00:00:00Z",
+    capabilities: { resolved: "qsv" },
+  } as unknown as StreamNode;
+
+  // A failing refetch leaves the two hashes apart while the health check goes on
+  // succeeding every 30 seconds, so the timestamp says fresh about an inventory
+  // the node has already contradicted.
+  it("marks a report stale when the node advertises a different hash", () => {
+    const node = {
+      ...base,
+      capabilities_hash: "sha256:stored",
+      advertised_capabilities_hash: "sha256:newer",
+    } as StreamNode;
+    const gpu = describeNodeGPU(node, Date.parse("2026-08-28T00:00:10Z"));
+    expect(gpu?.stale).toBe(true);
+  });
+
+  it("leaves a matching hash alone on a freshly checked node", () => {
+    const node = {
+      ...base,
+      capabilities_hash: "sha256:stored",
+      advertised_capabilities_hash: "sha256:stored",
+    } as StreamNode;
+    const gpu = describeNodeGPU(node, Date.parse("2026-08-28T00:00:10Z"));
+    expect(gpu?.stale).toBe(false);
+  });
+
+  // A node that never advertises one — an older build — keeps the timestamp rule.
+  it("falls back to the health-check age when no hash is advertised", () => {
+    const node = { ...base, capabilities_hash: "sha256:stored" } as StreamNode;
+    expect(describeNodeGPU(node, Date.parse("2026-08-28T00:00:10Z"))?.stale).toBe(false);
+    expect(describeNodeGPU(node, Date.parse("2026-08-28T00:20:00Z"))?.stale).toBe(true);
+  });
+});

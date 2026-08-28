@@ -3968,6 +3968,12 @@ export interface StreamNode {
   // until one report has been stored — and on every server predating them.
   capabilities?: NodeCapabilities | null;
   capabilities_hash?: string;
+  /**
+   * The hash the node named on its last health check. It differs from
+   * `capabilities_hash` while a refetch is outstanding or failing, which is the
+   * one case a fresh `last_health_check` cannot rule out.
+   */
+  advertised_capabilities_hash?: string;
   /** When `capabilities` was fetched: the age of the inventory, not the health check. */
   capabilities_refreshed_at?: string;
   /** Stable per-GPU identities; two nodes sharing one share hardware. */

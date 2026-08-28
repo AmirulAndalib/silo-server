@@ -73,6 +73,13 @@ type Node struct {
 	// for. Non-nil exactly when CapabilityDrift is, except on a note written
 	// before this column existed.
 	CapabilityDriftBaseline json.RawMessage `json:"capability_drift_baseline,omitempty"`
+	// AdvertisedCapabilitiesHash is the hash the node named on its last health
+	// check, which is not always the one stored beside it: the sweep refetches
+	// on a mismatch, and a refetch that keeps failing leaves the two apart while
+	// the health check goes on succeeding every 30 seconds. Derived per sweep
+	// rather than persisted — it is an observation about right now, and a
+	// restarted API re-learns it on its first check.
+	AdvertisedCapabilitiesHash string `json:"advertised_capabilities_hash,omitempty"`
 	// PhysicalGPUKeys identifies the actual GPUs behind this node, derived from
 	// Capabilities rather than stored: it is a pure function of that payload, so
 	// a column would only be a second copy that can disagree with it. Two nodes
