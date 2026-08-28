@@ -2,7 +2,11 @@ package nodeconfig
 
 import (
 	"context"
+	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/config"
 )
@@ -126,5 +130,73 @@ func TestOnLoadNormalizersApplyOnEveryLoad(t *testing.T) {
 	}
 	if got := w.Config().Playback.FFmpegPath; got != "/resolved/ffmpeg" {
 		t.Fatalf("after reload Playback.FFmpegPath = %q, want normalized value", got)
+	}
+}
+
+// staleReloadWindow is how long the poll's fetch waits for a concurrent forced
+// reload to overtake it. It is a bound on a violation, not a wait for
+// completion: serialized, nothing can overtake and the wait expires; unserialized,
+// the forced reload finishes far inside it and the poll's stale snapshot lands
+// last.
+const staleReloadWindow = 250 * time.Millisecond
+
+// The poll, the settings-changed event, and ForceReload all reload, and only
+// the first two share a goroutine. A poll that read server_settings before an
+// operator's edit must not be able to put that pre-edit snapshot back after
+// ForceReload has already applied the edit — the node would answer the endpoint
+// 204 while running the old policy.
+func TestReloadDoesNotLetAnEarlierSnapshotSupersedeALaterOne(t *testing.T) {
+	w := &Watcher{}
+
+	var mu sync.Mutex
+	var events []string
+	record := func(event string) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, event)
+	}
+	w.OnChange(func(_, updated *config.Config) { record("apply " + updated.Server.LogLevel) })
+
+	polling := make(chan struct{})
+	forced := make(chan struct{})
+	var fetches atomic.Int32
+	w.fetchSettingsFn = func(context.Context) (map[string]string, error) {
+		if fetches.Add(1) == 1 {
+			record("fetch info")
+			close(polling)
+			select {
+			case <-forced:
+			case <-time.After(staleReloadWindow):
+			}
+			return map[string]string{"server.log_level": "info"}, nil
+		}
+		record("fetch error")
+		return map[string]string{"server.log_level": "error"}, nil
+	}
+
+	polled := make(chan error, 1)
+	go func() { polled <- w.reload(context.Background()) }()
+	<-polling
+
+	go func() {
+		if err := w.ForceReload(context.Background()); err != nil {
+			t.Errorf("ForceReload() error = %v", err)
+		}
+		close(forced)
+	}()
+
+	if err := <-polled; err != nil {
+		t.Fatalf("poll reload error = %v", err)
+	}
+	<-forced
+
+	if got := w.Config().Server.LogLevel; got != "error" {
+		t.Errorf("Server.LogLevel = %q, want the value the later read saw", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"fetch info", "apply info", "fetch error", "apply error"}
+	if !slices.Equal(events, want) {
+		t.Errorf("reloads interleaved:\n got %v\nwant %v", events, want)
 	}
 }

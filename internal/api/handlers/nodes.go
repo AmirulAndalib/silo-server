@@ -442,6 +442,13 @@ func (h *NodeHandler) HandleCheckNode(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.UpdateHealth(r.Context(), id, node.URL, healthy, activeJobs, egressKbps, lastStats); err != nil {
 		slog.ErrorContext(r.Context(), "persisting health check result", "component", "api", "node_id", id, "error", err)
 	}
+	// The pools get it too, exactly as the background sweep would. A manual
+	// check that only wrote the row would leave the planner admitting work to a
+	// node whose scratch volume this check just found full, and would pair a
+	// fresh last_health_check in the database with the pool's older advertised
+	// hash — which is the combination the Nodes page reads as "this inventory
+	// was reconfirmed", for up to the next 30 seconds.
+	h.applyHealthToPools(node, healthy, activeJobs, egressKbps, capabilitiesHash, lastStats)
 
 	writeJSON(w, http.StatusOK, checkNodeResult{
 		Healthy:          healthy,
@@ -449,6 +456,27 @@ func (h *NodeHandler) HandleCheckNode(w http.ResponseWriter, r *http.Request) {
 		EgressKbps:       egressKbps,
 		CapabilitiesHash: capabilitiesHash,
 	})
+}
+
+// applyHealthToPools publishes one check's result to whichever pool holds the
+// node, so an operator-triggered check lands everywhere the sweep's would.
+//
+// Fenced on the node's URL by the pools themselves, like every other health
+// write: the row can be repointed while a check is in flight.
+func (h *NodeHandler) applyHealthToPools(
+	node *nodepool.Node, healthy bool, activeJobs, egressKbps int, capabilitiesHash string, lastStats []byte,
+) {
+	checkedAt := time.Now()
+	switch node.Type {
+	case nodepool.NodeTypeProxy:
+		if h.proxyPool != nil {
+			h.proxyPool.ApplyHealth(node.ID, node.URL, healthy, activeJobs, egressKbps, capabilitiesHash, lastStats, checkedAt)
+		}
+	case nodepool.NodeTypeTranscode:
+		if h.transcodePool != nil {
+			h.transcodePool.ApplyHealth(node.ID, node.URL, healthy, activeJobs, egressKbps, capabilitiesHash, lastStats, checkedAt)
+		}
+	}
 }
 
 // HandleForceReloadNodes handles POST /admin/nodes/force-reload — sends a

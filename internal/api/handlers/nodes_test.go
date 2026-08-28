@@ -697,3 +697,57 @@ func TestHandleListNodesCarriesTheAdvertisedHashFromThePools(t *testing.T) {
 		t.Fatalf("unchecked node advertised hash = %q, want it absent", byID[3])
 	}
 }
+
+// A manual check is a health check like the sweep's: whatever it learns has to
+// reach the pool the planner and the Nodes page read, not just the row.
+func TestHandleCheckNodePublishesResultToThePool(t *testing.T) {
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"active_jobs":       3,
+			"egress_kbps":       4200,
+			"capabilities_hash": "sha256:after",
+			"system":            map[string]any{"scratch_free_gb": 0.5},
+		})
+	}))
+	defer node.Close()
+
+	stale := "sha256:before"
+	pooled := &nodepool.Node{
+		ID: 7, Name: "gpu-7", Type: nodepool.NodeTypeTranscode, URL: node.URL, Enabled: true,
+		Healthy: true, ActiveJobs: 99, CapabilitiesHash: &stale, AdvertisedCapabilitiesHash: stale,
+	}
+	pool := nodepool.NewTranscodePool()
+	pool.SetNodes([]*nodepool.Node{pooled})
+
+	repo := &stubNodeRepository{node: pooled}
+	handler := NewNodeHandler(repo, nil, pool, nil, nil, nil, "secret")
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/admin/nodes/7/check", nil)
+	routeContext := chi.NewRouteContext()
+	routeContext.URLParams.Add("id", "7")
+	handler.HandleCheckNode(recorder, request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeContext)))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	updated := pool.Nodes()
+	if len(updated) != 1 {
+		t.Fatalf("pool holds %d nodes, want 1", len(updated))
+	}
+	if got := updated[0].AdvertisedCapabilitiesHash; got != "sha256:after" {
+		t.Errorf("pool advertised hash = %q, want the hash this check just read", got)
+	}
+	if got := updated[0].ActiveJobs; got != 3 {
+		t.Errorf("pool active jobs = %d, want 3", got)
+	}
+	// The stats decide whether the planner keeps admitting work; a check that
+	// found the scratch volume nearly full has to reach the planner's copy.
+	if len(updated[0].LastStats) == 0 {
+		t.Error("pool node kept no stats from the manual check")
+	}
+	if updated[0].LastHealthCheck == nil {
+		t.Error("pool node kept no check timestamp, so the row and the pool disagree on freshness")
+	}
+}

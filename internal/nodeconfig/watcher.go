@@ -82,6 +82,14 @@ type Watcher struct {
 	// nodeRowID is the row this worker has resolved to, kept so a later rename
 	// or repoint cannot sever the association. Zero until a lookup succeeds.
 	nodeRowID int
+
+	// reloadMu makes one reload atomic from the read of server_settings through
+	// the config swap and its callbacks; see reload.
+	reloadMu sync.Mutex
+	// fetchSettings, when set, replaces the read of server_settings. Only a
+	// test sets it — nothing in production needs to read settings from
+	// anywhere but the database.
+	fetchSettingsFn func(context.Context) (map[string]string, error)
 }
 
 // rememberNodeRowID records the row a lookup resolved to.
@@ -175,7 +183,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 
 // ForceReload triggers an immediate config reload from the database.
 func (w *Watcher) ForceReload(ctx context.Context) error {
-	if w == nil || w.pool == nil {
+	if w == nil || (w.pool == nil && w.fetchSettingsFn == nil) {
 		// A watcher with no database is one a test constructed, or a mode that
 		// runs entirely off bootstrap overrides. Either way there is nothing to
 		// re-read, and an error is a far better answer than the nil dereference
@@ -186,9 +194,8 @@ func (w *Watcher) ForceReload(ctx context.Context) error {
 }
 
 // RequestReload asks the poll goroutine to reload soon. Non-blocking and
-// coalescing — safe to call from request handlers. Unlike ForceReload, the
-// reload runs on the poll goroutine, so concurrent requests can never swap a
-// stale snapshot over a newer one.
+// coalescing — safe to call from request handlers. Unlike ForceReload it does
+// not wait for the reload, and does not report whether it succeeded.
 func (w *Watcher) RequestReload() {
 	select {
 	case w.reloadCh <- struct{}{}:
@@ -207,8 +214,32 @@ func (w *Watcher) SetConfigForTest(cfg *config.Config) {
 
 // reload fetches all settings from the database, builds a new Config,
 // applies bootstrap overrides, and atomically swaps the config pointer.
+//
+// Read and swap are one critical section. Reloads arrive from three places —
+// the 60s poll, the settings-changed event, and ForceReload on a request
+// goroutine — and only the first two share a goroutine. Letting them overlap
+// would make the winner the one that finished last rather than the one that
+// read last: a poll that sampled server_settings before an operator's edit can
+// return after ForceReload has already applied the edit, and put its pre-edit
+// snapshot back. The node would then answer 204 to the endpoint, the API would
+// reload its pool believing the node adopted the new backend and device, and
+// the node would go on transcoding with the old ones until something reloaded
+// it again.
+//
+// Serializing the whole operation, rather than just the swap, is what fixes
+// that: a reload's fetch cannot begin until the previous reload's swap is
+// done, so a later swap is always built on a later read. The callbacks run
+// inside the section too, so an older reload can't announce its config as the
+// current one after a newer swap.
 func (w *Watcher) reload(ctx context.Context) error {
-	m, err := w.fetchSettings(ctx)
+	w.reloadMu.Lock()
+	defer w.reloadMu.Unlock()
+
+	fetch := w.fetchSettings
+	if w.fetchSettingsFn != nil {
+		fetch = w.fetchSettingsFn
+	}
+	m, err := fetch(ctx)
 	if err != nil {
 		return err
 	}
