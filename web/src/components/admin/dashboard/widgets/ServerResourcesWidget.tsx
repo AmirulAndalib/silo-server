@@ -58,7 +58,7 @@ function ResourceMetricBox({ metric }: { metric: ResourceMetric }) {
       <div className="text-muted-foreground text-xs">{metric.label}</div>
       <div
         className={cn(
-          "mt-1 text-xl font-bold tabular-nums tracking-tight",
+          "mt-1 text-xl font-bold tracking-tight tabular-nums",
           metric.muted && "text-muted-foreground",
           metric.warning && "text-warning",
         )}
