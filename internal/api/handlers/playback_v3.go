@@ -81,7 +81,6 @@ type v3NodeCapabilityCache struct {
 	toneMapCapabilities tonemap.Capabilities
 	err                 error
 	expiresAt           time.Time
-	probeRequestTimeout time.Duration
 }
 
 type preparedTransportV3 struct {
@@ -306,14 +305,37 @@ func (h *PlaybackHandler) localToneMapProbeTimeoutV3() time.Duration {
 	return tonemap.ProbeEndpointTimeout(cfg.HWAccel, cfg.HWDevice)
 }
 
+// remoteToneMapProbeTimeoutV3 returns how long to allow one capability read of
+// a node, from the budget that node last advertised.
+//
+// The budget is kept apart from the inventory because it describes the node
+// rather than its hardware, and the two are invalidated for different reasons.
+// An acceleration change makes the inventory wrong and the matrix cold — which
+// is exactly when the next read is slowest — while how long that node takes to
+// answer has not changed. Storing them together meant an invalidation dropped
+// the budget with the inventory and the refresh it triggered fell back to two
+// minutes, short of the ~136 seconds a two-device node legitimately asks for,
+// so protocol-v3 planning lost its inventory precisely after an invalidation.
 func (h *PlaybackHandler) remoteToneMapProbeTimeoutV3(nodeURL string) time.Duration {
 	h.v3NodeCapabilitiesMu.Lock()
-	entry := h.v3NodeCapabilities[nodeURL]
+	budget := h.v3NodeProbeBudgets[nodeURL]
 	h.v3NodeCapabilitiesMu.Unlock()
-	if entry.probeRequestTimeout > 0 {
-		return entry.probeRequestTimeout
+	if budget > 0 {
+		return budget
 	}
 	return remoteNodeProbeFallbackTimeout
+}
+
+// rememberNodeProbeBudgetV3 records what a node says its capability read costs.
+// Callers must hold v3NodeCapabilitiesMu.
+func (h *PlaybackHandler) rememberNodeProbeBudgetLockedV3(nodeURL string, budget time.Duration) {
+	if budget <= 0 {
+		return
+	}
+	if h.v3NodeProbeBudgets == nil {
+		h.v3NodeProbeBudgets = make(map[string]time.Duration)
+	}
+	h.v3NodeProbeBudgets[nodeURL] = budget
 }
 
 func (h *PlaybackHandler) toneMapPlanningTimeoutV3(localFallbackAllowed bool) time.Duration {
@@ -418,7 +440,7 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 			h.v3NodeCapabilitiesMu.Unlock()
 			return current, nil
 		}
-		h.v3NodeCapabilities[nodeURL] = v3NodeCapabilityCache{err: err, expiresAt: completedAt.Add(v3NodeCapabilityErrorTTL), probeRequestTimeout: entry.probeRequestTimeout}
+		h.v3NodeCapabilities[nodeURL] = v3NodeCapabilityCache{err: err, expiresAt: completedAt.Add(v3NodeCapabilityErrorTTL)}
 		h.v3NodeCapabilitiesMu.Unlock()
 		return v3NodeCapabilityCache{}, err
 	}
@@ -426,9 +448,13 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 		transformations:     append([]playback.TransformationV3(nil), info.Transformations...),
 		toneMapCapabilities: append(tonemap.Capabilities(nil), info.ToneMapCapabilities...),
 		expiresAt:           completedAt.Add(v3NodeCapabilityTTL),
-		probeRequestTimeout: playback.NormalizeProbeRequestTimeout(info.ProbeRequestTimeoutMillis, remoteNodeProbeFallbackTimeout),
 	}
 	h.v3NodeCapabilitiesMu.Lock()
+	// Recorded even when the entry below is discarded as overtaken: what the
+	// node says its read costs is true regardless of whether this particular
+	// answer is still current.
+	h.rememberNodeProbeBudgetLockedV3(nodeURL,
+		playback.NormalizeProbeRequestTimeout(info.ProbeRequestTimeoutMillis, remoteNodeProbeFallbackTimeout))
 	if overtaken {
 		// Still overtaken after the retry. Hand the result to this caller, which
 		// has nothing better, but leave the cache empty so the next lookup

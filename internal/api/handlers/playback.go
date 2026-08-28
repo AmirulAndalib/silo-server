@@ -253,6 +253,13 @@ type PlaybackHandler struct {
 	v3ToneMapProbe       func(context.Context, string, string, string) (tonemap.Capabilities, error)
 	v3NodeCapabilitiesMu sync.Mutex
 	v3NodeCapabilities   map[string]v3NodeCapabilityCache
+	// v3NodeProbeBudgets holds what each node last said a capability read of it
+	// costs, guarded by v3NodeCapabilitiesMu. It is kept apart from the
+	// inventory above because the two are invalidated for different reasons: an
+	// acceleration change makes the inventory wrong and the next read slow,
+	// while how long that node takes to answer is unchanged. See
+	// remoteToneMapProbeTimeoutV3.
+	v3NodeProbeBudgets map[string]time.Duration
 	// v3NodeCapabilityInvalidations counts invalidations per node URL, guarded
 	// by v3NodeCapabilitiesMu. A probe that started before the count moved
 	// describes hardware the health sweep has already reported as changed, so

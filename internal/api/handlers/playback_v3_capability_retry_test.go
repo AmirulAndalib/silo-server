@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // A capability lookup overtaken by an invalidation was handing the caller the
@@ -72,5 +73,46 @@ func TestLookupRemoteCapabilitiesFetchesOnceWhenNothingInvalidates(t *testing.T)
 	}
 	if got := fetches.Load(); got != 1 {
 		t.Fatalf("fetches = %d, want a single read on the uncontended path", got)
+	}
+}
+
+// An acceleration change makes a node's inventory wrong and its next capability
+// matrix cold — which is exactly when the read is slowest. Dropping the learned
+// budget along with the inventory sent the refresh that invalidation triggers
+// back to the 120s fallback, short of what a two-device node legitimately asks
+// for, so planning lost its inventory precisely after the invalidation.
+func TestRefreshNodeCapabilitiesKeepsTheLearnedProbeBudget(t *testing.T) {
+	handler := NewPlaybackHandler(nil)
+
+	advertised := 136_000
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resolved":                 "qsv",
+			"probe_request_timeout_ms": advertised,
+		})
+	}))
+	t.Cleanup(node.Close)
+
+	if _, err := handler.lookupRemoteCapabilitiesV3(context.Background(), node.URL, false); err != nil {
+		t.Fatalf("lookupRemoteCapabilitiesV3: %v", err)
+	}
+	learned := handler.remoteToneMapProbeTimeoutV3(node.URL)
+	if want := 136 * time.Second; learned != want {
+		t.Fatalf("learned budget = %v, want the advertised %v", learned, want)
+	}
+
+	handler.RefreshNodeCapabilitiesV3(node.URL)
+
+	if got := handler.remoteToneMapProbeTimeoutV3(node.URL); got != learned {
+		t.Fatalf("budget after invalidation = %v, want the learned %v — the refresh it triggers is sized from this",
+			got, learned)
+	}
+	// The inventory itself is still discarded; only the budget survives.
+	handler.v3NodeCapabilitiesMu.Lock()
+	_, cached := handler.v3NodeCapabilities[node.URL]
+	handler.v3NodeCapabilitiesMu.Unlock()
+	if cached {
+		t.Fatal("invalidation left the inventory cached")
 	}
 }
