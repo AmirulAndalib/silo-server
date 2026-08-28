@@ -356,10 +356,38 @@ const hwAccelAuto = "auto"
 // probe passes wins.
 var hwAccelPreferenceOrder = []string{transcodeHWNVENC, transcodeHWQSV, transcodeHWVAAPI}
 
-// hwAccelWalkTimeout bounds one full backend walk regardless of how many
-// candidate devices a host exposes, so a wedged driver cannot stretch detection
-// without limit. tonemap.probeEndpointSlack budgets a capability request for it.
-const hwAccelWalkTimeout = 30 * time.Second
+// hwAccelWalkSlack is the margin the walk deadline carries above the commands
+// it may actually run, covering process spawn and the bookkeeping between them.
+const hwAccelWalkSlack = 5 * time.Second
+
+// hwAccelWalkTimeout bounds one full backend walk, so a wedged driver cannot
+// stretch detection without limit. tonemap.probeEndpointSlack budgets a
+// capability request for it.
+//
+// It is derived from the matrix the walk will actually run rather than fixed,
+// because that matrix grows with the device set: every configured render device
+// is probed for both QSV and VAAPI, so three Intel devices legitimately need
+// more than the thirty seconds a fixed bound allowed. The walk then marked
+// itself incomplete while every individual command was still inside its own
+// budget, and /hw-capabilities answered 503 for a node that was working — the
+// same failure shape as a bound that is a guess rather than a derivation.
+func hwAccelWalkTimeout(candidates hwCandidates) time.Duration {
+	commands := 0
+	for _, backend := range hwAccelPreferenceOrder {
+		if !candidates.presentFor(backend) {
+			continue
+		}
+		probe, ok := hwBackendProbeFor(backend)
+		if !ok {
+			continue
+		}
+		commands += probe.commandCount * len(candidates.probeDevicesFor(backend))
+	}
+	if commands == 0 {
+		commands = 1
+	}
+	return time.Duration(commands)*hwProbeCommandTimeout + hwAccelWalkSlack
+}
 
 // hwCandidates groups the candidate render devices by the backend each one can
 // plausibly drive, before any FFmpeg verification.
@@ -485,7 +513,7 @@ func walkHWAccelBackends(ctx context.Context, ffmpegPath string, candidates hwCa
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, hwAccelWalkTimeout)
+	ctx, cancel := context.WithTimeout(ctx, hwAccelWalkTimeout(candidates))
 	defer cancel()
 	complete = true
 	for _, backend := range hwAccelPreferenceOrder {

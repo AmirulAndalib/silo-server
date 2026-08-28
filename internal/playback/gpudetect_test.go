@@ -1331,3 +1331,39 @@ func TestCachedVideoToolboxProbeInvalidatesWhenExecutableIsReplaced(t *testing.T
 		t.Fatal("replacement binary reused the previous executable's positive verdict")
 	}
 }
+
+// The walk deadline has to cover the matrix it will actually run, which grows
+// with the device set: every configured render device is probed for both QSV
+// and VAAPI. A fixed thirty seconds marked a three-device host incomplete while
+// every individual command was still inside its own budget, and
+// /hw-capabilities then answered 503 for a node that was working.
+func TestHWAccelWalkTimeoutScalesWithTheDeviceSet(t *testing.T) {
+	one := hwCandidates{
+		intel: []string{"/dev/dri/renderD128"},
+		vaapi: []string{"/dev/dri/renderD128"},
+	}
+	three := hwCandidates{
+		intel: []string{"/dev/dri/renderD128", "/dev/dri/renderD129", "/dev/dri/renderD130"},
+		vaapi: []string{"/dev/dri/renderD128", "/dev/dri/renderD129", "/dev/dri/renderD130"},
+	}
+
+	oneDevice, threeDevices := hwAccelWalkTimeout(one), hwAccelWalkTimeout(three)
+	if threeDevices <= oneDevice {
+		t.Fatalf("three-device walk %v is not longer than the one-device %v", threeDevices, oneDevice)
+	}
+
+	// It covers what it will run: every command the matrix allows, at its own
+	// per-command bound, plus spawn slack.
+	wantThree := time.Duration(3*(3+2))*hwProbeCommandTimeout + hwAccelWalkSlack
+	if threeDevices != wantThree {
+		t.Fatalf("three-device walk = %v, want %v", threeDevices, wantThree)
+	}
+	if threeDevices <= 30*time.Second {
+		t.Fatalf("three-device walk = %v, which the old fixed 30s bound would have cut short", threeDevices)
+	}
+
+	// A host with nothing to probe still gets a usable, non-zero deadline.
+	if got := hwAccelWalkTimeout(hwCandidates{}); got <= 0 {
+		t.Fatalf("empty walk timeout = %v, want a positive bound", got)
+	}
+}

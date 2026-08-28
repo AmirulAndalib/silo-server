@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"slices"
@@ -400,7 +401,27 @@ func probeDevices(value, backend string) []string {
 		}
 		return []string{defaultDRIRenderDevice}
 	}
+	if len(devices) > MaxProbedDevices {
+		// Past the cap the budget every caller allows stops covering the matrix,
+		// so probing further would guarantee the request is canceled rather
+		// than finished. Truncating is the honest failure: the devices that are
+		// probed get real verdicts, and the omission is logged rather than
+		// silently folded into a shorter answer.
+		noteProbeDevicesTruncated(len(devices))
+		devices = devices[:MaxProbedDevices]
+	}
 	return devices
+}
+
+// probeDevicesTruncatedLogged latches the truncation warning to one line per
+// process: a device list is a standing configuration, not an event.
+var probeDevicesTruncatedLogged sync.Once
+
+func noteProbeDevicesTruncated(configured int) {
+	probeDevicesTruncatedLogged.Do(func() {
+		slog.Warn("tone-map probe covers only the first configured devices; the rest are not verified",
+			"component", "tonemap", "configured", configured, "probed", MaxProbedDevices)
+	})
 }
 
 // intersectSourceKinds preserves the left-hand ordering while retaining source
