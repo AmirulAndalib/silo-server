@@ -1167,3 +1167,58 @@ func TestNodeAwarePreparerInvalidateNodeCapabilitiesDropsTheInventory(t *testing
 		t.Fatalf("probe budget = %s, want the learned 161s preserved", entry.probeRequestTimeout)
 	}
 }
+
+// A policy edit invalidates while planning is already asking the node. The
+// answer in flight describes the node before the edit, so installing it would
+// restore the pre-edit inventory for a full TTL — and downloads would keep
+// selecting a tone-map executor the reconfigured worker no longer has.
+func TestNodeAwarePreparerDoesNotCacheAnOvertakenCapabilityFetch(t *testing.T) {
+	var hits atomic.Int32
+	invalidated := make(chan struct{})
+	released := make(chan struct{})
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if hits.Add(1) == 1 {
+			// The edit lands while this request is still open.
+			close(invalidated)
+			<-released
+		}
+		_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{
+			ToneMapCapabilities: tonemap.Capabilities{{
+				Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware,
+				Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+			}},
+		})
+	}))
+	defer remote.Close()
+	cfg := &config.Config{}
+	cfg.Auth.JWTSecret = "secret"
+	preparer := NewNodeAwarePreparer(nil, nil, func() *config.Config { return cfg })
+
+	fetched := make(chan error, 1)
+	go func() {
+		_, err := preparer.toneMapCapabilitiesForNode(context.Background(), remote.URL)
+		fetched <- err
+	}()
+	<-invalidated
+	preparer.InvalidateNodeCapabilities(remote.URL)
+	close(released)
+	if err := <-fetched; err != nil {
+		t.Fatalf("the caller waiting on the fetch got an error: %v", err)
+	}
+
+	// Nothing durable was written, so the next planning pass asks the node again
+	// rather than reading the overtaken answer.
+	key := nodepool.NormalizeNodeURL(remote.URL)
+	preparer.capabilityMu.Lock()
+	entry, cached := preparer.capabilities[key]
+	preparer.capabilityMu.Unlock()
+	if cached && len(entry.capabilities) > 0 {
+		t.Fatalf("an overtaken fetch repopulated the cache: %+v", entry)
+	}
+	if _, err := preparer.toneMapCapabilitiesForNode(context.Background(), remote.URL); err != nil {
+		t.Fatalf("second lookup: %v", err)
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("node was asked %d times, want a second read after the invalidation", hits.Load())
+	}
+}

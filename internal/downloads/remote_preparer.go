@@ -35,6 +35,12 @@ type NodeAwarePreparer struct {
 	capabilityMu     sync.Mutex
 	capabilities     map[string]remoteToneMapCapabilities
 	capabilityFlight singleflight.Group
+	// capabilityInvalidations counts how many times each node's inventory has
+	// been dropped. A fetch snapshots it before asking the node and refuses to
+	// install its answer if it has moved since — otherwise a probe already in
+	// flight when an operator changed the node's policy writes the report it
+	// was sent to collect, restoring the pre-edit inventory for a full TTL.
+	capabilityInvalidations map[string]uint64
 }
 
 // remoteToneMapCapabilities caches one node's validated inventory; an empty
@@ -446,6 +452,9 @@ func (p *NodeAwarePreparer) cachedRemoteCapabilitiesForNode(nodeURL string, now 
 }
 
 func (p *NodeAwarePreparer) fetchToneMapCapabilitiesForNode(ctx context.Context, nodeURL string) (tonemap.Capabilities, error) {
+	// Snapshotted before the node is asked anything, so an invalidation landing
+	// during the request is visible at install time.
+	generation := p.capabilityInvalidationsFor(nodeURL)
 	cfg := p.config()
 	if cfg == nil || strings.TrimSpace(cfg.Auth.JWTSecret) == "" {
 		err := errors.New("transcode node credentials unavailable")
@@ -471,12 +480,28 @@ func (p *NodeAwarePreparer) fetchToneMapCapabilitiesForNode(ctx context.Context,
 		probeRequestTimeout: normalizeRemoteToneMapProbeTimeout(info.ProbeRequestTimeoutMillis),
 	}
 	p.capabilityMu.Lock()
-	if p.capabilities == nil {
-		p.capabilities = make(map[string]remoteToneMapCapabilities)
+	if p.capabilityInvalidations[nodeURL] == generation {
+		if p.capabilities == nil {
+			p.capabilities = make(map[string]remoteToneMapCapabilities)
+		}
+		p.capabilities[nodeURL] = entry
 	}
-	p.capabilities[nodeURL] = entry
 	p.capabilityMu.Unlock()
+	// The answer still goes back to the caller that is waiting on it, overtaken
+	// or not. Its request is already in flight, most policy edits do not remove
+	// the executor it is about to pick, and refusing would fail a download over
+	// a change that probably does not affect it. What must not happen is the
+	// durable part: nothing is written, so the next caller asks the node again
+	// rather than reading this answer for a minute.
 	return append(tonemap.Capabilities(nil), entry.capabilities...), nil
+}
+
+// capabilityInvalidationsFor reports how many times a node's inventory has been
+// dropped.
+func (p *NodeAwarePreparer) capabilityInvalidationsFor(nodeURL string) uint64 {
+	p.capabilityMu.Lock()
+	defer p.capabilityMu.Unlock()
+	return p.capabilityInvalidations[nodeURL]
 }
 
 // ToneMapCapabilityTimeout returns the complete cold-node capability budget
@@ -557,6 +582,15 @@ func (p *NodeAwarePreparer) InvalidateNodeCapabilities(nodeURL string) {
 	nodeURL = nodepool.NormalizeNodeURL(nodeURL)
 	p.capabilityMu.Lock()
 	defer p.capabilityMu.Unlock()
+	// Counted whether or not anything is cached. A cold cache is the case where
+	// dropping an entry does nothing and a fetch is most likely to be in flight:
+	// the invalidation that follows a policy edit arrives while planning is
+	// already asking the node, and without a mark that fetch's answer would be
+	// installed after the edit as though it described the node afterwards.
+	if p.capabilityInvalidations == nil {
+		p.capabilityInvalidations = make(map[string]uint64)
+	}
+	p.capabilityInvalidations[nodeURL]++
 	entry, ok := p.capabilities[nodeURL]
 	if !ok {
 		return
