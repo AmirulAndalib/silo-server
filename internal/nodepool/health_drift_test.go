@@ -785,3 +785,71 @@ func TestResolveDriftNoteNamesEveryOutstandingLoss(t *testing.T) {
 		t.Fatalf("capability_drift = %q, want the still-missing card named", *still)
 	}
 }
+
+// The ordinary NVENC container has /dev/nvidia* and the toolkit and no /dev/dri,
+// so its cards exist only in nvidia_gpu_uuids. Losing one moves nothing in
+// render_devices, and the backend comparison does not cover it either: NVENC
+// stops being a candidate the moment the device nodes go away, and an absent
+// backend is deliberately not a lost one.
+func TestCapabilityDriftNotesAnNVIDIAOnlyCardGoingAway(t *testing.T) {
+	const before = `{"resolved":"nvenc","nvidia_gpu_uuids":["GPU-aaa","GPU-bbb"],` +
+		`"detected_backends":[{"backend":"nvenc","verified":true}]}`
+	// One card left. NVENC still verifies on it, so nothing else in the report
+	// says anything was lost.
+	const after = `{"resolved":"nvenc","nvidia_gpu_uuids":["GPU-bbb"],` +
+		`"detected_backends":[{"backend":"nvenc","verified":true}]}`
+
+	drift, parsed := computeCapabilityDrift([]byte(before), []byte(after))
+	if !parsed {
+		t.Fatal("drift did not parse")
+	}
+	if !drift.regressed() {
+		t.Fatal("a card that disappeared produced no drift")
+	}
+	if got := drift.lostDevices; len(got) != 1 || got[0] != "GPU-aaa" {
+		t.Fatalf("lost devices = %v, want the missing GPU-aaa", got)
+	}
+	if len(drift.lostBackends) != 0 {
+		t.Fatalf("lost backends = %v, want none — NVENC still verifies on the remaining card", drift.lostBackends)
+	}
+}
+
+// nvidia-smi sits behind a circuit breaker and can be missing from an image
+// outright, so an empty uuid list is not evidence a card is gone. NVENC is only
+// probed where /dev/nvidia* opens, so a report still carrying it describes a
+// node whose cards are present and whose query tool is not — latching drift
+// there would demand a uuid come back that nothing on the node can produce.
+func TestCapabilityDriftIgnoresNVIDIAUUIDsLostWithTheQueryTool(t *testing.T) {
+	const before = `{"resolved":"nvenc","nvidia_gpu_uuids":["GPU-aaa"],` +
+		`"detected_backends":[{"backend":"nvenc","verified":true}]}`
+	const after = `{"resolved":"nvenc","detected_backends":[{"backend":"nvenc","verified":true}]}`
+
+	drift, parsed := computeCapabilityDrift([]byte(before), []byte(after))
+	if !parsed {
+		t.Fatal("drift did not parse")
+	}
+	if drift.regressed() {
+		t.Fatalf("nvidia-smi going quiet was read as hardware loss: %+v", drift)
+	}
+}
+
+// A card with both a render node and an nvidia-smi entry is one card. Counting
+// it twice would report a device gone whenever the two sources disagree about
+// which of them can currently see it.
+func TestCapabilityDriftCountsOneCardOnceAcrossBothIdentitySources(t *testing.T) {
+	const before = `{"resolved":"nvenc","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128","gpu_uuid":"GPU-aaa"}],` +
+		`"nvidia_gpu_uuids":["GPU-aaa"],"detected_backends":[{"backend":"nvenc","verified":true}]}`
+	// nvidia-smi went quiet; the render node still reports the same card.
+	const after = `{"resolved":"nvenc","render_devices":["/dev/dri/renderD128"],` +
+		`"render_device_details":[{"path":"/dev/dri/renderD128"}],` +
+		`"detected_backends":[{"backend":"nvenc","verified":true}]}`
+
+	drift, parsed := computeCapabilityDrift([]byte(before), []byte(after))
+	if !parsed {
+		t.Fatal("drift did not parse")
+	}
+	if drift.regressed() {
+		t.Fatalf("one card read as two: %+v", drift)
+	}
+}

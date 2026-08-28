@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -245,18 +247,54 @@ func TestHandleReprobeNodeUnknownNode(t *testing.T) {
 // slower hardware is not abandoned on a cluster-wide guess. A node that has
 // never been inventoried falls back to the generous constant.
 func TestNodeReprobeTimeoutPrefersTheNodeAdvertisedBudget(t *testing.T) {
-	advertised := playback.HWAccelInfo{ProbeRequestTimeoutMillis: 111_000}
+	handler := NewNodeHandler(&stubNodeRepository{}, nil, nil, nil, nil, nil, "secret")
+	// Above the fallback, which is a floor: a node that says it needs less than
+	// the constant this handler is willing to spend does not shorten it.
+	advertised := playback.HWAccelInfo{ProbeRequestTimeoutMillis: 200_000}
 	payload, err := json.Marshal(advertised)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := nodeReprobeTimeout(&nodepool.Node{Capabilities: payload}); got != 111*time.Second {
-		t.Fatalf("timeout = %s, want the node-advertised 111s", got)
+	if nodeReprobeFallbackTimeout >= 200*time.Second {
+		t.Fatalf("fixture is inert: the fallback %s must stay under the advertised 200s", nodeReprobeFallbackTimeout)
 	}
-	if got := nodeReprobeTimeout(&nodepool.Node{}); got != nodeReprobeFallbackTimeout {
+	if got := handler.nodeReprobeTimeout(&nodepool.Node{Capabilities: payload}); got != 200*time.Second {
+		t.Fatalf("timeout = %s, want the node-advertised 200s", got)
+	}
+	if got := handler.nodeReprobeTimeout(&nodepool.Node{}); got != nodeReprobeFallbackTimeout {
 		t.Fatalf("timeout = %s, want the fallback %s for a node with no report", got, nodeReprobeFallbackTimeout)
 	}
-	if got := nodeReprobeTimeout(&nodepool.Node{Capabilities: json.RawMessage(`not json`)}); got != nodeReprobeFallbackTimeout {
+	if got := handler.nodeReprobeTimeout(&nodepool.Node{Capabilities: json.RawMessage(`not json`)}); got != nodeReprobeFallbackTimeout {
 		t.Fatalf("timeout = %s, want the fallback for an unreadable report", got)
+	}
+}
+
+// A re-probe discards every cache on the node, so it runs the full matrix for
+// whatever device set the node is configured for *now*. A report stored before
+// an operator widened hw_device_override advertises the old, smaller budget, and
+// honoring it would cancel the very request that would have replaced it.
+func TestNodeReprobeTimeoutRepricesAWidenedDeviceOverride(t *testing.T) {
+	devices := "/dev/dri/renderD128,/dev/dri/renderD129,/dev/dri/renderD130,/dev/dri/renderD131"
+	backend := tonemap.BackendQSV
+	handler := NewNodeHandler(&stubNodeRepository{}, nil, nil, nil, nil, nil, "secret")
+	handler.SetClusterPlaybackPolicy(func() config.PlaybackConfig {
+		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/dev/dri/renderD128"}
+	})
+	stored, err := json.Marshal(playback.HWAccelInfo{
+		ProbeRequestTimeoutMillis: playback.CapabilityRequestTimeout(backend, "/dev/dri/renderD128").Milliseconds(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := playback.CapabilityRequestTimeout(backend, devices)
+	got := handler.nodeReprobeTimeout(&nodepool.Node{
+		Capabilities: stored, HWAccelOverride: &backend, HWDeviceOverride: &devices,
+	})
+	if got != want {
+		t.Fatalf("re-probe timeout = %s, want the four-device %s", got, want)
+	}
+	if want <= nodeReprobeFallbackTimeout {
+		t.Fatalf("fixture is inert: the four-device budget %s must exceed the fallback %s", want, nodeReprobeFallbackTimeout)
 	}
 }

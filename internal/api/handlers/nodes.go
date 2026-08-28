@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/cache"
+	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/logredact"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -70,6 +71,31 @@ type NodeHandler struct {
 	// finished. Tests wait on it rather than on a sleep; production leaves it
 	// nil.
 	afterNodeUpdate func()
+	// clusterPlayback reports the cluster-wide acceleration policy, which is
+	// what a node without an override of its own runs. Read live rather than
+	// snapshotted, because it is hot-reloadable. nil where nothing wired it, and
+	// then a node's own override is all this handler can price from.
+	clusterPlayback func() config.PlaybackConfig
+}
+
+// SetClusterPlaybackPolicy wires the live cluster-wide acceleration policy,
+// which the re-probe budget needs to resolve a node that carries no override of
+// its own. Set after construction like the other collaborators here.
+func (h *NodeHandler) SetClusterPlaybackPolicy(policy func() config.PlaybackConfig) {
+	if h == nil {
+		return
+	}
+	h.clusterPlayback = policy
+}
+
+// playbackPolicy is the cluster-wide acceleration policy, or the zero policy
+// where none was wired — which prices the default device set rather than
+// nothing.
+func (h *NodeHandler) playbackPolicy() config.PlaybackConfig {
+	if h == nil || h.clusterPlayback == nil {
+		return config.PlaybackConfig{}
+	}
+	return h.clusterPlayback()
 }
 
 // SetCapabilityInvalidator wires the planning-cache drop used after a node's
@@ -624,9 +650,21 @@ const nodeReprobeFallbackTimeout = 150 * time.Second
 // capability report (probe_request_timeout_ms), which is exactly what a cold
 // capability fetch is given; a node with different hardware or a slower ffmpeg
 // therefore gets its own number rather than a cluster-wide guess.
-func nodeReprobeTimeout(n *nodepool.Node) time.Duration {
-	return playback.NormalizeProbeRequestTimeout(
-		playback.AdvertisedProbeBudgetMillis(n.StoredCapabilities()), nodeReprobeFallbackTimeout)
+//
+// Floored at what the node's current policy prices, for the same reason the
+// planning and download paths are: a report stored before an operator widened
+// hw_device_override advertises a budget for the smaller device set, and a
+// re-probe deliberately discards every cache on the node, so it runs the larger
+// matrix and gets canceled at the old deadline. Nothing here learns its way out
+// of that — a re-probe is exactly the request that never completes.
+func (h *NodeHandler) nodeReprobeTimeout(n *nodepool.Node) time.Duration {
+	cluster := h.playbackPolicy()
+	return playback.ColdCapabilityRequestTimeout(
+		n.StoredCapabilities(),
+		n.EffectiveHWAccel(cluster.HWAccel),
+		n.EffectiveHWDevice(cluster.HWDevice),
+		nodeReprobeFallbackTimeout,
+	)
 }
 
 // nodeReprobeWriteSlack covers the repository round trips and the JSON write
@@ -695,7 +733,7 @@ func (h *NodeHandler) HandleReprobeNode(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	extendReprobeWriteDeadline(w, r, nodeReprobeTimeout(node))
+	extendReprobeWriteDeadline(w, r, h.nodeReprobeTimeout(node))
 
 	result := ReprobeNodeResult{NodeID: node.ID, NodeName: node.Name, Status: "ok"}
 	reprobed, err := h.reprobeNode(r.Context(), node)
@@ -736,7 +774,7 @@ type nodeReprobeResponse struct {
 // reprobeNode performs the bearer-authenticated re-probe call against one node,
 // mirroring the force-reload client.
 func (h *NodeHandler) reprobeNode(ctx context.Context, node *nodepool.Node) (nodeReprobeResponse, error) {
-	timeout := nodeReprobeTimeout(node)
+	timeout := h.nodeReprobeTimeout(node)
 	client := &http.Client{Timeout: timeout}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

@@ -3173,6 +3173,11 @@ func NewRouter(deps Dependencies) chi.Router {
 								// moment it lands; the same invalidation the
 								// health sweep uses drops it.
 								nodeHandler.SetCapabilityInvalidator(playbackHandler.RefreshNodeCapabilitiesV3)
+								// A node with no override of its own runs the
+								// cluster's acceleration policy, and how many
+								// devices that names is what decides how long its
+								// re-probe may take.
+								nodeHandler.SetClusterPlaybackPolicy(playbackHandler.PlaybackConfig)
 								r.Route("/nodes", func(r chi.Router) {
 									r.Get("/", nodeHandler.HandleListNodes)
 									r.Post("/", nodeHandler.HandleCreateNode)

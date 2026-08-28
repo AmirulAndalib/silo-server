@@ -419,8 +419,12 @@ func CapabilityRequestTimeout(hwAccel, hwDevice string) time.Duration {
 // Getting it low does not slow the read down, it cancels it: the node drops out
 // of the capability map mid-matrix and playback plans without it.
 //
-// Two sources describe the same node and neither dominates, so the answer is
-// the larger:
+// Every source is a lower bound on what the read may need, so the answer is the
+// largest of them — the caller's fallback included, which is why it is a floor
+// and not only a last resort. Overshooting holds a dead node's fetch open a
+// little longer; undershooting loses a live one.
+//
+// Two of those sources describe the node, and neither dominates:
 //
 //   - What the node advertised in the report stored for it. That is the node's
 //     own measurement of its own matrix, it survives an API restart because it
@@ -435,17 +439,18 @@ func CapabilityRequestTimeout(hwAccel, hwDevice string) time.Duration {
 //     falls back to the cheapest backend and it reads as a floor rather than as
 //     the truth.
 //
-// The fallback covers a node with neither: no stored report and no policy.
+// The fallback is what each caller is willing to spend on a node it knows
+// nothing about, and a node that has never been inventoried is the one most
+// likely to be slow — so a policy that happens to price lower does not lower it.
 func ColdCapabilityRequestTimeout(storedReport json.RawMessage, hwAccel, hwDevice string, fallback time.Duration) time.Duration {
-	budget := time.Duration(0)
+	budget := fallback
 	if millis := AdvertisedProbeBudgetMillis(storedReport); millis > 0 {
-		budget = NormalizeProbeRequestTimeout(millis, fallback)
+		if advertised := NormalizeProbeRequestTimeout(millis, fallback); advertised > budget {
+			budget = advertised
+		}
 	}
 	if priced := CapabilityRequestTimeout(hwAccel, hwDevice); priced > budget {
 		budget = priced
-	}
-	if budget <= 0 {
-		return fallback
 	}
 	return budget
 }

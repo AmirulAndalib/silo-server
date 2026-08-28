@@ -546,16 +546,9 @@ func storedCapabilitiesHash(n *Node) string {
 // nodepool must not depend on playback, and drift only needs to know which
 // backends were verified and which render devices existed.
 type capabilityDriftView struct {
-	Resolved         string `json:"resolved"`
-	DetectedBackends []struct {
-		Backend  string `json:"backend"`
-		Verified bool   `json:"verified"`
-		// Skipped reports that no probe was attempted because the node cannot
-		// open any of the backend's candidate devices. That is a statement
-		// about access, not about hardware, so it never counts as a failure.
-		Skipped bool `json:"skipped"`
-	} `json:"detected_backends"`
-	RenderDevices []string `json:"render_devices"`
+	Resolved         string             `json:"resolved"`
+	DetectedBackends []driftBackendView `json:"detected_backends"`
+	RenderDevices    []string           `json:"render_devices"`
 	// RenderDeviceDetails carries each device's stable identity. Comparing
 	// enumeration paths alone reports a GPU as gone whenever DRM hands out a
 	// different renderD number, which a reboot is free to do; the uuid and the
@@ -565,6 +558,47 @@ type capabilityDriftView struct {
 		PCIAddress string `json:"pci_address"`
 		GPUUUID    string `json:"gpu_uuid"`
 	} `json:"render_device_details"`
+	// NVIDIAGPUUUIDs is where an NVIDIA card's identity lives when it has no
+	// readable DRM node — the ordinary NVENC container: /dev/nvidia* and the
+	// toolkit, no /dev/dri. Such a node reports no render devices at all, so
+	// without this a card disappearing from it moves nothing this comparison
+	// looks at, and the backend comparison does not cover it either: NVENC stops
+	// being a candidate the moment /dev/nvidia* goes away, and an absent backend
+	// is deliberately not a lost one.
+	NVIDIAGPUUUIDs []string `json:"nvidia_gpu_uuids"`
+}
+
+// driftBackendView is one backend's probe outcome as drift reads it.
+type driftBackendView struct {
+	Backend  string `json:"backend"`
+	Verified bool   `json:"verified"`
+	// Skipped reports that no probe was attempted because the node cannot open
+	// any of the backend's candidate devices. That is a statement about access,
+	// not about hardware, so it never counts as a failure.
+	Skipped bool `json:"skipped"`
+}
+
+// nvidiaBackend is the backend name whose presence in a report means the node
+// still has NVIDIA device nodes; detection drops it as a candidate when they go
+// away.
+const nvidiaBackend = "nvenc"
+
+// nvidiaIdentityBlind reports that this report cannot name the node's NVIDIA
+// cards even though the node still has them.
+//
+// nvidia-smi is queried behind a circuit breaker and can be absent from an
+// image entirely, so an empty uuid list is not by itself evidence that anything
+// is gone — the same "identity strength is not constant" problem renderDeviceAliases
+// exists for. What separates the two is the backend list: NVENC is only probed
+// where /dev/nvidia* can be opened, so a report that still carries NVENC and no
+// uuids is a node whose cards are present and whose query tool is not.
+func (v capabilityDriftView) nvidiaIdentityBlind() bool {
+	if len(v.NVIDIAGPUUUIDs) > 0 {
+		return false
+	}
+	return slices.ContainsFunc(v.DetectedBackends, func(backend driftBackendView) bool {
+		return backend.Backend == nvidiaBackend
+	})
 }
 
 // renderDeviceAliases lists every stable name each device in a report answers
@@ -588,6 +622,10 @@ type renderDeviceAliases struct {
 	// machine and outlive the card in them.
 	uuid    string
 	aliases []string
+	// nvidiaOnly marks a card known only through nvidia-smi, with no render
+	// node behind it. Its identity depends on a tool that comes and goes, so a
+	// report that lost it has to be read differently — see nvidiaIdentityBlind.
+	nvidiaOnly bool
 }
 
 // sameDevice reports whether two reports describe one card.
@@ -607,8 +645,9 @@ func (a renderDeviceAliases) sameDevice(b renderDeviceAliases) bool {
 }
 
 func renderDeviceAliasSets(view capabilityDriftView) []renderDeviceAliases {
-	devices := make([]renderDeviceAliases, 0, len(view.RenderDevices))
+	devices := make([]renderDeviceAliases, 0, len(view.RenderDevices)+len(view.NVIDIAGPUUUIDs))
 	covered := make(map[string]bool, len(view.RenderDeviceDetails))
+	coveredUUIDs := make(map[string]bool, len(view.RenderDeviceDetails)+len(view.NVIDIAGPUUUIDs))
 	for _, device := range view.RenderDeviceDetails {
 		entry := renderDeviceAliases{path: device.Path, uuid: device.GPUUUID}
 		for _, alias := range []string{device.GPUUUID, device.PCIAddress, device.Path} {
@@ -620,6 +659,9 @@ func renderDeviceAliasSets(view capabilityDriftView) []renderDeviceAliases {
 			continue
 		}
 		covered[device.Path] = true
+		if device.GPUUUID != "" {
+			coveredUUIDs[device.GPUUUID] = true
+		}
 		devices = append(devices, entry)
 	}
 	// A report that lists paths without details (a node predating them) still
@@ -630,6 +672,17 @@ func renderDeviceAliasSets(view capabilityDriftView) []renderDeviceAliases {
 		}
 		devices = append(devices, renderDeviceAliases{path: path, aliases: []string{path}})
 	}
+	// A card nvidia-smi named and no render node covers. Deduplicated against
+	// the details above by uuid, because a card with both a DRM node and an
+	// nvidia-smi entry is one card, not two. It gets no path: the uuid is the
+	// only name it has, and lostRenderDevices falls back to naming it by that.
+	for _, uuid := range view.NVIDIAGPUUUIDs {
+		if uuid == "" || coveredUUIDs[uuid] {
+			continue
+		}
+		coveredUUIDs[uuid] = true
+		devices = append(devices, renderDeviceAliases{uuid: uuid, aliases: []string{uuid}, nvidiaOnly: true})
+	}
 	return devices
 }
 
@@ -639,9 +692,16 @@ func renderDeviceAliasSets(view capabilityDriftView) []renderDeviceAliases {
 // when it comes back under a different one.
 func lostRenderDeviceEntries(previous, current capabilityDriftView) []renderDeviceAliases {
 	currentDevices := renderDeviceAliasSets(current)
+	blind := current.nvidiaIdentityBlind()
 	var lost []renderDeviceAliases
 	for _, device := range renderDeviceAliasSets(previous) {
 		if slices.ContainsFunc(currentDevices, device.sameDevice) {
+			continue
+		}
+		if blind && device.nvidiaOnly {
+			// The node still has its NVIDIA devices; only the tool that names
+			// them is missing. Latching a note here would demand a uuid come
+			// back that nothing on the node can currently produce.
 			continue
 		}
 		lost = append(lost, device)
