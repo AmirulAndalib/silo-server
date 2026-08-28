@@ -14,6 +14,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
+import { useDragAutoScroll } from "./dragAutoScroll";
 import { getDashboardWidget } from "./registry";
 import type { WidgetId } from "./types";
 import type { DashboardLayout } from "./useDashboardLayout";
@@ -137,7 +138,18 @@ export function DashboardGrid({
     maxRows: number;
     latestSpan: number;
     latestRows: number;
+    latestClientX: number;
+    latestClientY: number;
+    /** Auto-scroll during the session moves the grid under the stationary
+        pointer; this accumulates that movement so the size keeps following
+        where the pointer sits over the grid, not just where it last moved. */
+    scrollOffsetY: number;
   } | null>(null);
+
+  // Scrolls the page (or an inner scroll container) while a drag sits near the
+  // top or bottom edge, so a widget can be dragged to an off-screen part of
+  // the grid. Fed from dragover/pointermove; stopped on every drag ending.
+  const autoScroll = useDragAutoScroll(gridRef);
 
   const setWidgetCollapsed = useCallback((id: WidgetId, collapsed: boolean) => {
     setCollapsedIds((prev) => {
@@ -167,9 +179,10 @@ export function DashboardGrid({
   );
 
   const handleDragEnd = useCallback(() => {
+    autoScroll.stop();
     setDraggedId(null);
     setDropIndicator(null);
-  }, []);
+  }, [autoScroll]);
 
   /** True when the drag carries the Add-widget sheet's payload type. */
   const isAddDrag = useCallback(
@@ -221,11 +234,13 @@ export function DashboardGrid({
         setDropIndicator((prev) =>
           prev?.id === indicator?.id && prev?.edge === indicator?.edge ? prev : indicator,
         );
+        autoScroll.update(event.clientY);
         return;
       }
       if (!draggedId) return;
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
+      autoScroll.update(event.clientY);
       const target = resolveDropEdge(event);
       if (!target || target.id === draggedId) {
         setDropIndicator(null);
@@ -235,11 +250,12 @@ export function DashboardGrid({
         prev?.id === target.id && prev.edge === target.edge ? prev : target,
       );
     },
-    [draggedId, entries, isAddDrag, resolveDropEdge],
+    [autoScroll, draggedId, entries, isAddDrag, resolveDropEdge],
   );
 
   const handleDrop = useCallback(
     (event: DragEvent<HTMLElement>) => {
+      autoScroll.stop();
       if (isAddDrag(event)) {
         event.preventDefault();
         // The payload is authoritative; the state id is the fallback for a
@@ -273,6 +289,7 @@ export function DashboardGrid({
     [
       addDragId,
       addWidget,
+      autoScroll,
       draggedId,
       entries,
       findWidgetIdFromEvent,
@@ -317,24 +334,36 @@ export function DashboardGrid({
         maxRows: widget.maxRows,
         latestSpan: currentSpan,
         latestRows: currentRows,
+        latestClientX: event.clientX,
+        latestClientY: event.clientY,
+        scrollOffsetY: 0,
       };
       setResizePreview({ id, span: currentSpan, rows: currentRows });
     },
     [isCustomizing],
   );
 
-  const handleResizePointerMove = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+  /**
+   * Recomputes the previewed size from the session's latest pointer position.
+   * `scrollOffsetY` folds auto-scroll into the vertical delta: scrolling moves
+   * the widget up under a stationary pointer, which is the same gesture as
+   * dragging the handle down by that much.
+   */
+  const applyResizePreview = useCallback(() => {
     const session = resizeSessionRef.current;
     if (!session) return;
     // Each axis is clamped to its own range, so a widget with a pinned width
     // still grows in height and never drifts sideways under the pointer.
     const nextSpan = clamp(
-      Math.round(session.startSpan + (event.clientX - session.startX) / session.columnUnit),
+      Math.round(session.startSpan + (session.latestClientX - session.startX) / session.columnUnit),
       session.minSpan,
       session.maxSpan,
     );
     const nextRows = clamp(
-      Math.round(session.startRows + (event.clientY - session.startY) / session.rowUnit),
+      Math.round(
+        session.startRows +
+          (session.latestClientY + session.scrollOffsetY - session.startY) / session.rowUnit,
+      ),
       session.minRows,
       session.maxRows,
     );
@@ -346,10 +375,36 @@ export function DashboardGrid({
     setResizePreview({ id: session.id, span: nextSpan, rows: nextRows });
   }, []);
 
+  /** Auto-scroll moved the grid mid-resize; fold it in and re-derive the size. */
+  const handleResizeAutoScrolled = useCallback(
+    (dy: number) => {
+      const session = resizeSessionRef.current;
+      if (!session) return;
+      session.scrollOffsetY += dy;
+      applyResizePreview();
+    },
+    [applyResizePreview],
+  );
+
+  const handleResizePointerMove = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>) => {
+      const session = resizeSessionRef.current;
+      if (!session) return;
+      session.latestClientX = event.clientX;
+      session.latestClientY = event.clientY;
+      applyResizePreview();
+      // A widget can be taller than the viewport, so growing it needs the same
+      // edge auto-scroll a reorder drag gets.
+      autoScroll.update(event.clientY, handleResizeAutoScrolled);
+    },
+    [applyResizePreview, autoScroll, handleResizeAutoScrolled],
+  );
+
   const handleResizePointerEnd = useCallback(
     (event: ReactPointerEvent<HTMLButtonElement>) => {
       const session = resizeSessionRef.current;
       if (!session) return;
+      autoScroll.stop();
       resizeSessionRef.current = null;
       setResizePreview(null);
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -360,7 +415,7 @@ export function DashboardGrid({
         `${session.title} resized to ${session.latestSpan} of ${GRID_COLUMNS} columns × ${session.latestRows} ${session.latestRows === 1 ? "row" : "rows"}`,
       );
     },
-    [resizeWidget],
+    [autoScroll, resizeWidget],
   );
 
   const handleMoveKeyDown = useCallback(
@@ -595,6 +650,7 @@ export function DashboardGrid({
                   onDragEnd={() => {
                     // Fires for cancelled and completed drags alike; the drop
                     // handler has already applied any placement by now.
+                    autoScroll.stop();
                     setAddDragId(null);
                     setDropIndicator(null);
                   }}

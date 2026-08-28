@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AdminSession } from "@/api/types";
 import type { DashboardLayout } from "./useDashboardLayout";
@@ -179,11 +179,12 @@ function stubDataTransfer() {
  */
 function fireDragEvent(
   element: Element,
-  type: "dragstart" | "dragend" | "drop",
+  type: "dragstart" | "dragover" | "dragend" | "drop",
   dataTransfer: ReturnType<typeof stubDataTransfer>,
   clientX = 0,
+  clientY = 0,
 ) {
-  const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX });
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY });
   Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
   fireEvent(element, event);
 }
@@ -278,5 +279,83 @@ describe("DashboardGrid add-widget drag", () => {
 
     expect(layout.moveWidget).toHaveBeenCalledWith("now-playing", "stat-movies");
     expect(layout.addWidget).not.toHaveBeenCalled();
+  });
+});
+
+describe("DashboardGrid drag auto-scroll", () => {
+  beforeEach(() => {
+    mocks.useAdminSessions.mockReset();
+    mocks.useAdminStats.mockReset();
+    mocks.useAdminSessions.mockReturnValue({ data: [], isLoading: false, error: null });
+    mocks.useAdminStats.mockReturnValue({ data: undefined, isLoading: true, error: null });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("a dragover near the top edge scrolls the container up and dragend stops it", () => {
+    // A synchronous stand-in for requestAnimationFrame: the loop's frames pile
+    // up here and the test pumps them by hand, so a loop that never stops
+    // would run away only as far as `runFrames` lets it.
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((cb: FrameRequestCallback) => frames.push(cb)),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const runFrames = (n: number) => {
+      for (let i = 0; i < n && frames.length > 0; i++) frames.shift()!(0);
+    };
+
+    const { container } = render(
+      <MemoryRouter>
+        <DashboardGrid
+          layout={layoutWith(true, {
+            entries: [
+              { id: "now-playing", span: 12, rows: 3 },
+              { id: "stat-movies", span: 2, rows: 1 },
+            ],
+          })}
+          isAddPanelOpen={false}
+          onAddPanelOpenChange={() => {}}
+        />
+      </MemoryRouter>,
+    );
+
+    // The RTL container is the grid's parent; dress it up as the scrollable
+    // ancestor findScrollContainer should resolve (jsdom has no layout, so
+    // scroll metrics and the rect are stubbed).
+    container.style.overflowY = "auto";
+    Object.defineProperty(container, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(container, "clientHeight", { value: 400, configurable: true });
+    container.getBoundingClientRect = () => ({ top: 0, bottom: 400 }) as DOMRect;
+    let scrollTop = 100;
+    Object.defineProperty(container, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, value);
+      },
+    });
+
+    const nowPlaying = container.querySelector('[data-widget-id="now-playing"]');
+    const statMovies = container.querySelector('[data-widget-id="stat-movies"]');
+    if (!nowPlaying || !statMovies) throw new Error("expected both placed widgets");
+
+    const dataTransfer = stubDataTransfer();
+    fireDragEvent(nowPlaying, "dragstart", dataTransfer);
+    // Pointer 10px from the top edge: well inside the edge zone.
+    fireDragEvent(statMovies, "dragover", dataTransfer, 0, 10);
+
+    runFrames(3);
+    expect(scrollTop).toBeLessThan(100);
+    const afterScrolling = scrollTop;
+    expect(frames.length).toBeGreaterThan(0); // still looping mid-drag
+
+    fireDragEvent(nowPlaying, "dragend", dataTransfer);
+    runFrames(5);
+    expect(scrollTop).toBe(afterScrolling); // stopped: no further scrolling
+    expect(frames.length).toBe(0); // and nothing new scheduled
   });
 });
