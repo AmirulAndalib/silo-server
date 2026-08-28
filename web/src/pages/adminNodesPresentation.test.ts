@@ -1197,7 +1197,7 @@ describe("capability report staleness from an unconfirmed hash", () => {
       advertised_capabilities_hash: "sha256:newer",
     } as StreamNode;
     const gpu = describeNodeGPU(node, Date.parse("2026-08-28T00:00:10Z"));
-    expect(gpu?.stale).toBe(true);
+    expect(gpu.kind === "reported" && gpu.stale).toBe(true);
   });
 
   it("leaves a matching hash alone on a freshly checked node", () => {
@@ -1207,13 +1207,15 @@ describe("capability report staleness from an unconfirmed hash", () => {
       advertised_capabilities_hash: "sha256:stored",
     } as StreamNode;
     const gpu = describeNodeGPU(node, Date.parse("2026-08-28T00:00:10Z"));
-    expect(gpu?.stale).toBe(false);
+    expect(gpu.kind === "reported" && gpu.stale).toBe(false);
   });
 
   // A node that never advertises one — an older build — keeps the timestamp rule.
   it("falls back to the health-check age when no hash is advertised", () => {
     const node = { ...base, capabilities_hash: "sha256:stored" } as StreamNode;
-    expect(describeNodeGPU(node, Date.parse("2026-08-28T00:00:10Z"))?.stale).toBe(false);
-    expect(describeNodeGPU(node, Date.parse("2026-08-28T00:20:00Z"))?.stale).toBe(true);
+    const fresh = describeNodeGPU(node, Date.parse("2026-08-28T00:00:10Z"));
+    expect(fresh.kind === "reported" && fresh.stale).toBe(false);
+    const aged = describeNodeGPU(node, Date.parse("2026-08-28T00:20:00Z"));
+    expect(aged.kind === "reported" && aged.stale).toBe(true);
   });
 });
