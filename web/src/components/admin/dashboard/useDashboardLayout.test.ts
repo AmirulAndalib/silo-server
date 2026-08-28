@@ -309,7 +309,7 @@ describe("useDashboardLayout", () => {
     expect(result.current.entries).toContainEqual({
       id: "playback-reliability",
       span: 6,
-      rows: 2,
+      rows: 3,
       range: "day",
     });
   });
@@ -337,7 +337,7 @@ describe("useDashboardLayout", () => {
 
     const expected = [
       { id: "libraries", span: 7, rows: 4 },
-      { id: "now-playing", span: 12, rows: 4 },
+      { id: "now-playing", span: 12, rows: 3 },
     ];
     expect(result.current.entries).toEqual(expected);
     expect(readStored()).toEqual({ version: 1, entries: expected });
