@@ -82,9 +82,14 @@ func (h *AdminHandler) HandleGetServerStatus(w http.ResponseWriter, r *http.Requ
 	// Settings live in Postgres, so this lookup fails in exactly the outage the
 	// health object below exists to report. A failure therefore skips the
 	// jellycompat restart derivation instead of aborting the response — a 500
-	// here would hide postgres.ok:false from the one page built to show it.
+	// here would hide postgres.ok:false from the one page built to show it —
+	// and the lookup is bounded like the probes: a wedged pool must not hold
+	// this optional derivation, and with it the whole response, to the request
+	// deadline.
 	if h.SettingsRepo != nil {
-		settings, err := h.SettingsRepo.GetAll(r.Context())
+		settingsCtx, cancel := context.WithTimeout(r.Context(), adminHealthProbeTimeout)
+		settings, err := h.SettingsRepo.GetAll(settingsCtx)
+		cancel()
 		if err == nil && jellycompat.WebComponentStatusForConfig(h.Config, settings).RestartRequired {
 			resp.RestartRequired = true
 			if resp.RestartRequiredReason == "" {
