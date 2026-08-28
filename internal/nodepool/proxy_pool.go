@@ -27,7 +27,13 @@ func (p *ProxyPool) SetNodes(nodes []*Node) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, n := range nodes {
-		applyPhysicalGPUKeys(n)
+		if n != nil {
+			// Same rule as the transcode pool: URLs are normalized where they
+			// enter the pool and where lookups are made, so a URL stored with
+			// a trailing slash still matches FindByURL's exact comparison.
+			n.URL = normalizeNodeURL(n.URL)
+			applyPhysicalGPUKeys(n)
+		}
 	}
 	p.nodes = nodes
 }

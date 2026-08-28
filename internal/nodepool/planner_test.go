@@ -978,3 +978,24 @@ func TestSharedGPUDoesNotAffectProxySelection(t *testing.T) {
 		t.Fatalf("expected round-robin across both proxies, got %+v then %+v", first, second)
 	}
 }
+
+// A proxy URL stored with a trailing slash must still resolve: URLs are
+// normalized where they enter the pool, so the normalized lookup key
+// ProxyNodeByURL builds compares equal. Without the SetNodes normalization the
+// lookup always missed and capability pricing fell back to the cluster policy
+// for exactly the proxies an operator had configured by hand.
+func TestProxyNodeByURLNormalizesStoredAndLookupURLs(t *testing.T) {
+	proxies := NewProxyPool()
+	proxies.SetNodes([]*Node{{ID: 1, Name: "p1", URL: "https://proxy.example.com/", Enabled: true, Healthy: true}})
+	planner := NewPlanner(proxies, NewTranscodePool())
+
+	for _, lookup := range []string{"https://proxy.example.com", "https://proxy.example.com/"} {
+		node, ok := planner.ProxyNodeByURL(lookup)
+		if !ok || node == nil {
+			t.Fatalf("ProxyNodeByURL(%q) = %v, %v; want the pooled node", lookup, node, ok)
+		}
+		if node.ID != 1 {
+			t.Fatalf("ProxyNodeByURL(%q) resolved node %d, want 1", lookup, node.ID)
+		}
+	}
+}
