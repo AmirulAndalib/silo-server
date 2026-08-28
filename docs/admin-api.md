@@ -76,6 +76,21 @@ Some settings are only read at startup. Two routes carry that contract:
 | `restart_mark_count` | int | Increments on every restart-required save. Because the boolean latches, this counter is the only signal that a **new** requirement arrived — the admin UI re-arms its dismissed restart banner on it. |
 | `restart_requested`, `restart_requested_at` | bool, RFC3339 string | An in-app restart was requested, and when. |
 
+## Catalog search status
+
+`GET /api/v1/admin/catalog/search/status` reports the configured search
+provider, the provider currently answering requests, Meilisearch health, index
+state, semantic readiness, and links to the search maintenance tasks.
+
+`active_provider` describes the route requests actually take; it is not merely
+the configured provider. `degraded` and the optional `degraded_reason` explain
+temporary fallback or keyword-only operation. `index.rebuild_required` is true
+when the active index does not match the current settings. Background search
+maintenance runs at startup and every minute: it rebuilds a missing or stale
+index, then resumes incremental event sync. When the prior index is known to
+have the same document and media scope, Meilisearch continues serving keyword
+search while the replacement is built; otherwise searches use PostgreSQL.
+
 ## `GET /api/v1/admin/nodes`
 
 Lists every registered stream node — proxy and transcode alike — with its
