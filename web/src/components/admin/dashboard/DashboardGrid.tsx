@@ -26,6 +26,13 @@ const GRID_ROW_HEIGHT_PX = 100;
 const GRID_COLUMNS = 12;
 
 /**
+ * Drag payload type for adding a widget from the Add-widget sheet, distinct
+ * from the `text/plain` payload a grid reorder drag carries so neither path
+ * can mistake the other's drag for its own.
+ */
+export const WIDGET_ADD_DRAG_TYPE = "application/x-silo-widget-add";
+
+/**
  * Row height in CSS pixels.
  *
  * Read back from `--admin-row-h` so a drag follows the stylesheet instead of a
@@ -104,6 +111,10 @@ export function DashboardGrid({
 
   const gridRef = useRef<HTMLDivElement | null>(null);
   const [draggedId, setDraggedId] = useState<WidgetId | null>(null);
+  // A drag out of the Add-widget sheet. Tracked separately from `draggedId`
+  // because dragover cannot read the payload, only its type — the id has to
+  // come from state until the drop.
+  const [addDragId, setAddDragId] = useState<WidgetId | null>(null);
   const [dropIndicator, setDropIndicator] = useState<DropIndicator | null>(null);
   const [resizePreview, setResizePreview] = useState<ResizePreview | null>(null);
   const [liveMessage, setLiveMessage] = useState("");
@@ -160,51 +171,116 @@ export function DashboardGrid({
     setDropIndicator(null);
   }, []);
 
+  /** True when the drag carries the Add-widget sheet's payload type. */
+  const isAddDrag = useCallback(
+    (event: DragEvent<HTMLElement>) =>
+      addDragId !== null && event.dataTransfer.types.includes(WIDGET_ADD_DRAG_TYPE),
+    [addDragId],
+  );
+
+  /**
+   * Which placed widget the pointer is over and which side of it, or null when
+   * the drag is over the grid's trailing area rather than a widget.
+   */
+  const resolveDropEdge = useCallback(
+    (event: DragEvent<HTMLElement>): DropIndicator | null => {
+      const overId = findWidgetIdFromEvent(event);
+      if (!overId) return null;
+      const host = (event.target as HTMLElement).closest<HTMLElement>("[data-widget-id]");
+      if (!host) return null;
+      const rect = host.getBoundingClientRect();
+      return { id: overId, edge: event.clientX < rect.left + rect.width / 2 ? "before" : "after" };
+    },
+    [findWidgetIdFromEvent],
+  );
+
+  /** The entry the payload should land in front of, or null to append. */
+  const resolveBeforeId = useCallback(
+    (event: DragEvent<HTMLElement>): WidgetId | null => {
+      const target = resolveDropEdge(event);
+      if (!target) return null;
+      if (target.edge === "before") return target.id;
+      const overIndex = entries.findIndex((entry) => entry.id === target.id);
+      const nextEntry = overIndex === -1 ? undefined : entries[overIndex + 1];
+      return nextEntry ? nextEntry.id : null;
+    },
+    [entries, resolveDropEdge],
+  );
+
   const handleDragOver = useCallback(
     (event: DragEvent<HTMLElement>) => {
+      if (isAddDrag(event)) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        const target = resolveDropEdge(event);
+        // Over the trailing area the drop appends, shown as an "after" edge on
+        // the last widget; over a widget the indicator matches a reorder's.
+        const lastId = entries[entries.length - 1]?.id;
+        const indicator: DropIndicator | null =
+          target ?? (lastId ? { id: lastId, edge: "after" } : null);
+        setDropIndicator((prev) =>
+          prev?.id === indicator?.id && prev?.edge === indicator?.edge ? prev : indicator,
+        );
+        return;
+      }
       if (!draggedId) return;
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
-      const overId = findWidgetIdFromEvent(event);
-      if (!overId || overId === draggedId) {
+      const target = resolveDropEdge(event);
+      if (!target || target.id === draggedId) {
         setDropIndicator(null);
         return;
       }
-      const host = (event.target as HTMLElement).closest<HTMLElement>("[data-widget-id]");
-      if (!host) {
-        setDropIndicator(null);
-        return;
-      }
-      const rect = host.getBoundingClientRect();
-      const edge = event.clientX < rect.left + rect.width / 2 ? "before" : "after";
       setDropIndicator((prev) =>
-        prev?.id === overId && prev.edge === edge ? prev : { id: overId, edge },
+        prev?.id === target.id && prev.edge === target.edge ? prev : target,
       );
     },
-    [draggedId, findWidgetIdFromEvent],
+    [draggedId, entries, isAddDrag, resolveDropEdge],
   );
 
   const handleDrop = useCallback(
     (event: DragEvent<HTMLElement>) => {
+      if (isAddDrag(event)) {
+        event.preventDefault();
+        // The payload is authoritative; the state id is the fallback for a
+        // dataTransfer that cannot round-trip custom types.
+        const payloadId = event.dataTransfer.getData(WIDGET_ADD_DRAG_TYPE) as WidgetId;
+        const id = payloadId || addDragId;
+        setAddDragId(null);
+        setDropIndicator(null);
+        if (!id) return;
+        const beforeId = resolveBeforeId(event);
+        addWidget(id, beforeId);
+        const position =
+          beforeId === null
+            ? entries.length + 1
+            : Math.max(1, entries.findIndex((entry) => entry.id === beforeId) + 1);
+        setLiveMessage(
+          `${getDashboardWidget(id).title} added at position ${position} of ${entries.length + 1}`,
+        );
+        onAddPanelOpenChange(false);
+        return;
+      }
       if (!draggedId) return;
       event.preventDefault();
       const overId = findWidgetIdFromEvent(event);
       if (overId && overId !== draggedId) {
-        const host = (event.target as HTMLElement).closest<HTMLElement>("[data-widget-id]");
-        const rect = host?.getBoundingClientRect();
-        const before = rect ? event.clientX < rect.left + rect.width / 2 : true;
-        if (before) {
-          moveWidget(draggedId, overId);
-        } else {
-          const overIndex = entries.findIndex((entry) => entry.id === overId);
-          const nextEntry = overIndex === -1 ? undefined : entries[overIndex + 1];
-          moveWidget(draggedId, nextEntry ? nextEntry.id : null);
-        }
+        moveWidget(draggedId, resolveBeforeId(event));
       }
       setDraggedId(null);
       setDropIndicator(null);
     },
-    [draggedId, entries, findWidgetIdFromEvent, moveWidget],
+    [
+      addDragId,
+      addWidget,
+      draggedId,
+      entries,
+      findWidgetIdFromEvent,
+      isAddDrag,
+      moveWidget,
+      onAddPanelOpenChange,
+      resolveBeforeId,
+    ],
   );
 
   const handleResizePointerDown = useCallback(
@@ -477,9 +553,17 @@ export function DashboardGrid({
       </div>
 
       <Sheet open={isAddPanelOpen} onOpenChange={onAddPanelOpenChange} modal={false}>
+        {/* The sheet is non-modal, so Radix renders no overlay and the grid
+            behind it stays a live drop target. During an add-drag the panel
+            itself still covers the grid's right edge, so it goes transparent
+            to the pointer and fades — but stays mounted: unmounting the drag
+            source mid-drag cancels the drag in some engines. */}
         <SheetContent
           side="right"
-          className="w-80 gap-2 sm:max-w-sm"
+          className={cn(
+            "w-80 gap-2 sm:max-w-sm",
+            addDragId !== null && "pointer-events-none opacity-30",
+          )}
           onInteractOutside={(event) => event.preventDefault()}
         >
           <SheetHeader className="pb-0">
@@ -500,6 +584,20 @@ export function DashboardGrid({
                   type="button"
                   className="border-border hover:border-primary/50 hover:bg-accent/40 focus-visible:ring-ring flex cursor-pointer items-start gap-3 rounded-xl border p-3 text-left transition-colors focus-visible:ring-2 focus-visible:outline-none"
                   onClick={() => addWidget(widget.id)}
+                  // Dragging is the pointer shortcut for placing the widget at
+                  // a specific spot; clicking (the keyboard path) appends.
+                  draggable
+                  onDragStart={(event) => {
+                    event.dataTransfer.setData(WIDGET_ADD_DRAG_TYPE, widget.id);
+                    event.dataTransfer.effectAllowed = "copy";
+                    setAddDragId(widget.id);
+                  }}
+                  onDragEnd={() => {
+                    // Fires for cancelled and completed drags alike; the drop
+                    // handler has already applied any placement by now.
+                    setAddDragId(null);
+                    setDropIndicator(null);
+                  }}
                 >
                   <span className="bg-primary/10 text-primary flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md">
                     <Plus className="h-3.5 w-3.5" />

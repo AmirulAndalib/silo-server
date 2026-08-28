@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -7,16 +7,22 @@ import type { DashboardLayout } from "./useDashboardLayout";
 
 const mocks = vi.hoisted(() => ({
   useAdminSessions: vi.fn(),
+  useAdminStats: vi.fn(),
 }));
 
 vi.mock("@/hooks/queries/admin/stats", async () => {
   const actual = await vi.importActual<typeof import("@/hooks/queries/admin/stats")>(
     "@/hooks/queries/admin/stats",
   );
-  return { ...actual, useAdminSessions: mocks.useAdminSessions };
+  return {
+    ...actual,
+    useAdminSessions: mocks.useAdminSessions,
+    useAdminStats: mocks.useAdminStats,
+  };
 });
 
-import { DashboardGrid } from "./DashboardGrid";
+import { DashboardGrid, WIDGET_ADD_DRAG_TYPE } from "./DashboardGrid";
+import { getDashboardWidget } from "./registry";
 
 function session(overrides: Partial<AdminSession> = {}): AdminSession {
   return {
@@ -37,7 +43,10 @@ function session(overrides: Partial<AdminSession> = {}): AdminSession {
  * `entries`, so a one-entry layout keeps the test off every other widget's data
  * hooks.
  */
-function layoutWith(isCustomizing: boolean): DashboardLayout {
+function layoutWith(
+  isCustomizing: boolean,
+  overrides: Partial<DashboardLayout> = {},
+): DashboardLayout {
   return {
     entries: [{ id: "now-playing", span: 12, rows: 3 }],
     hiddenWidgets: [],
@@ -49,6 +58,7 @@ function layoutWith(isCustomizing: boolean): DashboardLayout {
     removeWidget: vi.fn(),
     addWidget: vi.fn(),
     resetLayout: vi.fn(),
+    ...overrides,
   };
 }
 
@@ -137,5 +147,136 @@ describe("DashboardGrid collapse", () => {
 
     expect(await screen.findByText("Arrival")).toBeTruthy();
     expect(rowsOf(container)).toBe("3");
+  });
+});
+
+/**
+ * jsdom implements neither DragEvent nor DataTransfer, so drag events are
+ * dispatched with this stand-in carrying the payload between dragstart and
+ * drop, the way a real drag session would.
+ */
+function stubDataTransfer() {
+  const store = new Map<string, string>();
+  return {
+    setData(type: string, value: string) {
+      store.set(type, value);
+    },
+    getData(type: string) {
+      return store.get(type) ?? "";
+    },
+    get types() {
+      return [...store.keys()];
+    },
+    effectAllowed: "none",
+    dropEffect: "none",
+  };
+}
+
+/**
+ * Dispatches a drag event as a MouseEvent so `clientX` survives — jsdom has no
+ * DragEvent, and testing-library's fallback drops mouse coordinates — with the
+ * stubbed dataTransfer attached the way a real drag event would carry it.
+ */
+function fireDragEvent(
+  element: Element,
+  type: "dragstart" | "dragend" | "drop",
+  dataTransfer: ReturnType<typeof stubDataTransfer>,
+  clientX = 0,
+) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX });
+  Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+  fireEvent(element, event);
+}
+
+describe("DashboardGrid add-widget drag", () => {
+  const libraries = getDashboardWidget("libraries");
+
+  beforeEach(() => {
+    mocks.useAdminSessions.mockReset();
+    mocks.useAdminStats.mockReset();
+    mocks.useAdminSessions.mockReturnValue({ data: [], isLoading: false, error: null });
+    // Loading keeps the stat tile on its skeleton, off the stats data shape.
+    mocks.useAdminStats.mockReturnValue({ data: undefined, isLoading: true, error: null });
+  });
+
+  function renderCustomizing(overrides: Partial<DashboardLayout> = {}) {
+    const layout = layoutWith(true, { hiddenWidgets: [libraries], ...overrides });
+    const onAddPanelOpenChange = vi.fn();
+    const view = render(
+      <MemoryRouter>
+        <DashboardGrid layout={layout} isAddPanelOpen onAddPanelOpenChange={onAddPanelOpenChange} />
+      </MemoryRouter>,
+    );
+    return { layout, onAddPanelOpenChange, ...view };
+  }
+
+  function sheetEntry(): HTMLElement {
+    return screen.getByRole("button", { name: new RegExp(libraries.title) });
+  }
+
+  it("dropping a sheet entry before a placed widget inserts it there in one call", () => {
+    const { layout, onAddPanelOpenChange, container } = renderCustomizing();
+    const dataTransfer = stubDataTransfer();
+
+    fireDragEvent(sheetEntry(), "dragstart", dataTransfer);
+    expect(dataTransfer.getData(WIDGET_ADD_DRAG_TYPE)).toBe("libraries");
+    expect(dataTransfer.effectAllowed).toBe("copy");
+
+    const host = container.querySelector('[data-widget-id="now-playing"]');
+    if (!host) throw new Error("expected the placed widget");
+    // jsdom rects are all zeros, so a negative clientX lands on the left half.
+    fireDragEvent(host, "drop", dataTransfer, -5);
+
+    expect(layout.addWidget).toHaveBeenCalledTimes(1);
+    expect(layout.addWidget).toHaveBeenCalledWith("libraries", "now-playing");
+    expect(layout.moveWidget).not.toHaveBeenCalled();
+    expect(onAddPanelOpenChange).toHaveBeenCalledWith(false);
+    expect(screen.getByRole("status").textContent).toContain("added at position 1 of 2");
+  });
+
+  it("dropping a sheet entry on the trailing area appends", () => {
+    const { layout, container } = renderCustomizing();
+    const dataTransfer = stubDataTransfer();
+
+    fireDragEvent(sheetEntry(), "dragstart", dataTransfer);
+    const grid = container.querySelector(".admin-widget-grid");
+    if (!grid) throw new Error("expected the widget grid");
+    fireDragEvent(grid, "drop", dataTransfer, 5);
+
+    expect(layout.addWidget).toHaveBeenCalledWith("libraries", null);
+  });
+
+  it("gets the sheet out of the pointer's way during the drag and restores it on cancel", () => {
+    const { layout } = renderCustomizing();
+    const dataTransfer = stubDataTransfer();
+    const sheet = document.querySelector('[data-slot="sheet-content"]');
+    if (!sheet) throw new Error("expected the add-widget sheet");
+
+    fireDragEvent(sheetEntry(), "dragstart", dataTransfer);
+    expect(sheet.className).toContain("pointer-events-none");
+
+    // A drag that ends without a valid drop only fires dragend.
+    fireDragEvent(sheetEntry(), "dragend", dataTransfer);
+    expect(sheet.className).not.toContain("pointer-events-none");
+    expect(layout.addWidget).not.toHaveBeenCalled();
+  });
+
+  it("a reorder drag is never treated as an add", () => {
+    const { layout, container } = renderCustomizing({
+      entries: [
+        { id: "now-playing", span: 12, rows: 3 },
+        { id: "stat-movies", span: 2, rows: 1 },
+      ],
+    });
+    const dataTransfer = stubDataTransfer();
+    const nowPlaying = container.querySelector('[data-widget-id="now-playing"]');
+    const statMovies = container.querySelector('[data-widget-id="stat-movies"]');
+    if (!nowPlaying || !statMovies) throw new Error("expected both placed widgets");
+
+    fireDragEvent(nowPlaying, "dragstart", dataTransfer);
+    fireDragEvent(statMovies, "drop", dataTransfer, -5);
+
+    expect(layout.moveWidget).toHaveBeenCalledWith("now-playing", "stat-movies");
+    expect(layout.addWidget).not.toHaveBeenCalled();
   });
 });

@@ -203,7 +203,13 @@ export interface DashboardLayout {
    */
   setWidgetRange: (id: WidgetId, range: WidgetRange) => void;
   removeWidget: (id: WidgetId) => void;
-  addWidget: (id: WidgetId) => void;
+  /**
+   * Place a hidden widget with its default span, rows, and window. With a
+   * `beforeId` it is inserted in front of that entry — one layout update, so a
+   * sheet drop rides a single debounced save rather than an add-then-move pair.
+   * Without one (or with an id that is not placed) it appends.
+   */
+  addWidget: (id: WidgetId, beforeId?: WidgetId | null) => void;
   resetLayout: () => void;
 }
 
@@ -424,7 +430,7 @@ export function useDashboardLayout(): DashboardLayout {
   );
 
   const addWidget = useCallback(
-    (id: WidgetId) => {
+    (id: WidgetId, beforeId?: WidgetId | null) => {
       update((prev) => {
         const widget = findDashboardWidget(id);
         if (!widget || prev.some((entry) => entry.id === id)) {
@@ -438,7 +444,13 @@ export function useDashboardLayout(): DashboardLayout {
         if (widget.ranges) {
           added.range = widget.ranges.default;
         }
-        return [...prev, added];
+        // An unknown beforeId appends rather than dropping the add: the anchor
+        // may have been removed between the drag starting and the drop landing.
+        const index = beforeId == null ? -1 : prev.findIndex((entry) => entry.id === beforeId);
+        if (index === -1) {
+          return [...prev, added];
+        }
+        return [...prev.slice(0, index), added, ...prev.slice(index)];
       });
     },
     [update],

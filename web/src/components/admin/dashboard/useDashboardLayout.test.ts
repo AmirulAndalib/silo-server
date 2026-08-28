@@ -373,6 +373,72 @@ describe("useDashboardLayout", () => {
     expect(readStored()).toEqual({ version: 1, entries: expected });
   });
 
+  it("addWidget with a beforeId inserts in front of that entry and persists", () => {
+    writeStored([
+      { id: "libraries", span: 7, rows: 4 },
+      { id: "users", span: 5, rows: 4 },
+    ]);
+    const { result } = renderHook(() => useDashboardLayout());
+
+    act(() => {
+      result.current.addWidget("now-playing", "users");
+    });
+
+    const expected = [
+      { id: "libraries", span: 7, rows: 4 },
+      { id: "now-playing", span: 12, rows: 3 },
+      { id: "users", span: 5, rows: 4 },
+    ];
+    expect(result.current.entries).toEqual(expected);
+    expect(readStored()).toEqual({ version: 1, entries: expected });
+  });
+
+  it("addWidget with a beforeId stamps a ranged widget's default window", () => {
+    writeStored([
+      { id: "libraries", span: 7, rows: 4 },
+      { id: "users", span: 5, rows: 4 },
+    ]);
+    const { result } = renderHook(() => useDashboardLayout());
+
+    act(() => {
+      result.current.addWidget("playback-reliability", "libraries");
+    });
+
+    expect(result.current.entries).toEqual([
+      { id: "playback-reliability", span: 6, rows: 3, range: "day" },
+      { id: "libraries", span: 7, rows: 4 },
+      { id: "users", span: 5, rows: 4 },
+    ]);
+  });
+
+  // The drop anchor may have been removed between the drag starting and the
+  // drop landing; the add still happens rather than vanishing.
+  it("addWidget appends when the beforeId is not placed", () => {
+    writeStored([{ id: "libraries", span: 7, rows: 4 }]);
+    const { result } = renderHook(() => useDashboardLayout());
+
+    act(() => {
+      result.current.addWidget("now-playing", "users");
+    });
+
+    expect(result.current.entries.map((entry) => entry.id)).toEqual(["libraries", "now-playing"]);
+  });
+
+  it("addWidget ignores a widget that is already placed, beforeId or not", () => {
+    writeStored([
+      { id: "libraries", span: 7, rows: 4 },
+      { id: "users", span: 5, rows: 4 },
+    ]);
+    const { result } = renderHook(() => useDashboardLayout());
+
+    act(() => {
+      result.current.addWidget("users", "libraries");
+      result.current.addWidget("libraries");
+    });
+
+    expect(result.current.entries.map((entry) => entry.id)).toEqual(["libraries", "users"]);
+  });
+
   it("removeWidget hides the widget and persists", () => {
     const { result } = renderHook(() => useDashboardLayout());
 
