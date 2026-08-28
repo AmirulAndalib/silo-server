@@ -241,7 +241,13 @@ export function DashboardGrid({
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
       autoScroll.update(event.clientY);
-      const target = resolveDropEdge(event);
+      // Over the trailing area a reorder appends, exactly like a sheet add;
+      // the indicator is the "after" edge of the last widget unless the
+      // dragged widget already is the last one.
+      const lastId = entries[entries.length - 1]?.id;
+      const target =
+        resolveDropEdge(event) ??
+        (lastId && lastId !== draggedId ? { id: lastId, edge: "after" as const } : null);
       if (!target || target.id === draggedId) {
         setDropIndicator(null);
         return;
@@ -282,6 +288,11 @@ export function DashboardGrid({
       const overId = findWidgetIdFromEvent(event);
       if (overId && overId !== draggedId) {
         moveWidget(draggedId, resolveBeforeId(event));
+      } else if (!overId) {
+        // The trailing area appends for reorders too — the sheet-add path
+        // already treats it that way, and a silent no-op strands the last
+        // position for mouse users.
+        moveWidget(draggedId, null);
       }
       setDraggedId(null);
       setDropIndicator(null);

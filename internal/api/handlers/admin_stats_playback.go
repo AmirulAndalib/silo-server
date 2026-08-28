@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Silo-Server/silo-server/internal/cache"
@@ -302,11 +303,27 @@ func queryAdminPlaybackActivity(ctx context.Context, pool *pgxpool.Pool, hours i
 
 	bucketSeconds := playbackActivityBucketSeconds(hours)
 
+	// Both statements run inside one repeatable-read transaction so they see a
+	// single snapshot and a single clock: read committed would let a session
+	// that starts or finalizes between them make reliability describe a
+	// different session set from the buckets, and now() — which is the
+	// transaction timestamp — would otherwise differ between the bucket filter
+	// and the reported window, moving the client's grid off the buckets around
+	// an hour or day boundary.
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("beginning playback activity read: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	// Truncation is pinned to UTC: date_trunc otherwise cuts on the session
 	// TimeZone's boundaries, and the dashboard zero-fills on epoch-aligned UTC
 	// buckets — a daily bucket cut in another zone would land in the wrong
 	// column (or between columns) client-side.
-	rows, err := pool.Query(ctx, adminPlaybackSessionsCTE+`
+	rows, err := tx.Query(ctx, adminPlaybackSessionsCTE+`
 		SELECT date_trunc($2, started_at, 'UTC') AS bucket,
 		       COALESCE(play_method, '') AS play_method,
 		       COUNT(*)::bigint AS sessions
@@ -342,7 +359,7 @@ func queryAdminPlaybackActivity(ctx context.Context, pool *pgxpool.Pool, hours i
 	// history so the tile means "watched on this server", not "appeared in
 	// someone's Trakt backlog". Manual marks stay in: they are on-server
 	// actions.
-	row := pool.QueryRow(ctx, adminPlaybackSessionsCTE+`,
+	row := tx.QueryRow(ctx, adminPlaybackSessionsCTE+`,
 		reliability AS (
 			SELECT
 				COUNT(*)::bigint AS sessions_started,
@@ -389,5 +406,8 @@ func queryAdminPlaybackActivity(ctx context.Context, pool *pgxpool.Pool, hours i
 		activity.Reliability.FinalizedSessions,
 	)
 
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("closing playback activity read: %w", err)
+	}
 	return activity, nil
 }

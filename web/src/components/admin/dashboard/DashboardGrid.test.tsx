@@ -262,6 +262,28 @@ describe("DashboardGrid add-widget drag", () => {
     expect(layout.addWidget).not.toHaveBeenCalled();
   });
 
+  // The sheet-add path already appends on the trailing area; a reorder
+  // dropped there must not be a silent no-op — mouse users could otherwise
+  // never move a widget into the last position.
+  it("dropping a reorder on the trailing area appends", () => {
+    const { layout, container } = renderCustomizing({
+      entries: [
+        { id: "now-playing", span: 12, rows: 3 },
+        { id: "stat-movies", span: 2, rows: 1 },
+      ],
+    });
+    const dataTransfer = stubDataTransfer();
+    const nowPlaying = container.querySelector('[data-widget-id="now-playing"]');
+    const grid = container.querySelector(".admin-widget-grid");
+    if (!nowPlaying || !grid) throw new Error("expected the widget and grid");
+
+    fireDragEvent(nowPlaying, "dragstart", dataTransfer);
+    fireDragEvent(grid, "drop", dataTransfer, 5);
+
+    expect(layout.moveWidget).toHaveBeenCalledWith("now-playing", null);
+    expect(layout.addWidget).not.toHaveBeenCalled();
+  });
+
   it("a reorder drag is never treated as an add", () => {
     const { layout, container } = renderCustomizing({
       entries: [
