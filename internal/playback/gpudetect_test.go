@@ -1407,3 +1407,34 @@ func TestCollectHWCandidatesCapsTheProbedDeviceSet(t *testing.T) {
 		t.Fatalf("qsv probe devices = %d, want the 3 configured", got)
 	}
 }
+
+// The ceiling is clamped against on an API replica, which does not have the
+// remote node's cards. Pricing a synthetic device list there classified the
+// fabricated paths as VAAPI-only — no sysfs vendor to read — so the ceiling came
+// out below what a node with a dozen Intel devices legitimately advertises, and
+// the clamp then canceled that node before its own matrix could finish.
+func TestMaxCapabilityRequestTimeoutDoesNotDependOnTheLocalHost(t *testing.T) {
+	env := setupHWAccelTest(t)
+	bare := MaxCapabilityRequestTimeout()
+
+	// Same process, now with Intel cards present: classification would change if
+	// the ceiling consulted sysfs at all.
+	for i := range 4 {
+		env.addRenderDevice(t, "renderD"+strconv.Itoa(128+i), "0x8086")
+	}
+	if got := MaxCapabilityRequestTimeout(); got != bare {
+		t.Fatalf("ceiling moved from %v to %v when local hardware appeared", bare, got)
+	}
+
+	// And it covers the largest matrix the cap allows: a full set of Intel
+	// devices, which is the classification that draws two backends per device.
+	devices := make([]string, 0, tonemap.MaxProbedDevices)
+	for i := range tonemap.MaxProbedDevices {
+		name := "renderD" + strconv.Itoa(200+i)
+		env.addRenderDevice(t, name, "0x8086")
+		devices = append(devices, env.devicePath(name))
+	}
+	if advertised := CapabilityRequestTimeout(hwAccelAuto, strings.Join(devices, ",")); advertised > bare {
+		t.Fatalf("a full Intel set advertises %v, above the %v ceiling that clamps it", advertised, bare)
+	}
+}

@@ -293,6 +293,12 @@ func (s *Server) buildCapabilitySnapshotLocked(ctx context.Context) (playback.HW
 		return playback.HWAccelInfo{}, err
 	}
 	info.Transformations = registry.Advertised()
+	// Advertised before the hash is taken, because it is part of what the hash
+	// covers. A proxy runs the same hardware walk a transcode node does, so
+	// with enough configured devices its cold read outlives every caller's
+	// fallback — and a caller that cancels mid-walk leaves the proxy's stored
+	// inventory as far behind as a failure would.
+	info.ProbeRequestTimeoutMillis = playback.CapabilityRequestTimeout(hwAccel, hwDevice).Milliseconds()
 	info.CapabilityHash = playback.ComputeCapabilityHash(info)
 	return info, nil
 }

@@ -160,3 +160,40 @@ func newCapabilityProxyServer(t *testing.T, secret string) *Server {
 	w.SetConfigForTest(cfg)
 	return NewServer(w, nil)
 }
+
+// A proxy runs the same hardware walk a transcode node does, so with enough
+// configured devices its cold capability read outlives every caller's fallback.
+// Without advertising a budget, a caller cancels mid-walk and the proxy's stored
+// inventory falls as far behind as it would after a failure.
+func TestProxyCapabilitiesAdvertiseTheProbeBudget(t *testing.T) {
+	const secret = "capability-secret"
+	server := newCapabilityProxyServer(t, secret)
+
+	request := httptest.NewRequest(http.MethodGet, "/hw-capabilities", nil)
+	request.Header.Set("Authorization", "Bearer "+secret)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var info playback.HWAccelInfo
+	if err := json.Unmarshal(recorder.Body.Bytes(), &info); err != nil {
+		t.Fatalf("decode capabilities: %v", err)
+	}
+	cfg := server.watcher.Config().Playback
+	want := playback.CapabilityRequestTimeout(cfg.HWAccel, cfg.HWDevice).Milliseconds()
+	if info.ProbeRequestTimeoutMillis != want {
+		t.Fatalf("probe_request_timeout_ms = %d, want the proxy's own %d",
+			info.ProbeRequestTimeoutMillis, want)
+	}
+
+	// It is inside the hash, so a build that needs longer reaches the sweep
+	// rather than sitting behind an unchanged identity.
+	served := info
+	served.ProbeRequestTimeoutMillis = want + 1_000
+	served.CapabilityHash = ""
+	if playback.ComputeCapabilityHash(served) == info.CapabilityHash {
+		t.Fatal("the advertised budget does not move the capability hash")
+	}
+}

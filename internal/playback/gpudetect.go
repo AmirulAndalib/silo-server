@@ -411,13 +411,35 @@ func CapabilityRequestTimeout(hwAccel, hwDevice string) time.Duration {
 }
 
 // MaxCapabilityRequestTimeout is the largest budget a node may advertise and be
-// believed, derived from the same composition at the device cap.
+// believed.
+//
+// It is computed from the command counts rather than by pricing a synthetic
+// device list, because classifying devices reads *this* host's sysfs — and the
+// host doing the clamping is an API replica that does not have the remote
+// node's cards. Fabricated render paths there resolve to no vendor and count as
+// VAAPI alone, so the ceiling came out below what a node with a dozen Intel
+// devices legitimately advertises, and the clamp then canceled that node
+// before its own matrix could finish. A ceiling that depends on where it is
+// evaluated is not a ceiling.
 func MaxCapabilityRequestTimeout() time.Duration {
-	devices := make([]string, 0, tonemap.MaxProbedDevices)
-	for i := range tonemap.MaxProbedDevices {
-		devices = append(devices, defaultDRIDir+"/renderD"+strconv.Itoa(128+i))
+	return maxHWAccelWalkTimeout() + tonemap.MaxProbeRequestTimeout()
+}
+
+// maxHWAccelWalkTimeout prices the largest walk the cap allows: every device
+// classified as Intel, which is the only vendor that draws two backends, plus
+// the single NVENC probe that runs regardless of the device list.
+func maxHWAccelWalkTimeout() time.Duration {
+	perDevice := 0
+	for _, backend := range []string{transcodeHWQSV, transcodeHWVAAPI} {
+		if probe, ok := hwBackendProbeFor(backend); ok {
+			perDevice += probe.commandCount
+		}
 	}
-	return CapabilityRequestTimeout(hwAccelAuto, strings.Join(devices, ","))
+	commands := perDevice * tonemap.MaxProbedDevices
+	if probe, ok := hwBackendProbeFor(transcodeHWNVENC); ok {
+		commands += probe.commandCount
+	}
+	return time.Duration(commands)*hwProbeCommandTimeout + hwAccelWalkSlack
 }
 
 // hwProbeDevicesTruncatedLogged latches the truncation warning to one line per
