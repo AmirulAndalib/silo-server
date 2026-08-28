@@ -44,8 +44,13 @@ const imageCacheWorkerMemoryBudget = 512 << 20
 // memoryBytes, when positive, is the tightest detected memory bound for this
 // process (GOMEMLIMIT, cgroup limit, or system memory) and caps the pool at
 // one worker per imageCacheWorkerMemoryBudget so a many-core container with a
-// small memory limit cannot be OOM-killed by concurrent decodes. The floor of
-// 2 is the pool size this task shipped with.
+// small memory limit cannot be OOM-killed by concurrent decodes.
+//
+// The floor of 2 is the pool size this task shipped with, and it deliberately
+// overrides the per-worker budget below 2×imageCacheWorkerMemoryBudget: a
+// sub-1GiB deployment ran 2 workers before this sizing existed, so the memory
+// cap never reduces such a host below its long-standing baseline. The budget
+// is a sizing heuristic for how far to scale up, not a reservation.
 func imageCacheWorkerCount(numCPU int, memoryBytes int64) int {
 	workers := min(48, 4*max(numCPU, 1))
 	if memoryBytes > 0 {
