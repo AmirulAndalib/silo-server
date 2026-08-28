@@ -182,13 +182,17 @@ type HWAccelInfo struct {
 	ProbeRequestTimeoutMillis int64 `json:"probe_request_timeout_ms,omitempty"`
 }
 
-const (
-	probeRequestMinTimeout = 5 * time.Second
-	probeRequestMaxTimeout = 5 * time.Minute
-)
+const probeRequestMinTimeout = 5 * time.Second
 
 // NormalizeProbeRequestTimeout bounds a node-advertised probe budget while
 // preserving the caller's established fallback for a missing advertisement.
+//
+// The ceiling exists because the value comes off the wire from a worker, and a
+// caller holds a connection open for it. It is derived from the probe formula
+// rather than picked, because a round number picked once was already below what
+// a nine-device node legitimately asks for: the API then canceled that node's
+// re-probe before its own deadline, every time, and its inventory never landed.
+// A ceiling that binds a real configuration is indistinguishable from a bug.
 func NormalizeProbeRequestTimeout(millis int64, fallback time.Duration) time.Duration {
 	if millis <= 0 {
 		return fallback
@@ -196,8 +200,8 @@ func NormalizeProbeRequestTimeout(millis int64, fallback time.Duration) time.Dur
 	if millis < probeRequestMinTimeout.Milliseconds() {
 		return probeRequestMinTimeout
 	}
-	if millis > probeRequestMaxTimeout.Milliseconds() {
-		return probeRequestMaxTimeout
+	if ceiling := tonemap.MaxProbeRequestTimeout(); millis > ceiling.Milliseconds() {
+		return ceiling
 	}
 	return time.Duration(millis) * time.Millisecond
 }

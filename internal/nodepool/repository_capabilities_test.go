@@ -318,8 +318,14 @@ func TestUpdateCapabilitiesRefusesAReportThatFollowsAStaleOne(t *testing.T) {
 	// row before either write, so it must not overwrite what is there now.
 	overtaken := repo.UpdateCapabilities(ctx, node.ID, node.URL,
 		[]byte(`{"resolved":"vaapi"}`), "sha256:overtaken", time.Now(), nil, nil, ptrString("sha256:first"))
-	if !errors.Is(overtaken, ErrNodeMoved) {
-		t.Fatalf("overtaken report error = %v, want ErrNodeMoved", overtaken)
+	// Superseded, not moved: the row still addresses this worker, and the
+	// caller has something to learn from it. The distinction is what stops the
+	// losing replica from sweeping against a stale hash forever.
+	if !errors.Is(overtaken, ErrCapabilitiesSuperseded) {
+		t.Fatalf("overtaken report error = %v, want ErrCapabilitiesSuperseded", overtaken)
+	}
+	if errors.Is(overtaken, ErrNodeMoved) {
+		t.Fatal("a superseded report reported as a moved node; the caller would discard rather than reconcile")
 	}
 
 	stored, err := repo.GetByID(ctx, node.ID)

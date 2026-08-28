@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -64,8 +65,12 @@ func newTestSampler(t *testing.T, tree *procTree, clock *fakeClock, opts Options
 	// have a real /host/proc; tests that exercise the lxcfs override set this
 	// explicitly to a tree that does.
 	s.hostProcDir = filepath.Join(tree.root, "no-such-host-proc")
+	// Every cgroup source is cleared, not just the ones a given test sets: these
+	// default to real host paths, and on Linux a test that forgot one reads the
+	// machine it is running on instead of its fixture.
 	s.cgroupUsagePaths = nil
 	s.cgroupCPUPaths = nil
+	s.cgroupCPUSetPaths = nil
 	s.statfs = func(string) (fsStats, error) { return fsStats{}, os.ErrNotExist }
 	s.runNVIDIASMI = func(context.Context) ([]byte, error) { return nil, os.ErrNotExist }
 	return s
@@ -953,5 +958,33 @@ func TestCountCPUSetEntries(t *testing.T) {
 				t.Fatalf("countCPUSetEntries(%q) = %d, want %d", tc.list, got, tc.want)
 			}
 		})
+	}
+}
+
+// Every cgroup source defaults to a real host path, so a fixture that forgets
+// one silently measures the machine the tests run on. That is invisible on a
+// developer's macOS laptop and decides the result on a Linux CI runner — which
+// is exactly how TestCPUWithoutCgroupQuotaUsesHostCores started failing only in
+// CI. This asserts the constructor leaves nothing pointing at the system.
+func TestNewTestSamplerReadsNoRealCgroupPaths(t *testing.T) {
+	s := newTestSampler(t, newProcTree(t), newFakeClock(), Options{})
+
+	var configured []string
+	for _, level := range s.cgroupUsagePaths {
+		configured = append(configured, level.limit, level.usage, level.stat)
+	}
+	for _, level := range s.cgroupCPUPaths {
+		configured = append(configured, level.usage, level.quota, level.period)
+	}
+	configured = append(configured, s.cgroupCPUSetPaths...)
+	configured = append(configured, s.procDir, s.hostProcDir)
+
+	for _, path := range configured {
+		if path == "" {
+			continue
+		}
+		if strings.HasPrefix(path, cgroupMountRoot) || path == "/proc" {
+			t.Fatalf("test sampler reads the real host path %q", path)
+		}
 	}
 }

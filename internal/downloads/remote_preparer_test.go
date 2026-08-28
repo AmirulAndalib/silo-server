@@ -808,7 +808,14 @@ func TestNormalizeRemoteToneMapProbeTimeout(t *testing.T) {
 		{name: "missing", want: 5 * time.Second},
 		{name: "too small", millis: time.Second.Milliseconds(), want: 5 * time.Second},
 		{name: "node specific", millis: (161 * time.Second).Milliseconds(), want: 161 * time.Second},
-		{name: "too large", millis: (10 * time.Minute).Milliseconds(), want: 5 * time.Minute},
+		{
+			// The ceiling is derived from the probe formula, not picked, so the
+			// expectation is too — a round number was already below what a
+			// nine-device node legitimately advertises.
+			name:   "too large",
+			millis: (24 * time.Hour).Milliseconds(),
+			want:   tonemap.MaxProbeRequestTimeout(),
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := normalizeRemoteToneMapProbeTimeout(test.millis); got != test.want {

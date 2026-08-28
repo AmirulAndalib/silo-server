@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -190,23 +191,62 @@ func TestWithCgroupSelfUsagePathsRewritesEveryFileOrNone(t *testing.T) {
 	relative := map[string]string{"memory": "system.slice/silo.service"}
 	got := withCgroupSelfUsagePaths(relative, cgroupMemoryUsagePaths)
 
-	if len(got) != len(cgroupMemoryUsagePaths)+1 {
-		t.Fatalf("got %d layouts, want only the v1 one rewritten alongside the originals", len(got))
+	// The v1 layout resolves, so it contributes one tuple per cgroup from this
+	// process up to the mount root, followed by the root layouts the list
+	// started with. The v2 layout has no "" membership here and is carried
+	// through unrewritten.
+	want := []cgroupUsagePath{
+		{
+			limit:        "/sys/fs/cgroup/memory/system.slice/silo.service/memory.limit_in_bytes",
+			usage:        "/sys/fs/cgroup/memory/system.slice/silo.service/memory.usage_in_bytes",
+			stat:         "/sys/fs/cgroup/memory/system.slice/silo.service/memory.stat",
+			inactiveFile: cgroupInactiveFileKeyV1,
+		},
+		{
+			limit:        "/sys/fs/cgroup/memory/system.slice/memory.limit_in_bytes",
+			usage:        "/sys/fs/cgroup/memory/system.slice/memory.usage_in_bytes",
+			stat:         "/sys/fs/cgroup/memory/system.slice/memory.stat",
+			inactiveFile: cgroupInactiveFileKeyV1,
+		},
+		{
+			limit:        cgroupMemoryUsagePaths[1].limit,
+			usage:        cgroupMemoryUsagePaths[1].usage,
+			stat:         cgroupMemoryUsagePaths[1].stat,
+			inactiveFile: cgroupInactiveFileKeyV1,
+		},
+		{
+			limit:        "/sys/fs/cgroup/memory.limit_in_bytes",
+			usage:        "/sys/fs/cgroup/memory.usage_in_bytes",
+			stat:         "/sys/fs/cgroup/memory.stat",
+			inactiveFile: cgroupInactiveFileKeyV1,
+		},
 	}
-	var rewritten *cgroupUsagePath
-	for i, layout := range got {
-		if layout.usage == "/sys/fs/cgroup/memory/system.slice/silo.service/memory.usage_in_bytes" {
-			rewritten = &got[i]
+	var v1 []cgroupUsagePath
+	for _, level := range got {
+		if strings.Contains(level.limit, "limit_in_bytes") {
+			v1 = append(v1, level)
 		}
 	}
-	if rewritten == nil {
-		t.Fatalf("no rewritten v1 layout in %+v", got)
+	if !slices.Equal(v1, want) {
+		t.Fatalf("v1 levels =\n%+v\nwant\n%+v", v1, want)
 	}
-	if rewritten.stat != "/sys/fs/cgroup/memory/system.slice/silo.service/memory.stat" {
-		t.Fatalf("stat = %q, want it rewritten beside its usage file", rewritten.stat)
+
+	// Every emitted level names all three files from one cgroup: memoryStats
+	// picks by limit and then reads usage from the same tuple, so a mismatch
+	// measures one population against another's capacity.
+	for _, level := range got {
+		if level.limit == "" {
+			continue
+		}
+		dir := filepath.Dir(level.limit)
+		if filepath.Dir(level.usage) != dir || filepath.Dir(level.stat) != dir {
+			t.Fatalf("level %+v mixes cgroups; limit, usage and stat must share one directory", level)
+		}
 	}
-	if rewritten.inactiveFile != cgroupInactiveFileKeyV1 {
-		t.Fatalf("inactiveFile = %q, want the layout's own key preserved", rewritten.inactiveFile)
+
+	// With no membership the list is exactly what it was.
+	if got := withCgroupSelfUsagePaths(nil, cgroupMemoryUsagePaths); !slices.Equal(got, cgroupMemoryUsagePaths) {
+		t.Fatalf("withCgroupSelfUsagePaths(nil) = %+v, want the original list", got)
 	}
 }
 
@@ -262,7 +302,8 @@ func TestEffectiveCgroupCPUQuotaTakesTheTightestAncestor(t *testing.T) {
 	// cgroupAncestorPaths only climbs inside the real cgroup mount, so the walk
 	// is exercised here by handing effectiveCgroupCPUQuota each level directly.
 	quotaAt := func(dir string) float64 {
-		return effectiveCgroupCPUQuota(cgroupCPUPath{quota: filepath.Join(dir, "cpu.max")})
+		_, cores := effectiveCgroupCPUQuota(cgroupCPUPath{quota: filepath.Join(dir, "cpu.max")})
+		return cores
 	}
 
 	// The service says "max" while its slice allows two cores.
@@ -277,7 +318,7 @@ func TestEffectiveCgroupCPUQuotaTakesTheTightestAncestor(t *testing.T) {
 
 	// A leaf tighter than its slice wins, and a looser one loses.
 	write(leaf, "cpu.max", "100000 100000\n")
-	if got := effectiveCgroupCPUQuota(cgroupCPUPath{quota: filepath.Join(leaf, "cpu.max")}); got != 1 {
+	if _, got := effectiveCgroupCPUQuota(cgroupCPUPath{quota: filepath.Join(leaf, "cpu.max")}); got != 1 {
 		t.Fatalf("tighter leaf = %v cores, want 1", got)
 	}
 }
@@ -292,11 +333,70 @@ func TestEffectiveCgroupCPUQuotaPairsQuotaWithItsOwnPeriod(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "cpu.cfs_period_us"), []byte("100000\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := effectiveCgroupCPUQuota(cgroupCPUPath{
+	_, got := effectiveCgroupCPUQuota(cgroupCPUPath{
 		quota:  filepath.Join(dir, "cpu.cfs_quota_us"),
 		period: filepath.Join(dir, "cpu.cfs_period_us"),
 	})
 	if got != 4 {
 		t.Fatalf("v1 quota = %v cores, want 4", got)
+	}
+}
+
+// The quota and the usage measured against it have to come from the same
+// cgroup. A quota on a shared ancestor is spent by every service under it, so
+// this process's own CPU time over that quota describes nothing: Silo at ten
+// percent beside a sibling at ninety would report ten, while the group is
+// saturated and being throttled.
+func TestEffectiveCgroupCPUQuotaReturnsTheLevelThatBinds(t *testing.T) {
+	root := t.TempDir()
+	// The walk only climbs inside the cgroup mount, so the fixture becomes one.
+	previousRoot := cgroupMountRoot
+	cgroupMountRoot = root
+	t.Cleanup(func() { cgroupMountRoot = previousRoot })
+
+	leaf := filepath.Join(root, "silo.service")
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatalf("create %s: %v", leaf, err)
+	}
+	write := func(dir, name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s/%s: %v", dir, name, err)
+		}
+	}
+	// The service imposes nothing; the slice above it allows two cores and
+	// carries the usage of everything under it.
+	write(leaf, "cpu.max", "max 100000\n")
+	write(leaf, "cpu.stat", "usage_usec 1000000\n")
+	write(root, "cpu.max", "200000 100000\n")
+	write(root, "cpu.stat", "usage_usec 9000000\n")
+
+	binding, cores := effectiveCgroupCPUQuota(cgroupCPUPath{
+		usage:     filepath.Join(leaf, "cpu.stat"),
+		usageKey:  cgroupCPUUsageKey,
+		usageUnit: 1,
+		quota:     filepath.Join(leaf, "cpu.max"),
+	})
+	if cores != 2 {
+		t.Fatalf("cores = %v, want the slice's 2", cores)
+	}
+	if want := filepath.Join(root, "cpu.stat"); binding.usage != want {
+		t.Fatalf("binding usage = %q, want the slice's own %q", binding.usage, want)
+	}
+
+	// Nothing above it binds: the level stays the leaf's, so an unconstrained
+	// or leaf-limited process still measures itself.
+	write(root, "cpu.max", "max 100000\n")
+	write(leaf, "cpu.max", "100000 100000\n")
+	binding, cores = effectiveCgroupCPUQuota(cgroupCPUPath{
+		usage:     filepath.Join(leaf, "cpu.stat"),
+		usageKey:  cgroupCPUUsageKey,
+		usageUnit: 1,
+		quota:     filepath.Join(leaf, "cpu.max"),
+	})
+	if cores != 1 {
+		t.Fatalf("cores = %v, want the leaf's 1", cores)
+	}
+	if want := filepath.Join(leaf, "cpu.stat"); binding.usage != want {
+		t.Fatalf("binding usage = %q, want the leaf's own %q", binding.usage, want)
 	}
 }

@@ -79,6 +79,33 @@ type Watcher struct {
 	missingRowLogged    bool
 	duplicateRowLogged  bool
 	ambiguousNameLogged bool
+	// nodeRowID is the row this worker has resolved to, kept so a later rename
+	// or repoint cannot sever the association. Zero until a lookup succeeds.
+	nodeRowID int
+}
+
+// rememberNodeRowID records the row a lookup resolved to.
+func (w *Watcher) rememberNodeRowID(id int) {
+	if id <= 0 {
+		return
+	}
+	w.mu.Lock()
+	w.nodeRowID = id
+	w.mu.Unlock()
+}
+
+// rememberedNodeRowID returns the row this worker previously resolved to.
+func (w *Watcher) rememberedNodeRowID() (int, bool) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.nodeRowID, w.nodeRowID > 0
+}
+
+// forgetNodeRowID drops a remembered row that no longer exists.
+func (w *Watcher) forgetNodeRowID() {
+	w.mu.Lock()
+	w.nodeRowID = 0
+	w.mu.Unlock()
 }
 
 // NewWatcher creates a new config watcher. Call Start to begin watching. The
@@ -360,8 +387,32 @@ func (w *Watcher) queryNodeHWOverrides(ctx context.Context, nodeURL, nodeName st
 	if w.pool == nil {
 		return nodeHWOverrides{}, false, errors.New("no database pool")
 	}
-	overrides, matched, err := w.queryOverrideRows(ctx,
-		`SELECT url, hw_accel_override, hw_device_override FROM stream_nodes
+	// The row this worker already resolved to, by its immutable id.
+	//
+	// Neither of the identities below survives an edit: a repoint changes the
+	// url, and a rename changes the name — and on a split-horizon deployment the
+	// name is the only match there was, so renaming a node severs the
+	// association permanently. The worker then keeps whatever policy it last
+	// read while the API dispatches the row's current one, which is the exact
+	// backend/device mismatch this overlay exists to prevent. Once the row has
+	// been identified, its id is what identifies it.
+	if id, ok := w.rememberedNodeRowID(); ok {
+		overrides, _, matched, err := w.queryOverrideRows(ctx,
+			`SELECT id, url, hw_accel_override, hw_device_override FROM stream_nodes
+			 WHERE id = $1`, id)
+		if err != nil {
+			return nodeHWOverrides{}, false, err
+		}
+		if len(matched) > 0 {
+			return overrides, true, nil
+		}
+		// The row was deleted. Forget it and fall back to the identities, which
+		// is how a re-registered node finds its new row.
+		w.forgetNodeRowID()
+	}
+
+	overrides, id, matched, err := w.queryOverrideRows(ctx,
+		`SELECT id, url, hw_accel_override, hw_device_override FROM stream_nodes
 		 WHERE rtrim(url, '/') = rtrim($1, '/') ORDER BY id LIMIT 2`, nodeURL)
 	if err != nil {
 		return nodeHWOverrides{}, false, err
@@ -370,6 +421,7 @@ func (w *Watcher) queryNodeHWOverrides(ctx context.Context, nodeURL, nodeName st
 		w.logDuplicateNodeRows(ctx, nodeURL, matched)
 	}
 	if len(matched) > 0 {
+		w.rememberNodeRowID(id)
 		return overrides, true, nil
 	}
 
@@ -381,8 +433,8 @@ func (w *Watcher) queryNodeHWOverrides(ctx context.Context, nodeURL, nodeName st
 	if nodeName == "" {
 		return nodeHWOverrides{}, false, nil
 	}
-	overrides, matched, err = w.queryOverrideRows(ctx,
-		`SELECT url, hw_accel_override, hw_device_override FROM stream_nodes
+	overrides, id, matched, err = w.queryOverrideRows(ctx,
+		`SELECT id, url, hw_accel_override, hw_device_override FROM stream_nodes
 		 WHERE name = $1 ORDER BY id LIMIT 2`, nodeName)
 	if err != nil {
 		return nodeHWOverrides{}, false, err
@@ -391,6 +443,7 @@ func (w *Watcher) queryNodeHWOverrides(ctx context.Context, nodeURL, nodeName st
 	case 0:
 		return nodeHWOverrides{}, false, nil
 	case 1:
+		w.rememberNodeRowID(id)
 		return overrides, true, nil
 	default:
 		w.logAmbiguousNodeName(ctx, nodeName, matched)
@@ -400,34 +453,36 @@ func (w *Watcher) queryNodeHWOverrides(ctx context.Context, nodeURL, nodeName st
 
 // queryOverrideRows runs one identity query and returns the first row plus the
 // urls of every row it matched, so callers can act on ambiguity.
-func (w *Watcher) queryOverrideRows(ctx context.Context, query, arg string) (nodeHWOverrides, []string, error) {
+func (w *Watcher) queryOverrideRows(ctx context.Context, query string, arg any) (nodeHWOverrides, int, []string, error) {
 	rows, err := w.pool.Query(ctx, query, arg)
 	if err != nil {
-		return nodeHWOverrides{}, nil, fmt.Errorf("query node acceleration overrides: %w", err)
+		return nodeHWOverrides{}, 0, nil, fmt.Errorf("query node acceleration overrides: %w", err)
 	}
 	defer rows.Close()
 
 	var (
 		overrides nodeHWOverrides
+		firstID   int
 		matched   []string
 	)
 	for rows.Next() {
 		var (
+			id  int
 			url string
 			row nodeHWOverrides
 		)
-		if err := rows.Scan(&url, &row.HWAccel, &row.HWDevice); err != nil {
-			return nodeHWOverrides{}, nil, fmt.Errorf("scan node acceleration overrides: %w", err)
+		if err := rows.Scan(&id, &url, &row.HWAccel, &row.HWDevice); err != nil {
+			return nodeHWOverrides{}, 0, nil, fmt.Errorf("scan node acceleration overrides: %w", err)
 		}
 		if len(matched) == 0 {
-			overrides = row
+			overrides, firstID = row, id
 		}
 		matched = append(matched, url)
 	}
 	if err := rows.Err(); err != nil {
-		return nodeHWOverrides{}, nil, fmt.Errorf("read node acceleration overrides: %w", err)
+		return nodeHWOverrides{}, 0, nil, fmt.Errorf("read node acceleration overrides: %w", err)
 	}
-	return overrides, matched, nil
+	return overrides, firstID, matched, nil
 }
 
 // logAmbiguousNodeName warns once per process: several registered nodes share

@@ -5498,11 +5498,14 @@ func TestRemoteToneMapProbeTimeoutUsesTargetNodeBudget(t *testing.T) {
 	handler.v3NodeCapabilitiesMu.Lock()
 	delete(handler.v3NodeCapabilities, remote.URL)
 	handler.v3NodeCapabilitiesMu.Unlock()
-	probeTimeoutMillis = (10 * time.Minute).Milliseconds()
+	probeTimeoutMillis = (24 * time.Hour).Milliseconds()
 	if _, err := handler.lookupRemoteCapabilitiesV3(context.Background(), remote.URL, false); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := handler.remoteToneMapProbeTimeoutV3(remote.URL), 5*time.Minute; got != want {
+	// Still bounded — the value comes off the wire from a worker — but at the
+	// ceiling the probe formula produces rather than a round number that a real
+	// nine-device node already exceeds.
+	if got, want := handler.remoteToneMapProbeTimeoutV3(remote.URL), tonemap.MaxProbeRequestTimeout(); got != want {
 		t.Fatalf("bounded remote probe timeout = %s, want %s", got, want)
 	}
 }

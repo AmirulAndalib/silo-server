@@ -143,35 +143,51 @@ type cgroupCPUSample struct {
 // the cgroup imposes no quota).
 func (s *Sampler) cgroupCPU(now time.Time) (cgroupCPUSample, float64) {
 	for _, paths := range s.cgroupCPUPaths {
-		usage, err := readCgroupCPUUsage(paths)
+		if _, err := readCgroupCPUUsage(paths); err != nil {
+			continue
+		}
+		binding, quota := effectiveCgroupCPUQuota(paths)
+		// Usage comes from whichever level supplied the binding quota, not from
+		// the leaf. They are one measurement: a quota shared with sibling
+		// services throttles on their CPU time too, so dividing only this
+		// process's by it reports ten percent for a group that is saturated and
+		// being throttled — the same pairing error the memory path had.
+		usage, err := readCgroupCPUUsage(binding)
 		if err != nil {
 			continue
 		}
-		return cgroupCPUSample{usageNS: usage, at: now, valid: true}, effectiveCgroupCPUQuota(paths)
+		return cgroupCPUSample{usageNS: usage, at: now, valid: true}, quota
 	}
 	return cgroupCPUSample{}, 0
 }
 
 // effectiveCgroupCPUQuota returns the tightest CPU budget in force on this
-// cgroup, in cores, or 0 when nothing above it imposes one.
+// cgroup, in cores, together with the level that imposes it.
 //
-// Usage and quota are read from different places on purpose. Usage has to be
-// this process's own — an ancestor's counts every sibling service on the
-// machine — while the quota is whatever the kernel will actually throttle
-// against, which is the smallest limit anywhere between here and the mount
-// root. A systemd unit inside a slice with CPUQuota=, or a container under a
-// limited pod cgroup, reads "max" at its leaf and is nonetheless capped; taking
-// the leaf's answer would normalize a two-core service against sixty-four.
+// The quota is whatever the kernel will actually throttle against, which is the
+// smallest limit anywhere between here and the mount root. A systemd unit inside
+// a slice with CPUQuota=, or a container under a limited pod cgroup, reads "max"
+// at its leaf and is nonetheless capped; taking the leaf's answer would
+// normalize a two-core service against sixty-four.
 //
-// The pair moves together at each level: a quota from one cgroup divided by a
+// The level is returned because usage has to be read from it too. A quota on a
+// shared ancestor is spent by every service under it, so this process's own CPU
+// time over that quota describes nothing: Silo at ten percent beside a sibling
+// at ninety reports ten, while the group is saturated and throttled.
+//
+// Everything within a level moves together: a quota from one cgroup divided by a
 // period from another describes no real budget.
-func effectiveCgroupCPUQuota(paths cgroupCPUPath) float64 {
+func effectiveCgroupCPUQuota(paths cgroupCPUPath) (cgroupCPUPath, float64) {
 	quotas := cgroupAncestorPaths(paths.quota)
 	periods := cgroupAncestorPaths(paths.period)
-	tightest := 0.0
+	usages := cgroupAncestorPaths(paths.usage)
+	binding, tightest := paths, 0.0
 	for i, quota := range quotas {
 		level := paths
 		level.quota = quota
+		if i < len(usages) {
+			level.usage = usages[i]
+		}
 		if paths.period != "" {
 			if i >= len(periods) {
 				break
@@ -183,10 +199,10 @@ func effectiveCgroupCPUQuota(paths cgroupCPUPath) float64 {
 			continue
 		}
 		if tightest == 0 || cores < tightest {
-			tightest = cores
+			tightest, binding = cores, level
 		}
 	}
-	return tightest
+	return binding, tightest
 }
 
 // readCgroupCPUUsage returns cumulative cgroup CPU time in nanoseconds.

@@ -292,6 +292,27 @@ func ProbeEndpointTimeout(hardwareBackend, hardwareDevice string) time.Duration 
 	return ProbeTotalTimeout(backend, hardwareDevice) + probeEndpointSlack
 }
 
+// MaxProbedDevices is the device count the ceiling on an advertised probe
+// budget is derived from.
+//
+// The matrix grows with the device set, which has no hard limit — an operator
+// can list as many render devices as the host has. This is the largest set a
+// caller will keep waiting for, chosen well above any real GPU node so that a
+// legitimate configuration never meets it and the ceiling only ever bounds a
+// worker advertising something absurd.
+const MaxProbedDevices = 16
+
+// MaxProbeRequestTimeout is the largest budget a node may advertise and be
+// believed, derived from the same formula the node itself uses so the two
+// cannot drift apart.
+func MaxProbeRequestTimeout() time.Duration {
+	devices := make([]string, 0, MaxProbedDevices)
+	for i := range MaxProbedDevices {
+		devices = append(devices, defaultDRIRenderDevice+strconv.Itoa(i))
+	}
+	return ProbeRequestTimeout(BackendQSV, strings.Join(devices, ","))
+}
+
 // ProbeRequestTimeout gives a remote caller additional transport and response
 // margin beyond the server-side endpoint budget.
 func ProbeRequestTimeout(hardwareBackend, hardwareDevice string) time.Duration {

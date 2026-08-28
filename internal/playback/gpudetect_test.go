@@ -473,7 +473,14 @@ func TestNormalizeProbeRequestTimeout(t *testing.T) {
 		{name: "negative uses caller fallback", millis: -1, fallback: 2 * time.Minute, want: 2 * time.Minute},
 		{name: "too small", millis: time.Second.Milliseconds(), fallback: 2 * time.Minute, want: 5 * time.Second},
 		{name: "advertised", millis: (137 * time.Second).Milliseconds(), fallback: 2 * time.Minute, want: 137 * time.Second},
-		{name: "too large", millis: (10 * time.Minute).Milliseconds(), fallback: 2 * time.Minute, want: 5 * time.Minute},
+		{
+			// The ceiling is derived from the probe formula rather than picked,
+			// so the assertion is too.
+			name:     "too large",
+			millis:   (24 * time.Hour).Milliseconds(),
+			fallback: 2 * time.Minute,
+			want:     tonemap.MaxProbeRequestTimeout(),
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := NormalizeProbeRequestTimeout(test.millis, test.fallback); got != test.want {

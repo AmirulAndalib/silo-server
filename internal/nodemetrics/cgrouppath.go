@@ -29,8 +29,10 @@ import (
 // (/docker/<id>) that does not exist under its own mount, so the rewritten
 // path simply fails to open and the root read happens as before.
 
-// cgroupMountRoot is where the cgroup hierarchy is mounted on Linux.
-const cgroupMountRoot = "/sys/fs/cgroup"
+// cgroupMountRoot is where the cgroup hierarchy is mounted on Linux. It is a
+// var so a test can point the ancestor walk at a temporary tree; nothing in
+// production writes it.
+var cgroupMountRoot = "/sys/fs/cgroup"
 
 // cgroupRelativePaths reports this process's path within each cgroup hierarchy,
 // read from <procDir>/self/cgroup.
@@ -185,17 +187,39 @@ func withCgroupSelfCPUPaths(relative map[string]string, layouts []cgroupCPUPath)
 	return out
 }
 
-// withCgroupSelfUsagePaths is withCgroupSelfPaths for the memory usage layouts.
+// withCgroupSelfUsagePaths is withCgroupSelfPaths for the memory layouts, which
+// name three files that have to move together: memoryStats picks the level whose
+// *limit* binds and then reads usage from that same level, so a tuple whose
+// limit and usage come from different cgroups measures one population against
+// another's capacity.
+//
+// Every level from this process's own cgroup up to the mount root is emitted,
+// because the binding limit is often an ancestor's — a slice with MemoryMax=, a
+// pod cgroup shared with sidecars — while the leaf says "max".
 func withCgroupSelfUsagePaths(relative map[string]string, layouts []cgroupUsagePath) []cgroupUsagePath {
 	out := make([]cgroupUsagePath, 0, len(layouts)*2)
-	for _, layout := range layouts {
-		own := layout
-		own.usage = cgroupSelfFile(relative, layout.usage)
-		own.stat = cgroupSelfFile(relative, layout.stat)
-		if own.usage != "" && own.stat != "" {
-			out = append(out, own)
+	seen := make(map[string]bool, len(layouts)*2)
+	add := func(level cgroupUsagePath) {
+		if level.limit == "" || seen[level.limit] {
+			return
 		}
-		out = append(out, layout)
+		seen[level.limit] = true
+		out = append(out, level)
+	}
+	for _, layout := range layouts {
+		if own := cgroupSelfFile(relative, layout.limit); own != "" {
+			usageName, statName := path.Base(layout.usage), path.Base(layout.stat)
+			for _, ancestor := range cgroupAncestorPaths(own) {
+				dir := path.Dir(ancestor)
+				add(cgroupUsagePath{
+					limit:        ancestor,
+					usage:        path.Join(dir, usageName),
+					stat:         path.Join(dir, statName),
+					inactiveFile: layout.inactiveFile,
+				})
+			}
+		}
+		add(layout)
 	}
 	return out
 }

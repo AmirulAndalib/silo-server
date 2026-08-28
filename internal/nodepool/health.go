@@ -402,6 +402,47 @@ func (hc *HealthChecker) RefreshNodeCapabilities(ctx context.Context, n *Node) e
 // in flight is at least as fresh as the one the caller wanted.
 var ErrCapabilityRefreshInFlight = errors.New("node capability refresh already in flight")
 
+// adoptStoredCapabilities brings this replica's in-memory node up to whatever
+// is stored, after another writer won the capability compare-and-set.
+//
+// Without it the losing replica keeps the pre-fetch hash in memory, compares
+// against it on every sweep, refetches, and loses the same write again — while
+// its pools serve GPU identities and a drift note that the row has moved past.
+// Reading the row is cheap next to the capability fetch that preceded it.
+func (hc *HealthChecker) adoptStoredCapabilities(
+	ctx context.Context, n *Node, applyCapabilities applyCapabilitiesFunc, onChanged func(string),
+) {
+	if hc.repo == nil {
+		return
+	}
+	stored, err := hc.repo.GetByID(ctx, n.ID)
+	if err != nil || stored == nil || stored.CapabilitiesHash == nil {
+		return
+	}
+	refreshedAt := time.Now()
+	if stored.CapabilitiesRefreshedAt != nil {
+		refreshedAt = *stored.CapabilitiesRefreshedAt
+	}
+	if applyCapabilities != nil {
+		applyCapabilities(stored.ID, stored.URL, stored.Capabilities, *stored.CapabilitiesHash,
+			refreshedAt, stored.CapabilityDrift, stored.CapabilityDriftBaseline)
+	}
+	// The planning cache is per replica, so the winner's invalidation did not
+	// reach this one. A capability change is exactly what it exists to hear.
+	if onChanged != nil && !sameOptionalHash(n.CapabilitiesHash, stored.CapabilitiesHash) {
+		onChanged(stored.URL)
+	}
+}
+
+// sameOptionalHash compares two stored capability hashes, treating absence as a
+// value rather than as a match.
+func sameOptionalHash(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 // applyCapabilitiesFor returns the pool writer for a node's type, or nil when
 // this checker has no pool for it — which is the normal state for a node row
 // that is disabled and therefore in no pool.
@@ -460,6 +501,16 @@ func (hc *HealthChecker) refreshCapabilities(ctx context.Context, n *Node, apply
 		// sweep on another replica cannot land an older report on top of a
 		// newer one.
 		if err := hc.repo.UpdateCapabilities(ctx, n.ID, n.URL, payload, hash, refreshedAt, note, driftBaseline, n.CapabilitiesHash); err != nil {
+			if errors.Is(err, ErrCapabilitiesSuperseded) {
+				// Another replica stored a report first. Its answer is the
+				// current one, so this replica adopts the row rather than
+				// discarding and retrying: left alone it would keep comparing
+				// against a hash the row no longer has, lose the same write
+				// every sweep, and serve stale GPU identities and drift state
+				// until something unrelated reloaded the pools.
+				hc.adoptStoredCapabilities(ctx, n, applyCapabilities, onChanged)
+				return err
+			}
 			if errors.Is(err, ErrNodeMoved) {
 				// Not a failure to report loudly: the node was edited or
 				// removed while this fetch ran, and the next sweep will fetch

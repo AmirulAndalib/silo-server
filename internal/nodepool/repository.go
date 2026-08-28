@@ -504,12 +504,25 @@ func (r *Repository) UpdateCapabilities(ctx context.Context, id int, fetchedFrom
 		return fmt.Errorf("update node capabilities: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		// The row is gone, it no longer addresses the worker this payload came
-		// from, or another replica has already stored a different report. All
-		// three mean the same thing to the caller: do not publish it.
-		return ErrNodeMoved
+		// Three ways to get here, and they do not mean the same thing. The row
+		// being gone or repointed is terminal for this payload; another replica
+		// having stored a different report is not — that replica's answer is the
+		// current one, and this one's in-memory copy is now behind it. Telling
+		// them apart costs one read and saves a replica sweeping forever against
+		// a hash the row no longer has.
+		current, err := r.GetByID(ctx, id)
+		if err != nil || current == nil || !sameStoredURL(current.URL, fetchedFrom) {
+			return ErrNodeMoved
+		}
+		return ErrCapabilitiesSuperseded
 	}
 	return nil
+}
+
+// sameStoredURL compares a stored node URL with the one a payload was fetched
+// from, ignoring the trailing slash the pools normalize and the column does not.
+func sameStoredURL(stored, fetchedFrom string) bool {
+	return strings.TrimRight(stored, "/") == strings.TrimRight(fetchedFrom, "/")
 }
 
 // Sentinel errors.
@@ -523,4 +536,10 @@ var (
 	// edited to address a different worker. The result must be discarded rather
 	// than published against whatever the row is now.
 	ErrNodeMoved = errors.New("stream node no longer matches the fetched identity")
+
+	// ErrCapabilitiesSuperseded reports that the row still addresses this
+	// worker but another writer stored a different report first. The payload is
+	// discarded; unlike ErrNodeMoved the caller has something to learn from the
+	// row, because the report now on it is newer than the one it started from.
+	ErrCapabilitiesSuperseded = errors.New("stream node capabilities were superseded by another writer")
 )

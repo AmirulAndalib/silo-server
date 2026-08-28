@@ -408,14 +408,15 @@ func (s *Server) StartHardwareEncoderWarmup(ctx context.Context) <-chan struct{}
 		return done
 	}
 	playbackCfg := cfg.Playback
+	// Claimed here, before the goroutine exists. Warmup is a real smoke encode
+	// and the listener opens while it may still be running, so an admin re-probe
+	// arriving in a node's first seconds must not see an idle gate — and a claim
+	// taken inside the goroutine leaves exactly that window, since the scheduler
+	// makes no promise about when it runs. Held rather than requested: warmup is
+	// already committed by the time it could be refused.
+	s.gpu.holdWork()
 	go func() {
 		defer close(done)
-		// Warmup is a real smoke encode, and the listener opens while this
-		// goroutine may still be running — so an admin re-probe arriving in the
-		// first seconds of a node's life would otherwise see an idle gate and
-		// run its matrix beside it. Held rather than requested: warmup is
-		// already started and refusing it here would only skip it.
-		s.gpu.holdWork()
 		defer s.gpu.endWork()
 		if err := playback.WarmHardwareEncoder(ctx, playbackCfg.FFmpegPath, playbackCfg.HWAccel, playbackCfg.HWDevice); err != nil {
 			slog.DebugContext(ctx, "transcode node hardware encoder warmup failed", "component", "transcodenode", "error", err)
