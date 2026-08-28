@@ -833,7 +833,7 @@ func TestNodeAwarePreparerCapabilityFailurePreservesNodeProbeBudget(t *testing.T
 		expiresAt:           time.Now().Add(-time.Second),
 	}
 
-	preparer.cacheToneMapCapabilityFailure(nodeURL, context.DeadlineExceeded)
+	preparer.cacheToneMapCapabilityFailure(nodeURL, preparer.capabilityInvalidationsFor(nodeURL), context.DeadlineExceeded)
 
 	if got, want := preparer.remoteToneMapProbeTimeout(nodeURL), 161*time.Second; got != want {
 		t.Fatalf("probe timeout after transient failure = %s, want preserved node budget %s", got, want)
@@ -1217,6 +1217,59 @@ func TestNodeAwarePreparerDoesNotCacheAnOvertakenCapabilityFetch(t *testing.T) {
 	}
 	if _, err := preparer.toneMapCapabilitiesForNode(context.Background(), remote.URL); err != nil {
 		t.Fatalf("second lookup: %v", err)
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("node was asked %d times, want a second read after the invalidation", hits.Load())
+	}
+}
+
+// A negative entry does not merely go stale, it takes the node out of planning
+// for its TTL. A fetch failing because the node was mid-reload — exactly what a
+// policy edit causes — would otherwise keep downloads off the node that edit had
+// just reconfigured, after the change that would have fixed it already landed.
+func TestNodeAwarePreparerDoesNotCacheAnOvertakenCapabilityFailure(t *testing.T) {
+	var hits atomic.Int32
+	invalidated := make(chan struct{})
+	released := make(chan struct{})
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if hits.Add(1) == 1 {
+			close(invalidated)
+			<-released
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{
+			ToneMapCapabilities: tonemap.Capabilities{{
+				Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware,
+				Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+			}},
+		})
+	}))
+	defer remote.Close()
+	cfg := &config.Config{}
+	cfg.Auth.JWTSecret = "secret"
+	preparer := NewNodeAwarePreparer(nil, nil, func() *config.Config { return cfg })
+
+	failed := make(chan error, 1)
+	go func() {
+		_, err := preparer.toneMapCapabilitiesForNode(context.Background(), remote.URL)
+		failed <- err
+	}()
+	<-invalidated
+	preparer.InvalidateNodeCapabilities(remote.URL)
+	close(released)
+	if err := <-failed; err == nil {
+		t.Fatal("the node answered 503 and the caller saw no error")
+	}
+
+	// The reconfigured node is asked again rather than sitting behind a negative
+	// entry the invalidation should have outranked.
+	capabilities, err := preparer.toneMapCapabilitiesForNode(context.Background(), remote.URL)
+	if err != nil {
+		t.Fatalf("second lookup: %v", err)
+	}
+	if len(capabilities) != 1 {
+		t.Fatalf("capabilities = %#v, want the reconfigured node's answer", capabilities)
 	}
 	if hits.Load() != 2 {
 		t.Fatalf("node was asked %d times, want a second read after the invalidation", hits.Load())

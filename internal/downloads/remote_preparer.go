@@ -458,19 +458,19 @@ func (p *NodeAwarePreparer) fetchToneMapCapabilitiesForNode(ctx context.Context,
 	cfg := p.config()
 	if cfg == nil || strings.TrimSpace(cfg.Auth.JWTSecret) == "" {
 		err := errors.New("transcode node credentials unavailable")
-		p.cacheToneMapCapabilityFailure(nodeURL, err)
+		p.cacheToneMapCapabilityFailure(nodeURL, generation, err)
 		return nil, err
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, p.remoteToneMapProbeTimeout(nodeURL))
 	defer cancel()
 	info, status, err := transcodenode.FetchHWCapabilities(requestCtx, p.probeClient, nodeURL, cfg.Auth.JWTSecret)
 	if err != nil {
-		p.cacheToneMapCapabilityFailure(nodeURL, err)
+		p.cacheToneMapCapabilityFailure(nodeURL, generation, err)
 		return nil, err
 	}
 	if status != http.StatusOK {
 		err := fmt.Errorf("transcode node returned %d", status)
-		p.cacheToneMapCapabilityFailure(nodeURL, err)
+		p.cacheToneMapCapabilityFailure(nodeURL, generation, err)
 		return nil, err
 	}
 	entry := remoteToneMapCapabilities{
@@ -600,9 +600,21 @@ func (p *NodeAwarePreparer) InvalidateNodeCapabilities(nodeURL string) {
 
 // cacheToneMapCapabilityFailure negatively caches an unreachable or invalid
 // node briefly so repeated artifact planning does not amplify the failure.
-func (p *NodeAwarePreparer) cacheToneMapCapabilityFailure(nodeURL string, err error) {
+//
+// Fenced on the same invalidation count a successful result is, and for a
+// sharper reason: a negative entry does not merely go stale, it takes the node
+// out of planning entirely for its TTL. A fetch that failed because the node
+// was mid-reload — which is exactly what a policy edit causes — would otherwise
+// keep downloads off the node it was just reconfigured for, falling back
+// locally or failing outright where local fallback is off, after the change
+// that would have fixed it had already landed.
+func (p *NodeAwarePreparer) cacheToneMapCapabilityFailure(nodeURL string, generation uint64, err error) {
 	nodeURL = nodepool.NormalizeNodeURL(nodeURL)
 	p.capabilityMu.Lock()
+	defer p.capabilityMu.Unlock()
+	if p.capabilityInvalidations[nodeURL] != generation {
+		return
+	}
 	if p.capabilities == nil {
 		p.capabilities = make(map[string]remoteToneMapCapabilities)
 	}
@@ -613,7 +625,6 @@ func (p *NodeAwarePreparer) cacheToneMapCapabilityFailure(nodeURL string, err er
 		expiresAt:           time.Now().Add(remoteToneMapCapabilityErrorTTL),
 		probeRequestTimeout: probeRequestTimeout,
 	}
-	p.capabilityMu.Unlock()
 }
 
 func remotePreparedArtifact(node *nodepool.Node, result downloadprepare.Result) PreparedArtifact {

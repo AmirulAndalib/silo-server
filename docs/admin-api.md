@@ -34,7 +34,7 @@ Always `200 OK` with a JSON array.
 | `last_stats` | object | The node's most recent host resource sample — `{"system": …, "gpu": […]}` in the shape below. Omitted when the node reported none. |
 | `hw_accel_override`, `hw_device_override` | string | This node's own acceleration policy (see below). Omitted when the node inherits the cluster-wide settings, which is the normal case. |
 | `capability_drift` | string | Human-readable note describing how the node's hardware got worse at the last capability refetch. Omitted when the last refetch found no regression (see below). |
-| `capability_drift_baseline` | object | What that note is waiting on — `{"backends": [...], "devices": [[alias, ...], ...]}`. Never present without `capability_drift`; absent with it only for a note written before this field existed (see below). Each device is every stable name it answered to, so it is recognized if it returns renumbered. |
+| `capability_drift_baseline` | object | What that note is waiting on — `{"backends": ["nvenc"], "devices": [{"uuid": "GPU-8a7b…", "aliases": ["GPU-8a7b…", "0000:03:00.0", "/dev/dri/renderD128"]}]}`. Never present without `capability_drift`; absent with it only for a note written before this field existed (see below). Each device carries every stable name it answered to, so it is recognized if it returns renumbered; `uuid` is held apart because it is the only name that can prove a *different* card, a replacement in the same slot inheriting both the slot and the render path. Either key is omitted when empty. |
 
 ### Acceleration overrides
 
@@ -270,14 +270,14 @@ Semantics worth knowing:
   absent from the report was not asked about — detection probes the backends the
   configured `hw_device` gives it candidates for — so repointing a node from a
   QSV render path to an NVENC index is not a regression. Hardware actually
-  disappearing shows up in `render_devices`, which is the host's own inventory
-  and owes nothing to the configuration.
+  disappearing shows up in the device inventory, which is the host's own and
+  owes nothing to the configuration: `render_devices` for cards with a DRM node,
+  and `nvidia_gpu_uuids` for those without one, which is the ordinary shape of
+  an NVENC container. A card that vanishes from either is a loss.
 - A backend reported as `skipped` neither sets the note nor holds it open.
   Skipping means no probe ran because the node cannot open the backend's
   configured devices, which is a statement about access rather than about
-  hardware — the GPU column reports that state separately. A backend that was
-  probed and *failed* is a loss, as is one that stopped being reported at all,
-  which is what a card disappearing looks like.
+  hardware — the GPU column reports that state separately.
 - Only a loss is reported. Added hardware is not drift.
 - A node's first stored report carries none — there is nothing to compare it
   against.
