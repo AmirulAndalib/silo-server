@@ -4,6 +4,7 @@ package tonemap
 
 import (
 	"bytes"
+	"cmp"
 	"slices"
 	"strings"
 
@@ -11,16 +12,18 @@ import (
 )
 
 const (
-	SoftwareFilterBT2390 = "tonemapx"
-	SoftwareFilterHable  = "tonemap"
-	HardwareFilterOpenCL = "tonemap_opencl"
-	HardwareFilterVAAPI  = "tonemap_vaapi"
-	HardwareFilterCUDA   = "tonemap_cuda"
+	SoftwareFilterBT2390       = "tonemapx"
+	SoftwareFilterHable        = "tonemap"
+	HardwareFilterOpenCL       = "tonemap_opencl"
+	HardwareFilterVAAPI        = "tonemap_vaapi"
+	HardwareFilterCUDA         = "tonemap_cuda"
+	HardwareFilterVideoToolbox = "scale_vt"
 
-	BackendSoftware = "software"
-	BackendQSV      = "qsv"
-	BackendVAAPI    = "vaapi"
-	BackendNVENC    = "nvenc"
+	BackendSoftware     = "software"
+	BackendQSV          = "qsv"
+	BackendVAAPI        = "vaapi"
+	BackendNVENC        = "nvenc"
+	BackendVideoToolbox = "videotoolbox"
 
 	DynamicRangeHDRUnknown  = "hdr_unknown"
 	DynamicRangeSDR         = "sdr"
@@ -651,6 +654,43 @@ func CUDAFilter() string {
 	return HardwareFilterCUDA + "=tonemap=bt2390:format=nv12:p=bt709:t=bt709:m=bt709:r=tv:apply_dovi=0"
 }
 
+// VideoToolboxFilter builds Apple's HDR-to-SDR pixel-transfer conversion.
+// VTPixelTransferSession performs tone mapping when HDR source attachments are
+// converted to the BT.709 destination properties. The output surface retains
+// the decoded bit depth, so callers must download it with
+// VideoToolboxDownloadFilter before an 8-bit H.264 encode.
+func VideoToolboxFilter(width, height string) string {
+	width = cmp.Or(strings.TrimSpace(width), "iw")
+	height = cmp.Or(strings.TrimSpace(height), "ih")
+	return HardwareFilterVideoToolbox + "=w=" + width + ":h=" + height + ":color_matrix=bt709:color_primaries=bt709:color_transfer=bt709"
+}
+
+// VideoToolboxDownloadFilter moves the converted IOSurface to system memory
+// and normalizes it to the 8-bit NV12 format accepted by the H.264 encoder and
+// CPU subtitle filters. scale_vt preserves its input surface depth.
+func VideoToolboxDownloadFilter(sourceVideoBitDepth int) string {
+	format := videoToolboxSurfacePixelFormat(sourceVideoBitDepth)
+	filter := "hwdownload,format=" + format
+	if format == "p010le" {
+		filter += ",format=nv12"
+	}
+	return filter
+}
+
+// VideoToolboxUploadFilter gives software-decoded frames the complete source
+// signal attachments that VTPixelTransferSession consumes before uploading
+// them to an IOSurface.
+func VideoToolboxUploadFilter(kind SourceKind, sourceVideoBitDepth int) string {
+	return SourceParameters(kind) + ",format=" + videoToolboxSurfacePixelFormat(sourceVideoBitDepth) + ",hwupload"
+}
+
+func videoToolboxSurfacePixelFormat(sourceVideoBitDepth int) string {
+	if sourceVideoBitDepth > 0 && sourceVideoBitDepth <= 8 {
+		return "nv12"
+	}
+	return "p010le"
+}
+
 // QSVInteropFilter normalizes the VAAPI tone-map surface before deriving the
 // QSV encoder surface. The extra scale_vaapi stage is required by Intel's
 // driver for real decoded HEVC frames even when tonemap_vaapi already emitted
@@ -663,6 +703,25 @@ func QSVInteropFilter() string {
 // to derive a QSV encoding device.
 func qsvVAAPIInitDevice(device string) string {
 	return "vaapi=va:" + device + ",driver=iHD,kernel_driver=i915,vendor_id=0x8086"
+}
+
+// initHWDeviceFlag is FFmpeg's hardware-device declaration flag, shared by
+// every init chain built here.
+const initHWDeviceFlag = "-init_hw_device"
+
+// QSVInitDeviceArgs declares the Intel VAAPI display and derives the QSV
+// device from it. Every QSV command line in the server — transcode, encoder
+// warmup, capability probes, tone-map smoke tests, chapter thumbnails — must
+// initialize hardware through this chain, so a driver constraint is fixed in
+// one place.
+func QSVInitDeviceArgs(device string) []string {
+	return []string{initHWDeviceFlag, qsvVAAPIInitDevice(device), initHWDeviceFlag, "qsv=qs@va"}
+}
+
+// VAAPIInitDeviceArgs declares one VAAPI device under the alias the caller's
+// filter graph and encoder reference.
+func VAAPIInitDeviceArgs(alias, device string) []string {
+	return []string{initHWDeviceFlag, "vaapi=" + alias + ":" + device}
 }
 
 // HDRMetadataRemovalFilter removes side data that would otherwise incorrectly

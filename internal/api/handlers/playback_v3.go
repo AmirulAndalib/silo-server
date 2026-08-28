@@ -81,7 +81,6 @@ type v3NodeCapabilityCache struct {
 	toneMapCapabilities tonemap.Capabilities
 	err                 error
 	expiresAt           time.Time
-	probeRequestTimeout time.Duration
 }
 
 type preparedTransportV3 struct {
@@ -282,11 +281,11 @@ func (h *PlaybackHandler) transformationRegistryV3(ctx context.Context) *playbac
 func (h *PlaybackHandler) localToneMapCapabilitiesV3(ctx context.Context) (tonemap.Capabilities, error) {
 	cfg := h.playbackConfig()
 	ffmpegPath := playback.ResolveFFmpegPath(cfg.FFmpegPath)
-	resolved := playback.ResolveHWAccelWithFFmpegContext(ctx, cfg.HWAccel, cfg.FFmpegPath)
+	hwDevice := strings.TrimSpace(cfg.HWDevice)
+	resolved := playback.ResolveHWAccelWithFFmpegContext(ctx, cfg.HWAccel, cfg.FFmpegPath, hwDevice)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	hwDevice := strings.TrimSpace(cfg.HWDevice)
 	probe := tonemap.Probe
 	if h.v3ToneMapProbe != nil {
 		probe = h.v3ToneMapProbe
@@ -303,17 +302,84 @@ func (h *PlaybackHandler) localToneMapCapabilitiesForTransportV3(ctx context.Con
 
 func (h *PlaybackHandler) localToneMapProbeTimeoutV3() time.Duration {
 	cfg := h.playbackConfig()
-	return tonemap.ProbeEndpointTimeout(cfg.HWAccel, cfg.HWDevice)
+	// The whole read, not its tone-map half: localToneMapCapabilitiesV3 resolves
+	// the backend first, and on Linux that is a full hardware walk whose cost
+	// scales with the configured device set.
+	return playback.CapabilityEndpointTimeout(cfg.HWAccel, cfg.HWDevice)
 }
 
+// remoteToneMapProbeTimeoutV3 returns how long to allow one capability read of
+// a node, from the budget that node last advertised.
+//
+// The budget is kept apart from the inventory because it describes the node
+// rather than its hardware, and the two are invalidated for different reasons.
+// An acceleration change makes the inventory wrong and the matrix cold — which
+// is exactly when the next read is slowest — while how long that node takes to
+// answer has not changed. Storing them together meant an invalidation dropped
+// the budget with the inventory and the refresh it triggered fell back to two
+// minutes, short of the ~136 seconds a two-device node legitimately asks for,
+// so protocol-v3 planning lost its inventory precisely after an invalidation.
 func (h *PlaybackHandler) remoteToneMapProbeTimeoutV3(nodeURL string) time.Duration {
+	nodeURL = nodepool.NormalizeNodeURL(nodeURL)
 	h.v3NodeCapabilitiesMu.Lock()
-	entry := h.v3NodeCapabilities[nodeURL]
+	budget := h.v3NodeProbeBudgets[nodeURL]
 	h.v3NodeCapabilitiesMu.Unlock()
-	if entry.probeRequestTimeout > 0 {
-		return entry.probeRequestTimeout
+	// Never less than what this node currently describes, whatever was learned
+	// from it before.
+	//
+	// A learned budget is kept across invalidations on purpose — an invalidation
+	// is the moment the next read is coldest and slowest, so dropping the budget
+	// with the inventory would fall back to a figure short of what the node
+	// needs. But a per-node policy edit invalidates through the same path, and
+	// widening hw_device_override is precisely a change that makes the learned
+	// number too small: the node reloads, walks four devices instead of one, and
+	// gets canceled at the one-device deadline. Nothing recovers from that on its
+	// own, because a budget is only ever learned from a read that completes.
+	if cold := h.coldNodeProbeTimeoutV3(nodeURL); cold > budget {
+		return cold
 	}
-	return remoteNodeProbeFallbackTimeout
+	return budget
+}
+
+// coldNodeProbeTimeoutV3 prices one capability read of a node this process has
+// not read successfully yet, from that node rather than from a cluster-wide
+// guess. Without a pooled record — a planner that cannot look nodes up, or a
+// URL that is no longer in the pool — the cluster's own policy is the closest
+// description available.
+func (h *PlaybackHandler) coldNodeProbeTimeoutV3(nodeURL string) time.Duration {
+	cfg := h.playbackConfig()
+	var node *nodepool.Node
+	if lookup, ok := h.NodePlanner.(transcodeNodeLookupV3); ok {
+		if found, ok := lookup.TranscodeNodeByURL(nodeURL); ok {
+			node = found
+		}
+	}
+	return playback.ColdCapabilityRequestTimeout(
+		node.StoredCapabilities(),
+		node.EffectiveHWAccel(cfg.HWAccel),
+		node.EffectiveHWDevice(cfg.HWDevice),
+		remoteNodeProbeFallbackTimeout,
+	)
+}
+
+// transcodeNodeLookupV3 resolves the pooled record behind a transcode node URL,
+// which carries that node's stored capability report and its acceleration
+// override. Optional, like the planner itself: without it this path falls back
+// to the cluster-wide setting. *nodepool.Planner implements it.
+type transcodeNodeLookupV3 interface {
+	TranscodeNodeByURL(nodeURL string) (*nodepool.Node, bool)
+}
+
+// rememberNodeProbeBudgetV3 records what a node says its capability read costs.
+// Callers must hold v3NodeCapabilitiesMu.
+func (h *PlaybackHandler) rememberNodeProbeBudgetLockedV3(nodeURL string, budget time.Duration) {
+	if budget <= 0 {
+		return
+	}
+	if h.v3NodeProbeBudgets == nil {
+		h.v3NodeProbeBudgets = make(map[string]time.Duration)
+	}
+	h.v3NodeProbeBudgets[nodeURL] = budget
 }
 
 func (h *PlaybackHandler) toneMapPlanningTimeoutV3(localFallbackAllowed bool) time.Duration {
@@ -351,6 +417,10 @@ func (h *PlaybackHandler) lookupRemoteTransformationsV3(ctx context.Context, nod
 // lookupRemoteCapabilitiesV3 fetches and jointly caches a node's transformation
 // and tone-map inventory, optionally reusing short-lived fetch failures.
 func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeURL string, honorCachedFailure bool) (v3NodeCapabilityCache, error) {
+	// Canonical here and in RefreshNodeCapabilitiesV3, which are the two ways
+	// into these maps; everything below is reached from one of them and so is
+	// already keyed the same way.
+	nodeURL = nodepool.NormalizeNodeURL(nodeURL)
 	now := time.Now()
 	h.v3NodeCapabilitiesMu.Lock()
 	entry, ok := h.v3NodeCapabilities[nodeURL]
@@ -372,20 +442,53 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 		return entry, nil
 	}
 
-	requestCtx, cancel := context.WithTimeout(ctx, h.remoteToneMapProbeTimeoutV3(nodeURL))
-	defer cancel()
-	info, err := fetchRemoteTranscodeCapabilities(requestCtx, nodeURL, h.JWTSecret)
-	completedAt := time.Now()
+	// An invalidation landing mid-fetch means the report this probe is about to
+	// return describes the node as it was, not as it is — and this caller is
+	// about to select transformations and a tone-map executor from it. Re-probe
+	// rather than plan on it.
+	//
+	// Bounded at two attempts, and the second result is used even if it is
+	// overtaken too. Failing the request instead would be worse than a slightly
+	// stale inventory: most hash changes are not "the hardware went away" — a
+	// driver update, a new identity field, a raised probe budget all move it —
+	// so refusing would reject playback that the report in hand describes
+	// perfectly well, and on a single-transcode-node deployment there is nothing
+	// to fall back to. A node changing faster than two probes can read it is a
+	// different problem, and one this path cannot fix by failing.
+	var (
+		info        playback.HWAccelInfo
+		err         error
+		completedAt time.Time
+		overtaken   bool
+	)
+	for attempt := range v3CapabilityFetchAttempts {
+		// Snapshot the invalidation count before probing: anything this fetch
+		// learns describes the node as it was when the request left.
+		invalidations := h.nodeCapabilityInvalidationsV3(nodeURL)
+		requestCtx, cancel := context.WithTimeout(ctx, h.remoteToneMapProbeTimeoutV3(nodeURL))
+		info, err = fetchRemoteTranscodeCapabilities(requestCtx, nodeURL, h.JWTSecret)
+		cancel()
+		completedAt = time.Now()
+		overtaken = h.nodeCapabilityInvalidationsV3(nodeURL) != invalidations
+		if !overtaken || attempt+1 == v3CapabilityFetchAttempts {
+			break
+		}
+	}
+
 	if err != nil {
 		h.v3NodeCapabilitiesMu.Lock()
 		if h.v3NodeCapabilities == nil {
 			h.v3NodeCapabilities = make(map[string]v3NodeCapabilityCache)
 		}
+		if overtaken {
+			h.v3NodeCapabilitiesMu.Unlock()
+			return v3NodeCapabilityCache{}, err
+		}
 		if current, currentOK := h.v3NodeCapabilities[nodeURL]; currentOK && current.err == nil && completedAt.Before(current.expiresAt) {
 			h.v3NodeCapabilitiesMu.Unlock()
 			return current, nil
 		}
-		h.v3NodeCapabilities[nodeURL] = v3NodeCapabilityCache{err: err, expiresAt: completedAt.Add(v3NodeCapabilityErrorTTL), probeRequestTimeout: entry.probeRequestTimeout}
+		h.v3NodeCapabilities[nodeURL] = v3NodeCapabilityCache{err: err, expiresAt: completedAt.Add(v3NodeCapabilityErrorTTL)}
 		h.v3NodeCapabilitiesMu.Unlock()
 		return v3NodeCapabilityCache{}, err
 	}
@@ -393,9 +496,20 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 		transformations:     append([]playback.TransformationV3(nil), info.Transformations...),
 		toneMapCapabilities: append(tonemap.Capabilities(nil), info.ToneMapCapabilities...),
 		expiresAt:           completedAt.Add(v3NodeCapabilityTTL),
-		probeRequestTimeout: playback.NormalizeProbeRequestTimeout(info.ProbeRequestTimeoutMillis, remoteNodeProbeFallbackTimeout),
 	}
 	h.v3NodeCapabilitiesMu.Lock()
+	// Recorded even when the entry below is discarded as overtaken: what the
+	// node says its read costs is true regardless of whether this particular
+	// answer is still current.
+	h.rememberNodeProbeBudgetLockedV3(nodeURL,
+		playback.NormalizeProbeRequestTimeout(info.ProbeRequestTimeoutMillis, remoteNodeProbeFallbackTimeout))
+	if overtaken {
+		// Still overtaken after the retry. Hand the result to this caller, which
+		// has nothing better, but leave the cache empty so the next lookup
+		// re-probes instead of serving it for a full TTL to everyone else.
+		h.v3NodeCapabilitiesMu.Unlock()
+		return entry, nil
+	}
 	if h.v3NodeCapabilities == nil {
 		h.v3NodeCapabilities = make(map[string]v3NodeCapabilityCache)
 	}
@@ -404,19 +518,97 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 	return entry, nil
 }
 
+// v3CapabilityFetchAttempts is how many times one lookup will re-probe a node
+// whose capabilities changed while it was being read.
+const v3CapabilityFetchAttempts = 2
+
+func (h *PlaybackHandler) nodeCapabilityInvalidationsV3(nodeURL string) uint64 {
+	h.v3NodeCapabilitiesMu.Lock()
+	defer h.v3NodeCapabilitiesMu.Unlock()
+	return h.v3NodeCapabilityInvalidations[nodeURL]
+}
+
+// RefreshNodeCapabilitiesV3 discards one node's cached capability inventory and
+// re-probes it in the background. It exists for the node health sweep, which
+// learns from a node's advertised capability hash that its hardware changed
+// long before this cache's freshness window would expire — and a cache that
+// outlives the hardware it describes plans transcodes onto a GPU that is gone.
+func (h *PlaybackHandler) RefreshNodeCapabilitiesV3(nodeURL string) {
+	if h == nil || nodeURL == "" {
+		return
+	}
+	// Every map here is keyed by the node's canonical address. This entry point
+	// is reached from the admin route with the URL exactly as the row stores it,
+	// which may carry a trailing slash the pools have already dropped — and then
+	// the entry this deletes is not the entry planning reads, so a node keeps
+	// serving the backend it was just moved off until the old key expires.
+	nodeURL = nodepool.NormalizeNodeURL(nodeURL)
+	h.v3NodeCapabilitiesMu.Lock()
+	delete(h.v3NodeCapabilities, nodeURL)
+	if h.v3NodeCapabilityInvalidations == nil {
+		h.v3NodeCapabilityInvalidations = make(map[string]uint64)
+	}
+	// Bumping the count is what makes the delete stick. A refresh already in
+	// flight fetched this node before its hardware changed, so it must neither
+	// re-install its answer over this delete nor be mistaken for the re-probe
+	// this invalidation is owed.
+	h.v3NodeCapabilityInvalidations[nodeURL]++
+	claimed := h.claimCapabilityRefreshLockedV3(nodeURL)
+	h.v3NodeCapabilitiesMu.Unlock()
+	if claimed {
+		h.runCapabilityRefreshV3(nodeURL)
+	}
+}
+
 func (h *PlaybackHandler) refreshRemoteCapabilitiesV3(nodeURL string) {
 	if h == nil || nodeURL == "" {
 		return
 	}
-	if _, loaded := h.v3NodeCapabilityRefresh.LoadOrStore(nodeURL, struct{}{}); loaded {
-		return
+	h.v3NodeCapabilitiesMu.Lock()
+	claimed := h.claimCapabilityRefreshLockedV3(nodeURL)
+	h.v3NodeCapabilitiesMu.Unlock()
+	if claimed {
+		h.runCapabilityRefreshV3(nodeURL)
 	}
+}
+
+// claimCapabilityRefreshLockedV3 takes the node's single background-refresh
+// slot. The caller must hold v3NodeCapabilitiesMu: taking the slot under the
+// same lock as the invalidation counter is what guarantees that an invalidation
+// either starts a refresh or is seen by the one already running.
+func (h *PlaybackHandler) claimCapabilityRefreshLockedV3(nodeURL string) bool {
+	if _, inFlight := h.v3NodeCapabilityRefresh[nodeURL]; inFlight {
+		return false
+	}
+	if h.v3NodeCapabilityRefresh == nil {
+		h.v3NodeCapabilityRefresh = make(map[string]struct{})
+	}
+	h.v3NodeCapabilityRefresh[nodeURL] = struct{}{}
+	return true
+}
+
+// runCapabilityRefreshV3 probes one node in the background until its result is
+// current: a probe that an invalidation overtook was discarded, so it repeats
+// rather than leave the cache empty until the next viewer pays for a probe.
+func (h *PlaybackHandler) runCapabilityRefreshV3(nodeURL string) {
 	go func() {
-		defer h.v3NodeCapabilityRefresh.Delete(nodeURL)
-		ctx, cancel := context.WithTimeout(context.Background(), h.remoteToneMapProbeTimeoutV3(nodeURL))
-		defer cancel()
-		if _, err := h.lookupRemoteCapabilitiesV3(ctx, nodeURL, false); err != nil {
-			slog.Debug("protocol v3 background node capability refresh failed", "component", "api", "node", logredact.SanitizeURL(nodeURL), "error", err)
+		for {
+			invalidations := h.nodeCapabilityInvalidationsV3(nodeURL)
+			ctx, cancel := context.WithTimeout(context.Background(), h.remoteToneMapProbeTimeoutV3(nodeURL))
+			_, err := h.lookupRemoteCapabilitiesV3(ctx, nodeURL, false)
+			cancel()
+			if err != nil {
+				slog.Debug("protocol v3 background node capability refresh failed", "component", "api", "node", logredact.SanitizeURL(nodeURL), "error", err)
+			}
+			h.v3NodeCapabilitiesMu.Lock()
+			current := h.v3NodeCapabilityInvalidations[nodeURL] == invalidations
+			if current {
+				delete(h.v3NodeCapabilityRefresh, nodeURL)
+			}
+			h.v3NodeCapabilitiesMu.Unlock()
+			if current {
+				return
+			}
 		}
 	}()
 }
@@ -1123,23 +1315,51 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 	})
 	timings.mark("planning")
 	if terminalAllowsAlternateFileV3(result.Terminal) && shouldTryAlternateFileV3(req.QualityPreference) {
-		if alternate, alternateErr := h.findAlternateFile(r.Context(), requestedFile); alternateErr == nil && alternate != nil {
-			effectiveFile = h.ensurePlaybackProbe(r.Context(), alternate)
-			audioIndex = remapAudioIndexV3(requestedFile, effectiveFile, audioIndex)
-			if err := h.remapSubtitleSelectionV3(r.Context(), requestedFile, effectiveFile, &req); err != nil {
-				response, persistErr := h.persistTerminalStartDecisionV3(r.Context(), userID, profileID, req, requestDigests, requestedFile.ID, effectiveFile.ID, playback.NewTerminalResponseV3("subtitle_unavailable_in_version", err.Error(), false))
-				if persistErr != nil {
-					writeStartAttemptPersistenceErrorV3(w, persistErr)
-					return
+		if alternates, alternateErr := h.findAlternateFiles(r.Context(), requestedFile); alternateErr == nil {
+			baseReq := req
+			baseAudioIndex := audioIndex
+			var firstFailureResult playback.PlannerResultV3
+			var firstFailureToneMapErr error
+			var firstFailureFile *models.MediaFile
+			var firstFailureReq playback.StartRequestV3
+			firstFailureAudioIndex := 0
+			for _, alternate := range alternates {
+				candidateFile := h.ensurePlaybackProbe(r.Context(), alternate)
+				candidateReq := baseReq
+				candidateAudioIndex := remapAudioIndexV3(requestedFile, candidateFile, baseAudioIndex)
+				var candidateResult playback.PlannerResultV3
+				var candidateToneMapErr error
+				if err := h.remapSubtitleSelectionV3(r.Context(), requestedFile, candidateFile, &candidateReq); err != nil {
+					candidateResult = playback.PlannerResultV3{Terminal: &playback.TerminalV3{Reason: terminalSubtitleUnavailableInVersionV3, Message: err.Error(), Retryable: false}}
+				} else {
+					if err := preflightPlaybackFile(r.Context(), candidateFile, h.MissingMarker, h.EventsHub); err != nil {
+						continue
+					}
+					candidateResult, candidateToneMapErr = h.planPlaybackWithCapabilitiesV3(r.Context(), playback.PlannerInputV3{Request: candidateReq, RequestedFile: requestedFile, EffectiveFile: candidateFile, AudioTrackIndex: candidateAudioIndex, Settings: settings, Registry: h.transformationRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), candidateFile), Now: time.Now(), AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), candidateFile)})
 				}
-				writeJSON(w, http.StatusCreated, response)
-				return
+				if candidateResult.Terminal == nil {
+					req = candidateReq
+					effectiveFile = candidateFile
+					audioIndex = candidateAudioIndex
+					result = candidateResult
+					toneMapCapabilityErr = candidateToneMapErr
+					break
+				}
+				if firstFailureFile == nil {
+					firstFailureResult = candidateResult
+					firstFailureToneMapErr = candidateToneMapErr
+					firstFailureFile = candidateFile
+					firstFailureReq = candidateReq
+					firstFailureAudioIndex = candidateAudioIndex
+				}
 			}
-			if err := preflightPlaybackFile(r.Context(), effectiveFile, h.MissingMarker, h.EventsHub); err != nil {
-				writePlaybackFilePreflightError(w, err)
-				return
+			if result.Terminal != nil && firstFailureFile != nil {
+				req = firstFailureReq
+				effectiveFile = firstFailureFile
+				audioIndex = firstFailureAudioIndex
+				result = firstFailureResult
+				toneMapCapabilityErr = firstFailureToneMapErr
 			}
-			result, toneMapCapabilityErr = h.planPlaybackWithCapabilitiesV3(r.Context(), playback.PlannerInputV3{Request: req, RequestedFile: requestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: settings, Registry: h.transformationRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
 		}
 	}
 	result = retryIncompleteToneMapPlanningV3(result, toneMapCapabilityErr)
@@ -1980,7 +2200,7 @@ func (h *PlaybackHandler) identityGrantStreamURLV3(ctx context.Context, s *playb
 	if !stored {
 		return h.playbackStreamURL(s), false, nil
 	}
-	return strings.TrimRight(proxyNode.URL, "/") + "/stream/v3/" + s.ID, true, prior
+	return strings.TrimRight(proxyNode.ClientURL(), "/") + "/stream/v3/" + s.ID, true, prior
 }
 
 // putProxyGrantV3 stores the recipe a designated proxy origin serves this
@@ -2325,7 +2545,7 @@ func (h *PlaybackHandler) identityStreamURLV3(s *playback.Session, file *models.
 	if token == "" {
 		return h.playbackStreamURL(s), false
 	}
-	base := strings.TrimRight(proxyNode.URL, "/")
+	base := strings.TrimRight(proxyNode.ClientURL(), "/")
 	if s.PlayMethod == playback.PlayRemux {
 		if claims.PlayMethod == streamtoken.PlayMethodAudioDownmixRemux {
 			return base + "/stream/remux/audio-v2/" + token, true
@@ -2636,6 +2856,7 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 			// become an immediate client-visible transport error.
 			retryOpts := opts
 			retryOpts.AvoidHWDevice = startupFailure.failedDevice
+			retryOpts.HWAccel = playback.StartupRetryHWAccel(opts)
 			slog.WarnContext(r.Context(), "local transcode crashed during startup; retrying once",
 				logComponentKey, playbackLogValueV3,
 				"playback_session_id", session.ID,
@@ -2742,7 +2963,10 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 	}
 	sourceMetadata := sourceExecutionMetadataV3(file, result)
 	sourceProfile, sourceBitDepth := sourceVideoTranscodeFactsV3(file, result)
-	hwAccel := h.playbackConfig().HWAccel
+	// The node's own override wins over this host's cluster-wide setting; every
+	// other node gets the cluster value verbatim, "auto" included, so the node
+	// still resolves it against live hardware at session start.
+	hwAccel := node.EffectiveHWAccel(h.playbackConfig().HWAccel)
 	toneMapFilter := ""
 	if result.ToneMapMode != "" {
 		capabilities, err := h.remoteToneMapCapabilitiesV3(r.Context(), node.URL, false)
@@ -2931,7 +3155,7 @@ func (h *PlaybackHandler) grantManifestURLV3(ctx context.Context, card playback.
 	if !stored {
 		return localURL, false, nil
 	}
-	return strings.TrimRight(proxyNode.URL, "/") + "/stream/v3/" + card.SessionID + "/master.m3u8", true, prior
+	return strings.TrimRight(proxyNode.ClientURL(), "/") + "/stream/v3/" + card.SessionID + "/master.m3u8", true, prior
 }
 
 // sourceExecutionMetadataV3 freezes the source facts used by a remote executor.
@@ -3678,22 +3902,59 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 		result, toneMapCapabilityErr = h.planPlaybackWithCapabilitiesV3(r.Context(), playback.PlannerInputV3{Request: start, RequestedFile: plannerRequestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: plannerSettings, Registry: h.transformationRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AttemptedKeys: attemptedKeys, AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
 	}
 	if terminalAllowsAlternateFileV3(result.Terminal) && replanAllowsAlternateFileV3(operation, start.QualityPreference) {
-		if alternate, alternateErr := h.findAlternateFile(r.Context(), requestedFile); alternateErr == nil && alternate != nil {
-			alternate = h.ensurePlaybackProbe(r.Context(), alternate)
-			remappedAudio := remapAudioIndexV3(effectiveFile, alternate, audioIndex)
-			if err := h.remapSubtitleSelectionV3(r.Context(), effectiveFile, alternate, &start); err == nil {
-				start.FileID = alternate.ID
-				if err := preflightPlaybackFile(r.Context(), alternate, h.MissingMarker, h.EventsHub); err == nil {
-					effectiveFile = alternate
-					audioIndex = remappedAudio
-					result, toneMapCapabilityErr = h.planPlaybackWithCapabilitiesV3(r.Context(), playback.PlannerInputV3{Request: start, RequestedFile: plannerRequestedFile, EffectiveFile: effectiveFile, AudioTrackIndex: audioIndex, Settings: plannerSettings, Registry: h.transformationRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), effectiveFile), Now: time.Now(), AttemptedKeys: attemptedKeys, AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), effectiveFile)})
+		if alternates, alternateErr := h.findAlternateFiles(r.Context(), requestedFile); alternateErr == nil {
+			baseStart := start
+			baseEffectiveFile := effectiveFile
+			baseAudioIndex := audioIndex
+			var firstFailureResult playback.PlannerResultV3
+			var firstFailureToneMapErr error
+			var firstFailureFile *models.MediaFile
+			var firstFailureStart playback.StartRequestV3
+			firstFailureAudioIndex := 0
+			for _, alternate := range alternates {
+				if alternate.ID == baseEffectiveFile.ID {
+					continue
 				}
-			} else if start.SubtitleTrackIndex != nil || start.SubtitleTrackID != "" {
-				result = playback.PlannerResultV3{Terminal: &playback.TerminalV3{
-					Reason:    "subtitle_unavailable_in_version",
-					Message:   "The selected subtitle track is unavailable in the fallback media version.",
-					Retryable: false,
-				}}
+				candidateFile := h.ensurePlaybackProbe(r.Context(), alternate)
+				candidateStart := baseStart
+				candidateAudioIndex := remapAudioIndexV3(baseEffectiveFile, candidateFile, baseAudioIndex)
+				var candidateResult playback.PlannerResultV3
+				var candidateToneMapErr error
+				if err := h.remapSubtitleSelectionV3(r.Context(), baseEffectiveFile, candidateFile, &candidateStart); err != nil {
+					candidateResult = playback.PlannerResultV3{Terminal: &playback.TerminalV3{
+						Reason:    terminalSubtitleUnavailableInVersionV3,
+						Message:   "The selected subtitle track is unavailable in the fallback media version.",
+						Retryable: false,
+					}}
+				} else {
+					candidateStart.FileID = candidateFile.ID
+					if err := preflightPlaybackFile(r.Context(), candidateFile, h.MissingMarker, h.EventsHub); err != nil {
+						continue
+					}
+					candidateResult, candidateToneMapErr = h.planPlaybackWithCapabilitiesV3(r.Context(), playback.PlannerInputV3{Request: candidateStart, RequestedFile: plannerRequestedFile, EffectiveFile: candidateFile, AudioTrackIndex: candidateAudioIndex, Settings: plannerSettings, Registry: h.transformationRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), candidateFile), Now: time.Now(), AttemptedKeys: attemptedKeys, AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), candidateFile)})
+				}
+				if candidateResult.Terminal == nil {
+					start = candidateStart
+					effectiveFile = candidateFile
+					audioIndex = candidateAudioIndex
+					result = candidateResult
+					toneMapCapabilityErr = candidateToneMapErr
+					break
+				}
+				if firstFailureFile == nil {
+					firstFailureResult = candidateResult
+					firstFailureToneMapErr = candidateToneMapErr
+					firstFailureFile = candidateFile
+					firstFailureStart = candidateStart
+					firstFailureAudioIndex = candidateAudioIndex
+				}
+			}
+			if result.Terminal != nil && firstFailureFile != nil {
+				start = firstFailureStart
+				effectiveFile = firstFailureFile
+				audioIndex = firstFailureAudioIndex
+				result = firstFailureResult
+				toneMapCapabilityErr = firstFailureToneMapErr
 			}
 		}
 	}
@@ -4355,6 +4616,7 @@ const (
 	terminalNoAlternateVersionV3            = "no_alternate_version"
 	terminalHDRTranscodeUnsupportedV3       = playback.TerminalHDRTranscodeUnsupportedV3
 	terminalSubtitleConversionUnsupportedV3 = "subtitle_conversion_unsupported"
+	terminalSubtitleUnavailableInVersionV3  = "subtitle_unavailable_in_version"
 )
 
 // terminalAllowsAlternateFileV3 reports whether a refusal is the kind another
@@ -4405,7 +4667,7 @@ func (h *PlaybackHandler) clarifyOriginalQuality4KTerminalV3(ctx context.Context
 	if !alternateFilePinned || terminal == nil || terminal.Reason != terminalNoAlternateVersionV3 || terminal.Message != playback.TerminalMessage4KTranscodeDisabledV3 {
 		return
 	}
-	if alternate, err := h.findAlternateFile(ctx, requestedFile); err == nil && alternate != nil {
+	if alternate, err := h.findAlternateFile(ctx, requestedFile); err == nil && alternate != nil && !playback.Is4KMediaFileV3(alternate) {
 		terminal.Message = "4K transcoding is disabled and quality 'original' pins the 4K version; a compatible lower-resolution version of this title is available."
 	}
 }
@@ -4592,10 +4854,18 @@ func (h *PlaybackHandler) enqueueRouteEventV3(event playback.RouteEventRecordV3)
 	}
 	h.v3EventOnce.Do(func() {
 		h.v3EventQueue = make(chan playback.RouteEventRecordV3, 512)
+		// The store is captured with the queue rather than read per event. The
+		// goroutine below outlives the request that started it, so re-reading
+		// the field would be an unsynchronized read of handler state — harmless
+		// in production, where the router wires PlanStoreV3 once before serving,
+		// and a real data race against any caller that replaces it afterwards.
+		// Capturing also matches what the queue is: work batched for the store
+		// that existed when it was created.
+		store := h.PlanStoreV3
 		go func() {
 			for value := range h.v3EventQueue {
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				if err := h.PlanStoreV3.RecordRouteEvent(ctx, value); err != nil {
+				if err := store.RecordRouteEvent(ctx, value); err != nil {
 					slog.Warn("playback route event write failed", "error", err, "event", value.Event)
 				}
 				cancel()

@@ -246,14 +246,30 @@ type PlaybackHandler struct {
 	tm *playback.TranscodeManager
 	// PlanStoreV3 owns the short-lived protocol-v3 control-plane state. Router
 	// wiring replaces the in-memory default with PostgreSQL in integrated mode.
-	PlanStoreV3             playback.PlanStoreV3
-	v3RegistryMu            sync.Mutex
-	v3Registry              *playback.TransformationRegistryV3
-	v3RegistryProbe         func(context.Context, string, tonemap.Capabilities) (*playback.TransformationRegistryV3, error)
-	v3ToneMapProbe          func(context.Context, string, string, string) (tonemap.Capabilities, error)
-	v3NodeCapabilitiesMu    sync.Mutex
-	v3NodeCapabilities      map[string]v3NodeCapabilityCache
-	v3NodeCapabilityRefresh sync.Map
+	PlanStoreV3          playback.PlanStoreV3
+	v3RegistryMu         sync.Mutex
+	v3Registry           *playback.TransformationRegistryV3
+	v3RegistryProbe      func(context.Context, string, tonemap.Capabilities) (*playback.TransformationRegistryV3, error)
+	v3ToneMapProbe       func(context.Context, string, string, string) (tonemap.Capabilities, error)
+	v3NodeCapabilitiesMu sync.Mutex
+	v3NodeCapabilities   map[string]v3NodeCapabilityCache
+	// v3NodeProbeBudgets holds what each node last said a capability read of it
+	// costs, guarded by v3NodeCapabilitiesMu. It is kept apart from the
+	// inventory above because the two are invalidated for different reasons: an
+	// acceleration change makes the inventory wrong and the next read slow,
+	// while how long that node takes to answer is unchanged. See
+	// remoteToneMapProbeTimeoutV3.
+	v3NodeProbeBudgets map[string]time.Duration
+	// v3NodeCapabilityInvalidations counts invalidations per node URL, guarded
+	// by v3NodeCapabilitiesMu. A probe that started before the count moved
+	// describes hardware the health sweep has already reported as changed, so
+	// its result must not be installed. See RefreshNodeCapabilitiesV3.
+	v3NodeCapabilityInvalidations map[string]uint64
+	// v3NodeCapabilityRefresh holds the nodes with a background refresh in
+	// flight, one at a time each. Guarded by v3NodeCapabilitiesMu, the same
+	// lock as the invalidation counter, so a refresh cannot release its slot in
+	// between an invalidation and that invalidation's claim on it.
+	v3NodeCapabilityRefresh map[string]struct{}
 	v3EventOnce             sync.Once
 	v3EventQueue            chan playback.RouteEventRecordV3
 	v3StartEffectsOnce      sync.Once
@@ -1795,7 +1811,7 @@ func (h *PlaybackHandler) buildProxyManifestURL(card playback.RecipeCard, proxyN
 	if proxyNode == nil || token == "" {
 		return appendStreamToken(localURL, token)
 	}
-	return proxyNode.URL + "/stream/transcode/" + token + "/master.m3u8"
+	return nodepool.NodeEndpoint(proxyNode.ClientURL(), "/stream/transcode/"+token+"/master.m3u8")
 }
 
 // proxyToTranscodeNode forwards a request to the remote transcode node.
@@ -1903,9 +1919,25 @@ func (h *PlaybackHandler) maybeStartThrottler(ctx context.Context, session *play
 	session.StartThrottler(threshold)
 }
 
-// findAlternateFile finds a non-4K file version for the same content.
-// Prefers SDR over HDR, then highest resolution, then highest bitrate.
+// findAlternateFile finds another file version for the same content. It
+// prefers non-4K versions because they can escape a disabled-4K-transcode
+// terminal, but when none exist it returns a 4K candidate so the planner can
+// still accept one that direct-plays or remuxes without forbidden video
+// encoding.
+// Within each class it prefers SDR, then resolution, then bitrate.
 func (h *PlaybackHandler) findAlternateFile(ctx context.Context, source *models.MediaFile) (*models.MediaFile, error) {
+	candidates, err := h.findAlternateFiles(ctx, source)
+	if err != nil || len(candidates) == 0 {
+		return nil, err
+	}
+	return candidates[0], nil
+}
+
+// findAlternateFiles returns every compatible edition/version candidate in
+// fallback order. Callers that plan candidates must keep trying after a
+// terminal: a lower-resolution candidate can still fail while a later 4K
+// candidate direct-plays or remuxes without forbidden video encoding.
+func (h *PlaybackHandler) findAlternateFiles(ctx context.Context, source *models.MediaFile) ([]*models.MediaFile, error) {
 	if h.FileVersionFetcher == nil {
 		return nil, fmt.Errorf("file version fetcher not configured")
 	}
@@ -1921,10 +1953,9 @@ func (h *PlaybackHandler) findAlternateFile(ctx context.Context, source *models.
 		return nil, err
 	}
 
-	// Filter to non-4K candidates.
 	candidates := make([]*models.MediaFile, 0, len(files))
 	for _, f := range files {
-		if f.ID == source.ID || f.Resolution == "2160p" {
+		if f.ID == source.ID {
 			continue
 		}
 		if source.EditionKey != "" && f.EditionKey != source.EditionKey {
@@ -1945,9 +1976,17 @@ func (h *PlaybackHandler) findAlternateFile(ctx context.Context, source *models.
 		return nil, nil
 	}
 
-	// Sort: SDR before HDR, then highest resolution, then highest bitrate.
+	// Prefer non-4K before 4K so a lower-resolution sibling is tried first.
+	// Keep 4K siblings at the end: when no non-4K sibling exists, the planner
+	// may still direct-play or remux one because the policy only forbids video
+	// encoding.
 	sort.Slice(candidates, func(i, j int) bool {
 		a, b := candidates[i], candidates[j]
+		a4K := playback.Is4KMediaFileV3(a)
+		b4K := playback.Is4KMediaFileV3(b)
+		if a4K != b4K {
+			return !a4K
+		}
 		// Prefer SDR over HDR (SDR = !HDR, so !HDR < HDR means SDR first).
 		if a.HDR != b.HDR {
 			return !a.HDR
@@ -1960,7 +1999,7 @@ func (h *PlaybackHandler) findAlternateFile(ctx context.Context, source *models.
 		return a.Bitrate > b.Bitrate
 	})
 
-	return candidates[0], nil
+	return candidates, nil
 }
 
 const (

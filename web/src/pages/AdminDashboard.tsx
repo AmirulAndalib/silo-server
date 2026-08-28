@@ -22,6 +22,7 @@ const DASHBOARD_WIDGET_QUERY_PREFIXES = [
   adminKeys.playbackActivityRoot(),
   adminKeys.topActivityRoot(),
   adminKeys.serverStatus(),
+  adminKeys.systemResources(),
   adminKeys.nodes(),
   adminKeys.autoscanStatus(),
   adminKeys.autoscanScansRoot(),
@@ -271,7 +272,7 @@ export default function AdminDashboard() {
           </span>
           <button
             type="button"
-            className="text-muted-foreground hover:text-foreground focus-visible:ring-ring ml-auto cursor-pointer text-xs underline-offset-2 transition-colors hover:underline focus-visible:ring-2 focus-visible:outline-none"
+            className="text-muted-foreground hover:text-foreground focus-visible:ring-ring ml-auto cursor-pointer text-xs underline-offset-2 transition-colors hover:underline focus-visible:outline-none focus-visible:ring-2"
             onClick={() => layout.resetLayout()}
           >
             Reset to default layout

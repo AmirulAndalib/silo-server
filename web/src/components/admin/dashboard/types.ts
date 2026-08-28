@@ -10,6 +10,7 @@ export type WidgetId =
   | "stat-users"
   | "stat-storage"
   | "health-strip"
+  | "server-resources"
   | "playback-24h"
   | "concurrent-streams-24h"
   | "egress-24h"

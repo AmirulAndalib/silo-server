@@ -17,6 +17,7 @@ import {
 import { ConcurrentStreamsWidget } from "./widgets/ConcurrentStreamsWidget";
 import { EgressWidget } from "./widgets/EgressWidget";
 import { HealthStripWidget } from "./widgets/HealthStripWidget";
+import { ServerResourcesWidget } from "./widgets/ServerResourcesWidget";
 import { PlaybackActivityWidget } from "./widgets/PlaybackActivityWidget";
 import { PlaybackReliabilityWidget } from "./widgets/PlaybackReliabilityWidget";
 import { TopProfilesWidget } from "./widgets/TopProfilesWidget";
@@ -157,6 +158,18 @@ export const DASHBOARD_WIDGETS: DashboardWidgetDefinition[] = [
     maxRows: 2,
     defaultRows: 1,
     Component: HealthStripWidget,
+  },
+  {
+    id: "server-resources",
+    title: "Server resources",
+    description: "CPU, memory, disk, network, and GPU usage on the API host",
+    minSpan: 6,
+    maxSpan: 12,
+    defaultSpan: 12,
+    minRows: 2,
+    maxRows: 4,
+    defaultRows: 2,
+    Component: ServerResourcesWidget,
   },
   {
     id: "playback-24h",
@@ -380,6 +393,7 @@ const DEFAULT_LAYOUT_BOXES: DashboardLayoutEntry[] = [
   { id: "stat-users", span: 3, rows: 1 },
   { id: "stat-storage", span: 3, rows: 1 },
   { id: "health-strip", span: 12, rows: 1 },
+  { id: "server-resources", span: 12, rows: 2 },
   { id: "playback-24h", span: 6, rows: 3 },
   { id: "concurrent-streams-24h", span: 6, rows: 3 },
   { id: "egress-24h", span: 6, rows: 3 },
