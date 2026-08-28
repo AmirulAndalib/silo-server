@@ -20,41 +20,39 @@ type reprobeCapabilitiesResponse struct {
 }
 
 // handleReprobeCapabilities discards this proxy's cached probe verdicts and
-// rebuilds the capability snapshot against live hardware.
+// rebuilds the capability snapshot against the live ffmpeg binary.
 //
-// A proxy runs ffmpeg too (remux, Dolby Vision RPU strip), and the probe caches
-// behind its snapshot keep a successful verdict for the process lifetime. That
-// is correct for playback and blind to hardware that has since stopped working
-// underneath it, which no cache key can observe — see the transcode node's copy
-// of this handler for the full reasoning. A rebuild that does not finish keeps
-// the previously published hash.
+// A proxy runs ffmpeg for remux and Dolby Vision RPU strips, so an operator who
+// swaps the binary under a running proxy needs a way to say so now instead of
+// waiting out the 15-minute snapshot tick. It is deliberately *not* a hardware
+// re-verification: a proxy never executes a hardware transcode, so its report
+// carries no acceleration inventory to re-check — see
+// buildCapabilitySnapshotLocked. The rebuild is therefore cheap, and one that
+// does not finish still keeps the previously published hash.
 //
 // Unlike the transcode node this does not refuse while *jobs* are running. That
 // guard is about encoder sessions: a proxy's jobs are remuxes and RPU strips,
 // which hold no encoder slot for a probe's smoke encode to lose a race against.
-// It does refuse while another probe is running, which is a different thing —
-// see below.
 func (s *Server) handleReprobeCapabilities(w http.ResponseWriter, r *http.Request) {
-	// Held across the invalidation and the rebuild together: discarding the
-	// verdicts and recomputing them has to be one step, or the scheduled
-	// snapshot could start its own cold matrix in between and run ffmpeg on the
-	// same GPU at the same time.
+	// Held across the invalidation and the rebuild together, so a scheduled
+	// snapshot cannot interleave with them and publish a hash for a half-cleared
+	// cache.
 	s.capabilityBuildMu.Lock()
 	defer s.capabilityBuildMu.Unlock()
 
-	// The mutex is not enough on its own. A probe outlives its caller by
-	// design — both singleflights run on background contexts so a canceled
-	// request cannot kill work another request is waiting on — so a capability
-	// request abandoned mid-probe releases this mutex while ffmpeg is still
-	// encoding. Invalidating then starts a second matrix beside the first, and
-	// two smoke encodes contending for one card publish a hardware failure for
-	// hardware that is fine. That is the same false verdict the transcode node's
-	// gate exists to prevent, and it does not care which kind of node it is on.
+	// The mutex is not enough on its own: a probe outlives its caller by design
+	// — the singleflights run on background contexts so a canceled request
+	// cannot kill work another request is waiting on — so a capability request
+	// abandoned mid-probe releases this mutex while ffmpeg is still running.
+	// Invalidating then would start a second matrix beside the first. A proxy no
+	// longer launches the hardware walk that made this expensive, so in practice
+	// the count is zero; the gate stays because it is the shared contract with
+	// the transcode node's route and costs one comparison.
 	if busy := s.probesInFlight(); busy > 0 {
 		slog.InfoContext(r.Context(), "proxy capability re-probe refused while probes are still running",
 			"component", "proxy", "probes_in_flight", busy)
 		http.Error(w, fmt.Sprintf(
-			"node is running %d hardware probe(s); a re-probe smoke-encodes on the GPU and two at once would report working hardware as failed. Retry shortly.",
+			"node is running %d probe(s); starting another beside them would report working hardware as failed. Retry shortly.",
 			busy), http.StatusConflict)
 		return
 	}
@@ -62,10 +60,11 @@ func (s *Server) handleReprobeCapabilities(w http.ResponseWriter, r *http.Reques
 	playback.InvalidateHWProbeCache()
 	tonemap.InvalidateProbeCache()
 	// The resource sampler retires nvidia-smi after repeated failure, and a
-	// driver that was broken at start is exactly what a re-probe is called for.
-	// A proxy samples the same GPU a transcode node does, so it needs the same
-	// nudge — without it the node re-verifies its encoders here and still
-	// reports no GPU utilization until the breaker's own retry interval.
+	// driver that was broken at start is exactly what an operator reaches for
+	// this route after. A proxy samples the same GPU a transcode node does — it
+	// reports utilization on /health even though it never transcodes — so
+	// without this nudge it keeps reporting no GPU until the breaker's own retry
+	// interval.
 	s.metrics.RetrySources()
 
 	// buildCapabilitySnapshotLocked owns the probe deadline, so a re-probe can

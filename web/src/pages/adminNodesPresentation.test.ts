@@ -21,6 +21,7 @@ import {
   formatBitsPerSecond,
   nodeHWDevicePaths,
   nodeHasHWDeviceInventory,
+  nodeReportsAcceleration,
   hwDeviceSyntaxChanges,
   nodeUsesCUDADevices,
   parseHWDeviceOverride,
@@ -1411,6 +1412,20 @@ describe("describeNodeJobs", () => {
 
   it("names a proxy node's concurrency for what it carries", () => {
     expect(describeNodeJobs(makeNode({ type: "proxy" })).label).toBe("Streams");
+  });
+});
+
+describe("nodeReportsAcceleration", () => {
+  // A proxy stopped probing for hardware it never uses, so its report carries
+  // no backend and no device. The card must drop the acceleration block and the
+  // re-probe button with it — a button whose tooltip promises to re-verify
+  // devices against live hardware is a promise a proxy cannot keep.
+  it("says a proxy has no acceleration to show", () => {
+    expect(nodeReportsAcceleration(makeNode({ type: "proxy" }))).toBe(false);
+  });
+
+  it("keeps the acceleration block on a transcode node", () => {
+    expect(nodeReportsAcceleration(makeNode({ type: "transcode" }))).toBe(true);
   });
 });
 

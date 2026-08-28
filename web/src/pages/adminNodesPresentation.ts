@@ -1248,6 +1248,21 @@ function capacityFill(used: number, cap: number | null): number | null {
   return cap != null && cap > 0 ? clampPercent((used / cap) * 100) : null;
 }
 
+/**
+ * Whether this node's card has hardware acceleration to show at all.
+ *
+ * Only a transcode node does. A proxy relays bytes and runs identity/remux
+ * recipes on ffmpeg; it never executes a hardware transcode, so it stopped
+ * probing for one and its capability report now carries no backend, no device,
+ * and no GPU identity. Drawing the acceleration block for it would report
+ * "software" as a finding rather than as the absence of a question, and the
+ * re-probe button beside it promises a hardware re-verification a proxy no
+ * longer performs.
+ */
+export function nodeReportsAcceleration(node: Pick<StreamNode, "type">): boolean {
+  return node.type !== "proxy";
+}
+
 /** Concurrency: transcodes on a transcode node, relayed streams on a proxy. */
 export function describeNodeJobs(node: StreamNode): ResourceMetric {
   const label = node.type === "proxy" ? "Streams" : "Transcodes";

@@ -509,8 +509,21 @@ func (hc *HealthChecker) refreshCapabilities(ctx context.Context, n *Node, apply
 	// Computed before the write, because the comparison is against the report
 	// this one replaces, and stored with it so a reader never sees a note
 	// describing a different payload.
+	//
+	// Not for a proxy. Drift is a statement about transcode hardware, and a
+	// proxy's report deliberately carries no hardware inventory at all: it
+	// relays streams and runs remux recipes, so it advertises transformations
+	// and nothing else. Comparing a hardware-free report against one an older
+	// build stored with render devices in it reads as every device disappearing
+	// at once, and nothing can ever clear that note — recovery is evidenced by
+	// probes the proxy will never run again. So drift is skipped and both
+	// columns are written nil, which also erases whatever an older build latched.
 	drift, parsed := computeCapabilityDrift(n.Capabilities, payload)
-	note, driftBaseline := resolveDriftNote(n.CapabilityDrift, n.CapabilityDriftBaseline, drift, parsed, payload)
+	var note *string
+	var driftBaseline []byte
+	if n.Type != NodeTypeProxy {
+		note, driftBaseline = resolveDriftNote(n.CapabilityDrift, n.CapabilityDriftBaseline, drift, parsed, payload)
+	}
 	refreshedAt := time.Now()
 	if hc.repo != nil {
 		// Fenced on the URL this payload was fetched from — the fetch is
@@ -1139,7 +1152,11 @@ func logCapabilityChange(ctx context.Context, n *Node, drift capabilityDrift, pa
 			"id", n.ID, "name", n.Name, "url", n.URL)
 		return
 	}
-	if !drift.regressed() {
+	if !drift.regressed() || n.Type == NodeTypeProxy {
+		// See refreshCapabilities: a proxy reports no hardware, so a "lost"
+		// backend or device here is the old report's inventory going away rather
+		// than the node's, and warning about it would page an operator for an
+		// upgrade.
 		return
 	}
 	slog.WarnContext(ctx, "node capability drift", "component", "nodepool",
