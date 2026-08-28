@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // shrinkBulkBatchSize forces the bulk-reset loops through multiple batches with
@@ -30,17 +31,95 @@ func itemPosterSurface(t *testing.T) artworkSweepSurface {
 	return artworkSweepSurface{}
 }
 
+// The bulk resets under test sweep their whole table, not just this test's
+// fixtures. The test database may be shared and populated, so each test
+// snapshots every pre-existing row its reset would touch and restores those
+// rows on cleanup; only the seeded fixtures are asserted on.
+
+func restorePreexistingPosterRows(t *testing.T, pool *pgxpool.Pool, seededPrefix string) {
+	t.Helper()
+	ctx := context.Background()
+	surface := itemPosterSurface(t)
+	rows, err := pool.Query(ctx, fmt.Sprintf(
+		`SELECT content_id, poster_path, last_refreshed, updated_at FROM media_items
+		 WHERE %s AND content_id NOT LIKE $1`, surface.cachedPredicate()), seededPrefix+"%")
+	if err != nil {
+		t.Fatalf("snapshot pre-existing poster rows: %v", err)
+	}
+	type itemState struct {
+		contentID     string
+		posterPath    string
+		lastRefreshed *time.Time
+		updatedAt     *time.Time
+	}
+	var snapshot []itemState
+	for rows.Next() {
+		var s itemState
+		if err := rows.Scan(&s.contentID, &s.posterPath, &s.lastRefreshed, &s.updatedAt); err != nil {
+			t.Fatalf("scan poster snapshot: %v", err)
+		}
+		snapshot = append(snapshot, s)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read poster snapshot: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, s := range snapshot {
+			if _, err := pool.Exec(ctx,
+				`UPDATE media_items SET poster_path = $2, last_refreshed = $3, updated_at = $4 WHERE content_id = $1`,
+				s.contentID, s.posterPath, s.lastRefreshed, s.updatedAt); err != nil {
+				t.Errorf("restore poster row %s: %v", s.contentID, err)
+			}
+		}
+	})
+}
+
+func restorePreexistingChapterRows(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := pool.Query(ctx,
+		`SELECT id, chapters, chapter_thumbnail_retry_after FROM media_files WHERE `+chapterThumbnailFilesPredicate)
+	if err != nil {
+		t.Fatalf("snapshot pre-existing chapter rows: %v", err)
+	}
+	type fileState struct {
+		id         int64
+		chapters   []byte
+		retryAfter *time.Time
+	}
+	var snapshot []fileState
+	for rows.Next() {
+		var s fileState
+		if err := rows.Scan(&s.id, &s.chapters, &s.retryAfter); err != nil {
+			t.Fatalf("scan chapter snapshot: %v", err)
+		}
+		snapshot = append(snapshot, s)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read chapter snapshot: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, s := range snapshot {
+			if _, err := pool.Exec(ctx,
+				`UPDATE media_files SET chapters = $2::jsonb, chapter_thumbnail_retry_after = $3 WHERE id = $1`,
+				s.id, s.chapters, s.retryAfter); err != nil {
+				t.Errorf("restore chapter row %d: %v", s.id, err)
+			}
+		}
+	})
+}
+
 // TestBulkResetSurfaceBatches drives bulkResetSurface across several batches
 // and verifies both halves: rows with a remote source are requeued (path reset
 // to the source URL), rows without one are cleared. Assertions are scoped to
-// the seeded rows because the reset sweeps the whole table and the test
-// database may hold rows from other tests.
+// the seeded rows; pre-existing rows the sweep touches are snapshot-restored.
 func TestBulkResetSurfaceBatches(t *testing.T) {
 	pool := localArtworkTestPool(t)
 	ctx := context.Background()
 	shrinkBulkBatchSize(t, 3)
 
 	prefix := fmt.Sprintf("bulkreset-%d", time.Now().UnixNano())
+	restorePreexistingPosterRows(t, pool, prefix)
 	const requeueRows, clearRows = 7, 5
 	sourceURL := func(i int) string {
 		return fmt.Sprintf("https://image.example.org/t/p/original/%s-%d.jpg", prefix, i)
@@ -108,6 +187,7 @@ func TestBulkResetChapterThumbnailsBatches(t *testing.T) {
 	pool := localArtworkTestPool(t)
 	ctx := context.Background()
 	shrinkBulkBatchSize(t, 2)
+	restorePreexistingChapterRows(t, pool)
 
 	suffix := time.Now().UnixNano()
 	var folderID int
