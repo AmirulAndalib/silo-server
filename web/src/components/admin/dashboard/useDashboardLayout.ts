@@ -6,6 +6,7 @@ import {
   useResetAdminDashboardLayout,
   useSaveAdminDashboardLayout,
 } from "@/hooks/queries/admin/dashboardLayout";
+import { useAuth } from "@/hooks/useAuth";
 import { DASHBOARD_WIDGETS, DEFAULT_LAYOUT, findDashboardWidget } from "./registry";
 import type {
   DashboardLayoutEntry,
@@ -14,7 +15,20 @@ import type {
   WidgetRange,
 } from "./types";
 
-export const DASHBOARD_LAYOUT_STORAGE_KEY = "silo.admin-dashboard-layout.v1";
+/**
+ * The unscoped key this cache used before layouts were scoped per account.
+ *
+ * Two admins sharing a browser shared one cached layout under it, and the
+ * "no server layout yet" migration would have uploaded whichever admin cached
+ * last to the account that logged in next. It is only ever deleted: its value
+ * cannot be attributed to an account, so it is never adopted.
+ */
+export const LEGACY_DASHBOARD_LAYOUT_STORAGE_KEY = "silo.admin-dashboard-layout.v1";
+
+/** Where this account's cached arrangement lives in localStorage. */
+export function dashboardLayoutStorageKey(userId: number): string {
+  return `${LEGACY_DASHBOARD_LAYOUT_STORAGE_KEY}.u${userId}`;
+}
 
 // Edits are bursty — a drag emits several moves, a resize several spans — so
 // the server write waits for the burst to settle. Local state and localStorage
@@ -108,10 +122,13 @@ function sanitizeLayoutDocument(value: unknown): DashboardLayoutEntry[] | null {
   return entries;
 }
 
-function readStoredLayout(): DashboardLayoutEntry[] | null {
+function readStoredLayout(userId: number | null): DashboardLayoutEntry[] | null {
+  if (userId === null) {
+    return null;
+  }
   let raw: string | null = null;
   try {
-    raw = window.localStorage.getItem(DASHBOARD_LAYOUT_STORAGE_KEY);
+    raw = window.localStorage.getItem(dashboardLayoutStorageKey(userId));
   } catch {
     return null;
   }
@@ -125,28 +142,43 @@ function readStoredLayout(): DashboardLayoutEntry[] | null {
   }
 }
 
-function loadStoredLayout(): DashboardLayoutEntry[] {
-  return readStoredLayout() ?? [...DEFAULT_LAYOUT];
+function loadStoredLayout(userId: number | null): DashboardLayoutEntry[] {
+  return readStoredLayout(userId) ?? [...DEFAULT_LAYOUT];
 }
 
 function toLayoutDocument(entries: DashboardLayoutEntry[]): AdminDashboardLayoutDocument {
   return { version: 1, entries };
 }
 
-function persistLayout(entries: DashboardLayoutEntry[]) {
+function persistLayout(userId: number | null, entries: DashboardLayoutEntry[]) {
+  if (userId === null) {
+    return;
+  }
   try {
     const stored: StoredLayout = { version: 1, entries };
-    window.localStorage.setItem(DASHBOARD_LAYOUT_STORAGE_KEY, JSON.stringify(stored));
+    window.localStorage.setItem(dashboardLayoutStorageKey(userId), JSON.stringify(stored));
   } catch {
     // Storage may be unavailable (private mode, quota); the layout still works in-memory.
   }
 }
 
-function clearStoredLayout() {
+function clearStoredLayout(userId: number | null) {
+  if (userId === null) {
+    return;
+  }
   try {
-    window.localStorage.removeItem(DASHBOARD_LAYOUT_STORAGE_KEY);
+    window.localStorage.removeItem(dashboardLayoutStorageKey(userId));
   } catch {
     // Ignore storage failures; in-memory state still resets.
+  }
+}
+
+/** Drops the pre-scoping cache so it can never be uploaded to an account. */
+function clearLegacyStoredLayout() {
+  try {
+    window.localStorage.removeItem(LEGACY_DASHBOARD_LAYOUT_STORAGE_KEY);
+  } catch {
+    // Ignore storage failures; nothing reads the legacy key either way.
   }
 }
 
@@ -184,10 +216,18 @@ export interface DashboardLayout {
  * server the first time it finds none there, and debounces subsequent writes.
  * A failed write never rolls back local state — the arrangement the admin sees
  * is the one they just made.
+ *
+ * The cache is keyed by account: two admins sharing a browser must not see —
+ * or migrate up — each other's arrangement.
  */
 export function useDashboardLayout(): DashboardLayout {
-  const [entries, setEntries] = useState<DashboardLayoutEntry[]>(loadStoredLayout);
+  // The admin routes only render behind an authenticated session, so this is a
+  // user in practice; without one the layout simply stays in memory.
+  const userId = useAuth().user?.id ?? null;
+  const [entries, setEntries] = useState<DashboardLayoutEntry[]>(() => loadStoredLayout(userId));
   const [isCustomizing, setCustomizing] = useState(false);
+
+  useEffect(clearLegacyStoredLayout, []);
 
   const remote = useAdminDashboardLayout();
   const saveLayout = useSaveAdminDashboardLayout();
@@ -253,16 +293,17 @@ export function useDashboardLayout(): DashboardLayout {
     const serverEntries = sanitizeLayoutDocument(remoteData?.layout);
     if (serverEntries) {
       setEntries(serverEntries);
-      persistLayout(serverEntries);
+      persistLayout(userId, serverEntries);
       return;
     }
     // No server layout yet: hand this browser's arrangement up once so the
     // admin's other browsers inherit it instead of starting from defaults.
-    const local = readStoredLayout();
+    // Only this account's own cache qualifies.
+    const local = readStoredLayout(userId);
     if (local) {
       saveMutate(toLayoutDocument(local));
     }
-  }, [remoteSettled, remoteData, saveMutate]);
+  }, [remoteSettled, remoteData, saveMutate, userId]);
 
   const update = useCallback(
     (updater: (prev: DashboardLayoutEntry[]) => DashboardLayoutEntry[]) => {
@@ -272,12 +313,12 @@ export function useDashboardLayout(): DashboardLayout {
           return prev;
         }
         editedRef.current = true;
-        persistLayout(next);
+        persistLayout(userId, next);
         scheduleSave(next);
         return next;
       });
     },
-    [scheduleSave],
+    [scheduleSave, userId],
   );
 
   const moveWidget = useCallback(
@@ -389,14 +430,16 @@ export function useDashboardLayout(): DashboardLayout {
 
   const resetLayout = useCallback(() => {
     // Drop the queued write first: saving the arrangement the admin just threw
-    // away would resurrect it on the next load.
+    // away would resurrect it on the next load. A save already in flight cannot
+    // be cancelled here — the shared mutation scope in
+    // `hooks/queries/admin/dashboardLayout` makes the reset wait for it instead.
     cancelPendingSave();
-    clearStoredLayout();
+    clearStoredLayout(userId);
     editedRef.current = true;
     settledRef.current = true;
     setEntries([...DEFAULT_LAYOUT]);
     resetMutate();
-  }, [cancelPendingSave, resetMutate]);
+  }, [cancelPendingSave, resetMutate, userId]);
 
   const hiddenWidgets = useMemo(() => {
     const visible = new Set(entries.map((entry) => entry.id));

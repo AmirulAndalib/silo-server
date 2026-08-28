@@ -34,21 +34,26 @@ const adminTopActivityWatchSourceFilter = `COALESCE(h.source, 'legacy') NOT IN (
 // AdminTopTitle is one row of the most-watched-titles list. Episodes are rolled
 // up to their series, so media_item_id is a series content id for TV.
 type AdminTopTitle struct {
-	MediaItemID  string `json:"media_item_id"`
-	Title        string `json:"title"`
-	MediaType    string `json:"media_type"`
-	Plays        int64  `json:"plays"`
-	TotalSeconds int64  `json:"total_seconds"`
+	MediaItemID string `json:"media_item_id"`
+	Title       string `json:"title"`
+	MediaType   string `json:"media_type"`
+	Plays       int64  `json:"plays"`
+	// TotalSeconds is watched time summed from finalized playback sessions, not
+	// the runtime of the titles played. A title that was only ever marked
+	// watched has no sessions and reports 0.
+	TotalSeconds int64 `json:"total_seconds"`
 }
 
 // AdminTopProfile is one row of the most-active-profiles list.
 type AdminTopProfile struct {
-	UserID       int    `json:"user_id"`
-	Username     string `json:"username"`
-	ProfileID    string `json:"profile_id"`
-	ProfileName  string `json:"profile_name"`
-	Plays        int64  `json:"plays"`
-	TotalSeconds int64  `json:"total_seconds"`
+	UserID      int    `json:"user_id"`
+	Username    string `json:"username"`
+	ProfileID   string `json:"profile_id"`
+	ProfileName string `json:"profile_name"`
+	Plays       int64  `json:"plays"`
+	// TotalSeconds is watched time summed from this profile's finalized
+	// playback sessions, not the runtime of what it played.
+	TotalSeconds int64 `json:"total_seconds"`
 }
 
 // AdminTopActivity is the GET /admin/stats/top-activity body.
@@ -198,23 +203,48 @@ func queryAdminTopActivity(ctx context.Context, pool *pgxpool.Pool, days, limit 
 	}
 
 	// Episodes roll up to their series: a season binge should read as one show,
-	// not twelve one-play entries. media_items is joined twice — once for the
-	// item itself (movies) and once for the parent series (episodes).
+	// not twelve one-play entries.
+	//
+	// Plays come from user_watch_history (marked-watched counts as a play),
+	// while total_seconds is watched time summed from finalized playback
+	// sessions — user_watch_history.duration_seconds is the media's full
+	// runtime, so summing it would report three hours for a movie someone
+	// abandoned after a minute. A title that was only ever marked watched has
+	// no session rows and reports 0 seconds.
+	//
+	// The ranking is computed and limited first so the title lookup and the
+	// watched-seconds aggregate only run over the rows that survive.
 	titleRows, err := pool.Query(ctx, `
-		SELECT COALESCE(ep.series_id, h.media_item_id) AS item_id,
-		       COALESCE(smi.title, mi.title, '') AS title,
-		       COALESCE(CASE WHEN ep.content_id IS NOT NULL THEN 'series' ELSE mi.type END, '') AS media_type,
-		       COUNT(*)::bigint AS plays,
-		       COALESCE(SUM(h.duration_seconds), 0)::bigint AS total_seconds
-		FROM user_watch_history h
-		LEFT JOIN episodes ep ON ep.content_id = h.media_item_id
-		LEFT JOIN media_items mi ON mi.content_id = h.media_item_id
-		LEFT JOIN media_items smi ON smi.content_id = ep.series_id
-		WHERE h.watched_at >= now() - make_interval(days => $1)
-		  AND `+adminTopActivityWatchSourceFilter+`
-		GROUP BY 1, 2, 3
-		ORDER BY plays DESC, total_seconds DESC
-		LIMIT $2
+		WITH ranked AS (
+			SELECT COALESCE(ep.series_id, h.media_item_id) AS item_id,
+			       bool_or(ep.content_id IS NOT NULL) AS is_series,
+			       COUNT(*)::bigint AS plays
+			FROM user_watch_history h
+			LEFT JOIN episodes ep ON ep.content_id = h.media_item_id
+			WHERE h.watched_at >= now() - make_interval(days => $1)
+			  AND `+adminTopActivityWatchSourceFilter+`
+			GROUP BY 1
+			ORDER BY plays DESC, item_id
+			LIMIT $2
+		),
+		watched AS (
+			SELECT COALESCE(ep.series_id, p.media_item_id) AS item_id,
+			       SUM(p.watched_seconds) AS total_seconds
+			FROM playback_history_admin p
+			LEFT JOIN episodes ep ON ep.content_id = p.media_item_id
+			WHERE p.started_at >= now() - make_interval(days => $1)
+			  AND COALESCE(ep.series_id, p.media_item_id) IN (SELECT item_id FROM ranked)
+			GROUP BY 1
+		)
+		SELECT r.item_id,
+		       COALESCE(mi.title, '') AS title,
+		       COALESCE(CASE WHEN r.is_series THEN 'series' ELSE mi.type END, '') AS media_type,
+		       r.plays,
+		       COALESCE(w.total_seconds, 0)::bigint AS total_seconds
+		FROM ranked r
+		LEFT JOIN media_items mi ON mi.content_id = r.item_id
+		LEFT JOIN watched w ON w.item_id = r.item_id
+		ORDER BY r.plays DESC, total_seconds DESC, r.item_id
 	`, days, limit)
 	if err != nil {
 		return nil, fmt.Errorf("querying top titles: %w", err)
@@ -243,29 +273,55 @@ func queryAdminTopActivity(ctx context.Context, pool *pgxpool.Pool, days, limit 
 	// user_watch_history, so they are read back from the most recent admin
 	// playback-history row for that profile. A profile that has only ever been
 	// marked-watched has no such row and falls back to its id.
+	//
+	// The ranking groups on (user_id, profile_id) alone: a profile that was
+	// renamed mid-window would otherwise split into two rows. The name lookup
+	// and the watched-seconds aggregate run after the limit, once per surviving
+	// profile rather than once per history row. As above, total_seconds is
+	// watched time from finalized playback sessions.
 	profileRows, err := pool.Query(ctx, `
-		SELECT h.user_id,
+		WITH ranked AS (
+			SELECT h.user_id,
+			       h.profile_id,
+			       COUNT(*)::bigint AS plays
+			FROM user_watch_history h
+			WHERE h.watched_at >= now() - make_interval(days => $1)
+			  AND `+adminTopActivityWatchSourceFilter+`
+			GROUP BY 1, 2
+			ORDER BY plays DESC, h.user_id, h.profile_id
+			LIMIT $2
+		),
+		watched AS (
+			SELECT p.user_id,
+			       p.profile_id,
+			       SUM(p.watched_seconds) AS total_seconds
+			FROM playback_history_admin p
+			WHERE p.started_at >= now() - make_interval(days => $1)
+			  AND EXISTS (
+				SELECT 1 FROM ranked r
+				WHERE r.user_id = p.user_id AND r.profile_id = p.profile_id
+			  )
+			GROUP BY 1, 2
+		)
+		SELECT r.user_id,
 		       COALESCE(u.username, '') AS username,
-		       h.profile_id,
-		       COALESCE(pn.profile_name, h.profile_id) AS profile_name,
-		       COUNT(*)::bigint AS plays,
-		       COALESCE(SUM(h.duration_seconds), 0)::bigint AS total_seconds
-		FROM user_watch_history h
-		LEFT JOIN users u ON u.id = h.user_id
+		       r.profile_id,
+		       COALESCE(pn.profile_name, r.profile_id) AS profile_name,
+		       r.plays,
+		       COALESCE(w.total_seconds, 0)::bigint AS total_seconds
+		FROM ranked r
+		LEFT JOIN users u ON u.id = r.user_id
+		LEFT JOIN watched w ON w.user_id = r.user_id AND w.profile_id = r.profile_id
 		LEFT JOIN LATERAL (
 			SELECT p.profile_name
 			FROM playback_history_admin p
-			WHERE p.user_id = h.user_id
-			  AND p.profile_id = h.profile_id
+			WHERE p.user_id = r.user_id
+			  AND p.profile_id = r.profile_id
 			  AND p.profile_name <> ''
 			ORDER BY p.ended_at DESC
 			LIMIT 1
 		) pn ON TRUE
-		WHERE h.watched_at >= now() - make_interval(days => $1)
-		  AND `+adminTopActivityWatchSourceFilter+`
-		GROUP BY 1, 2, 3, 4
-		ORDER BY plays DESC, total_seconds DESC
-		LIMIT $2
+		ORDER BY r.plays DESC, total_seconds DESC, r.user_id, r.profile_id
 	`, days, limit)
 	if err != nil {
 		return nil, fmt.Errorf("querying top profiles: %w", err)

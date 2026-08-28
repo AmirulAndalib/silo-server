@@ -144,6 +144,45 @@ describe("HealthStripWidget", () => {
     expect(screen.getByText("Not configured")).toBeTruthy();
   });
 
+  // A node an operator disabled is not expected to report healthy, so it is
+  // neither half of the ratio: one disabled node reads as no nodes at all.
+  it("leaves disabled nodes out of the ratio", () => {
+    mocks.useAdminServerStatus.mockReturnValue({
+      data: status(),
+      isLoading: false,
+      error: null,
+    });
+    mocks.useAdminNodes.mockReturnValue({
+      data: [node({ enabled: false, healthy: false })],
+      isLoading: false,
+      error: null,
+    });
+
+    renderStrip();
+
+    expect(screen.getByText("none")).toBeTruthy();
+    expect(screen.getByText("this server transcodes")).toBeTruthy();
+    expect(screen.queryByText("0/1")).toBeNull();
+  });
+
+  it("counts only enabled nodes in the denominator", () => {
+    mocks.useAdminServerStatus.mockReturnValue({
+      data: status(),
+      isLoading: false,
+      error: null,
+    });
+    mocks.useAdminNodes.mockReturnValue({
+      data: [node(), node({ id: 2, name: "node-2", enabled: false, healthy: false })],
+      isLoading: false,
+      error: null,
+    });
+
+    renderStrip();
+
+    expect(screen.getByText("1/1")).toBeTruthy();
+    expect(screen.getByText("healthy")).toBeTruthy();
+  });
+
   it("says where transcodes run when no stream nodes are registered", () => {
     mocks.useAdminServerStatus.mockReturnValue({
       data: status(),

@@ -61,8 +61,19 @@ export function UsersWidget() {
               {users.slice(0, 8).map((u) => (
                 <TableRow
                   key={u.id}
-                  className="hover:bg-accent/50 cursor-pointer"
+                  className="hover:bg-accent/50 focus-visible:ring-ring cursor-pointer focus-visible:ring-2 focus-visible:outline-none"
+                  role="link"
+                  tabIndex={0}
+                  aria-label={`Open ${u.username}`}
                   onClick={() => navigate(`/admin/users/${u.id}`)}
+                  onKeyDown={(event) => {
+                    // Space scrolls the page by default; a row that behaves like
+                    // a link has to swallow it before navigating.
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      navigate(`/admin/users/${u.id}`);
+                    }
+                  }}
                 >
                   <TableCell>
                     <div className="flex items-center gap-2.5">

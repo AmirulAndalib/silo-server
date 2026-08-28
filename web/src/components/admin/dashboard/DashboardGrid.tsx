@@ -19,7 +19,7 @@ import type { WidgetId } from "./types";
 import type { DashboardLayout } from "./useDashboardLayout";
 import { WidgetChromeProvider } from "./widgetChrome";
 
-/** Must match the `gap` of `.admin-widget-grid` in app.css (0.875rem). */
+/** Fallback for the `gap` of `.admin-widget-grid` in app.css (0.875rem). */
 const GRID_GAP_PX = 14;
 /** Must match `--admin-row-h` on `.admin-widget-grid` in app.css (6.25rem). */
 const GRID_ROW_HEIGHT_PX = 100;
@@ -44,6 +44,25 @@ function readRowHeightPx(grid: HTMLElement | null): number {
   if (raw.endsWith("rem")) {
     const root = Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize);
     return Number.isFinite(root) && root > 0 ? value * root : GRID_ROW_HEIGHT_PX;
+  }
+  return value;
+}
+
+/**
+ * Gutter width in CSS pixels.
+ *
+ * Read back from the resolved `column-gap` for the same reason as the row
+ * height: a drag follows the stylesheet rather than a second copy of the
+ * number. `GRID_GAP_PX` is the fallback for anything that cannot resolve it
+ * (jsdom, a grid that is not mounted yet).
+ */
+function readGapPx(grid: HTMLElement | null): number {
+  if (!grid) {
+    return GRID_GAP_PX;
+  }
+  const value = Number.parseFloat(window.getComputedStyle(grid).columnGap);
+  if (!Number.isFinite(value) || value < 0) {
+    return GRID_GAP_PX;
   }
   return value;
 }
@@ -192,7 +211,8 @@ export function DashboardGrid({
       event.stopPropagation();
       event.currentTarget.setPointerCapture(event.pointerId);
       const gridWidth = gridRef.current?.getBoundingClientRect().width ?? 0;
-      const columnUnit = gridWidth > 0 ? (gridWidth + GRID_GAP_PX) / GRID_COLUMNS : 1;
+      const gapPx = readGapPx(gridRef.current);
+      const columnUnit = gridWidth > 0 ? (gridWidth + gapPx) / GRID_COLUMNS : 1;
       resizeSessionRef.current = {
         id,
         title: widget.title,
@@ -201,7 +221,7 @@ export function DashboardGrid({
         startSpan: currentSpan,
         startRows: currentRows,
         columnUnit,
-        rowUnit: readRowHeightPx(gridRef.current) + GRID_GAP_PX,
+        rowUnit: readRowHeightPx(gridRef.current) + gapPx,
         minSpan: widget.minSpan,
         maxSpan: widget.maxSpan,
         minRows: widget.minRows,

@@ -109,7 +109,7 @@ export function StackedColumnChart({
             <div
               key={column.t}
               className={cn(
-                "flex min-w-0 flex-1 justify-center rounded-sm transition-colors duration-100 focus-visible:outline-none",
+                "focus-visible:ring-ring flex min-w-0 flex-1 justify-center rounded-sm transition-colors duration-100 focus-visible:ring-2 focus-visible:outline-none",
                 activeIndex === index && "bg-foreground/5",
               )}
               tabIndex={0}

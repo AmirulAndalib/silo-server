@@ -13,14 +13,17 @@ import type { WidgetRange } from "./types";
 export const WIDGET_RANGE_ORDER: readonly WidgetRange[] = ["hour", "day", "week", "month"];
 
 /**
- * Hours for the timeseries and playback-activity endpoints. A month is 744
- * hours (31 days), matching the sampler's retention window.
+ * Hours for the timeseries and playback-activity endpoints. A month is 720
+ * hours (30 days), so the charted window matches the "30d" label and the
+ * 30-day window `RANGE_DAYS` asks the top-activity endpoint for. The sampler
+ * retains 31 days — deliberately one day wider than anything charted here, so
+ * the oldest bucket in view is never one the retention job is about to drop.
  */
 const RANGE_HOURS: Record<WidgetRange, number> = {
   hour: 1,
   day: 24,
   week: 168,
-  month: 744,
+  month: 720,
 };
 
 /**

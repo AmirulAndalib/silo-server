@@ -261,7 +261,7 @@ export function LineChart({
           {/* Full-plot hit layer: the pointer only has to be closest on X, never
               land on the 2px stroke. Arrow keys walk the same samples. */}
           <div
-            className="absolute inset-0 cursor-crosshair focus-visible:outline-none"
+            className="focus-visible:ring-ring absolute inset-0 cursor-crosshair rounded-sm focus-visible:ring-2 focus-visible:outline-none"
             tabIndex={0}
             role="application"
             aria-label={`${ariaLabel} — use arrow keys to inspect samples`}

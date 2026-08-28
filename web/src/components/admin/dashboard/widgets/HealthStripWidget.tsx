@@ -28,7 +28,11 @@ export function HealthStripWidget() {
   const status = statusQuery.data;
   const health = status?.health;
   const nodes = nodesQuery.data ?? [];
-  const healthyNodes = nodes.filter((node) => node.enabled && node.healthy).length;
+  // A disabled node is not expected to be healthy, so it belongs in neither
+  // half of the ratio: counting it in the denominator would report a warning
+  // ("0/1") for a deployment whose only node was deliberately taken out.
+  const enabledNodes = nodes.filter((node) => node.enabled);
+  const healthyNodes = enabledNodes.filter((node) => node.healthy).length;
 
   if (statusQuery.isLoading) {
     return <Skeleton className="h-full min-h-[92px] rounded-2xl" />;
@@ -67,9 +71,9 @@ export function HealthStripWidget() {
         <HealthCell
           icon={Server}
           label="Nodes"
-          value={nodes.length === 0 ? "none" : `${healthyNodes}/${nodes.length}`}
-          detail={nodes.length === 0 ? "this server transcodes" : "healthy"}
-          tone={nodes.length > 0 && healthyNodes < nodes.length ? "warn" : undefined}
+          value={enabledNodes.length === 0 ? "none" : `${healthyNodes}/${enabledNodes.length}`}
+          detail={enabledNodes.length === 0 ? "this server transcodes" : "healthy"}
+          tone={healthyNodes < enabledNodes.length ? "warn" : undefined}
         />
         <HealthCell
           icon={AlertTriangle}

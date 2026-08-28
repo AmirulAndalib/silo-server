@@ -94,6 +94,12 @@ func TestAssembleTimeseries(t *testing.T) {
 				if !got[i].T.Equal(tt.want[i].T) {
 					t.Fatalf("point %d time = %s, want %s", i, got[i].T, tt.want[i].T)
 				}
+				// Equal ignores the location, so the instant matching is not
+				// enough: the wire format is UTC, and a dropped .UTC() would
+				// serialize an offset the charts do not expect.
+				if loc := got[i].T.Location(); loc != time.UTC {
+					t.Fatalf("point %d location = %s, want UTC", i, loc)
+				}
 				if got[i].Streams != tt.want[i].Streams ||
 					got[i].Direct != tt.want[i].Direct ||
 					got[i].Remux != tt.want[i].Remux ||

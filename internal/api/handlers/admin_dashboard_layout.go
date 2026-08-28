@@ -60,6 +60,49 @@ func parseDashboardLayoutPayload(body []byte) (json.RawMessage, error) {
 	return raw, nil
 }
 
+// adminDashboardCapabilitiesResponse advertises the admin dashboard surface a
+// server supports. Every field is additive and true on a server that has this
+// endpoint at all; they exist so a client can tell "this deployment is older
+// than my build" from "this deployment is broken" — a server predating the
+// dashboard answers 404 on the aggregates and stores no layout, which is
+// otherwise indistinguishable from a transport failure.
+//
+// Per the v1 rules, new functionality is feature-detected rather than inferred
+// from a version. This follows the existing per-subsystem convention
+// (/admin/sessions/capabilities, /events/capability).
+type adminDashboardCapabilitiesResponse struct {
+	// ServerLayouts reports that GET/PUT/DELETE /admin/dashboard/layout store
+	// the widget arrangement per admin account server-side.
+	ServerLayouts bool `json:"server_layouts"`
+	// Timeseries reports that GET /admin/stats/timeseries serves sampled
+	// concurrent-stream and egress history.
+	Timeseries bool `json:"timeseries"`
+	// PlaybackActivity reports that GET /admin/stats/playback-activity serves
+	// the rolling playback activity aggregate.
+	PlaybackActivity bool `json:"playback_activity"`
+	// TopActivity reports that GET /admin/stats/top-activity serves the
+	// most-watched-titles and most-active-profiles leaderboards.
+	TopActivity bool `json:"top_activity"`
+	// Health reports that GET /admin/server/status carries the additive
+	// `health` object the dashboard health strip reads.
+	Health bool `json:"health"`
+	// LogLevelList reports that GET /admin/logs/app accepts a multi-level
+	// filter rather than a single level.
+	LogLevelList bool `json:"log_level_list"`
+}
+
+// HandleGetDashboardCapabilities handles GET /admin/dashboard/capabilities.
+func (h *AdminHandler) HandleGetDashboardCapabilities(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, adminDashboardCapabilitiesResponse{
+		ServerLayouts:    true,
+		Timeseries:       true,
+		PlaybackActivity: true,
+		TopActivity:      true,
+		Health:           true,
+		LogLevelList:     true,
+	})
+}
+
 // HandleGetDashboardLayout handles GET /admin/dashboard/layout.
 func (h *AdminHandler) HandleGetDashboardLayout(w http.ResponseWriter, r *http.Request) {
 	if h.pool == nil {

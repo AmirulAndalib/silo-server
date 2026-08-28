@@ -220,3 +220,26 @@ func TestPutDashboardLayoutRejectsInvalidBodies(t *testing.T) {
 		})
 	}
 }
+
+// TestDashboardCapabilitiesAdvertisesEverySurface pins the feature-detection
+// contract for the dashboard: a client reads this to tell an older deployment
+// from a failing request, so a surface may only be dropped from the response
+// deliberately.
+func TestDashboardCapabilitiesAdvertisesEverySurface(t *testing.T) {
+	t.Parallel()
+
+	rr := httptest.NewRecorder()
+	(&AdminHandler{}).HandleGetDashboardCapabilities(rr, httptest.NewRequest(http.MethodGet, "/admin/dashboard/capabilities", nil))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+	var resp adminDashboardCapabilitiesResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode capabilities: %v", err)
+	}
+	if !resp.ServerLayouts || !resp.Timeseries || !resp.PlaybackActivity ||
+		!resp.TopActivity || !resp.Health || !resp.LogLevelList {
+		t.Fatalf("capabilities must advertise every dashboard surface: %+v", resp)
+	}
+}

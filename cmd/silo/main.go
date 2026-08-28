@@ -2156,8 +2156,10 @@ func main() {
 
 		// The dashboard metrics sampler is the only writer of concurrent-stream
 		// and egress history. Proxy and transcode nodes serve bytes but do not
-		// own the catalog database, so only the API-facing modes sample.
-		if mode == "integrated" || mode == "api" {
+		// own the catalog database, so only the API-facing modes sample. An
+		// unset SILO_MODE is the integrated default everywhere else in this
+		// file, so it samples too.
+		if mode == "integrated" || mode == "api" || mode == "" {
 			dashSampler := dashmetrics.NewSampler(deps.DB, deps.StreamTelemetry, nodeIdentity)
 			dashSampler.Start(appCtx)
 			defer dashSampler.Stop()

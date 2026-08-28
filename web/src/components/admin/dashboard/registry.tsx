@@ -374,45 +374,54 @@ export function findDashboardWidget(id: string): DashboardWidgetDefinition | und
 }
 
 /**
- * The boxes of the default arrangement: live numbers first, then the charts
+ * The order of the default arrangement: live numbers first, then the charts
  * that explain them, then the operational surfaces that are only interesting
  * when something is wrong. Admins who already customized their dashboard keep
  * their stored layout — this list is only the starting point, and every widget
  * stays available from the Add-widget sheet.
  *
- * Windows are not written here; DEFAULT_LAYOUT below stamps each ranged widget
- * with the default from its own definition, so the two cannot drift apart.
+ * Only the order lives here. Sizes and windows come from each widget's own
+ * definition below, so a widget can never start out at a size its definition
+ * disagrees with.
  */
-const DEFAULT_LAYOUT_BOXES: DashboardLayoutEntry[] = [
-  { id: "stat-active-streams", span: 3, rows: 1 },
-  { id: "stat-egress-now", span: 3, rows: 1 },
-  { id: "stat-transcode-share", span: 3, rows: 1 },
-  { id: "stat-profiles-active", span: 3, rows: 1 },
-  { id: "stat-movies", span: 3, rows: 1 },
-  { id: "stat-shows", span: 3, rows: 1 },
-  { id: "stat-users", span: 3, rows: 1 },
-  { id: "stat-storage", span: 3, rows: 1 },
-  { id: "health-strip", span: 12, rows: 1 },
-  { id: "server-resources", span: 12, rows: 2 },
-  { id: "playback-24h", span: 6, rows: 3 },
-  { id: "concurrent-streams-24h", span: 6, rows: 3 },
-  { id: "egress-24h", span: 6, rows: 3 },
-  { id: "playback-reliability", span: 6, rows: 2 },
-  { id: "now-playing", span: 12, rows: 4 },
-  { id: "transcode-nodes", span: 6, rows: 3 },
-  { id: "scanner", span: 6, rows: 3 },
-  { id: "libraries", span: 7, rows: 4 },
-  { id: "users", span: 5, rows: 4 },
-  { id: "top-titles", span: 6, rows: 3 },
-  { id: "top-profiles", span: 6, rows: 3 },
-  { id: "trakt-sync", span: 9, rows: 1 },
-  { id: "scan-activity", span: 12, rows: 3 },
-  { id: "recent-errors", span: 12, rows: 4 },
-  { id: "recent-activity", span: 12, rows: 4 },
+const DEFAULT_LAYOUT_ORDER: WidgetId[] = [
+  "stat-active-streams",
+  "stat-egress-now",
+  "stat-transcode-share",
+  "stat-profiles-active",
+  "stat-movies",
+  "stat-shows",
+  "stat-users",
+  "stat-storage",
+  "health-strip",
+  "server-resources",
+  "playback-24h",
+  "concurrent-streams-24h",
+  "egress-24h",
+  "playback-reliability",
+  "now-playing",
+  "transcode-nodes",
+  "scanner",
+  "libraries",
+  "users",
+  "top-titles",
+  "top-profiles",
+  "trakt-sync",
+  "scan-activity",
+  "recent-errors",
+  "recent-activity",
 ];
 
-/** The default arrangement, with each ranged widget on its default window. */
-export const DEFAULT_LAYOUT: DashboardLayoutEntry[] = DEFAULT_LAYOUT_BOXES.map((entry) => {
-  const ranges = getDashboardWidget(entry.id).ranges;
-  return ranges ? { ...entry, range: ranges.default } : entry;
+/**
+ * The default arrangement: every widget at its own default size, and each
+ * ranged one on its own default window.
+ */
+export const DEFAULT_LAYOUT: DashboardLayoutEntry[] = DEFAULT_LAYOUT_ORDER.map((id) => {
+  const widget = getDashboardWidget(id);
+  const entry: DashboardLayoutEntry = {
+    id: widget.id,
+    span: widget.defaultSpan,
+    rows: widget.defaultRows,
+  };
+  return widget.ranges ? { ...entry, range: widget.ranges.default } : entry;
 });

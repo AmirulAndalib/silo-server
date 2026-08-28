@@ -2955,6 +2955,7 @@ func NewRouter(deps Dependencies) chi.Router {
 							// Per-admin-account dashboard arrangement. The server
 							// stores it as an opaque JSON object; the web client
 							// owns widget-id and span validation.
+							r.Get("/dashboard/capabilities", adminHandler.HandleGetDashboardCapabilities)
 							r.Get("/dashboard/layout", adminHandler.HandleGetDashboardLayout)
 							r.Put("/dashboard/layout", adminHandler.HandlePutDashboardLayout)
 							r.Delete("/dashboard/layout", adminHandler.HandleDeleteDashboardLayout)

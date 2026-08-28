@@ -746,6 +746,34 @@ Body: `{"layout": {…}}`. Responds `204 No Content` on success, and
 Resets this admin to the default arrangement. `204 No Content`, and idempotent:
 deleting a layout that is not there succeeds.
 
+## `GET /api/v1/admin/dashboard/capabilities`
+
+Feature detection for the admin dashboard surface. Per the v1 rules a new
+feature is detected rather than inferred from a server version, and every field
+here is additive: a server that has this endpoint answers `true` for all of
+them, and a server that predates the dashboard answers `404`. That is how a
+client tells "this deployment is older than my build" from "the request failed".
+
+| Field | Meaning |
+|---|---|
+| `server_layouts` | `GET`/`PUT`/`DELETE /admin/dashboard/layout` store the widget arrangement per admin account. |
+| `timeseries` | `GET /admin/stats/timeseries` serves sampled concurrent-stream and egress history. |
+| `playback_activity` | `GET /admin/stats/playback-activity` serves the rolling playback activity aggregate. |
+| `top_activity` | `GET /admin/stats/top-activity` serves the leaderboards. |
+| `health` | `GET /admin/server/status` carries the additive `health` object. |
+| `log_level_list` | `GET /admin/logs/app` accepts a multi-level filter. |
+
+```json
+{
+  "server_layouts": true,
+  "timeseries": true,
+  "playback_activity": true,
+  "top_activity": true,
+  "health": true,
+  "log_level_list": true
+}
+```
+
 ## `GET /api/v1/admin/stats/timeseries`
 
 Sampled history for the concurrent-streams and egress charts. Cached in-process
@@ -891,14 +919,25 @@ for 5 minutes — a seven-day ranking barely moves within minutes — with the s
 | `limit` | int | Rows per list. Default 10, clamped to 1..25. |
 | `refresh` | bool | Bypass the cache for this read. |
 
-Both lists read `user_watch_history` with the same source exclusions as
-`profiles_active_24h` above. Episodes are rolled up to their series, so a
-season binge reads as one show and a title's `media_item_id` is a series
-content id for TV. Profile display names live in the per-user stores rather
-than in watch history, so they are read back from that profile's most recent
-`playback_history_admin` row; a profile that has only ever marked things
-watched falls back to its profile id. No poster URLs are returned — the
-bar-list widgets do not need them, and it keeps the query cheap.
+`plays` on both lists counts `user_watch_history` rows with the same source
+exclusions as `profiles_active_24h` above, so marking something watched counts
+as a play. Episodes are rolled up to their series, so a season binge reads as
+one show and a title's `media_item_id` is a series content id for TV.
+
+`total_seconds` is **watched time**, summed from finalized playback sessions
+(`playback_history_admin.watched_seconds`) started inside the same window — not
+the runtime of what was played. Watch history records the media's full duration,
+so summing that would report three hours for a movie someone abandoned after a
+minute. An entry that was only ever marked watched has no sessions and reports
+`0`.
+
+Profile display names live in the per-user stores rather than in watch history,
+so they are read back from that profile's most recent `playback_history_admin`
+row; a profile that has only ever marked things watched falls back to its
+profile id. Ties are broken on a stable key (`media_item_id`, or
+`user_id`/`profile_id`) so equal rows keep their order between refreshes. No
+poster URLs are returned — the bar-list widgets do not need them, and it keeps
+the query cheap.
 
 Both lists are `[]` on a server with no history, never `null`.
 

@@ -48,15 +48,31 @@ function activity(overrides: Partial<AdminPlaybackActivity> = {}): AdminPlayback
 }
 
 describe("buildPlaybackActivityColumns", () => {
+  // The endpoint filters on `started_at >= now() - interval` and then truncates,
+  // so at 14:37 a 24-hour window legitimately contains 25 hourly buckets: the
+  // partial one that starts at 14:00 yesterday through the current hour.
   it("zero-fills the whole window when the response is empty", () => {
     const columns = buildPlaybackActivityColumns([], { now: NOW });
 
-    expect(columns).toHaveLength(24);
-    expect(columns[0]?.t).toBe(CURRENT_HOUR - 23 * HOUR_MS);
-    expect(columns[23]?.t).toBe(CURRENT_HOUR);
+    expect(columns).toHaveLength(25);
+    expect(columns[0]?.t).toBe(CURRENT_HOUR - 24 * HOUR_MS);
+    expect(columns[24]?.t).toBe(CURRENT_HOUR);
     for (const column of columns) {
       expect([...column.segments]).toEqual([0, 0, 0]);
     }
+  });
+
+  // The leading bucket is only half inside the window, but every session the
+  // endpoint counted for it is: dropping the column would lose them.
+  it("keeps the leading partial bucket the endpoint can return", () => {
+    const columns = buildPlaybackActivityColumns(
+      [{ hour: isoHour(24), direct: 3, remux: 0, transcode: 1 }],
+      { now: NOW },
+    );
+
+    expect(columns).toHaveLength(25);
+    expect(columns[0]?.t).toBe(CURRENT_HOUR - 24 * HOUR_MS);
+    expect([...(columns[0]?.segments ?? [])]).toEqual([3, 0, 1]);
   });
 
   it("places sparse buckets at their hour and leaves the quiet hours at zero", () => {
@@ -68,11 +84,11 @@ describe("buildPlaybackActivityColumns", () => {
       { now: NOW },
     );
 
-    expect(columns).toHaveLength(24);
-    expect([...(columns[21]?.segments ?? [])]).toEqual([4, 1, 2]);
-    expect([...(columns[0]?.segments ?? [])]).toEqual([1, 0, 0]);
-    expect([...(columns[22]?.segments ?? [])]).toEqual([0, 0, 0]);
+    expect(columns).toHaveLength(25);
+    expect([...(columns[22]?.segments ?? [])]).toEqual([4, 1, 2]);
+    expect([...(columns[1]?.segments ?? [])]).toEqual([1, 0, 0]);
     expect([...(columns[23]?.segments ?? [])]).toEqual([0, 0, 0]);
+    expect([...(columns[24]?.segments ?? [])]).toEqual([0, 0, 0]);
   });
 
   it("ignores buckets outside the window and unparseable timestamps", () => {
@@ -84,12 +100,12 @@ describe("buildPlaybackActivityColumns", () => {
       { now: NOW },
     );
 
-    expect(columns).toHaveLength(24);
+    expect(columns).toHaveLength(25);
     expect(columns.every((column) => column.segments.every((value) => value === 0))).toBe(true);
   });
 
   it("treats a missing response as an empty window", () => {
-    expect(buildPlaybackActivityColumns(undefined, { now: NOW })).toHaveLength(24);
+    expect(buildPlaybackActivityColumns(undefined, { now: NOW })).toHaveLength(25);
   });
 
   // Past two days the endpoint groups by day, and zero-filling on an hourly
@@ -100,16 +116,18 @@ describe("buildPlaybackActivityColumns", () => {
       { hours: 168, bucketSeconds: 86_400, now: NOW },
     );
 
-    expect(columns).toHaveLength(7);
-    expect(columns[0]?.t).toBe(CURRENT_DAY - 6 * DAY_MS);
-    expect(columns[6]?.t).toBe(CURRENT_DAY);
-    expect([...(columns[3]?.segments ?? [])]).toEqual([5, 0, 1]);
-    expect([...(columns[4]?.segments ?? [])]).toEqual([0, 0, 0]);
+    // Eight columns, not seven: the day the window opens in is partial and the
+    // endpoint still reports it.
+    expect(columns).toHaveLength(8);
+    expect(columns[0]?.t).toBe(CURRENT_DAY - 7 * DAY_MS);
+    expect(columns[7]?.t).toBe(CURRENT_DAY);
+    expect([...(columns[4]?.segments ?? [])]).toEqual([5, 0, 1]);
+    expect([...(columns[5]?.segments ?? [])]).toEqual([0, 0, 0]);
   });
 
   it("covers a month with 31 daily columns", () => {
     const columns = buildPlaybackActivityColumns([], {
-      hours: 744,
+      hours: 720,
       bucketSeconds: 86_400,
       now: NOW,
     });
@@ -120,7 +138,7 @@ describe("buildPlaybackActivityColumns", () => {
   it("falls back to hourly buckets when the response omits the width", () => {
     const columns = buildPlaybackActivityColumns([], { hours: 24, bucketSeconds: 0, now: NOW });
 
-    expect(columns).toHaveLength(24);
+    expect(columns).toHaveLength(25);
   });
 });
 
@@ -143,18 +161,19 @@ describe("PlaybackActivityWidget", () => {
     render(<PlaybackActivityWidget />);
 
     const chart = screen.getByRole("img", { name: /playback sessions per hour/i });
-    expect(chart.querySelectorAll(":scope > div")).toHaveLength(24);
+    // 25 hourly columns: the hour the window opens in is partial but real.
+    expect(chart.querySelectorAll(":scope > div")).toHaveLength(25);
     expect(screen.getByText("3 sessions")).toBeTruthy();
     expect(screen.getByText("Direct stream")).toBeTruthy();
     expect(screen.getByText("Playback activity · last 24 h")).toBeTruthy();
   });
 
-  // A month asks for 744 hours and gets daily buckets back, so the chart has to
-  // draw 31 columns rather than 744 near-empty hourly ones.
+  // A month asks for 720 hours and gets daily buckets back, so the chart has to
+  // draw 31 columns rather than 720 near-empty hourly ones.
   it("renders one column per day when the server bucketed daily", () => {
     mocks.useAdminPlaybackActivity.mockReturnValue({
       data: activity({
-        hours: 744,
+        hours: 720,
         bucket_seconds: 86_400,
         buckets: [
           { hour: new Date(Date.now() - DAY_MS).toISOString(), direct: 4, remux: 0, transcode: 2 },
@@ -170,7 +189,7 @@ describe("PlaybackActivityWidget", () => {
       </WidgetChromeProvider>,
     );
 
-    expect(mocks.useAdminPlaybackActivity).toHaveBeenCalledWith(744);
+    expect(mocks.useAdminPlaybackActivity).toHaveBeenCalledWith(720);
     const chart = screen.getByRole("img", { name: /playback sessions per day/i });
     expect(chart.querySelectorAll(":scope > div")).toHaveLength(31);
     expect(screen.getByText("6 sessions")).toBeTruthy();

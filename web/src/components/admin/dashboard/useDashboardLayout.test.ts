@@ -7,15 +7,19 @@ import type { AdminDashboardLayoutResponse } from "@/api/types";
 import { DASHBOARD_WIDGETS, DEFAULT_LAYOUT } from "./registry";
 import {
   DASHBOARD_LAYOUT_SAVE_DEBOUNCE_MS,
-  DASHBOARD_LAYOUT_STORAGE_KEY,
+  dashboardLayoutStorageKey,
+  LEGACY_DASHBOARD_LAYOUT_STORAGE_KEY,
   useDashboardLayout,
 } from "./useDashboardLayout";
 import type { DashboardLayoutEntry } from "./types";
+
+const ADMIN_USER_ID = 1;
 
 const mocks = vi.hoisted(() => ({
   query: { data: undefined as AdminDashboardLayoutResponse | undefined, isSuccess: false },
   save: vi.fn(),
   reset: vi.fn(),
+  userId: 1,
 }));
 
 vi.mock("@/hooks/queries/admin/dashboardLayout", () => ({
@@ -23,6 +27,16 @@ vi.mock("@/hooks/queries/admin/dashboardLayout", () => ({
   useSaveAdminDashboardLayout: () => ({ mutate: mocks.save }),
   useResetAdminDashboardLayout: () => ({ mutate: mocks.reset }),
 }));
+
+// The layout cache is keyed by the signed-in account, so every test needs an
+// authenticated user; `mocks.userId` is the account the hook sees.
+vi.mock("@/hooks/useAuth", () => ({
+  useAuth: () => ({ user: { id: mocks.userId } }),
+}));
+
+function storageKey(userId: number = mocks.userId): string {
+  return dashboardLayoutStorageKey(userId);
+}
 
 function serverLayout(entries: unknown, updatedAt = "2026-08-26T10:00:00Z") {
   mocks.query = {
@@ -35,19 +49,16 @@ function serverNoLayout() {
   mocks.query = { data: { layout: null, updated_at: null }, isSuccess: true };
 }
 
-function readStored(): { version: number; entries: DashboardLayoutEntry[] } {
-  const raw = window.localStorage.getItem(DASHBOARD_LAYOUT_STORAGE_KEY);
+function readStored(userId?: number): { version: number; entries: DashboardLayoutEntry[] } {
+  const raw = window.localStorage.getItem(storageKey(userId));
   if (raw === null) {
     throw new Error("expected a persisted layout");
   }
   return JSON.parse(raw) as { version: number; entries: DashboardLayoutEntry[] };
 }
 
-function writeStored(entries: unknown) {
-  window.localStorage.setItem(
-    DASHBOARD_LAYOUT_STORAGE_KEY,
-    JSON.stringify({ version: 1, entries }),
-  );
+function writeStored(entries: unknown, userId?: number) {
+  window.localStorage.setItem(storageKey(userId), JSON.stringify({ version: 1, entries }));
 }
 
 // A widget joins the registry before it joins DEFAULT_LAYOUT — new widgets
@@ -63,6 +74,7 @@ function hiddenWidgetIds(...alsoRemoved: string[]): string[] {
 describe("useDashboardLayout", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    mocks.userId = ADMIN_USER_ID;
     mocks.query = { data: undefined, isSuccess: false };
     mocks.save.mockReset();
     mocks.reset.mockReset();
@@ -77,7 +89,7 @@ describe("useDashboardLayout", () => {
   });
 
   it("falls back to the default layout on corrupt JSON", () => {
-    window.localStorage.setItem(DASHBOARD_LAYOUT_STORAGE_KEY, "{not json");
+    window.localStorage.setItem(storageKey(), "{not json");
 
     const { result } = renderHook(() => useDashboardLayout());
 
@@ -86,7 +98,7 @@ describe("useDashboardLayout", () => {
 
   it("falls back to the default layout on an unexpected shape", () => {
     window.localStorage.setItem(
-      DASHBOARD_LAYOUT_STORAGE_KEY,
+      storageKey(),
       JSON.stringify({ version: 2, entries: [{ id: "libraries", span: 7 }] }),
     );
 
@@ -463,7 +475,7 @@ describe("useDashboardLayout", () => {
     });
 
     expect(result.current.entries).toEqual(DEFAULT_LAYOUT);
-    expect(window.localStorage.getItem(DASHBOARD_LAYOUT_STORAGE_KEY)).toBeNull();
+    expect(window.localStorage.getItem(storageKey())).toBeNull();
   });
 
   it("round-trips a customized layout through localStorage", () => {
@@ -493,6 +505,7 @@ describe("useDashboardLayout", () => {
 describe("useDashboardLayout server persistence", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    mocks.userId = ADMIN_USER_ID;
     mocks.query = { data: undefined, isSuccess: false };
     mocks.save.mockReset();
     mocks.reset.mockReset();
@@ -664,6 +677,64 @@ describe("useDashboardLayout server persistence", () => {
     expect(mocks.reset).toHaveBeenCalledTimes(1);
     expect(mocks.save).not.toHaveBeenCalled();
     expect(result.current.entries).toEqual(DEFAULT_LAYOUT);
-    expect(window.localStorage.getItem(DASHBOARD_LAYOUT_STORAGE_KEY)).toBeNull();
+    expect(window.localStorage.getItem(storageKey())).toBeNull();
+  });
+});
+
+describe("useDashboardLayout account scoping", () => {
+  const OTHER_ADMIN_USER_ID = 2;
+
+  beforeEach(() => {
+    window.localStorage.clear();
+    mocks.userId = ADMIN_USER_ID;
+    mocks.query = { data: undefined, isSuccess: false };
+    mocks.save.mockReset();
+    mocks.reset.mockReset();
+  });
+
+  it("does not show one admin's cached layout to another on the same browser", () => {
+    writeStored([{ id: "users", span: 5, rows: 6 }], ADMIN_USER_ID);
+
+    mocks.userId = OTHER_ADMIN_USER_ID;
+    const { result } = renderHook(() => useDashboardLayout());
+
+    expect(result.current.entries).toEqual(DEFAULT_LAYOUT);
+  });
+
+  it("writes each account's edits under its own key", () => {
+    const first = renderHook(() => useDashboardLayout());
+    act(() => {
+      first.result.current.resizeWidget("users", { span: 8 });
+    });
+    first.unmount();
+
+    mocks.userId = OTHER_ADMIN_USER_ID;
+    const second = renderHook(() => useDashboardLayout());
+    act(() => {
+      second.result.current.removeWidget("users");
+    });
+
+    expect(readStored(ADMIN_USER_ID).entries.find((entry) => entry.id === "users")).toMatchObject({
+      span: 8,
+    });
+    expect(readStored(OTHER_ADMIN_USER_ID).entries.some((entry) => entry.id === "users")).toBe(
+      false,
+    );
+  });
+
+  // The unscoped key cannot be attributed to an account, so it is deleted
+  // rather than adopted — and above all never uploaded as someone's layout.
+  it("deletes the pre-scoping cache without migrating it to the server", () => {
+    window.localStorage.setItem(
+      LEGACY_DASHBOARD_LAYOUT_STORAGE_KEY,
+      JSON.stringify({ version: 1, entries: [{ id: "users", span: 5, rows: 6 }] }),
+    );
+    serverNoLayout();
+
+    const { result } = renderHook(() => useDashboardLayout());
+
+    expect(window.localStorage.getItem(LEGACY_DASHBOARD_LAYOUT_STORAGE_KEY)).toBeNull();
+    expect(mocks.save).not.toHaveBeenCalled();
+    expect(result.current.entries).toEqual(DEFAULT_LAYOUT);
   });
 });

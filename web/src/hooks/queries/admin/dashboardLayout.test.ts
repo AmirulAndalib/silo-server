@@ -132,6 +132,89 @@ describe("useSaveAdminDashboardLayout", () => {
   });
 });
 
+// Both mutations share one scope, so react-query runs them one at a time in
+// the order they were started. Without that an older PUT can land last and
+// seed the cache with a stale document, and a reset can be overtaken by a save
+// that resurrects the arrangement it discarded.
+describe("dashboard layout writes are serialized", () => {
+  beforeEach(() => {
+    mocks.api.mockReset();
+    mocks.toastError.mockReset();
+    mocks.toastSuccess.mockReset();
+  });
+
+  function renderWriters(queryClient: QueryClient) {
+    return renderHook(
+      () => ({
+        save: useSaveAdminDashboardLayout(),
+        reset: useResetAdminDashboardLayout(),
+      }),
+      { wrapper: createWrapper(queryClient) },
+    );
+  }
+
+  it("holds a second save until the first one finishes", async () => {
+    const queryClient = createQueryClient();
+    const started: string[] = [];
+    const release: (() => void)[] = [];
+    mocks.api.mockImplementation(() => {
+      started.push("PUT");
+      return new Promise<void>((resolve) => release.push(() => resolve()));
+    });
+    const { result } = renderWriters(queryClient);
+
+    const second = { version: 1, entries: [{ id: "users", span: 5, rows: 4 }] };
+    act(() => {
+      result.current.save.mutate(layoutDocument);
+      result.current.save.mutate(second);
+    });
+
+    await waitFor(() => expect(started).toEqual(["PUT"]));
+    act(() => release[0]?.());
+    await waitFor(() => expect(started).toEqual(["PUT", "PUT"]));
+    act(() => release[1]?.());
+
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData<AdminDashboardLayoutResponse>(["admin", "dashboard", "layout"])
+          ?.layout,
+      ).toEqual(second),
+    );
+  });
+
+  it("runs a reset after a save that is already in flight", async () => {
+    const queryClient = createQueryClient();
+    const started: string[] = [];
+    let releaseSave: (() => void) | undefined;
+    mocks.api.mockImplementation((_path: string, init?: { method?: string }) => {
+      started.push(init?.method ?? "GET");
+      if (init?.method === "PUT") {
+        return new Promise<void>((resolve) => {
+          releaseSave = () => resolve();
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    const { result } = renderWriters(queryClient);
+
+    act(() => {
+      result.current.save.mutate(layoutDocument);
+      result.current.reset.mutate();
+    });
+
+    await waitFor(() => expect(started).toEqual(["PUT"]));
+    act(() => releaseSave?.());
+
+    await waitFor(() => expect(started).toEqual(["PUT", "DELETE"]));
+    await waitFor(() =>
+      expect(queryClient.getQueryData(["admin", "dashboard", "layout"])).toEqual({
+        layout: null,
+        updated_at: null,
+      }),
+    );
+  });
+});
+
 describe("useResetAdminDashboardLayout", () => {
   beforeEach(() => {
     mocks.api.mockReset();

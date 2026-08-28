@@ -13,6 +13,17 @@ const SAVE_TOAST_ID = "admin-dashboard-layout-save";
 const RESET_TOAST_ID = "admin-dashboard-layout-reset";
 
 /**
+ * Writes to the layout row run one at a time.
+ *
+ * Same-scope mutations queue and execute in the order they were started, which
+ * is what keeps the last write the admin made the one that wins: without it two
+ * saves can overlap and the slower one's `onSuccess` seeds the cache with the
+ * older document, and a reset can land before an in-flight save that then
+ * resurrects the arrangement it just discarded.
+ */
+const LAYOUT_MUTATION_SCOPE = { id: "admin-dashboard-layout" } as const;
+
+/**
  * Reads this admin account's saved dashboard arrangement.
  *
  * `staleTime: Infinity` on purpose: the layout only changes when this admin
@@ -32,6 +43,7 @@ export function useAdminDashboardLayout() {
 export function useSaveAdminDashboardLayout() {
   const queryClient = useQueryClient();
   return useMutation({
+    scope: LAYOUT_MUTATION_SCOPE,
     mutationFn: (layout: AdminDashboardLayoutDocument) =>
       api<void>(DASHBOARD_LAYOUT_PATH, {
         method: "PUT",
@@ -53,6 +65,7 @@ export function useSaveAdminDashboardLayout() {
 export function useResetAdminDashboardLayout() {
   const queryClient = useQueryClient();
   return useMutation({
+    scope: LAYOUT_MUTATION_SCOPE,
     mutationFn: () => api<void>(DASHBOARD_LAYOUT_PATH, { method: "DELETE" }),
     onSuccess: () => {
       queryClient.setQueryData<AdminDashboardLayoutResponse>(adminKeys.dashboardLayout(), {
