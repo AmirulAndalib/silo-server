@@ -17,12 +17,13 @@ export type WidgetId =
   | "playback-reliability"
   | "top-titles"
   | "top-profiles"
-  | "trakt-sync"
+  | "watch-providers"
   | "now-playing"
   | "transcode-nodes"
   | "scanner"
   | "libraries"
   | "users"
+  | "downloads"
   | "scan-activity"
   | "recent-errors"
   | "recent-activity";
@@ -63,6 +64,15 @@ export interface DashboardWidgetDefinition {
   minRows: number;
   maxRows: number;
   defaultRows: number;
+  /**
+   * Height to fall back to while the widget reports it has nothing to show.
+   *
+   * Opt-in: a widget with no `collapsedRows` always occupies the rows the admin
+   * gave it. The one that has it renders a slim strip instead of a tall empty
+   * box on an idle server, and springs back to `rows` the moment it has
+   * content. Customize mode ignores it so drag and resize targets stay put.
+   */
+  collapsedRows?: number;
   ranges?: WidgetRangeOptions;
   Component: React.ComponentType;
 }

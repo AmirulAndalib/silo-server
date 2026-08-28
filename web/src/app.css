@@ -2165,6 +2165,35 @@
     min-width: 0;
   }
 
+  /* ── Dashboard Widget Scrollbars ──────────────────────────── */
+  /* Widget bodies scroll inside their row, so the default OS bar
+     sits right on top of the theme. One rule covers every widget:
+     `scrollbar-width`/`scrollbar-color` inherit, so Firefox picks
+     them up from the grid, and WebKit gets a descendant rule.
+     Matches .overlay-scroll so the dashboard and its Add-widget
+     sheet look the same.                                        */
+  .admin-widget-grid {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--foreground) 15%, transparent) transparent;
+  }
+  .admin-widget-grid ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .admin-widget-grid ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .admin-widget-grid ::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--foreground) 15%, transparent);
+    border-radius: 3px;
+  }
+  .admin-widget-grid ::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, var(--foreground) 30%, transparent);
+  }
+  .admin-widget-grid ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
   @media (min-width: 640px) and (max-width: 1023px) {
     .admin-widget-grid {
       grid-template-columns: repeat(2, 1fr);

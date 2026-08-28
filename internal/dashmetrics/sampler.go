@@ -15,7 +15,10 @@
 //   - "proc:<node_id>" carries the viewer egress served by one API process,
 //     measured from the local stream-telemetry registry. stream_nodes only
 //     describes external stream nodes, so without these rows a single-server
-//     deployment would chart zero egress forever.
+//     deployment would chart zero egress forever. egress_kbps is the process
+//     total; download_egress_kbps is the file-transfer subset of that total
+//     (see computeEgressDelta), so the dashboard can split playback from
+//     download traffic.
 //
 // Sampling is best-effort: every failure is logged and swallowed. A missed
 // minute is a gap in the chart, never a failed request or a dead server.
@@ -188,12 +191,19 @@ func (s *Sampler) sampleProcessEgress(ctx context.Context, at time.Time, bucket 
 	}
 
 	// Zero minutes are written too: an idle server should draw a line along the
-	// baseline, not a gap that reads as "no data".
+	// baseline, not a gap that reads as "no data". egress_kbps stays the total
+	// this process served (its pre-split meaning), while download_egress_kbps
+	// carries the file-transfer subset. The subset is clamped under the total
+	// after rounding so a reader deriving playback as total - download can
+	// never see a negative minute from two independent roundings.
+	elapsed := at.Sub(previousAt)
+	totalKbps := egressKbps(delta.Total, elapsed)
+	downloadKbps := min(egressKbps(delta.Download, elapsed), totalKbps)
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO dashboard_metric_samples (bucket, source, egress_kbps)
-		VALUES ($1, $2, $3)
+		INSERT INTO dashboard_metric_samples (bucket, source, egress_kbps, download_egress_kbps)
+		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (bucket, source) DO NOTHING
-	`, bucket, s.source, egressKbps(delta, at.Sub(previousAt)))
+	`, bucket, s.source, totalKbps, downloadKbps)
 	if err != nil {
 		slog.WarnContext(ctx, "failed to sample process egress", "component", component, "source", s.source, "error", err)
 	}

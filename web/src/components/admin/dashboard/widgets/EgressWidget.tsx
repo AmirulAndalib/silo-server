@@ -23,16 +23,42 @@ import { buildTimeseriesPoints } from "./timeseriesSeries";
  * node-less single-server install charts the second alone. Wide windows are
  * bucketed server-side to the peak minute in each bucket, so "Peak" means the
  * same thing at every range.
+ *
+ * When the window contains measured download traffic the chart splits into
+ * Playback (`egress_kbps - download_egress_kbps`) and Downloads
+ * (`download_egress_kbps`) series. Without any — including on samples written
+ * before the server measured the split — it stays a single "Egress" line
+ * rather than labeling a possibly-mixed total "Playback".
  */
 export function EgressWidget() {
   const { range } = useWidgetRange();
   const query = useAdminTimeseries(rangeHours(range));
-  const points = useMemo(
-    () => buildTimeseriesPoints(query.data, (point) => point.egress_kbps / 1_000),
+  const hasDownloadTraffic = useMemo(
+    () => (query.data?.points ?? []).some((point) => (point.download_egress_kbps ?? 0) > 0),
     [query.data],
   );
+  const points = useMemo(
+    () =>
+      buildTimeseriesPoints(query.data, (point) =>
+        hasDownloadTraffic
+          ? (point.egress_kbps - (point.download_egress_kbps ?? 0)) / 1_000
+          : point.egress_kbps / 1_000,
+      ),
+    [query.data, hasDownloadTraffic],
+  );
+  const downloadPoints = useMemo(
+    () =>
+      hasDownloadTraffic
+        ? buildTimeseriesPoints(query.data, (point) => (point.download_egress_kbps ?? 0) / 1_000)
+        : [],
+    [query.data, hasDownloadTraffic],
+  );
 
-  const peak = points.reduce((max, point) => Math.max(max, point.value ?? 0), 0);
+  // Peak stays the total the deployment pushed, whichever way it is charted.
+  const peak = points.reduce(
+    (max, point, index) => Math.max(max, (point.value ?? 0) + (downloadPoints[index]?.value ?? 0)),
+    0,
+  );
 
   return (
     <Card className="h-full">
@@ -49,7 +75,12 @@ export function EgressWidget() {
         <TimeseriesChartBody
           query={query}
           points={points}
-          seriesLabel="Egress"
+          seriesLabel={hasDownloadTraffic ? "Playback" : "Egress"}
+          overlays={
+            hasDownloadTraffic
+              ? [{ label: "Downloads", points: downloadPoints, seriesIndex: 1 }]
+              : undefined
+          }
           ariaLabel={`Egress over ${rangePhrase(range)}, in megabits per second`}
           errorMessage="Failed to load egress history."
           emptyMessage="No egress samples yet"

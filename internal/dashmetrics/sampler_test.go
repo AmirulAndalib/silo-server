@@ -23,14 +23,14 @@ func TestComputeEgressDelta(t *testing.T) {
 		name      string
 		prev      map[string]int64
 		snapshot  streamtelemetry.Snapshot
-		wantDelta int64
+		wantDelta egressDelta
 		wantNext  map[string]int64
 	}{
 		{
 			name:      "empty snapshot yields nothing",
 			prev:      map[string]int64{},
 			snapshot:  streamtelemetry.Snapshot{},
-			wantDelta: 0,
+			wantDelta: egressDelta{},
 			wantNext:  map[string]int64{},
 		},
 		{
@@ -39,7 +39,7 @@ func TestComputeEgressDelta(t *testing.T) {
 			snapshot: streamtelemetry.Snapshot{
 				Sessions: []streamtelemetry.SessionView{viewerSession("s1", 4_000)},
 			},
-			wantDelta: 4_000,
+			wantDelta: egressDelta{Total: 4_000},
 			wantNext:  map[string]int64{"session:s1": 4_000},
 		},
 		{
@@ -48,7 +48,7 @@ func TestComputeEgressDelta(t *testing.T) {
 			snapshot: streamtelemetry.Snapshot{
 				Sessions: []streamtelemetry.SessionView{viewerSession("s1", 6_500)},
 			},
-			wantDelta: 2_500,
+			wantDelta: egressDelta{Total: 2_500},
 			wantNext:  map[string]int64{"session:s1": 6_500},
 		},
 		{
@@ -57,7 +57,7 @@ func TestComputeEgressDelta(t *testing.T) {
 			snapshot: streamtelemetry.Snapshot{
 				Sessions: []streamtelemetry.SessionView{viewerSession("s2", 1_000)},
 			},
-			wantDelta: 0,
+			wantDelta: egressDelta{},
 			wantNext:  map[string]int64{"session:s2": 1_000},
 		},
 		{
@@ -66,7 +66,7 @@ func TestComputeEgressDelta(t *testing.T) {
 			snapshot: streamtelemetry.Snapshot{
 				Sessions: []streamtelemetry.SessionView{viewerSession("s1", 500)},
 			},
-			wantDelta: 0,
+			wantDelta: egressDelta{},
 			wantNext:  map[string]int64{"session:s1": 500},
 		},
 		{
@@ -78,7 +78,7 @@ func TestComputeEgressDelta(t *testing.T) {
 					viewerSession("s2", 900),
 				},
 			},
-			wantDelta: 800,
+			wantDelta: egressDelta{Total: 800},
 			wantNext:  map[string]int64{"session:s1": 500, "session:s2": 900},
 		},
 		{
@@ -94,11 +94,11 @@ func TestComputeEgressDelta(t *testing.T) {
 					},
 				}},
 			},
-			wantDelta: 700,
+			wantDelta: egressDelta{Total: 700},
 			wantNext:  map[string]int64{"session:s1": 700},
 		},
 		{
-			name: "viewer transfers count and other transfer roles do not",
+			name: "viewer transfers count as download egress and other transfer roles do not",
 			prev: map[string]int64{"transfer:t1": 200},
 			snapshot: streamtelemetry.Snapshot{
 				Transfers: []streamtelemetry.TransferView{
@@ -106,7 +106,7 @@ func TestComputeEgressDelta(t *testing.T) {
 					{ID: "t2", Role: streamtelemetry.RoleInternalRelay, BytesAccepted: 8_000},
 				},
 			},
-			wantDelta: 1_000,
+			wantDelta: egressDelta{Total: 1_000, Download: 1_000},
 			wantNext:  map[string]int64{"transfer:t1": 1_200},
 		},
 		{
@@ -116,14 +116,24 @@ func TestComputeEgressDelta(t *testing.T) {
 				Sessions:  []streamtelemetry.SessionView{viewerSession("x", 10)},
 				Transfers: []streamtelemetry.TransferView{{ID: "x", Role: streamtelemetry.RoleViewerEgress, BytesAccepted: 20}},
 			},
-			wantDelta: 30,
+			wantDelta: egressDelta{Total: 30, Download: 20},
 			wantNext:  map[string]int64{"session:x": 10, "transfer:x": 20},
+		},
+		{
+			name: "session growth stays out of the download subset",
+			prev: map[string]int64{"session:s1": 100, "transfer:t1": 100},
+			snapshot: streamtelemetry.Snapshot{
+				Sessions:  []streamtelemetry.SessionView{viewerSession("s1", 700)},
+				Transfers: []streamtelemetry.TransferView{{ID: "t1", Role: streamtelemetry.RoleViewerEgress, BytesAccepted: 350}},
+			},
+			wantDelta: egressDelta{Total: 850, Download: 250},
+			wantNext:  map[string]int64{"session:s1": 700, "transfer:t1": 350},
 		},
 		{
 			name:      "a nil previous map behaves like an empty one",
 			prev:      nil,
 			snapshot:  streamtelemetry.Snapshot{Sessions: []streamtelemetry.SessionView{viewerSession("s1", 42)}},
-			wantDelta: 42,
+			wantDelta: egressDelta{Total: 42},
 			wantNext:  map[string]int64{"session:s1": 42},
 		},
 	}
@@ -134,7 +144,7 @@ func TestComputeEgressDelta(t *testing.T) {
 
 			delta, next := computeEgressDelta(tt.prev, tt.snapshot)
 			if delta != tt.wantDelta {
-				t.Fatalf("delta = %d, want %d", delta, tt.wantDelta)
+				t.Fatalf("delta = %+v, want %+v", delta, tt.wantDelta)
 			}
 			if len(next) != len(tt.wantNext) {
 				t.Fatalf("next = %v, want %v", next, tt.wantNext)

@@ -107,6 +107,10 @@ export function DashboardGrid({
   const [dropIndicator, setDropIndicator] = useState<DropIndicator | null>(null);
   const [resizePreview, setResizePreview] = useState<ResizePreview | null>(null);
   const [liveMessage, setLiveMessage] = useState("");
+  // Widgets that have reported they have nothing to show. Only the ones whose
+  // registry entry sets `collapsedRows` act on it; recording every report keeps
+  // the grid out of the business of knowing which widget is which.
+  const [collapsedIds, setCollapsedIds] = useState<readonly WidgetId[]>([]);
   const resizeSessionRef = useRef<{
     id: WidgetId;
     title: string;
@@ -123,6 +127,15 @@ export function DashboardGrid({
     latestSpan: number;
     latestRows: number;
   } | null>(null);
+
+  const setWidgetCollapsed = useCallback((id: WidgetId, collapsed: boolean) => {
+    setCollapsedIds((prev) => {
+      // Returning `prev` unchanged is what keeps a widget reporting the same
+      // value every render from looping through the grid and back.
+      if (prev.includes(id) === collapsed) return prev;
+      return collapsed ? [...prev, id] : prev.filter((other) => other !== id);
+    });
+  }, []);
 
   const findWidgetIdFromEvent = useCallback((event: DragEvent<HTMLElement>): WidgetId | null => {
     const target = event.target as HTMLElement | null;
@@ -342,8 +355,17 @@ export function DashboardGrid({
         {entries.map((entry) => {
           const widget = getDashboardWidget(entry.id);
           const isWidgetResizing = resizePreview?.id === entry.id;
+          // Customize mode always renders full size: the admin is aiming at
+          // drag and resize targets, and a widget that shrank under the pointer
+          // because its data went quiet would be unresizable.
+          const isCollapsed =
+            !isCustomizing && widget.collapsedRows !== undefined && collapsedIds.includes(entry.id);
           const span = isWidgetResizing ? resizePreview.span : entry.span;
-          const rows = isWidgetResizing ? resizePreview.rows : entry.rows;
+          const rows = isWidgetResizing
+            ? resizePreview.rows
+            : isCollapsed
+              ? (widget.collapsedRows ?? entry.rows)
+              : entry.rows;
           const canResize = widget.minSpan !== widget.maxSpan || widget.minRows !== widget.maxRows;
           const WidgetComponent = widget.Component;
 
@@ -351,6 +373,7 @@ export function DashboardGrid({
             <div
               key={entry.id}
               data-widget-id={entry.id}
+              data-collapsed={isCollapsed ? "true" : undefined}
               className={cn(
                 "admin-widget",
                 span >= 6 && "admin-widget-wide",
@@ -367,6 +390,7 @@ export function DashboardGrid({
                 id={entry.id}
                 range={entry.range ?? widget.ranges?.default}
                 setRange={setWidgetRange}
+                setCollapsed={setWidgetCollapsed}
               >
                 <WidgetComponent />
               </WidgetChromeProvider>
@@ -464,7 +488,7 @@ export function DashboardGrid({
               Widgets you&apos;ve removed or haven&apos;t placed yet.
             </SheetDescription>
           </SheetHeader>
-          <div className="flex flex-col gap-2 overflow-y-auto p-4 pt-2">
+          <div className="overlay-scroll flex flex-col gap-2 overflow-y-auto p-4 pt-2">
             {hiddenWidgets.length === 0 ? (
               <p className="text-muted-foreground py-4 text-sm">
                 Everything is on the dashboard already.

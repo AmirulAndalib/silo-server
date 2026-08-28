@@ -48,15 +48,16 @@ func TestAssembleTimeseries(t *testing.T) {
 		{
 			name: "a full minute maps straight through",
 			rows: []timeseriesRow{{
-				Bucket:     minuteOne,
-				Streams:    int64Ptr(3),
-				Direct:     int64Ptr(1),
-				Remux:      int64Ptr(0),
-				Transcode:  int64Ptr(2),
-				EgressKbps: 48_211,
+				Bucket:             minuteOne,
+				Streams:            int64Ptr(3),
+				Direct:             int64Ptr(1),
+				Remux:              int64Ptr(0),
+				Transcode:          int64Ptr(2),
+				EgressKbps:         48_211,
+				DownloadEgressKbps: 6_100,
 			}},
 			want: []AdminTimeseriesPoint{
-				{T: minuteOne, Streams: 3, Direct: 1, Remux: 0, Transcode: 2, EgressKbps: 48_211},
+				{T: minuteOne, Streams: 3, Direct: 1, Remux: 0, Transcode: 2, EgressKbps: 48_211, DownloadEgressKbps: 6_100},
 			},
 		},
 		{
@@ -104,7 +105,8 @@ func TestAssembleTimeseries(t *testing.T) {
 					got[i].Direct != tt.want[i].Direct ||
 					got[i].Remux != tt.want[i].Remux ||
 					got[i].Transcode != tt.want[i].Transcode ||
-					got[i].EgressKbps != tt.want[i].EgressKbps {
+					got[i].EgressKbps != tt.want[i].EgressKbps ||
+					got[i].DownloadEgressKbps != tt.want[i].DownloadEgressKbps {
 					t.Fatalf("point %d = %+v, want %+v", i, got[i], tt.want[i])
 				}
 			}

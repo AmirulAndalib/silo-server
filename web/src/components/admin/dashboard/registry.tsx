@@ -22,12 +22,13 @@ import { PlaybackActivityWidget } from "./widgets/PlaybackActivityWidget";
 import { PlaybackReliabilityWidget } from "./widgets/PlaybackReliabilityWidget";
 import { TopProfilesWidget } from "./widgets/TopProfilesWidget";
 import { TopTitlesWidget } from "./widgets/TopTitlesWidget";
-import { TraktSyncWidget } from "./widgets/TraktSyncWidget";
+import { WatchProvidersWidget } from "./widgets/WatchProvidersWidget";
 import { NowPlayingWidget } from "./widgets/NowPlayingWidget";
 import { TranscodeNodesWidget } from "./widgets/TranscodeNodesWidget";
 import { ScannerWidget } from "./widgets/ScannerWidget";
 import { LibrariesWidget } from "./widgets/LibrariesWidget";
 import { UsersWidget } from "./widgets/UsersWidget";
+import { DownloadsWidget } from "./widgets/DownloadsWidget";
 import { ScanActivityWidget } from "./widgets/ScanActivityWidget";
 import { RecentErrorsWidget } from "./widgets/RecentErrorsWidget";
 import { RecentActivityWidget } from "./widgets/RecentActivityWidget";
@@ -153,7 +154,7 @@ export const DASHBOARD_WIDGETS: DashboardWidgetDefinition[] = [
     description: "Version, uptime, dependencies, nodes, and 24h error count",
     minSpan: 6,
     maxSpan: 12,
-    defaultSpan: 8,
+    defaultSpan: 12,
     minRows: 1,
     maxRows: 2,
     defaultRows: 1,
@@ -250,16 +251,19 @@ export const DASHBOARD_WIDGETS: DashboardWidgetDefinition[] = [
     Component: TopProfilesWidget,
   },
   {
-    id: "trakt-sync",
-    title: "Trakt sync",
-    description: "Watch provider connection and 24h sync status",
+    id: "watch-providers",
+    title: "Watch providers",
+    description: "Per-provider connection and 24h sync status",
     minSpan: 6,
     maxSpan: 12,
     defaultSpan: 12,
+    // One compact row per provider. It starts at the single row it occupied as
+    // a Trakt-only strip and grows to three for a deployment running several
+    // providers; past that the list scrolls like the other list widgets.
     minRows: 1,
-    maxRows: 1,
+    maxRows: 3,
     defaultRows: 1,
-    Component: TraktSyncWidget,
+    Component: WatchProvidersWidget,
   },
   {
     id: "now-playing",
@@ -271,6 +275,9 @@ export const DASHBOARD_WIDGETS: DashboardWidgetDefinition[] = [
     minRows: 2,
     maxRows: 8,
     defaultRows: 3,
+    // An idle server has nothing to put in three rows, so the widget hands them
+    // back and shows a one-line strip until a stream starts.
+    collapsedRows: 1,
     Component: NowPlayingWidget,
   },
   {
@@ -322,6 +329,18 @@ export const DASHBOARD_WIDGETS: DashboardWidgetDefinition[] = [
     Component: UsersWidget,
   },
   {
+    id: "downloads",
+    title: "Offline downloads",
+    description: "Who has media downloaded to devices, and how much",
+    minSpan: 3,
+    maxSpan: 8,
+    defaultSpan: 4,
+    minRows: 2,
+    maxRows: 5,
+    defaultRows: 3,
+    Component: DownloadsWidget,
+  },
+  {
     id: "scan-activity",
     title: "Scan activity",
     description: "Recent scan runs with trigger, status, and duration",
@@ -369,8 +388,21 @@ export function getDashboardWidget(id: WidgetId): DashboardWidgetDefinition {
   return widget;
 }
 
+/**
+ * Widget ids that were renamed after layouts had already been stored under
+ * them. A saved arrangement is the admin's, not ours to discard, so an old id
+ * resolves to the widget that replaced it instead of being dropped as unknown.
+ * Sanitizing a layout dedupes by the resolved widget, so a document holding
+ * both the old and the new id collapses to one entry.
+ */
+const LEGACY_WIDGET_IDS: Record<string, WidgetId> = {
+  // Became the pluggable per-provider widget; the payload it reads is no
+  // longer Trakt-specific.
+  "trakt-sync": "watch-providers",
+};
+
 export function findDashboardWidget(id: string): DashboardWidgetDefinition | undefined {
-  return WIDGETS_BY_ID.get(id as WidgetId);
+  return WIDGETS_BY_ID.get((LEGACY_WIDGET_IDS[id] ?? id) as WidgetId);
 }
 
 /**
@@ -385,36 +417,26 @@ export function findDashboardWidget(id: string): DashboardWidgetDefinition | und
  * disagrees with.
  */
 const DEFAULT_LAYOUT_ORDER: WidgetId[] = [
-  // Live numbers: one dense row of tiles, then the last two tiles complete
-  // the health strip's row.
+  // Live numbers: one dense row of tiles, then the whole-deployment health
+  // strip. Everything the default leaves out stays one click away in the
+  // Add-widget sheet — a sane starting page beats an exhaustive one.
   "stat-active-streams",
   "stat-egress-now",
-  "stat-transcode-share",
   "stat-profiles-active",
   "stat-movies",
   "stat-shows",
-  "stat-users",
   "stat-storage",
   "health-strip",
   // What is playing right now — the reason most admins open this page.
   "now-playing",
-  // The trends that explain the numbers, in equal-height pairs.
+  // The trends that explain the numbers, then who watched what.
   "playback-24h",
-  "concurrent-streams-24h",
   "egress-24h",
-  "playback-reliability",
   "top-titles",
   "top-profiles",
-  // Content management.
+  // Content management, then the history feed.
   "libraries",
   "users",
-  // Infrastructure and operations: interesting when something is wrong.
-  "server-resources",
-  "transcode-nodes",
-  "scanner",
-  "scan-activity",
-  "trakt-sync",
-  "recent-errors",
   "recent-activity",
 ];
 

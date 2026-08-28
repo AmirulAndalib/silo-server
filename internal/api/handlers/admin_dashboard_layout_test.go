@@ -239,7 +239,7 @@ func TestDashboardCapabilitiesAdvertisesEverySurface(t *testing.T) {
 		t.Fatalf("decode capabilities: %v", err)
 	}
 	if !resp.ServerLayouts || !resp.Timeseries || !resp.PlaybackActivity ||
-		!resp.TopActivity || !resp.Health || !resp.LogLevelList {
+		!resp.TopActivity || !resp.Health || !resp.LogLevelList || !resp.DownloadsStats {
 		t.Fatalf("capabilities must advertise every dashboard surface: %+v", resp)
 	}
 }

@@ -11,11 +11,35 @@ import {
 import type { AdminSession } from "@/api/types";
 import { formatRelativeTime } from "@/lib/date";
 import { SectionError } from "../feedback";
+import { useReportCollapsed } from "../widgetChrome";
 import { SessionProfilePill } from "./SessionProfilePill";
 
 export function NowPlayingWidget() {
   const sessionsQuery = useAdminSessions();
   const sessions = sessionsQuery.data ?? [];
+
+  // Only a successful, genuinely empty load earns the strip. A skeleton or an
+  // error keeps its full height: shrinking the widget to announce a failure
+  // would hide the failure.
+  const isIdle = !sessionsQuery.isLoading && !sessionsQuery.error && sessions.length === 0;
+  useReportCollapsed(isIdle);
+
+  if (isIdle) {
+    return (
+      <div className="flex h-full min-w-0 items-center gap-3">
+        <div className="shrink-0 text-base font-bold">Now Playing</div>
+        <div className="text-muted-foreground min-w-0 flex-1 truncate text-sm">
+          Nothing playing right now
+        </div>
+        <Link
+          to="/admin/activity"
+          className="text-muted-foreground hover:text-primary shrink-0 text-[11px] transition-colors"
+        >
+          View activity ›
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col">
@@ -41,9 +65,9 @@ export function NowPlayingWidget() {
           </div>
         ) : sessionsQuery.error ? (
           <SectionError message="Failed to load streams." />
-        ) : sessions.length === 0 ? (
-          <div className="text-muted-foreground py-4 text-sm">No active streams.</div>
         ) : (
+          /* The empty case never reaches here — it returned the collapsed strip
+             above — so this branch always has at least one stream to show. */
           <>
             <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-2">
               {sessions.slice(0, 4).map((session) => (

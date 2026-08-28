@@ -1226,6 +1226,7 @@ func main() {
 		watchProviderRepo = watchsync.NewPostgresRepository(deps.DB, deps.SecretCipher)
 		watchProviderService = watchsync.NewService(watchProviderRepo, watchProviderRegistry)
 		deps.WatchProviderService = watchProviderService
+		deps.WatchProviderRegistry = watchProviderRegistry
 	}
 
 	// Initialize node pools for integrated/api modes.
@@ -2126,7 +2127,7 @@ func main() {
 	}
 
 	if deps.DB != nil {
-		adminStatsProvider, statsErr := handlers.NewAdminStatsProvider(appCtx, deps.DB, deps.EventBus)
+		adminStatsProvider, statsErr := handlers.NewAdminStatsProvider(appCtx, deps.DB, deps.EventBus, watchProviderRegistry)
 		if statsErr != nil {
 			log.Fatalf("failed to create admin stats provider: %v", statsErr)
 		}
@@ -2153,6 +2154,13 @@ func main() {
 		}
 		defer timeseriesProvider.Close()
 		deps.AdminTimeseriesProvider = timeseriesProvider
+
+		downloadsStatsProvider, downloadsStatsErr := handlers.NewAdminDownloadsStatsProvider(appCtx, deps.DB, deps.EventBus)
+		if downloadsStatsErr != nil {
+			log.Fatalf("failed to create admin downloads stats provider: %v", downloadsStatsErr)
+		}
+		defer downloadsStatsProvider.Close()
+		deps.AdminDownloadsStatsProvider = downloadsStatsProvider
 
 		// The dashboard metrics sampler is the only writer of concurrent-stream
 		// and egress history. Proxy and transcode nodes serve bytes but do not

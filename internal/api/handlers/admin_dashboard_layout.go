@@ -89,6 +89,14 @@ type adminDashboardCapabilitiesResponse struct {
 	// LogLevelList reports that GET /admin/logs/app accepts a multi-level
 	// filter rather than a single level.
 	LogLevelList bool `json:"log_level_list"`
+	// WatchProviders reports that GET /admin/stats carries the `watch_providers`
+	// per-provider breakdown that replaced the Trakt-only
+	// `watch_provider_activity` object.
+	WatchProviders bool `json:"watch_providers"`
+	// DownloadsStats reports that GET /admin/stats/downloads serves the
+	// offline-download aggregate and that timeseries points carry the
+	// additive `download_egress_kbps` split.
+	DownloadsStats bool `json:"downloads_stats"`
 }
 
 // HandleGetDashboardCapabilities handles GET /admin/dashboard/capabilities.
@@ -100,6 +108,8 @@ func (h *AdminHandler) HandleGetDashboardCapabilities(w http.ResponseWriter, _ *
 		TopActivity:      true,
 		Health:           true,
 		LogLevelList:     true,
+		WatchProviders:   true,
+		DownloadsStats:   true,
 	})
 }
 

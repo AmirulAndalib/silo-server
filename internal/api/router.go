@@ -166,11 +166,15 @@ type Dependencies struct {
 	MarkerContributionStore   *markers.ContributionStore
 	MarkerContributionService *markers.ContributionService
 	WatchProviderService      handlers.WatchProviderService
-	WatchCompletionObserver   watchstate.CompletionObserver
-	PluginService             *plugins.Service
-	PluginHTTPProxy           *plugins.HTTPProxy
-	PluginUserConfig          *plugins.UserConfigStore
-	AuthProviders             []auth.RegisteredProvider
+	// WatchProviderRegistry is the watchsync registry, used by the admin stats
+	// to list every provider — built-in or plugin-contributed — even when none
+	// of them has any activity yet.
+	WatchProviderRegistry   handlers.WatchProviderLister
+	WatchCompletionObserver watchstate.CompletionObserver
+	PluginService           *plugins.Service
+	PluginHTTPProxy         *plugins.HTTPProxy
+	PluginUserConfig        *plugins.UserConfigStore
+	AuthProviders           []auth.RegisteredProvider
 	// PublicURL is the externally-reachable origin (scheme + host) for this
 	// silo instance. Used to build redirect_uri values handed to OAuth
 	// IdPs. Empty disables the /oauth/{install_id}/{init,callback} routes.
@@ -206,6 +210,7 @@ type Dependencies struct {
 	AdminPlaybackActivityProvider handlers.AdminPlaybackActivitySource
 	AdminTopActivityProvider      handlers.AdminTopActivitySource
 	AdminTimeseriesProvider       handlers.AdminTimeseriesSource
+	AdminDownloadsStatsProvider   handlers.AdminDownloadsStatsSource
 
 	// ABSHandler is the Audiobookshelf-compatible HTTP handler. When non-nil
 	// it is mounted at the root router level (not under /api/v1/) so that ABS
@@ -1185,9 +1190,11 @@ func NewRouter(deps Dependencies) chi.Router {
 		adminHandler.EventsHub = deps.EventsHub
 		adminHandler.ImpersonationService = authService
 		adminHandler.StatsSource = deps.AdminStatsProvider
+		adminHandler.WatchProviders = deps.WatchProviderRegistry
 		adminHandler.PlaybackActivitySource = deps.AdminPlaybackActivityProvider
 		adminHandler.TopActivitySource = deps.AdminTopActivityProvider
 		adminHandler.TimeseriesSource = deps.AdminTimeseriesProvider
+		adminHandler.DownloadsStatsSource = deps.AdminDownloadsStatsProvider
 		adminHandler.RedisClient = deps.RedisClient
 		adminHandler.RealtimeHub = deps.RealtimeHub
 		adminHandler.AccessGroups = accessGroupStore
@@ -2947,6 +2954,11 @@ func NewRouter(deps Dependencies) chi.Router {
 							// because their windows and refresh rates differ.
 							r.Get("/stats/playback-activity", adminHandler.HandleGetPlaybackActivity)
 							r.Get("/stats/top-activity", adminHandler.HandleGetTopActivity)
+							// Offline-download aggregate for the dashboard's
+							// downloads widget. Reads the downloads table, which
+							// exists whether or not the feature is enabled, so a
+							// download-less deployment answers zeros.
+							r.Get("/stats/downloads", adminHandler.HandleGetDownloadsStats)
 							// Minute-resolution samples written by the dashboard
 							// metrics sampler (internal/dashmetrics); the only
 							// history for concurrent streams and egress.

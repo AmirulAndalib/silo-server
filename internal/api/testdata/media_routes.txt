@@ -154,6 +154,7 @@ GET /api/v1/admin/settings/sensitive-status	non-media
 GET /api/v1/admin/settings/{key}	non-media
 PUT /api/v1/admin/settings/{key}	non-media
 GET /api/v1/admin/stats	non-media
+GET /api/v1/admin/stats/downloads	non-media
 GET /api/v1/admin/stats/playback-activity	non-media
 GET /api/v1/admin/stats/timeseries	non-media
 GET /api/v1/admin/stats/top-activity	non-media

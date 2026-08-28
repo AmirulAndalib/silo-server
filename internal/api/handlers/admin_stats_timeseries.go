@@ -64,13 +64,24 @@ func timeseriesBucketSeconds(hours int) int {
 // A bucket that spans several minutes reports the peak minute of each column,
 // never an average: concurrency and egress are read to answer "how bad did it
 // get", and a mean would hide exactly that.
+//
+// EgressKbps keeps its pre-split meaning — every source's total viewer egress —
+// so charts drawn from it alone stay truthful. DownloadEgressKbps is the
+// additive file-transfer subset of that total (offline/direct downloads, ebook
+// and ABS file fetches, measured by the API processes; node egress cannot be
+// split and therefore counts entirely outside the subset). A client shows the
+// split as download versus egress − download; the sampler clamps the subset
+// under the total per minute, and both columns take their per-bucket MAX over
+// the same minutes, so the difference is never negative. Samples written before
+// the split report a zero subset.
 type AdminTimeseriesPoint struct {
-	T          time.Time `json:"t"`
-	Streams    int64     `json:"streams"`
-	Direct     int64     `json:"direct"`
-	Remux      int64     `json:"remux"`
-	Transcode  int64     `json:"transcode"`
-	EgressKbps int64     `json:"egress_kbps"`
+	T                  time.Time `json:"t"`
+	Streams            int64     `json:"streams"`
+	Direct             int64     `json:"direct"`
+	Remux              int64     `json:"remux"`
+	Transcode          int64     `json:"transcode"`
+	EgressKbps         int64     `json:"egress_kbps"`
+	DownloadEgressKbps int64     `json:"download_egress_kbps"`
 }
 
 // AdminTimeseries is the GET /admin/stats/timeseries body.
@@ -216,12 +227,13 @@ func (h *AdminHandler) HandleGetTimeseries(w http.ResponseWriter, r *http.Reques
 // a shared row when a replica sampled egress but every attempt at the shared
 // row lost the race or failed.
 type timeseriesRow struct {
-	Bucket     time.Time
-	Streams    *int64
-	Direct     *int64
-	Remux      *int64
-	Transcode  *int64
-	EgressKbps int64
+	Bucket             time.Time
+	Streams            *int64
+	Direct             *int64
+	Remux              *int64
+	Transcode          *int64
+	EgressKbps         int64
+	DownloadEgressKbps int64
 }
 
 // assembleTimeseries turns grouped rows into response points, reading a missing
@@ -231,12 +243,13 @@ func assembleTimeseries(rows []timeseriesRow) []AdminTimeseriesPoint {
 	points := make([]AdminTimeseriesPoint, 0, len(rows))
 	for _, row := range rows {
 		points = append(points, AdminTimeseriesPoint{
-			T:          row.Bucket.UTC(),
-			Streams:    nullableCount(row.Streams),
-			Direct:     nullableCount(row.Direct),
-			Remux:      nullableCount(row.Remux),
-			Transcode:  nullableCount(row.Transcode),
-			EgressKbps: row.EgressKbps,
+			T:                  row.Bucket.UTC(),
+			Streams:            nullableCount(row.Streams),
+			Direct:             nullableCount(row.Direct),
+			Remux:              nullableCount(row.Remux),
+			Transcode:          nullableCount(row.Transcode),
+			EgressKbps:         row.EgressKbps,
+			DownloadEgressKbps: row.DownloadEgressKbps,
 		})
 	}
 	return points
@@ -273,7 +286,8 @@ func queryAdminTimeseries(ctx context.Context, pool *pgxpool.Pool, hours int) (*
 			       MAX(streams_direct)    FILTER (WHERE source = 'shared') AS streams_direct,
 			       MAX(streams_remux)     FILTER (WHERE source = 'shared') AS streams_remux,
 			       MAX(streams_transcode) FILTER (WHERE source = 'shared') AS streams_transcode,
-			       COALESCE(SUM(egress_kbps), 0)::bigint AS egress_kbps
+			       COALESCE(SUM(egress_kbps), 0)::bigint AS egress_kbps,
+			       COALESCE(SUM(download_egress_kbps), 0)::bigint AS download_egress_kbps
 			FROM dashboard_metric_samples
 			WHERE bucket >= now() - make_interval(hours => $1)
 			GROUP BY bucket
@@ -283,7 +297,8 @@ func queryAdminTimeseries(ctx context.Context, pool *pgxpool.Pool, hours int) (*
 		       MAX(streams_direct),
 		       MAX(streams_remux),
 		       MAX(streams_transcode),
-		       MAX(egress_kbps)::bigint
+		       MAX(egress_kbps)::bigint,
+		       MAX(download_egress_kbps)::bigint
 		FROM minutes
 		GROUP BY display_bucket
 		ORDER BY display_bucket
@@ -303,6 +318,7 @@ func queryAdminTimeseries(ctx context.Context, pool *pgxpool.Pool, hours int) (*
 			&row.Remux,
 			&row.Transcode,
 			&row.EgressKbps,
+			&row.DownloadEgressKbps,
 		); err != nil {
 			return nil, fmt.Errorf("scanning dashboard metric sample: %w", err)
 		}

@@ -1,7 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "@/api/client";
-import type { AdminPlaybackActivity, AdminTimeseries, AdminTopActivity } from "@/api/types";
+import type {
+  AdminDownloadsStats,
+  AdminPlaybackActivity,
+  AdminTimeseries,
+  AdminTopActivity,
+} from "@/api/types";
 import { adminKeys } from "../keys";
 
 /**
@@ -21,6 +26,7 @@ const TOP_ACTIVITY_STALE_TIME = 5 * 60_000;
 
 export const DEFAULT_INSIGHT_HOURS = 24;
 export const DEFAULT_TOP_ACTIVITY_DAYS = 7;
+export const DEFAULT_DOWNLOADS_TOP_LIMIT = 10;
 
 // Mirrors the server-side clamps (internal/api/handlers/admin_stats_*.go). The
 // client applies them before building the key so two requests the server would
@@ -32,6 +38,8 @@ const MIN_HOURS = 1;
 const MAX_HOURS = 744;
 const MIN_DAYS = 1;
 const MAX_DAYS = 30;
+const MIN_DOWNLOADS_TOP_LIMIT = 1;
+const MAX_DOWNLOADS_TOP_LIMIT = 25;
 
 function clampWindow(value: number, min: number, max: number, fallback: number): number {
   if (!Number.isFinite(value)) {
@@ -50,6 +58,16 @@ export function normalizeTopActivityDays(days: number = DEFAULT_TOP_ACTIVITY_DAY
   return clampWindow(days, MIN_DAYS, MAX_DAYS, DEFAULT_TOP_ACTIVITY_DAYS);
 }
 
+/** Top-list size accepted by the downloads stats endpoint. */
+export function normalizeDownloadsTopLimit(limit: number = DEFAULT_DOWNLOADS_TOP_LIMIT): number {
+  return clampWindow(
+    limit,
+    MIN_DOWNLOADS_TOP_LIMIT,
+    MAX_DOWNLOADS_TOP_LIMIT,
+    DEFAULT_DOWNLOADS_TOP_LIMIT,
+  );
+}
+
 export function adminTimeseriesPath(hours: number): string {
   return `/admin/stats/timeseries?hours=${normalizeInsightHours(hours)}`;
 }
@@ -60,6 +78,10 @@ export function adminPlaybackActivityPath(hours: number): string {
 
 export function adminTopActivityPath(days: number): string {
   return `/admin/stats/top-activity?days=${normalizeTopActivityDays(days)}`;
+}
+
+export function adminDownloadsStatsPath(limit: number): string {
+  return `/admin/stats/downloads?limit=${normalizeDownloadsTopLimit(limit)}`;
 }
 
 /** Minute-resolution stream counts and egress for the last `hours`. */
@@ -89,5 +111,15 @@ export function useAdminTopActivity(days: number = DEFAULT_TOP_ACTIVITY_DAYS) {
     queryKey: adminKeys.topActivity(window),
     queryFn: () => api<AdminTopActivity>(adminTopActivityPath(window)),
     staleTime: TOP_ACTIVITY_STALE_TIME,
+  });
+}
+
+/** Offline-download aggregate: who keeps what downloaded, and how much. */
+export function useAdminDownloadsStats(limit: number = DEFAULT_DOWNLOADS_TOP_LIMIT) {
+  const topLimit = normalizeDownloadsTopLimit(limit);
+  return useQuery({
+    queryKey: adminKeys.downloadsStats(topLimit),
+    queryFn: () => api<AdminDownloadsStats>(adminDownloadsStatsPath(topLimit)),
+    staleTime: SAMPLED_SERIES_STALE_TIME,
   });
 }

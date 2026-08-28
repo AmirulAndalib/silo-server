@@ -2464,14 +2464,25 @@ export interface AdminStats {
   total_show_files?: number;
   active_streams: number;
   total_storage_bytes: number;
-  watch_provider_activity: WatchProviderActivity;
+  /**
+   * One entry per watch provider, ordered by `provider`. Covers every provider
+   * registered on the server — including ones a plugin contributes at runtime,
+   * which appear with zeros — plus any provider that still has stored activity
+   * after its plugin was removed (`registered: false`).
+   */
+  watch_providers: WatchProviderStats[];
 }
 
-export interface WatchProviderActivity {
-  trakt_connected_profiles: number;
-  trakt_enabled_profiles: number;
-  trakt_export_enabled: number;
-  trakt_scrobble_enabled: number;
+export interface WatchProviderStats {
+  provider: string;
+  display_name: string;
+  registered: boolean;
+  scrobbling: boolean;
+  exporting: boolean;
+  connected_profiles: number;
+  enabled_profiles: number;
+  export_enabled_profiles: number;
+  scrobble_enabled_profiles: number;
   last_sync_completed_at?: string;
   sync_runs_24h: number;
   sync_errors_24h: number;
@@ -4748,6 +4759,12 @@ export interface AdminTimeseriesPoint {
   remux: number;
   transcode: number;
   egress_kbps: number;
+  // File-transfer subset of `egress_kbps` (offline/direct downloads, ebook and
+  // ABS file fetches, API-served only). Always <= egress_kbps; playback egress
+  // is the difference. Optional because responses predating the split lack it,
+  // and 0 on samples written before the split — "not measured", not "no
+  // downloads".
+  download_egress_kbps?: number;
 }
 
 // `oldest_sample_at` is null until the sampler has written anything, which is
@@ -4760,6 +4777,27 @@ export interface AdminTimeseries {
   to: string;
   oldest_sample_at: string | null;
   points: AdminTimeseriesPoint[];
+}
+
+// GET /admin/stats/downloads. Headline numbers and top_users count active
+// managed device entries (media somebody keeps offline); the 24h counters also
+// include one-shot web downloads. All zeros with an empty top_users on a
+// deployment where nobody downloads — the widget's empty state, not an error.
+export interface AdminDownloadsUser {
+  user_id: number;
+  username: string;
+  downloads: number;
+  total_bytes: number;
+}
+
+export interface AdminDownloadsStats {
+  users_with_downloads: number;
+  active_downloads: number;
+  total_bytes: number;
+  downloads_started_24h: number;
+  downloads_completed_24h: number;
+  limit: number;
+  top_users: AdminDownloadsUser[];
 }
 
 // IP visibility

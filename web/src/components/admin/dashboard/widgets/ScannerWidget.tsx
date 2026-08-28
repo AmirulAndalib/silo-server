@@ -102,35 +102,10 @@ export function ScannerWidget() {
           <SectionError message="Failed to load scanner status." />
         ) : (
           <>
-            {groups.length === 0 ? (
-              <div className="text-muted-foreground flex items-center gap-2 py-2 text-sm">
-                <ScanLine className="h-4 w-4" aria-hidden="true" />
-                No scans running
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {groups.slice(0, VISIBLE_LIBRARIES).map((group) => (
-                  <div
-                    key={group.libraryID}
-                    className="bg-surface border-border rounded-md border p-2.5"
-                  >
-                    <div className="truncate text-[13px] font-semibold">
-                      {libraryNames.get(group.libraryID) ?? `Library #${group.libraryID}`}
-                    </div>
-                    <div className="text-muted-foreground mt-0.5 truncate text-[11px] tabular-nums">
-                      {formatDashboardLibraryScanProgress(group.primary, group.count)}
-                    </div>
-                  </div>
-                ))}
-                {hiddenGroups > 0 ? (
-                  <div className="text-muted-foreground text-[11px]">
-                    + {hiddenGroups} more {hiddenGroups === 1 ? "library" : "libraries"}
-                  </div>
-                ) : null}
-              </div>
-            )}
-
-            <div className="border-border/60 text-muted-foreground grid grid-cols-3 gap-2 border-t pt-3 text-[11px]">
+            {/* The queue counters lead: they are the widget's stable summary,
+                while the per-library list below grows and shrinks with the
+                scans that happen to be running. */}
+            <div className="text-muted-foreground grid grid-cols-3 gap-2 text-[11px]">
               <QueueCount label="Running" value={status?.running_scans} />
               <QueueCount label="Queued" value={status?.accepted_scans} />
               <QueueCount label="Polling" value={runningPolls} />
@@ -147,6 +122,36 @@ export function ScannerWidget() {
                   </span>
                 </>
               ) : null}
+            </div>
+
+            <div className="border-border/60 border-t pt-3">
+              {groups.length === 0 ? (
+                <div className="text-muted-foreground flex items-center gap-2 py-1 text-sm">
+                  <ScanLine className="h-4 w-4" aria-hidden="true" />
+                  No scans running
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {groups.slice(0, VISIBLE_LIBRARIES).map((group) => (
+                    <div
+                      key={group.libraryID}
+                      className="bg-surface border-border rounded-md border p-2.5"
+                    >
+                      <div className="truncate text-[13px] font-semibold">
+                        {libraryNames.get(group.libraryID) ?? `Library #${group.libraryID}`}
+                      </div>
+                      <div className="text-muted-foreground mt-0.5 truncate text-[11px] tabular-nums">
+                        {formatDashboardLibraryScanProgress(group.primary, group.count)}
+                      </div>
+                    </div>
+                  ))}
+                  {hiddenGroups > 0 ? (
+                    <div className="text-muted-foreground text-[11px]">
+                      + {hiddenGroups} more {hiddenGroups === 1 ? "library" : "libraries"}
+                    </div>
+                  ) : null}
+                </div>
+              )}
             </div>
           </>
         )}

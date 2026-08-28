@@ -33,7 +33,12 @@ export {
   type TimeBucket,
   type TimeSample,
 } from "./chartMath";
-export { LineChart, type LineChartPoint, type LineChartProps } from "./LineChart";
+export {
+  LineChart,
+  type LineChartOverlay,
+  type LineChartPoint,
+  type LineChartProps,
+} from "./LineChart";
 export { Sparkline, type SparklineProps } from "./Sparkline";
 export { useMeasuredSize, type MeasuredSize } from "./useMeasuredSize";
 export {

@@ -21,6 +21,7 @@ const DASHBOARD_WIDGET_QUERY_PREFIXES = [
   adminKeys.dashboardTimeseriesRoot(),
   adminKeys.playbackActivityRoot(),
   adminKeys.topActivityRoot(),
+  adminKeys.downloadsStatsRoot(),
   adminKeys.serverStatus(),
   adminKeys.systemResources(),
   adminKeys.nodes(),

@@ -8,7 +8,7 @@ import {
 import { formatTime } from "@/lib/datetime";
 import { cn } from "@/lib/utils";
 import { buildAreaPath, buildLinePath, chartSeriesColor, niceTicks } from "./chartMath";
-import { ChartTooltip, ChartTooltipRow } from "./chartChrome";
+import { ChartLegend, ChartTooltip, ChartTooltipRow } from "./chartChrome";
 import { useMeasuredSize } from "./useMeasuredSize";
 
 export interface LineChartPoint {
@@ -16,6 +16,20 @@ export interface LineChartPoint {
   t: number;
   /** `null` is a missing sample: the line breaks rather than inventing a zero. */
   value: number | null;
+}
+
+/**
+ * A secondary line plotted over the primary series. Overlay points must sit on
+ * the same time grid as `points` (same length, same timestamps): the crosshair
+ * snaps by index, so a misaligned overlay would pair the wrong samples in the
+ * tooltip.
+ */
+export interface LineChartOverlay {
+  /** Series name for the legend and the hover readout. */
+  label: string;
+  points: readonly LineChartPoint[];
+  /** Categorical slot for the overlay color; never reuse the primary's slot. */
+  seriesIndex: number;
 }
 
 export interface LineChartProps {
@@ -44,6 +58,12 @@ export interface LineChartProps {
   edgeLabels?: { start: string; end: string };
   /** Smallest axis tick gap — counts pass 1 to avoid fractional gridlines. */
   minTickStep?: number;
+  /**
+   * Additional series drawn as plain lines (no area wash) over the primary
+   * one. A legend appears as soon as one overlay is present; the value axis
+   * scales to the maximum across every series.
+   */
+  overlays?: readonly LineChartOverlay[];
   ariaLabel: string;
   className?: string;
 }
@@ -76,6 +96,7 @@ export function LineChart({
   formatTimestamp = (t) => formatTime(t),
   edgeLabels,
   minTickStep,
+  overlays = [],
   ariaLabel,
   className,
 }: LineChartProps) {
@@ -86,7 +107,8 @@ export function LineChart({
   const viewHeight = plotSize && plotSize.height > 0 ? plotSize.height : VIEW_HEIGHT;
 
   const geometry = useMemo(() => {
-    const values = points
+    const values = [points, ...overlays.map((overlay) => overlay.points)]
+      .flat()
       .map((point) => point.value)
       .filter((value): value is number => value !== null && Number.isFinite(value));
     const ticks = niceTicks(0, values.length > 0 ? Math.max(...values) : 0, 3, {
@@ -107,13 +129,16 @@ export function LineChart({
       return (point.t - firstT) / span;
     });
 
-    const projected = points.map((point, index) => ({
-      x: (xRatios[index] ?? 0) * viewWidth,
-      y:
-        point.value === null || !Number.isFinite(point.value)
-          ? null
-          : viewHeight - (point.value / top) * viewHeight,
-    }));
+    const project = (series: readonly LineChartPoint[]) =>
+      series.map((point, index) => ({
+        x: (xRatios[index] ?? 0) * viewWidth,
+        y:
+          point.value === null || !Number.isFinite(point.value)
+            ? null
+            : viewHeight - (point.value / top) * viewHeight,
+      }));
+
+    const projected = project(points);
 
     return {
       ticks,
@@ -121,13 +146,24 @@ export function LineChart({
       xRatios,
       linePath: buildLinePath(projected),
       areaPath: buildAreaPath(projected, viewHeight),
+      // Overlays are plain lines: a second area wash would stack visually and
+      // read as a total, which the overlay is not.
+      overlayPaths: overlays.map((overlay) => buildLinePath(project(overlay.points))),
     };
-  }, [points, minTickStep, viewWidth, viewHeight]);
+  }, [points, overlays, minTickStep, viewWidth, viewHeight]);
 
+  // An index is inspectable when any series has a sample there, so a minute
+  // where only an overlay saw traffic still gets a crosshair stop.
   const plottedIndexes = useMemo(
     () =>
-      points.map((point, index) => ({ point, index })).filter(({ point }) => point.value !== null),
-    [points],
+      points
+        .map((point, index) => ({ point, index }))
+        .filter(
+          ({ point, index }) =>
+            point.value !== null ||
+            overlays.some((overlay) => (overlay.points[index]?.value ?? null) !== null),
+        ),
+    [points, overlays],
   );
 
   function nearestIndex(ratio: number): number | null {
@@ -169,12 +205,31 @@ export function LineChart({
 
   const activePoint = activeIndex === null ? null : (points[activeIndex] ?? null);
   const activeValue = activePoint && activePoint.value !== null ? activePoint.value : null;
+  const activeOverlayValues =
+    activeIndex === null
+      ? []
+      : overlays.map((overlay) => overlay.points[activeIndex]?.value ?? null);
+  const hasActiveSample =
+    activeValue !== null || activeOverlayValues.some((value) => value !== null);
   const activeRatio = activeIndex === null ? 0 : (geometry.xRatios[activeIndex] ?? 0);
   const firstPoint = points[0];
   const lastPoint = points[points.length - 1];
 
   return (
     <div className={cn("w-full", fill && "flex min-h-0 flex-1 flex-col", className)}>
+      {overlays.length > 0 ? (
+        <ChartLegend
+          shape="line"
+          className="mb-1.5 pl-12"
+          entries={[
+            { label: seriesLabel, color },
+            ...overlays.map((overlay) => ({
+              label: overlay.label,
+              color: chartSeriesColor(overlay.seriesIndex),
+            })),
+          ]}
+        />
+      ) : null}
       <div className={cn("flex items-stretch gap-2", fill && "min-h-0 flex-1")}>
         <div className="relative w-10 shrink-0" style={fill ? undefined : { height }}>
           {geometry.ticks.map((tick) => (
@@ -229,31 +284,60 @@ export function LineChart({
                 vectorEffect="non-scaling-stroke"
               />
             ) : null}
+            {geometry.overlayPaths.map((path, index) =>
+              path ? (
+                <path
+                  key={overlays[index]?.label ?? index}
+                  d={path}
+                  fill="none"
+                  stroke={chartSeriesColor(overlays[index]?.seriesIndex ?? index + 1)}
+                  strokeWidth={2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  vectorEffect="non-scaling-stroke"
+                />
+              ) : null,
+            )}
           </svg>
 
-          {activePoint && activeValue !== null ? (
+          {activePoint && hasActiveSample ? (
             <>
               <div
                 aria-hidden="true"
                 className="bg-border pointer-events-none absolute inset-y-0 w-px"
                 style={{ left: `${activeRatio * 100}%` }}
               />
-              <div
-                aria-hidden="true"
-                className="pointer-events-none absolute h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full"
-                style={{
-                  left: `${activeRatio * 100}%`,
-                  top: `${(1 - activeValue / geometry.top) * 100}%`,
-                  backgroundColor: color,
-                  boxShadow: "0 0 0 2px var(--card)",
-                }}
-              />
-              <ChartTooltip xRatio={activeRatio} title={formatTimestamp(activePoint.t)}>
-                <ChartTooltipRow
-                  color={color}
-                  label={seriesLabel}
-                  value={formatValue(activeValue)}
+              {activeValue !== null ? (
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full"
+                  style={{
+                    left: `${activeRatio * 100}%`,
+                    top: `${(1 - activeValue / geometry.top) * 100}%`,
+                    backgroundColor: color,
+                    boxShadow: "0 0 0 2px var(--card)",
+                  }}
                 />
+              ) : null}
+              <ChartTooltip xRatio={activeRatio} title={formatTimestamp(activePoint.t)}>
+                {activeValue !== null ? (
+                  <ChartTooltipRow
+                    color={color}
+                    label={seriesLabel}
+                    value={formatValue(activeValue)}
+                  />
+                ) : null}
+                {overlays.map((overlay, index) => {
+                  const value = activeOverlayValues[index];
+                  return value === null || value === undefined ? null : (
+                    <ChartTooltipRow
+                      key={overlay.label}
+                      color={chartSeriesColor(overlay.seriesIndex)}
+                      label={overlay.label}
+                      value={formatValue(value)}
+                    />
+                  );
+                })}
               </ChartTooltip>
             </>
           ) : null}

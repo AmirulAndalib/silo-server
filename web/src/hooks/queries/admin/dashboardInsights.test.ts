@@ -13,11 +13,14 @@ vi.mock("@/api/client", () => ({
 
 import { adminKeys } from "../keys";
 import {
+  adminDownloadsStatsPath,
   adminPlaybackActivityPath,
   adminTimeseriesPath,
   adminTopActivityPath,
+  normalizeDownloadsTopLimit,
   normalizeInsightHours,
   normalizeTopActivityDays,
+  useAdminDownloadsStats,
   useAdminPlaybackActivity,
   useAdminTimeseries,
   useAdminTopActivity,
@@ -62,6 +65,17 @@ describe("dashboard insight windows", () => {
     expect(normalizeTopActivityDays(input)).toBe(expected);
   });
 
+  it.each([
+    [10, 10],
+    [1, 1],
+    [25, 25],
+    [0, 1],
+    [99, 25],
+    [Number.NaN, 10],
+  ])("clamps a top limit of %p to %p", (input, expected) => {
+    expect(normalizeDownloadsTopLimit(input)).toBe(expected);
+  });
+
   it("builds request paths from the clamped window", () => {
     expect(adminTimeseriesPath(24)).toBe("/admin/stats/timeseries?hours=24");
     expect(adminTimeseriesPath(1)).toBe("/admin/stats/timeseries?hours=1");
@@ -69,6 +83,8 @@ describe("dashboard insight windows", () => {
     expect(adminPlaybackActivityPath(24)).toBe("/admin/stats/playback-activity?hours=24");
     expect(adminTopActivityPath(7)).toBe("/admin/stats/top-activity?days=7");
     expect(adminTopActivityPath(0)).toBe("/admin/stats/top-activity?days=1");
+    expect(adminDownloadsStatsPath(10)).toBe("/admin/stats/downloads?limit=10");
+    expect(adminDownloadsStatsPath(99)).toBe("/admin/stats/downloads?limit=25");
   });
 
   it("keys every window under the prefix the dashboard refresh invalidates", () => {
@@ -76,6 +92,7 @@ describe("dashboard insight windows", () => {
       [adminKeys.dashboardTimeseriesRoot(), adminKeys.dashboardTimeseries(24)],
       [adminKeys.playbackActivityRoot(), adminKeys.playbackActivity(24)],
       [adminKeys.topActivityRoot(), adminKeys.topActivity(7)],
+      [adminKeys.downloadsStatsRoot(), adminKeys.downloadsStats(10)],
     ] as const;
     for (const [root, leaf] of roots) {
       expect(leaf.slice(0, root.length)).toEqual([...root]);
@@ -121,6 +138,17 @@ describe("dashboard insight hooks", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(mocks.api).toHaveBeenCalledWith("/admin/stats/top-activity?days=7");
     expect(queryClient.getQueryData(adminKeys.topActivity(7))).toEqual({});
+  });
+
+  it("defaults downloads stats to a top-10 list", async () => {
+    const queryClient = createQueryClient();
+    const { result } = renderHook(() => useAdminDownloadsStats(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mocks.api).toHaveBeenCalledWith("/admin/stats/downloads?limit=10");
+    expect(queryClient.getQueryData(adminKeys.downloadsStats(10))).toEqual({});
   });
 
   it("paces from the dashboard loop: stale just under 60s, never self-polling", async () => {

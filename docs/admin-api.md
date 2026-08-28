@@ -762,6 +762,8 @@ client tells "this deployment is older than my build" from "the request failed".
 | `top_activity` | `GET /admin/stats/top-activity` serves the leaderboards. |
 | `health` | `GET /admin/server/status` carries the additive `health` object. |
 | `log_level_list` | `GET /admin/logs/app` accepts a multi-level filter. |
+| `watch_providers` | `GET /admin/stats` carries the per-provider `watch_providers` array. |
+| `downloads_stats` | `GET /admin/stats/downloads` serves the offline-download aggregate, and timeseries points carry the additive `download_egress_kbps` split. |
 
 ```json
 {
@@ -770,9 +772,109 @@ client tells "this deployment is older than my build" from "the request failed".
   "playback_activity": true,
   "top_activity": true,
   "health": true,
-  "log_level_list": true
+  "log_level_list": true,
+  "watch_providers": true,
+  "downloads_stats": true
 }
 ```
+
+## `GET /api/v1/admin/stats`
+
+Library, user, and playback totals for the dashboard, plus one entry per watch
+provider. Cached in-process for 15s and bypassed with `?refresh=1`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `total_items`, `total_files`, `total_users` | int | Catalog and account totals. |
+| `total_movies`, `total_movie_files`, `total_shows`, `total_show_files` | int | Per-kind catalog totals. |
+| `active_streams` | int | Playback sessions currently synced as live. |
+| `total_storage_bytes` | int | Sum of every scanned media file's size. |
+| `watch_providers` | object[] | One entry per watch provider, ordered by `provider`. Always an array, never null. |
+
+`watch_providers` covers the union of the providers registered in the watchsync
+registry — built-in and plugin-contributed alike, so a provider installed by a
+plugin appears as soon as it registers, with zeros — and any provider that has
+rows in the watch-provider tables. The second half of that union keeps history
+visible after a provider's plugin is uninstalled; such an entry carries
+`"registered": false` and falls back to its key as the display name.
+
+Each entry:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `provider` | string | Provider key (`trakt`, `simkl`, `mdblist`, a plugin's key). |
+| `display_name` | string | Human name from the registry, or the key when the provider is not registered. |
+| `registered` | bool | False when the provider only exists in stored rows. |
+| `scrobbling` | bool | The provider declares the scrobble-playback capability. |
+| `exporting` | bool | The provider declares the export-watched capability. |
+| `connected_profiles` | int | Profiles with a connection to this provider. |
+| `enabled_profiles` | int | Connected profiles with at least one sync direction enabled. |
+| `export_enabled_profiles`, `scrobble_enabled_profiles` | int | Connected profiles with that toggle on. |
+| `last_sync_completed_at` | string | RFC3339 timestamp of the newest completed sync run. Omitted when there is none. |
+| `sync_runs_24h`, `sync_errors_24h` | int | Sync runs started in the last 24h, and how many of those failed. |
+| `imported_watched_24h`, `imported_progress_24h`, `exported_watched_24h` | int | Rows moved by those runs. |
+| `pending_exports`, `failed_exports` | int | Queued history exports by status, all-time. |
+| `open_scrobbles` | int | Scrobble sessions started but not yet stopped. |
+| `scrobbles_24h` | int | Scrobble sessions touched in the last 24h. |
+
+```json
+{
+  "total_items": 4821,
+  "total_files": 5310,
+  "total_users": 6,
+  "total_movies": 1980,
+  "total_shows": 212,
+  "active_streams": 3,
+  "total_storage_bytes": 91234567890,
+  "watch_providers": [
+    {
+      "provider": "mdblist",
+      "display_name": "MDBList",
+      "registered": true,
+      "scrobbling": false,
+      "exporting": false,
+      "connected_profiles": 0,
+      "enabled_profiles": 0,
+      "export_enabled_profiles": 0,
+      "scrobble_enabled_profiles": 0,
+      "sync_runs_24h": 0,
+      "sync_errors_24h": 0,
+      "imported_watched_24h": 0,
+      "imported_progress_24h": 0,
+      "exported_watched_24h": 0,
+      "pending_exports": 0,
+      "failed_exports": 0,
+      "open_scrobbles": 0,
+      "scrobbles_24h": 0
+    },
+    {
+      "provider": "trakt",
+      "display_name": "Trakt",
+      "registered": true,
+      "scrobbling": true,
+      "exporting": true,
+      "connected_profiles": 2,
+      "enabled_profiles": 2,
+      "export_enabled_profiles": 2,
+      "scrobble_enabled_profiles": 1,
+      "last_sync_completed_at": "2026-03-01T12:00:00Z",
+      "sync_runs_24h": 5,
+      "sync_errors_24h": 0,
+      "imported_watched_24h": 30,
+      "imported_progress_24h": 4,
+      "exported_watched_24h": 12,
+      "pending_exports": 0,
+      "failed_exports": 0,
+      "open_scrobbles": 1,
+      "scrobbles_24h": 9
+    }
+  ]
+}
+```
+
+`watch_providers` replaced the Trakt-hardcoded `watch_provider_activity` object,
+which was removed pre-lock; see the removals table in
+[architecture/v1-scope.md](architecture/v1-scope.md).
 
 ## `GET /api/v1/admin/stats/timeseries`
 
@@ -822,6 +924,18 @@ sums every source for a minute before the peak minute of the bucket is taken.
 Precision is mixed by design: node egress is a 30-second rolling average and
 process egress is an exact byte delta.
 
+`egress_kbps` keeps its pre-split meaning — the total viewer egress across
+every source — so a chart drawn from it alone stays truthful.
+`download_egress_kbps` is the additive file-transfer subset of that total:
+offline and direct downloads, ebook reads, and ABS file fetches, measured as
+the actual bytes each API process wrote (including partial range-request
+bodies). Node egress cannot be split and counts entirely outside the subset.
+The sampler keeps the subset ≤ the total per minute and both take their
+per-bucket peak over the same minutes, so a client charting the split as
+`download_egress_kbps` versus `egress_kbps - download_egress_kbps` never sees
+a negative value. Samples written before the split report `0` — read that as
+"not measured yet", not "no downloads".
+
 A bucket with no sample in it is absent from `points` rather than zero — a gap
 (a restart, a stopped server) and an idle bucket are different facts. Stream
 telemetry being disabled means no `proc:` rows, not an error.
@@ -841,7 +955,8 @@ fresh install renders "collecting data" instead of an empty chart.
       "direct": 1,
       "remux": 0,
       "transcode": 2,
-      "egress_kbps": 48211
+      "egress_kbps": 48211,
+      "download_egress_kbps": 6100
     }
   ]
 }
@@ -973,6 +1088,57 @@ Both lists are `[]` on a server with no history, never `null`.
       "plays": 12,
       "total_seconds": 40100
     }
+  ]
+}
+```
+
+## `GET /api/v1/admin/stats/downloads`
+
+Offline-download aggregate for the dashboard's downloads widget. Cached
+in-process for 60s, dropped early on admin activity from the shared event bus,
+and bypassed with `?refresh=1`.
+
+| Parameter | Type | Meaning |
+|---|---|---|
+| `limit` | int | Rows in `top_users`. Default 10, clamped to 1..25. A non-numeric value is `400 bad_request`. |
+| `refresh` | bool | Bypass the cache for this read. |
+
+The aggregate reads the `downloads` table, which carries two lifecycles: a
+**managed device entry** (a device keeps the item offline; `device_id` set) and
+a **one-shot web download** (`device_id` null, pruned over time). "Active"
+means a managed entry whose status is `queued`, `preparing`, `ready`,
+`downloading`, or `completed` — anything that has not ended in failure,
+cancellation, or revocation. The headline numbers and `top_users` count active
+managed entries only; the 24-hour counters cover both lifecycles, so one-shot
+web downloads show up there.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `users_with_downloads` | int | Distinct accounts (login accounts, not household profiles) with at least one active managed download. |
+| `active_downloads` | int | Active managed entries. A series batch contributes one entry per episode. |
+| `total_bytes` | int | Sum of `file_size` over completed managed entries — bytes sitting on devices as far as the server can know without devices reporting back. |
+| `downloads_started_24h` | int | Rows created in the last 24 hours, both lifecycles. |
+| `downloads_completed_24h` | int | Rows that reached `completed` in the last 24 hours, both lifecycles. |
+| `limit` | int | The clamped `top_users` size the response was built with. |
+| `top_users` | object[] | Accounts ranked by active managed downloads; `[]` when nobody downloads, never `null`. |
+
+Each `top_users` entry: `user_id`, `username`, `downloads` (active managed
+entries), and `total_bytes` (completed managed entries only, like the headline).
+
+A deployment with the downloads feature disabled answers all zeros rather than
+an error — the table exists on every deployment.
+
+```json
+{
+  "users_with_downloads": 2,
+  "active_downloads": 14,
+  "total_bytes": 52613349376,
+  "downloads_started_24h": 3,
+  "downloads_completed_24h": 2,
+  "limit": 10,
+  "top_users": [
+    { "user_id": 3, "username": "quick", "downloads": 11, "total_bytes": 41234567890 },
+    { "user_id": 5, "username": "kid", "downloads": 3, "total_bytes": 11378781486 }
   ]
 }
 ```
