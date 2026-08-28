@@ -296,14 +296,17 @@ describe("useOverlayPrefs", () => {
   });
 
   it("prefers a stored profile document over the admin defaults", async () => {
-    mocks.profileId.mockReturnValue("profile-1");
+    mocks.profileId = "profile-1";
     mocks.api.mockResolvedValue({
       enabled: true,
       defaults: JSON.stringify({ version: 2, preset: "vibrant", order: [], items: {} }),
     });
-    mocks.effective.mockReturnValue(
-      effectiveOverlayValue({ version: 2, preset: "minimal", order: [], items: {} }),
-    );
+    mocks.effective = effectiveOverlayValue({
+      version: 2,
+      preset: "minimal",
+      order: [],
+      items: {},
+    }).data as Record<string, { value: unknown }>;
 
     const { result } = renderHook(() => useOverlayPrefs(), { wrapper: createWrapper() });
 
@@ -316,14 +319,17 @@ describe("useOverlayPrefs", () => {
   // A snapshot of today's server values would pin the profile to them; only
   // deleting the stored document keeps it tracking later admin changes.
   it("deletes the profile document so the profile follows the server defaults again", async () => {
-    mocks.profileId.mockReturnValue("profile-1");
+    mocks.profileId = "profile-1";
     mocks.api.mockResolvedValue({
       enabled: true,
       defaults: JSON.stringify({ version: 2, preset: "vibrant", order: [], items: {} }),
     });
-    mocks.effective.mockReturnValue(
-      effectiveOverlayValue({ version: 2, preset: "minimal", order: [], items: {} }),
-    );
+    mocks.effective = effectiveOverlayValue({
+      version: 2,
+      preset: "minimal",
+      order: [],
+      items: {},
+    }).data as Record<string, { value: unknown }>;
     mocks.clearValue.mockResolvedValue(undefined);
 
     const { result, rerender } = renderHook(() => useOverlayPrefs(), { wrapper: createWrapper() });
@@ -340,7 +346,7 @@ describe("useOverlayPrefs", () => {
 
     // The effective read now resolves to the contract default (null), which is
     // exactly what lets the admin document apply.
-    mocks.effective.mockReturnValue(effectiveOverlayValue(null));
+    mocks.effective = effectiveOverlayValue(null).data as Record<string, { value: unknown }>;
     rerender();
 
     expect(result.current.hasOverride).toBe(false);
@@ -348,9 +354,9 @@ describe("useOverlayPrefs", () => {
   });
 
   it("treats a 404 from the canonical delete as already inheriting", async () => {
-    mocks.profileId.mockReturnValue("profile-1");
+    mocks.profileId = "profile-1";
     mocks.api.mockResolvedValue({ enabled: true });
-    mocks.effective.mockReturnValue(effectiveOverlayValue(null));
+    mocks.effective = effectiveOverlayValue(null).data as Record<string, { value: unknown }>;
     mocks.clearValue.mockRejectedValue(new ApiClientError(404, "not_found", "no stored value"));
 
     const { result } = renderHook(() => useOverlayPrefs(), { wrapper: createWrapper() });
@@ -362,11 +368,14 @@ describe("useOverlayPrefs", () => {
   });
 
   it("surfaces a failed delete instead of pretending the reset landed", async () => {
-    mocks.profileId.mockReturnValue("profile-1");
+    mocks.profileId = "profile-1";
     mocks.api.mockResolvedValue({ enabled: true });
-    mocks.effective.mockReturnValue(
-      effectiveOverlayValue({ version: 2, preset: "minimal", order: [], items: {} }),
-    );
+    mocks.effective = effectiveOverlayValue({
+      version: 2,
+      preset: "minimal",
+      order: [],
+      items: {},
+    }).data as Record<string, { value: unknown }>;
     mocks.clearValue.mockRejectedValue(new ApiClientError(500, "server_error", "boom"));
 
     const { result } = renderHook(() => useOverlayPrefs(), { wrapper: createWrapper() });

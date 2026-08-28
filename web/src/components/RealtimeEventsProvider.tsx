@@ -35,10 +35,11 @@ import {
   scheduleProgressHomeRefresh,
   userStateChangeAffectsSectionMembership,
 } from "@/components/realtimeCatalogInvalidation";
+import { bumpHomeRefreshSignal } from "@/pages/homeSurfaceRefresh";
 import { useAuth } from "@/hooks/useAuth";
 import { useIsActingAdmin } from "@/hooks/useIsActingAdmin";
 import { usePageActivity } from "@/hooks/usePageActivity";
-import { adminKeys, historyImportKeys, libraryKeys } from "@/hooks/queries/keys";
+import { adminKeys, historyImportKeys, libraryKeys, sectionKeys } from "@/hooks/queries/keys";
 import {
   scheduleMediaSurfaceInvalidation,
   updateCatalogItemDetail,
@@ -459,17 +460,19 @@ function handleUserStateEvent(
           skipSimilarItems: true,
         }
       : { skipSimilarItems: true },
-  ).then(() => {
-    // Resetting home's load queue re-runs every section fetch. Membership
-    // changes do it immediately; progress ticks coalesce into one trailing
-    // refresh per window so an open home still catches another client's
-    // playback without a per-tick storm.
-    if (userStateChangeAffectsSectionMembership(payload.change)) {
-      bumpHomeRefreshSignal(queryClient);
-    } else {
-      scheduleProgressHomeRefresh(queryClient);
-    }
-  });
+  );
+  // Resetting home's load queue re-runs every section fetch. Membership
+  // changes do it immediately; progress ticks coalesce into one trailing
+  // refresh per window so an open home still catches another client's
+  // playback without a per-tick storm. Mark the home sections stale before
+  // an immediate reset because the surface invalidation above is debounced.
+  if (userStateChangeAffectsSectionMembership(payload.change)) {
+    void queryClient
+      .invalidateQueries({ queryKey: sectionKeys.home(), refetchType: "none" })
+      .then(() => bumpHomeRefreshSignal(queryClient));
+  } else {
+    scheduleProgressHomeRefresh(queryClient);
+  }
   void queryClient.invalidateQueries({
     queryKey: adminKeys.stats(),
     refetchType: allowDashboardRefetch ? "active" : "none",
