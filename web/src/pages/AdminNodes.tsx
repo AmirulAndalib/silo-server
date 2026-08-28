@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useAdminServerSettings } from "@/hooks/queries/admin/settings";
 import type { FormEvent, ReactNode } from "react";
 import type { StreamNode, CreateNodeRequest, UpdateNodeRequest } from "@/api/types";
@@ -54,6 +54,7 @@ import {
   describeSharedGPU,
   nodeHWDevicePaths,
   nodeHasHWDeviceInventory,
+  hwDeviceSyntaxChanges,
   nodeUsesCUDADevices,
   parseHWDeviceOverride,
 } from "./adminNodesPresentation";
@@ -550,19 +551,20 @@ function NodeForm({
   const clusterHWAccel = serverSettings?.["playback.hw_accel"];
   const usesCUDADevices = nodeUsesCUDADevices(node, hwAccelOverride, clusterHWAccel);
   // A device override written for one syntax means nothing in the other: a
-  // render path is not a CUDA identity and neither is settable as the other. So
-  // when the selection moves between them the stored value is dropped rather
-  // than carried into a policy it cannot express — but only on a change made
-  // here, never on the first render, which would wipe a valid override just for
-  // opening the form.
-  const previousUsesCUDA = useRef(usesCUDADevices);
-  useEffect(() => {
-    if (previousUsesCUDA.current === usesCUDADevices) {
-      return;
+  // render path is not a CUDA identity and neither is settable as the other, so
+  // moving the selection between them drops the stored value rather than
+  // carrying it into a policy it cannot express.
+  //
+  // Driven by the operator's own edit rather than by watching usesCUDADevices,
+  // because that value also moves on its own: the cluster setting arrives after
+  // the first render, and an effect would read that as a change and erase a
+  // valid override on a dialog nobody had touched yet.
+  function selectHWAccelOverride(next: string) {
+    if (hwDeviceSyntaxChanges(node, hwAccelOverride, next, clusterHWAccel)) {
+      setHwDeviceOverride("");
     }
-    previousUsesCUDA.current = usesCUDADevices;
-    setHwDeviceOverride("");
-  }, [usesCUDADevices]);
+    setHwAccelOverride(next);
+  }
   const hasDeviceInventory = nodeHasHWDeviceInventory(node) && !usesCUDADevices;
   const deviceRows = buildNodeHWDeviceRows(node, hwDeviceOverride);
   const devicePaths = nodeHWDevicePaths(node);
@@ -700,7 +702,7 @@ function NodeForm({
         <>
           <div className="space-y-2">
             <Label htmlFor="node-hw-accel-override">Hardware Acceleration</Label>
-            <Select value={hwAccelOverride} onValueChange={setHwAccelOverride}>
+            <Select value={hwAccelOverride} onValueChange={selectHWAccelOverride}>
               <SelectTrigger id="node-hw-accel-override" className="w-full">
                 <SelectValue />
               </SelectTrigger>

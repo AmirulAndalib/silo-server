@@ -409,6 +409,20 @@ func CapabilityEndpointTimeout(hwAccel, hwDevice string) time.Duration {
 		tonemap.ProbeEndpointTimeout(hwAccel, hwDevice)
 }
 
+// HWAccelWalkTimeout is how long a hardware detection walk of this host takes at
+// worst, for the configured device set.
+//
+// Exported for a caller that runs one synchronously while holding an HTTP
+// connection open and must size its write deadline to cover it: the walk grows
+// with the device count and passes the API listener's own write timeout at eight
+// Intel render devices, so a response can be lost while every probe is still
+// inside its bound. Unlike the ceiling used to clamp what a *remote* node
+// advertises, this classifies devices on the host that is about to walk them,
+// which is the host asking.
+func HWAccelWalkTimeout(hwDevice string) time.Duration {
+	return hwAccelWalkTimeout(collectHWCandidates(hwDevice))
+}
+
 // CapabilityRequestTimeout is CapabilityEndpointTimeout plus the transport
 // margin a remote caller needs. It is what a node advertises and what a caller
 // of that node's capability endpoint must allow.

@@ -671,17 +671,19 @@ export const HW_ACCEL_OVERRIDE_OPTIONS: readonly { value: string; label: string 
  * NVENC leaves it holding a render path with no way to type the CUDA identity
  * the backend actually needs.
  *
- * `override` is the backend selected in the editor, which may be the inherit
- * sentinel. Inheriting means running whatever the cluster names, so that is
- * what decides the device syntax — not what this node resolves today, which
- * still reflects the override being given up. A node overriding QSV under an
- * NVENC cluster would otherwise keep the render-path picker while inheritance
- * is selected, leaving no way to type the CUDA identity the backend needs and
- * letting `/dev/dri/…` be saved as an NVENC policy that cannot work.
+ * `override` is the backend selected in the editor. Only the inherit sentinel
+ * defers to the cluster: inheriting means running whatever the cluster names,
+ * so that is what decides the device syntax — not what this node resolves
+ * today, which still reflects the override being given up. A node overriding
+ * QSV under an NVENC cluster would otherwise keep the render-path picker while
+ * inheritance is selected, leaving no way to type the CUDA identity the backend
+ * needs and letting `/dev/dri/…` be saved as an NVENC policy that cannot work.
  *
- * Only when the cluster itself names no backend — unset or `auto` — does the
- * node's own resolution decide, because then its detection result is what it
- * will inherit.
+ * An explicit `auto` is not inheritance. It is this node's own policy — detect
+ * against your own hardware — so the cluster's backend says nothing about what
+ * it will run, and its own resolution decides. That is also the fallback when
+ * inheritance is selected and the cluster names no backend, since an `auto`
+ * cluster is inherited as exactly that instruction.
  */
 export function nodeUsesCUDADevices(
   node: StreamNode | null | undefined,
@@ -695,11 +697,39 @@ export function nodeUsesCUDADevices(
   if (selected !== "" && selected !== HW_ACCEL_INHERIT && selected !== "auto") {
     return false;
   }
-  const cluster = clusterHWAccel?.trim().toLowerCase() ?? "";
-  if (cluster !== "" && cluster !== "auto") {
-    return cluster === "nvenc";
+  if (selected === "" || selected === HW_ACCEL_INHERIT) {
+    const cluster = clusterHWAccel?.trim().toLowerCase() ?? "";
+    if (cluster !== "" && cluster !== "auto") {
+      return cluster === "nvenc";
+    }
   }
   return node?.capabilities?.resolved?.trim().toLowerCase() === "nvenc";
+}
+
+/**
+ * Whether moving the backend selection from `current` to `next` leaves the
+ * device override meaningless.
+ *
+ * The two syntaxes are not interchangeable: a render path is not a CUDA index
+ * or UUID and neither is settable as the other, so a value written for one is
+ * not a value for the other — it is a policy that cannot work. Crossing between
+ * them drops it.
+ *
+ * Takes both selections rather than watching the effective syntax, because that
+ * also moves on its own: the cluster setting arrives after the first render,
+ * and treating that as a change would erase a valid override on a dialog nobody
+ * had touched.
+ */
+export function hwDeviceSyntaxChanges(
+  node: StreamNode | null | undefined,
+  current: string | null | undefined,
+  next: string | null | undefined,
+  clusterHWAccel?: string | null,
+): boolean {
+  return (
+    nodeUsesCUDADevices(node, current, clusterHWAccel) !==
+    nodeUsesCUDADevices(node, next, clusterHWAccel)
+  );
 }
 
 /** A node's own acceleration policy, as rendered beside its GPU inventory. */

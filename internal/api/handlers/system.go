@@ -131,7 +131,7 @@ func (h *SystemHandler) HandleHWAccel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(healthy) == 0 {
-		writeJSON(w, http.StatusOK, HWAccelInventory{HWAccelInfo: h.localHWAccel()})
+		writeJSON(w, http.StatusOK, HWAccelInventory{HWAccelInfo: h.localHWAccel(w, r)})
 		return
 	}
 
@@ -173,7 +173,7 @@ func (h *SystemHandler) HandleHWAccel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !primaried {
-		inventory.HWAccelInfo = h.localHWAccel()
+		inventory.HWAccelInfo = h.localHWAccel(w, r)
 	}
 	writeJSON(w, http.StatusOK, inventory)
 }
@@ -183,12 +183,37 @@ func (h *SystemHandler) HandleHWAccel(w http.ResponseWriter, r *http.Request) {
 // A zero-value handler answers with the ffmpeg on PATH and auto-detection
 // rather than panicking: tests build one directly, and the accessor is wiring
 // this method should not depend on having received.
-func (h *SystemHandler) localHWAccel() playback.HWAccelInfo {
+func (h *SystemHandler) localHWAccel(w http.ResponseWriter, r *http.Request) playback.HWAccelInfo {
 	var ffmpegPath, hwAccel, hwDevice string
 	if h.playback != nil {
 		ffmpegPath, hwAccel, hwDevice = h.playback()
 	}
+	extendHWAccelWriteDeadline(w, r, hwDevice)
 	return playback.DetectHWAccelWithFFmpeg(hwAccel, ffmpegPath, hwDevice)
+}
+
+// hwAccelWriteSlack covers reading the node list and writing the JSON around the
+// walk this route runs.
+const hwAccelWriteSlack = 15 * time.Second
+
+// extendHWAccelWriteDeadline lifts this connection's write deadline to cover a
+// synchronous hardware walk.
+//
+// The walk is bounded by its own budget, which scales with the configured device
+// set: eight Intel render devices draw five ffmpeg commands each at three
+// seconds apiece, which is already past the API listener's 120-second write
+// timeout. Without this the settings page loses its response while every probe
+// is still inside its bound, and the operator sees a failed request for a probe
+// that is about to succeed. The re-probe route extends its deadline for exactly
+// the same reason.
+func extendHWAccelWriteDeadline(w http.ResponseWriter, r *http.Request, hwDevice string) {
+	budget := playback.HWAccelWalkTimeout(hwDevice) + hwAccelWriteSlack
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(budget)); err != nil {
+		// A ResponseWriter that cannot carry a deadline (a test recorder, a
+		// wrapper that does not unwrap) is not a reason to refuse the probe.
+		slog.WarnContext(r.Context(), "hw-accel write deadline not extended", "component", "api",
+			"budget", budget, "error", err)
+	}
 }
 
 // HandleBuildInfo handles GET /admin/system/build.

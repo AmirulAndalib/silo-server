@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -245,5 +247,45 @@ func TestHandleHWAccelProbeLogRedactsNodeURLSecrets(t *testing.T) {
 	}
 	if !strings.Contains(diagnostics, failed.URL) {
 		t.Fatalf("capability probe log lost sanitized node origin: %q", diagnostics)
+	}
+}
+
+// The local inventory runs a full hardware walk on the request goroutine, and
+// that walk grows with the configured device set — eight Intel render devices
+// draw five ffmpeg commands each, already past the API listener's 120-second
+// write timeout. Without lifting the deadline the settings page loses its
+// response while every probe is still inside its own bound.
+func TestHWAccelExtendsTheWriteDeadlineForItsWalk(t *testing.T) {
+	devices := make([]string, 0, 8)
+	for i := range 8 {
+		devices = append(devices, "/dev/dri/renderD"+strconv.Itoa(128+i))
+	}
+	hwDevice := strings.Join(devices, ",")
+	handler := &SystemHandler{
+		playback: func() (string, string, string) { return "/nonexistent/ffmpeg", "auto", hwDevice },
+	}
+
+	recorder := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	before := time.Now()
+	handler.HandleHWAccel(recorder, httptest.NewRequest(http.MethodGet, "/admin/system/hw-accel", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	// Sized from the walk's own budget, so it grows with the device set exactly
+	// as the walk does. How large that is depends on how the devices classify,
+	// which depends on the sysfs of the host running this — an Intel host draws
+	// five commands per device and passes 120 seconds at eight of them, while a
+	// machine with no such devices prices the same list far lower. So this
+	// asserts the derivation rather than a number no host agrees on.
+	want := playback.HWAccelWalkTimeout(hwDevice) + hwAccelWriteSlack
+	if reserved := recorder.deadline.Sub(before); reserved < want {
+		t.Fatalf("reserved %s, want at least the walk's own budget plus slack (%s)", reserved, want)
+	}
+	// And it is derived from the configured set, not a constant: a single device
+	// has to price lower than eight.
+	if single := playback.HWAccelWalkTimeout(devices[0]); single >= playback.HWAccelWalkTimeout(hwDevice) {
+		t.Fatalf("one device budgets %s and eight budget %s; the walk budget does not follow the device set",
+			single, playback.HWAccelWalkTimeout(hwDevice))
 	}
 }

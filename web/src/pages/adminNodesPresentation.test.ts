@@ -17,6 +17,7 @@ import {
   formatBitsPerSecond,
   nodeHWDevicePaths,
   nodeHasHWDeviceInventory,
+  hwDeviceSyntaxChanges,
   nodeUsesCUDADevices,
   parseHWDeviceOverride,
 } from "./adminNodesPresentation";
@@ -1180,6 +1181,17 @@ describe("nodeUsesCUDADevices", () => {
     expect(nodeUsesCUDADevices(node, HW_ACCEL_INHERIT, "vaapi")).toBe(false);
   });
 
+  // Auto is not inheritance: it tells this node to detect against its own
+  // hardware, so what the cluster names says nothing about what it will run.
+  // Reading the cluster there would switch a node whose Auto resolves QSV to
+  // CUDA syntax and throw away a valid render-path override.
+  it("keeps an explicit auto on the node's own resolution", () => {
+    const qsv = makeNode({ capabilities: { resolved: "qsv" } });
+    expect(nodeUsesCUDADevices(qsv, "auto", "nvenc")).toBe(false);
+    const nvenc = makeNode({ capabilities: { resolved: "nvenc" } });
+    expect(nodeUsesCUDADevices(nvenc, "auto", "qsv")).toBe(true);
+  });
+
   // The node's own selection still wins: it is what that node will run.
   it("keeps an explicit override ahead of the cluster backend", () => {
     const node = makeNode({ capabilities: { resolved: "qsv" } });
@@ -1198,6 +1210,36 @@ describe("nodeUsesCUDADevices", () => {
     const node = makeNode({ capabilities: { resolved: "qsv" } });
     expect(nodeUsesCUDADevices(node, HW_ACCEL_INHERIT)).toBe(false);
     expect(nodeUsesCUDADevices(null, HW_ACCEL_INHERIT)).toBe(false);
+  });
+});
+
+describe("hwDeviceSyntaxChanges", () => {
+  // Under an NVENC cluster, giving up a QSV override means the device value has
+  // to be a CUDA identity — the render path it holds cannot become one.
+  it("reports a crossing when inheritance flips the syntax", () => {
+    const node = makeNode({
+      capabilities: { resolved: "qsv" },
+      hw_accel_override: "qsv",
+      hw_device_override: "/dev/dri/renderD128",
+    });
+    expect(hwDeviceSyntaxChanges(node, "qsv", HW_ACCEL_INHERIT, "nvenc")).toBe(true);
+    expect(hwDeviceSyntaxChanges(node, HW_ACCEL_INHERIT, "qsv", "nvenc")).toBe(true);
+  });
+
+  // Both name render paths, so the value the operator typed still means what it
+  // meant. Dropping it here would be losing work for nothing.
+  it("reports no crossing between two render-device backends", () => {
+    const node = makeNode({ capabilities: { resolved: "qsv" } });
+    expect(hwDeviceSyntaxChanges(node, "qsv", "vaapi", "qsv")).toBe(false);
+  });
+
+  // The whole reason this takes both selections: the cluster setting is absent
+  // on the first render and arrives with the query. Nothing the operator did
+  // changed, so nothing may be erased.
+  it("reports no crossing when only the cluster setting arrives", () => {
+    const node = makeNode({ capabilities: { resolved: "qsv" } });
+    expect(hwDeviceSyntaxChanges(node, HW_ACCEL_INHERIT, HW_ACCEL_INHERIT, undefined)).toBe(false);
+    expect(hwDeviceSyntaxChanges(node, HW_ACCEL_INHERIT, HW_ACCEL_INHERIT, "nvenc")).toBe(false);
   });
 });
 
