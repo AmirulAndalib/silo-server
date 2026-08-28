@@ -372,19 +372,45 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 		return entry, nil
 	}
 
-	// Snapshot the invalidation count before probing: anything this fetch
-	// learns describes the node as it was when the request left.
-	invalidations := h.nodeCapabilityInvalidationsV3(nodeURL)
-	requestCtx, cancel := context.WithTimeout(ctx, h.remoteToneMapProbeTimeoutV3(nodeURL))
-	defer cancel()
-	info, err := fetchRemoteTranscodeCapabilities(requestCtx, nodeURL, h.JWTSecret)
-	completedAt := time.Now()
+	// An invalidation landing mid-fetch means the report this probe is about to
+	// return describes the node as it was, not as it is — and this caller is
+	// about to select transformations and a tone-map executor from it. Re-probe
+	// rather than plan on it.
+	//
+	// Bounded at two attempts, and the second result is used even if it is
+	// overtaken too. Failing the request instead would be worse than a slightly
+	// stale inventory: most hash changes are not "the hardware went away" — a
+	// driver update, a new identity field, a raised probe budget all move it —
+	// so refusing would reject playback that the report in hand describes
+	// perfectly well, and on a single-transcode-node deployment there is nothing
+	// to fall back to. A node changing faster than two probes can read it is a
+	// different problem, and one this path cannot fix by failing.
+	var (
+		info        playback.HWAccelInfo
+		err         error
+		completedAt time.Time
+		overtaken   bool
+	)
+	for attempt := range v3CapabilityFetchAttempts {
+		// Snapshot the invalidation count before probing: anything this fetch
+		// learns describes the node as it was when the request left.
+		invalidations := h.nodeCapabilityInvalidationsV3(nodeURL)
+		requestCtx, cancel := context.WithTimeout(ctx, h.remoteToneMapProbeTimeoutV3(nodeURL))
+		info, err = fetchRemoteTranscodeCapabilities(requestCtx, nodeURL, h.JWTSecret)
+		cancel()
+		completedAt = time.Now()
+		overtaken = h.nodeCapabilityInvalidationsV3(nodeURL) != invalidations
+		if !overtaken || attempt+1 == v3CapabilityFetchAttempts {
+			break
+		}
+	}
+
 	if err != nil {
 		h.v3NodeCapabilitiesMu.Lock()
 		if h.v3NodeCapabilities == nil {
 			h.v3NodeCapabilities = make(map[string]v3NodeCapabilityCache)
 		}
-		if h.v3NodeCapabilityInvalidations[nodeURL] != invalidations {
+		if overtaken {
 			h.v3NodeCapabilitiesMu.Unlock()
 			return v3NodeCapabilityCache{}, err
 		}
@@ -403,11 +429,10 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 		probeRequestTimeout: playback.NormalizeProbeRequestTimeout(info.ProbeRequestTimeoutMillis, remoteNodeProbeFallbackTimeout),
 	}
 	h.v3NodeCapabilitiesMu.Lock()
-	if h.v3NodeCapabilityInvalidations[nodeURL] != invalidations {
-		// The node's hardware changed while this probe was in flight. Hand the
-		// result to this caller, which has nothing better, but leave the cache
-		// empty so the next lookup re-probes instead of serving it for a full
-		// TTL to everyone else.
+	if overtaken {
+		// Still overtaken after the retry. Hand the result to this caller, which
+		// has nothing better, but leave the cache empty so the next lookup
+		// re-probes instead of serving it for a full TTL to everyone else.
 		h.v3NodeCapabilitiesMu.Unlock()
 		return entry, nil
 	}
@@ -418,6 +443,10 @@ func (h *PlaybackHandler) lookupRemoteCapabilitiesV3(ctx context.Context, nodeUR
 	h.v3NodeCapabilitiesMu.Unlock()
 	return entry, nil
 }
+
+// v3CapabilityFetchAttempts is how many times one lookup will re-probe a node
+// whose capabilities changed while it was being read.
+const v3CapabilityFetchAttempts = 2
 
 func (h *PlaybackHandler) nodeCapabilityInvalidationsV3(nodeURL string) uint64 {
 	h.v3NodeCapabilitiesMu.Lock()
