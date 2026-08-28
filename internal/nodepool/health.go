@@ -454,15 +454,17 @@ func (hc *HealthChecker) refreshCapabilities(ctx context.Context, n *Node, apply
 	note, driftBaseline := resolveDriftNote(n.CapabilityDrift, n.CapabilityDriftBaseline, drift, parsed, payload)
 	refreshedAt := time.Now()
 	if hc.repo != nil {
-		// Fenced on the URL this payload was fetched from: the fetch is
-		// detached and bounded at two minutes, so the row may since have been
-		// repointed at a different worker.
-		if err := hc.repo.UpdateCapabilities(ctx, n.ID, n.URL, payload, hash, refreshedAt, note, driftBaseline); err != nil {
+		// Fenced on the URL this payload was fetched from — the fetch is
+		// detached and bounded, so the row may since have been repointed at a
+		// different worker — and on the report it is replacing, so a slower
+		// sweep on another replica cannot land an older report on top of a
+		// newer one.
+		if err := hc.repo.UpdateCapabilities(ctx, n.ID, n.URL, payload, hash, refreshedAt, note, driftBaseline, n.CapabilitiesHash); err != nil {
 			if errors.Is(err, ErrNodeMoved) {
 				// Not a failure to report loudly: the node was edited or
 				// removed while this fetch ran, and the next sweep will fetch
 				// whatever the row addresses now.
-				slog.InfoContext(ctx, "discarded a capability report for a node that changed identity mid-fetch",
+				slog.InfoContext(ctx, "discarded a capability report the row no longer expects",
 					"component", "nodepool", "id", n.ID, "name", n.Name, "url", n.URL)
 				return err
 			}

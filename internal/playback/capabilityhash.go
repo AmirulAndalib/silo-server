@@ -14,11 +14,20 @@ import (
 // comparable token, so a reader (the node health sweep, an operator) detects
 // change without diffing a whole report or re-probing.
 //
-// Only hardware identity and capability are hashed. Fields that describe the
-// report rather than the host — Source, NodeURL, ProbeRequestTimeoutMillis, and
-// the hash itself — are excluded, because a report of unchanged hardware must
-// keep its hash no matter who asked for it or how. IntelDetected is excluded as
-// well: it is derived from the render devices already covered.
+// Only hardware identity and capability are hashed. Fields that vary with who
+// asked rather than with the host — Source, NodeURL, and the hash itself — are
+// excluded, because a report of unchanged hardware must keep its hash no matter
+// who asked for it. IntelDetected is excluded as well: it is derived from the
+// render devices already covered.
+//
+// ProbeRequestTimeoutMillis is included, though it describes the report rather
+// than the hardware. It is the node's own statement of how long its answer may
+// take, and the control plane sizes real deadlines from the stored copy. A node
+// upgraded to a build that needs longer changes nothing else about itself, so
+// leaving it out of the change signal meant the sweep never refetched and the
+// API kept canceling that node's re-probes against a budget it had outgrown.
+// It is stable for a given build and configuration, so including it costs one
+// refetch at upgrade and nothing after.
 //
 // Every slice is ordered here rather than trusted from the input: probe and
 // filesystem enumeration order is incidental, so two reports of the same host
@@ -42,6 +51,7 @@ type canonicalCapability struct {
 	RenderDevices       []string                   `json:"render_devices"`
 	RenderDeviceDetails []canonicalRenderDevice    `json:"render_device_details"`
 	NVIDIAGPUUUIDs      []string                   `json:"nvidia_gpu_uuids"`
+	ProbeRequestTimeout int64                      `json:"probe_request_timeout_ms"`
 	DetectedBackends    []canonicalDetectedBackend `json:"detected_backends"`
 	Transformations     []canonicalTransformation  `json:"transformations"`
 	ToneMapCapabilities []canonicalToneMap         `json:"tone_map_capabilities"`
@@ -87,6 +97,7 @@ func canonicalCapabilities(info HWAccelInfo) canonicalCapability {
 		RenderDevices:       sortedStrings(info.RenderDevices),
 		RenderDeviceDetails: canonicalRenderDevices(info.RenderDeviceDetails),
 		NVIDIAGPUUUIDs:      sortedStrings(info.NVIDIAGPUUUIDs),
+		ProbeRequestTimeout: info.ProbeRequestTimeoutMillis,
 		DetectedBackends:    canonicalDetectedBackends(info.DetectedBackends),
 		Transformations:     canonicalTransformations(info.Transformations),
 		ToneMapCapabilities: canonicalToneMaps(info.ToneMapCapabilities),

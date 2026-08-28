@@ -64,7 +64,6 @@ func newTestSampler(t *testing.T, tree *procTree, clock *fakeClock, opts Options
 	// have a real /host/proc; tests that exercise the lxcfs override set this
 	// explicitly to a tree that does.
 	s.hostProcDir = filepath.Join(tree.root, "no-such-host-proc")
-	s.cgroupLimitPaths = nil
 	s.cgroupUsagePaths = nil
 	s.cgroupCPUPaths = nil
 	s.statfs = func(string) (fsStats, error) { return fsStats{}, os.ErrNotExist }
@@ -271,8 +270,8 @@ func TestMemoryCorrectedByCgroupLimitAndUsage(t *testing.T) {
 			}
 
 			s := newTestSampler(t, tree, clock, Options{})
-			s.cgroupLimitPaths = []string{filepath.Join(cgroupDir, tc.limitFile)}
 			s.cgroupUsagePaths = []cgroupUsagePath{{
+				limit:        filepath.Join(cgroupDir, tc.limitFile),
 				usage:        filepath.Join(cgroupDir, tc.usageFile),
 				stat:         filepath.Join(cgroupDir, tc.statFile),
 				inactiveFile: tc.inactiveKey,
@@ -704,8 +703,7 @@ func TestMemoryStatsDoesNotMixCgroupUsageWithHostTotal(t *testing.T) {
 	if err := os.WriteFile(usage, []byte("1048576\n"), 0o600); err != nil {
 		t.Fatalf("write cgroup usage: %v", err)
 	}
-	s.cgroupLimitPaths = []string{filepath.Join(t.TempDir(), "absent")}
-	s.cgroupUsagePaths = []cgroupUsagePath{{usage: usage}}
+	s.cgroupUsagePaths = []cgroupUsagePath{{limit: filepath.Join(t.TempDir(), "absent"), usage: usage}}
 
 	used, total := s.memoryStats()
 	if total != 65536*1024 {
@@ -733,8 +731,7 @@ func TestMemoryStatsUsesCgroupUsageBesideACgroupLimit(t *testing.T) {
 	if err := os.WriteFile(usage, []byte("1048576\n"), 0o600); err != nil {
 		t.Fatalf("write cgroup usage: %v", err)
 	}
-	s.cgroupLimitPaths = []string{limit}
-	s.cgroupUsagePaths = []cgroupUsagePath{{usage: usage}}
+	s.cgroupUsagePaths = []cgroupUsagePath{{limit: limit, usage: usage}}
 
 	used, total := s.memoryStats()
 	if total != 8388608 {
@@ -834,31 +831,127 @@ func TestMemoryLimitTakesTheTightestCgroupInForce(t *testing.T) {
 	slice := write("slice.max", "2147483648\n")
 	root := write("root.max", "68719476736\n")
 
-	usage := write("memory.current", "1073741824\n")
+	// The slice's usage counts every service under it, not just this one: that
+	// is the population its limit actually bounds.
+	leafUsage := write("leaf.current", "1073741824\n")
+	sliceUsage := write("slice.current", "1610612736\n")
+	rootUsage := write("root.current", "3221225472\n")
 	stat := write("memory.stat", "inactive_file 0\n")
 
 	s := newTestSampler(t, tree, clock, Options{})
-	s.cgroupLimitPaths = []string{leaf, slice, root}
-	s.cgroupUsagePaths = []cgroupUsagePath{{usage: usage, stat: stat, inactiveFile: cgroupInactiveFileKeyV2}}
+	s.cgroupUsagePaths = []cgroupUsagePath{
+		{limit: leaf, usage: leafUsage, stat: stat, inactiveFile: cgroupInactiveFileKeyV2},
+		{limit: slice, usage: sliceUsage, stat: stat, inactiveFile: cgroupInactiveFileKeyV2},
+		{limit: root, usage: rootUsage, stat: stat, inactiveFile: cgroupInactiveFileKeyV2},
+	}
 	s.sample(context.Background())
 
 	system := s.Snapshot().System
 	if system.MemTotalMB != 2048 {
 		t.Fatalf("MemTotalMB = %d, want the 2048 the slice allows, not the leaf's looser 8192", system.MemTotalMB)
 	}
-	// Total came from a cgroup, so used has to come from one too.
-	if system.MemUsedMB != 1024 {
-		t.Fatalf("MemUsedMB = %d, want the cgroup's own 1024", system.MemUsedMB)
+	// Used comes from the *same* cgroup the limit did. Pairing the slice's
+	// 2 GiB capacity with this service's own 1 GiB would show half the volume
+	// free while the sibling services under that slice have filled it.
+	if system.MemUsedMB != 1536 {
+		t.Fatalf("MemUsedMB = %d, want the 1536 charged to the slice whose limit binds", system.MemUsedMB)
 	}
 
 	// The other shape of the same bug: a leaf that imposes nothing at all while
 	// an ancestor does.
 	unlimited := write("unlimited.max", "max\n")
 	s = newTestSampler(t, tree, clock, Options{})
-	s.cgroupLimitPaths = []string{unlimited, slice, root}
-	s.cgroupUsagePaths = []cgroupUsagePath{{usage: usage, stat: stat, inactiveFile: cgroupInactiveFileKeyV2}}
+	s.cgroupUsagePaths = []cgroupUsagePath{
+		{limit: unlimited, usage: leafUsage, stat: stat, inactiveFile: cgroupInactiveFileKeyV2},
+		{limit: slice, usage: sliceUsage, stat: stat, inactiveFile: cgroupInactiveFileKeyV2},
+		{limit: root, usage: rootUsage, stat: stat, inactiveFile: cgroupInactiveFileKeyV2},
+	}
 	s.sample(context.Background())
 	if got := s.Snapshot().System.MemTotalMB; got != 2048 {
 		t.Fatalf("MemTotalMB = %d with an unlimited leaf, want the slice's 2048", got)
+	}
+}
+
+// A cpuset is the other way a deployment caps CPU, and it leaves cpu.max saying
+// "max". A process pinned to two CPUs on a sixty-four core host would otherwise
+// divide its own busy time by sixty-four and report three percent while it is
+// saturated.
+func TestCPUCorrectedByCpusetWithoutAQuota(t *testing.T) {
+	tree := newProcTree(t)
+	clock := newFakeClock()
+	tree.write("loadavg", "0 0 0 0/0 0\n")
+	tree.write("meminfo", "MemTotal: 1024 kB\n")
+	tree.write("net/dev", "")
+	// An eight-core host, so the two allowed CPUs are visibly a subset.
+	hostStat := func(busy, idle int) string {
+		line := "cpu  " + itoa(busy) + " 0 0 " + itoa(idle) + " 0 0 0 0\n"
+		for i := range 8 {
+			line += "cpu" + itoa(i) + " 0 0 0 0 0 0 0 0\n"
+		}
+		return line
+	}
+	tree.write("stat", hostStat(100, 9900))
+
+	dir := t.TempDir()
+	cpuset := filepath.Join(dir, "cpuset.cpus.effective")
+	if err := os.WriteFile(cpuset, []byte("2-3\n"), 0o644); err != nil {
+		t.Fatalf("write cpuset: %v", err)
+	}
+	usage := filepath.Join(dir, "cpu.stat")
+	writeUsage := func(micros int) {
+		if err := os.WriteFile(usage, []byte("usage_usec "+itoa(micros)+"\n"), 0o644); err != nil {
+			t.Fatalf("write cgroup usage: %v", err)
+		}
+	}
+	writeUsage(0)
+	quota := filepath.Join(dir, "cpu.max")
+	if err := os.WriteFile(quota, []byte("max 100000\n"), 0o644); err != nil {
+		t.Fatalf("write cgroup quota: %v", err)
+	}
+
+	s := newTestSampler(t, tree, clock, Options{})
+	s.cgroupCPUPaths = []cgroupCPUPath{{
+		usage: usage, usageKey: cgroupCPUUsageKey, usageUnit: time.Microsecond, quota: quota,
+	}}
+	s.cgroupCPUSetPaths = []string{cpuset}
+	s.sample(context.Background())
+
+	// 10 seconds of CPU over 5 seconds of wall time on two allowed CPUs: pegged,
+	// while the host is 1% busy.
+	writeUsage(10_000_000)
+	tree.write("stat", hostStat(200, 19800))
+	clock.advance(5 * time.Second)
+	s.sample(context.Background())
+
+	system := s.Snapshot().System
+	if system.CPUPct != 100 {
+		t.Fatalf("CPUPct = %d, want 100 — the process is saturating every CPU it may use", system.CPUPct)
+	}
+	if system.Cores != 2 {
+		t.Fatalf("Cores = %d, want the 2 CPUs the cpuset allows, not the host's 8", system.Cores)
+	}
+}
+
+func TestCountCPUSetEntries(t *testing.T) {
+	for _, tc := range []struct {
+		list string
+		want int
+	}{
+		{"0-3", 4},
+		{"0-3,8,12-13", 7},
+		{"5", 1},
+		{" 0-1 , 4 \n", 3},
+		{"", 0},
+		{"garbage", 0},
+		// A reversed or negative range describes nothing; counting it would
+		// invent a budget out of a malformed file.
+		{"5-2", 0},
+		{"-1", 0},
+	} {
+		t.Run(tc.list, func(t *testing.T) {
+			if got := countCPUSetEntries(tc.list); got != tc.want {
+				t.Fatalf("countCPUSetEntries(%q) = %d, want %d", tc.list, got, tc.want)
+			}
+		})
 	}
 }

@@ -64,7 +64,7 @@ func TestRepositoryUpdateCapabilitiesRoundTrip(t *testing.T) {
 
 	payload := json.RawMessage(`{"resolved":"nvenc","render_devices":["/dev/dri/renderD128"]}`)
 	refreshedAt := time.Now().UTC().Truncate(time.Millisecond)
-	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:abc", refreshedAt, nil, nil); err != nil {
+	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:abc", refreshedAt, nil, nil, nil); err != nil {
 		t.Fatalf("update capabilities: %v", err)
 	}
 
@@ -113,7 +113,7 @@ func TestRepositoryUpdateCapabilitiesDriftRoundTripAndClear(t *testing.T) {
 
 	note := "verified hardware backends lost: nvenc; resolved backend nvenc -> none"
 	payload := json.RawMessage(`{"resolved":"none"}`)
-	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:degraded", time.Now(), &note, nil); err != nil {
+	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:degraded", time.Now(), &note, nil, nil); err != nil {
 		t.Fatalf("update capabilities with drift: %v", err)
 	}
 	reloaded, err := repo.GetByID(ctx, node.ID)
@@ -125,7 +125,7 @@ func TestRepositoryUpdateCapabilitiesDriftRoundTripAndClear(t *testing.T) {
 	}
 
 	recovered := json.RawMessage(`{"resolved":"nvenc"}`)
-	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, recovered, "sha256:recovered", time.Now(), nil, nil); err != nil {
+	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, recovered, "sha256:recovered", time.Now(), nil, nil, ptrString("sha256:degraded")); err != nil {
 		t.Fatalf("update capabilities without drift: %v", err)
 	}
 	reloaded, err = repo.GetByID(ctx, node.ID)
@@ -139,7 +139,7 @@ func TestRepositoryUpdateCapabilitiesDriftRoundTripAndClear(t *testing.T) {
 
 func TestRepositoryUpdateCapabilitiesUnknownNode(t *testing.T) {
 	repo := NewRepository(newNodeTestPool(t))
-	err := repo.UpdateCapabilities(context.Background(), -1, "http://gone", []byte(`{}`), "sha256:abc", time.Now(), nil, nil)
+	err := repo.UpdateCapabilities(context.Background(), -1, "http://gone", []byte(`{}`), "sha256:abc", time.Now(), nil, nil, nil)
 	if !errors.Is(err, ErrNodeMoved) {
 		t.Fatalf("err = %v, want ErrNodeMoved", err)
 	}
@@ -168,7 +168,7 @@ func TestRepositoryUpdateCapabilitiesRefusesAfterAURLEdit(t *testing.T) {
 		t.Fatalf("repoint node: %v", err)
 	}
 
-	err = repo.UpdateCapabilities(ctx, node.ID, node.URL, []byte(`{"resolved":"qsv"}`), "sha256:stale", time.Now(), nil, nil)
+	err = repo.UpdateCapabilities(ctx, node.ID, node.URL, []byte(`{"resolved":"qsv"}`), "sha256:stale", time.Now(), nil, nil, nil)
 	if !errors.Is(err, ErrNodeMoved) {
 		t.Fatalf("err = %v, want ErrNodeMoved after the row was repointed", err)
 	}
@@ -198,7 +198,7 @@ func TestRepositoryUpdateCapabilitiesIgnoresATrailingSlash(t *testing.T) {
 	t.Cleanup(func() { _ = repo.Delete(ctx, node.ID) })
 
 	normalized := strings.TrimSuffix(node.URL, "/")
-	if err := repo.UpdateCapabilities(ctx, node.ID, normalized, []byte(`{"resolved":"qsv"}`), "sha256:ok", time.Now(), nil, nil); err != nil {
+	if err := repo.UpdateCapabilities(ctx, node.ID, normalized, []byte(`{"resolved":"qsv"}`), "sha256:ok", time.Now(), nil, nil, nil); err != nil {
 		t.Fatalf("UpdateCapabilities with a normalized URL: %v", err)
 	}
 }
@@ -223,7 +223,7 @@ func TestRepositoryUpdateClearsWorkerStateWhenTheURLMoves(t *testing.T) {
 
 	note := "verified hardware backends lost: qsv"
 	payload := []byte(`{"resolved":"qsv","render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],"boot_id":"boot-1"}`)
-	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:old", time.Now(), &note, []byte(`{"backends":["qsv"]}`)); err != nil {
+	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:old", time.Now(), &note, []byte(`{"backends":["qsv"]}`), nil); err != nil {
 		t.Fatalf("store capabilities: %v", err)
 	}
 	if err := repo.UpdateHealth(ctx, node.ID, node.URL, true, 2, 0, []byte(`{"system":{"cpu_pct":41}}`)); err != nil {
@@ -267,7 +267,7 @@ func TestRepositoryUpdateKeepsWorkerStateWithoutAMove(t *testing.T) {
 	t.Cleanup(func() { _ = repo.Delete(ctx, node.ID) })
 
 	payload := []byte(`{"resolved":"qsv","render_device_details":[{"path":"/dev/dri/renderD128","pci_address":"0000:03:00.0"}],"boot_id":"boot-1"}`)
-	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:keep", time.Now(), nil, nil); err != nil {
+	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL, payload, "sha256:keep", time.Now(), nil, nil, nil); err != nil {
 		t.Fatalf("store capabilities: %v", err)
 	}
 
@@ -283,5 +283,50 @@ func TestRepositoryUpdateKeepsWorkerStateWithoutAMove(t *testing.T) {
 		t.Fatalf("re-save url: %v", err)
 	} else if len(updated.Capabilities) == 0 {
 		t.Fatal("a trailing-slash change was treated as a different worker")
+	}
+}
+
+func ptrString(value string) *string { return &value }
+
+// Every API replica runs its own health sweep, so two can fetch successive
+// reports from one node at once. Without a fence on the report being replaced,
+// a slower fetch of the older one lands last and takes the durable GPU
+// identities and drift state back with it.
+func TestUpdateCapabilitiesRefusesAReportThatFollowsAStaleOne(t *testing.T) {
+	ctx := context.Background()
+	repo := NewRepository(newNodeTestPool(t))
+	node, err := repo.Create(ctx, CreateNodeInput{
+		Name: fmt.Sprintf("capability-cas-%d", time.Now().UnixNano()),
+		Type: NodeTypeTranscode,
+		URL:  fmt.Sprintf("http://capability-cas-%d", time.Now().UnixNano()),
+	})
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Delete(ctx, node.ID) })
+
+	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL,
+		[]byte(`{"resolved":"qsv"}`), "sha256:first", time.Now(), nil, nil, nil); err != nil {
+		t.Fatalf("first report: %v", err)
+	}
+	// A second replica stores its newer report.
+	if err := repo.UpdateCapabilities(ctx, node.ID, node.URL,
+		[]byte(`{"resolved":"nvenc"}`), "sha256:second", time.Now(), nil, nil, ptrString("sha256:first")); err != nil {
+		t.Fatalf("second report: %v", err)
+	}
+	// The first replica's *other* in-flight fetch finally lands. It read the
+	// row before either write, so it must not overwrite what is there now.
+	overtaken := repo.UpdateCapabilities(ctx, node.ID, node.URL,
+		[]byte(`{"resolved":"vaapi"}`), "sha256:overtaken", time.Now(), nil, nil, ptrString("sha256:first"))
+	if !errors.Is(overtaken, ErrNodeMoved) {
+		t.Fatalf("overtaken report error = %v, want ErrNodeMoved", overtaken)
+	}
+
+	stored, err := repo.GetByID(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("reload node: %v", err)
+	}
+	if stored.CapabilitiesHash == nil || *stored.CapabilitiesHash != "sha256:second" {
+		t.Fatalf("stored hash = %v, want the newer report kept", stored.CapabilitiesHash)
 	}
 }

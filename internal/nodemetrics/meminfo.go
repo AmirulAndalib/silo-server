@@ -28,15 +28,24 @@ const (
 // It returns a fresh slice per call so a caller iterating it cannot reorder the
 // preference for everyone else.
 func CgroupMemoryLimitPaths() []string {
-	return []string{
-		"/sys/fs/cgroup/memory.max",                   // cgroup v2
-		"/sys/fs/cgroup/memory/memory.limit_in_bytes", // cgroup v1
+	paths := make([]string, 0, len(cgroupMemoryUsagePaths))
+	for _, level := range cgroupMemoryUsagePaths {
+		paths = append(paths, level.limit)
 	}
+	return paths
 }
 
-// cgroupUsagePath pairs one cgroup version's current-usage file with the stat
-// file and key that names its page cache.
+// cgroupUsagePath pairs one cgroup level's limit with the current-usage file,
+// the stat file, and the key that names its page cache.
+//
+// All four move together because a limit and the usage measured against it have
+// to describe the same cgroup. When the binding limit comes from an ancestor —
+// a pod cgroup shared with sidecars, a systemd slice shared with other services
+// — the memory that fills it is everything charged to that ancestor, not just
+// this process's leaf. Pairing the parent's capacity with the leaf's working
+// set shows headroom that does not exist, right up until the parent OOMs.
 type cgroupUsagePath struct {
+	limit        string
 	usage        string
 	stat         string
 	inactiveFile string
@@ -50,11 +59,13 @@ type cgroupUsagePath struct {
 // an OOM kill (and is what `docker stats` reports).
 var cgroupMemoryUsagePaths = []cgroupUsagePath{
 	{
+		limit:        "/sys/fs/cgroup/memory.max",
 		usage:        "/sys/fs/cgroup/memory.current",
 		stat:         "/sys/fs/cgroup/memory.stat",
 		inactiveFile: cgroupInactiveFileKeyV2,
 	},
 	{
+		limit:        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
 		usage:        "/sys/fs/cgroup/memory/memory.usage_in_bytes",
 		stat:         "/sys/fs/cgroup/memory/memory.stat",
 		inactiveFile: cgroupInactiveFileKeyV1,

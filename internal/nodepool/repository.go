@@ -486,18 +486,27 @@ func (r *Repository) UpdateHealth(ctx context.Context, id int, checkedURL string
 // shared-GPU work on that reading until another sweep corrected it. Trailing
 // slashes are ignored on both sides because the pools normalize URLs and the
 // column does not.
-func (r *Repository) UpdateCapabilities(ctx context.Context, id int, fetchedFrom string, capabilities []byte, hash string, refreshedAt time.Time, drift *string, driftBaseline []byte) error {
+// It is also fenced on the report it believes it is replacing. Every API
+// replica runs its own health sweep, so two can fetch successive reports from
+// one node concurrently; without this a slower fetch of an older report lands
+// after a newer one and overwrites it, taking the durable GPU identities and
+// drift state back with it until some later sweep repairs them. Comparing
+// against the hash the caller read before fetching makes the write a
+// compare-and-set: whichever replica gets there first wins, and the loser
+// discards a report that no longer describes the row it was derived from.
+// Clock skew between replicas does not enter into it.
+func (r *Repository) UpdateCapabilities(ctx context.Context, id int, fetchedFrom string, capabilities []byte, hash string, refreshedAt time.Time, drift *string, driftBaseline []byte, replacing *string) error {
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE stream_nodes SET capabilities = $2, capabilities_hash = $3, capabilities_refreshed_at = $4, capability_drift = $5, capability_drift_baseline = $7
-		 WHERE id = $1 AND rtrim(url, '/') = rtrim($6, '/')`,
-		id, capabilities, hash, refreshedAt, drift, fetchedFrom, driftBaseline)
+		 WHERE id = $1 AND rtrim(url, '/') = rtrim($6, '/') AND capabilities_hash IS NOT DISTINCT FROM $8`,
+		id, capabilities, hash, refreshedAt, drift, fetchedFrom, driftBaseline, replacing)
 	if err != nil {
 		return fmt.Errorf("update node capabilities: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		// Either the row is gone or it no longer addresses the worker this
-		// payload came from. Both mean the same thing to the caller: do not
-		// publish it.
+		// The row is gone, it no longer addresses the worker this payload came
+		// from, or another replica has already stored a different report. All
+		// three mean the same thing to the caller: do not publish it.
 		return ErrNodeMoved
 	}
 	return nil

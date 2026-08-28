@@ -365,3 +365,33 @@ func TestReprobeCapabilitiesRefusedWhileASessionIsStillClosing(t *testing.T) {
 	}
 	server.gpu.endReprobe()
 }
+
+// Warmup is a real smoke encode, and the listener opens while it may still be
+// running: an admin re-probe arriving in a node's first seconds would otherwise
+// see an idle gate and run its matrix beside it, publishing a false hardware
+// failure on a session-limited GPU.
+func TestReprobeCapabilitiesRefusedWhileEncoderWarmupRuns(t *testing.T) {
+	server := newTestServer(t)
+	server.storeCapabilityHash("sha256:previous")
+
+	// The gate is what warmup holds; observed here rather than by starting a
+	// real ffmpeg, which the test host has no hardware for.
+	server.gpu.holdWork()
+	if got := server.activeJobs.Load(); got != 0 {
+		t.Fatalf("active jobs = %d, want the warmup window where nothing is registered", got)
+	}
+
+	recorder := postReprobe(t, server)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 while the encoder is warming", recorder.Code)
+	}
+	if got := server.storedCapabilityHash(); got != "sha256:previous" {
+		t.Fatalf("stored hash = %q, want the previous report untouched", got)
+	}
+
+	server.gpu.endWork()
+	if _, ok := server.gpu.beginReprobe(0, 0); !ok {
+		t.Fatal("re-probe refused after warmup finished")
+	}
+	server.gpu.endReprobe()
+}

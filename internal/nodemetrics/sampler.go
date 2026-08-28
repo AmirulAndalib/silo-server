@@ -79,9 +79,10 @@ type Sampler struct {
 	// bind-mounted when this sampler runs in Docker nested inside an LXC
 	// container. See procDirFor for why it takes priority when present.
 	hostProcDir      string
-	cgroupLimitPaths []string
 	cgroupUsagePaths []cgroupUsagePath
-	cgroupCPUPaths   []cgroupCPUPath
+	// cgroupCPUSetPaths are the cpuset files consulted when no CFS quota binds.
+	cgroupCPUSetPaths []string
+	cgroupCPUPaths    []cgroupCPUPath
 
 	snapshot atomic.Pointer[Snapshot]
 
@@ -156,14 +157,14 @@ func NewSampler(opts Options) *Sampler {
 		// mount root, so a systemd unit with CPUQuota= or MemoryMax= is
 		// measured against its limit rather than against the whole machine.
 		// See cgrouppath.go; a container is unaffected either way.
-		cgroupLimitPaths: withCgroupSelfPaths(cgroupSelf, CgroupMemoryLimitPaths()),
-		cgroupUsagePaths: withCgroupSelfUsagePaths(cgroupSelf, cgroupMemoryUsagePaths),
-		cgroupCPUPaths:   withCgroupSelfCPUPaths(cgroupSelf, cgroupCPUPaths),
-		prevGPU:          map[fdinfoClient]engineCounters{},
-		disks:            map[string]*diskEntry{},
-		statfs:           osStatfs,
-		runNVIDIASMI:     runNVIDIASMI,
-		nvidiaBreaker:    &sourceBreaker{name: "nvidia-smi"},
+		cgroupUsagePaths:  withCgroupSelfUsagePaths(cgroupSelf, cgroupMemoryUsagePaths),
+		cgroupCPUPaths:    withCgroupSelfCPUPaths(cgroupSelf, cgroupCPUPaths),
+		cgroupCPUSetPaths: withCgroupSelfPaths(cgroupSelf, cgroupCPUSetPaths),
+		prevGPU:           map[fdinfoClient]engineCounters{},
+		disks:             map[string]*diskEntry{},
+		statfs:            osStatfs,
+		runNVIDIASMI:      runNVIDIASMI,
+		nvidiaBreaker:     &sourceBreaker{name: "nvidia-smi"},
 	}
 	s.snapshot.Store(&Snapshot{})
 	return s
@@ -282,6 +283,14 @@ func (s *Sampler) cpuStats(now time.Time) (busyPct, cores int) {
 	}
 
 	sample, quota := s.cgroupCPU(now)
+	// A cpuset caps CPU without setting a quota, so a process pinned to two
+	// CPUs reads cpu.max = "max" and would otherwise be measured against the
+	// whole host. Whichever cap is tighter is the one it actually runs under.
+	if pinned := cgroupCPUSetCores(s.cgroupCPUSetPaths); pinned > 0 {
+		if quota <= 0 || float64(pinned) < quota {
+			quota = float64(pinned)
+		}
+	}
 	if quota > 0 {
 		cores = cgroupQuotaCores(quota, hostCores)
 	}

@@ -66,6 +66,70 @@ var cgroupCPUPaths = []cgroupCPUPath{
 	},
 }
 
+// cgroupCPUSetPaths lists where a cgroup publishes the CPUs it may run on, v2
+// first. The "effective" file is what the kernel actually allows after
+// intersecting with every ancestor, which is the number a process is really
+// bounded by; the plain file is the request, and is read only where the
+// effective one is absent.
+var cgroupCPUSetPaths = []string{
+	"/sys/fs/cgroup/cpuset.cpus.effective",
+	"/sys/fs/cgroup/cpuset/cpuset.effective_cpus",
+	"/sys/fs/cgroup/cpuset.cpus",
+	"/sys/fs/cgroup/cpuset/cpuset.cpus",
+}
+
+// cgroupCPUSetCores counts the CPUs this cgroup may run on, or 0 when it is not
+// restricted to a subset.
+//
+// A cpuset is the other way a deployment caps CPU, and unlike a CFS quota it
+// leaves cpu.max saying "max". Without reading it, a process pinned to two CPUs
+// on a sixty-four core host divides its own busy time by sixty-four and reports
+// three percent while it is saturated — which defeats the whole point of the
+// correction.
+//
+// The effective file already accounts for ancestors, so unlike the quota this
+// needs no walk of its own; where only the pre-intersection file exists, the
+// per-level candidates cover the same ground.
+func cgroupCPUSetCores(paths []string) int {
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if count := countCPUSetEntries(string(raw)); count > 0 {
+			return count
+		}
+	}
+	return 0
+}
+
+// countCPUSetEntries counts the CPUs in a Linux cpu list ("0-3,8,12-13").
+// An unparseable or empty list counts nothing rather than guessing.
+func countCPUSetEntries(list string) int {
+	total := 0
+	for _, part := range strings.Split(strings.TrimSpace(list), ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		low, high, ranged := strings.Cut(part, "-")
+		first, err := strconv.Atoi(strings.TrimSpace(low))
+		if err != nil || first < 0 {
+			continue
+		}
+		if !ranged {
+			total++
+			continue
+		}
+		last, err := strconv.Atoi(strings.TrimSpace(high))
+		if err != nil || last < first {
+			continue
+		}
+		total += last - first + 1
+	}
+	return total
+}
+
 // cgroupCPUSample is one cumulative CPU-time reading. Only differences between
 // two readings mean anything.
 type cgroupCPUSample struct {

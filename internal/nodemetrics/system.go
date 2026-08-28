@@ -208,10 +208,12 @@ func (s *Sampler) memoryStats() (usedBytes, totalBytes int64) {
 	// Every limit in force is read, not just the first: the list runs from this
 	// process's own cgroup up through its ancestors, and a leaf that says "max"
 	// can still sit inside a slice or pod cgroup that does not. The kernel
-	// OOM-kills against the tightest of them, so that is the one to report.
-	capped := false
-	for _, path := range s.cgroupLimitPaths {
-		limit, err := ReadCgroupMemoryLimit(path)
+	// OOM-kills against the tightest of them, so that is the one to report — and
+	// the level it came from is kept, because the usage that fills it is
+	// everything charged to that cgroup, not just this process's own.
+	var binding *cgroupUsagePath
+	for i, level := range s.cgroupUsagePaths {
+		limit, err := ReadCgroupMemoryLimit(level.limit)
 		if err != nil || limit <= 0 {
 			continue
 		}
@@ -220,7 +222,7 @@ func (s *Sampler) memoryStats() (usedBytes, totalBytes int64) {
 		// give it.
 		if totalBytes == 0 || limit < totalBytes {
 			totalBytes = limit
-			capped = true
+			binding = &s.cgroupUsagePaths[i]
 		}
 	}
 
@@ -230,8 +232,8 @@ func (s *Sampler) memoryStats() (usedBytes, totalBytes int64) {
 	// — "1 GiB of 64 GiB" on a machine that is nearly out of memory, because the
 	// two numbers describe different domains. Whichever domain total came from,
 	// used has to come from the same one.
-	if capped {
-		if usage, ok := s.cgroupMemoryUsage(); ok {
+	if binding != nil {
+		if usage, ok := cgroupMemoryUsage(*binding); ok {
 			usedBytes = usage
 		}
 	}
@@ -241,20 +243,20 @@ func (s *Sampler) memoryStats() (usedBytes, totalBytes int64) {
 	return usedBytes, totalBytes
 }
 
-// cgroupMemoryUsage returns the working set of this process's memory cgroup:
-// current charge minus reclaimable file pages.
-func (s *Sampler) cgroupMemoryUsage() (int64, bool) {
-	for _, paths := range s.cgroupUsagePaths {
-		usage, err := readCgroupSingleValue(paths.usage)
-		if err != nil {
-			continue
-		}
-		if inactive, err := readCgroupStatKey(paths.stat, paths.inactiveFile); err == nil && inactive > 0 && inactive <= usage {
-			usage -= inactive
-		}
-		return usage, true
+// cgroupMemoryUsage returns the working set of one memory cgroup: its current
+// charge minus reclaimable file pages.
+//
+// The level is the caller's choice rather than a search, because the only level
+// worth measuring is the one whose limit binds — see memoryStats.
+func cgroupMemoryUsage(level cgroupUsagePath) (int64, bool) {
+	usage, err := readCgroupSingleValue(level.usage)
+	if err != nil {
+		return 0, false
 	}
-	return 0, false
+	if inactive, err := readCgroupStatKey(level.stat, level.inactiveFile); err == nil && inactive > 0 && inactive <= usage {
+		usage -= inactive
+	}
+	return usage, true
 }
 
 func clampPercent(value int) int {

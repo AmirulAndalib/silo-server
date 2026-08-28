@@ -52,19 +52,34 @@ func TestComputeCapabilityHashIgnoresSliceOrder(t *testing.T) {
 	}
 }
 
-// Fields that describe the report rather than the host must not move the hash:
-// otherwise the same node hashes differently depending on who asked.
-func TestComputeCapabilityHashIgnoresReportMetadata(t *testing.T) {
+// Fields that vary with who asked must not move the hash: otherwise the same
+// node hashes differently depending on the caller.
+func TestComputeCapabilityHashIgnoresPerCallerMetadata(t *testing.T) {
 	info := sampleCapabilityInfo()
 	want := ComputeCapabilityHash(info)
 
 	info.Source = "remote"
 	info.NodeURL = "http://node-7:8080"
-	info.ProbeRequestTimeoutMillis = 42_000
 	info.CapabilityHash = "sha256:stale"
 
 	if got := ComputeCapabilityHash(info); got != want {
 		t.Fatalf("report metadata changed the hash:\n got %s\nwant %s", got, want)
+	}
+}
+
+// The advertised probe budget does move it, though it describes the report
+// rather than the hardware. The control plane sizes real deadlines from the
+// stored copy, so a node upgraded to a build that needs longer — changing
+// nothing else about itself — has to reach the sweep, or the API keeps
+// canceling that node's re-probes against a budget it has outgrown.
+func TestComputeCapabilityHashTracksTheAdvertisedProbeBudget(t *testing.T) {
+	info := sampleCapabilityInfo()
+	info.ProbeRequestTimeoutMillis = 111_000
+	before := ComputeCapabilityHash(info)
+
+	info.ProbeRequestTimeoutMillis = 136_000
+	if got := ComputeCapabilityHash(info); got == before {
+		t.Fatal("a node that raised its advertised probe budget hashed identically; the sweep would never refetch it")
 	}
 }
 
