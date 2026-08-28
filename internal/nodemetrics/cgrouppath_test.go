@@ -463,3 +463,42 @@ func TestCgroupCPUMovesUsageDownWhenTheCpusetBinds(t *testing.T) {
 		t.Fatalf("usage = %d, want the slice's %d", sample.usageNS, want)
 	}
 }
+
+// Two cgroups publishing the same quota are not equivalent. The ancestor's is
+// shared with siblings that can exhaust it, so it is the level whose usage
+// describes what is actually being throttled: Silo at 0.2 cores beside a
+// sibling at 1.8 under a shared two-core parent reads ten percent from the leaf
+// while the parent is saturated.
+func TestEffectiveCgroupCPUQuotaPrefersTheOuterLevelOnATie(t *testing.T) {
+	root := t.TempDir()
+	previousRoot := cgroupMountRoot
+	cgroupMountRoot = root
+	t.Cleanup(func() { cgroupMountRoot = previousRoot })
+
+	leaf := filepath.Join(root, "silo.service")
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatalf("create %s: %v", leaf, err)
+	}
+	write := func(dir, name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s/%s: %v", dir, name, err)
+		}
+	}
+	write(leaf, "cpu.max", "200000 100000\n")
+	write(leaf, "cpu.stat", "usage_usec 200000\n")
+	write(root, "cpu.max", "200000 100000\n")
+	write(root, "cpu.stat", "usage_usec 2000000\n")
+
+	binding, cores := effectiveCgroupCPUQuota(cgroupCPUPath{
+		usage:     filepath.Join(leaf, "cpu.stat"),
+		usageKey:  cgroupCPUUsageKey,
+		usageUnit: 1,
+		quota:     filepath.Join(leaf, "cpu.max"),
+	})
+	if cores != 2 {
+		t.Fatalf("cores = %v, want 2 from either level", cores)
+	}
+	if want := filepath.Join(root, "cpu.stat"); binding.usage != want {
+		t.Fatalf("binding usage = %q, want the shared parent's %q", binding.usage, want)
+	}
+}

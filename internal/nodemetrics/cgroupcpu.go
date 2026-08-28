@@ -213,7 +213,13 @@ func effectiveCgroupCPUQuota(paths cgroupCPUPath) (cgroupCPUPath, float64) {
 		if err != nil || cores <= 0 {
 			continue
 		}
-		if tightest == 0 || cores < tightest {
+		// Ties go to the outer level, which the walk reaches later. Two cgroups
+		// publishing the same quota are not equivalent: the ancestor's is shared
+		// with siblings that can exhaust it, so it is the one whose usage
+		// describes what is being throttled. Silo at 0.2 cores beside a sibling
+		// at 1.8 under a shared two-core parent reads ten percent from the leaf
+		// while the parent is saturated.
+		if tightest == 0 || cores <= tightest {
 			tightest, binding = cores, level
 		}
 	}

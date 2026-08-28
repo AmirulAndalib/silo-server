@@ -692,3 +692,94 @@ func TestInvalidateHWProbeCacheSupersedesAnInFlightVideoToolboxProbe(t *testing.
 	}
 	wg.Wait()
 }
+
+// A capable Mac was publishing resolved:"none" with no detected backends: the
+// snapshot builder only walked backends on Linux, so the VideoToolbox probe
+// that resolution uses never ran here. The API stored that as the node's
+// durable inventory — software-only, planned for software tone mapping, with an
+// operator re-probe that could not verify otherwise.
+func TestDetectHWAccelPublishesVideoToolboxOnDarwin(t *testing.T) {
+	setupHWAccelTest(t)
+	currentGOOS = darwinGOOS
+	ffmpeg := writeFakeFFmpeg(t, successfulVideoToolboxProbe())
+
+	info, err := DetectHWAccelWithFFmpegContextResult(context.Background(), hwAccelAuto, ffmpeg.path, "")
+	if err != nil {
+		t.Fatalf("DetectHWAccelWithFFmpegContextResult: %v", err)
+	}
+	if info.Resolved != transcodeHWVideoToolbox {
+		t.Fatalf("Resolved = %q, want videotoolbox", info.Resolved)
+	}
+	if len(info.DetectedBackends) != 1 || info.DetectedBackends[0].Backend != transcodeHWVideoToolbox ||
+		!info.DetectedBackends[0].Verified {
+		t.Fatalf("DetectedBackends = %+v, want a verified videotoolbox entry", info.DetectedBackends)
+	}
+}
+
+// A Mac whose probe fails publishes the failure rather than silence, so an
+// operator can see why — but a probe cut short by the caller's deadline is not
+// a verdict about the hardware and must not be hashed as one.
+func TestDetectHWAccelReportsAFailedVideoToolboxProbe(t *testing.T) {
+	setupHWAccelTest(t)
+	currentGOOS = darwinGOOS
+	ffmpeg := writeFakeFFmpeg(t, fakeFFmpegProbe{})
+
+	info, err := DetectHWAccelWithFFmpegContextResult(context.Background(), hwAccelAuto, ffmpeg.path, "")
+	if err != nil {
+		t.Fatalf("DetectHWAccelWithFFmpegContextResult: %v", err)
+	}
+	if info.Resolved != HWAccelNone {
+		t.Fatalf("Resolved = %q, want none", info.Resolved)
+	}
+	if len(info.DetectedBackends) != 1 || info.DetectedBackends[0].Verified ||
+		info.DetectedBackends[0].Reason == "" {
+		t.Fatalf("DetectedBackends = %+v, want an unverified entry carrying a reason", info.DetectedBackends)
+	}
+
+	hung := writeFakeFFmpeg(t, fakeFFmpegProbe{hang: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	t.Cleanup(cancel)
+	if _, err := DetectHWAccelWithFFmpegContextResult(ctx, hwAccelAuto, hung.path, ""); !errors.Is(err, ErrHardwareDetectionIncomplete) {
+		t.Fatalf("error = %v, want ErrHardwareDetectionIncomplete for a deadline inside the probe", err)
+	}
+}
+
+// The VideoToolbox flight outlives its caller like the others, so it has to be
+// counted like the others — otherwise a re-probe sees an idle encoder and a
+// new-generation probe starts beside the one still running.
+func TestHWProbesInFlightCountsADetachedVideoToolboxProbe(t *testing.T) {
+	setupHWAccelTest(t)
+	currentGOOS = darwinGOOS
+	ffmpeg := writeFakeFFmpeg(t, successfulVideoToolboxProbe())
+	awaitNoProbesInFlight(t)
+
+	release := make(chan struct{})
+	var released, announced sync.Once
+	started := make(chan struct{})
+	previous := videoToolboxProbeStarted
+	videoToolboxProbeStarted = func() {
+		announced.Do(func() { close(started) })
+		<-release
+	}
+	t.Cleanup(func() {
+		videoToolboxProbeStarted = previous
+		released.Do(func() { close(release) })
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = cachedVideoToolboxProbeContext(ctx, ffmpeg.path)
+	}()
+	<-started
+	cancel()
+	<-done
+
+	if got := HWProbesInFlight(); got < 1 {
+		t.Fatalf("HWProbesInFlight() = %d with a detached VideoToolbox probe running, want at least 1", got)
+	}
+	released.Do(func() { close(release) })
+	awaitNoProbesInFlight(t)
+}

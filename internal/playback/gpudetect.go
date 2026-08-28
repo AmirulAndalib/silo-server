@@ -253,8 +253,27 @@ func DetectHWAccelWithFFmpegContextResult(ctx context.Context, hwAccel, ffmpegPa
 	resolved := HWAccelNone
 	var detected []DetectedBackend
 	complete := true
-	if currentGOOS == linuxGOOS {
+	switch currentGOOS {
+	case linuxGOOS:
 		resolved, detected, complete = walkHWAccelBackends(ctx, ffmpegPath, candidates, false)
+	case darwinGOOS:
+		// macOS has no render devices to walk, but it does have hardware: the
+		// same VideoToolbox probe resolution uses. Without this a capable Mac
+		// publishes resolved:"none" with no detected backends, and the API
+		// stores that as its durable inventory — a software-only node, planned
+		// for software tone mapping, with an operator re-probe that cannot
+		// verify otherwise because there is nothing here to verify.
+		entry := DetectedBackend{Backend: transcodeHWVideoToolbox}
+		if ok, reason := ffmpegSupportsVideoToolboxContext(ctx, ffmpegPath); ok {
+			entry.Verified = true
+			resolved = transcodeHWVideoToolbox
+		} else {
+			entry.Reason = reason
+			// A probe cut short by the caller's deadline is not a verdict about
+			// the hardware, and must not be hashed as one.
+			complete = ctx.Err() == nil
+		}
+		detected = append(detected, entry)
 	}
 	if configured := strings.TrimSpace(hwAccel); configured != "" && configured != hwAccelAuto {
 		resolved = configured
@@ -999,6 +1018,12 @@ func cachedVideoToolboxProbeContext(ctx context.Context, ffmpegPath string) hard
 	}
 	call := &videoToolboxProbeCall{done: make(chan struct{})}
 	videoToolboxProbes.inFlight[cacheKey] = call
+	// Counted for the life of the smoke encode, not the life of the caller: the
+	// goroutine below is rooted at Background so an abandoned request cannot
+	// kill work another is waiting on, and it keeps ffmpeg on the card after
+	// every caller has returned. Raised here, before the goroutine exists, so
+	// the claim cannot be observed unraised by anyone this call returns to.
+	hwProbesInFlight.Add(1)
 	videoToolboxProbes.Unlock()
 
 	commandTimeout := hwProbeCommandTimeout
@@ -1010,6 +1035,7 @@ func cachedVideoToolboxProbeContext(ctx context.Context, ffmpegPath string) hard
 		}
 		probeCtx, cancel := context.WithTimeout(context.Background(), 4*commandTimeout+time.Second)
 		defer cancel()
+		defer hwProbesInFlight.Add(-1)
 		result := probeFFmpegVideoToolboxContext(probeCtx, execPath, commandTimeout)
 		entry := videoToolboxProbeEntry{result: result}
 		if !result.available || !result.hevcAvailable {
