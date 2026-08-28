@@ -1027,3 +1027,64 @@ func TestNodeAwarePreparerDoesNotFallBackWhenRecoveryProbeIsIndeterminate(t *tes
 		t.Fatalf("local calls = %d, want 0", local.calls)
 	}
 }
+
+// nodeLookupPlanner is a planner that can resolve a node by URL, as the real
+// one does. It reserves nothing: these tests only price probes.
+type nodeLookupPlanner struct {
+	node *nodepool.Node
+}
+
+func (p *nodeLookupPlanner) ReserveTranscodeWork(string) (*nodepool.Node, func()) {
+	return nil, func() {}
+}
+
+func (p *nodeLookupPlanner) TranscodeNode(int) (*nodepool.Node, bool) { return nil, false }
+
+func (p *nodeLookupPlanner) TranscodeNodeByURL(nodeURL string) (*nodepool.Node, bool) {
+	if p.node == nil || p.node.URL != nodeURL {
+		return nil, false
+	}
+	return p.node, true
+}
+
+// The cluster setting describes the cluster. A node overridden onto four render
+// devices walks four of them cold, and pricing that walk at the cluster's single
+// device cancels it partway — which drops the node from the capability map and
+// sends the download local, or fails it where local fallback is off.
+func TestNodeAwarePreparerColdProbeBudgetFollowsTheNodeOverride(t *testing.T) {
+	const nodeURL = "https://node.example"
+	devices := "/dev/dri/renderD128,/dev/dri/renderD129,/dev/dri/renderD130,/dev/dri/renderD131"
+	backend := tonemap.BackendQSV
+	planner := &nodeLookupPlanner{node: &nodepool.Node{
+		ID: 1, URL: nodeURL, HWAccelOverride: &backend, HWDeviceOverride: &devices,
+	}}
+	cfg := &config.Config{}
+	cfg.Playback.HWAccel = tonemap.BackendQSV
+	cfg.Playback.HWDevice = "/dev/dri/renderD128"
+	preparer := NewNodeAwarePreparer(nil, planner, func() *config.Config { return cfg })
+
+	want := playback.CapabilityRequestTimeout(backend, devices)
+	if got := preparer.remoteToneMapProbeTimeout(nodeURL); got != want {
+		t.Fatalf("cold probe timeout = %s, want the node's four-device budget %s", got, want)
+	}
+	if cluster := playback.CapabilityRequestTimeout(cfg.Playback.HWAccel, cfg.Playback.HWDevice); want <= cluster {
+		t.Fatalf("fixture is inert: the override budget %s must exceed the cluster's %s", want, cluster)
+	}
+}
+
+// What the node last advertised beats what its policy would be priced at: it is
+// the node's own measurement of its own matrix, and it survives an API restart
+// because it is stored with the report.
+func TestNodeAwarePreparerColdProbeBudgetPrefersTheStoredAdvertisement(t *testing.T) {
+	const nodeURL = "https://node.example"
+	planner := &nodeLookupPlanner{node: &nodepool.Node{
+		ID: 1, URL: nodeURL,
+		Capabilities: json.RawMessage(`{"resolved":"qsv","probe_request_timeout_ms":161000}`),
+	}}
+	cfg := &config.Config{}
+	preparer := NewNodeAwarePreparer(nil, planner, func() *config.Config { return cfg })
+
+	if got, want := preparer.remoteToneMapProbeTimeout(nodeURL), 161*time.Second; got != want {
+		t.Fatalf("cold probe timeout = %s, want the advertised %s", got, want)
+	}
+}

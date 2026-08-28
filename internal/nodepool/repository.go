@@ -79,7 +79,14 @@ type Node struct {
 	// the health check goes on succeeding every 30 seconds. Derived per sweep
 	// rather than persisted — it is an observation about right now, and a
 	// restarted API re-learns it on its first check.
-	AdvertisedCapabilitiesHash string `json:"advertised_capabilities_hash,omitempty"`
+	//
+	// A pointer for three states, not two. nil is "nobody has checked this node
+	// yet", which every node reads as until the first sweep after a restart, and
+	// which says nothing about the stored report. A pointer to "" is the health
+	// check answering with no hash at all — a node downgraded to a build that
+	// predates capability reports — and that is a node no longer standing behind
+	// what is stored for it, which a reader must be able to tell from silence.
+	AdvertisedCapabilitiesHash *string `json:"advertised_capabilities_hash,omitempty"`
 	// PhysicalGPUKeys identifies the actual GPUs behind this node, derived from
 	// Capabilities rather than stored: it is a pure function of that payload, so
 	// a column would only be a second copy that can disagree with it. Two nodes
@@ -108,6 +115,33 @@ func (n *Node) EffectiveHWAccel(clusterHWAccel string) string {
 		return override
 	}
 	return clusterHWAccel
+}
+
+// StoredCapabilities returns this node's last stored capability report, nil-safe
+// like the Effective* accessors so a caller whose lookup came up empty prices a
+// missing node and a missing report through one path.
+func (n *Node) StoredCapabilities() json.RawMessage {
+	if n == nil {
+		return nil
+	}
+	return n.Capabilities
+}
+
+// EffectiveHWDevice is the device set this node runs under, resolved the same
+// way as EffectiveHWAccel.
+//
+// Its readers care about the size of the set, not the paths: how many devices a
+// node walks is what decides how long its cold capability probe takes, and a
+// node overridden onto four devices needs several times the budget the cluster
+// setting would price for it.
+func (n *Node) EffectiveHWDevice(clusterHWDevice string) string {
+	if n == nil || n.HWDeviceOverride == nil {
+		return clusterHWDevice
+	}
+	if override := strings.TrimSpace(*n.HWDeviceOverride); override != "" {
+		return override
+	}
+	return clusterHWDevice
 }
 
 // CreateNodeInput holds the fields for creating a new node.

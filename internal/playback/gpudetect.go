@@ -2,6 +2,7 @@ package playback
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -408,6 +409,55 @@ func CapabilityEndpointTimeout(hwAccel, hwDevice string) time.Duration {
 // of that node's capability endpoint must allow.
 func CapabilityRequestTimeout(hwAccel, hwDevice string) time.Duration {
 	return CapabilityEndpointTimeout(hwAccel, hwDevice) + tonemap.ProbeRequestSlack
+}
+
+// ColdCapabilityRequestTimeout is how long to allow one capability read of a
+// node this process has not read successfully yet.
+//
+// Cold is when the read is slowest — every probe cache on the node is empty and
+// the whole matrix runs — so it is exactly the wrong moment to guess low, and
+// there are three progressively worse sources to guess from:
+//
+//   - The budget the node itself advertised in the report stored for it. That
+//     is the node's own measurement of its own matrix, it survives an API
+//     restart because it is persisted with the report, and it is right even
+//     when this replica has never spoken to the node.
+//   - The node's effective acceleration policy — its own override where it has
+//     one, the cluster setting otherwise — priced here. This is what a node
+//     registered a minute ago has, and the override matters: a cluster
+//     configured for one device says nothing about a node overridden onto four.
+//   - The caller's fallback, for a node with neither.
+//
+// Getting this low does not slow anything down, it cancels the read: the node
+// is dropped from the capability map mid-matrix and playback plans without it.
+func ColdCapabilityRequestTimeout(storedReport json.RawMessage, hwAccel, hwDevice string, fallback time.Duration) time.Duration {
+	if millis := AdvertisedProbeBudgetMillis(storedReport); millis > 0 {
+		return NormalizeProbeRequestTimeout(millis, fallback)
+	}
+	if budget := CapabilityRequestTimeout(hwAccel, hwDevice); budget > 0 {
+		return budget
+	}
+	return fallback
+}
+
+// AdvertisedProbeBudgetMillis reads the probe budget out of a stored capability
+// report, or 0 when it names none.
+//
+// The report is parsed for this one field rather than decoded whole: callers
+// that want a budget have no business depending on the shape of an inventory,
+// and a report they cannot parse is not a reason to fail — it reads as "no
+// budget advertised" and the caller falls back.
+func AdvertisedProbeBudgetMillis(storedReport json.RawMessage) int64 {
+	if len(storedReport) == 0 {
+		return 0
+	}
+	var advertised struct {
+		ProbeRequestTimeoutMillis int64 `json:"probe_request_timeout_ms"`
+	}
+	if err := json.Unmarshal(storedReport, &advertised); err != nil {
+		return 0
+	}
+	return advertised.ProbeRequestTimeoutMillis
 }
 
 // MaxCapabilityRequestTimeout is the largest budget a node may advertise and be

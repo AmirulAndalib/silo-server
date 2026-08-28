@@ -156,10 +156,10 @@ func (h *NodeHandler) HandleListNodes(w http.ResponseWriter, r *http.Request) {
 // case a recent last_health_check cannot rule out, because that check keeps
 // succeeding while the refetch behind it fails.
 func (h *NodeHandler) overlayAdvertisedHashes(nodes []*nodepool.Node) {
-	advertised := make(map[int]string, len(nodes))
+	advertised := make(map[int]*string, len(nodes))
 	collect := func(pooled []*nodepool.Node) {
 		for _, n := range pooled {
-			if n != nil && n.AdvertisedCapabilitiesHash != "" {
+			if n != nil && n.AdvertisedCapabilitiesHash != nil {
 				advertised[n.ID] = n.AdvertisedCapabilitiesHash
 			}
 		}
@@ -623,19 +623,10 @@ const nodeReprobeFallbackTimeout = 150 * time.Second
 // The node itself publishes the budget its probe matrix needs in every
 // capability report (probe_request_timeout_ms), which is exactly what a cold
 // capability fetch is given; a node with different hardware or a slower ffmpeg
-// therefore gets its own number rather than a cluster-wide guess. The stored
-// report is parsed minimally here for the same reason nodepool parses its own
-// narrow views: this layer has no business decoding the whole inventory.
+// therefore gets its own number rather than a cluster-wide guess.
 func nodeReprobeTimeout(n *nodepool.Node) time.Duration {
-	var advertised struct {
-		ProbeRequestTimeoutMillis int64 `json:"probe_request_timeout_ms"`
-	}
-	if n != nil && len(n.Capabilities) > 0 {
-		// A report that cannot be parsed leaves the zero value, which is the
-		// fallback; an unreadable report is not a reason to fail the action.
-		_ = json.Unmarshal(n.Capabilities, &advertised)
-	}
-	return playback.NormalizeProbeRequestTimeout(advertised.ProbeRequestTimeoutMillis, nodeReprobeFallbackTimeout)
+	return playback.NormalizeProbeRequestTimeout(
+		playback.AdvertisedProbeBudgetMillis(n.StoredCapabilities()), nodeReprobeFallbackTimeout)
 }
 
 // nodeReprobeWriteSlack covers the repository round trips and the JSON write

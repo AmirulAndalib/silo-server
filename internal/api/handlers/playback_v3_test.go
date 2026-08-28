@@ -5401,8 +5401,12 @@ func TestPlaybackV3ToneMapBudgetsCoverColdNodeWork(t *testing.T) {
 	if got, want := handler.localToneMapProbeTimeoutV3(), playback.CapabilityEndpointTimeout(tonemap.BackendQSV, "/dev/dri/renderD128"); got != want {
 		t.Fatalf("local tone-map probe timeout = %s, want %s", got, want)
 	}
-	if got, want := handler.remoteToneMapProbeTimeoutV3("https://unknown.example"), remoteNodeProbeFallbackTimeout; got != want {
-		t.Fatalf("remote tone-map probe timeout = %s, want %s", got, want)
+	// A node this handler cannot resolve is priced at the cluster's own policy,
+	// which is what such a node runs unless it carries an override — closer than
+	// a flat guess, and the flat fallback is reserved for having no policy either.
+	coldUnknown := playback.CapabilityRequestTimeout(tonemap.BackendQSV, "/dev/dri/renderD128")
+	if got := handler.remoteToneMapProbeTimeoutV3("https://unknown.example"); got != coldUnknown {
+		t.Fatalf("remote tone-map probe timeout = %s, want %s", got, coldUnknown)
 	}
 	if got := handler.toneMapPlanningTimeoutV3(true); got != v3NodeCapabilityPlanTimeout {
 		t.Fatalf("planning timeout with local fallback = %s, want %s", got, v3NodeCapabilityPlanTimeout)
@@ -5417,7 +5421,7 @@ func TestPlaybackV3ToneMapBudgetsCoverColdNodeWork(t *testing.T) {
 		RequireReady:             true,
 		HWAccel:                  tonemap.BackendQSV,
 	}
-	want := remoteNodeProbeFallbackTimeout + playback.ManifestStartupTimeout +
+	want := coldUnknown + playback.ManifestStartupTimeout +
 		tonemap.SourcePreflightTimeout(100) + transcodenode.TranscodeStartReadinessTimeout
 	if got := handler.remotePlaybackTransportTimeout("https://unknown.example", request); got != want {
 		t.Fatalf("remote tone-map start timeout = %s, want %s", got, want)
@@ -5546,5 +5550,70 @@ func TestRemoteToneMapProbeTimeoutUsesTargetNodeBudget(t *testing.T) {
 	// nine-device node already exceeds.
 	if got, want := handler.remoteToneMapProbeTimeoutV3(remote.URL), playback.MaxCapabilityRequestTimeout(); got != want {
 		t.Fatalf("bounded remote probe timeout = %s, want %s", got, want)
+	}
+}
+
+// v3NodeLookupPlanner plans nothing and only resolves nodes by URL, which is all
+// a cold probe budget needs from a planner.
+type v3NodeLookupPlanner struct {
+	node *nodepool.Node
+}
+
+func (p *v3NodeLookupPlanner) PlanSession(string, string, bool, int) nodepool.Plan {
+	return nodepool.Plan{}
+}
+
+func (p *v3NodeLookupPlanner) TranscodeNodeByURL(nodeURL string) (*nodepool.Node, bool) {
+	if p.node == nil || p.node.URL != nodeURL {
+		return nil, false
+	}
+	return p.node, true
+}
+
+// The first read of a node after an API restart is also its most expensive: no
+// probe cache on the node survives, so the whole matrix runs. The flat fallback
+// is shorter than a two-device node legitimately takes, and paying it would
+// cancel exactly the multi-GPU nodes this path exists to plan onto — so the
+// durable report the node last advertised is what prices it.
+func TestPlaybackV3ColdNodeProbeBudgetComesFromTheStoredReport(t *testing.T) {
+	const nodeURL = "https://gpu-1.example"
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/dev/dri/renderD128"}
+	}
+	handler.NodePlanner = &v3NodeLookupPlanner{node: &nodepool.Node{
+		ID: 1, URL: nodeURL,
+		Capabilities: json.RawMessage(`{"resolved":"qsv","probe_request_timeout_ms":163000}`),
+	}}
+
+	if got, want := handler.remoteToneMapProbeTimeoutV3(nodeURL), 163*time.Second; got != want {
+		t.Fatalf("cold probe timeout = %s, want the node's advertised %s", got, want)
+	}
+	if remoteNodeProbeFallbackTimeout >= 163*time.Second {
+		t.Fatal("fixture is inert: the advertised budget must exceed the flat fallback")
+	}
+}
+
+// A node registered since the last capability fetch has no stored report to read
+// a budget from, but it does have its own acceleration override — and that is
+// what decides how long its walk takes.
+func TestPlaybackV3ColdNodeProbeBudgetFollowsTheOverrideWithoutAReport(t *testing.T) {
+	const nodeURL = "https://gpu-2.example"
+	devices := "/dev/dri/renderD128,/dev/dri/renderD129,/dev/dri/renderD130"
+	backend := tonemap.BackendQSV
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/dev/dri/renderD128"}
+	}
+	handler.NodePlanner = &v3NodeLookupPlanner{node: &nodepool.Node{
+		ID: 2, URL: nodeURL, HWAccelOverride: &backend, HWDeviceOverride: &devices,
+	}}
+
+	want := playback.CapabilityRequestTimeout(backend, devices)
+	if got := handler.remoteToneMapProbeTimeoutV3(nodeURL); got != want {
+		t.Fatalf("cold probe timeout = %s, want the override's %s", got, want)
+	}
+	if cluster := playback.CapabilityRequestTimeout(tonemap.BackendQSV, "/dev/dri/renderD128"); want <= cluster {
+		t.Fatalf("fixture is inert: the override budget %s must exceed the cluster's %s", want, cluster)
 	}
 }

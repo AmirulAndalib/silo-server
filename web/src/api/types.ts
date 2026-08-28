@@ -3969,9 +3969,12 @@ export interface StreamNode {
   capabilities?: NodeCapabilities | null;
   capabilities_hash?: string;
   /**
-   * The hash the node named on its last health check. It differs from
-   * `capabilities_hash` while a refetch is outstanding or failing, which is the
-   * one case a fresh `last_health_check` cannot rule out.
+   * The hash the node named on its last health check, present only once a check
+   * has happened. It differs from `capabilities_hash` while a refetch is
+   * outstanding or failing, which is the one case a fresh `last_health_check`
+   * cannot rule out; it is present and empty when the node answers with no hash
+   * at all, as a build predating capability reports does. Absent means nothing
+   * has asked yet, which says nothing about the stored report.
    */
   advertised_capabilities_hash?: string;
   /** When `capabilities` was fetched: the age of the inventory, not the health check. */

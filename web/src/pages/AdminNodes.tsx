@@ -36,7 +36,11 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { formatDateTime } from "@/lib/datetime";
 import { toggleHWDevice } from "@/lib/hwDevices";
 import { cn } from "@/lib/utils";
-import type { NodeHWDeviceRow, ResourceMetric } from "./adminNodesPresentation";
+import type {
+  NodeCapabilityStaleReason,
+  NodeHWDeviceRow,
+  ResourceMetric,
+} from "./adminNodesPresentation";
 import {
   HW_ACCEL_INHERIT,
   HW_ACCEL_OVERRIDE_OPTIONS,
@@ -156,6 +160,26 @@ function NodeDriftBadge({ node }: { node: StreamNode }) {
   );
 }
 
+// Each reason names a different thing to go look at, so none of them is worth
+// collapsing into a generic "out of date": a contradicted report means the
+// refetch is failing, an unreported one means the node no longer speaks
+// capabilities at all, and an unconfirmed one means the health check stopped
+// landing.
+function staleInventoryTitle(reason: NodeCapabilityStaleReason, node: StreamNode): string {
+  const refreshed = `The inventory below was last refreshed ${formatDateTime(node.capabilities_refreshed_at ?? "")}.`;
+  switch (reason) {
+    case "contradicted":
+      return `This node reports hardware different from what is stored, and the refetch has not landed. ${refreshed}`;
+    case "unreported":
+      return `This node no longer reports a hardware inventory, so nothing confirms the one stored for it. ${refreshed}`;
+    case "unconfirmed":
+      return (
+        `No health check has confirmed this inventory since ${formatDateTime(node.last_health_check ?? "")}. ` +
+        `It was last refreshed ${formatDateTime(node.capabilities_refreshed_at ?? "")}.`
+      );
+  }
+}
+
 function NodeGPUCell({ node, allNodes }: { node: StreamNode; allNodes: StreamNode[] }) {
   const gpu = describeNodeGPU(node);
   if (gpu.kind === "awaiting") {
@@ -194,14 +218,7 @@ function NodeGPUCell({ node, allNodes }: { node: StreamNode; allNodes: StreamNod
         {gpu.stale && (
           <span
             className="text-muted-foreground text-xs"
-            title={
-              node.advertised_capabilities_hash &&
-              node.advertised_capabilities_hash !== node.capabilities_hash
-                ? `This node reports hardware different from what is stored, and the refetch has not landed. ` +
-                  `The inventory below was last refreshed ${formatDateTime(node.capabilities_refreshed_at ?? "")}.`
-                : `No health check has confirmed this inventory since ${formatDateTime(node.last_health_check ?? "")}. ` +
-                  `It was last refreshed ${formatDateTime(node.capabilities_refreshed_at ?? "")}.`
-            }
+            title={staleInventoryTitle(gpu.stale, node)}
           >
             stale
           </span>

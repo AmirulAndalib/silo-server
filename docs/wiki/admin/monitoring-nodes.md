@@ -306,12 +306,18 @@ idle on a card that may be busy and merely unobservable. Its session count still
 ships, since that comes from Silo's own accounting rather than from a driver.
 
 The GPU gauges (`streamapp_node_gpu_video_busy_percent`,
-`streamapp_node_gpu_render_busy_percent`, `streamapp_node_gpu_sessions`,
-`streamapp_node_gpu_vram_used_bytes`, `streamapp_node_gpu_vram_total_bytes`) are
-labeled by `device`. On Intel and AMD they measure Silo's own FFmpeg processes
-only, so a card shared with anything outside Silo reads as less busy than it is;
-on NVIDIA they come from `nvidia-smi` and are whole-GPU. A device that nothing
-could measure this interval publishes no VRAM series rather than a zero.
+`streamapp_node_gpu_render_busy_percent`, `streamapp_node_gpu_busy_percent`,
+`streamapp_node_gpu_sessions`, `streamapp_node_gpu_vram_used_bytes`,
+`streamapp_node_gpu_vram_total_bytes`) are labeled by `device`. On Intel and AMD
+the engine gauges measure Silo's own FFmpeg processes only, so a card shared with
+anything outside Silo reads as less busy than it is; on NVIDIA they come from
+`nvidia-smi` and are whole-GPU. A device that nothing could measure this interval
+publishes no VRAM series rather than a zero.
+
+`streamapp_node_gpu_busy_percent` is the card's own utilization, other tenants
+included, and it ships wherever a source reports one — `nvidia-smi` today. It is
+the series to alert on for a shared GPU: the engine gauges can show Silo idle
+while the card it is planned onto is saturated by something else.
 
 If `nvidia-smi` fails five samples running, Silo stops calling it — a host
 without the NVIDIA toolkit would otherwise spawn a doomed subprocess every few

@@ -56,8 +56,8 @@ export type NodeGPUPresentation =
       deviceSummary: string | null;
       /** Full device paths, one per line, for the summary's tooltip. */
       deviceTitle: string | null;
-      /** No health check has re-confirmed this report recently. */
-      stale: boolean;
+      /** Why this report is no longer trustworthy as current; null when it is. */
+      stale: NodeCapabilityStaleReason | null;
       /**
        * Live per-device readings from the node's last health check, matched
        * against the capability inventory. Empty when the node reports no
@@ -66,6 +66,18 @@ export type NodeGPUPresentation =
        */
       live: NodeGPULiveDevice[];
     };
+
+/**
+ * Why a stored capability report is not being treated as current.
+ *
+ * - `contradicted` — the node reports a different hash than the one stored, so
+ *   the stored inventory describes hardware the node itself disagrees with.
+ * - `unreported` — the node answers health checks but names no hash at all, as
+ *   a build predating capability reports does. It is not standing behind the
+ *   stored inventory either; it simply cannot say.
+ * - `unconfirmed` — no health check has re-confirmed the report recently enough.
+ */
+export type NodeCapabilityStaleReason = "contradicted" | "unreported" | "unconfirmed";
 
 /** One GPU's live reading, as rendered next to the capability inventory. */
 export interface NodeGPULiveDevice {
@@ -112,7 +124,7 @@ export function describeNodeGPU(node: StreamNode, now: number = Date.now()): Nod
     failures: otherFailures(resolved, capabilities.detected_backends ?? []),
     deviceSummary: devices.summary,
     deviceTitle: devices.title,
-    stale: isCapabilityReportStale(node, now),
+    stale: capabilityReportStaleness(node, now),
     live: describeLiveGPUs(node),
   };
 }
@@ -319,32 +331,38 @@ function failureReason(entry: NodeDetected): string {
   return entry.reason?.trim() || "no reason reported";
 }
 
-function isCapabilityReportStale(node: StreamNode, now: number): boolean {
+function capabilityReportStaleness(
+  node: StreamNode,
+  now: number,
+): NodeCapabilityStaleReason | null {
   // An unhealthy node cannot refresh its report; calling that stale would blame
   // the inventory for the outage the Health column already shows.
   if (!node.healthy) {
-    return false;
+    return null;
   }
   if (Number.isNaN(Date.parse(node.capabilities_refreshed_at ?? ""))) {
-    return false;
+    return null;
   }
-  // The node says its hardware is something other than what is stored. The
-  // sweep refetches on that mismatch, so seeing it here means the refetch has
-  // not landed — and a health check that keeps succeeding every 30 seconds
-  // would otherwise present a report we already know is obsolete as current.
-  // This is the one staleness a timestamp cannot see.
+  // What the node said about itself on its last health check. Absent means no
+  // check has happened here yet — every node reads that way until the first
+  // sweep after a restart — which is silence, not disagreement. Present and
+  // empty is the node answering with no hash at all, and that is a node not
+  // standing behind the stored report any more than a mismatching one does:
+  // both leave an inventory nothing currently confirms while the health check
+  // goes on succeeding every 30 seconds. This is the staleness a timestamp
+  // cannot see.
   const advertised = node.advertised_capabilities_hash?.trim();
-  if (advertised && advertised !== node.capabilities_hash?.trim()) {
-    return true;
+  if (advertised !== undefined && advertised !== (node.capabilities_hash?.trim() ?? "")) {
+    return advertised === "" ? "unreported" : "contradicted";
   }
   // Measured against the health check, not against the report's own age: the
   // check is what re-confirms the report, and it is the only one of the two
   // that moves on a node whose hardware never changes.
   const lastCheck = Date.parse(node.last_health_check ?? "");
   if (Number.isNaN(lastCheck)) {
-    return false;
+    return null;
   }
-  return now - lastCheck > CAPABILITY_STALE_AFTER_MS;
+  return now - lastCheck > CAPABILITY_STALE_AFTER_MS ? "unconfirmed" : null;
 }
 
 function summarizeRenderDevices(capabilities: NodeCapabilities): {

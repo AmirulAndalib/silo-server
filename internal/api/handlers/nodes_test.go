@@ -714,7 +714,7 @@ func TestHandleCheckNodePublishesResultToThePool(t *testing.T) {
 	stale := "sha256:before"
 	pooled := &nodepool.Node{
 		ID: 7, Name: "gpu-7", Type: nodepool.NodeTypeTranscode, URL: node.URL, Enabled: true,
-		Healthy: true, ActiveJobs: 99, CapabilitiesHash: &stale, AdvertisedCapabilitiesHash: stale,
+		Healthy: true, ActiveJobs: 99, CapabilitiesHash: &stale, AdvertisedCapabilitiesHash: &stale,
 	}
 	pool := nodepool.NewTranscodePool()
 	pool.SetNodes([]*nodepool.Node{pooled})
@@ -736,8 +736,8 @@ func TestHandleCheckNodePublishesResultToThePool(t *testing.T) {
 	if len(updated) != 1 {
 		t.Fatalf("pool holds %d nodes, want 1", len(updated))
 	}
-	if got := updated[0].AdvertisedCapabilitiesHash; got != "sha256:after" {
-		t.Errorf("pool advertised hash = %q, want the hash this check just read", got)
+	if got := updated[0].AdvertisedCapabilitiesHash; got == nil || *got != "sha256:after" {
+		t.Errorf("pool advertised hash = %v, want the hash this check just read", got)
 	}
 	if got := updated[0].ActiveJobs; got != 3 {
 		t.Errorf("pool active jobs = %d, want 3", got)
@@ -749,5 +749,47 @@ func TestHandleCheckNodePublishesResultToThePool(t *testing.T) {
 	}
 	if updated[0].LastHealthCheck == nil {
 		t.Error("pool node kept no check timestamp, so the row and the pool disagree on freshness")
+	}
+}
+
+// Three states, not two: a node that answers health checks with no hash is not
+// the same as a node nobody has checked yet. The first is no longer standing
+// behind the inventory stored for it — a build downgraded past capability
+// reports — while the second is every node until the first sweep after a
+// restart, and says nothing at all.
+func TestHandleListNodesDistinguishesUncheckedFromUnreportedHashes(t *testing.T) {
+	stored := "sha256:stored"
+	none := ""
+	repo := &stubNodeRepository{nodes: []*nodepool.Node{
+		{ID: 1, Name: "checked", Type: nodepool.NodeTypeTranscode, URL: "http://gpu-1", CapabilitiesHash: &stored},
+		{ID: 2, Name: "unchecked", Type: nodepool.NodeTypeTranscode, URL: "http://gpu-2", CapabilitiesHash: &stored},
+	}}
+	pool := nodepool.NewTranscodePool()
+	pool.SetNodes([]*nodepool.Node{
+		{ID: 1, Name: "checked", Type: nodepool.NodeTypeTranscode, URL: "http://gpu-1", AdvertisedCapabilitiesHash: &none},
+		{ID: 2, Name: "unchecked", Type: nodepool.NodeTypeTranscode, URL: "http://gpu-2"},
+	})
+	handler := NewNodeHandler(repo, nil, pool, nil, nil, nil, "secret")
+
+	recorder := httptest.NewRecorder()
+	handler.HandleListNodes(recorder, httptest.NewRequest(http.MethodGet, "/admin/nodes", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &items); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("returned %d nodes, want 2", len(items))
+	}
+	// Present and empty: the node was asked and named nothing.
+	advertised, ok := items[0]["advertised_capabilities_hash"]
+	if !ok || advertised != "" {
+		t.Errorf("checked node advertised %v (present=%v), want an empty string", advertised, ok)
+	}
+	// Absent: nothing has asked, so the field must not claim the node said so.
+	if _, ok := items[1]["advertised_capabilities_hash"]; ok {
+		t.Errorf("unchecked node carried an advertised hash: %v", items[1])
 	}
 }

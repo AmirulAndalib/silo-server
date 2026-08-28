@@ -326,7 +326,42 @@ func (h *PlaybackHandler) remoteToneMapProbeTimeoutV3(nodeURL string) time.Durat
 	if budget > 0 {
 		return budget
 	}
-	return remoteNodeProbeFallbackTimeout
+	// Nothing learned from this node yet, which is every node after an API
+	// restart and any node registered since. The durable report holds what it
+	// last advertised, and its override holds what it would advertise; the flat
+	// fallback below is shorter than a two-device node's matrix legitimately
+	// takes, so reaching for it first would cancel exactly the multi-GPU nodes
+	// this path most wants to keep.
+	return h.coldNodeProbeTimeoutV3(nodeURL)
+}
+
+// coldNodeProbeTimeoutV3 prices one capability read of a node this process has
+// not read successfully yet, from that node rather than from a cluster-wide
+// guess. Without a pooled record — a planner that cannot look nodes up, or a
+// URL that is no longer in the pool — the cluster's own policy is the closest
+// description available.
+func (h *PlaybackHandler) coldNodeProbeTimeoutV3(nodeURL string) time.Duration {
+	cfg := h.playbackConfig()
+	var node *nodepool.Node
+	if lookup, ok := h.NodePlanner.(transcodeNodeLookupV3); ok {
+		if found, ok := lookup.TranscodeNodeByURL(nodeURL); ok {
+			node = found
+		}
+	}
+	return playback.ColdCapabilityRequestTimeout(
+		node.StoredCapabilities(),
+		node.EffectiveHWAccel(cfg.HWAccel),
+		node.EffectiveHWDevice(cfg.HWDevice),
+		remoteNodeProbeFallbackTimeout,
+	)
+}
+
+// transcodeNodeLookupV3 resolves the pooled record behind a transcode node URL,
+// which carries that node's stored capability report and its acceleration
+// override. Optional, like the planner itself: without it this path falls back
+// to the cluster-wide setting. *nodepool.Planner implements it.
+type transcodeNodeLookupV3 interface {
+	TranscodeNodeByURL(nodeURL string) (*nodepool.Node, bool)
 }
 
 // rememberNodeProbeBudgetV3 records what a node says its capability read costs.

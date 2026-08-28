@@ -58,6 +58,7 @@ func TestCollectorExposesSnapshot(t *testing.T) {
 		"streamapp_node_network_rx_bps",
 		"streamapp_node_network_tx_bps",
 		"streamapp_node_gpu_video_busy_percent",
+		"streamapp_node_gpu_busy_percent",
 		"streamapp_node_gpu_sessions",
 		"streamapp_node_gpu_vram_used_bytes",
 		"streamapp_node_gpu_vram_total_bytes",
@@ -263,8 +264,31 @@ func TestCollectorOmitsUnmeasuredGPUEngineGauges(t *testing.T) {
 	if _, present := values["streamapp_node_gpu_render_busy_percent"]; present {
 		t.Fatal("an unmeasured GPU exported a render busy percentage")
 	}
+	if _, present := values["streamapp_node_gpu_busy_percent"]; present {
+		t.Fatal("an unmeasured GPU exported a whole-GPU utilization")
+	}
 	if got := values["streamapp_node_gpu_sessions"]; got != 2 {
 		t.Fatalf("gpu sessions = %v, want the workload count exported regardless", got)
+	}
+}
+
+// Whole-GPU utilization is what nvidia-smi can see and fdinfo cannot: the card's
+// own busyness, other tenants included. Without it an operator watching only the
+// engine gauges sees this node's idle transcoder and no sign that the card it is
+// planned onto is saturated by someone else.
+func TestCollectorExportsWholeGPUUtilization(t *testing.T) {
+	sampler := NewFixedSamplerForTest(Snapshot{
+		Available: true,
+		System:    &SystemStats{},
+		GPU: []GPUStats{{
+			Device: "cuda:0", Vendor: vendorNVIDIA, Sessions: 0,
+			VideoBusyPct: ptr(3), TotalBusyPct: ptr(94), Source: SourceNVIDIASMI,
+		}},
+	})
+
+	values := gatherNames(t, sampler)
+	if got := values["streamapp_node_gpu_busy_percent"]; got != 94 {
+		t.Fatalf("whole-GPU busy = %v, want the card's 94 rather than this node's 3", got)
 	}
 }
 

@@ -64,6 +64,10 @@ var (
 		"streamapp_node_gpu_render_busy_percent",
 		"GPU render engine busy percentage. From DRM fdinfo this covers only this node's own transcodes.",
 		[]string{gpuDeviceLabel}, nil)
+	descGPUTotalBusy = prometheus.NewDesc(
+		"streamapp_node_gpu_busy_percent",
+		"Whole-GPU utilization including workloads from other tenants, where an enrichment source reports it.",
+		[]string{gpuDeviceLabel}, nil)
 	descGPUSessions = prometheus.NewDesc(
 		"streamapp_node_gpu_sessions",
 		"Active GPU workloads this node has pinned to a device.",
@@ -153,6 +157,14 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 		}
 		if gpu.RenderBusyPct != nil {
 			gauge(descGPURenderBusy, float64(*gpu.RenderBusyPct), gpu.Device)
+		}
+		// The engine readings above describe this node's own work when they come
+		// from fdinfo; this one describes the card. A shared GPU saturated by
+		// another tenant is the case where they disagree, and it is the one an
+		// operator most needs to alert on — a transcode that will not get the
+		// silicon it was planned onto.
+		if gpu.TotalBusyPct != nil {
+			gauge(descGPUTotalBusy, float64(*gpu.TotalBusyPct), gpu.Device)
 		}
 		// Sessions always ships: it comes from this process's own workload
 		// accounting, not from a driver, so it is exact whatever the driver can

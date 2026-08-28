@@ -493,13 +493,38 @@ func (p *NodeAwarePreparer) remoteToneMapProbeTimeout(nodeURL string) time.Durat
 	if timeout > 0 {
 		return timeout
 	}
-	cfg := p.config()
-	if cfg == nil {
-		return playback.CapabilityRequestTimeout("", "")
+	// Cold. The cluster setting describes the cluster, not this node: a node
+	// overridden onto four devices walks four, and pricing it at the cluster's
+	// one cancels its matrix before its own deadline — which drops it from the
+	// capability map and sends the download local, or fails it outright where
+	// local fallback is off. Its own stored report and its own override are
+	// what describe it.
+	var node *nodepool.Node
+	if lookup, ok := p.planner.(transcodeNodeLookup); ok {
+		if found, ok := lookup.TranscodeNodeByURL(nodeURL); ok {
+			node = found
+		}
+	}
+	hwAccel, hwDevice := "", ""
+	if cfg := p.config(); cfg != nil {
+		hwAccel, hwDevice = cfg.Playback.HWAccel, cfg.Playback.HWDevice
 	}
 	// The whole capability read, not just its tone-map half: the node runs a
-	// hardware walk first, and that walk scales with the configured device set.
-	return playback.CapabilityRequestTimeout(cfg.Playback.HWAccel, cfg.Playback.HWDevice)
+	// hardware walk first, and that walk scales with the device set it walks.
+	return playback.ColdCapabilityRequestTimeout(
+		node.StoredCapabilities(),
+		node.EffectiveHWAccel(hwAccel),
+		node.EffectiveHWDevice(hwDevice),
+		playback.CapabilityRequestTimeout(hwAccel, hwDevice),
+	)
+}
+
+// transcodeNodeLookup resolves the pooled record behind a transcode node URL,
+// which carries that node's stored capability report and its acceleration
+// override. Optional, like the planner's other capabilities: without it this
+// path falls back to the cluster-wide setting. *nodepool.Planner implements it.
+type transcodeNodeLookup interface {
+	TranscodeNodeByURL(nodeURL string) (*nodepool.Node, bool)
 }
 
 // cacheToneMapCapabilityFailure negatively caches an unreachable or invalid

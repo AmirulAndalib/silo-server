@@ -124,7 +124,10 @@ func applyNodeHealth(nodes []*Node, id int, checkedURL string, healthy bool, act
 		clone.ActiveJobs = activeJobs
 		clone.EgressKbps = egressKbps
 		clone.LastHealthCheck = &checkedAt
-		clone.AdvertisedCapabilitiesHash = advertisedHash
+		// Always a pointer once a check has happened, empty string included: the
+		// distinction between "this node reports no hash" and "no one has asked"
+		// is the whole reason the field is one.
+		clone.AdvertisedCapabilitiesHash = &advertisedHash
 		// A check that carried no stats clears them rather than keeping the
 		// previous sample: an unreachable node's five-minute-old CPU number
 		// looks live on a dashboard, which is worse than no number at all. The
