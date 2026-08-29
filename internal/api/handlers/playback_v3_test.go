@@ -3269,11 +3269,13 @@ func TestPrepareTransportV3SendsResolvedCopyAnchorToRemoteExecutor(t *testing.T)
 
 func TestPrepareRemoteTransportV3RemuxOmitsToneMapOnlyDolbyVisionEvidence(t *testing.T) {
 	var startRequest transcodenode.TranscodeStartRequest
+	var startCalled bool
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
 			writeJSON(w, http.StatusOK, playback.HWAccelInfo{})
 		case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
+			startCalled = true
 			if err := json.NewDecoder(r.Body).Decode(&startRequest); err != nil {
 				t.Errorf("decode remote start: %v", err)
 			}
@@ -3308,6 +3310,9 @@ func TestPrepareRemoteTransportV3RemuxOmitsToneMapOnlyDolbyVisionEvidence(t *tes
 		t.Fatalf("prepare remote Dolby Vision remux: %v", transportErr)
 	}
 	defer transport.rollback()
+	if !startCalled {
+		t.Fatal("remote transcode start was not requested")
+	}
 	if startRequest.ToneMapDVConfigPresent || startRequest.ToneMapDVBLCompatIDPresent || startRequest.ToneMapDVBLPresent || startRequest.ToneMapDVRPUPresent {
 		t.Fatalf("remote copy/remux request carried tone-map-only Dolby Vision evidence: %#v", startRequest)
 	}
