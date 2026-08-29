@@ -54,6 +54,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/chapterthumbs"
 	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/dashmetrics"
 	"github.com/Silo-Server/silo-server/internal/database"
 	"github.com/Silo-Server/silo-server/internal/diagnostics"
 	"github.com/Silo-Server/silo-server/internal/downloads"
@@ -1226,6 +1227,7 @@ func main() {
 		watchProviderRepo = watchsync.NewPostgresRepository(deps.DB, deps.SecretCipher)
 		watchProviderService = watchsync.NewService(watchProviderRepo, watchProviderRegistry)
 		deps.WatchProviderService = watchProviderService
+		deps.WatchProviderRegistry = watchProviderRegistry
 	}
 
 	// Initialize node pools for integrated/api modes.
@@ -2126,12 +2128,51 @@ func main() {
 	}
 
 	if deps.DB != nil {
-		adminStatsProvider, statsErr := handlers.NewAdminStatsProvider(appCtx, deps.DB, deps.EventBus)
+		adminStatsProvider, statsErr := handlers.NewAdminStatsProvider(appCtx, deps.DB, deps.EventBus, watchProviderRegistry)
 		if statsErr != nil {
 			log.Fatalf("failed to create admin stats provider: %v", statsErr)
 		}
 		defer adminStatsProvider.Close()
 		deps.AdminStatsProvider = adminStatsProvider
+
+		playbackActivityProvider, playbackActivityErr := handlers.NewAdminPlaybackActivityProvider(appCtx, deps.DB, deps.EventBus)
+		if playbackActivityErr != nil {
+			log.Fatalf("failed to create admin playback activity provider: %v", playbackActivityErr)
+		}
+		defer playbackActivityProvider.Close()
+		deps.AdminPlaybackActivityProvider = playbackActivityProvider
+
+		topActivityProvider, topActivityErr := handlers.NewAdminTopActivityProvider(appCtx, deps.DB, deps.EventBus)
+		if topActivityErr != nil {
+			log.Fatalf("failed to create admin top activity provider: %v", topActivityErr)
+		}
+		defer topActivityProvider.Close()
+		deps.AdminTopActivityProvider = topActivityProvider
+
+		timeseriesProvider, timeseriesErr := handlers.NewAdminTimeseriesProvider(appCtx, deps.DB, deps.EventBus)
+		if timeseriesErr != nil {
+			log.Fatalf("failed to create admin timeseries provider: %v", timeseriesErr)
+		}
+		defer timeseriesProvider.Close()
+		deps.AdminTimeseriesProvider = timeseriesProvider
+
+		downloadsStatsProvider, downloadsStatsErr := handlers.NewAdminDownloadsStatsProvider(appCtx, deps.DB, deps.EventBus)
+		if downloadsStatsErr != nil {
+			log.Fatalf("failed to create admin downloads stats provider: %v", downloadsStatsErr)
+		}
+		defer downloadsStatsProvider.Close()
+		deps.AdminDownloadsStatsProvider = downloadsStatsProvider
+
+		// The dashboard metrics sampler is the only writer of concurrent-stream
+		// and egress history. Proxy and transcode nodes serve bytes but do not
+		// own the catalog database, so only the API-facing modes sample. An
+		// unset SILO_MODE is the integrated default everywhere else in this
+		// file, so it samples too.
+		if mode == "integrated" || mode == "api" || mode == "" {
+			dashSampler := dashmetrics.NewSampler(deps.DB, deps.StreamTelemetry, nodeIdentity)
+			dashSampler.Start(appCtx)
+			defer dashSampler.Stop()
+		}
 	}
 
 	// Wire recommendations engine, worker, and ratings repo if enabled.
