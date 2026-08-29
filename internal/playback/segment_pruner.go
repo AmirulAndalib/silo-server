@@ -27,7 +27,7 @@ type segmentPruneCandidate struct {
 // durations retain the same back-seek window.
 func (s *TranscodeSession) scheduleSegmentPruneLocked() {
 	retentionSeconds := s.opts.SegmentRetentionSeconds
-	if retentionSeconds <= 0 || s.segmentPruneRunning || s.restarting {
+	if retentionSeconds <= 0 || s.segmentPruneRunning || s.restarting != nil {
 		return
 	}
 
@@ -67,7 +67,7 @@ func (s *TranscodeSession) scheduleSegmentPruneLocked() {
 func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloadedThrough int, continuation bool) {
 	started := time.Now()
 	s.mu.Lock()
-	if generation != s.segmentGeneration || s.restarting {
+	if generation != s.segmentGeneration || s.restarting != nil {
 		s.mu.Unlock()
 		return
 	}
@@ -198,7 +198,7 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 		// Once either advances the generation, this pass cannot delete files
 		// generated for a replacement timeline or session object.
 		s.mu.Lock()
-		if generation != s.segmentGeneration || s.restarting {
+		if generation != s.segmentGeneration || s.restarting != nil {
 			s.mu.Unlock()
 			return
 		}
@@ -327,7 +327,7 @@ func (s *TranscodeSession) finishSegmentPrune(
 	if retryAfter > 0 {
 		time.AfterFunc(retryAfter, func() {
 			s.mu.Lock()
-			if generation != s.segmentGeneration || s.restarting {
+			if generation != s.segmentGeneration || s.restarting != nil {
 				s.mu.Unlock()
 				return
 			}

@@ -61,7 +61,7 @@ func TestTranscodeProxyAcknowledgesOnlyFullDownstreamResponse(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/stream/transcode/token/segment/seg_00007.ts", nil)
 			req.Header.Set("Range", tt.rangeHeader)
 			rr := httptest.NewRecorder()
-			server.proxyToTranscodeNode(rr, req, claims, "/transcode/remote/segment/seg_00007.ts")
+			server.proxyToTranscodeNode(rr, req, claims, "/transcode/remote/segment/seg_00007.ts", "")
 
 			if rr.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d; body = %q", rr.Code, tt.wantStatus, rr.Body.String())
@@ -96,7 +96,7 @@ func TestTranscodeProxyDoesNotAcknowledgeFailedDownstreamWrite(t *testing.T) {
 	claims := &streamtoken.Claims{SessionID: "public", TranscodeNode: node.URL}
 	req := httptest.NewRequest(http.MethodGet, "/stream/transcode/token/segment/seg_00007.ts", nil)
 	w := &failingCompletionResponseWriter{header: make(http.Header), remaining: 5}
-	server.proxyToTranscodeNode(w, req, claims, "/transcode/remote/segment/seg_00007.ts")
+	server.proxyToTranscodeNode(w, req, claims, "/transcode/remote/segment/seg_00007.ts", "")
 
 	if got := acknowledgements.Load(); got != 0 {
 		t.Fatalf("failed downstream transfer produced %d acknowledgement(s)", got)

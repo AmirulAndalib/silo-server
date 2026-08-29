@@ -325,7 +325,7 @@ func TestOpenSegmentWaitsThroughRestartInsteadOfLeasingStaleFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "seg_00001.ts")
 	writePrunerTestFile(t, path, []byte("stale segment"), time.Now())
-	session := &TranscodeSession{outputDir: dir, restarting: true}
+	session := &TranscodeSession{outputDir: dir, restarting: &restartFlight{done: make(chan struct{})}}
 
 	if segment, err := session.OpenSegment("seg_00001.ts"); !errors.Is(err, ErrSegmentNotFound) {
 		if segment != nil {
