@@ -63,12 +63,17 @@ type PlaybackSession struct {
 
 // PlaybackMediaSource stores one negotiated stream source within a compat play session.
 type PlaybackMediaSource struct {
-	ID                          string
-	FileID                      int
-	Version                     catalog.FileVersion
-	SupportsDirectPlay          bool
-	SupportsDirectStream        bool
-	SupportsTranscoding         bool
+	ID                   string
+	FileID               int
+	Version              catalog.FileVersion
+	SupportsDirectPlay   bool
+	SupportsDirectStream bool
+	SupportsTranscoding  bool
+	// HLSRemux selects fragmented MP4 with video copy. TranscodeAudio remains
+	// the independent audio-encode decision, so a compatible audio codec can
+	// stay bit-for-bit copied.
+	HLSRemux                    bool
+	HLSRemuxAudioStreamIndexes  []int
 	TranscodeAudio              bool
 	DefaultAudioStreamIndex     *int
 	SelectedAudioStreamIndex    *int
