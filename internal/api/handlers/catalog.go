@@ -119,7 +119,7 @@ func (h *CatalogHandler) HandleGetCatalog(w http.ResponseWriter, r *http.Request
 	if groupedByWork {
 		result, entries, err := h.resolveGroupedCatalogByWork(r, req, accessFilter)
 		if err != nil {
-			handleCatalogResolveError(w, r, err, "catalog: resolve grouped by work failed")
+			handleCatalogResolveError(w, r, err, true)
 			return
 		}
 
@@ -136,18 +136,18 @@ func (h *CatalogHandler) HandleGetCatalog(w http.ResponseWriter, r *http.Request
 
 	result, err := h.resolver.Resolve(r.Context(), req, accessFilter)
 	if err != nil {
-		handleCatalogResolveError(w, r, err, "catalog: resolve failed")
+		handleCatalogResolveError(w, r, err, false)
 		return
 	}
 	items := h.catalogItemResponses(r, result.Items, catalogSortMetricField(req, result), playableTargetLibraryIDs(req), accessFilter)
 	h.writeCatalogResponse(w, result, items, groupedByWork)
 }
 
-// handleCatalogResolveError keeps grouped and ordinary catalogue resolution on
+// handleCatalogResolveError keeps grouped and ordinary catalog resolution on
 // the same error contract. In particular, a grouped search still runs through
 // the bounded PostgreSQL path and must return search_timeout rather than hiding
 // a deadline behind the generic 500 response.
-func handleCatalogResolveError(w http.ResponseWriter, r *http.Request, err error, failureLog string) {
+func handleCatalogResolveError(w http.ResponseWriter, r *http.Request, err error, groupedByWork bool) {
 	if errors.Is(err, catalog.ErrInvalidCatalogRequest) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
@@ -159,7 +159,13 @@ func handleCatalogResolveError(w http.ResponseWriter, r *http.Request, err error
 	if handleCatalogSearchContextError(w, r, err) {
 		return
 	}
-	slog.ErrorContext(r.Context(), failureLog, "component", "api", "err_msg", err.Error())
+	slog.ErrorContext(
+		r.Context(),
+		"catalog: resolve failed",
+		"component", "api",
+		"grouped_by_work", groupedByWork,
+		"err_msg", err.Error(),
+	)
 	writeError(w, http.StatusInternalServerError, "internal_error", "Failed to resolve catalog")
 }
 

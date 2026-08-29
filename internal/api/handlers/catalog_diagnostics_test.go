@@ -161,7 +161,7 @@ func TestHandleCatalogResolveError_GroupedDeadlineReturnsRetryableTimeout(t *tes
 		rec,
 		req,
 		errors.Join(errors.New("grouped search failed"), context.DeadlineExceeded),
-		"catalog: resolve grouped by work failed",
+		true,
 	)
 	if rec.Code != http.StatusGatewayTimeout {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusGatewayTimeout, rec.Body.String())
