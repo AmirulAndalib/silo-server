@@ -148,7 +148,11 @@ func codecProfileApplies(
 	useSubContainer bool,
 ) bool {
 	profileContainers := profile.Container
-	if useSubContainer && normalizeCompatToken(profile.Container) == compatHLSPathSegment {
+	profileContainer := strings.TrimSpace(profile.Container)
+	if useSubContainer &&
+		profileContainer != "" &&
+		!strings.HasPrefix(profileContainer, "-") &&
+		matchesCodecProfileContainer(profileContainer, compatHLSPathSegment) {
 		profileContainers = profile.SubContainer
 	}
 	if !matchesCodecProfileContainer(profileContainers, container) {

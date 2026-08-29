@@ -1979,7 +1979,15 @@ func (h *PlaybackHandler) buildPlaybackSource(
 		allowAudioCopy &&
 		!supportsDirectPlay &&
 		profile.SupportsHLSRemuxForAudioStream(version, selectedAudioIndex)
-	transcodeAudio := !hlsAudioCopy && enableDirectStream && allowVideoCopy && videoSupported && !audioSupported
+	hlsAudioTranscode := !allowAudioCopy &&
+		enableTranscoding &&
+		!supportsDirectPlay &&
+		profile.supportsHLSRemuxWithAudioTranscodeForAudioStream(version, selectedAudioIndex)
+	transcodeAudio := !hlsAudioCopy &&
+		enableDirectStream &&
+		allowVideoCopy &&
+		videoSupported &&
+		(!audioSupported || hlsAudioTranscode)
 	hlsRemux := hlsAudioCopy || transcodeAudio
 	var hlsRemuxAudioStreamIndexes []int
 	if hlsRemux && !transcodeAudio {

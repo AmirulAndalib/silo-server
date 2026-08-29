@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/models"
 )
 
 // DeviceProfile captures the subset of Jellyfin client capabilities the
@@ -214,6 +215,40 @@ func (p DeviceProfile) SupportsHLSRemuxForAudioStream(version catalog.FileVersio
 			continue
 		}
 		return p.hlsRemuxCodecProfileCompatibility(version, audioStreamIndex).supportsDirectPlay()
+	}
+	return false
+}
+
+func (p DeviceProfile) supportsHLSRemuxWithAudioTranscodeForAudioStream(version catalog.FileVersion, audioStreamIndex *int) bool {
+	if len(p.TranscodingProfiles) == 0 {
+		return false
+	}
+	for _, profile := range p.TranscodingProfiles {
+		if !matchesVideoType(profile.Type) {
+			continue
+		}
+		if protocol := strings.ToLower(strings.TrimSpace(profile.Protocol)); protocol != "" && protocol != "hls" {
+			continue
+		}
+		if !matchesCSV(profile.Container, "mp4") ||
+			!matchesCSV(profile.VideoCodec, version.CodecVideo) ||
+			!matchesCSV(profile.AudioCodec, compatTargetAudioCodec) {
+			continue
+		}
+
+		outputVersion := version
+		outputAudio := compatAudioTrack(version, audioStreamIndex)
+		outputAudio.Codec = compatTargetAudioCodec
+		outputAudio.Profile = ""
+		outputAudio.Bitrate = 192_000
+		if outputAudio.Channels > 0 {
+			outputAudio.Channels = 2
+		}
+		outputAudio.Default = true
+		outputVersion.CodecAudio = compatTargetAudioCodec
+		outputVersion.AudioTracks = []models.AudioTrack{outputAudio}
+		outputAudioStreamIndex := len(outputVersion.VideoTracks)
+		return p.hlsRemuxCodecProfileCompatibility(outputVersion, &outputAudioStreamIndex).supportsDirectPlay()
 	}
 	return false
 }
