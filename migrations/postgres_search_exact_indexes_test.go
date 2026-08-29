@@ -53,10 +53,14 @@ func TestPostgresSearchExactTitleIndexesAreConcurrentAndRetrySafe(t *testing.T) 
 	for _, required := range []string{
 		"CREATE TRIGGER trg_episode_catalog_entries_episodes_overview",
 		"AFTER UPDATE OF overview ON public.episodes",
-		"DROP TRIGGER IF EXISTS trg_episode_catalog_entries_episodes_overview ON public.episodes",
 	} {
-		if !strings.Contains(sql, required) {
+		if !strings.Contains(upSQL, required) {
 			t.Fatalf("migration missing race-safe overview trigger clause %q:\n%s", required, sql)
 		}
+	}
+	downSQL := sql[downMarker:]
+	const overviewTriggerDrop = "DROP TRIGGER IF EXISTS trg_episode_catalog_entries_episodes_overview ON public.episodes"
+	if !strings.Contains(downSQL, overviewTriggerDrop) {
+		t.Fatalf("migration down path missing overview trigger cleanup %q:\n%s", overviewTriggerDrop, sql)
 	}
 }
