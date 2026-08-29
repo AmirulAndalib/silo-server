@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -18,8 +22,14 @@ const (
 	probeCommandTimeout = 5 * time.Second
 	probeNegativeTTL    = 15 * time.Second
 	probeTimeoutSlack   = time.Second
-	probeEndpointSlack  = 20 * time.Second
-	probeRequestSlack   = 5 * time.Second
+	// probeEndpointSlack covers what a capability endpoint spends around the
+	// tone-map matrix itself: one bounded hardware detection walk (30s in
+	// playback.hwAccelWalkTimeout), the transformation registry's three 3s
+	// commands, and response overhead. It cannot be derived from those
+	// constants — playback imports this package, not the other way round — so
+	// it is raised whenever either budget grows.
+	probeEndpointSlack = 45 * time.Second
+	probeRequestSlack  = 5 * time.Second
 )
 
 // One deterministic 64x64 Main 10 HEVC frame. Keeping the compressed fixture
@@ -34,8 +44,8 @@ const decodeProbeFixtureBase64 = "AAAAAUABDAH//wIgAAADAJAAAAMAAAMAHpWUCQAAAAFCAQ
 // output. Tests inject it to model individual FFmpeg capabilities and failures.
 type CommandRunner func(context.Context, string, ...string) ([]byte, error)
 
-// probeCacheEntry stores either a permanent positive capability result or a
-// short-lived negative result that is eligible for retry.
+// probeCacheEntry stores either a permanent complete capability result or a
+// short-lived incomplete result that is eligible for retry.
 type probeCacheEntry struct {
 	capabilities Capabilities
 	expiresAt    time.Time
@@ -45,6 +55,12 @@ var probeCache = struct {
 	sync.Mutex
 	entries map[string]probeCacheEntry
 	group   singleflight.Group
+	// generation counts invalidations and is part of every cache and
+	// singleflight key. It is what makes InvalidateProbeCache supersede a probe
+	// already in flight instead of merely clearing the map in front of it: the
+	// flight stores its inventory under the generation it started in, and the
+	// next caller asks a different key and therefore runs a fresh probe.
+	generation uint64
 }{entries: make(map[string]probeCacheEntry)}
 
 // Probe returns the cached, smoke-tested tone-map capabilities for an FFmpeg
@@ -56,8 +72,8 @@ func Probe(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevice stri
 // probeCached coalesces identical probes without allowing one caller's
 // cancellation to abort the shared work needed by other playback requests.
 func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevice string, run CommandRunner, now func() time.Time) (Capabilities, error) {
-	key := probeCacheKey(ffmpegPath, hardwareBackend, hardwareDevice)
 	probeCache.Lock()
+	key := probeCacheKey(probeCache.generation, ffmpegPath, hardwareBackend, hardwareDevice)
 	if cached, ok := probeCache.entries[key]; ok && probeCacheEntryCurrent(cached, now()) {
 		result := append(Capabilities(nil), cached.capabilities...)
 		probeCache.Unlock()
@@ -65,6 +81,13 @@ func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevic
 	}
 	probeCache.Unlock()
 
+	// Claimed here, on the calling goroutine, not inside the function below.
+	// DoChan schedules that function and returns without waiting for it, so a
+	// caller whose context is already done returns while the probe has not
+	// reached its first line — and this probe runs real smoke encodes on the
+	// GPU. Anything that needs the encoder to itself has to see them; see
+	// ProbesInFlight.
+	probesInFlight.Add(1)
 	resultCh := probeCache.group.DoChan(key, func() (any, error) {
 		probeCache.Lock()
 		cached, ok := probeCache.entries[key]
@@ -79,7 +102,7 @@ func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevic
 			return nil, err
 		}
 		entry := probeCacheEntry{capabilities: append(Capabilities(nil), result...)}
-		if len(result) == 0 {
+		if !probeCapabilitiesComplete(result, hardwareBackend) {
 			entry.expiresAt = now().Add(probeNegativeTTL)
 		}
 		probeCache.Lock()
@@ -89,8 +112,16 @@ func probeCached(ctx context.Context, ffmpegPath, hardwareBackend, hardwareDevic
 	})
 	select {
 	case <-ctx.Done():
+		// The flight outlives this caller by design — its probe context is
+		// rooted at Background so a canceled request cannot kill work another
+		// request is waiting on — so the claim goes with the flight, not with us.
+		go func() {
+			<-resultCh
+			probesInFlight.Add(-1)
+		}()
 		return nil, ctx.Err()
 	case result := <-resultCh:
+		probesInFlight.Add(-1)
 		if result.Err != nil {
 			return nil, result.Err
 		}
@@ -130,7 +161,7 @@ func probeWithRunner(
 
 // probeCacheKey binds reusable capabilities to the resolved FFmpeg binary and
 // the driver facts for every configured hardware device.
-func probeCacheKey(ffmpegPath, hardwareBackend, hardwareDevice string) string {
+func probeCacheKey(generation uint64, ffmpegPath, hardwareBackend, hardwareDevice string) string {
 	binaryIdentity := strings.TrimSpace(ffmpegPath)
 	if _, cacheKey, cacheable := ffmpegBinaryCacheKey(binaryIdentity); cacheable {
 		binaryIdentity = cacheKey
@@ -139,20 +170,103 @@ func probeCacheKey(ffmpegPath, hardwareBackend, hardwareDevice string) string {
 	device := strings.TrimSpace(hardwareDevice)
 	driverIdentities := make([]string, 0)
 	switch backend {
-	case BackendQSV, BackendVAAPI, BackendNVENC:
+	case BackendQSV, BackendVAAPI, BackendNVENC, BackendVideoToolbox:
 		devices := probeDevices(device, backend)
 		driverIdentities = make([]string, 0, len(devices))
 		for _, configuredDevice := range devices {
 			driverIdentities = append(driverIdentities, driverFingerprint(backend, configuredDevice))
 		}
 	}
-	return strings.Join([]string{binaryIdentity, backend, device, strings.Join(driverIdentities, ",")}, "\x00")
+	return strings.Join([]string{
+		strconv.FormatUint(generation, 10),
+		binaryIdentity, backend, device, strings.Join(driverIdentities, ","),
+	}, "\x00")
 }
 
-// probeCacheEntryCurrent reports whether a positive result or unexpired
-// negative result may be reused.
+// InvalidateProbeCache drops every cached tone-map inventory so the next probe
+// re-runs its listings and single-frame conversions.
+//
+// A non-empty inventory is cached permanently (see probeCacheEntryCurrent),
+// which is right for playback and wrong for an operator who just upgraded a
+// driver or an FFmpeg build in place: the binary's identity key only changes
+// when the file does, and a driver has no key at all. This is the seam an
+// operator-triggered re-probe uses to force the matrix to run again.
+//
+// A probe already in flight is neither canceled nor discarded — canceling
+// shared work would fail the unrelated playback request waiting on it — but it
+// is superseded: bumping the generation moves every cache and singleflight key,
+// so the in-flight probe stores its inventory where nothing will read it and
+// the next caller runs a genuinely cold probe rather than joining the old
+// flight. Without that, a re-probe racing a background capability fetch would
+// republish the very inventory it was asked to discard.
+func InvalidateProbeCache() {
+	probeCache.Lock()
+	defer probeCache.Unlock()
+	probeCache.generation++
+	probeCache.entries = make(map[string]probeCacheEntry)
+}
+
+// probesInFlight counts tone-map probes this process has claimed the encoder
+// for, including ones whose caller has already given up on them.
+var probesInFlight atomic.Int64
+
+// ProbesInFlight reports how many tone-map probes this process has claimed the
+// encoder for.
+//
+// The matrix behind one of these is real FFmpeg smoke encodes, and a probe
+// outlives its caller by design: the singleflight task runs on a background
+// context so a canceled request cannot kill work another request is waiting on.
+// A component that released its own claim on the GPU when its call returned —
+// the transcode node's capability build does exactly that — can therefore leave
+// encodes running with nothing accounting for them. Anything that needs the
+// encoder exclusively must add this to whatever else it counts as busy, or it
+// will start a second matrix beside the first and publish the collision as a
+// capability failure.
+//
+// It counts claims rather than processes and errs high, for the same reason its
+// hardware-probe counterpart does: an overcount costs a retry, an undercount
+// costs a false verdict.
+func ProbesInFlight() int {
+	count := probesInFlight.Load()
+	if count < 0 {
+		return 0
+	}
+	return int(count)
+}
+
+// probeCacheEntryCurrent reports whether a complete result or unexpired
+// incomplete result may be reused.
 func probeCacheEntryCurrent(entry probeCacheEntry, now time.Time) bool {
-	return len(entry.capabilities) > 0 || now.Before(entry.expiresAt)
+	return entry.expiresAt.IsZero() || now.Before(entry.expiresAt)
+}
+
+// probeCapabilitiesComplete reports whether discovery found a reusable result
+// for every executor class it was asked to inspect. A software capability does
+// not make a missing configured hardware executor permanent: temporary device
+// contention must be retried after the negative-cache interval.
+func probeCapabilitiesComplete(capabilities Capabilities, hardwareBackend string) bool {
+	if !capabilityCoversAllSourceKinds(capabilities, ModeSoftware, BackendSoftware) {
+		return false
+	}
+	backend := strings.ToLower(strings.TrimSpace(hardwareBackend))
+	switch backend {
+	case BackendQSV, BackendVAAPI, BackendNVENC, BackendVideoToolbox:
+		return capabilityCoversAllSourceKinds(capabilities, ModeHardware, backend)
+	default:
+		return true
+	}
+}
+
+func capabilityCoversAllSourceKinds(capabilities Capabilities, mode Mode, backend string) bool {
+	index := slices.IndexFunc(capabilities, func(capability Capability) bool {
+		return capability.Mode == mode && capability.Backend == backend
+	})
+	if index < 0 {
+		return false
+	}
+	return !slices.ContainsFunc(AllSourceKinds(), func(kind SourceKind) bool {
+		return !slices.Contains(capabilities[index].SourceKinds, kind)
+	})
 }
 
 // ProbeTotalTimeout budgets one bounded deadline for every listing and smoke
@@ -161,7 +275,7 @@ func ProbeTotalTimeout(hardwareBackend, hardwareDevice string) time.Duration {
 	commandCount := 2 + len(AllSourceKinds())
 	backend := strings.ToLower(strings.TrimSpace(hardwareBackend))
 	switch backend {
-	case BackendQSV, BackendVAAPI, BackendNVENC:
+	case BackendQSV, BackendVAAPI, BackendNVENC, BackendVideoToolbox:
 		commandCount += len(AllSourceKinds()) * len(probeDevices(hardwareDevice, backend))
 	}
 	return time.Duration(commandCount)*probeCommandTimeout + probeTimeoutSlack
@@ -177,6 +291,32 @@ func ProbeEndpointTimeout(hardwareBackend, hardwareDevice string) time.Duration 
 		backend = BackendQSV
 	}
 	return ProbeTotalTimeout(backend, hardwareDevice) + probeEndpointSlack
+}
+
+// ProbeRequestSlack is the transport and response margin a remote caller adds
+// on top of a node's endpoint budget. Exported so playback can compose the same
+// request budget without duplicating the number.
+const ProbeRequestSlack = probeRequestSlack
+
+// MaxProbedDevices is the device count the ceiling on an advertised probe
+// budget is derived from.
+//
+// The matrix grows with the device set, which has no hard limit — an operator
+// can list as many render devices as the host has. This is the largest set a
+// caller will keep waiting for, chosen well above any real GPU node so that a
+// legitimate configuration never meets it and the ceiling only ever bounds a
+// worker advertising something absurd.
+const MaxProbedDevices = 16
+
+// MaxProbeRequestTimeout is the largest budget a node may advertise and be
+// believed, derived from the same formula the node itself uses so the two
+// cannot drift apart.
+func MaxProbeRequestTimeout() time.Duration {
+	devices := make([]string, 0, MaxProbedDevices)
+	for i := range MaxProbedDevices {
+		devices = append(devices, defaultDRIRenderDevice+strconv.Itoa(i))
+	}
+	return ProbeRequestTimeout(BackendQSV, strings.Join(devices, ","))
 }
 
 // ProbeRequestTimeout gives a remote caller additional transport and response
@@ -261,9 +401,32 @@ func probeDevices(value, backend string) []string {
 		if backend == BackendNVENC {
 			return []string{"0"}
 		}
+		if backend == BackendVideoToolbox {
+			return []string{""}
+		}
 		return []string{defaultDRIRenderDevice}
 	}
+	if len(devices) > MaxProbedDevices {
+		// Past the cap the budget every caller allows stops covering the matrix,
+		// so probing further would guarantee the request is canceled rather
+		// than finished. Truncating is the honest failure: the devices that are
+		// probed get real verdicts, and the omission is logged rather than
+		// silently folded into a shorter answer.
+		noteProbeDevicesTruncated(len(devices))
+		devices = devices[:MaxProbedDevices]
+	}
 	return devices
+}
+
+// probeDevicesTruncatedLogged latches the truncation warning to one line per
+// process: a device list is a standing configuration, not an event.
+var probeDevicesTruncatedLogged sync.Once
+
+func noteProbeDevicesTruncated(configured int) {
+	probeDevicesTruncatedLogged.Do(func() {
+		slog.Warn("tone-map probe covers only the first configured devices; the rest are not verified",
+			"component", "tonemap", "configured", configured, "probed", MaxProbedDevices)
+	})
 }
 
 // intersectSourceKinds preserves the left-hand ordering while retaining source
@@ -288,6 +451,8 @@ func hardwareFilter(backend string) string {
 		return HardwareFilterOpenCL
 	case BackendNVENC:
 		return HardwareFilterCUDA
+	case BackendVideoToolbox:
+		return HardwareFilterVideoToolbox
 	default:
 		return HardwareFilterVAAPI
 	}
@@ -322,6 +487,8 @@ func hardwareProbeAvailable(backend string, filters, encoders []byte) bool {
 		return hasToken(filters, HardwareFilterVAAPI) && hasToken(filters, "scale_vaapi") && hasToken(encoders, "h264_vaapi")
 	case BackendNVENC:
 		return hasToken(filters, HardwareFilterCUDA) && hasToken(filters, "scale_cuda") && hasToken(encoders, "h264_nvenc")
+	case BackendVideoToolbox:
+		return hasToken(filters, HardwareFilterVideoToolbox) && hasToken(filters, "hwdownload") && hasToken(filters, "sidedata") && hasToken(encoders, "h264_videotoolbox")
 	default:
 		return false
 	}
@@ -359,27 +526,29 @@ func softwareSmokeArgs(fixturePath string, kind SourceKind, filterName string) [
 // command for one hardware backend, device, and source kind.
 func hardwareSmokeArgs(fixturePath, backend, hardwareDevice string, kind SourceKind) []string {
 	device := firstDevice(hardwareDevice)
-	if device == "" && backend != BackendNVENC {
+	if device == "" && backend != BackendNVENC && backend != BackendVideoToolbox {
 		device = defaultDRIRenderDevice
 	}
 	base := []string{ffmpegHideBannerArg, ffmpegLogLevelArg, ffmpegErrorLogLevel}
 	switch backend {
 	case BackendQSV:
+		base = append(base, QSVInitDeviceArgs(device)...)
 		base = append(base,
-			"-init_hw_device", qsvVAAPIInitDevice(device),
-			"-init_hw_device", "qsv=qs@va",
 			"-init_hw_device", "opencl=ocl@va",
 			"-filter_hw_device", "va",
 			"-hwaccel", BackendVAAPI, "-hwaccel_output_format", BackendVAAPI,
 		)
 	case BackendVAAPI:
-		base = append(base, "-init_hw_device", "vaapi=va:"+device, "-filter_hw_device", "va", "-hwaccel", BackendVAAPI, "-hwaccel_output_format", BackendVAAPI)
+		base = append(base, VAAPIInitDeviceArgs("va", device)...)
+		base = append(base, "-filter_hw_device", "va", "-hwaccel", BackendVAAPI, "-hwaccel_output_format", BackendVAAPI)
 	case BackendNVENC:
 		cudaDevice := device
 		if cudaDevice == "" {
 			cudaDevice = "0"
 		}
 		base = append(base, "-init_hw_device", "cuda=cu:"+cudaDevice, "-filter_hw_device", "cu", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda")
+	case BackendVideoToolbox:
+		base = append(base, "-hwaccel", BackendVideoToolbox, "-hwaccel_output_format", "videotoolbox_vld")
 	}
 	base = append(base,
 		"-f", codecHEVC, "-i", fixturePath,
@@ -392,6 +561,9 @@ func hardwareSmokeArgs(fixturePath, backend, hardwareDevice string, kind SourceK
 // hardwareSmokeFilter builds the backend-specific graph used to validate both
 // HDR and already-SDR Dolby Vision base layers.
 func hardwareSmokeFilter(backend string, kind SourceKind, sourceVideoBitDepth int) string {
+	if backend == BackendVideoToolbox {
+		return SourceParameters(kind) + "," + VideoToolboxFilter("iw", "ih") + "," + VideoToolboxDownloadFilter(sourceVideoBitDepth) + "," + HDRMetadataRemovalFilter()
+	}
 	if backend == BackendNVENC {
 		if IsSDRSource(kind) {
 			return "hwdownload,format=" + NVENCSoftwareFallbackPixelFormat(sourceVideoBitDepth) + "," + SoftwareFilter(kind, "") + ",format=nv12,hwupload_cuda"
@@ -437,6 +609,8 @@ func hardwareEncoder(backend string) string {
 		return "h264_qsv"
 	case BackendVAAPI:
 		return "h264_vaapi"
+	case BackendVideoToolbox:
+		return "h264_videotoolbox"
 	default:
 		return "h264_nvenc"
 	}

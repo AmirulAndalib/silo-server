@@ -124,7 +124,7 @@ func TestHLSPlanningRegistryV3UnionsPooledNodeCapabilities(t *testing.T) {
 		}
 		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{
 			{Name: "video_to_h264", Executor: "server", RecipeVersion: "2"},
-			{Name: "audio_to_aac", Executor: "server", RecipeVersion: "2"},
+			{Name: "audio_to_aac", Executor: "server", RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 		}})
 	}))
 	defer remote.Close()
@@ -133,7 +133,7 @@ func TestHLSPlanningRegistryV3UnionsPooledNodeCapabilities(t *testing.T) {
 	handler.JWTSecret = "test-secret"
 	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
 		{Name: "video_to_h264", RecipeVersion: "2"},
-		{Name: "audio_to_aac", RecipeVersion: "2"},
+		{Name: "audio_to_aac", RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 		{Name: "server_dv7_to_hdr10", RecipeVersion: "1"},
 	}))
 	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{remote.URL}}
@@ -694,6 +694,80 @@ func TestRemoteTransformationsV3FailureCacheSplit(t *testing.T) {
 	}
 }
 
+func TestRemoteTransformationsPlanningV3ServesStaleSuccessWhileRefreshing(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	var hits atomic.Int32
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if hits.Add(1) == 1 {
+			close(requestStarted)
+		}
+		<-releaseRequest
+		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: "2"}}})
+	}))
+	defer remote.Close()
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	handler.v3NodeCapabilities = map[string]v3NodeCapabilityCache{
+		remote.URL: {
+			transformations: []playback.TransformationV3{{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"}},
+			expiresAt:       time.Now().Add(-time.Second),
+		},
+	}
+	result := make(chan []playback.TransformationV3, 1)
+	go func() {
+		transformations, _ := handler.remoteTransformationsPlanningV3(context.Background(), remote.URL)
+		result <- transformations
+	}()
+	select {
+	case transformations := <-result:
+		if len(transformations) != 1 || transformations[0].Name != playback.TransformationAudioToAACV3 {
+			t.Fatalf("stale planning transformations = %#v", transformations)
+		}
+	case <-time.After(time.Second):
+		close(releaseRequest)
+		t.Fatal("planning waited for the stale capability refresh")
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		close(releaseRequest)
+		t.Fatal("background capability refresh did not start")
+	}
+	if _, err := handler.remoteTransformationsPlanningV3(context.Background(), remote.URL); err != nil {
+		close(releaseRequest)
+		t.Fatalf("second stale planning lookup: %v", err)
+	}
+	if got := hits.Load(); got != 1 {
+		close(releaseRequest)
+		t.Fatalf("concurrent background refresh requests = %d, want 1", got)
+	}
+	close(releaseRequest)
+}
+
+func TestWarmPlaybackCapabilitiesV3PopulatesNodeCache(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"}}})
+	}))
+	defer remote.Close()
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{remote.URL}}
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{}}
+	handler.PlaybackConfig = func() config.PlaybackConfig { return config.PlaybackConfig{HWAccel: playback.HWAccelNone} }
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3(nil))
+	handler.warmPlaybackCapabilitiesV3(context.Background())
+
+	handler.v3NodeCapabilitiesMu.Lock()
+	entry, ok := handler.v3NodeCapabilities[remote.URL]
+	handler.v3NodeCapabilitiesMu.Unlock()
+	if !ok || entry.err != nil || len(entry.transformations) != 1 || entry.transformations[0].Name != playback.TransformationAudioToAACV3 {
+		t.Fatalf("warmed node capability = %#v, found=%t", entry, ok)
+	}
+}
+
 func TestLookupRemoteCapabilitiesV3PreservesConcurrentFreshSuccessOnRefetchFailure(t *testing.T) {
 	requestStarted := make(chan struct{})
 	releaseRequest := make(chan struct{})
@@ -708,9 +782,9 @@ func TestLookupRemoteCapabilitiesV3PreservesConcurrentFreshSuccessOnRefetchFailu
 	handler.JWTSecret = "test-secret"
 	handler.v3NodeCapabilities = make(map[string]v3NodeCapabilityCache)
 	handler.v3NodeCapabilities[remote.URL] = v3NodeCapabilityCache{
-		expiresAt:           time.Now().Add(-time.Second),
-		probeRequestTimeout: time.Second,
+		expiresAt: time.Now().Add(-time.Second),
 	}
+	handler.v3NodeProbeBudgets = map[string]time.Duration{remote.URL: time.Second}
 	type lookupResult struct {
 		entry v3NodeCapabilityCache
 		err   error

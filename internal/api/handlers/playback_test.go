@@ -640,6 +640,11 @@ func TestHandleStartPlaybackV3_PersistsSeriesPlaybackPreferenceForEpisodes(t *te
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
+	var response playback.DecisionResponseV3
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	handler.waitForPlaybackStartSideEffectsV3(context.Background(), response.SessionID)
 
 	pref, err := store.GetSeriesPlaybackPreference(context.Background(), "profile-1", "series-1")
 	if err != nil {
@@ -1147,6 +1152,68 @@ func TestFindAlternateFile_DoesNotCrossEdition(t *testing.T) {
 	}
 	if alternate.ID != 3 {
 		t.Fatalf("alternate.ID = %d, want 3", alternate.ID)
+	}
+}
+
+func TestFindAlternateFile_PrefersNon4KAcrossLabelsAndDimensions(t *testing.T) {
+	source := &models.MediaFile{
+		ID:         1,
+		ContentID:  "movie-1",
+		Resolution: "2160p",
+		HDR:        true,
+		Bitrate:    30_000_000,
+	}
+
+	handler := &PlaybackHandler{
+		FileVersionFetcher: testPlaybackFileVersionFetcher{
+			byContent: map[string][]*models.MediaFile{
+				"movie-1": {
+					source,
+					{ID: 6, ContentID: "movie-1", Resolution: "8K", Bitrate: 40_000_000},
+					{ID: 2, ContentID: "movie-1", Resolution: "4K", Bitrate: 28_000_000},
+					{ID: 3, ContentID: "movie-1", Resolution: " uhd ", Bitrate: 26_000_000},
+					{ID: 4, ContentID: "movie-1", Resolution: "1080p", Bitrate: 24_000_000, VideoTracks: []models.VideoTrack{{Width: 3840, Height: 1626}}},
+					{ID: 5, ContentID: "movie-1", Resolution: "1080p", Bitrate: 12_000_000, VideoTracks: []models.VideoTrack{{Width: 1920, Height: 1080}}},
+				},
+			},
+		},
+	}
+
+	alternate, err := handler.findAlternateFile(context.Background(), source)
+	if err != nil {
+		t.Fatalf("findAlternateFile: %v", err)
+	}
+	if alternate == nil {
+		t.Fatal("expected alternate file")
+	}
+	if alternate.ID != 5 {
+		t.Fatalf("alternate.ID = %d (resolution %q), want 5", alternate.ID, alternate.Resolution)
+	}
+}
+
+func TestFindAlternateFile_Returns4KVersionWhenItIsTheOnlyAlternate(t *testing.T) {
+	source := &models.MediaFile{ID: 1, ContentID: "movie-1", Resolution: "2160p", Bitrate: 30_000_000}
+
+	handler := &PlaybackHandler{
+		FileVersionFetcher: testPlaybackFileVersionFetcher{
+			byContent: map[string][]*models.MediaFile{
+				"movie-1": {
+					source,
+					{ID: 2, ContentID: "movie-1", Resolution: "uhd", Bitrate: 26_000_000},
+				},
+			},
+		},
+	}
+
+	alternate, err := handler.findAlternateFile(context.Background(), source)
+	if err != nil {
+		t.Fatalf("findAlternateFile: %v", err)
+	}
+	if alternate == nil {
+		t.Fatal("expected 4K alternate to reach the planner")
+	}
+	if alternate.ID != 2 {
+		t.Fatalf("alternate.ID = %d, want 2", alternate.ID)
 	}
 }
 

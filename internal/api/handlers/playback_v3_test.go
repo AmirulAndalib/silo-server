@@ -13,9 +13,11 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +31,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 	"github.com/Silo-Server/silo-server/internal/userstore"
+	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
 
 type mutablePlaybackSettingsV3 struct {
@@ -37,6 +40,108 @@ type mutablePlaybackSettingsV3 struct {
 	getCalls  map[string]int
 	err       error
 	getErrors map[string]error
+}
+
+type gatedPlaybackSettingsV3 struct {
+	started chan string
+	release chan struct{}
+}
+
+func (s *gatedPlaybackSettingsV3) Get(_ context.Context, key string) (string, error) {
+	s.started <- key
+	<-s.release
+	return "true", nil
+}
+
+type blockingPlaybackSessionSyncerV3 struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingPlaybackSessionSyncerV3) SyncNow(context.Context) error {
+	select {
+	case s.started <- struct{}{}:
+	default:
+	}
+	<-s.release
+	return nil
+}
+
+type orderedBlockingPlaybackScrobblerV3 struct {
+	mu           sync.Mutex
+	startEntered chan struct{}
+	releaseStart chan struct{}
+	events       []string
+}
+
+type saturatingPlaybackScrobblerV3 struct {
+	entered chan string
+	release chan struct{}
+	mu      sync.Mutex
+	starts  []string
+}
+
+func (s *saturatingPlaybackScrobblerV3) ScrobbleStart(ctx context.Context, event watchsync.ScrobbleEvent) error {
+	select {
+	case s.entered <- event.PlaybackSessionID:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	s.mu.Lock()
+	s.starts = append(s.starts, event.PlaybackSessionID)
+	s.mu.Unlock()
+	return nil
+}
+
+func (*saturatingPlaybackScrobblerV3) ScrobblePause(context.Context, watchsync.ScrobbleEvent) error {
+	return nil
+}
+
+func (*saturatingPlaybackScrobblerV3) ScrobbleStop(context.Context, watchsync.ScrobbleEvent) error {
+	return nil
+}
+
+func (s *saturatingPlaybackScrobblerV3) recordedStarts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.starts...)
+}
+
+func (s *orderedBlockingPlaybackScrobblerV3) ScrobbleStart(context.Context, watchsync.ScrobbleEvent) error {
+	select {
+	case s.startEntered <- struct{}{}:
+	default:
+	}
+	<-s.releaseStart
+	s.mu.Lock()
+	s.events = append(s.events, "start")
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *orderedBlockingPlaybackScrobblerV3) ScrobblePause(context.Context, watchsync.ScrobbleEvent) error {
+	s.mu.Lock()
+	s.events = append(s.events, "pause")
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *orderedBlockingPlaybackScrobblerV3) ScrobbleStop(context.Context, watchsync.ScrobbleEvent) error {
+	s.mu.Lock()
+	s.events = append(s.events, "stop")
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *orderedBlockingPlaybackScrobblerV3) recordedEvents() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.events...)
 }
 
 type failingAudioPreferenceStoreV3 struct {
@@ -159,11 +264,13 @@ func TestValidateAdvertisedTransformationsV3RejectsOldVideoRecipe(t *testing.T) 
 
 func TestHandleStartPlaybackV3ExplainsOriginalQuality4KPinWhenAlternateExists(t *testing.T) {
 	for _, test := range []struct {
-		name             string
-		includeAlternate bool
-		wantMessage      string
+		name                string
+		alternateResolution string
+		wantMessage         string
 	}{
-		{name: "alternate exists", includeAlternate: true, wantMessage: "compatible lower-resolution version of this title is available"},
+		{name: "lower-resolution alternate exists", alternateResolution: "1080p", wantMessage: "compatible lower-resolution version of this title is available"},
+		{name: "only 4K alternate exists", alternateResolution: "UHD", wantMessage: playback.TerminalMessage4KTranscodeDisabledV3},
+		{name: "only label-only 8K alternate exists", alternateResolution: "8K", wantMessage: playback.TerminalMessage4KTranscodeDisabledV3},
 		{name: "no alternate", wantMessage: playback.TerminalMessage4KTranscodeDisabledV3},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -176,16 +283,22 @@ func TestHandleStartPlaybackV3ExplainsOriginalQuality4KPinWhenAlternateExists(t 
 			source.VideoTracks[0].Bitrate = 32_000
 
 			versions := []*models.MediaFile{source}
-			if test.includeAlternate {
+			if test.alternateResolution != "" {
 				alternateValue := *source
 				alternate := &alternateValue
 				alternate.ID = 84
-				alternate.Resolution = "1080p"
+				alternate.Resolution = test.alternateResolution
 				alternate.Bitrate = 8_000
 				alternate.VideoTracks = append([]models.VideoTrack(nil), source.VideoTracks...)
-				alternate.VideoTracks[0].Width = 1920
-				alternate.VideoTracks[0].Height = 1080
-				alternate.VideoTracks[0].Level = 41
+				switch test.alternateResolution {
+				case "1080p":
+					alternate.VideoTracks[0].Width = 1920
+					alternate.VideoTracks[0].Height = 1080
+					alternate.VideoTracks[0].Level = 41
+				case "8K":
+					alternate.VideoTracks[0].Width = 0
+					alternate.VideoTracks[0].Height = 0
+				}
 				alternate.VideoTracks[0].Bitrate = 8_000
 				versions = append(versions, alternate)
 			}
@@ -259,6 +372,159 @@ func TestHandleStartPlaybackV3TriesAlternateAfterHDRTerminal(t *testing.T) {
 	}
 }
 
+func TestHandleStartPlaybackV3TriesLater4KAlternateAfterNon4KTerminal(t *testing.T) {
+	source := v3HandlerFixtureFile(t)
+	source.CodecVideo = "hevc"
+	source.Resolution = "2160p"
+	source.Bitrate = 32_000
+	source.VideoTracks[0] = models.VideoTrack{
+		Codec: "hevc", Profile: "main 10", Level: 150, Width: 3840, Height: 2160,
+		FrameRate: "24000/1001", Bitrate: 32_000, BitDepth: 10,
+		VideoRange: "DolbyVision", VideoRangeType: "DOVIWithHDR10", DVProfile: 8, DVBLCompatID: 1,
+	}
+
+	lowerValue := *source
+	lower := &lowerValue
+	lower.ID = 84
+	lower.Resolution = "1080p"
+	lower.Bitrate = 8_000
+	lower.VideoTracks = append([]models.VideoTrack(nil), source.VideoTracks...)
+	lower.VideoTracks[0].Width = 1920
+	lower.VideoTracks[0].Height = 1080
+	lower.VideoTracks[0].Bitrate = 8_000
+
+	playableValue := *source
+	playable := &playableValue
+	playable.ID = 85
+	playable.CodecVideo = "h264"
+	playable.Resolution = "UHD"
+	playable.Bitrate = 12_000
+	playable.VideoTracks = []models.VideoTrack{{
+		Codec: "h264", Profile: "high", Level: 52, Width: 3840, Height: 2160,
+		FrameRate: "24000/1001", Bitrate: 12_000, BitDepth: 8,
+		VideoRange: "SDR", VideoRangeType: "SDR",
+	}}
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0), testPlaybackFileResolver{file: source})
+	handler.FileVersionFetcher = testPlaybackFileVersionFetcher{byContent: map[string][]*models.MediaFile{
+		source.ContentID: {source, lower, playable},
+	}}
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"allow_4k_transcode": "false"}}
+	handler.PlaybackConfig = playbackTestConfig("", "")
+	handler.ItemAccess = allowAllPlaybackItemAccess{}
+
+	start := v3HandlerStartRequest()
+	start.QualityPreference = "auto"
+	start.Capabilities.MaxResolution = "2160p"
+	start.Capabilities.VideoDecode[0].Levels = []int{52}
+	start.Capabilities.VideoDecode[0].MaxWidth = 3840
+	start.Capabilities.VideoDecode[0].MaxHeight = 2160
+	start.Capabilities.VideoDecode[0].MaxBitrateKbps = 50_000
+	start.ClientPlaybackContext.Deliveries[playback.DeliveryClassHLSV3] = playback.DeliveryCapabilityV3{
+		Enabled: true, SupportedOnDevice: true, Containers: []string{"hls"},
+		VideoCodecs: []string{"h264"}, AudioDecodeCodecs: []string{"aac"},
+	}
+	rr := httptest.NewRecorder()
+	handler.HandleStartPlayback(rr, httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, start))).WithContext(newAuthorizedPlaybackContext()))
+
+	var response playback.DecisionResponseV3
+	if rr.Code != http.StatusCreated || json.Unmarshal(rr.Body.Bytes(), &response) != nil || response.PlaybackPlan == nil {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if response.PlaybackPlan.EffectiveMediaFileID != playable.ID {
+		t.Fatalf("effective file = %d, want later directly playable 4K alternate %d", response.PlaybackPlan.EffectiveMediaFileID, playable.ID)
+	}
+}
+
+func TestHandleReplanPlaybackV3TriesLater4KAlternateAfterNon4KTerminal(t *testing.T) {
+	source := v3HandlerFixtureFile(t)
+	source.Resolution = "2160p"
+	source.Bitrate = 32_000
+	source.VideoTracks[0].Level = 52
+	source.VideoTracks[0].Width = 3840
+	source.VideoTracks[0].Height = 2160
+	source.VideoTracks[0].Bitrate = 32_000
+
+	lowerValue := *source
+	lower := &lowerValue
+	lower.ID = 84
+	lower.Resolution = "1080p"
+	lower.Bitrate = 8_000
+	lower.HDR = true
+	lower.VideoTracks = append([]models.VideoTrack(nil), source.VideoTracks...)
+	lower.VideoTracks[0].Width = 1920
+	lower.VideoTracks[0].Height = 1080
+	lower.VideoTracks[0].Bitrate = 8_000
+	lower.VideoTracks[0].VideoRange = "HDR10"
+	lower.VideoTracks[0].VideoRangeType = "HDR10"
+
+	playableValue := *source
+	playable := &playableValue
+	playable.ID = 85
+	playable.CodecVideo = "hevc"
+	playable.Resolution = "UHD"
+	playable.Bitrate = 12_000
+	playable.VideoTracks = []models.VideoTrack{{
+		Codec: "hevc", Profile: "main", Level: 52, Width: 3840, Height: 2160,
+		FrameRate: "24000/1001", Bitrate: 12_000, BitDepth: 8,
+		VideoRange: "SDR", VideoRangeType: "SDR",
+	}}
+
+	manager := playback.NewSessionManager(0, 0)
+	files := map[int]*models.MediaFile{source.ID: source, lower.ID: lower, playable.ID: playable}
+	handler := NewPlaybackHandler(manager, mapPlaybackFileResolver{files: files})
+	handler.FileVersionFetcher = testPlaybackFileVersionFetcher{byContent: map[string][]*models.MediaFile{
+		source.ContentID: {source, lower, playable},
+	}}
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"allow_4k_transcode": "false"}}
+	handler.PlaybackConfig = playbackTestConfig("", "")
+	handler.ItemAccess = allowAllPlaybackItemAccess{}
+
+	startRequest := v3HandlerStartRequest()
+	startRequest.Capabilities.MaxResolution = "2160p"
+	startRequest.Capabilities.VideoDecode[0].Levels = []int{52}
+	startRequest.Capabilities.VideoDecode[0].MaxWidth = 3840
+	startRequest.Capabilities.VideoDecode[0].MaxHeight = 2160
+	startRequest.Capabilities.VideoDecode[0].MaxBitrateKbps = 50_000
+	startRequest.ClientPlaybackContext.Deliveries[playback.DeliveryClassHLSV3] = playback.DeliveryCapabilityV3{
+		Enabled: true, SupportedOnDevice: true, Containers: []string{"hls"},
+		VideoCodecs: []string{"hevc"}, AudioDecodeCodecs: []string{"aac"},
+	}
+	startRR := httptest.NewRecorder()
+	handler.HandleStartPlayback(startRR, httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, startRequest))).WithContext(newAuthorizedPlaybackContext()))
+	var started playback.DecisionResponseV3
+	if startRR.Code != http.StatusCreated || json.Unmarshal(startRR.Body.Bytes(), &started) != nil || started.PlaybackPlan == nil {
+		t.Fatalf("start status=%d body=%s", startRR.Code, startRR.Body.String())
+	}
+
+	replanCapabilities := startRequest.Capabilities
+	replanCapabilities.CodecsVideo = []string{"hevc"}
+	replanCapabilities.CodecsVideoHardware = []string{"hevc"}
+	replanCapabilities.VideoDecode = []playback.VideoDecodeCapabilityV3{{
+		Codec: "hevc", Profiles: []string{"main"}, Levels: []int{52}, BitDepths: []int{8},
+		MaxWidth: 3840, MaxHeight: 2160, MaxFrameRate: 60, MaxBitrateKbps: 50_000, Hardware: true,
+	}}
+	currentKey := playback.PlanAttemptKeyV3(*started.PlaybackPlan, startRequest.ClientPlaybackContext.Output.OutputContextID, nil)
+	replanned := postPlaybackReplanV3(t, handler, started.SessionID, playback.ReplanRequestV3{
+		ProtocolVersion: playback.ProtocolV3, Operation: playback.ReplanOperationFailureRecoveryV3,
+		PlaybackAttemptID: startRequest.PlaybackAttemptID, ReplanRequestID: "later-4k-replan-0001",
+		FailedPlanID: started.PlaybackPlan.PlanID, PlanAttemptID: "later-4k-plan-0001",
+		PlanAttemptKey: currentKey, AttemptedPlanKeys: []string{currentKey}, AttemptCount: 1,
+		QualityPreference: "auto", SelectedTracks: started.PlaybackPlan.SelectedTracks,
+		Failure:      playback.FailureV3{Classification: "playback_error"},
+		Capabilities: replanCapabilities, ClientPlaybackContext: startRequest.ClientPlaybackContext,
+	})
+	if replanned.Terminal != nil {
+		t.Fatalf("replan terminal = %+v", *replanned.Terminal)
+	}
+	if replanned.PlaybackPlan == nil {
+		t.Fatalf("replan = %#v", replanned)
+	}
+	if replanned.PlaybackPlan.EffectiveMediaFileID != playable.ID {
+		t.Fatalf("effective file = %d, want later directly playable 4K alternate %d", replanned.PlaybackPlan.EffectiveMediaFileID, playable.ID)
+	}
+}
+
 func TestReplanAllowsAlternateFileV3PinsSeekOperations(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -318,6 +584,42 @@ func TestPlannerSettingsV3ResultPreservesAllow4KStoreFailure(t *testing.T) {
 	_, err := handler.plannerSettingsV3Result(context.Background())
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("plannerSettingsV3Result() error = %v, want allow-4K deadline", err)
+	}
+}
+
+func TestPlannerSettingsV3ResultReadsPolicyKeysConcurrently(t *testing.T) {
+	store := &gatedPlaybackSettingsV3{
+		started: make(chan string, 3),
+		release: make(chan struct{}),
+	}
+	handler := &PlaybackHandler{SettingsRepo: store}
+	result := make(chan error, 1)
+	go func() {
+		_, err := handler.plannerSettingsV3Result(context.Background())
+		result <- err
+	}()
+
+	started := make(map[string]bool, 3)
+	for len(started) < 3 {
+		select {
+		case key := <-store.started:
+			started[key] = true
+		case <-time.After(time.Second):
+			t.Fatalf("settings reads started concurrently = %v, want all three keys", started)
+		}
+	}
+	close(store.release)
+	if err := <-result; err != nil {
+		t.Fatalf("plannerSettingsV3Result() error = %v", err)
+	}
+	for _, key := range []string{
+		config.Allow4KTranscodeSettingKey,
+		config.PlaybackTranscodeHardwareToneMapSettingKey,
+		config.PlaybackTranscodeSoftwareToneMapSettingKey,
+	} {
+		if !started[key] {
+			t.Fatalf("settings read missing key %q", key)
+		}
 	}
 }
 
@@ -395,6 +697,7 @@ func TestHandleStartPlaybackV3CommitsStartSideEffectsOnce(t *testing.T) {
 	if first.SessionID != second.SessionID {
 		t.Fatalf("idempotent replay session = %q, want %q", second.SessionID, first.SessionID)
 	}
+	handler.waitForPlaybackStartSideEffectsV3(context.Background(), first.SessionID)
 	if len(scrobbler.starts) != 1 {
 		t.Fatalf("start scrobbles = %d, want 1", len(scrobbler.starts))
 	}
@@ -409,6 +712,119 @@ func TestHandleStartPlaybackV3CommitsStartSideEffectsOnce(t *testing.T) {
 	}
 	if analyzer.callCount() != 1 {
 		t.Fatalf("lazy marker calls = %d, want 1", analyzer.callCount())
+	}
+}
+
+func TestHandleStartPlaybackV3DoesNotWaitForSessionSync(t *testing.T) {
+	file := v3HandlerFixtureFile(t)
+	syncer := &blockingPlaybackSessionSyncerV3{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0), testPlaybackFileResolver{file: file})
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{}}
+	handler.ItemAccess = allowAllPlaybackItemAccess{}
+	handler.SessionSyncer = syncer
+	body := marshalV3StartRequest(t, v3HandlerStartRequest())
+	responseReady := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rr := httptest.NewRecorder()
+		handler.HandleStartPlayback(rr, httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(body)).WithContext(newAuthorizedPlaybackContext()))
+		responseReady <- rr
+	}()
+
+	select {
+	case <-syncer.started:
+	case <-time.After(time.Second):
+		t.Fatal("session sync did not start")
+	}
+	select {
+	case rr := <-responseReady:
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("start status=%d body=%s", rr.Code, rr.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("playback start waited for the blocked session sync")
+	}
+	close(syncer.release)
+}
+
+func TestPlaybackStartSideEffectsPreserveImmediateStopScrobbleOrder(t *testing.T) {
+	file := v3HandlerFixtureFile(t)
+	scrobbler := &orderedBlockingPlaybackScrobblerV3{
+		startEntered: make(chan struct{}, 1),
+		releaseStart: make(chan struct{}),
+	}
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0), testPlaybackFileResolver{file: file})
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{}}
+	handler.ItemAccess = allowAllPlaybackItemAccess{}
+	handler.WatchScrobbler = scrobbler
+	body := marshalV3StartRequest(t, v3HandlerStartRequest())
+	rr := httptest.NewRecorder()
+	handler.HandleStartPlayback(rr, httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(body)).WithContext(newAuthorizedPlaybackContext()))
+	var response playback.DecisionResponseV3
+	if rr.Code != http.StatusCreated || json.Unmarshal(rr.Body.Bytes(), &response) != nil {
+		t.Fatalf("start status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	select {
+	case <-scrobbler.startEntered:
+	case <-time.After(time.Second):
+		t.Fatal("start scrobble did not begin")
+	}
+	session, err := handler.sessionMgr.GetSession(response.SessionID)
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+	stopped := make(chan struct{})
+	go func() {
+		handler.finalizeSessionStop(context.Background(), session, false, "", true)
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("stop completed before the start side effects were released")
+	default:
+	}
+	close(scrobbler.releaseStart)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("stop did not complete after start side effects")
+	}
+	if got := scrobbler.recordedEvents(); !reflect.DeepEqual(got, []string{"start", "stop"}) {
+		t.Fatalf("scrobble events = %v, want [start stop]", got)
+	}
+}
+
+func TestQueuedPlaybackStartSideEffectsAreDroppedOnStop(t *testing.T) {
+	scrobbler := &saturatingPlaybackScrobblerV3{
+		entered: make(chan string, playbackStartSideEffectsWorkersV3+1),
+		release: make(chan struct{}),
+	}
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.WatchScrobbler = scrobbler
+	file := &models.MediaFile{ID: 1, ContentID: "movie-1", Duration: 600}
+
+	for i := range playbackStartSideEffectsWorkersV3 {
+		sessionID := fmt.Sprintf("running-%d", i)
+		handler.enqueuePlaybackStartSideEffectsV3(context.Background(), &playback.Session{ID: sessionID}, file, 1, "profile-1", 0)
+	}
+	for range playbackStartSideEffectsWorkersV3 {
+		select {
+		case <-scrobbler.entered:
+		case <-time.After(time.Second):
+			t.Fatal("start side-effect workers did not saturate")
+		}
+	}
+
+	queuedSessionID := "queued-stop"
+	handler.enqueuePlaybackStartSideEffectsV3(context.Background(), &playback.Session{ID: queuedSessionID}, file, 1, "profile-1", 0)
+	handler.cancelPlaybackStartSideEffectsV3(context.Background(), queuedSessionID)
+	close(scrobbler.release)
+	handler.waitForPlaybackStartSideEffectsV3(context.Background(), queuedSessionID)
+
+	if starts := scrobbler.recordedStarts(); slices.Contains(starts, queuedSessionID) {
+		t.Fatalf("queued stopped session emitted a start scrobble: %v", starts)
 	}
 }
 
@@ -797,6 +1213,45 @@ func TestHandleStartPlaybackV3PersistsAndReplaysTerminalDecision(t *testing.T) {
 	conflict := start(marshalV3StartRequest(t, changed))
 	if conflict.Code != http.StatusConflict {
 		t.Fatalf("changed request status = %d, body = %s", conflict.Code, conflict.Body.String())
+	}
+}
+
+func TestHandleStartPlaybackV3DirectPlaysH264ConstrainedBaselineWhenVideoTranscodingDisabled(t *testing.T) {
+	file := v3HandlerFixtureFile(t)
+	file.VideoTracks[0].Profile = "Constrained Baseline"
+	manager := playback.NewSessionManager(0, 0)
+	manager.SetLimitProvider(func(context.Context, int) (playback.SessionLimits, error) {
+		return playback.SessionLimits{
+			MaxTranscodes:            0,
+			TranscodingDisabled:      true,
+			AudioTranscodingDisabled: false,
+		}, nil
+	})
+	handler := NewPlaybackHandler(manager, testPlaybackFileResolver{file: file})
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"transcode_enabled": "true"}}
+	handler.ItemAccess = allowAllPlaybackItemAccess{}
+	request := v3HandlerStartRequest()
+	request.Capabilities.VideoDecode[0].Profiles = []string{"baseline"}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, request))).WithContext(newAuthorizedPlaybackContext())
+	rr := httptest.NewRecorder()
+	handler.HandleStartPlayback(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var response playback.DecisionResponseV3
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Outcome != playback.OutcomePlayableV3 || response.Terminal != nil || response.PlaybackPlan == nil {
+		t.Fatalf("response = %#v, want playable direct plan", response)
+	}
+	if response.PlaybackPlan.Delivery != playback.DeliveryOriginalHTTPV3 || response.PlaybackPlan.DecisionReason != "validated_original_playback" {
+		t.Fatalf("plan = %#v, want validated original playback", response.PlaybackPlan)
+	}
+	sessions := manager.AllSessions()
+	if len(sessions) != 1 || sessions[0].PlayMethod != playback.PlayDirect || sessions[0].TranscodeAudio {
+		t.Fatalf("sessions = %#v, want one direct session without adaptation", sessions)
 	}
 }
 
@@ -2976,6 +3431,120 @@ func TestSourceExecutionMetadataV3FreezesH264High10SoftwareDecode(t *testing.T) 
 	}
 }
 
+func TestSourceExecutionMetadataV3ScopesDolbyVisionProvenanceToToneMapRecipe(t *testing.T) {
+	file := v3HandlerFixtureFile(t)
+	file.VideoTracks[0].DVConfigPresent = true
+	file.VideoTracks[0].DVBLCompatIDPresent = true
+	file.VideoTracks[0].DVBLPresent = true
+	file.VideoTracks[0].DVRPUPresent = true
+
+	metadata := sourceExecutionMetadataV3(file, playback.PlannerResultV3{})
+	if metadata.ToneMapDVConfigPresent || metadata.ToneMapDVBLCompatIDPresent || metadata.ToneMapDVBLPresent || metadata.ToneMapDVRPUPresent {
+		t.Fatalf("non-tone-map source metadata retained Dolby Vision provenance: %#v", metadata)
+	}
+
+	toneMapResult := playback.PlannerResultV3{
+		ToneMapMode:              tonemap.ModeHardware,
+		ToneMapSourceKind:        tonemap.SourcePQ,
+		ToneMapPreflightRequired: true,
+		ToneMapSourceRevision:    tonemap.RevisionForFile(file),
+	}
+	metadata = sourceExecutionMetadataV3(file, toneMapResult)
+	if !metadata.ToneMapDVConfigPresent || !metadata.ToneMapDVBLCompatIDPresent || !metadata.ToneMapDVBLPresent || !metadata.ToneMapDVRPUPresent {
+		t.Fatalf("tone-map source metadata lost Dolby Vision provenance: %#v", metadata)
+	}
+
+	frozen := metadata
+	result := playback.PlannerResultV3{FrozenSourceMetadata: &frozen}
+	metadata = sourceExecutionMetadataV3(file, result)
+	if metadata.ToneMapSourceKind != "" || metadata.ToneMapPreflightRequired || !metadata.ToneMapSourceRevision.IsZero() ||
+		metadata.ToneMapDVConfigPresent || metadata.ToneMapDVBLCompatIDPresent || metadata.ToneMapDVBLPresent || metadata.ToneMapDVRPUPresent {
+		t.Fatalf("non-tone-map frozen metadata retained a partial recipe: %#v", metadata)
+	}
+}
+
+func TestPrepareLocalTransportV3AllowsDolbyVisionVideoCopyAudioAdaptation(t *testing.T) {
+	manager := playback.NewSessionManager(0, 0)
+	handler := NewPlaybackHandler(manager)
+	ffmpegPath := writePlaybackTestFFmpeg(t)
+	transcodeDir := t.TempDir()
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{FFmpegPath: ffmpegPath, TranscodeDir: transcodeDir, TranscodeEnabled: true, HWAccel: playback.HWAccelNone}
+	}
+	file := v3HandlerFixtureFile(t)
+	file.CodecVideo = "hevc"
+	file.CodecAudio = "eac3"
+	file.Resolution = "2160p"
+	file.VideoTracks[0].Codec = "hevc"
+	file.VideoTracks[0].DVProfile = 8
+	file.VideoTracks[0].DVBLCompatID = 1
+	file.VideoTracks[0].DVConfigPresent = true
+	file.VideoTracks[0].DVBLCompatIDPresent = true
+	file.VideoTracks[0].DVBLPresent = true
+	file.VideoTracks[0].DVRPUPresent = true
+	result := playback.PlannerResultV3{
+		Plan:       &playback.PlanV3{PlanID: "plan:dv-copy-audio-adaptation", Delivery: playback.DeliveryRemuxHLSV3},
+		PlayMethod: playback.PlayRemux, TargetVideoCodec: "copy", TargetAudioCodec: "aac", TargetResolution: "2160p",
+		SubtitleTrackIndex: -1, SubtitleTransportTrackIndex: -1,
+	}
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+	transport, transportErr := handler.prepareLocalTransportV3(request,
+		&playback.Session{ID: "session-dv-copy-audio-adaptation", UserID: 7, ProfileID: "profile-1"},
+		file, result, preparedTimelineV3{}, mediaAuthModeV3{})
+	if transportErr != nil {
+		t.Fatalf("prepare Dolby Vision remux transport: %v (cause: %v)", transportErr, transportErr.cause)
+	}
+	transport.rollback()
+}
+
+func TestPrepareRemoteTransportV3OmitsToneMapProvenanceForDolbyVisionRemux(t *testing.T) {
+	var startRequest transcodenode.TranscodeStartRequest
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
+			if err := json.NewDecoder(r.Body).Decode(&startRequest); err != nil {
+				t.Errorf("decode remote start: %v", err)
+			}
+			if startRequest.ToneMapMode == "" && (startRequest.ToneMapDVConfigPresent || startRequest.ToneMapDVBLCompatIDPresent || startRequest.ToneMapDVBLPresent || startRequest.ToneMapDVRPUPresent) {
+				http.Error(w, "incomplete tone-map recipe", http.StatusUnprocessableEntity)
+				return
+			}
+			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: startRequest.SessionID, Status: "started"})
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer remote.Close()
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	file := v3HandlerFixtureFile(t)
+	file.CodecVideo = "hevc"
+	file.VideoTracks[0].Codec = "hevc"
+	file.VideoTracks[0].DVConfigPresent = true
+	file.VideoTracks[0].DVBLCompatIDPresent = true
+	file.VideoTracks[0].DVBLPresent = true
+	file.VideoTracks[0].DVRPUPresent = true
+	result := playback.PlannerResultV3{
+		Plan:       &playback.PlanV3{PlanID: "plan:remote-dv-remux", Delivery: playback.DeliveryRemuxHLSV3},
+		PlayMethod: playback.PlayRemux, TargetVideoCodec: "copy", TargetAudioCodec: "aac", TargetResolution: "2160p",
+		SubtitleTrackIndex: -1, SubtitleTransportTrackIndex: -1,
+	}
+	transport, transportErr := handler.prepareRemoteTransportV3(
+		httptest.NewRequest(http.MethodPost, "/", nil),
+		&playback.Session{ID: "session-remote-dv-remux", UserID: 7, ProfileID: "profile-1"},
+		file, result, nodepool.Plan{TranscodeNode: &nodepool.Node{URL: remote.URL}}, preparedTimelineV3{}, mediaAuthModeV3{})
+	if transportErr != nil {
+		t.Fatalf("prepare remote Dolby Vision remux transport: %v (cause: %v)", transportErr, transportErr.cause)
+	}
+	defer transport.rollback()
+	if startRequest.TargetCodecVideo != "copy" || startRequest.ToneMapMode != "" || startRequest.ToneMapDVConfigPresent || startRequest.ToneMapDVBLCompatIDPresent || startRequest.ToneMapDVBLPresent || startRequest.ToneMapDVRPUPresent {
+		t.Fatalf("remote remux request carried a partial tone-map recipe: %#v", startRequest)
+	}
+}
+
 func TestSourceVideoTranscodeFactsV3UsesFrozenProfileAndBitDepth(t *testing.T) {
 	var recipe playback.ExecutableRecipeV3
 	if err := json.Unmarshal([]byte(`{"version":2,"plan_id":"plan:frozen-source-facts","play_method":"transcode","source_video_profile":"Main 10","source_video_bit_depth":10}`), &recipe); err != nil {
@@ -3265,6 +3834,32 @@ func TestConfigureHLSTimelineV3MatchesTransportSeekSemantics(t *testing.T) {
 		unknownDurationPlan.Timeline.SeekWindowEndSeconds != nil ||
 		unknownDurationPlan.Timeline.SeekRestoration != "source_position" {
 		t.Fatalf("unknown-duration timeline=%#v seek=%v segment=%d", unknownDurationPlan.Timeline, unknownDurationSeek, unknownDurationSegment)
+	}
+}
+
+func TestBitmapFastStartKeepsDefaultTimelineAndSessionSegments(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	plan := &playback.PlanV3{
+		Delivery: playback.DeliveryTranscodeHLSV3,
+		Timeline: playback.TimelineV3{SourceStartSeconds: 658},
+	}
+	result := playback.PlannerResultV3{
+		Plan:                 plan,
+		TargetVideoCodec:     "h264",
+		SubtitleBurnIn:       true,
+		SubtitleCodec:        "hdmv_pgs_subtitle",
+		FrozenSourceMetadata: &playback.SourceExecutionMetadataV3{DurationSeconds: 1_000_000},
+	}
+	timeline, timelineErr := handler.prepareTransportTimelineV3(context.Background(), &playback.Session{ID: "bitmap-fast-start"}, nil, result)
+	if timelineErr != nil {
+		t.Fatalf("prepare timeline: %v", timelineErr)
+	}
+	if timeline.seekSeconds != 658 || timeline.startSegmentNumber != 329 {
+		t.Fatalf("timeline = %#v, want default segment alignment", timeline)
+	}
+	state := handler.v3SessionStreamState(context.Background(), &playback.Session{}, nil, result, preparedTransportV3{}, mediaAuthModeV3{})
+	if state.SegmentDuration != playback.DefaultSegmentDuration {
+		t.Fatalf("session segment duration = %d, want %d", state.SegmentDuration, playback.DefaultSegmentDuration)
 	}
 }
 
@@ -4954,18 +5549,21 @@ func TestTerminalAllowsAlternateFileV3CoversSubtitleForcedRefusals(t *testing.T)
 		t.Fatal("a nil terminal must not trigger an alternate-version retry")
 	}
 }
-
 func TestPlaybackV3ToneMapBudgetsCoverColdNodeWork(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.PlaybackConfig = func() config.PlaybackConfig {
 		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/dev/dri/renderD128"}
 	}
 
-	if got, want := handler.localToneMapProbeTimeoutV3(), tonemap.ProbeEndpointTimeout(tonemap.BackendQSV, "/dev/dri/renderD128"); got != want {
+	if got, want := handler.localToneMapProbeTimeoutV3(), playback.CapabilityEndpointTimeout(tonemap.BackendQSV, "/dev/dri/renderD128"); got != want {
 		t.Fatalf("local tone-map probe timeout = %s, want %s", got, want)
 	}
-	if got, want := handler.remoteToneMapProbeTimeoutV3("https://unknown.example"), remoteNodeProbeFallbackTimeout; got != want {
-		t.Fatalf("remote tone-map probe timeout = %s, want %s", got, want)
+	// A node this handler cannot resolve is priced at the cluster's own policy,
+	// which is what such a node runs unless it carries an override — closer than
+	// a flat guess, and the flat fallback is reserved for having no policy either.
+	coldUnknown := playback.CapabilityRequestTimeout(tonemap.BackendQSV, "/dev/dri/renderD128")
+	if got := handler.remoteToneMapProbeTimeoutV3("https://unknown.example"); got != coldUnknown {
+		t.Fatalf("remote tone-map probe timeout = %s, want %s", got, coldUnknown)
 	}
 	if got := handler.toneMapPlanningTimeoutV3(true); got != v3NodeCapabilityPlanTimeout {
 		t.Fatalf("planning timeout with local fallback = %s, want %s", got, v3NodeCapabilityPlanTimeout)
@@ -4980,7 +5578,7 @@ func TestPlaybackV3ToneMapBudgetsCoverColdNodeWork(t *testing.T) {
 		RequireReady:             true,
 		HWAccel:                  tonemap.BackendQSV,
 	}
-	want := remoteNodeProbeFallbackTimeout + playback.ManifestStartupTimeout +
+	want := coldUnknown + playback.ManifestStartupTimeout +
 		tonemap.SourcePreflightTimeout(100) + transcodenode.TranscodeStartReadinessTimeout
 	if got := handler.remotePlaybackTransportTimeout("https://unknown.example", request); got != want {
 		t.Fatalf("remote tone-map start timeout = %s, want %s", got, want)
@@ -5019,6 +5617,62 @@ func TestLookupRemoteCapabilitiesStartsCacheTTLAfterRequestCompletes(t *testing.
 	}
 }
 
+// waitForCachedNodeCapabilitiesV3 returns the first successful cache entry the
+// background refresh installs for nodeURL.
+func waitForCachedNodeCapabilitiesV3(t *testing.T, handler *PlaybackHandler, nodeURL string) v3NodeCapabilityCache {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		handler.v3NodeCapabilitiesMu.Lock()
+		entry, ok := handler.v3NodeCapabilities[nodeURL]
+		handler.v3NodeCapabilitiesMu.Unlock()
+		if ok && entry.err == nil {
+			return entry
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("no node capability report was cached before the deadline")
+	return v3NodeCapabilityCache{}
+}
+
+// A report fetched before the health sweep reported the node's hardware changed
+// must not be installed after the invalidation that change fired, and the
+// invalidation still owes a re-probe: a cache that outlives the hardware it
+// describes plans transcodes onto a GPU that is gone.
+func TestRefreshNodeCapabilitiesDropsReportFetchedBeforeInvalidation(t *testing.T) {
+	var requests atomic.Int64
+	firstRequest := make(chan struct{})
+	release := make(chan struct{})
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		transformation := "post_change"
+		if requests.Add(1) == 1 {
+			close(firstRequest)
+			<-release
+			transformation = "pre_change"
+		}
+		_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{
+			Transformations: []playback.TransformationV3{{Name: transformation}},
+		})
+	}))
+	defer remote.Close()
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.refreshRemoteCapabilitiesV3(remote.URL)
+	<-firstRequest
+
+	// The sweep's callback lands while the earlier probe is still outstanding.
+	handler.RefreshNodeCapabilitiesV3(remote.URL)
+	close(release)
+
+	entry := waitForCachedNodeCapabilitiesV3(t, handler, remote.URL)
+	if len(entry.transformations) != 1 || entry.transformations[0].Name != "post_change" {
+		t.Fatalf("cached transformations = %v, want the report fetched after the invalidation", entry.transformations)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("node was probed %d time(s), want the invalidation's own re-probe and no more", got)
+	}
+}
+
 func TestRemoteToneMapProbeTimeoutUsesTargetNodeBudget(t *testing.T) {
 	probeTimeoutMillis := int64(137000)
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -5027,11 +5681,17 @@ func TestRemoteToneMapProbeTimeoutUsesTargetNodeBudget(t *testing.T) {
 	defer remote.Close()
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.PlaybackConfig = func() config.PlaybackConfig {
-		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/central/device/one,/central/device/two"}
+		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/central/device/one"}
 	}
 
 	if _, err := handler.lookupRemoteCapabilitiesV3(context.Background(), remote.URL, false); err != nil {
 		t.Fatal(err)
+	}
+	// The node's own figure is what this path exists to use. It has to exceed
+	// what the cluster setting prices, or the floor below it would be answering
+	// and this would pass without the target node being consulted at all.
+	if cluster := playback.CapabilityRequestTimeout(tonemap.BackendQSV, "/central/device/one"); cluster >= 137*time.Second {
+		t.Fatalf("fixture is inert: the cluster price %s must stay under the node's 137s", cluster)
 	}
 	if got, want := handler.remoteToneMapProbeTimeoutV3(remote.URL), 137*time.Second; got != want {
 		t.Fatalf("remote probe timeout = %s, want target node budget %s", got, want)
@@ -5044,11 +5704,161 @@ func TestRemoteToneMapProbeTimeoutUsesTargetNodeBudget(t *testing.T) {
 	handler.v3NodeCapabilitiesMu.Lock()
 	delete(handler.v3NodeCapabilities, remote.URL)
 	handler.v3NodeCapabilitiesMu.Unlock()
-	probeTimeoutMillis = (10 * time.Minute).Milliseconds()
+	probeTimeoutMillis = (24 * time.Hour).Milliseconds()
 	if _, err := handler.lookupRemoteCapabilitiesV3(context.Background(), remote.URL, false); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := handler.remoteToneMapProbeTimeoutV3(remote.URL), 5*time.Minute; got != want {
+	// Still bounded — the value comes off the wire from a worker — but at the
+	// ceiling the probe formula produces rather than a round number that a real
+	// nine-device node already exceeds.
+	if got, want := handler.remoteToneMapProbeTimeoutV3(remote.URL), playback.MaxCapabilityRequestTimeout(); got != want {
 		t.Fatalf("bounded remote probe timeout = %s, want %s", got, want)
+	}
+}
+
+// v3NodeLookupPlanner plans nothing and only resolves nodes by URL, which is all
+// a cold probe budget needs from a planner.
+type v3NodeLookupPlanner struct {
+	node *nodepool.Node
+}
+
+func (p *v3NodeLookupPlanner) PlanSession(string, string, bool, int) nodepool.Plan {
+	return nodepool.Plan{}
+}
+
+func (p *v3NodeLookupPlanner) TranscodeNodeByURL(nodeURL string) (*nodepool.Node, bool) {
+	if p.node == nil || p.node.URL != nodeURL {
+		return nil, false
+	}
+	return p.node, true
+}
+
+// The first read of a node after an API restart is also its most expensive: no
+// probe cache on the node survives, so the whole matrix runs. The flat fallback
+// is shorter than a two-device node legitimately takes, and paying it would
+// cancel exactly the multi-GPU nodes this path exists to plan onto — so the
+// durable report the node last advertised is what prices it.
+func TestPlaybackV3ColdNodeProbeBudgetComesFromTheStoredReport(t *testing.T) {
+	const nodeURL = "https://gpu-1.example"
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/dev/dri/renderD128"}
+	}
+	handler.NodePlanner = &v3NodeLookupPlanner{node: &nodepool.Node{
+		ID: 1, URL: nodeURL,
+		Capabilities: json.RawMessage(`{"resolved":"qsv","probe_request_timeout_ms":163000}`),
+	}}
+
+	if got, want := handler.remoteToneMapProbeTimeoutV3(nodeURL), 163*time.Second; got != want {
+		t.Fatalf("cold probe timeout = %s, want the node's advertised %s", got, want)
+	}
+	if remoteNodeProbeFallbackTimeout >= 163*time.Second {
+		t.Fatal("fixture is inert: the advertised budget must exceed the flat fallback")
+	}
+}
+
+// A node registered since the last capability fetch has no stored report to read
+// a budget from, but it does have its own acceleration override — and that is
+// what decides how long its walk takes.
+func TestPlaybackV3ColdNodeProbeBudgetFollowsTheOverrideWithoutAReport(t *testing.T) {
+	const nodeURL = "https://gpu-2.example"
+	devices := "/dev/dri/renderD128,/dev/dri/renderD129,/dev/dri/renderD130"
+	backend := tonemap.BackendQSV
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/dev/dri/renderD128"}
+	}
+	handler.NodePlanner = &v3NodeLookupPlanner{node: &nodepool.Node{
+		ID: 2, URL: nodeURL, HWAccelOverride: &backend, HWDeviceOverride: &devices,
+	}}
+
+	want := playback.CapabilityRequestTimeout(backend, devices)
+	if got := handler.remoteToneMapProbeTimeoutV3(nodeURL); got != want {
+		t.Fatalf("cold probe timeout = %s, want the override's %s", got, want)
+	}
+	if cluster := playback.CapabilityRequestTimeout(tonemap.BackendQSV, "/dev/dri/renderD128"); want <= cluster {
+		t.Fatalf("fixture is inert: the override budget %s must exceed the cluster's %s", want, cluster)
+	}
+}
+
+// A per-node policy edit invalidates the inventory through the same path a
+// hardware change does, and the learned budget deliberately survives that. But
+// widening hw_device_override is exactly the change that makes the learned
+// number too small: the node reloads, walks four devices instead of one, and is
+// canceled at the one-device deadline on every retry — with no way back, since a
+// budget is only learned from a read that completes.
+func TestPlaybackV3RepricesALearnedBudgetAfterTheDeviceSetGrows(t *testing.T) {
+	const nodeURL = "https://gpu-3.example"
+	devices := "/dev/dri/renderD128,/dev/dri/renderD129,/dev/dri/renderD130,/dev/dri/renderD131"
+	backend := tonemap.BackendQSV
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/dev/dri/renderD128"}
+	}
+	handler.NodePlanner = &v3NodeLookupPlanner{node: &nodepool.Node{
+		ID: 3, URL: nodeURL, HWAccelOverride: &backend, HWDeviceOverride: &devices,
+	}}
+	// Learned while the node was still on the cluster's single device.
+	learned := playback.CapabilityRequestTimeout(backend, "/dev/dri/renderD128")
+	handler.v3NodeCapabilitiesMu.Lock()
+	handler.rememberNodeProbeBudgetLockedV3(nodeURL, learned)
+	handler.v3NodeCapabilitiesMu.Unlock()
+
+	handler.RefreshNodeCapabilitiesV3(nodeURL)
+
+	want := playback.CapabilityRequestTimeout(backend, devices)
+	if got := handler.remoteToneMapProbeTimeoutV3(nodeURL); got != want {
+		t.Fatalf("probe timeout after the override grew = %s, want the four-device %s", got, want)
+	}
+	if want <= learned {
+		t.Fatalf("fixture is inert: the four-device budget %s must exceed the learned %s", want, learned)
+	}
+}
+
+// The reverse must still hold: a node whose own measurement exceeds what this
+// replica can price keeps its measurement, which is the whole reason the learned
+// budget survives an invalidation.
+func TestPlaybackV3KeepsALearnedBudgetLargerThanThePolicyPrice(t *testing.T) {
+	const nodeURL = "https://gpu-4.example"
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{HWAccel: tonemap.BackendQSV, HWDevice: "/dev/dri/renderD128"}
+	}
+	handler.NodePlanner = &v3NodeLookupPlanner{node: &nodepool.Node{ID: 4, URL: nodeURL}}
+	learned := playback.MaxCapabilityRequestTimeout()
+	handler.v3NodeCapabilitiesMu.Lock()
+	handler.rememberNodeProbeBudgetLockedV3(nodeURL, learned)
+	handler.v3NodeCapabilitiesMu.Unlock()
+
+	if got := handler.remoteToneMapProbeTimeoutV3(nodeURL); got != learned {
+		t.Fatalf("probe timeout = %s, want the node's own larger measurement %s", got, learned)
+	}
+}
+
+// The admin route invalidates with the URL exactly as the row stores it, which
+// may carry a trailing slash the pools have already dropped. Keyed verbatim, the
+// entry this deletes is not the entry planning reads, so the node keeps serving
+// the backend it was just moved off until the old key expires.
+func TestRefreshNodeCapabilitiesV3NormalizesTheCacheKey(t *testing.T) {
+	const nodeURL = "https://gpu-5.example"
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.v3NodeCapabilitiesMu.Lock()
+	if handler.v3NodeCapabilities == nil {
+		handler.v3NodeCapabilities = map[string]v3NodeCapabilityCache{}
+	}
+	handler.v3NodeCapabilities[nodeURL] = v3NodeCapabilityCache{expiresAt: time.Now().Add(time.Hour)}
+	handler.v3NodeCapabilitiesMu.Unlock()
+
+	handler.RefreshNodeCapabilitiesV3(nodeURL + "/")
+
+	handler.v3NodeCapabilitiesMu.Lock()
+	_, present := handler.v3NodeCapabilities[nodeURL]
+	invalidations := handler.v3NodeCapabilityInvalidations[nodeURL]
+	handler.v3NodeCapabilitiesMu.Unlock()
+	if present {
+		t.Fatal("the canonical entry survived an invalidation made with a trailing slash")
+	}
+	if invalidations == 0 {
+		t.Fatal("the invalidation was counted under a different key than planning reads")
 	}
 }
