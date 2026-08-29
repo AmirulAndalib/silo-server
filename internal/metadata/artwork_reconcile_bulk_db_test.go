@@ -65,6 +65,104 @@ func restoreImageLadderState(t *testing.T, pool *pgxpool.Pool) {
 	})
 }
 
+// restoreDisplacedGCCandidates snapshots the artwork-GC candidate rows the
+// bulk reset can touch and restores them on cleanup. Displacing a cached
+// poster path ending in /original.<ext> fires queue_displaced_artwork_revision,
+// which inserts a candidate for the path or resets an existing candidate's
+// schedule, attempts, lease, and error state — auxiliary shared-database state
+// the media_items row restore alone does not undo. Candidates created for the
+// test's own fixture paths are deleted outright.
+func restoreDisplacedGCCandidates(t *testing.T, pool *pgxpool.Pool, seededPathPattern string) {
+	t.Helper()
+	ctx := context.Background()
+	surface := itemPosterSurface(t)
+
+	var displaced []string
+	rows, err := pool.Query(ctx, fmt.Sprintf(
+		`SELECT poster_path FROM media_items WHERE %s`, surface.cachedPredicate()))
+	if err != nil {
+		t.Fatalf("list displaceable poster paths: %v", err)
+	}
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			t.Fatalf("scan displaceable path: %v", err)
+		}
+		displaced = append(displaced, path)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read displaceable paths: %v", err)
+	}
+
+	type candidate struct {
+		originalPath  string
+		imageType     string
+		objectKeys    []string
+		notBefore     time.Time
+		nextAttemptAt *time.Time
+		deletedAt     *time.Time
+		attemptCount  int
+		lockedAt      *time.Time
+		lockedBy      string
+		lastError     string
+	}
+	var snapshot []candidate
+	snapshotPaths := []string{}
+	rows, err = pool.Query(ctx, `
+		SELECT original_path, image_type, object_keys, not_before, next_attempt_at,
+			deleted_at, attempt_count, locked_at, locked_by, last_error
+		FROM artwork_revision_gc_candidates WHERE original_path = ANY($1)`, displaced)
+	if err != nil {
+		t.Fatalf("snapshot gc candidates: %v", err)
+	}
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.originalPath, &c.imageType, &c.objectKeys, &c.notBefore,
+			&c.nextAttemptAt, &c.deletedAt, &c.attemptCount, &c.lockedAt, &c.lockedBy, &c.lastError); err != nil {
+			t.Fatalf("scan gc candidate: %v", err)
+		}
+		snapshot = append(snapshot, c)
+		snapshotPaths = append(snapshotPaths, c.originalPath)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read gc candidates: %v", err)
+	}
+
+	t.Cleanup(func() {
+		if _, err := pool.Exec(ctx,
+			`DELETE FROM artwork_revision_gc_candidates WHERE original_path LIKE $1`, seededPathPattern); err != nil {
+			t.Errorf("delete fixture gc candidates: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `
+			DELETE FROM artwork_revision_gc_candidates
+			WHERE original_path = ANY($1) AND original_path <> ALL($2)`, displaced, snapshotPaths); err != nil {
+			t.Errorf("delete reset-created gc candidates: %v", err)
+		}
+		for _, c := range snapshot {
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO artwork_revision_gc_candidates (
+					original_path, image_type, object_keys, not_before, next_attempt_at,
+					deleted_at, attempt_count, locked_at, locked_by, last_error, updated_at
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+				ON CONFLICT (original_path) DO UPDATE SET
+					image_type = EXCLUDED.image_type,
+					object_keys = EXCLUDED.object_keys,
+					not_before = EXCLUDED.not_before,
+					next_attempt_at = EXCLUDED.next_attempt_at,
+					deleted_at = EXCLUDED.deleted_at,
+					attempt_count = EXCLUDED.attempt_count,
+					locked_at = EXCLUDED.locked_at,
+					locked_by = EXCLUDED.locked_by,
+					last_error = EXCLUDED.last_error,
+					updated_at = NOW()`,
+				c.originalPath, c.imageType, c.objectKeys, c.notBefore, c.nextAttemptAt,
+				c.deletedAt, c.attemptCount, c.lockedAt, c.lockedBy, c.lastError); err != nil {
+				t.Errorf("restore gc candidate %s: %v", c.originalPath, err)
+			}
+		}
+	})
+}
+
 func restorePreexistingPosterRows(t *testing.T, pool *pgxpool.Pool, seededPrefix string) {
 	t.Helper()
 	ctx := context.Background()
@@ -149,6 +247,7 @@ func TestBulkResetSurfaceBatches(t *testing.T) {
 
 	prefix := fmt.Sprintf("bulkreset-%d", time.Now().UnixNano())
 	restoreImageLadderState(t, pool)
+	restoreDisplacedGCCandidates(t, pool, "metadata/movie/"+prefix+"-%")
 	restorePreexistingPosterRows(t, pool, prefix)
 	const requeueRows, clearRows = 7, 5
 	sourceURL := func(i int) string {
@@ -297,6 +396,7 @@ func TestBulkResetSurfacePartialFailureKeepsCounts(t *testing.T) {
 
 	prefix := fmt.Sprintf("bulkpartial-%d", time.Now().UnixNano())
 	restoreImageLadderState(t, pool)
+	restoreDisplacedGCCandidates(t, pool, "metadata/movie/"+prefix+"-%")
 	restorePreexistingPosterRows(t, pool, prefix)
 
 	const requeueRows = 5
