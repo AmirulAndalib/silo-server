@@ -749,7 +749,8 @@ func (h *PlaybackHandler) compatToneMapCapabilityInventoryWithPolicy(
 
 	var remoteResults []capabilityResult
 	var nodeURLs []string
-	if enumerator, ok := h.NodePlanner.(compatTranscodeNodeEnumerator); ok {
+	workerAllowed := compatWorkerHLSRouteAllowed(noderouting.WorkloadVideoTranscode, routingPolicy)
+	if enumerator, ok := h.NodePlanner.(compatTranscodeNodeEnumerator); ok && workerAllowed {
 		nodeURLs = enumerator.TranscodeNodeURLs()
 		remoteResults = make([]capabilityResult, len(nodeURLs))
 		var wg sync.WaitGroup

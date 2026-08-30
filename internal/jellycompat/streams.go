@@ -52,6 +52,7 @@ func compatRouteOutcomeCode(outcome noderouting.Outcome) string {
 // satisfy both halves of the workload's policy. Local execution necessarily
 // uses API egress; adopting it must not cross either hard boundary.
 func compatLocalHLSRouteAllowed(workload noderouting.Workload, policy config.PlaybackRoutingPolicy) bool {
+	policy = config.EffectivePlaybackRoutingPolicy(policy)
 	switch workload {
 	case noderouting.WorkloadRemux:
 		return policy.RemuxExecution != config.PlaybackExecutionWorkerOnly &&
@@ -59,6 +60,21 @@ func compatLocalHLSRouteAllowed(workload noderouting.Workload, policy config.Pla
 	case noderouting.WorkloadVideoTranscode:
 		return policy.VideoTranscodeExecution != config.PlaybackExecutionWorkerOnly &&
 			policy.VideoTranscodeEgress != config.PlaybackEgressProxyOnly
+	default:
+		return false
+	}
+}
+
+// compatWorkerHLSRouteAllowed reports whether the workload may use a pooled
+// transcode executor. Its capabilities must not influence planning when the
+// API host is the hard execution boundary.
+func compatWorkerHLSRouteAllowed(workload noderouting.Workload, policy config.PlaybackRoutingPolicy) bool {
+	policy = config.EffectivePlaybackRoutingPolicy(policy)
+	switch workload {
+	case noderouting.WorkloadRemux:
+		return policy.RemuxExecution != config.PlaybackExecutionAPIOnly
+	case noderouting.WorkloadVideoTranscode:
+		return policy.VideoTranscodeExecution != config.PlaybackExecutionAPIOnly
 	default:
 		return false
 	}

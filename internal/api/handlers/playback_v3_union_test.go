@@ -390,6 +390,53 @@ func TestHLSToneMapCapabilityInventoryV3ExcludesLocalForProxyOnlyEgress(t *testi
 	}
 }
 
+func TestHLSPlanningCapabilitiesV3ExcludeWorkersForAPIOnlyExecution(t *testing.T) {
+	var remoteProbes atomic.Int32
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		remoteProbes.Add(1)
+		writeJSON(w, http.StatusOK, playback.HWAccelInfo{
+			Transformations: []playback.TransformationV3{{
+				Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3,
+				RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3,
+			}},
+			ToneMapCapabilities: tonemap.Capabilities{{
+				Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware,
+				Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+			}},
+		})
+	}))
+	t.Cleanup(remote.Close)
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{remote.URL}}
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{
+		Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3,
+	}}))
+	handler.v3ToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+		return nil, nil
+	}
+	policy := config.DefaultPlaybackRoutingPolicy()
+	policy.VideoTranscodeExecution = config.PlaybackExecutionAPIOnly
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{Routing: policy}
+	}
+
+	inventory, err := handler.hlsToneMapCapabilityInventoryV3(t.Context())
+	if err != nil {
+		t.Fatalf("capability inventory error = %v", err)
+	}
+	registry := handler.hlsPlanningRegistryWithInputsV3(t.Context(), playback.PlannerSettingsV3{}, inventory)
+	if registry.Available(playback.TransformationVideoToH264V3) {
+		t.Fatal("remote-only video transformation was advertised under API-only execution")
+	}
+	if len(inventory.union) != 0 {
+		t.Fatalf("tone-map inventory = %#v, want no remote capabilities", inventory.union)
+	}
+	if got := remoteProbes.Load(); got != 0 {
+		t.Fatalf("remote capability probes = %d, want 0 under API-only execution", got)
+	}
+}
+
 func TestIncompleteToneMapPlanningBecomesRetryableStartFailure(t *testing.T) {
 	for _, reason := range []string{
 		playback.TerminalHDRTranscodeUnsupportedV3,

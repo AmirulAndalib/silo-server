@@ -813,6 +813,9 @@ func (h *PlaybackHandler) hlsPlanningRegistryWithInputsV3(
 	inventory hlsToneMapCapabilityInventoryV3,
 ) *playback.TransformationRegistryV3 {
 	local := h.localHLSExecutionRegistryWithInputsV3(ctx, settings, inventory)
+	if !workerHLSVideoRouteAllowedV3(h.playbackRoutingPolicyForContextV3(ctx)) {
+		return local
+	}
 	enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3)
 	if !ok {
 		return local
@@ -842,10 +845,17 @@ func localHLSVideoRouteAllowedV3(policy config.PlaybackRoutingPolicy) bool {
 		policy.VideoTranscodeEgress != config.PlaybackEgressProxyOnly
 }
 
+func workerHLSVideoRouteAllowedV3(policy config.PlaybackRoutingPolicy) bool {
+	policy = config.EffectivePlaybackRoutingPolicy(policy)
+	return policy.VideoTranscodeExecution != config.PlaybackExecutionAPIOnly
+}
+
 // hlsToneMapCapabilityInventoryV3 snapshots local and pooled-node tone-map
 // capabilities for a single planning operation.
 func (h *PlaybackHandler) hlsToneMapCapabilityInventoryV3(ctx context.Context) (hlsToneMapCapabilityInventoryV3, error) {
-	localAllowed := localHLSVideoRouteAllowedV3(h.playbackRoutingPolicyForContextV3(ctx))
+	routingPolicy := h.playbackRoutingPolicyForContextV3(ctx)
+	localAllowed := localHLSVideoRouteAllowedV3(routingPolicy)
+	workerAllowed := workerHLSVideoRouteAllowedV3(routingPolicy)
 	fetchCtx, cancel := context.WithTimeout(ctx, h.toneMapPlanningTimeoutV3(localAllowed))
 	defer cancel()
 
@@ -864,7 +874,7 @@ func (h *PlaybackHandler) hlsToneMapCapabilityInventoryV3(ctx context.Context) (
 	}
 
 	var nodeURLs []string
-	if enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3); ok {
+	if enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3); ok && workerAllowed {
 		nodeURLs = enumerator.TranscodeNodeURLs()
 	}
 	results := make([]capabilityResult, len(nodeURLs))

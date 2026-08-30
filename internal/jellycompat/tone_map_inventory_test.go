@@ -58,6 +58,38 @@ func TestCompatToneMapCapabilityInventoryUsesRoutingSnapshot(t *testing.T) {
 	}
 }
 
+func TestCompatToneMapCapabilityInventoryExcludesWorkersForAPIOnlyExecution(t *testing.T) {
+	var remoteProbes atomic.Int32
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		remoteProbes.Add(1)
+		_ = json.NewEncoder(w).Encode(playback.HWAccelInfo{ToneMapCapabilities: tonemap.Capabilities{{
+			Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware,
+			Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+		}}})
+	}))
+	t.Cleanup(remote.Close)
+
+	handler := &PlaybackHandler{
+		NodePlanner: compatToneMapInventoryPlanner{urls: []string{remote.URL}},
+		compatToneMapProbe: func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+			return nil, nil
+		},
+	}
+	policy := config.DefaultPlaybackRoutingPolicy()
+	policy.VideoTranscodeExecution = config.PlaybackExecutionAPIOnly
+
+	capabilities, byNode, err := handler.compatToneMapCapabilityInventoryWithPolicy(t.Context(), time.Second, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capabilities) != 0 || len(byNode) != 0 {
+		t.Fatalf("capabilities = %#v, by node = %#v; API-only snapshot must exclude workers", capabilities, byNode)
+	}
+	if got := remoteProbes.Load(); got != 0 {
+		t.Fatalf("remote capability probes = %d, want 0 under API-only execution", got)
+	}
+}
+
 func TestCompatToneMapCapabilityInventoryFetchesNodesConcurrently(t *testing.T) {
 	var active atomic.Int32
 	var startedOnce sync.Once
