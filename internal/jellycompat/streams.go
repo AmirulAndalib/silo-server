@@ -612,6 +612,10 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 		remoteNodeURL := tcNode.URL
 		startErr := h.startRemoteTranscodeWithToneMapMode(r.Context(), playSession.ID, playSession.UpstreamSessionID, *source, file, initialSeekSeconds, tcNode.URL, requiredToneMapMode)
 		if errors.Is(startErr, errRemoteStartAdoptedLocal) {
+			// Route resolution reserved the remote candidate before the concurrent
+			// local winner was observed. Neither the allowed local continuation nor
+			// the policy-error path uses those nodes, so return their capacity now.
+			h.releaseCompatSessionReservation(playSession.UpstreamSessionID)
 			if !compatLocalHLSRouteAllowed(decision.Shape.Workload, routingPolicy) {
 				h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
 				writeError(w, http.StatusServiceUnavailable, compatRoutingPolicyUnsatisfiedCode, "A local transcode won a concurrent start but local execution or API egress is forbidden")

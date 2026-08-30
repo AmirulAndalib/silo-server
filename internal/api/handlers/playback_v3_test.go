@@ -4638,6 +4638,53 @@ func TestSidecarOnlyHLSReplanKeepsEffectiveToneMapFallback(t *testing.T) {
 	}
 }
 
+func TestReusedHLSRouteAllowedV3HonorsCurrentHardPolicy(t *testing.T) {
+	result := playback.PlannerResultV3{Plan: &playback.PlanV3{Delivery: playback.DeliveryRemuxHLSV3}}
+	local := &playback.Session{
+		RoutingWorkload:  string(noderouting.WorkloadRemux),
+		RoutingExecution: string(noderouting.ExecutionAPI),
+		RoutingEgress:    string(noderouting.EgressAPI),
+	}
+	remote := &playback.Session{
+		RoutingWorkload:  string(noderouting.WorkloadRemux),
+		RoutingExecution: string(noderouting.ExecutionTranscode),
+		RoutingEgress:    string(noderouting.EgressProxy),
+	}
+	tests := []struct {
+		name         string
+		session      *playback.Session
+		mutate       func(*config.PlaybackRoutingPolicy)
+		proxyAllowed bool
+		want         bool
+	}{
+		{name: "local remains legal under soft preferences", session: local, proxyAllowed: true, want: true},
+		{name: "local violates worker only", session: local, proxyAllowed: true, mutate: func(policy *config.PlaybackRoutingPolicy) {
+			policy.RemuxExecution = config.PlaybackExecutionWorkerOnly
+		}},
+		{name: "local violates proxy only", session: local, proxyAllowed: true, mutate: func(policy *config.PlaybackRoutingPolicy) {
+			policy.RemuxEgress = config.PlaybackEgressProxyOnly
+		}},
+		{name: "remote violates API execution only", session: remote, proxyAllowed: true, mutate: func(policy *config.PlaybackRoutingPolicy) {
+			policy.RemuxExecution = config.PlaybackExecutionAPIOnly
+		}},
+		{name: "remote violates API egress only", session: remote, proxyAllowed: true, mutate: func(policy *config.PlaybackRoutingPolicy) {
+			policy.RemuxEgress = config.PlaybackEgressAPIOnly
+		}},
+		{name: "remote proxy is client incompatible", session: remote, proxyAllowed: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			policy := config.DefaultPlaybackRoutingPolicy()
+			if test.mutate != nil {
+				test.mutate(&policy)
+			}
+			if got := reusedHLSRouteAllowedV3(test.session, result, policy, test.proxyAllowed); got != test.want {
+				t.Fatalf("reusedHLSRouteAllowedV3() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestSidecarOnlyHLSReplanRejectsSourceVideoExecutionFactDrift(t *testing.T) {
 	currentPlan := playback.PlanV3{
 		PlanID:               "current-plan",

@@ -96,6 +96,12 @@ func (a sessionPlannerAdapter) releaseSession(sessionID string) {
 	}
 }
 
+// ReleaseSession lets Resolve reconcile an earlier reservation even when its
+// caller supplied the legacy planner contract through AdaptSessionPlanner.
+func (a sessionPlannerAdapter) ReleaseSession(sessionID string) {
+	a.releaseSession(sessionID)
+}
+
 func (a sessionPlannerAdapter) planSession(request nodepool.RouteRequest, transcode bool, eligible func(*nodepool.Node) bool) nodepool.Plan {
 	if planner, ok := a.planner.(eligibleSessionPlanner); ok && eligible != nil {
 		return planner.PlanSessionWith(request.SessionID, request.CurrentTranscodeURL, transcode,
@@ -143,16 +149,26 @@ func Resolve(planner nodepool.RoutePlanner, request ResolveRequest) (Decision, e
 		return decided(request.Workload, Decision{Outcome: OutcomePolicyUnsatisfied, Rejected: compiled.Rejected})
 	}
 
+	plannerAttempted := false
 	for _, shape := range compiled.Candidates {
 		if _, excluded := request.ExcludedShapeIDs[shape.ID]; excluded {
 			continue
 		}
 		if !shape.NeedsTranscodeNode() && !shape.NeedsProxyNode() {
+			// Exact route planning normally replaces this session's provisional
+			// reservation. A node-free route bypasses the planner, so explicitly
+			// clear any reservation left by the session's previous route.
+			if !plannerAttempted {
+				if releaser, ok := planner.(sessionReservationReleaser); ok {
+					releaser.ReleaseSession(request.SessionID)
+				}
+			}
 			return decided(request.Workload, Decision{Shape: shape, Outcome: OutcomeSelected, Rejected: compiled.Rejected})
 		}
 		if planner == nil {
 			continue
 		}
+		plannerAttempted = true
 		plan := planner.PlanRoute(nodepool.RouteRequest{
 			SessionID:            request.SessionID,
 			CurrentTranscodeURL:  request.CurrentTranscodeURL,

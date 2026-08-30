@@ -122,6 +122,30 @@ func TestSessionPlannerAdapterReleasesRejectedPlan(t *testing.T) {
 	}
 }
 
+func TestResolveReleasesPreviousReservationForNodeFreeRoute(t *testing.T) {
+	planner := &reservingLegacyPlanner{}
+	policy := config.DefaultPlaybackRoutingPolicy()
+	policy.VideoTranscodeExecution = config.PlaybackExecutionAPIOnly
+	policy.VideoTranscodeEgress = config.PlaybackEgressAPIOnly
+
+	decision, err := Resolve(AdaptSessionPlanner(planner), ResolveRequest{
+		Request: Request{
+			Workload: WorkloadVideoTranscode, Delivery: DeliveryHLSVideo,
+			Policy: policy, ProxyAllowed: true,
+		},
+		SessionID: "session-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decision.Selected() || decision.Shape.ID != "hls_video_api" {
+		t.Fatalf("decision = %#v, want local API route", decision)
+	}
+	if len(planner.released) != 1 || planner.released[0] != "session-1" {
+		t.Fatalf("released reservations = %v, want session-1", planner.released)
+	}
+}
+
 func TestResolveCountsLowCardinalityDecisionMetric(t *testing.T) {
 	counter := routingDecisions.WithLabelValues(
 		string(WorkloadDirectPlay), string(ExecutionNone), string(EgressAPI),

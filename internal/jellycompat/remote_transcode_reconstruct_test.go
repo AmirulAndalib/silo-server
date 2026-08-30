@@ -349,7 +349,7 @@ func TestStartRemoteToneMapDelayedSuccessCannotOverwriteLocalSoftwareWinner(t *t
 	// before httptest waits for that handler to exit.
 	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseRemoteStart) }) })
 
-	handler, _, _, _, source := newManifestToneMapFailoverHandler(t, remoteNode.URL, true)
+	handler, planner, _, _, source := newManifestToneMapFailoverHandler(t, remoteNode.URL, true)
 	handler.compatToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
 		return tonemap.Capabilities{software}, nil
 	}
@@ -412,6 +412,9 @@ func TestStartRemoteToneMapDelayedSuccessCannotOverwriteLocalSoftwareWinner(t *t
 	}
 	if live := handler.tm.GetTranscodeSession("upstream-1"); live != localWinner || !localWinner.IsRunning() {
 		t.Fatalf("live runtime = %#v running=%v, want local software winner %#v", live, localWinner.IsRunning(), localWinner)
+	}
+	if probe := planner.PlanSession("reservation-probe", "", true, source.Version.Bitrate); probe.TranscodeNode == nil {
+		t.Fatal("remote reservation was not released after adopting the local winner")
 	}
 	stored, ok := handler.playbackStore.Get("play-1")
 	if !ok || stored.Recipe == nil || stored.Recipe.ToneMapMode != tonemap.ModeSoftware || stored.Recipe.TranscodeNodeURL != "" {

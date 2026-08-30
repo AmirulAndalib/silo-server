@@ -4161,7 +4161,10 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 	}
 	transportReused := false
 	if trackChange && h.hasActiveHLSTransportV3(session) {
-		if reusedRecipe, ok := sidecarOnlyHLSReplanV3(record, result.Plan, artifactRecipe, req.ClientPlaybackContext.Output.OutputContextID); ok {
+		proxyAllowed := mode.proxyEgress || (!mode.headerAuth && h.JWTSecret != "")
+		policy := h.playbackRoutingPolicyForContextV3(r.Context())
+		if reusedRecipe, ok := sidecarOnlyHLSReplanV3(record, result.Plan, artifactRecipe, req.ClientPlaybackContext.Output.OutputContextID); ok &&
+			reusedHLSRouteAllowedV3(session, result, policy, proxyAllowed) {
 			artifactRecipe = reusedRecipe
 			result.ToneMapMode = reusedRecipe.ToneMapMode
 			transportReused = true
@@ -4677,6 +4680,31 @@ func reusedHLSTransportV3(session *playback.Session, streamURL string) preparedT
 	transport.commit = func() {}
 	transport.rollback = func() {}
 	return transport
+}
+
+// reusedHLSRouteAllowedV3 checks the running transport against the routing
+// snapshot for this replan. Soft preferences do not interrupt healthy bytes,
+// but a hard execution/egress boundary or client-incompatible proxy route must
+// force normal replacement preparation.
+func reusedHLSRouteAllowedV3(session *playback.Session, result playback.PlannerResultV3, policy config.PlaybackRoutingPolicy, proxyAllowed bool) bool {
+	workload, delivery, ok := routingClassV3(result)
+	if !ok || session == nil {
+		return false
+	}
+	compiled, err := noderouting.Candidates(noderouting.Request{
+		Workload: workload, Delivery: delivery, Policy: policy, ProxyAllowed: proxyAllowed,
+	})
+	if err != nil {
+		return false
+	}
+	for _, shape := range compiled.Candidates {
+		if shape.Workload == noderouting.Workload(session.RoutingWorkload) &&
+			shape.Execution == noderouting.Execution(session.RoutingExecution) &&
+			shape.Egress == noderouting.Egress(session.RoutingEgress) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *PlaybackHandler) hasActiveHLSTransportV3(session *playback.Session) bool {
