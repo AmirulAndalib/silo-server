@@ -782,6 +782,7 @@ func identityRecipeCard(s *playback.Session) playback.RecipeCard {
 	card.RoutingWorkload = s.RoutingWorkload
 	card.RoutingExecution = s.RoutingExecution
 	card.RoutingEgress = s.RoutingEgress
+	card.RoutingEgressNodeID = s.RoutingEgressNodeID
 	return card
 }
 
@@ -1914,9 +1915,13 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 // proxy authenticates from the token in the URL path alone. It gets the
 // API-local manifest path, which the client fetches with its own credential.
 func (h *PlaybackHandler) buildProxyManifestURL(card playback.RecipeCard, proxyNode *nodepool.Node, requireMediaAuth bool) string {
-	token := h.signSessionToken(card, requireMediaAuth)
 	localURL := fmt.Sprintf("/playback/transcode/%s/master.m3u8", card.SessionID)
-	if proxyNode == nil || token == "" {
+	if proxyNode == nil {
+		return appendStreamToken(localURL, h.signSessionToken(card, requireMediaAuth))
+	}
+	card.RoutingEgressNodeID = proxyNode.ID
+	token := h.signSessionToken(card, requireMediaAuth)
+	if token == "" {
 		return appendStreamToken(localURL, token)
 	}
 	return nodepool.NodeEndpoint(proxyNode.ClientURL(), "/stream/transcode/"+token+"/master.m3u8")

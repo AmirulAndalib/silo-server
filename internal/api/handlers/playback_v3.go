@@ -918,9 +918,23 @@ func (h *PlaybackHandler) hlsPlanningRegistryWithInputsForWorkloadV3(
 	inventory hlsToneMapCapabilityInventoryV3,
 	workload noderouting.Workload,
 ) *playback.TransformationRegistryV3 {
+	return h.hlsPlanningRegistryWithInputsForClientV3(ctx, settings, inventory, workload, true)
+}
+
+// hlsPlanningRegistryWithInputsForClientV3 keeps transformation availability
+// inside both the workload's execution boundary and this client's admitted
+// egress boundary. The unscoped capability document uses proxyAllowed=true;
+// one playback attempt supplies the client's actual proxy support.
+func (h *PlaybackHandler) hlsPlanningRegistryWithInputsForClientV3(
+	ctx context.Context,
+	settings playback.PlannerSettingsV3,
+	inventory hlsToneMapCapabilityInventoryV3,
+	workload noderouting.Workload,
+	proxyAllowed bool,
+) *playback.TransformationRegistryV3 {
 	local := h.localHLSExecutionRegistryWithInputsV3(ctx, settings, inventory)
 	routingPolicy := h.playbackRoutingPolicyForContextV3(ctx)
-	localAllowed, workerAllowed := hlsRouteExecutorAvailabilityV3(workload, routingPolicy)
+	localAllowed, workerAllowed := hlsRouteExecutorAvailabilityForClientV3(workload, routingPolicy, proxyAllowed)
 	if !workerAllowed {
 		if !localAllowed {
 			return local.OnlyAdvertised(nil)
@@ -978,6 +992,14 @@ func workerHLSRouteAllowedV3(workload noderouting.Workload, policy config.Playba
 }
 
 func hlsRouteExecutorAvailabilityV3(workload noderouting.Workload, policy config.PlaybackRoutingPolicy) (bool, bool) {
+	return hlsRouteExecutorAvailabilityForClientV3(workload, policy, true)
+}
+
+func hlsRouteExecutorAvailabilityForClientV3(
+	workload noderouting.Workload,
+	policy config.PlaybackRoutingPolicy,
+	proxyAllowed bool,
+) (bool, bool) {
 	var delivery noderouting.Delivery
 	switch workload {
 	case noderouting.WorkloadRemux:
@@ -988,7 +1010,7 @@ func hlsRouteExecutorAvailabilityV3(workload noderouting.Workload, policy config
 		return false, false
 	}
 	routes, err := noderouting.Candidates(noderouting.Request{
-		Workload: workload, Delivery: delivery, Policy: policy, ProxyAllowed: true,
+		Workload: workload, Delivery: delivery, Policy: policy, ProxyAllowed: proxyAllowed,
 	})
 	if err != nil {
 		return false, false
@@ -1004,9 +1026,17 @@ func hlsRouteExecutorAvailabilityV3(workload noderouting.Workload, policy config
 // hlsToneMapCapabilityInventoryV3 snapshots local and pooled-node tone-map
 // capabilities for a single planning operation.
 func (h *PlaybackHandler) hlsToneMapCapabilityInventoryV3(ctx context.Context) (hlsToneMapCapabilityInventoryV3, error) {
+	return h.hlsToneMapCapabilityInventoryForClientV3(ctx, true)
+}
+
+func (h *PlaybackHandler) hlsToneMapCapabilityInventoryForClientV3(
+	ctx context.Context,
+	proxyAllowed bool,
+) (hlsToneMapCapabilityInventoryV3, error) {
 	routingPolicy := h.playbackRoutingPolicyForContextV3(ctx)
-	localAllowed := localHLSVideoRouteAllowedV3(routingPolicy)
-	workerAllowed := workerHLSVideoRouteAllowedV3(routingPolicy)
+	localAllowed, workerAllowed := hlsRouteExecutorAvailabilityForClientV3(
+		noderouting.WorkloadVideoTranscode, routingPolicy, proxyAllowed,
+	)
 	fetchCtx, cancel := context.WithTimeout(ctx, h.toneMapPlanningTimeoutV3(localAllowed))
 	defer cancel()
 
@@ -1105,15 +1135,18 @@ func (snapshot *hlsPlanningSnapshotV3) resolveInventory() {
 		snapshot.inventoryResolved = true
 		policy := tonemap.NewPolicy(snapshot.settings.HardwareToneMapEnabled, snapshot.settings.SoftwareToneMapEnabled)
 		if policy != tonemap.PolicyNone {
-			snapshot.inventory, snapshot.inventoryErr = snapshot.handler.hlsToneMapCapabilityInventoryV3(snapshot.ctx)
+			snapshot.inventory, snapshot.inventoryErr = snapshot.handler.hlsToneMapCapabilityInventoryForClientV3(
+				snapshot.ctx, snapshot.proxyAllowed,
+			)
 		}
 	})
 }
 
 func (snapshot *hlsPlanningSnapshotV3) hlsRemuxRegistry() *playback.TransformationRegistryV3 {
 	snapshot.remuxOnce.Do(func() {
-		snapshot.remuxRegistry = snapshot.handler.hlsPlanningRegistryWithInputsForWorkloadV3(
+		snapshot.remuxRegistry = snapshot.handler.hlsPlanningRegistryWithInputsForClientV3(
 			snapshot.ctx, snapshot.settings, hlsToneMapCapabilityInventoryV3{}, noderouting.WorkloadRemux,
+			snapshot.proxyAllowed,
 		)
 	})
 	return snapshot.remuxRegistry
@@ -1122,8 +1155,9 @@ func (snapshot *hlsPlanningSnapshotV3) hlsRemuxRegistry() *playback.Transformati
 func (snapshot *hlsPlanningSnapshotV3) hlsVideoRegistry() *playback.TransformationRegistryV3 {
 	snapshot.videoOnce.Do(func() {
 		snapshot.resolveInventory()
-		snapshot.videoRegistry = snapshot.handler.hlsPlanningRegistryWithInputsForWorkloadV3(
+		snapshot.videoRegistry = snapshot.handler.hlsPlanningRegistryWithInputsForClientV3(
 			snapshot.ctx, snapshot.settings, snapshot.inventory, noderouting.WorkloadVideoTranscode,
+			snapshot.proxyAllowed,
 		)
 	})
 	return snapshot.videoRegistry
@@ -2340,6 +2374,10 @@ func (h *PlaybackHandler) prepareIdentityTransportV3(r *http.Request, session *p
 	routeSession.TargetAudioChannels = result.TargetAudioChannels
 	routeSession.TargetAudioBitrateKbps = result.TargetAudioBitrateKbps
 	routeSession.RemuxDVMode = remuxDVModeForPlanV3(result.Plan)
+	// A replan starts without an egress identity. Do not let the previous
+	// proxy's row or internal URL leak into an API-served replacement route.
+	routeSession.RoutingEgressNodeID = 0
+	routeSession.RoutingEgressNodeURL = ""
 
 	// The shared resolver removes proxy shapes when this client cannot address
 	// an authorized origin, then applies the same policy ordering as every HLS
@@ -2371,6 +2409,8 @@ func (h *PlaybackHandler) prepareIdentityTransportV3(r *http.Request, session *p
 	routeSession.RoutingEgress = string(noderouting.EgressAPI)
 	if proxyNode != nil {
 		routeSession.RoutingEgress = string(noderouting.EgressProxy)
+		routeSession.RoutingEgressNodeID = proxyNode.ID
+		routeSession.RoutingEgressNodeURL = proxyNode.URL
 		if routeSession.RoutingWorkload == string(noderouting.WorkloadRemux) {
 			routeSession.RoutingExecution = string(noderouting.ExecutionProxy)
 		}
@@ -2534,6 +2574,7 @@ func (h *PlaybackHandler) identityGrantStreamURLV3(ctx context.Context, s *playb
 	card.InputPath = file.FilePath
 	card.DVProfile = file.PrimaryDVProfile()
 	card.AudioOnly = file.IsAudioOnly()
+	card.RoutingEgressNodeID = proxyNode.ID
 	prior, stored := h.putProxyGrantV3(ctx, s.ID, card)
 	if !stored {
 		return h.playbackStreamURL(s), false, nil
@@ -2909,6 +2950,7 @@ func (h *PlaybackHandler) identityStreamURLV3(s *playback.Session, file *models.
 	}
 	card := identityRecipeCard(s)
 	card.InputPath = file.FilePath
+	card.RoutingEgressNodeID = proxyNode.ID
 	claims := card.ToClaims()
 	claims.DVProfile = file.PrimaryDVProfile()
 	claims.AudioOnly = file.IsAudioOnly()
@@ -3432,6 +3474,7 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 	card.RoutingEgress = string(noderouting.EgressAPI)
 	if nodePlan.ProxyNode != nil {
 		card.RoutingEgress = string(noderouting.EgressProxy)
+		card.RoutingEgressNodeID = nodePlan.ProxyNode.ID
 	}
 	confirmedHWAccel := card.HWAccel
 	url := fmt.Sprintf("/playback/transcode/%s/master.m3u8", session.ID)
@@ -3553,6 +3596,7 @@ func (h *PlaybackHandler) grantManifestURLV3(ctx context.Context, card playback.
 	if proxyNode == nil {
 		return localURL, false, nil
 	}
+	card.RoutingEgressNodeID = proxyNode.ID
 	prior, stored := h.putProxyGrantV3(ctx, card.SessionID, card)
 	if !stored {
 		return localURL, false, nil

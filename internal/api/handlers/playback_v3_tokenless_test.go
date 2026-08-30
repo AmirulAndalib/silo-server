@@ -13,6 +13,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 )
 
@@ -78,9 +79,14 @@ func TestPlaybackURLBuildersRefuseTokensForMediaAuthorizedSessions(t *testing.T)
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "test-stream-signing-secret"
 	file := v3HandlerFixtureFile(t)
-	proxy := &nodepool.Node{URL: "http://proxy.example"}
+	proxy := &nodepool.Node{ID: 71, URL: "http://proxy.example"}
 
-	secure := &playback.Session{ID: "session-secure", UserID: 7, ProfileID: "profile-1", MediaFileID: file.ID, PlayMethod: playback.PlayDirect, RequireMediaAuthorization: true}
+	secure := &playback.Session{
+		ID: "session-secure", UserID: 7, ProfileID: "profile-1", MediaFileID: file.ID,
+		PlayMethod: playback.PlayDirect, RequireMediaAuthorization: true,
+		RoutingWorkload: string(noderouting.WorkloadDirectPlay), RoutingExecution: string(noderouting.ExecutionNone),
+		RoutingEgress: string(noderouting.EgressProxy),
+	}
 	legacy := *secure
 	legacy.ID = "session-legacy"
 	legacy.RequireMediaAuthorization = false
@@ -100,11 +106,23 @@ func TestPlaybackURLBuildersRefuseTokensForMediaAuthorizedSessions(t *testing.T)
 	}
 
 	card := playback.NewRecipeCard(secure.UserID, secure.ProfileID, file.ID, "", playback.TranscodeOpts{SessionID: secure.ID, InputPath: file.FilePath})
+	card.RoutingWorkload = string(noderouting.WorkloadVideoTranscode)
+	card.RoutingExecution = string(noderouting.ExecutionTranscode)
+	card.RoutingEgress = string(noderouting.EgressProxy)
 	if got := handler.buildProxyManifestURL(card, proxy, true); got != "/playback/transcode/session-secure/master.m3u8" {
 		t.Fatalf("secure manifest URL = %q, want the tokenless API-local manifest", got)
 	}
-	if got := handler.buildProxyManifestURL(card, proxy, false); !strings.HasPrefix(got, proxy.URL+"/stream/transcode/") {
-		t.Fatalf("legacy manifest URL = %q, want the signed proxy manifest", got)
+	legacyManifestURL := handler.buildProxyManifestURL(card, proxy, false)
+	if !strings.HasPrefix(legacyManifestURL, proxy.URL+"/stream/transcode/") {
+		t.Fatalf("legacy manifest URL = %q, want the signed proxy manifest", legacyManifestURL)
+	}
+	manifestToken := strings.TrimSuffix(strings.TrimPrefix(legacyManifestURL, proxy.URL+"/stream/transcode/"), "/master.m3u8")
+	manifestClaims, err := streamtoken.Verify(manifestToken, handler.JWTSecret)
+	if err != nil {
+		t.Fatalf("verify proxy manifest token: %v", err)
+	}
+	if manifestClaims.RoutingEgressNodeID != 71 {
+		t.Fatalf("manifest token egress node ID = %d, want 71", manifestClaims.RoutingEgressNodeID)
 	}
 	if token := handler.signSessionToken(card, true); token != "" {
 		t.Fatalf("signer minted a token for a media-authorized session: %q", token)
@@ -123,8 +141,10 @@ func TestPlaybackURLBuildersRefuseTokensForMediaAuthorizedSessions(t *testing.T)
 		t.Fatalf("origins identity URL = %q (proxy %v), want the credential-free proxy route", got, servedByProxy)
 	}
 	assertNoPlaybackCredentialV3(t, got)
-	if _, ok := grants.cards["session-secure"]; !ok {
+	if grant, ok := grants.cards["session-secure"]; !ok {
 		t.Fatal("origins identity URL was published without a grant behind it")
+	} else if grant.RoutingEgressNodeID != 71 {
+		t.Fatalf("identity grant egress node ID = %d, want 71", grant.RoutingEgressNodeID)
 	}
 
 	got, servedByProxy, _ = handler.grantManifestURLV3(context.Background(), card, proxy)
@@ -132,6 +152,9 @@ func TestPlaybackURLBuildersRefuseTokensForMediaAuthorizedSessions(t *testing.T)
 		t.Fatalf("origins manifest URL = %q (proxy %v), want the credential-free proxy manifest", got, servedByProxy)
 	}
 	assertNoPlaybackCredentialV3(t, got)
+	if grant := grants.cards["session-secure"]; grant.RoutingEgressNodeID != 71 {
+		t.Fatalf("manifest grant egress node ID = %d, want 71", grant.RoutingEgressNodeID)
+	}
 }
 
 // escalationFixtureV3 plans a progressive remux that must convert audio, which

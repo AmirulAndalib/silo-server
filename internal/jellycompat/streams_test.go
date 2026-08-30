@@ -890,7 +890,7 @@ func TestProxyRedirectURLClaimGrowthBudget(t *testing.T) {
 	session := &Session{StreamAppUserID: 2147483647, ProfileID: "123e4567-e89b-12d3-a456-426614174000"}
 	createdAt := time.Date(2026, 8, 16, 12, 34, 56, 987654321, time.UTC)
 	transcodeNodeURL := "http://" + strings.Repeat("n", 57) // 64 bytes.
-	proxyNode := &nodepool.Node{URL: "http://proxy"}
+	proxyNode := &nodepool.Node{ID: 61, URL: "http://proxy"}
 
 	for _, method := range []string{string(playback.PlayDirect), string(playback.PlayRemux), string(playback.PlayTranscode)} {
 		t.Run(method, func(t *testing.T) {
@@ -924,8 +924,8 @@ func TestProxyRedirectURLClaimGrowthBudget(t *testing.T) {
 				wantWorkload = string(noderouting.WorkloadVideoTranscode)
 				wantExecution = string(noderouting.ExecutionTranscode)
 			}
-			if claims.RoutingWorkload != wantWorkload || claims.RoutingExecution != wantExecution || claims.RoutingEgress != string(noderouting.EgressProxy) {
-				t.Fatalf("routing claims = %q/%q/%q, want %q/%q/%q", claims.RoutingWorkload, claims.RoutingExecution, claims.RoutingEgress, wantWorkload, wantExecution, noderouting.EgressProxy)
+			if claims.RoutingWorkload != wantWorkload || claims.RoutingExecution != wantExecution || claims.RoutingEgress != string(noderouting.EgressProxy) || claims.RoutingEgressNodeID != 61 {
+				t.Fatalf("routing claims = %q/%q/%q on node %d, want %q/%q/%q on node 61", claims.RoutingWorkload, claims.RoutingExecution, claims.RoutingEgress, claims.RoutingEgressNodeID, wantWorkload, wantExecution, noderouting.EgressProxy)
 			}
 		})
 	}
@@ -991,7 +991,7 @@ func TestUpstreamRecipeCardOverlaysTopLevelCreatedAt(t *testing.T) {
 func TestUpstreamRecipeCardOverlaysDurableRoutingAssignment(t *testing.T) {
 	assignment := playback.NodeRoutingAssignment{
 		Workload: string(noderouting.WorkloadVideoTranscode), Execution: string(noderouting.ExecutionTranscode),
-		Egress: string(noderouting.EgressProxy),
+		Egress: string(noderouting.EgressProxy), EgressNodeID: 62,
 	}
 	playSession := &PlaybackSession{
 		UpstreamSessionID: "upstream", RoutingAssignment: &assignment,
@@ -1003,8 +1003,8 @@ func TestUpstreamRecipeCardOverlaysDurableRoutingAssignment(t *testing.T) {
 		PlaybackMediaSource{FileID: 77},
 		string(playback.PlayTranscode),
 	)
-	if card.RoutingWorkload != assignment.Workload || card.RoutingExecution != assignment.Execution || card.RoutingEgress != assignment.Egress {
-		t.Fatalf("routing card = %q/%q/%q, want %#v", card.RoutingWorkload, card.RoutingExecution, card.RoutingEgress, assignment)
+	if card.RoutingWorkload != assignment.Workload || card.RoutingExecution != assignment.Execution || card.RoutingEgress != assignment.Egress || card.RoutingEgressNodeID != assignment.EgressNodeID {
+		t.Fatalf("routing card = %q/%q/%q on node %d, want %#v", card.RoutingWorkload, card.RoutingExecution, card.RoutingEgress, card.RoutingEgressNodeID, assignment)
 	}
 }
 
@@ -1016,7 +1016,7 @@ func TestPersistTranscodeRecipeCarriesTopLevelCreatedAt(t *testing.T) {
 	// this session read as already expired once wall-clock passes it.
 	assignment := playback.NodeRoutingAssignment{
 		Workload: string(noderouting.WorkloadVideoTranscode), Execution: string(noderouting.ExecutionTranscode),
-		Egress: string(noderouting.EgressAPI),
+		Egress: string(noderouting.EgressAPI), EgressNodeID: 63,
 	}
 	store.Put(PlaybackSession{ID: "play", CreatedAt: createdAt, ExpiresAt: time.Now().Add(time.Hour), RoutingAssignment: &assignment})
 	manager := playback.NewSessionManager(0, 0)
@@ -1031,8 +1031,8 @@ func TestPersistTranscodeRecipeCarriesTopLevelCreatedAt(t *testing.T) {
 	if !ok || got.Recipe == nil || !got.Recipe.OriginalStartedAt.Equal(createdAt) {
 		t.Fatalf("persisted recipe = %#v, want OriginalStartedAt %s", got, createdAt)
 	}
-	if got.Recipe.RoutingWorkload != assignment.Workload || got.Recipe.RoutingExecution != assignment.Execution || got.Recipe.RoutingEgress != assignment.Egress {
-		t.Fatalf("persisted recipe routing = %q/%q/%q, want %#v", got.Recipe.RoutingWorkload, got.Recipe.RoutingExecution, got.Recipe.RoutingEgress, assignment)
+	if got.Recipe.RoutingWorkload != assignment.Workload || got.Recipe.RoutingExecution != assignment.Execution || got.Recipe.RoutingEgress != assignment.Egress || got.Recipe.RoutingEgressNodeID != assignment.EgressNodeID {
+		t.Fatalf("persisted recipe routing = %q/%q/%q on node %d, want %#v", got.Recipe.RoutingWorkload, got.Recipe.RoutingExecution, got.Recipe.RoutingEgress, got.Recipe.RoutingEgressNodeID, assignment)
 	}
 }
 

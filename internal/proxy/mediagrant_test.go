@@ -121,6 +121,7 @@ func TestProxyGrantRoutesRefuseUnauthenticatedAndUnauthorizedCallers(t *testing.
 			}
 		})
 	}
+
 }
 
 // An API key is a machine credential, not a viewer: it is refused here rather
@@ -187,11 +188,13 @@ func TestProxyGrantRoutesEnforceCommittedProxyEgress(t *testing.T) {
 	proxy.RoutingWorkload = string(noderouting.WorkloadDirectPlay)
 	proxy.RoutingExecution = string(noderouting.ExecutionNone)
 	proxy.RoutingEgress = string(noderouting.EgressProxy)
+	proxy.RoutingEgressNodeID = 11
 	legacy := base
 	legacy.SessionID = "legacy"
 	srv := newGrantProxyServer(t, map[string]playback.RecipeCard{
 		api.SessionID: api, partial.SessionID: partial, proxy.SessionID: proxy, legacy.SessionID: legacy,
 	})
+	srv.nodeRowID = func() (int, bool) { return 11, true }
 	bearer := grantAccessToken(t, 7, "login-1")
 
 	for _, test := range []struct {
@@ -224,6 +227,18 @@ func TestProxyGrantRoutesEnforceCommittedProxyEgress(t *testing.T) {
 				t.Fatalf("error = %q, want %q", body.Error, test.wantError)
 			}
 		})
+	}
+
+	sibling := newGrantProxyServer(t, map[string]playback.RecipeCard{proxy.SessionID: proxy})
+	sibling.nodeRowID = func() (int, bool) { return 12, true }
+	recorder := grantRequest(t, sibling, http.MethodGet, "/stream/v3/"+proxy.SessionID, bearer)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("sibling proxy status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = grantRequest(t, srv, http.MethodGet, "/stream/v3/"+proxy.SessionID+"/master.m3u8", bearer)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("identity grant on transcode route = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -293,8 +308,8 @@ func TestProxyGrantIdentityRefusesATranscodeGrant(t *testing.T) {
 		"session-hls": {SessionID: "session-hls", UserID: 7, PlayMethod: playback.PlayTranscode, TranscodeNodeURL: "http://node-1"},
 	})
 	rr := grantRequest(t, srv, http.MethodGet, "/stream/v3/session-hls", grantAccessToken(t, 7, "login-1"))
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (body %s)", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body %s)", rr.Code, rr.Body.String())
 	}
 }
 

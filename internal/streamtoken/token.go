@@ -49,6 +49,7 @@ type Claims struct {
 	RoutingWorkload      string `json:"rwl,omitempty"`
 	RoutingExecution     string `json:"rex,omitempty"`
 	RoutingEgress        string `json:"reg,omitempty"`
+	RoutingEgressNodeID  int    `json:"renid,omitempty"`
 	TargetCodec          string `json:"tc,omitempty"`
 	TargetRes            string `json:"tres,omitempty"`
 	AudioCodec           string `json:"ac,omitempty"`

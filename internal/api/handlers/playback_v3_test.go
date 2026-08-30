@@ -5091,7 +5091,7 @@ func identityProxyPlanV3(delivery playback.DeliveryV3, transformations ...playba
 func TestPrepareTransportV3RoutesDirectPlayThroughProxyNode(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "test-secret"
-	planner := &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: "http://proxy-1"}}}
+	planner := &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{ID: 41, URL: "http://proxy-1"}}}
 	handler.NodePlanner = planner
 
 	transport, transportErr := handler.prepareTransportV3(
@@ -5130,8 +5130,9 @@ func TestPrepareTransportV3RoutesDirectPlayThroughProxyNode(t *testing.T) {
 	}
 	if claims.RoutingWorkload != string(noderouting.WorkloadDirectPlay) ||
 		claims.RoutingExecution != string(noderouting.ExecutionNone) ||
-		claims.RoutingEgress != string(noderouting.EgressProxy) {
-		t.Fatalf("token route = %q/%q/%q, want direct/none/proxy", claims.RoutingWorkload, claims.RoutingExecution, claims.RoutingEgress)
+		claims.RoutingEgress != string(noderouting.EgressProxy) ||
+		claims.RoutingEgressNodeID != 41 {
+		t.Fatalf("token route = %q/%q/%q on node %d, want direct/none/proxy on node 41", claims.RoutingWorkload, claims.RoutingExecution, claims.RoutingEgress, claims.RoutingEgressNodeID)
 	}
 }
 
@@ -5140,7 +5141,7 @@ func TestPrepareTransportV3RoutesProgressiveRemuxThroughProxyNodeWithSeekAndDV(t
 	handler.JWTSecret = "test-secret"
 	stubCopySeekAnchorV3(handler)
 	proxy := capableProxyStubV3(t)
-	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: proxy.URL + "/"}}}
+	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{ID: 42, URL: proxy.URL + "/"}}}
 
 	file := v3HandlerFixtureFile(t)
 	file.VideoTracks[0].DVProfile = 7
@@ -5178,8 +5179,9 @@ func TestPrepareTransportV3RoutesProgressiveRemuxThroughProxyNodeWithSeekAndDV(t
 	}
 	if claims.RoutingWorkload != string(noderouting.WorkloadRemux) ||
 		claims.RoutingExecution != string(noderouting.ExecutionProxy) ||
-		claims.RoutingEgress != string(noderouting.EgressProxy) {
-		t.Fatalf("token route = %q/%q/%q, want remux/proxy/proxy", claims.RoutingWorkload, claims.RoutingExecution, claims.RoutingEgress)
+		claims.RoutingEgress != string(noderouting.EgressProxy) ||
+		claims.RoutingEgressNodeID != 42 {
+		t.Fatalf("token route = %q/%q/%q on node %d, want remux/proxy/proxy on node 42", claims.RoutingWorkload, claims.RoutingExecution, claims.RoutingEgress, claims.RoutingEgressNodeID)
 	}
 }
 

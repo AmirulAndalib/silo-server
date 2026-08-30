@@ -154,6 +154,22 @@ func TestRecipeCardPreservesCopyVideoMPEGTS(t *testing.T) {
 	}
 }
 
+func TestRecipeCardPreservesRoutingEgressNodeID(t *testing.T) {
+	card := NewDirectRecipeCard("route-bound", 42, "profile-1", 77)
+	card.RoutingWorkload = "direct_play"
+	card.RoutingExecution = "none"
+	card.RoutingEgress = "proxy"
+	card.RoutingEgressNodeID = 11
+
+	claims := card.ToClaims()
+	if claims.RoutingEgressNodeID != 11 {
+		t.Fatalf("claims egress node ID = %d, want 11", claims.RoutingEgressNodeID)
+	}
+	if back := RecipeCardFromClaims(&claims); back.RoutingEgressNodeID != 11 {
+		t.Fatalf("round-trip egress node ID = %d, want 11", back.RoutingEgressNodeID)
+	}
+}
+
 func ptr[T any](value T) *T { return &value }
 
 func TestRecipeCardPlayMethodConstructors(t *testing.T) {
@@ -383,6 +399,7 @@ func TestReconstructSessionRestoresSourceAudioChannels(t *testing.T) {
 	card.RoutingWorkload = "remux"
 	card.RoutingExecution = "proxy"
 	card.RoutingEgress = "proxy"
+	card.RoutingEgressNodeID = 11
 
 	claims := card.ToClaims()
 	if claims.SourceAudioChannels != 6 || claims.AudioChannels != 0 {
@@ -392,7 +409,8 @@ func TestReconstructSessionRestoresSourceAudioChannels(t *testing.T) {
 	if reconstructed == nil || reconstructed.SourceAudioChannels != 6 ||
 		reconstructed.RoutingWorkload != card.RoutingWorkload ||
 		reconstructed.RoutingExecution != card.RoutingExecution ||
-		reconstructed.RoutingEgress != card.RoutingEgress {
+		reconstructed.RoutingEgress != card.RoutingEgress ||
+		reconstructed.RoutingEgressNodeID != card.RoutingEgressNodeID {
 		t.Fatalf("reconstructed session = %#v, want source channels and route assignment restored", reconstructed)
 	}
 

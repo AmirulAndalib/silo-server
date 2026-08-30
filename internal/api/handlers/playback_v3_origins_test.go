@@ -69,7 +69,7 @@ func authorizedOriginsModeV3() mediaAuthModeV3 {
 func TestPrepareTransportV3AuthorizedOriginsRestoreDirectPlayProxyEgress(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "test-secret"
-	planner := &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: "http://proxy-1"}}}
+	planner := &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{ID: 51, URL: "http://proxy-1"}}}
 	handler.NodePlanner = planner
 	grants := &recordingRecipeCardStoreV3{}
 	handler.ProxyGrantStore = grants
@@ -99,6 +99,9 @@ func TestPrepareTransportV3AuthorizedOriginsRestoreDirectPlayProxyEgress(t *test
 	}
 	if card.UserID != 7 || card.PlayMethod != playback.PlayDirect {
 		t.Fatalf("grant identity = %#v, want the session's owner and play method", card)
+	}
+	if card.RoutingEgressNodeID != 51 {
+		t.Fatalf("grant egress node ID = %d, want 51", card.RoutingEgressNodeID)
 	}
 
 	// A transport that never reaches the client must not leave a live grant
@@ -398,7 +401,7 @@ func TestPrepareTransportV3AuthorizedOriginsPublishGrantBackedHLSManifest(t *tes
 
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "test-secret"
-	planner := &recordingNodePlannerV3{plan: nodepool.Plan{TranscodeNode: &nodepool.Node{URL: node.URL}, ProxyNode: &nodepool.Node{URL: "http://proxy-1"}}}
+	planner := &recordingNodePlannerV3{plan: nodepool.Plan{TranscodeNode: &nodepool.Node{URL: node.URL}, ProxyNode: &nodepool.Node{ID: 52, URL: "http://proxy-1"}}}
 	handler.NodePlanner = planner
 	grants := &recordingRecipeCardStoreV3{}
 	handler.ProxyGrantStore = grants
@@ -433,6 +436,9 @@ func TestPrepareTransportV3AuthorizedOriginsPublishGrantBackedHLSManifest(t *tes
 	}
 	if card.TranscodeTransportID != transport.transportID {
 		t.Fatalf("grant transport id = %q, want the plan-scoped transport %q", card.TranscodeTransportID, transport.transportID)
+	}
+	if card.RoutingEgressNodeID != 52 {
+		t.Fatalf("grant egress node ID = %d, want 52", card.RoutingEgressNodeID)
 	}
 }
 

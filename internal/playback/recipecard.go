@@ -29,11 +29,13 @@ type RecipeCard struct {
 	OriginalStartedAt    time.Time `json:"original_started_at,omitempty"`
 	// Routing fields freeze the committed media-serving boundary so a token or
 	// stored card cannot lose a proxy-only assignment when it reconstructs a
-	// session on another process. Node identities and internal URLs stay out of
-	// the portable recipe.
-	RoutingWorkload  string `json:"routing_workload,omitempty"`
-	RoutingExecution string `json:"routing_execution,omitempty"`
-	RoutingEgress    string `json:"routing_egress,omitempty"`
+	// session on another process. The stable egress node identity binds a
+	// proxy-served artifact to the node whose capacity the planner reserved;
+	// internal URLs stay out of the portable recipe.
+	RoutingWorkload     string `json:"routing_workload,omitempty"`
+	RoutingExecution    string `json:"routing_execution,omitempty"`
+	RoutingEgress       string `json:"routing_egress,omitempty"`
+	RoutingEgressNodeID int    `json:"routing_egress_node_id,omitempty"`
 
 	// PlayMethod discriminates which serve path reconstructs this session
 	// (direct / remux / transcode). Empty decodes as PlayTranscode for
@@ -356,6 +358,7 @@ func (c RecipeCard) ToClaims() streamtoken.Claims {
 		RoutingWorkload:      c.RoutingWorkload,
 		RoutingExecution:     c.RoutingExecution,
 		RoutingEgress:        c.RoutingEgress,
+		RoutingEgressNodeID:  c.RoutingEgressNodeID,
 		TargetCodec:          c.TargetCodecVideo,
 		TargetRes:            c.TargetResolution,
 		AudioTrackIndex:      c.AudioTrackIndex,
@@ -441,6 +444,7 @@ func RecipeCardFromClaims(c *streamtoken.Claims) RecipeCard {
 		RoutingWorkload:            c.RoutingWorkload,
 		RoutingExecution:           c.RoutingExecution,
 		RoutingEgress:              c.RoutingEgress,
+		RoutingEgressNodeID:        c.RoutingEgressNodeID,
 		PlayMethod:                 method,
 		TranscodeAudio:             c.TranscodeAudio,
 		RemuxDVMode:                RemuxDVMode(c.RemuxDVMode),

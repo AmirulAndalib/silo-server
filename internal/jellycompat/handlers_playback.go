@@ -1210,6 +1210,7 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 		RoutingWorkload:     string(noderouting.WorkloadDirectPlay),
 		RoutingExecution:    string(noderouting.ExecutionNone),
 		RoutingEgress:       string(noderouting.EgressProxy),
+		RoutingEgressNodeID: proxyNode.ID,
 	}
 	switch method {
 	case string(playback.PlayRemux):
@@ -1767,6 +1768,7 @@ func (h *PlaybackHandler) persistTranscodeRecipe(
 					card.RoutingWorkload = assignment.Workload
 					card.RoutingExecution = assignment.Execution
 					card.RoutingEgress = assignment.Egress
+					card.RoutingEgressNodeID = assignment.EgressNodeID
 				}
 			}
 			recipe = &card

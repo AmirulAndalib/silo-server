@@ -2171,6 +2171,7 @@ func (h *PlaybackHandler) upstreamRecipeCard(ps *PlaybackSession, cs *Session, s
 		card.RoutingWorkload = ps.RoutingAssignment.Workload
 		card.RoutingExecution = ps.RoutingAssignment.Execution
 		card.RoutingEgress = ps.RoutingAssignment.Egress
+		card.RoutingEgressNodeID = ps.RoutingAssignment.EgressNodeID
 	}
 	return card
 }

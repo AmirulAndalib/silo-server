@@ -742,10 +742,10 @@ request; **—** = the path never executes on that role (nothing to reconstruct)
 |------|--------------------|--------------------|------------------------|
 | native · direct | ✅ rebuild `Session` from `?st` token → `Range` re-serve | ✅ stateless re-serve from `claims.MediaPath` | — not served on a transcode node |
 | native · remux | ✅ token + `?seek`, or relay/reconstruct remote HLS | ✅ stateless per-request pipe or HLS relay | ✅ for remote HLS, using the same recipe carrier as native transcode |
-| native · transcode | ✅ token (full recipe) → respawn ffmpeg seeked to segment | ✅ transparent re-route + token forward | ✅ self-contained — token is recipe-complete |
+| native · transcode | ✅ token (full recipe) → respawn ffmpeg seeked to segment | ✅ same-node restart + token forward | ✅ self-contained — token is recipe-complete |
 | jellycompat · direct | ✅ re-resolve from durable compat row → `Range` re-serve | ✅ stateless re-serve from token `MediaPath` | — |
 | jellycompat · remux | ✅ compat row + `?seek`, or relay remote HLS | ✅ stateless per-request pipe or HLS relay | ⚠️ for remote HLS, while the shared Redis recipe still exists |
-| jellycompat · transcode | ✅ `ReconstructTranscode(*ps.Recipe)` from compat row | ✅ transparent re-route + token forward | ⚠️ reconstructs **iff** the shared Redis recipe (`internal/noderecipe`, ≤24h TTL) still exists; fails closed (404) otherwise |
+| jellycompat · transcode | ✅ `ReconstructTranscode(*ps.Recipe)` from compat row | ✅ same-node restart + token forward | ⚠️ reconstructs **iff** the shared Redis recipe (`internal/noderecipe`, ≤24h TTL) still exists; fails closed (404) otherwise |
 
 **What carries the recovery state, per role**
 
@@ -757,11 +757,13 @@ request; **—** = the path never executes on that role (nothing to reconstruct)
 
 **Reading the matrix**
 
-- **Integrated and proxy-node restarts are unconditional** for every applicable
-  path. The proxy holds no authoritative per-session state — direct/remux are
-  re-served from the token's `MediaPath`, transcode is reverse-proxied — so a
-  proxy bounce, or a reroute to any in-group proxy (`pickProxy` is round-robin
-  with no session affinity), is transparent.
+- **Integrated restarts and restarts of the selected logical proxy node are
+  unconditional** for every applicable path. The proxy holds no authoritative
+  per-session state — direct/remux are re-served from the token's `MediaPath`,
+  transcode is reverse-proxied — and the artifact remains bound to the same
+  `stream_nodes.id` across a process restart. A sibling proxy must not consume
+  that artifact: failover to another node requires replanning and reminting so
+  capacity, group affinity, and the client-visible origin move together.
 - **The two direct-play `—` cells are structural, not gaps.** Direct play has no
   executor. Remux is different: progressive remux can run on a proxy, while HLS
   remux can run on a transcode node and leave through either the API relay or a

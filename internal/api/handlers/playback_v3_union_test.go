@@ -485,6 +485,114 @@ func TestHLSPlanningCapabilitiesV3RespectWorkloadExecutionPolicy(t *testing.T) {
 	}
 }
 
+func TestHLSPlanningCapabilitiesV3HonorClientProxySupport(t *testing.T) {
+	newHandler := func(t *testing.T, policy config.PlaybackRoutingPolicy) (*PlaybackHandler, *atomic.Int32) {
+		t.Helper()
+		remoteProbes := &atomic.Int32{}
+		remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			remoteProbes.Add(1)
+			writeJSON(w, http.StatusOK, playback.HWAccelInfo{
+				Transformations: []playback.TransformationV3{
+					{Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
+					{Name: playback.TransformationVideoToH264V3, Executor: playback.ExecutorServerV3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
+				},
+				ToneMapCapabilities: tonemap.Capabilities{{
+					Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware,
+					Filter: tonemap.SoftwareFilterBT2390, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ},
+				}},
+			})
+		}))
+		t.Cleanup(remote.Close)
+
+		handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+		handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{remote.URL}}
+		handler.PlaybackConfig = func() config.PlaybackConfig {
+			return config.PlaybackConfig{Routing: policy}
+		}
+		presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
+			{Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
+			{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3},
+		}))
+		return handler, remoteProbes
+	}
+
+	proxyOnly := config.DefaultPlaybackRoutingPolicy()
+	proxyOnly.RemuxExecution = config.PlaybackExecutionWorkerOnly
+	proxyOnly.RemuxEgress = config.PlaybackEgressProxyOnly
+	proxyOnly.VideoTranscodeExecution = config.PlaybackExecutionWorkerOnly
+	proxyOnly.VideoTranscodeEgress = config.PlaybackEgressProxyOnly
+
+	t.Run("client without proxy support", func(t *testing.T) {
+		handler, remoteProbes := newHandler(t, proxyOnly)
+		remux := handler.hlsPlanningRegistryWithInputsForClientV3(
+			t.Context(), playback.PlannerSettingsV3{}, hlsToneMapCapabilityInventoryV3{},
+			noderouting.WorkloadRemux, false,
+		)
+		video := handler.hlsPlanningRegistryWithInputsForClientV3(
+			t.Context(), playback.PlannerSettingsV3{}, hlsToneMapCapabilityInventoryV3{},
+			noderouting.WorkloadVideoTranscode, false,
+		)
+		inventory, err := handler.hlsToneMapCapabilityInventoryForClientV3(t.Context(), false)
+		if err != nil {
+			t.Fatalf("tone-map inventory: %v", err)
+		}
+		if remux.Available(playback.TransformationAudioToAACV3) || video.Available(playback.TransformationVideoToH264V3) {
+			t.Fatal("proxy-only worker transformations leaked into a client attempt without proxy support")
+		}
+		if len(inventory.union) != 0 {
+			t.Fatalf("tone-map inventory = %#v, want empty", inventory.union)
+		}
+		if got := remoteProbes.Load(); got != 0 {
+			t.Fatalf("remote probes = %d, want 0", got)
+		}
+	})
+
+	t.Run("client with proxy support", func(t *testing.T) {
+		handler, remoteProbes := newHandler(t, proxyOnly)
+		registry := handler.hlsPlanningRegistryWithInputsForClientV3(
+			t.Context(), playback.PlannerSettingsV3{}, hlsToneMapCapabilityInventoryV3{},
+			noderouting.WorkloadVideoTranscode, true,
+		)
+		inventory, err := handler.hlsToneMapCapabilityInventoryForClientV3(t.Context(), true)
+		if err != nil {
+			t.Fatalf("tone-map inventory: %v", err)
+		}
+		if !registry.Available(playback.TransformationVideoToH264V3) {
+			t.Fatal("proxy-capable client excluded the admitted worker transformation")
+		}
+		if !inventory.union.Supports(tonemap.ModeSoftware, tonemap.SourcePQ) {
+			t.Fatalf("tone-map inventory = %#v, want worker capability", inventory.union)
+		}
+		if got := remoteProbes.Load(); got == 0 {
+			t.Fatal("remote capabilities were not probed")
+		}
+	})
+
+	t.Run("API relay does not require client proxy support", func(t *testing.T) {
+		apiEgress := proxyOnly
+		apiEgress.VideoTranscodeEgress = config.PlaybackEgressAPIOnly
+		handler, _ := newHandler(t, apiEgress)
+		registry := handler.hlsPlanningRegistryWithInputsForClientV3(
+			t.Context(), playback.PlannerSettingsV3{}, hlsToneMapCapabilityInventoryV3{},
+			noderouting.WorkloadVideoTranscode, false,
+		)
+		if !registry.Available(playback.TransformationVideoToH264V3) {
+			t.Fatal("worker capability was excluded even though the API may relay its output")
+		}
+	})
+
+	t.Run("unscoped capability view retains proxy route", func(t *testing.T) {
+		handler, _ := newHandler(t, proxyOnly)
+		registry := handler.hlsPlanningRegistryWithInputsForWorkloadV3(
+			t.Context(), playback.PlannerSettingsV3{}, hlsToneMapCapabilityInventoryV3{},
+			noderouting.WorkloadVideoTranscode,
+		)
+		if !registry.Available(playback.TransformationVideoToH264V3) {
+			t.Fatal("server-wide capability view excluded an admitted proxy route")
+		}
+	})
+}
+
 func TestProgressivePlanningCapabilitiesV3UseOnlyEligibleProxyExecutors(t *testing.T) {
 	var remoteProbes atomic.Int32
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
