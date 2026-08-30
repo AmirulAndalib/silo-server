@@ -107,8 +107,9 @@ same client-facing GET path rather than treating an S3 storage HEAD as proof
 that the public URL works.
 
 The practical consequence for a client is that shortly after a server upgrade,
-`image_size=large` may return an image narrower than the table above. It is never
-a broken URL, and no client action is required: the correct width appears once
+`image_size=large` may return an image narrower than the table above. The server
+validates the selected URL through its own delivery route and falls back
+automatically; no client action is required to pick up the correct width once
 the pass completes. URLs served from a fallback carry a shortened expiry so the
 real rung is picked up promptly rather than a day later. Externally delivered
 wide-rung URLs are also revalidated on that shorter cadence, because public
@@ -116,9 +117,9 @@ delivery health can change independently of the backing object. The first
 delivery error in a batch stops later entries from probing the same failing
 endpoint, bounding browse latency during an outage. This safe fallback is why
 the capability endpoint can continue advertising the `large` request semantic
-while a deployment's wide-rung backfill is incomplete. The check observes the
-server's route to the public endpoint; a CDN may still send a remote client to a
-different edge with transient edge-local state.
+while a deployment's wide-rung backfill is incomplete. The check does not prove
+client renderability or delivery from every CDN edge; a remote client may still
+reach an edge with transient edge-local state.
 
 ## Jellyfin compatibility
 
