@@ -2,6 +2,7 @@ package playback
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -140,6 +141,20 @@ func TestRecipeCardOriginalStartedAtRoundTripAndReconstruct(t *testing.T) {
 		t.Fatalf("reconstructed StartedAt = %v, want %s", session, started)
 	}
 }
+
+func TestRecipeCardPreservesCopyVideoMPEGTS(t *testing.T) {
+	card := NewRecipeCard(42, "profile-1", 77, "", TranscodeOpts{
+		SessionID: "copy-ts", TargetCodecVideo: "copy", TargetCodecAudio: "copy", CopyVideoMPEGTS: true,
+	})
+	if !card.TranscodeOpts(t.TempDir(), "/usr/bin/ffmpeg", nil).CopyVideoMPEGTS {
+		t.Fatal("stored recipe lost copy-video MPEG-TS selection")
+	}
+	if back := RecipeCardFromClaims(ptr(card.ToClaims())); !back.CopyVideoMPEGTS {
+		t.Fatal("stream-token recipe lost copy-video MPEG-TS selection")
+	}
+}
+
+func ptr[T any](value T) *T { return &value }
 
 func TestRecipeCardPlayMethodConstructors(t *testing.T) {
 	if c := NewRecipeCard(1, "p", 2, "", TranscodeOpts{SessionID: "t"}); c.PlayMethod != PlayTranscode {
@@ -486,5 +501,38 @@ func TestOrdinaryTranscodeRecipeClaimsKeepLegacyMethod(t *testing.T) {
 	claims := (RecipeCard{PlayMethod: PlayTranscode}).ToClaims()
 	if got := claims.PlayMethod; got != string(PlayTranscode) {
 		t.Fatalf("ordinary transcode token method = %q, want %q", got, PlayTranscode)
+	}
+}
+
+func TestCopyFMP4RecipeCardsFailClosedAcrossReaderGenerations(t *testing.T) {
+	card := NewRecipeCard(1, "profile-1", 2, "http://node", TranscodeOpts{
+		SessionID: "copy-fmp4", TargetCodecVideo: "copy", SegmentDuration: 2,
+	})
+	if card.CopyFMP4RecipeVersion != CopyFMP4RecipeVersion {
+		t.Fatalf("stored copy recipe version = %q, want %q", card.CopyFMP4RecipeVersion, CopyFMP4RecipeVersion)
+	}
+	if card.PlayMethod == PlayTranscode || card.PlayMethod == "" {
+		t.Fatalf("stored copy recipe method = %q, want a method rejected by old readers", card.PlayMethod)
+	}
+	if err := ValidateCopyFMP4RecipeCard(card); err != nil {
+		t.Fatalf("current stored copy recipe rejected: %v", err)
+	}
+
+	claims := card.ToClaims()
+	if claims.PlayMethod != streamtoken.PlayMethodCopyFMP4Transcode || claims.CopyFMP4RecipeVersion != CopyFMP4RecipeVersion {
+		t.Fatalf("copy token discriminator/version = %q/%q", claims.PlayMethod, claims.CopyFMP4RecipeVersion)
+	}
+	roundTrip := RecipeCardFromClaims(&claims)
+	if err := ValidateCopyFMP4RecipeCard(roundTrip); err != nil {
+		t.Fatalf("round-tripped copy recipe rejected: %v", err)
+	}
+
+	legacy := RecipeCard{SessionID: "legacy-copy", PlayMethod: PlayTranscode, TargetCodecVideo: "copy", SegmentDuration: 2}
+	if err := ValidateCopyFMP4RecipeCard(legacy); !errors.Is(err, ErrCopyFMP4RecipeVersionMismatch) {
+		t.Fatalf("legacy copy recipe error = %v, want version mismatch", err)
+	}
+	ordinary := RecipeCard{SessionID: "encoded", PlayMethod: PlayTranscode, TargetCodecVideo: "h264", SegmentDuration: 2}
+	if err := ValidateCopyFMP4RecipeCard(ordinary); err != nil {
+		t.Fatalf("ordinary encoded recipe rejected: %v", err)
 	}
 }

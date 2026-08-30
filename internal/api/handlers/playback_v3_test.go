@@ -3221,7 +3221,10 @@ func TestPrepareTransportV3SendsResolvedCopyAnchorToRemoteExecutor(t *testing.T)
 			if err := json.NewDecoder(r.Body).Decode(&startRequest); err != nil {
 				t.Errorf("decode remote start: %v", err)
 			}
-			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: startRequest.SessionID, Status: "started"})
+			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{
+				SessionID: startRequest.SessionID, Status: "started",
+				CopyFMP4RecipeVersion: startRequest.CopyFMP4RecipeVersion,
+			})
 		case r.Method == http.MethodDelete:
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -3279,7 +3282,10 @@ func TestPrepareRemoteTransportV3RemuxOmitsToneMapOnlyDolbyVisionEvidence(t *tes
 			if err := json.NewDecoder(r.Body).Decode(&startRequest); err != nil {
 				t.Errorf("decode remote start: %v", err)
 			}
-			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: startRequest.SessionID, Status: "started"})
+			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{
+				SessionID: startRequest.SessionID, Status: "started",
+				CopyFMP4RecipeVersion: startRequest.CopyFMP4RecipeVersion,
+			})
 		case r.Method == http.MethodDelete:
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -3312,6 +3318,9 @@ func TestPrepareRemoteTransportV3RemuxOmitsToneMapOnlyDolbyVisionEvidence(t *tes
 	defer transport.rollback()
 	if !startCalled {
 		t.Fatal("remote transcode start was not requested")
+	}
+	if startRequest.CopyFMP4RecipeVersion != playback.CopyFMP4RecipeVersion {
+		t.Fatalf("copy fMP4 recipe version = %q, want %q", startRequest.CopyFMP4RecipeVersion, playback.CopyFMP4RecipeVersion)
 	}
 	if startRequest.ToneMapDVConfigPresent || startRequest.ToneMapDVBLCompatIDPresent || startRequest.ToneMapDVBLPresent || startRequest.ToneMapDVRPUPresent {
 		t.Fatalf("remote copy/remux request carried tone-map-only Dolby Vision evidence: %#v", startRequest)
@@ -3363,7 +3372,10 @@ func TestPrepareTransportV3UsesFrozenSourceMetadataAfterProbeDrift(t *testing.T)
 			if err := json.NewDecoder(r.Body).Decode(&startRequest); err != nil {
 				t.Errorf("decode remote start: %v", err)
 			}
-			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: startRequest.SessionID, Status: "started"})
+			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{
+				SessionID: startRequest.SessionID, Status: "started",
+				CopyFMP4RecipeVersion: startRequest.CopyFMP4RecipeVersion,
+			})
 		case r.Method == http.MethodDelete:
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -3514,7 +3526,10 @@ func TestPrepareRemoteTransportV3OmitsToneMapProvenanceForDolbyVisionRemux(t *te
 				http.Error(w, "incomplete tone-map recipe", http.StatusUnprocessableEntity)
 				return
 			}
-			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: startRequest.SessionID, Status: "started"})
+			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{
+				SessionID: startRequest.SessionID, Status: "started",
+				CopyFMP4RecipeVersion: startRequest.CopyFMP4RecipeVersion,
+			})
 		case r.Method == http.MethodDelete:
 			w.WriteHeader(http.StatusNoContent)
 		default:

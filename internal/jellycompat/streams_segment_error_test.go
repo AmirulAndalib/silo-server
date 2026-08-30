@@ -38,6 +38,12 @@ func TestHLSSegmentErrorResponse(t *testing.T) {
 		{"tone-map executor unavailable", playback.ErrToneMapExecutorUnavailable, http.StatusServiceUnavailable, "TranscodeUnavailable"},
 		{"tone-map preflight rejected", tonemap.ErrSourcePreflightRejected, http.StatusUnsupportedMediaType, "TranscodeUnsupported"},
 		{
+			name:       "wrapped manifest not ready from recovery",
+			err:        fmt.Errorf("restart segment: %w", playback.ErrManifestNotReady),
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "NotReady",
+		},
+		{
 			// WaitForSegment wraps the ffmpeg exit error as
 			// fmt.Errorf("%w: %v", ErrTranscodeFailed, waitErr) — this is exactly the
 			// error that hit the catch-all 500 in production (Fire TV, seg_00000.ts).
