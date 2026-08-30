@@ -43,21 +43,20 @@ type PlannerInputV3 struct {
 	// Registry holds the transformations the local binary can execute.
 	// Progressive remux routes always gate on it: they run in this process.
 	Registry *TransformationRegistryV3
-	// HLSRegistry optionally widens transformation availability for HLS
-	// deliveries, which can execute on pooled transcode nodes as well as
-	// locally. Nil means HLS routes gate on Registry alone. It is a lazy
-	// producer because building the widened registry can touch the network
-	// (node capability fetches): the planner only invokes it when a route
-	// decision genuinely depends on node capabilities, so direct-play and
-	// other source-preserving starts never pay for it. Producers must
-	// return a superset of Registry (local ∪ node capabilities) and should
-	// memoize; the transport layer re-validates whichever executor is
-	// actually selected.
-	HLSRegistry func() *TransformationRegistryV3
+	// HLSRemuxRegistry and HLSVideoRegistry report the transformations
+	// executable by policy-eligible HLS remux and video-transcode routes. They
+	// are lazy because building either registry can touch pooled nodes. The
+	// planner only invokes the producer when that workload needs a server
+	// transformation, and the transport layer re-validates the selected
+	// executor. HLSRegistry is the legacy shared fallback used when a caller
+	// does not provide workload-specific registries.
+	HLSRemuxRegistry func() *TransformationRegistryV3
+	HLSVideoRegistry func() *TransformationRegistryV3
+	HLSRegistry      func() *TransformationRegistryV3
 	// ToneMapCapabilities and HLSToneMapCapabilities mirror Registry and
-	// HLSRegistry for executor variants of hdr_to_sdr_tonemap. The public plan
-	// names one stable transformation; these internal capabilities select a
-	// validated hardware or software implementation without exposing that
+	// HLSVideoRegistry for executor variants of hdr_to_sdr_tonemap. The public
+	// plan names one stable transformation; these internal capabilities select
+	// a validated hardware or software implementation without exposing that
 	// deployment policy to clients.
 	ToneMapCapabilities    tonemap.Capabilities
 	HLSToneMapCapabilities func() tonemap.Capabilities
@@ -66,7 +65,7 @@ type PlannerInputV3 struct {
 	// carries the transformation; this answers whether the file does, which
 	// no capability probe can. Nil means "assume it does", preserving the
 	// pre-probe behaviour for callers that cannot run one (the shadow
-	// planner, tests). Lazy for the same reason as HLSRegistry: it shells out
+	// planner, tests). Lazy for the same reason as the HLS registries: it shells out
 	// to ffmpeg, so it is consulted only once every cheap eligibility gate
 	// has already passed and a strip route is genuinely on the table.
 	DVRPUStrippable     func() bool
@@ -109,6 +108,20 @@ func (input PlannerInputV3) hlsRegistry() *TransformationRegistryV3 {
 		}
 	}
 	return input.Registry
+}
+
+func (input PlannerInputV3) hlsRemuxRegistry() *TransformationRegistryV3 {
+	if input.HLSRemuxRegistry != nil {
+		return input.HLSRemuxRegistry()
+	}
+	return input.hlsRegistry()
+}
+
+func (input PlannerInputV3) hlsVideoRegistry() *TransformationRegistryV3 {
+	if input.HLSVideoRegistry != nil {
+		return input.HLSVideoRegistry()
+	}
+	return input.hlsRegistry()
 }
 
 type PlannerResultV3 struct {
@@ -227,7 +240,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 	dvStripEligibleLocal := canStripDolbyVisionToHDR10V3(source, input.Request, input.Registry)
 	dvStripEligible := dvStripEligibleLocal
 	if !dvStripEligible && hlsDeliveryOK && source.DynamicRange == DynamicRangeDolbyVisionV3 {
-		dvStripEligible = canStripDolbyVisionToHDR10V3(source, input.Request, input.hlsRegistry())
+		dvStripEligible = canStripDolbyVisionToHDR10V3(source, input.Request, input.hlsRemuxRegistry())
 	}
 	// A source whose RPU ffmpeg cannot parse must lose the strip here rather
 	// than at the transport, so that the plan's HDR10 promise, the durable
@@ -450,7 +463,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 			// use. Short-circuit order keeps locally-capable planning from
 			// consulting node capabilities at all.
 			audioConvertOK := localAudioConvertOK ||
-				hlsDeliveryOK && input.hlsRegistry().Available(TransformationAudioToAACV3)
+				hlsDeliveryOK && input.hlsRemuxRegistry().Available(TransformationAudioToAACV3)
 			if !audioConvertOK {
 				return terminalPlannerResultV3(TerminalAudioConversionUnsupportedV3, "The required validated AAC conversion toolchain is unavailable.", true)
 			}
@@ -515,7 +528,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 			plan.Stream = StreamV3{Protocol: StreamHLSV3, Container: "hls", MIMEType: "application/vnd.apple.mpegurl", Headers: map[string]string{}, HeaderRefresh: HeaderRefreshNoneV3}
 			hlsAudioChannels := 0
 			if hlsTranscodeAudio {
-				if !input.hlsRegistry().Available(TransformationAudioToAACV3) {
+				if !input.hlsRemuxRegistry().Available(TransformationAudioToAACV3) {
 					return terminalPlannerResultV3(TerminalAudioConversionUnsupportedV3, "The HLS route requires the validated AAC conversion toolchain.", true)
 				}
 				// HLS packaging cannot safely copy non-native codecs such as
@@ -534,7 +547,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 				appendAppliedQuirkV3(&plan, *firefoxAACTimingQuirk, "")
 			}
 			if hlsAudioQuirkOK && !hlsTranscodeAudio {
-				if !input.hlsRegistry().Available(TransformationAudioToAACV3) {
+				if !input.hlsRemuxRegistry().Available(TransformationAudioToAACV3) {
 					return terminalPlannerResultV3(TerminalAudioConversionUnsupportedV3, "The device-specific HLS route requires the validated AAC conversion toolchain.", true)
 				}
 				hlsTranscodeAudio = true
@@ -850,7 +863,7 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 		return terminalPlannerResultV3("no_alternate_version", TerminalMessage4KTranscodeDisabledV3, false)
 	}
 	if hlsRegistry == nil {
-		hlsRegistry = input.hlsRegistry()
+		hlsRegistry = input.hlsVideoRegistry()
 	}
 	if hlsRegistry == nil || !hlsRegistry.Available(TransformationVideoToH264V3) || !hlsRegistry.Available(TransformationAudioToAACV3) {
 		return terminalPlannerResultV3("conversion_tool_unavailable", "The required validated H.264/AAC conversion toolchain is unavailable.", true)
@@ -1249,7 +1262,7 @@ func resolveToneMapRecipeV3(input PlannerInputV3, source SourceDescriptorV3, hls
 		return recipe
 	}
 	if hlsRegistry == nil {
-		hlsRegistry = input.hlsRegistry()
+		hlsRegistry = input.hlsVideoRegistry()
 	}
 	recipe.hlsRegistry = hlsRegistry
 	if hlsRegistry == nil || !hlsRegistry.Available(TransformationHDRToSDRToneMapV3) {
@@ -1304,7 +1317,8 @@ func videoTranscodeExecutableV3(input PlannerInputV3, source SourceDescriptorV3)
 	if hdrTranscodeUnavailableV3(input, source) {
 		return false
 	}
-	return input.hlsRegistry().Available(TransformationVideoToH264V3) && input.hlsRegistry().Available(TransformationAudioToAACV3)
+	registry := input.hlsVideoRegistry()
+	return registry.Available(TransformationVideoToH264V3) && registry.Available(TransformationAudioToAACV3)
 }
 
 func recipeFromSourceV3(source SourceDescriptorV3) EffectiveRecipeV3 {

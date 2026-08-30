@@ -45,6 +45,35 @@ func TestTransformationRegistryWithAdvertised(t *testing.T) {
 	}
 }
 
+func TestTransformationRegistryOnlyAdvertised(t *testing.T) {
+	registry := NewTransformationRegistryV3([]TransformationSpecV3{
+		{Name: "audio_to_aac", RecipeVersion: TransformationAudioToAACRecipeVersionV3},
+		{Name: "video_to_h264", RecipeVersion: "2", Available: true},
+		{Name: "server_dv7_to_hdr10", RecipeVersion: "1", Available: true},
+	})
+	restricted := registry.OnlyAdvertised([]TransformationV3{
+		{Name: "Audio_To_AAC", Executor: "server", RecipeVersion: TransformationAudioToAACRecipeVersionV3},
+		{Name: "video_to_h264", Executor: "server", RecipeVersion: "1"},
+		{Name: "server_dv7_to_hdr10", Executor: "client", RecipeVersion: "1"},
+		{Name: "made_up_transform", Executor: "server", RecipeVersion: "1"},
+	})
+	if !restricted.Available("audio_to_aac") {
+		t.Fatal("a matching node advertisement must be available")
+	}
+	if restricted.Available("video_to_h264") {
+		t.Fatal("local availability and a mismatched node recipe must be excluded")
+	}
+	if restricted.Available("server_dv7_to_hdr10") {
+		t.Fatal("local availability and client-executor advertisements must be excluded")
+	}
+	if restricted.Available("made_up_transform") {
+		t.Fatal("advertisements must not introduce unknown specs")
+	}
+	if !registry.Available("video_to_h264") || !registry.Available("server_dv7_to_hdr10") {
+		t.Fatal("restricting availability must not mutate the receiver")
+	}
+}
+
 // A deployment whose API host lacks the H.264/AAC toolchain must still plan
 // an HLS transcode when pooled transcode nodes advertise it, and must keep
 // the terminal when nothing does.
@@ -71,9 +100,35 @@ func TestPlanPlaybackV3TranscodeOffloadsToNodeToolchain(t *testing.T) {
 		{Name: "video_to_h264", Executor: "server", RecipeVersion: "2"},
 		{Name: "audio_to_aac", Executor: "server", RecipeVersion: TransformationAudioToAACRecipeVersionV3},
 	})
-	withNodes := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: settings, Registry: local, HLSRegistry: staticHLSRegistryV3(union)})
+	withNodes := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: settings, Registry: local, HLSVideoRegistry: staticHLSRegistryV3(union)})
 	if withNodes.Plan == nil || withNodes.Plan.Delivery != DeliveryTranscodeHLSV3 {
 		t.Fatalf("with nodes = %s", ExplainPlannerResultV3(withNodes))
+	}
+}
+
+func TestPlanPlaybackV3VideoRegistryExcludesForbiddenLocalToolchain(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.VideoTracks[0].VideoRange = "SDR"
+	file.VideoTracks[0].VideoRangeType = "SDR"
+	file.VideoTracks[0].ColorTransfer = "bt709"
+	req := validStartRequestV3()
+	req.QualityPreference = "480p"
+	req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{{Codec: "hevc", Profiles: []string{"main 10"}, Levels: []int{153}, BitDepths: []int{10}, MaxWidth: 3840, MaxHeight: 2160, MaxFrameRate: 60, MaxBitrateKbps: 80_000, Hardware: true}}
+	local := NewTransformationRegistryV3([]TransformationSpecV3{
+		{Name: "video_to_h264", RecipeVersion: "2", Available: true},
+		{Name: "audio_to_aac", RecipeVersion: TransformationAudioToAACRecipeVersionV3, Available: true},
+	})
+	workerOnly := local.OnlyAdvertised([]TransformationV3{{
+		Name: "audio_to_aac", Executor: "server", RecipeVersion: TransformationAudioToAACRecipeVersionV3,
+	}})
+
+	result := PlanPlaybackV3(PlannerInputV3{
+		Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
+		Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true},
+		Registry: local, HLSVideoRegistry: staticHLSRegistryV3(workerOnly),
+	})
+	if result.Terminal == nil || result.Terminal.Reason != "conversion_tool_unavailable" {
+		t.Fatalf("result = %s", ExplainPlannerResultV3(result))
 	}
 }
 
@@ -96,7 +151,7 @@ func TestPlanPlaybackV3AudioAdaptationOffloadsToHLSRemux(t *testing.T) {
 	}
 
 	union := local.WithAdvertised([]TransformationV3{{Name: "audio_to_aac", Executor: "server", RecipeVersion: TransformationAudioToAACRecipeVersionV3}})
-	offloaded := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: settings, Registry: local, HLSRegistry: staticHLSRegistryV3(union)})
+	offloaded := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: settings, Registry: local, HLSRemuxRegistry: staticHLSRegistryV3(union)})
 	if offloaded.Plan == nil || offloaded.Plan.Delivery != DeliveryRemuxHLSV3 || !offloaded.TranscodeAudio || offloaded.TargetAudioCodec != "aac" {
 		t.Fatalf("with nodes = %s", ExplainPlannerResultV3(offloaded))
 	}
@@ -181,7 +236,7 @@ func TestPlanPlaybackV3Profile7StripOffloadsToHLSRemux(t *testing.T) {
 	}
 
 	union := local.WithAdvertised([]TransformationV3{{Name: "server_dv7_to_hdr10", Executor: "server", RecipeVersion: "1"}})
-	offloaded := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: settings, Registry: local, HLSRegistry: staticHLSRegistryV3(union)})
+	offloaded := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: settings, Registry: local, HLSRemuxRegistry: staticHLSRegistryV3(union)})
 	if offloaded.Plan == nil || offloaded.Plan.Delivery != DeliveryRemuxHLSV3 || offloaded.TargetVideoCodec != "copy" {
 		t.Fatalf("with nodes = %s", ExplainPlannerResultV3(offloaded))
 	}

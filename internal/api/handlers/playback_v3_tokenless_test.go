@@ -182,6 +182,14 @@ func progressiveRemuxFixtureV3(t *testing.T, file *models.MediaFile, hlsCapable 
 		{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},
 	})
 	presetLocalRegistryV3(handler, registry)
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{{
+			Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3,
+			RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3,
+		}}})
+	}))
+	t.Cleanup(worker.Close)
+	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{TranscodeNode: &nodepool.Node{URL: worker.URL}}}
 
 	request := v3HandlerStartRequest()
 	request.QualityPreference = "auto"

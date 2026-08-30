@@ -790,11 +790,9 @@ func (h *PlaybackHandler) localHLSExecutionRegistryWithInputsV3(
 	return local
 }
 
-// hlsPlanningRegistryV3 returns the registry HLS deliveries plan against: the
-// local execution registry plus every pooled transcode node's advertised
-// transformations. Only availability of locally-defined specs widens (name
-// and recipe version pinned by this server), so node-only capabilities remain
-// unavailable when transport falls back to the API process.
+// hlsPlanningRegistryV3 returns the video-transcode registry exposed by the
+// capability endpoint. Playback planning uses workload-specific registries so
+// remux and video policy cannot leak executor capabilities into one another.
 func (h *PlaybackHandler) hlsPlanningRegistryV3(ctx context.Context) *playback.TransformationRegistryV3 {
 	settings := h.plannerSettingsV3(ctx)
 	inventory := hlsToneMapCapabilityInventoryV3{}
@@ -812,21 +810,46 @@ func (h *PlaybackHandler) hlsPlanningRegistryWithInputsV3(
 	settings playback.PlannerSettingsV3,
 	inventory hlsToneMapCapabilityInventoryV3,
 ) *playback.TransformationRegistryV3 {
+	return h.hlsPlanningRegistryWithInputsForWorkloadV3(ctx, settings, inventory, noderouting.WorkloadVideoTranscode)
+}
+
+// hlsPlanningRegistryWithInputsForWorkloadV3 keeps transformation
+// availability inside the hard execution boundary for one HLS workload.
+func (h *PlaybackHandler) hlsPlanningRegistryWithInputsForWorkloadV3(
+	ctx context.Context,
+	settings playback.PlannerSettingsV3,
+	inventory hlsToneMapCapabilityInventoryV3,
+	workload noderouting.Workload,
+) *playback.TransformationRegistryV3 {
 	local := h.localHLSExecutionRegistryWithInputsV3(ctx, settings, inventory)
-	if !workerHLSVideoRouteAllowedV3(h.playbackRoutingPolicyForContextV3(ctx)) {
+	routingPolicy := h.playbackRoutingPolicyForContextV3(ctx)
+	localAllowed, workerAllowed := hlsRouteExecutorAvailabilityV3(workload, routingPolicy)
+	if !workerAllowed {
+		if !localAllowed {
+			return local.OnlyAdvertised(nil)
+		}
 		return local
 	}
 	enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3)
 	if !ok {
+		if !localAllowed {
+			return local.OnlyAdvertised(nil)
+		}
 		return local
 	}
 	nodeURLs := enumerator.TranscodeNodeURLs()
 	if len(nodeURLs) == 0 {
+		if !localAllowed {
+			return local.OnlyAdvertised(nil)
+		}
 		return local
 	}
 	var merged []playback.TransformationV3
 	for _, transformations := range h.pooledNodeTransformationsV3(ctx, nodeURLs) {
 		merged = append(merged, transformations...)
+	}
+	if !localAllowed {
+		return local.OnlyAdvertised(merged)
 	}
 	return local.WithAdvertised(merged)
 }
@@ -840,14 +863,45 @@ func (h *PlaybackHandler) localHLSToneMapCapabilitiesForTransportV3(ctx context.
 }
 
 func localHLSVideoRouteAllowedV3(policy config.PlaybackRoutingPolicy) bool {
-	policy = config.EffectivePlaybackRoutingPolicy(policy)
-	return policy.VideoTranscodeExecution != config.PlaybackExecutionWorkerOnly &&
-		policy.VideoTranscodeEgress != config.PlaybackEgressProxyOnly
+	return localHLSRouteAllowedV3(noderouting.WorkloadVideoTranscode, policy)
 }
 
 func workerHLSVideoRouteAllowedV3(policy config.PlaybackRoutingPolicy) bool {
-	policy = config.EffectivePlaybackRoutingPolicy(policy)
-	return policy.VideoTranscodeExecution != config.PlaybackExecutionAPIOnly
+	return workerHLSRouteAllowedV3(noderouting.WorkloadVideoTranscode, policy)
+}
+
+func localHLSRouteAllowedV3(workload noderouting.Workload, policy config.PlaybackRoutingPolicy) bool {
+	localAllowed, _ := hlsRouteExecutorAvailabilityV3(workload, policy)
+	return localAllowed
+}
+
+func workerHLSRouteAllowedV3(workload noderouting.Workload, policy config.PlaybackRoutingPolicy) bool {
+	_, workerAllowed := hlsRouteExecutorAvailabilityV3(workload, policy)
+	return workerAllowed
+}
+
+func hlsRouteExecutorAvailabilityV3(workload noderouting.Workload, policy config.PlaybackRoutingPolicy) (bool, bool) {
+	var delivery noderouting.Delivery
+	switch workload {
+	case noderouting.WorkloadRemux:
+		delivery = noderouting.DeliveryHLSRemux
+	case noderouting.WorkloadVideoTranscode:
+		delivery = noderouting.DeliveryHLSVideo
+	default:
+		return false, false
+	}
+	routes, err := noderouting.Candidates(noderouting.Request{
+		Workload: workload, Delivery: delivery, Policy: policy, ProxyAllowed: true,
+	})
+	if err != nil {
+		return false, false
+	}
+	var localAllowed, workerAllowed bool
+	for _, candidate := range routes.Candidates {
+		localAllowed = localAllowed || candidate.Execution == noderouting.ExecutionAPI
+		workerAllowed = workerAllowed || candidate.NeedsTranscodeNode()
+	}
+	return localAllowed, workerAllowed
 }
 
 // hlsToneMapCapabilityInventoryV3 snapshots local and pooled-node tone-map
@@ -923,42 +977,58 @@ func (h *PlaybackHandler) hlsToneMapCapabilitiesV3(ctx context.Context) tonemap.
 }
 
 type hlsPlanningSnapshotV3 struct {
-	handler   *PlaybackHandler
-	ctx       context.Context
-	settings  playback.PlannerSettingsV3
-	once      sync.Once
-	registry  *playback.TransformationRegistryV3
-	inventory hlsToneMapCapabilityInventoryV3
-	err       error
-	resolved  bool
+	handler           *PlaybackHandler
+	ctx               context.Context
+	settings          playback.PlannerSettingsV3
+	remuxOnce         sync.Once
+	remuxRegistry     *playback.TransformationRegistryV3
+	videoOnce         sync.Once
+	videoRegistry     *playback.TransformationRegistryV3
+	inventoryOnce     sync.Once
+	inventory         hlsToneMapCapabilityInventoryV3
+	inventoryErr      error
+	inventoryResolved bool
 }
 
-func (snapshot *hlsPlanningSnapshotV3) resolve() {
-	snapshot.once.Do(func() {
-		snapshot.resolved = true
+func (snapshot *hlsPlanningSnapshotV3) resolveInventory() {
+	snapshot.inventoryOnce.Do(func() {
+		snapshot.inventoryResolved = true
 		policy := tonemap.NewPolicy(snapshot.settings.HardwareToneMapEnabled, snapshot.settings.SoftwareToneMapEnabled)
 		if policy != tonemap.PolicyNone {
-			snapshot.inventory, snapshot.err = snapshot.handler.hlsToneMapCapabilityInventoryV3(snapshot.ctx)
+			snapshot.inventory, snapshot.inventoryErr = snapshot.handler.hlsToneMapCapabilityInventoryV3(snapshot.ctx)
 		}
-		snapshot.registry = snapshot.handler.hlsPlanningRegistryWithInputsV3(snapshot.ctx, snapshot.settings, snapshot.inventory)
 	})
 }
 
-func (snapshot *hlsPlanningSnapshotV3) hlsRegistry() *playback.TransformationRegistryV3 {
-	snapshot.resolve()
-	return snapshot.registry
+func (snapshot *hlsPlanningSnapshotV3) hlsRemuxRegistry() *playback.TransformationRegistryV3 {
+	snapshot.remuxOnce.Do(func() {
+		snapshot.remuxRegistry = snapshot.handler.hlsPlanningRegistryWithInputsForWorkloadV3(
+			snapshot.ctx, snapshot.settings, hlsToneMapCapabilityInventoryV3{}, noderouting.WorkloadRemux,
+		)
+	})
+	return snapshot.remuxRegistry
+}
+
+func (snapshot *hlsPlanningSnapshotV3) hlsVideoRegistry() *playback.TransformationRegistryV3 {
+	snapshot.videoOnce.Do(func() {
+		snapshot.resolveInventory()
+		snapshot.videoRegistry = snapshot.handler.hlsPlanningRegistryWithInputsForWorkloadV3(
+			snapshot.ctx, snapshot.settings, snapshot.inventory, noderouting.WorkloadVideoTranscode,
+		)
+	})
+	return snapshot.videoRegistry
 }
 
 func (snapshot *hlsPlanningSnapshotV3) toneMapCapabilities() tonemap.Capabilities {
-	snapshot.resolve()
+	snapshot.resolveInventory()
 	return snapshot.inventory.union
 }
 
 func (snapshot *hlsPlanningSnapshotV3) capabilityError() error {
-	if !snapshot.resolved {
+	if !snapshot.inventoryResolved {
 		return nil
 	}
-	return snapshot.err
+	return snapshot.inventoryErr
 }
 
 func retryIncompleteToneMapPlanningV3(result playback.PlannerResultV3, capabilityErr error) playback.PlannerResultV3 {
@@ -1000,7 +1070,8 @@ func retryIncompletePlaybackSettingsV3(result playback.PlannerResultV3, settings
 
 func (h *PlaybackHandler) planPlaybackWithCapabilitiesV3(ctx context.Context, input playback.PlannerInputV3) (playback.PlannerResultV3, error) {
 	snapshot := &hlsPlanningSnapshotV3{handler: h, ctx: ctx, settings: input.Settings}
-	input.HLSRegistry = snapshot.hlsRegistry
+	input.HLSRemuxRegistry = snapshot.hlsRemuxRegistry
+	input.HLSVideoRegistry = snapshot.hlsVideoRegistry
 	input.HLSToneMapCapabilities = snapshot.toneMapCapabilities
 	result := playback.PlanPlaybackV3(input)
 	if result.Terminal != nil {
@@ -2513,9 +2584,9 @@ func identityLocalFallbackAllowedV3(result playback.PlannerResultV3, policy conf
 
 // plannerInputV3 assembles the planner input for one route decision. The
 // escalation below re-plans with the same inputs the original decision used,
-// plus the refused route's attempt key. HLSRegistry and HLSToneMapCapabilities
-// are deliberately left unset: planPlaybackWithCapabilitiesV3 installs its own
-// lazily-memoized snapshot of both, so the two can never disagree.
+// plus the refused route's attempt key. The HLS registries and tone-map
+// capabilities are deliberately left unset: planPlaybackWithCapabilitiesV3
+// installs its own lazily memoized snapshot, so the inputs can never disagree.
 func (h *PlaybackHandler) plannerInputV3(ctx context.Context, req playback.StartRequestV3, requestedFile, effectiveFile *models.MediaFile, audioIndex int, attemptedKeys []string) playback.PlannerInputV3 {
 	return playback.PlannerInputV3{
 		Request:             req,

@@ -19,6 +19,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
+	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
@@ -434,6 +435,51 @@ func TestHLSPlanningCapabilitiesV3ExcludeWorkersForAPIOnlyExecution(t *testing.T
 	}
 	if got := remoteProbes.Load(); got != 0 {
 		t.Fatalf("remote capability probes = %d, want 0 under API-only execution", got)
+	}
+}
+
+func TestHLSPlanningCapabilitiesV3RespectWorkloadExecutionPolicy(t *testing.T) {
+	var remoteProbes atomic.Int32
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		remoteProbes.Add(1)
+		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{{
+			Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3,
+			RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3,
+		}}})
+	}))
+	t.Cleanup(remote.Close)
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{remote.URL}}
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
+		{Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3, Available: true},
+		{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},
+	}))
+	policy := config.DefaultPlaybackRoutingPolicy()
+	policy.RemuxExecution = config.PlaybackExecutionAPIOnly
+	policy.VideoTranscodeExecution = config.PlaybackExecutionWorkerOnly
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{Routing: policy}
+	}
+
+	remuxRegistry := handler.hlsPlanningRegistryWithInputsForWorkloadV3(
+		t.Context(), playback.PlannerSettingsV3{}, hlsToneMapCapabilityInventoryV3{}, noderouting.WorkloadRemux,
+	)
+	videoRegistry := handler.hlsPlanningRegistryWithInputsForWorkloadV3(
+		t.Context(), playback.PlannerSettingsV3{}, hlsToneMapCapabilityInventoryV3{}, noderouting.WorkloadVideoTranscode,
+	)
+
+	if !remuxRegistry.Available(playback.TransformationAudioToAACV3) {
+		t.Fatal("API-only remux registry excluded a local transformation")
+	}
+	if videoRegistry.Available(playback.TransformationVideoToH264V3) {
+		t.Fatal("worker-only video registry inherited a local-only transformation")
+	}
+	if !videoRegistry.Available(playback.TransformationAudioToAACV3) {
+		t.Fatal("worker-only video registry excluded a matching worker transformation")
+	}
+	if got := remoteProbes.Load(); got != 1 {
+		t.Fatalf("remote capability probes = %d, want 1 for video only", got)
 	}
 }
 

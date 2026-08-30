@@ -406,7 +406,7 @@ func TestPrepareTransportV3AuthorizedOriginsPublishGrantBackedHLSManifest(t *tes
 // available must keep the route the planner chose.
 func TestEscalateRefusedProgressiveRemuxV3SkipsEscalationWhenOriginsHaveAProxy(t *testing.T) {
 	handler, input, result := escalationFixtureV3(t, true)
-	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: "http://proxy-1"}}}
+	handler.NodePlanner.(*recordingNodePlannerV3).plan.ProxyNode = &nodepool.Node{URL: "http://proxy-1"}
 	handler.ProxyGrantStore = &recordingRecipeCardStoreV3{}
 
 	escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), authorizedOriginsModeV3(), func() playback.PlannerInputV3 { return input }, result)
@@ -422,7 +422,6 @@ func TestEscalateRefusedProgressiveRemuxV3SkipsEscalationWhenOriginsHaveAProxy(t
 // escalation must be too — otherwise the attempt plans a route nothing can run.
 func TestEscalateRefusedProgressiveRemuxV3StillEscalatesWithoutAnyProxyOrigin(t *testing.T) {
 	handler, input, result := escalationFixtureV3(t, true)
-	handler.NodePlanner = &recordingNodePlannerV3{}
 	handler.ProxyGrantStore = &recordingRecipeCardStoreV3{}
 
 	escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), authorizedOriginsModeV3(), func() playback.PlannerInputV3 { return input }, result)
@@ -449,7 +448,7 @@ func TestEscalateRefusedProgressiveRemuxV3StillEscalatesWithoutAUsableGrantStore
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			handler, input, result := escalationFixtureV3(t, true)
-			handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: "http://proxy-1"}}}
+			handler.NodePlanner.(*recordingNodePlannerV3).plan.ProxyNode = &nodepool.Node{URL: "http://proxy-1"}
 			handler.ProxyGrantStore = test.store
 
 			escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), authorizedOriginsModeV3(), func() playback.PlannerInputV3 { return input }, result)
