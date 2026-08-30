@@ -49,6 +49,15 @@ func hlsEAC3AudioCorrectionV3(source SourceDescriptorV3, request StartRequestV3)
 	return &quirk, true
 }
 
+// usesFirstPartyAndroidMedia3HLSV3 identifies the legacy Silo Android clients
+// that already opt into the device-quirks contract. Current clients advertise
+// native_hls_playback_v1 on the HLS delivery directly; this bounded fallback
+// keeps existing build 15 installs on the same native Media3 byte recipe.
+func usesFirstPartyAndroidMedia3HLSV3(request StartRequestV3) bool {
+	return deviceQuirkProtocolAvailableV3(request) &&
+		strings.EqualFold(strings.TrimSpace(request.ClientPlaybackContext.Device.Platform), "android")
+}
+
 func dv8HDR10PlusRuntimeCorrectionV3(source SourceDescriptorV3, request StartRequestV3, deliveryClass string) (*AppliedQuirkV3, bool) {
 	if !deviceQuirkProtocolAvailableV3(request) || source.DVProfile != 8 || !source.HDR10Plus ||
 		!isAmazonFireTVV3(request) || !deliverySupportsFeatureV3(request, deliveryClass, ClientDV8HDR10PlusSanitizerV3) {

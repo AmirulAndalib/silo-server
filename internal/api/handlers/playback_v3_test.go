@@ -2601,9 +2601,10 @@ func TestSeekReanchorIdentityChangesV3ReportsOnlyChangedFieldNames(t *testing.T)
 	candidate.PlanID = "plan:candidate"
 	candidate.Delivery = playback.DeliveryRemuxHLSV3
 	candidate.Stream.Container = "hls"
+	candidate.EffectiveRecipe.VideoSampleEntry = playback.VideoSampleEntryHVC1
 	candidate.EffectiveRecipe.AudioCodec = "ac3"
 	got := strings.Join(seekReanchorIdentityChangesV3(record, &candidate), ",")
-	if want := "plan_id,delivery,container,audio_codec"; got != want {
+	if want := "plan_id,delivery,container,video_sample_entry,audio_codec"; got != want {
 		t.Fatalf("changed fields = %q, want %q", got, want)
 	}
 }
@@ -3335,6 +3336,12 @@ func TestVideoSampleEntryForPlanV3(t *testing.T) {
 			name: "stripped HDR10",
 			plan: &playback.PlanV3{Delivery: playback.DeliveryRemuxHLSV3,
 				Transformations: []playback.TransformationV3{{Name: playback.TransformationServerDV7HDR10V3}}},
+			want: playback.VideoSampleEntryHVC1,
+		},
+		{
+			name: "explicit native HLS recipe",
+			plan: &playback.PlanV3{Delivery: playback.DeliveryRemuxHLSV3,
+				EffectiveRecipe: playback.EffectiveRecipeV3{VideoCodec: "hevc", VideoSampleEntry: playback.VideoSampleEntryHVC1}},
 			want: playback.VideoSampleEntryHVC1,
 		},
 		{
