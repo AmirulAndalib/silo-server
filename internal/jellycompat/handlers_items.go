@@ -1578,7 +1578,11 @@ func (h *ItemsHandler) HandleEpisodes(w http.ResponseWriter, r *http.Request) {
 		requestedSeasonID = decodedSeasonID
 		if h.seasonRepo != nil {
 			season, seasonErr := h.seasonRepo.GetByID(r.Context(), requestedSeasonID)
-			if seasonErr == nil && season != nil {
+			if seasonErr != nil && !errors.Is(seasonErr, catalog.ErrSeasonNotFound) {
+				writeError(w, http.StatusInternalServerError, "InternalServerError", "Database error")
+				return
+			}
+			if season != nil {
 				seriesID = season.SeriesID
 			}
 		}
