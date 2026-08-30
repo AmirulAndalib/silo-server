@@ -136,6 +136,49 @@ func TestForwardRestartPrunesOnlyFilesPresentAcrossSparseGap(t *testing.T) {
 	assertPrunerFileExists(t, filepath.Join(dir, "seg_00004.ts.tmp"))
 }
 
+func TestForwardRestartPrunesPreservedRangeBeforeFreshWindowFills(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-time.Minute)
+	opts := TranscodeOpts{
+		SessionID:               "partial-restart-window-test",
+		SegmentDuration:         2,
+		SegmentRetentionSeconds: 10,
+		StartSegmentNumber:      100,
+	}
+	for _, segment := range []int{90, 96, 97, 99, 100, 101, 102} {
+		writePrunerTestFile(t, filepath.Join(dir, segmentFilename(segment, opts)), []byte("segment"), old)
+	}
+	session := &TranscodeSession{
+		opts:                 opts,
+		outputDir:            dir,
+		lastPruneFloor:       90,
+		lastPruneHighWater:   opts.StartSegmentNumber - 1,
+		lastRequestedSegment: opts.StartSegmentNumber,
+		lastCompletedSegment: opts.StartSegmentNumber - 1,
+		pruneBeforeStart:     true,
+	}
+
+	// Only three replacement segments have been consumed, so the configured
+	// five-segment back buffer still reaches into the preserved generation.
+	// Files older than that partial window should be reclaimed immediately.
+	session.ReportSegmentDownloaded(opts.StartSegmentNumber + 2)
+	waitForPrunerFileMissing(t, filepath.Join(dir, segmentFilename(96, opts)))
+	waitForPrunePass(t, session, 97)
+
+	for _, segment := range []int{90, 96} {
+		assertPrunerFileMissing(t, filepath.Join(dir, segmentFilename(segment, opts)))
+	}
+	for _, segment := range []int{97, 99, 100, 101, 102} {
+		assertPrunerFileExists(t, filepath.Join(dir, segmentFilename(segment, opts)))
+	}
+	session.mu.Lock()
+	pruneBeforeStart := session.pruneBeforeStart
+	session.mu.Unlock()
+	if !pruneBeforeStart {
+		t.Fatal("partial replacement window discarded the remaining preserved back buffer")
+	}
+}
+
 func TestCopyRetentionUsesManifestDurations(t *testing.T) {
 	dir := t.TempDir()
 	old := time.Now().Add(-time.Minute)
@@ -191,6 +234,47 @@ func TestCopyRetentionUsesManifestDurations(t *testing.T) {
 	assertPrunerFileExists(t, filepath.Join(dir, segmentFilename(13, opts)))
 	assertPrunerFileExists(t, filepath.Join(dir, segmentFilename(14, opts)))
 	assertPrunerFileExists(t, filepath.Join(dir, segmentFilename(15, opts)))
+}
+
+func TestCopyRetentionParsesOnlyNewManifestEntries(t *testing.T) {
+	dir := t.TempDir()
+	opts := TranscodeOpts{
+		SessionID:               "copy-duration-cache-test",
+		SourceVideoCodec:        "h264",
+		TargetCodecVideo:        "copy",
+		SegmentRetentionSeconds: 10,
+	}
+	manifestPath := filepath.Join(dir, "stream.m3u8")
+	initialManifest := copyPrunerManifest(opts, 0, 3_000)
+	if err := os.WriteFile(manifestPath, []byte(initialManifest), 0o600); err != nil {
+		t.Fatalf("write initial manifest: %v", err)
+	}
+	session := &TranscodeSession{opts: opts, outputDir: dir}
+
+	floor, complete, err := session.segmentRetentionFloor(0, opts, 3_000)
+	if err != nil {
+		t.Fatalf("initial retention floor: %v", err)
+	}
+	if !complete || floor != 2_995 {
+		t.Fatalf("initial retention floor = (%d, %t), want (2995, true)", floor, complete)
+	}
+
+	// Make the already-indexed prefix invalid before appending five entries.
+	// An incremental update reads only the bounded manifest tail; reparsing the
+	// complete growing playlist would encounter this sentinel and fail.
+	advancedManifest := copyPrunerManifest(opts, 0, 3_005)
+	advancedManifest = strings.Replace(advancedManifest, "#EXTINF:2.0,", "#EXTINF:not-a-duration,", 1)
+	if err := os.WriteFile(manifestPath, []byte(advancedManifest), 0o600); err != nil {
+		t.Fatalf("write advanced manifest: %v", err)
+	}
+
+	floor, complete, err = session.segmentRetentionFloor(0, opts, 3_005)
+	if err != nil {
+		t.Fatalf("incremental retention floor: %v", err)
+	}
+	if !complete || floor != 3_000 {
+		t.Fatalf("incremental retention floor = (%d, %t), want (3000, true)", floor, complete)
+	}
 }
 
 func TestReportSegmentDownloadedDisabledKeepsSegments(t *testing.T) {
@@ -379,6 +463,17 @@ func writePrunerTestFile(t *testing.T, path string, contents []byte, modTime tim
 	if err := os.Chtimes(path, modTime, modTime); err != nil {
 		t.Fatalf("set times for %s: %v", filepath.Base(path), err)
 	}
+}
+
+func copyPrunerManifest(opts TranscodeOpts, firstSegment, lastSegment int) string {
+	var manifest strings.Builder
+	manifest.WriteString("#EXTM3U\n#EXT-X-VERSION:7\n")
+	for segment := firstSegment; segment <= lastSegment; segment++ {
+		manifest.WriteString("#EXTINF:2.0,\n")
+		manifest.WriteString(segmentFilename(segment, opts))
+		manifest.WriteByte('\n')
+	}
+	return manifest.String()
 }
 
 func waitForPrunePass(t *testing.T, session *TranscodeSession, wantFloor int) {

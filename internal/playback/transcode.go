@@ -178,6 +178,8 @@ type TranscodeSession struct {
 	lastPruneHighWater   int
 	segmentPruneRunning  bool
 	pruneBeforeStart     bool
+	copyDurationMu       sync.Mutex
+	copyDurationIndex    copyManifestDurationIndex
 	segmentGeneration    uint64
 	segmentIncarnation   string
 	throttler            *TranscodeThrottler
