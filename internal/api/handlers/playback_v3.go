@@ -73,6 +73,7 @@ const (
 	requestIDLogKeyV3                   = "request_id"
 	playbackLogValueV3                  = "playback"
 	playbackRemoteOutcomeFailedV3       = "failed"
+	routeCapabilityUnavailableReasonV3  = "route_capability_unavailable"
 )
 
 var errSubtitleStoreUnavailableV3 = errors.New("subtitle store unavailable")
@@ -2155,7 +2156,7 @@ func (h *PlaybackHandler) prepareTransportWithPolicyV3(r *http.Request, session 
 				releaser.ReleaseSession(session.ID)
 			}
 			excludedNodes[nodeURL] = struct{}{}
-			lastErr = combineTransportErrorsV3(lastErr, &transportErrorV3{reason: "route_capability_unavailable", message: "No available worker can execute the selected playback recipe.", retryable: true, cause: capabilityErr})
+			lastErr = combineTransportErrorsV3(lastErr, &transportErrorV3{reason: routeCapabilityUnavailableReasonV3, message: "No available worker can execute the selected playback recipe.", retryable: true, cause: capabilityErr})
 			continue
 		}
 
@@ -2254,7 +2255,7 @@ func (h *PlaybackHandler) validateLocalProgressiveCapabilitiesV3(ctx context.Con
 	}
 	if err := validateAdvertisedTransformationsV3(result.Plan, h.transformationRegistryV3(ctx).Advertised()); err != nil {
 		return &transportErrorV3{
-			reason: "route_capability_unavailable", message: "The API server cannot execute the selected progressive-remux recipe.",
+			reason: routeCapabilityUnavailableReasonV3, message: "The API server cannot execute the selected progressive-remux recipe.",
 			retryable: true, cause: err,
 		}
 	}
@@ -2357,7 +2358,7 @@ func (h *PlaybackHandler) prepareIdentityTransportV3(r *http.Request, session *p
 				releaser.ReleaseSession(session.ID)
 			}
 			return preparedTransportV3{}, &transportErrorV3{
-				reason: "route_capability_unavailable", message: "The selected proxy cannot execute the progressive-remux recipe.",
+				reason: routeCapabilityUnavailableReasonV3, message: "The selected proxy cannot execute the progressive-remux recipe.",
 				retryable: true, cause: capabilityErr,
 			}
 		}

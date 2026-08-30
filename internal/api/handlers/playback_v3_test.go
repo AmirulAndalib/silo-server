@@ -3091,7 +3091,7 @@ func TestPrepareTransportV3RejectsNodeMissingRequiredTransformation(t *testing.T
 	}
 	request := httptest.NewRequest(http.MethodPost, "/", nil)
 	_, transportErr := handler.prepareTransportV3(request, &playback.Session{ID: "session-capability"}, v3HandlerFixtureFile(t), playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac"}, mediaAuthModeV3{})
-	if transportErr == nil || transportErr.reason != "route_capability_unavailable" {
+	if transportErr == nil || transportErr.reason != routeCapabilityUnavailableReasonV3 {
 		t.Fatalf("transport error = %#v", transportErr)
 	}
 	if startHits != 0 {
