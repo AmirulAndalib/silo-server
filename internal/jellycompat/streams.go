@@ -1476,11 +1476,14 @@ const (
 	compatAudioCodecFLAC       = "flac"
 	compatAudioCodecMP3        = "mp3"
 	compatAudioCodecOpus       = "opus"
+	compatContainerMP4         = "mp4"
+	compatVideoCodecHEVC       = "hevc"
 	compatRangeDOVI            = "DOVI"
 	compatRangeDOVIWithHLG     = "DOVIWithHLG"
 	compatRangeDOVIWithHDR     = "DOVIWithHDR10"
 	compatRangeDOVIWithHDRPlus = "DOVIWithHDR10Plus"
 	compatRangeHDR10Plus       = "HDR10Plus"
+	compatRangeHDR10           = "HDR10"
 	compatRangeHLG             = "HLG"
 	compatRangeSDR             = "SDR"
 )
@@ -3007,7 +3010,7 @@ func compatMasterVideoRange(video models.VideoTrack, versionHDR bool) string {
 	switch compatVideoRangeType(video, versionHDR) {
 	case compatRangeHLG, compatRangeDOVIWithHLG:
 		return compatRangeHLG
-	case "HDR10", compatRangeHDR10Plus, compatRangeDOVI, compatRangeDOVIWithHDR, compatRangeDOVIWithHDRPlus:
+	case compatRangeHDR10, compatRangeHDR10Plus, compatRangeDOVI, compatRangeDOVIWithHDR, compatRangeDOVIWithHDRPlus:
 		return "PQ"
 	case compatRangeSDR:
 		return compatRangeSDR
@@ -3019,7 +3022,7 @@ func compatMasterVideoRange(video models.VideoTrack, versionHDR bool) string {
 func compatMasterCodecs(source PlaybackMediaSource, video models.VideoTrack, audio models.AudioTrack) string {
 	codecs := make([]string, 0, 2)
 	switch strings.ToLower(strings.TrimSpace(video.Codec)) {
-	case "hevc", "h265":
+	case compatVideoCodecHEVC, "h265":
 		if video.Level > 0 {
 			profile := "1.4"
 			if strings.EqualFold(strings.ReplaceAll(video.Profile, " ", ""), "main10") {
@@ -3027,7 +3030,7 @@ func compatMasterCodecs(source PlaybackMediaSource, video models.VideoTrack, aud
 			}
 			codecs = append(codecs, fmt.Sprintf("hvc1.%s.L%d.B0", profile, video.Level))
 		}
-	case "h264", "avc":
+	case compatTargetVideoCodec, "avc":
 		if video.Level > 0 {
 			profile := "4240"
 			switch strings.ToLower(strings.TrimSpace(video.Profile)) {

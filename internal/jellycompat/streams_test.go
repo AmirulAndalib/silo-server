@@ -592,6 +592,26 @@ func TestBuildProxyRedirectURLMarksCopyFMP4ForOldReaderRejection(t *testing.T) {
 	}
 }
 
+func TestBuildProxyRedirectURLCarriesMPEGTSForRemoteCopyRecipe(t *testing.T) {
+	h := &PlaybackHandler{JWTSecret: "test-secret"}
+	source := PlaybackMediaSource{HLSRemux: true, HLSRemuxMPEGTS: true}
+	redirectURL, err := h.buildProxyRedirectURL(
+		"play-1", "upstream-1", string(playback.PlayTranscode),
+		&models.MediaFile{FilePath: "/media/movie.mkv"}, source, nil, time.Time{},
+		"http://transcode-1", 0, &nodepool.Node{URL: "http://proxy-1"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := streamtoken.Verify(proxyTokenFromRedirect(t, redirectURL, string(playback.PlayTranscode)), h.JWTSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claims.CopyVideoMPEGTS {
+		t.Fatalf("copy proxy token omitted MPEG-TS packaging: %#v", claims)
+	}
+}
+
 func TestBuildProxyRedirectURLMarksToneMapForOldReaderRejection(t *testing.T) {
 	h := &PlaybackHandler{JWTSecret: "test-secret"}
 	source := PlaybackMediaSource{Version: catalog.FileVersion{HDR: true, VideoTracks: []models.VideoTrack{{VideoRangeType: "HDR10", ColorTransfer: "smpte2084"}}}}

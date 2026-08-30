@@ -1764,7 +1764,7 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 						// away from stalling while FFmpeg catches up. Briefly wait
 						// for a single lookahead fragment when available so the
 						// first resumed playback window is less brittle.
-						nextSegmentName := fmt.Sprintf("seg_%05d.m4s", segNum+1)
+						nextSegmentName := fmt.Sprintf("seg_%05d%s", segNum+1, filepath.Ext(segmentName))
 						if nextSegment, nextErr := transcodeSession.WaitForOpenSegment(nextSegmentName, 1200*time.Millisecond); nextErr == nil {
 							_ = nextSegment.Close()
 						}

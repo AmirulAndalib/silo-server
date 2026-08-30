@@ -1118,6 +1118,7 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 	if method == string(playback.PlayTranscode) && compatHLSCopiesVideo(source) {
 		claims.PlayMethod = streamtoken.PlayMethodCopyFMP4Transcode
 		claims.CopyFMP4RecipeVersion = playback.CopyFMP4RecipeVersion
+		claims.CopyVideoMPEGTS = source.HLSRemuxMPEGTS
 	}
 	if compatSession != nil {
 		claims.UserID = compatSession.StreamAppUserID
@@ -2134,7 +2135,7 @@ func (h *PlaybackHandler) mediaSourceDTO(routeItemID, playSessionID, compatToken
 			if source.HLSRemuxMPEGTS {
 				dto.TranscodingContainer = "ts"
 			} else {
-				dto.TranscodingContainer = "mp4"
+				dto.TranscodingContainer = compatContainerMP4
 			}
 		} else {
 			dto.TranscodingContainer = "ts"
