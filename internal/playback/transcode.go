@@ -2861,13 +2861,13 @@ func (s *TranscodeSession) restart(
 	s.restartCount++
 	s.segmentGeneration++
 	s.segmentPruneRunning = false
-	forwardRestart := startSegment > s.lastRequestedSegment
+	preStartRangePrunable := opts.SegmentRetentionSeconds > 0 && s.lastPruneFloor < startSegment
 	s.lastRequestedSegment = startSegment
 	s.lastCompletedSegment = startSegment - 1
-	if forwardRestart && s.opts.SegmentRetentionSeconds > 0 {
-		// Keep the old prune cursor reachable until the replacement process has
-		// produced a complete back buffer. Otherwise every forward restart leaves
-		// one retained window permanently behind startSegment.
+	if preStartRangePrunable {
+		// Every restart preserves files below startSegment. Keep an older prune
+		// cursor reachable until replacement downloads age out that range, even
+		// when the reported restart position trails the download high-water mark.
 		s.pruneBeforeStart = true
 	} else {
 		s.lastPruneFloor = startSegment - 1
