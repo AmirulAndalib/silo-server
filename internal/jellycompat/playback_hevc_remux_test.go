@@ -86,6 +86,26 @@ func TestBuildPlaybackSourceWebOSDOVIMKVUsesVersionedContainerRules(t *testing.T
 	}
 }
 
+func TestWebOSDolbyVisionRemuxUsesMPEGTS(t *testing.T) {
+	source := PlaybackMediaSource{
+		HLSRemux: true,
+		Version: catalog.FileVersion{VideoTracks: []models.VideoTrack{{
+			Codec: "hevc", DVProfile: 8, VideoRangeType: "DOVIWithHDR10",
+		}}},
+	}
+
+	if !compatWebOSDVMPEGTS("Mozilla/5.0 (Web0S; Linux/SmartTV)", source) {
+		t.Fatal("WebOS Dolby Vision remux did not select MPEG-TS")
+	}
+	if compatWebOSDVMPEGTS("Mozilla/5.0 (Macintosh)", source) {
+		t.Fatal("non-WebOS Dolby Vision remux unexpectedly selected MPEG-TS")
+	}
+	source.SupportsDirectPlay = true
+	if compatWebOSDVMPEGTS("Mozilla/5.0 (WebOS; Linux/SmartTV)", source) {
+		t.Fatal("direct-play source unexpectedly selected an HLS segment format")
+	}
+}
+
 func TestHLSRemuxCodecProfileUsesHLSSubContainer(t *testing.T) {
 	profile, err := decodeDeviceProfile(strings.NewReader(`{
 		"TranscodingProfiles": [{

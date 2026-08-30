@@ -142,6 +142,20 @@ func TestRecipeCardOriginalStartedAtRoundTripAndReconstruct(t *testing.T) {
 	}
 }
 
+func TestRecipeCardPreservesCopyVideoMPEGTS(t *testing.T) {
+	card := NewRecipeCard(42, "profile-1", 77, "", TranscodeOpts{
+		SessionID: "copy-ts", TargetCodecVideo: "copy", TargetCodecAudio: "copy", CopyVideoMPEGTS: true,
+	})
+	if !card.TranscodeOpts(t.TempDir(), "/usr/bin/ffmpeg", nil).CopyVideoMPEGTS {
+		t.Fatal("stored recipe lost copy-video MPEG-TS selection")
+	}
+	if back := RecipeCardFromClaims(ptr(card.ToClaims())); !back.CopyVideoMPEGTS {
+		t.Fatal("stream-token recipe lost copy-video MPEG-TS selection")
+	}
+}
+
+func ptr[T any](value T) *T { return &value }
+
 func TestRecipeCardPlayMethodConstructors(t *testing.T) {
 	if c := NewRecipeCard(1, "p", 2, "", TranscodeOpts{SessionID: "t"}); c.PlayMethod != PlayTranscode {
 		t.Errorf("transcode card PlayMethod = %q, want transcode", c.PlayMethod)

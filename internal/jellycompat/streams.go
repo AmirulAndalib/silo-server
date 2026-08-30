@@ -130,6 +130,20 @@ func compatHLSCopiesVideo(source PlaybackMediaSource) bool {
 	return source.HLSRemux || source.TranscodeAudio
 }
 
+func compatHLSUsesFMP4(source PlaybackMediaSource) bool {
+	return compatHLSCopiesVideo(source) && !source.HLSRemuxMPEGTS
+}
+
+func compatWebOSDVMPEGTS(userAgent string, source PlaybackMediaSource) bool {
+	ua := strings.ToLower(userAgent)
+	if (!strings.Contains(ua, "web0s") && !strings.Contains(ua, "webos")) ||
+		source.SupportsDirectPlay || !compatHLSCopiesVideo(source) {
+		return false
+	}
+	video := compatPrimaryVideoTrack(source.Version)
+	return playback.VideoSampleEntryForDVCopy(video.DVProfile) == playback.VideoSampleEntryDVH1
+}
+
 func compatHLSTranscodesAudio(source PlaybackMediaSource) bool {
 	if compatHLSCopiesVideo(source) {
 		return source.TranscodeAudio
@@ -157,7 +171,8 @@ func compatRecipeMatchesSource(recipe *playback.RecipeCard, source PlaybackMedia
 	return recipe != nil &&
 		recipe.MediaFileID == source.FileID &&
 		recipe.AudioTrackIndex == compatAudioTrackIndexOrDefault(source) &&
-		recipe.SourceAudioChannels == compatHLSRecipeSourceAudioChannels(source)
+		recipe.SourceAudioChannels == compatHLSRecipeSourceAudioChannels(source) &&
+		recipe.CopyVideoMPEGTS == source.HLSRemuxMPEGTS
 }
 
 // Versioned wrappers put a literal path segment in every byte URL whose
@@ -645,7 +660,7 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	segDuration := h.compatSegmentDuration()
 
 	if manifest == nil {
-		manifest = generateFullManifest(source.Version.Duration, segDuration, compatHLSCopiesVideo(*source), playSession.InitialSeekSeconds)
+		manifest = generateFullManifest(source.Version.Duration, segDuration, compatHLSUsesFMP4(*source), playSession.InitialSeekSeconds)
 	}
 	if compatHLSCopiesVideo(*source) {
 		manifest = generateCompatCopyVideoMasterManifest(
@@ -745,7 +760,7 @@ func (h *PlaybackHandler) HandleHLSManifest(w http.ResponseWriter, r *http.Reque
 	segDuration := h.compatSegmentDuration()
 
 	if manifest == nil {
-		manifest = generateFullManifest(source.Version.Duration, segDuration, compatHLSCopiesVideo(*source), playSession.InitialSeekSeconds)
+		manifest = generateFullManifest(source.Version.Duration, segDuration, compatHLSUsesFMP4(*source), playSession.InitialSeekSeconds)
 	}
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.WriteHeader(http.StatusOK)
@@ -2214,6 +2229,7 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 	if compatHLSCopiesVideo(source) {
 		opts.TargetCodecVideo = compatCopyCodec
 		opts.VideoSampleEntry = playback.VideoSampleEntryForDVCopy(file.PrimaryDVProfile())
+		opts.CopyVideoMPEGTS = source.HLSRemuxMPEGTS
 	}
 	if !compatHLSTranscodesAudio(source) {
 		opts.TargetCodecAudio = compatCopyCodec
@@ -2384,7 +2400,8 @@ func compatLiveTranscodeMatchesAudioSource(transcodeSession *playback.TranscodeS
 	}
 	opts := transcodeSession.Opts()
 	return opts.AudioTrackIndex == compatAudioTrackIndexOrDefault(source) &&
-		opts.SourceAudioChannels == compatHLSRecipeSourceAudioChannels(source)
+		opts.SourceAudioChannels == compatHLSRecipeSourceAudioChannels(source) &&
+		opts.CopyVideoMPEGTS == source.HLSRemuxMPEGTS
 }
 
 func shouldGenerateCompatFullManifest(source PlaybackMediaSource, segmentDuration int) bool {

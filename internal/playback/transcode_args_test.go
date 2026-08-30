@@ -446,6 +446,21 @@ func TestBuildFFmpegArgsCopyVideoAppliesSampleEntry(t *testing.T) {
 	}
 }
 
+func TestBuildFFmpegArgsCopyVideoCanUseMPEGTS(t *testing.T) {
+	args := strings.Join(buildFFmpegArgs(TranscodeOpts{
+		InputPath: "/media/dovi.mkv", OutputDir: t.TempDir(),
+		SourceVideoCodec: "hevc", TargetCodecVideo: "copy", TargetCodecAudio: "copy",
+		VideoSampleEntry: VideoSampleEntryDVH1, CopyVideoMPEGTS: true, SegmentDuration: 2,
+	}), " ")
+
+	if !strings.Contains(args, "-hls_segment_type mpegts") || !strings.Contains(args, "seg_%05d.ts") {
+		t.Fatalf("copy-video MPEG-TS recipe was not honored: %s", args)
+	}
+	if strings.Contains(args, "seg_%05d.m4s") {
+		t.Fatalf("copy-video MPEG-TS recipe leaked fMP4 output: %s", args)
+	}
+}
+
 func TestBuildFFmpegArgsCopyVideoAcceptsNoncanonicalCodecCase(t *testing.T) {
 	args := strings.Join(buildFFmpegArgs(TranscodeOpts{
 		InputPath:        "/media/movie.mkv",

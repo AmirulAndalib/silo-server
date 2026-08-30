@@ -103,6 +103,7 @@ type Claims struct {
 	ToneMapDVRPUPresent        bool    `json:"tmdr,omitempty"`
 	VideoBitstreamFilter       string  `json:"vbsf,omitempty"`
 	VideoSampleEntry           string  `json:"vse,omitempty"`
+	CopyVideoMPEGTS            bool    `json:"cvts,omitempty"`
 	OutputSubdir               string  `json:"osd,omitempty"`
 	SeekSeconds                float64 `json:"seek,omitempty"`
 	StreamOriginSeconds        float64 `json:"origin,omitempty"`

@@ -1373,6 +1373,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 	if compatHLSCopiesVideo(source) {
 		reqBody.TargetCodecVideo = compatCopyCodec
 		reqBody.VideoSampleEntry = playback.VideoSampleEntryForDVCopy(file.PrimaryDVProfile())
+		reqBody.CopyVideoMPEGTS = source.HLSRemuxMPEGTS
 		reqBody.CopyFMP4RecipeVersion = playback.CopyFMP4RecipeVersion
 	}
 	if !compatHLSTranscodesAudio(source) {
@@ -1564,6 +1565,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		TargetResolution:    reqBody.TargetResolution,
 		TargetBitrateKbps:   reqBody.TargetBitrateKbps,
 		VideoSampleEntry:    reqBody.VideoSampleEntry,
+		CopyVideoMPEGTS:     reqBody.CopyVideoMPEGTS,
 		SegmentDuration:     reqBody.SegmentDuration,
 		AudioTrackIndex:     reqBody.AudioTrackIndex,
 		SourceAudioChannels: reqBody.SourceAudioChannels,
@@ -1868,6 +1870,7 @@ func (h *PlaybackHandler) HandlePlaybackInfo(w http.ResponseWriter, r *http.Requ
 			requestedSubtitleIndex = intPtr(int(*req.SubtitleStreamIndex))
 		}
 		source.SelectedSubtitleStreamIndex = resolveSelectedSubtitleStreamIndex(source.Version, len(downloaded), downloadedKnown, requestedSubtitleIndex, source.DefaultSubtitleStreamIndex)
+		source.HLSRemuxMPEGTS = compatWebOSDVMPEGTS(r.UserAgent(), source)
 
 		sources = append(sources, source)
 		dto := h.mediaSourceDTO(routeItemID, playSessionID, session.Token, source)
@@ -2128,7 +2131,11 @@ func (h *PlaybackHandler) mediaSourceDTO(routeItemID, playSessionID, compatToken
 		}
 		dto.TranscodingURL = fmt.Sprintf("%s/master.m3u8?PlaySessionId=%s&MediaSourceId=%s", basePath, playSessionID, source.ID)
 		if compatHLSCopiesVideo(source) {
-			dto.TranscodingContainer = "mp4"
+			if source.HLSRemuxMPEGTS {
+				dto.TranscodingContainer = "ts"
+			} else {
+				dto.TranscodingContainer = "mp4"
+			}
 		} else {
 			dto.TranscodingContainer = "ts"
 		}
