@@ -434,6 +434,88 @@ func TestAdminUpdateSettingsValidatesRoutingAgainstStoredPeer(t *testing.T) {
 	}
 }
 
+func TestAdminUpdateSettingValidatesRoutingAgainstStoredPeer(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		storedKey string
+		stored    string
+		key       string
+		value     string
+	}{
+		{
+			name: "remux execution against proxy-only egress", storedKey: config.PlaybackRoutingRemuxEgressSettingKey,
+			stored: string(config.PlaybackEgressProxyOnly), key: config.PlaybackRoutingRemuxExecutionSettingKey,
+			value: string(config.PlaybackExecutionAPIOnly),
+		},
+		{
+			name: "remux egress against API-only execution", storedKey: config.PlaybackRoutingRemuxExecutionSettingKey,
+			stored: string(config.PlaybackExecutionAPIOnly), key: config.PlaybackRoutingRemuxEgressSettingKey,
+			value: string(config.PlaybackEgressProxyOnly),
+		},
+		{
+			name: "video execution against proxy-only egress", storedKey: config.PlaybackRoutingVideoTranscodeEgressSettingKey,
+			stored: string(config.PlaybackEgressProxyOnly), key: config.PlaybackRoutingVideoTranscodeExecutionSettingKey,
+			value: string(config.PlaybackExecutionAPIOnly),
+		},
+		{
+			name: "video egress against API-only execution", storedKey: config.PlaybackRoutingVideoTranscodeExecutionSettingKey,
+			stored: string(config.PlaybackExecutionAPIOnly), key: config.PlaybackRoutingVideoTranscodeEgressSettingKey,
+			value: string(config.PlaybackEgressProxyOnly),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			settings := &fakeServerSettingsStore{values: map[string]string{test.storedKey: test.stored}}
+			handler := &AdminHandler{SettingsRepo: settings}
+			request := httptest.NewRequest(
+				http.MethodPut,
+				"/admin/settings/"+test.key,
+				strings.NewReader(`{"value":"`+test.value+`"}`),
+			)
+			request = withChiParam(request, "key", test.key)
+			recorder := httptest.NewRecorder()
+
+			handler.HandleUpdateSetting(recorder, request)
+
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), `"error":"invalid_settings"`) {
+				t.Fatalf("response = %d %s, want invalid-settings rejection", recorder.Code, recorder.Body.String())
+			}
+			if settings.atomicCalls != 1 || settings.setManyCalls != 0 {
+				t.Fatalf("atomic calls=%d writes=%d, want 1 and 0", settings.atomicCalls, settings.setManyCalls)
+			}
+			if _, exists := settings.values[test.key]; exists {
+				t.Fatalf("invalid routing setting was persisted: %#v", settings.values)
+			}
+			if _, err := config.LoadFromDB(settings.values); err != nil {
+				t.Fatalf("rejected write left restart-invalid settings: %v", err)
+			}
+		})
+	}
+}
+
+func TestAdminUpdateSettingCanRepairLegacyInvalidRoutingPair(t *testing.T) {
+	settings := &fakeServerSettingsStore{values: map[string]string{
+		config.PlaybackRoutingRemuxExecutionSettingKey: string(config.PlaybackExecutionAPIOnly),
+		config.PlaybackRoutingRemuxEgressSettingKey:    string(config.PlaybackEgressProxyOnly),
+	}}
+	handler := &AdminHandler{SettingsRepo: settings}
+	request := httptest.NewRequest(
+		http.MethodPut,
+		"/admin/settings/"+config.PlaybackRoutingRemuxExecutionSettingKey,
+		strings.NewReader(`{"value":"worker_only"}`),
+	)
+	request = withChiParam(request, "key", config.PlaybackRoutingRemuxExecutionSettingKey)
+	recorder := httptest.NewRecorder()
+
+	handler.HandleUpdateSetting(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("response = %d %s, want repair accepted", recorder.Code, recorder.Body.String())
+	}
+	if _, err := config.LoadFromDB(settings.values); err != nil {
+		t.Fatalf("repaired settings are restart-invalid: %v", err)
+	}
+}
+
 func TestAdminUpdateSettingsValidatesProspectiveDiagnosticsLimits(t *testing.T) {
 	const (
 		mib = 1024 * 1024
