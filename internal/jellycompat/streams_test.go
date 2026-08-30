@@ -557,7 +557,7 @@ func TestHandleVideoStreamGuardsIntegratedAudioEncodingAfterProxyFiltering(t *te
 		name            string
 		sourceChannels  int
 		transcodeAudio  bool
-		localFallback   string
+		workerOnly      bool
 		includeOldProxy bool
 		localSupportsV2 bool
 		wantStatus      int
@@ -568,28 +568,28 @@ func TestHandleVideoStreamGuardsIntegratedAudioEncodingAfterProxyFiltering(t *te
 	}{
 		{
 			name: "disabled local fallback refuses old-proxy surround downmix", sourceChannels: 6,
-			transcodeAudio: true, localFallback: "false", includeOldProxy: true, localSupportsV2: true,
-			wantStatus: http.StatusServiceUnavailable, wantCode: "NoTranscodeNode",
+			transcodeAudio: true, workerOnly: true, includeOldProxy: true, localSupportsV2: true,
+			wantStatus: http.StatusServiceUnavailable, wantCode: "RouteCapacityUnavailable",
 		},
 		{
 			name: "incompatible local FFmpeg refuses surround downmix", sourceChannels: 6,
-			transcodeAudio: true, localFallback: "true", includeOldProxy: true, localSupportsV2: false,
+			transcodeAudio: true, includeOldProxy: true, localSupportsV2: false,
 			wantStatus: http.StatusServiceUnavailable, wantCode: "TranscodeUnavailable", wantProbe: true,
 		},
 		{
 			name: "compatible configured FFmpeg executes surround downmix", sourceChannels: 6,
-			transcodeAudio: true, localFallback: "true", includeOldProxy: true, localSupportsV2: true,
+			transcodeAudio: true, includeOldProxy: true, localSupportsV2: true,
 			wantStatus: http.StatusOK, wantBody: "remuxed", wantProbe: true, wantExecution: true,
 		},
 		{
 			name: "stereo encoding retains legacy no-probe behavior", sourceChannels: 2,
-			transcodeAudio: true, localFallback: "true", localSupportsV2: false,
+			transcodeAudio: true, localSupportsV2: false,
 			wantStatus: http.StatusOK, wantBody: "remuxed", wantExecution: true,
 		},
 		{
-			name: "copy-only remux ignores disabled transcode fallback", sourceChannels: 6,
-			localFallback: "false", localSupportsV2: false,
-			wantStatus: http.StatusOK, wantBody: "remuxed", wantExecution: true,
+			name: "copy-only remux honors worker-only policy", sourceChannels: 6,
+			workerOnly: true, localSupportsV2: false,
+			wantStatus: http.StatusServiceUnavailable, wantCode: "RouteCapacityUnavailable",
 		},
 	}
 
@@ -633,11 +633,11 @@ func TestHandleVideoStreamGuardsIntegratedAudioEncodingAfterProxyFiltering(t *te
 				fileResolver:  testCompatFileResolver{file: &models.MediaFile{ID: version.FileID, FilePath: mediaPath}},
 				NodePlanner:   planner,
 				JWTSecret:     "secret",
-				SettingsRepo: stubSettingsReader{values: map[string]string{
-					config.PlaybackLocalTranscodeFallbackSettingKey: tt.localFallback,
-				}},
-				FFmpegPath: ffmpegPath,
-				tm:         playback.NewTranscodeManager(),
+				FFmpegPath:    ffmpegPath,
+				tm:            playback.NewTranscodeManager(),
+			}
+			if tt.workerOnly {
+				requireCompatWorkerRouting(handler)
 			}
 
 			recorder := serveCompatVideoStream(

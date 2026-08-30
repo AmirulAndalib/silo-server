@@ -294,7 +294,7 @@ func TestHLSToneMapCapabilitiesV3FetchesNodesConcurrently(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "test-secret"
 	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{first.URL, second.URL}}
-	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{config.PlaybackLocalTranscodeFallbackSettingKey: "false"}}
+	requireWorkerRoutingV3(handler)
 	result := make(chan tonemap.Capabilities, 1)
 	go func() { result <- handler.hlsToneMapCapabilitiesV3(context.Background()) }()
 	select {
@@ -511,7 +511,7 @@ func TestHLSToneMapCapabilitiesV3HonorsSharedDeadline(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "test-secret"
 	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{slow.URL, slow.URL, fast.URL}}
-	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{config.PlaybackLocalTranscodeFallbackSettingKey: "false"}}
+	requireWorkerRoutingV3(handler)
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	started := time.Now()
@@ -539,7 +539,7 @@ func TestHLSToneMapCapabilityInventoryV3RedactsNodeURLSecrets(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "jwt-secret"
 	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{nodeURL}}
-	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{config.PlaybackLocalTranscodeFallbackSettingKey: "false"}}
+	requireWorkerRoutingV3(handler)
 
 	var logs bytes.Buffer
 	previousLogger := slog.Default()
@@ -617,7 +617,7 @@ func TestHandlePlaybackCapabilityV3AdvertisesPooledTransformationsWhenToneMapDis
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "test-secret"
 	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{remote.URL}}
-	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{config.PlaybackLocalTranscodeFallbackSettingKey: "false"}}
+	requireWorkerRoutingV3(handler)
 	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
 		{Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3},
 		{Name: playback.TransformationHDRToSDRToneMapV3, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3},
@@ -1087,7 +1087,6 @@ func TestPrepareTransportV3PrefersLocalHardwareBeforeSoftwareFallback(t *testing
 		}
 	}
 	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{
-		config.PlaybackLocalTranscodeFallbackSettingKey:   "true",
 		config.PlaybackTranscodeHardwareToneMapSettingKey: "true",
 		config.PlaybackTranscodeSoftwareToneMapSettingKey: "true",
 	}}
@@ -1233,7 +1232,7 @@ func TestPrepareSoftwareToneMapFallbackV3ValidatesLocalRegistry(t *testing.T) {
 	_, attempted, transportErr := handler.prepareSoftwareToneMapFallbackV3(
 		httptest.NewRequest(http.MethodPost, "/", nil),
 		&playback.Session{ID: "session-invalid-local-fallback", UserID: 7, ProfileID: "profile-1"},
-		file, result, preparedTimelineV3{}, mediaAuthModeV3{},
+		file, result, mediaAuthModeV3{},
 	)
 	if !attempted {
 		t.Fatal("software fallback was not attempted")
@@ -1295,9 +1294,7 @@ func TestPrepareTransportV3FallsBackToSoftwareCapacity(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "test-secret"
 	handler.NodePlanner = nodepool.NewPlanner(nodepool.NewProxyPool(), transcodes)
-	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{
-		config.PlaybackLocalTranscodeFallbackSettingKey: "false",
-	}}
+	requireWorkerRoutingV3(handler)
 	file := stableToneMapTransportFileV3(t)
 	result := playback.PlannerResultV3{
 		Plan: &playback.PlanV3{
@@ -1368,7 +1365,7 @@ func TestPrepareTransportV3TriesNextSoftwareNodeAfterStartFailure(t *testing.T) 
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "test-secret"
 	handler.NodePlanner = nodepool.NewPlanner(nodepool.NewProxyPool(), transcodes)
-	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{config.PlaybackLocalTranscodeFallbackSettingKey: "false"}}
+	requireWorkerRoutingV3(handler)
 	file := stableToneMapTransportFileV3(t)
 	result := playback.PlannerResultV3{
 		Plan:       &playback.PlanV3{PlanID: "plan:tone-map-retry", Delivery: playback.DeliveryTranscodeHLSV3, Transformations: required},
@@ -1430,7 +1427,7 @@ func TestPrepareTransportV3ClassifiesExhaustedRemoteLiveValidation(t *testing.T)
 			handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 			handler.JWTSecret = "test-secret"
 			handler.NodePlanner = nodepool.NewPlanner(nodepool.NewProxyPool(), transcodes)
-			handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{config.PlaybackLocalTranscodeFallbackSettingKey: "false"}}
+			requireWorkerRoutingV3(handler)
 			file := stableToneMapTransportFileV3(t)
 			result := playback.PlannerResultV3{
 				Plan:       &playback.PlanV3{PlanID: "plan:remote-live-validation", Delivery: playback.DeliveryTranscodeHLSV3, Transformations: required},

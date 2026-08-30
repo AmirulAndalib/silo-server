@@ -547,6 +547,7 @@ func TestMasterManifestGatesUnhealthyRemoteAdoption(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			handler, _, playbackStore := newRemoteTranscodeHandler(t, adoptedURL, &stubRecipeNodeStore{})
 			handler.NodePlanner = newPool(tt.adoptedHealthy)
+			requireCompatWorkerRouting(handler)
 			source := testRemoteTranscodeSource()
 			playbackStore.Put(PlaybackSession{
 				ID: "play-1", CompatToken: "compat-token", RouteItemID: "item",

@@ -409,6 +409,31 @@ func TestAdminUpdateSettingsRejectsWholeBatchBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestAdminUpdateSettingsValidatesRoutingAgainstStoredPeer(t *testing.T) {
+	settings := &fakeServerSettingsStore{values: map[string]string{
+		config.PlaybackRoutingRemuxEgressSettingKey: string(config.PlaybackEgressProxyOnly),
+	}}
+	handler := &AdminHandler{SettingsRepo: settings}
+	req := httptest.NewRequest(
+		http.MethodPut,
+		"/admin/settings",
+		strings.NewReader(`{"values":{"playback.routing.remux_execution":"api_only"}}`),
+	)
+	rec := httptest.NewRecorder()
+
+	handler.HandleUpdateSettings(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if settings.setManyCalls != 0 {
+		t.Fatalf("SetMany calls = %d, want 0", settings.setManyCalls)
+	}
+	if _, exists := settings.values[config.PlaybackRoutingRemuxExecutionSettingKey]; exists {
+		t.Fatalf("invalid routing setting was persisted: %#v", settings.values)
+	}
+}
+
 func TestAdminUpdateSettingsValidatesProspectiveDiagnosticsLimits(t *testing.T) {
 	const (
 		mib = 1024 * 1024

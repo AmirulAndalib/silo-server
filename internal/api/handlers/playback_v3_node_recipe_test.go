@@ -296,16 +296,18 @@ func TestFinalizeSessionStopDropsTheNodeRecipe(t *testing.T) {
 // transcode node keeps its half, because it is running the job.
 func TestPrepareTransportV3ReleasesTheProxyHalfWhenTheManifestIsNotProxyServed(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		jwtSecret string
-		mode      mediaAuthModeV3
-		grants    recipeCardStoreV3
+		name             string
+		jwtSecret        string
+		mode             mediaAuthModeV3
+		grants           recipeCardStoreV3
+		wantProxyRelease bool
 	}{
 		{
-			name:      "grant write failed",
-			jwtSecret: "test-secret",
-			mode:      authorizedOriginsModeV3(),
-			grants:    &recordingRecipeCardStoreV3{putErr: errors.New("redis is down")},
+			name:             "grant write failed",
+			jwtSecret:        "test-secret",
+			mode:             authorizedOriginsModeV3(),
+			grants:           &recordingRecipeCardStoreV3{putErr: errors.New("redis is down")},
+			wantProxyRelease: true,
 		},
 		{
 			// The legacy no-token fallback leaks the same half: no signable
@@ -337,8 +339,12 @@ func TestPrepareTransportV3ReleasesTheProxyHalfWhenTheManifestIsNotProxyServed(t
 			if transport.url != "/playback/transcode/session-proxy-half/master.m3u8" {
 				t.Fatalf("manifest url = %q, want the API-relayed manifest", transport.url)
 			}
-			if len(planner.releasedProxy) != 1 || planner.releasedProxy[0] != "session-proxy-half" {
-				t.Fatalf("proxy-half releases = %v, want the unused proxy reservation given back", planner.releasedProxy)
+			wantProxyReleases := 0
+			if test.wantProxyRelease {
+				wantProxyReleases = 1
+			}
+			if len(planner.releasedProxy) != wantProxyReleases {
+				t.Fatalf("proxy-half releases = %v, want %d", planner.releasedProxy, wantProxyReleases)
 			}
 			if len(planner.released) != 0 {
 				t.Fatalf("whole-reservation releases = %v, want none: the transcode node is running the job", planner.released)

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/nodepool"
+	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 )
@@ -278,10 +279,13 @@ func TestPrepareTransportV3AuthorizedOriginsFallBackToTheAPIWhenTheGrantFails(t 
 
 // The grant-failure fallback lands on the API server, which is ffmpeg work for
 // a remux carrying a server transformation. An operator who disabled
-// playback.local_transcode_fallback disabled exactly that, so the fallback has
+// worker-only remux routing forbids exactly that, so the fallback has
 // to honor the same gate the no-origins mode enforces rather than quietly
 // spawning an encoder. Escalation cannot cover this: it was legitimately
 // skipped at plan time because the pool does offer a proxy.
+//
+// The pool offering one is also why the refusal is retryable: the policy is
+// satisfiable and only this attempt's grant write failed.
 func TestPrepareTransportV3AuthorizedOriginsRefuseLocalRemuxWhenTheGrantFails(t *testing.T) {
 	handler, _, result := escalationFixtureV3(t, true)
 	proxy := capableProxyStubV3(t)
@@ -299,8 +303,8 @@ func TestPrepareTransportV3AuthorizedOriginsRefuseLocalRemuxWhenTheGrantFails(t 
 		transport.rollback()
 		t.Fatalf("grant failure produced an API-local remux at %q; local fallback is disabled", transport.url)
 	}
-	if transportErr.reason != "capacity_unavailable" || !transportErr.retryable {
-		t.Fatalf("transport error = %#v, want a retryable capacity_unavailable", transportErr)
+	if transportErr.reason != string(noderouting.OutcomeCapacityUnavailable) || !transportErr.retryable {
+		t.Fatalf("transport error = %#v, want a retryable proxy-egress capacity failure", transportErr)
 	}
 	if len(planner.released) != 1 {
 		t.Fatalf("planner releases = %v, want the unusable proxy reservation released", planner.released)

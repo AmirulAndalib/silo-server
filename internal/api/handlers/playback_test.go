@@ -479,6 +479,32 @@ func playbackTestConfig(ffmpegPath, transcodeDir string) func() config.PlaybackC
 	}
 }
 
+func requireWorkerRoutingV3(handler *PlaybackHandler) {
+	previous := handler.PlaybackConfig
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		var cfg config.PlaybackConfig
+		if previous != nil {
+			cfg = previous()
+		}
+		cfg.Routing = config.DefaultPlaybackRoutingPolicy()
+		cfg.Routing.RemuxExecution = config.PlaybackExecutionWorkerOnly
+		cfg.Routing.VideoTranscodeExecution = config.PlaybackExecutionWorkerOnly
+		return cfg
+	}
+}
+
+func useDefaultRoutingV3(handler *PlaybackHandler) {
+	previous := handler.PlaybackConfig
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		var cfg config.PlaybackConfig
+		if previous != nil {
+			cfg = previous()
+		}
+		cfg.Routing = config.DefaultPlaybackRoutingPolicy()
+		return cfg
+	}
+}
+
 func writePlaybackTestMediaFile(t *testing.T, name string) string {
 	t.Helper()
 

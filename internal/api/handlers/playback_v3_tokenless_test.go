@@ -11,7 +11,9 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
+	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/transcodenode"
 )
 
 // The negotiated mode's whole promise is that nothing the client can see
@@ -141,11 +143,40 @@ func escalationFixtureV3(t *testing.T, hlsCapable bool) (*PlaybackHandler, playb
 	file.CodecAudio = "eac3"
 	file.AudioTracks = []models.AudioTrack{{Codec: "eac3", Channels: 6, Layout: "5.1", Default: true}}
 
+	handler, input, result := progressiveRemuxFixtureV3(t, file, hlsCapable)
+	if !planRequiresServerTransformationsV3(result.Plan) {
+		t.Fatalf("fixture plan carries no server transformation: %#v", result.Plan.Transformations)
+	}
+	return handler, input, result
+}
+
+// copyOnlyEscalationFixtureV3 plans the lightest remux there is: the codecs are
+// already playable and only the container has to change, so the plan carries no
+// transformation at all. remux_execution=worker_only refuses it on the API
+// exactly as it refuses a converting one, so it needs the same escalation.
+func copyOnlyEscalationFixtureV3(t *testing.T) (*PlaybackHandler, playback.PlannerInputV3, playback.PlannerResultV3) {
+	t.Helper()
+	file := v3HandlerFixtureFile(t)
+	file.Container = "mkv"
+	file.FilePath = writePlaybackTestMediaFile(t, "movie.mkv")
+
+	handler, input, result := progressiveRemuxFixtureV3(t, file, true)
+	if planRequiresServerTransformationsV3(result.Plan) {
+		t.Fatalf("fixture plan is not copy-only: %#v", result.Plan.Transformations)
+	}
+	return handler, input, result
+}
+
+// progressiveRemuxFixtureV3 builds the worker-only handler and the planner input
+// both escalation fixtures share, and asserts the source plans a progressive
+// remux before any escalation runs.
+func progressiveRemuxFixtureV3(t *testing.T, file *models.MediaFile, hlsCapable bool) (*PlaybackHandler, playback.PlannerInputV3, playback.PlannerResultV3) {
+	t.Helper()
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{
-		"allow_4k_transcode":                "true",
-		"playback.local_transcode_fallback": "false",
+		"allow_4k_transcode": "true",
 	}}
+	requireWorkerRoutingV3(handler)
 	registry := playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
 		{Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3, Available: true},
 		{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},
@@ -168,10 +199,7 @@ func escalationFixtureV3(t *testing.T, hlsCapable bool) (*PlaybackHandler, playb
 	}
 	result := playback.PlanPlaybackV3(input)
 	if result.Terminal != nil || result.Plan == nil || result.Plan.Delivery != playback.DeliveryRemuxProgressiveV3 {
-		t.Fatalf("fixture planned %#v, want a progressive remux", result)
-	}
-	if !planRequiresServerTransformationsV3(result.Plan) {
-		t.Fatalf("fixture plan carries no server transformation: %#v", result.Plan.Transformations)
+		t.Fatalf("fixture planned %s, want a progressive remux", playback.ExplainPlannerResultV3(result))
 	}
 	return handler, input, result
 }
@@ -190,6 +218,56 @@ func TestEscalateRefusedProgressiveRemuxV3PlansHLSForCapableClients(t *testing.T
 	}
 }
 
+// worker_only refuses every API remux, including a container-only copy that
+// converts nothing. Escalation therefore cannot key on how heavy the recipe is:
+// the copy-only remux has no progressive route either, and must reach the same
+// HLS delivery a pooled transcode node serves instead of hard-failing while the
+// heavier remux plays.
+func TestEscalateRefusedProgressiveRemuxV3EscalatesCopyOnlyRemuxes(t *testing.T) {
+	handler, input, result := copyOnlyEscalationFixtureV3(t)
+	escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), mediaAuthModeV3{headerAuth: true}, func() playback.PlannerInputV3 { return input }, result)
+	if transportErr != nil {
+		t.Fatalf("escalation error = %#v", transportErr)
+	}
+	if escalated.Terminal != nil || escalated.Plan == nil || escalated.Plan.Delivery != playback.DeliveryRemuxHLSV3 {
+		t.Fatalf("escalated result = %s, want %q", playback.ExplainPlannerResultV3(escalated), playback.DeliveryRemuxHLSV3)
+	}
+
+	// The escalation is only worth anything if the delivery it picked actually
+	// runs somewhere: prove a pooled transcode node ends up executing it.
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/hw-capabilities":
+			writeJSON(w, http.StatusOK, playback.HWAccelInfo{})
+		case r.Method == http.MethodPost && r.URL.Path == "/transcode/start":
+			var start transcodenode.TranscodeStartRequest
+			if err := json.NewDecoder(r.Body).Decode(&start); err != nil {
+				t.Errorf("decode remote start: %v", err)
+			}
+			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: start.SessionID, Status: "started"})
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer node.Close()
+	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{TranscodeNode: &nodepool.Node{ID: 9, URL: node.URL}}}
+
+	transport, transportErr := handler.prepareTransportV3(
+		httptest.NewRequest(http.MethodPost, "/", nil),
+		&playback.Session{ID: "session-copy-only-escalated", UserID: 7, ProfileID: "profile-1"},
+		input.EffectiveFile,
+		escalated,
+		mediaAuthModeV3{headerAuth: true})
+	if transportErr != nil {
+		t.Fatalf("prepare escalated transport: %#v", transportErr)
+	}
+	defer transport.rollback()
+
+	if transport.routingExecution != noderouting.ExecutionTranscode || transport.routingExecutorURL != node.URL {
+		t.Fatalf("escalated execution = %q on %q, want the pooled transcode node %q", transport.routingExecution, transport.routingExecutorURL, node.URL)
+	}
+}
+
 // A progressive-only client has no alternative delivery, so the refusal is
 // final: a retryable error would make it retry a route no retry can satisfy.
 func TestEscalateRefusedProgressiveRemuxV3IsTerminalForProgressiveOnlyClients(t *testing.T) {
@@ -202,6 +280,7 @@ func TestEscalateRefusedProgressiveRemuxV3IsTerminalForProgressiveOnlyClients(t 
 
 func TestEscalateRefusedProgressiveRemuxV3LeavesExecutableRoutesAlone(t *testing.T) {
 	handler, input, result := escalationFixtureV3(t, true)
+	useDefaultRoutingV3(handler)
 	planned := 0
 	plannerInput := func() playback.PlannerInputV3 {
 		planned++
@@ -210,7 +289,6 @@ func TestEscalateRefusedProgressiveRemuxV3LeavesExecutableRoutesAlone(t *testing
 	if escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), mediaAuthModeV3{}, plannerInput, result); transportErr != nil || escalated.Plan.Delivery != playback.DeliveryRemuxProgressiveV3 {
 		t.Fatalf("legacy attempt was escalated: %#v %#v", escalated.Plan, transportErr)
 	}
-	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"playback.local_transcode_fallback": "true"}}
 	if escalated, transportErr := handler.escalateRefusedProgressiveRemuxV3(context.Background(), mediaAuthModeV3{headerAuth: true}, plannerInput, result); transportErr != nil || escalated.Plan.Delivery != playback.DeliveryRemuxProgressiveV3 {
 		t.Fatalf("locally executable remux was escalated: %#v %#v", escalated.Plan, transportErr)
 	}

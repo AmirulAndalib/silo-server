@@ -2473,6 +2473,8 @@ func validateProspectiveAdminSettings(values map[string]string, redisBootstrapAv
 var adminSettingDependencyGroups = [][]string{
 	{"auth.access_token_expiry", "auth.refresh_token_expiry"},
 	{"playback.watched_threshold", "playback.min_resume_threshold"},
+	{config.PlaybackRoutingRemuxExecutionSettingKey, config.PlaybackRoutingRemuxEgressSettingKey},
+	{config.PlaybackRoutingVideoTranscodeExecutionSettingKey, config.PlaybackRoutingVideoTranscodeEgressSettingKey},
 	{"s3.public_endpoint", "s3.public_bucket"},
 	{"s3.public_access_key", "s3.public_secret_key"},
 	{"s3.private_endpoint", "s3.private_bucket"},

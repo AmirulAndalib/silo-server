@@ -25,6 +25,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/markers"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
+	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
@@ -3078,7 +3079,7 @@ func TestPrepareTransportV3RejectsNodeMissingRequiredTransformation(t *testing.T
 
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.NodePlanner = staticNodePlannerV3{plan: nodepool.Plan{TranscodeNode: &nodepool.Node{URL: remote.URL}}}
-	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"playback.local_transcode_fallback": "false"}}
+	requireWorkerRoutingV3(handler)
 	plan := &playback.PlanV3{
 		PlanID:   "plan:remote-capability",
 		Delivery: playback.DeliveryTranscodeHLSV3,
@@ -3089,7 +3090,7 @@ func TestPrepareTransportV3RejectsNodeMissingRequiredTransformation(t *testing.T
 	}
 	request := httptest.NewRequest(http.MethodPost, "/", nil)
 	_, transportErr := handler.prepareTransportV3(request, &playback.Session{ID: "session-capability"}, v3HandlerFixtureFile(t), playback.PlannerResultV3{Plan: plan, PlayMethod: playback.PlayTranscode, TargetVideoCodec: "h264", TargetAudioCodec: "aac"}, mediaAuthModeV3{})
-	if transportErr == nil || transportErr.reason != "transcode_node_capability_unavailable" {
+	if transportErr == nil || transportErr.reason != "route_capability_unavailable" {
 		t.Fatalf("transport error = %#v", transportErr)
 	}
 	if startHits != 0 {
@@ -5220,7 +5221,7 @@ func TestPrepareTransportV3RefusesLocalRemuxWhenFallbackDisabled(t *testing.T) {
 	handler.JWTSecret = "test-secret"
 	stubCopySeekAnchorV3(handler)
 	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{}}
-	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"playback.local_transcode_fallback": "false"}}
+	requireWorkerRoutingV3(handler)
 
 	_, transportErr := handler.prepareTransportV3(
 		httptest.NewRequest(http.MethodPost, "/", nil),
@@ -5231,8 +5232,8 @@ func TestPrepareTransportV3RefusesLocalRemuxWhenFallbackDisabled(t *testing.T) {
 			PlayMethod:     playback.PlayRemux,
 			TranscodeAudio: true,
 		}, mediaAuthModeV3{})
-	if transportErr == nil || transportErr.reason != "capacity_unavailable" {
-		t.Fatalf("transport error = %#v, want capacity_unavailable when local remux work is disabled", transportErr)
+	if transportErr == nil || transportErr.reason != string(noderouting.OutcomeCapacityUnavailable) {
+		t.Fatalf("transport error = %#v, want route capacity unavailable when worker-only remux has no worker", transportErr)
 	}
 }
 
@@ -5240,7 +5241,7 @@ func TestPrepareTransportV3AllowsLocalDirectPlayWhenFallbackDisabled(t *testing.
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "test-secret"
 	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{}}
-	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"playback.local_transcode_fallback": "false"}}
+	requireWorkerRoutingV3(handler)
 
 	// Direct play moves bytes rather than running ffmpeg, so the transcode
 	// fallback gate must not strand a single-node deployment.
@@ -5470,7 +5471,7 @@ func TestPrepareTransportV3PrefersACapableSiblingProxy(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "test-secret"
 	stubCopySeekAnchorV3(handler)
-	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"playback.local_transcode_fallback": "false"}}
+	requireWorkerRoutingV3(handler)
 	handler.NodePlanner = &poolNodePlannerV3{proxies: []*nodepool.Node{
 		{ID: 1, URL: stale.URL},
 		{ID: 2, URL: upgraded.URL},
@@ -5865,5 +5866,29 @@ func TestRefreshNodeCapabilitiesV3NormalizesTheCacheKey(t *testing.T) {
 	}
 	if invalidations == 0 {
 		t.Fatal("the invalidation was counted under a different key than planning reads")
+	}
+}
+
+func TestPlaybackRoutingPolicySnapshotContextV3(t *testing.T) {
+	calls := 0
+	handler := &PlaybackHandler{PlaybackConfig: func() config.PlaybackConfig {
+		calls++
+		policy := config.DefaultPlaybackRoutingPolicy()
+		if calls > 1 {
+			policy.DirectPlayEgress = config.PlaybackEgressAPIOnly
+		}
+		return config.PlaybackConfig{Routing: policy}
+	}}
+
+	snapshot := handler.playbackRoutingPolicyV3()
+	ctx := withPlaybackRoutingPolicySnapshotV3(context.Background(), snapshot)
+	if got := handler.playbackRoutingPolicyForContextV3(ctx); got != snapshot {
+		t.Fatalf("context policy = %#v, want immutable snapshot %#v", got, snapshot)
+	}
+	if calls != 1 {
+		t.Fatalf("PlaybackConfig calls = %d, want one snapshot read", calls)
+	}
+	if got := handler.playbackRoutingPolicyForContextV3(context.Background()); got.DirectPlayEgress != config.PlaybackEgressAPIOnly {
+		t.Fatalf("unsnapshotted policy = %#v, want current config", got)
 	}
 }
