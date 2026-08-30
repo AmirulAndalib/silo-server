@@ -1,10 +1,17 @@
 package jellycompat
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/noderouting"
+	"github.com/Silo-Server/silo-server/internal/playback"
 )
 
 func TestCompatLocalHLSRouteAllowedHonorsHardPolicyBoundaries(t *testing.T) {
@@ -68,5 +75,115 @@ func TestCompatWorkerHLSRouteAllowedHonorsHardExecutionBoundaries(t *testing.T) 
 				t.Fatalf("compatWorkerHLSRouteAllowed() = %t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestCompatChildHLSRoutesRequireBoundPolicyCompliantTransport(t *testing.T) {
+	tests := []struct {
+		name       string
+		segment    bool
+		recipe     string
+		assignment playback.NodeRoutingAssignment
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "manifest rejects unbound route", wantStatus: http.StatusConflict, wantCode: compatPlaybackRouteUnboundCode},
+		{name: "segment rejects unbound route", segment: true, wantStatus: http.StatusConflict, wantCode: compatPlaybackRouteUnboundCode},
+		{
+			name: "manifest rejects recipe outside committed workload", recipe: "local",
+			assignment: playback.NodeRoutingAssignment{
+				Workload: string(noderouting.WorkloadRemux), Execution: string(noderouting.ExecutionTranscode),
+				Egress: string(noderouting.EgressAPI),
+			},
+			wantStatus: http.StatusServiceUnavailable, wantCode: compatRoutingPolicyUnsatisfiedCode,
+		},
+		{
+			name: "segment rejects recipe outside committed workload", segment: true, recipe: "local",
+			assignment: playback.NodeRoutingAssignment{
+				Workload: string(noderouting.WorkloadRemux), Execution: string(noderouting.ExecutionTranscode),
+				Egress: string(noderouting.EgressAPI),
+			},
+			wantStatus: http.StatusServiceUnavailable, wantCode: compatRoutingPolicyUnsatisfiedCode,
+		},
+		{
+			name: "manifest rejects API relay outside committed proxy route", recipe: "remote",
+			assignment: playback.NodeRoutingAssignment{
+				Workload: string(noderouting.WorkloadVideoTranscode), Execution: string(noderouting.ExecutionTranscode),
+				ExecutionNodeURL: "http://worker-1", Egress: string(noderouting.EgressProxy),
+			},
+			wantStatus: http.StatusServiceUnavailable, wantCode: compatRoutingPolicyUnsatisfiedCode,
+		},
+		{
+			name: "segment rejects API relay outside committed proxy route", segment: true, recipe: "remote",
+			assignment: playback.NodeRoutingAssignment{
+				Workload: string(noderouting.WorkloadVideoTranscode), Execution: string(noderouting.ExecutionTranscode),
+				ExecutionNodeURL: "http://worker-1", Egress: string(noderouting.EgressProxy),
+			},
+			wantStatus: http.StatusServiceUnavailable, wantCode: compatRoutingPolicyUnsatisfiedCode,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := testCompatSource(NewResourceIDCodec(), testCompatVersion())
+			var recipe *playback.RecipeCard
+			if test.recipe != "" {
+				card := playback.NewRecipeCard(7, "profile-1", source.FileID, "", playback.TranscodeOpts{SessionID: "upstream-1"})
+				if test.recipe == "remote" {
+					card.TranscodeNodeURL = "http://worker-1"
+				}
+				recipe = &card
+			}
+			var assignment *playback.NodeRoutingAssignment
+			if test.assignment.Workload != "" {
+				copy := test.assignment
+				assignment = &copy
+			}
+			store := NewPlaybackSessionStore(0, nil)
+			store.Put(PlaybackSession{
+				ID: "play-1", CompatToken: "compat-token", RouteItemID: "item-1", UpstreamSessionID: "upstream-1",
+				MediaSources: []PlaybackMediaSource{source}, Recipe: recipe, RoutingAssignment: assignment,
+			})
+			handler := &PlaybackHandler{playbackStore: store}
+
+			request := httptest.NewRequest(http.MethodGet, "/Videos/item-1/hls/play-1/stream.m3u8", nil)
+			routeCtx := chi.NewRouteContext()
+			routeCtx.URLParams.Add("id", "item-1")
+			routeCtx.URLParams.Add("playlistId", "play-1")
+			if test.segment {
+				routeCtx.URLParams.Add("segmentId", "0")
+				routeCtx.URLParams.Add("segmentContainer", "ts")
+			}
+			ctx := context.WithValue(t.Context(), chi.RouteCtxKey, routeCtx)
+			ctx = context.WithValue(ctx, compatSessionKey, &Session{Token: "compat-token", StreamAppUserID: 7})
+			recorder := httptest.NewRecorder()
+			if test.segment {
+				handler.HandleHLSSegment(recorder, request.WithContext(ctx))
+			} else {
+				handler.HandleHLSManifest(recorder, request.WithContext(ctx))
+			}
+
+			if recorder.Code != test.wantStatus || !strings.Contains(recorder.Body.String(), `"Error":"`+test.wantCode+`"`) {
+				t.Fatalf("response = %d %s, want %d %s", recorder.Code, recorder.Body.String(), test.wantStatus, test.wantCode)
+			}
+		})
+	}
+}
+
+func TestRecordNodeRoutingAssignmentPersistsChildRouteBinding(t *testing.T) {
+	store := NewPlaybackSessionStore(0, nil)
+	store.Put(PlaybackSession{ID: "play-1", CompatToken: "compat-token"})
+	handler := &PlaybackHandler{playbackStore: store}
+	want := playback.NodeRoutingAssignment{
+		Workload: string(noderouting.WorkloadVideoTranscode), Execution: string(noderouting.ExecutionTranscode),
+		ExecutionNodeID: 2, ExecutionNodeURL: "http://worker-1",
+		Egress: string(noderouting.EgressAPI),
+	}
+
+	if err := handler.recordNodeRoutingAssignment(t.Context(), "play-1", "upstream-1", want); err != nil {
+		t.Fatalf("record route: %v", err)
+	}
+	stored, ok := store.Get("play-1")
+	if !ok || stored.RoutingAssignment == nil || *stored.RoutingAssignment != want {
+		t.Fatalf("stored route = %#v, want %#v", stored.RoutingAssignment, want)
 	}
 }

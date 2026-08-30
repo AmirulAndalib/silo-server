@@ -36,6 +36,7 @@ import (
 const (
 	compatRoutingPolicyUnsatisfiedCode = "RoutingPolicyUnsatisfied"
 	compatRouteCapacityUnavailableCode = "RouteCapacityUnavailable"
+	compatPlaybackRouteUnboundCode     = "PlaybackRouteUnbound"
 )
 
 // compatRouteOutcomeCode maps an unselected route outcome onto the Jellyfin
@@ -78,6 +79,37 @@ func compatWorkerHLSRouteAllowed(workload noderouting.Workload, policy config.Pl
 	default:
 		return false
 	}
+}
+
+// compatChildHLSRouteMatches reports whether a durable recipe has a route
+// assignment committed by the master manifest. Child handlers cannot select
+// or redirect a route of their own, and this API origin may only serve the
+// workload when its committed egress is the API. Execution may legitimately
+// change later (for example, during an audio switch), so the current recipe is
+// authoritative for its local-versus-worker executor.
+func compatChildHLSRouteMatches(source PlaybackMediaSource, recipe *playback.RecipeCard, assignment *playback.NodeRoutingAssignment) bool {
+	if recipe == nil || assignment == nil {
+		return false
+	}
+	workload := noderouting.WorkloadRemux
+	if !compatHLSCopiesVideo(source) {
+		workload = noderouting.WorkloadVideoTranscode
+	}
+	return assignment.Workload == string(workload) &&
+		assignment.Execution != "" &&
+		assignment.Egress == string(noderouting.EgressAPI)
+}
+
+func (h *PlaybackHandler) requireCompatChildHLSRoute(w http.ResponseWriter, playSession *PlaybackSession, source PlaybackMediaSource) bool {
+	if playSession == nil || playSession.Recipe == nil || playSession.RoutingAssignment == nil {
+		writeError(w, http.StatusConflict, compatPlaybackRouteUnboundCode, "Request the master manifest before child HLS resources")
+		return false
+	}
+	if !compatChildHLSRouteMatches(source, playSession.Recipe, playSession.RoutingAssignment) {
+		writeError(w, http.StatusServiceUnavailable, compatRoutingPolicyUnsatisfiedCode, "The child HLS request does not match the route bound by the master manifest")
+		return false
+	}
+	return true
 }
 
 // Jellyfin Web is sensitive to startup latency. Use shorter compat segments
@@ -403,7 +435,11 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 				assignment.ExecutionNodeID = proxyNode.ID
 				assignment.ExecutionNodeURL = proxyNode.URL
 			}
-			h.recordNodeRoutingAssignment(r.Context(), playSession.UpstreamSessionID, assignment)
+			if err := h.recordNodeRoutingAssignment(r.Context(), playSession.ID, playSession.UpstreamSessionID, assignment); err != nil {
+				h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
+				writeError(w, http.StatusInternalServerError, "ServerError", "Failed to bind playback route")
+				return
+			}
 			http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 			return
 		}
@@ -428,9 +464,13 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 	if decision.Shape.Workload == noderouting.WorkloadRemux {
 		localExecution = noderouting.ExecutionAPI
 	}
-	h.recordNodeRoutingAssignment(r.Context(), playSession.UpstreamSessionID, playback.NodeRoutingAssignment{
+	if err := h.recordNodeRoutingAssignment(r.Context(), playSession.ID, playSession.UpstreamSessionID, playback.NodeRoutingAssignment{
 		Workload: string(decision.Shape.Workload), Execution: string(localExecution), Egress: string(noderouting.EgressAPI),
-	})
+	}); err != nil {
+		h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
+		writeError(w, http.StatusInternalServerError, "ServerError", "Failed to bind playback route")
+		return
+	}
 	if requiresAudioBoost {
 		if capabilityErr := h.requireLocalAudioDownmixCapability(r.Context(), compatSourceAudioChannels(*source)); capabilityErr != nil {
 			h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
@@ -664,11 +704,15 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 		if decision.Shape.Egress == noderouting.EgressProxy {
 			redirectURL, redirectErr := h.buildProxyRedirectURL(playSession.ID, playSession.UpstreamSessionID, string(playback.PlayTranscode), file, *source, session, playSession.CreatedAt, remoteNodeURL, 0, plan.ProxyNode)
 			if redirectErr == nil {
-				h.recordNodeRoutingAssignment(r.Context(), playSession.UpstreamSessionID, playback.NodeRoutingAssignment{
+				if err := h.recordNodeRoutingAssignment(r.Context(), playSession.ID, playSession.UpstreamSessionID, playback.NodeRoutingAssignment{
 					Workload: string(decision.Shape.Workload), Execution: string(noderouting.ExecutionTranscode),
 					ExecutionNodeID: executionNodeID, ExecutionNodeURL: remoteNodeURL,
 					Egress: string(noderouting.EgressProxy), EgressNodeID: plan.ProxyNode.ID, EgressNodeURL: plan.ProxyNode.URL,
-				})
+				}); err != nil {
+					h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
+					writeError(w, http.StatusInternalServerError, "ServerError", "Failed to bind playback route")
+					return
+				}
 				http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 				return
 			}
@@ -687,10 +731,14 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 			excludedNodes[strings.TrimRight(remoteNodeURL, "/")] = struct{}{}
 			continue
 		}
-		h.recordNodeRoutingAssignment(r.Context(), playSession.UpstreamSessionID, playback.NodeRoutingAssignment{
+		if err := h.recordNodeRoutingAssignment(r.Context(), playSession.ID, playSession.UpstreamSessionID, playback.NodeRoutingAssignment{
 			Workload: string(decision.Shape.Workload), Execution: string(noderouting.ExecutionTranscode),
 			ExecutionNodeID: executionNodeID, ExecutionNodeURL: remoteNodeURL, Egress: string(noderouting.EgressAPI),
-		})
+		}); err != nil {
+			h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
+			writeError(w, http.StatusInternalServerError, "ServerError", "Failed to bind playback route")
+			return
+		}
 		writeCompatManifest(w, manifest, playSession, *source, h.compatSegmentDuration())
 		return
 	}
@@ -707,9 +755,13 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	// Ensure the transcode process is running.
 	manifest, err := h.ensureTranscodeManifestWithToneMapMode(r.Context(), session, playSession.ID, *source, requiredToneMapMode)
 	if err == nil {
-		h.recordNodeRoutingAssignment(r.Context(), playSession.UpstreamSessionID, playback.NodeRoutingAssignment{
+		if routeErr := h.recordNodeRoutingAssignment(r.Context(), playSession.ID, playSession.UpstreamSessionID, playback.NodeRoutingAssignment{
 			Workload: string(localRoutingWorkload), Execution: string(noderouting.ExecutionAPI), Egress: string(noderouting.EgressAPI),
-		})
+		}); routeErr != nil {
+			h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
+			writeError(w, http.StatusInternalServerError, "ServerError", "Failed to bind playback route")
+			return
+		}
 		// Local-fallback path: the upstream session was minted in here, so this
 		// is the first point at which the observation can carry the merged view's
 		// canonical key. No-op when the earlier attach already succeeded.
@@ -790,6 +842,9 @@ func (h *PlaybackHandler) HandleHLSManifest(w http.ResponseWriter, r *http.Reque
 	if !validateCompatRemuxV1Route(w, r, compatHLSUsesAudioCopyV1(*source)) {
 		return
 	}
+	if !h.requireCompatChildHLSRoute(w, playSession, *source) {
+		return
+	}
 	// Before ensureTranscodeManifest, for the same reason as the master manifest.
 	attachCompatStream(r.Context(), session, playSession, source.FileID)
 	if playSession.Recipe != nil && playSession.Recipe.TranscodeNodeURL != "" {
@@ -850,6 +905,9 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !validateCompatRemuxV1Route(w, r, compatHLSUsesAudioCopyV1(*source)) {
+		return
+	}
+	if !h.requireCompatChildHLSRoute(w, playSession, *source) {
 		return
 	}
 	segmentSourceFileID := source.FileID

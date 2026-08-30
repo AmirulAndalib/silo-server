@@ -176,17 +176,31 @@ type nodeRoutingAssignmentSetter interface {
 	SetNodeRoutingAssignment(sessionID string, assignment playback.NodeRoutingAssignment) error
 }
 
-func (h *PlaybackHandler) recordNodeRoutingAssignment(ctx context.Context, sessionID string, assignment playback.NodeRoutingAssignment) {
+// recordNodeRoutingAssignment commits the compat-owned route marker before
+// mirroring it onto the native session used by admin and session sync views.
+// Child HLS requests trust the durable compat marker, so its write is fatal;
+// the native mirror remains best-effort as it was before route markers existed.
+func (h *PlaybackHandler) recordNodeRoutingAssignment(ctx context.Context, playSessionID, sessionID string, assignment playback.NodeRoutingAssignment) error {
+	if h.playbackStore != nil {
+		if err := h.playbackStore.Update(playSessionID, func(current *PlaybackSession) error {
+			committed := assignment
+			current.RoutingAssignment = &committed
+			return nil
+		}); err != nil {
+			return fmt.Errorf("persist Jellyfin-compatible node route: %w", err)
+		}
+	}
 	setter, ok := h.sessionMgr.(nodeRoutingAssignmentSetter)
 	if !ok {
-		return
+		return nil
 	}
 	if err := setter.SetNodeRoutingAssignment(sessionID, assignment); err != nil {
 		slog.WarnContext(ctx, "record Jellyfin-compatible node route failed", "component", "jellycompat",
 			"error", err, "playback_session_id", sessionID)
-		return
+		return nil
 	}
 	h.syncSessionsNow(ctx, "compat_node_routing")
+	return nil
 }
 
 // recordTranscodeStreamDetails mirrors the encode decisions of a started
