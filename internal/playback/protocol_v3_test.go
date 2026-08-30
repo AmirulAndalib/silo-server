@@ -1009,16 +1009,19 @@ func TestHLSVideoSampleEntryV3ScopesNativeRecipes(t *testing.T) {
 	tests := []struct {
 		name         string
 		platform     string
+		appBuild     string
 		deviceQuirks bool
 		nativeHLS    bool
 		dvProfile    int
 		dvStrip      bool
 		want         string
 	}{
-		{name: "legacy Android plain HEVC", platform: "android", deviceQuirks: true, want: VideoSampleEntryHVC1},
-		{name: "legacy Android Profile 7 strip", platform: "android", deviceQuirks: true, dvProfile: 7, dvStrip: true, want: VideoSampleEntryHVC1},
-		{name: "legacy Android Profile 8 preserve", platform: "android", deviceQuirks: true, dvProfile: 8, want: VideoSampleEntryDVH1},
-		{name: "unscoped Android client", platform: "android", dvProfile: 8, want: ""},
+		{name: "legacy Android plain HEVC", platform: "android", appBuild: legacyAndroidMedia3HLSBuildV3, deviceQuirks: true, want: VideoSampleEntryHVC1},
+		{name: "legacy Android Profile 7 strip", platform: "android", appBuild: legacyAndroidMedia3HLSBuildV3, deviceQuirks: true, dvProfile: 7, dvStrip: true, want: VideoSampleEntryHVC1},
+		{name: "legacy Android Profile 8 preserve", platform: "android", appBuild: legacyAndroidMedia3HLSBuildV3, deviceQuirks: true, dvProfile: 8, want: VideoSampleEntryDVH1},
+		{name: "Android quirks without legacy build", platform: "android", deviceQuirks: true, dvProfile: 8, want: ""},
+		{name: "Android quirks on another build", platform: "android", appBuild: "16", deviceQuirks: true, dvProfile: 8, want: ""},
+		{name: "unscoped Android legacy build", platform: "android", appBuild: legacyAndroidMedia3HLSBuildV3, dvProfile: 8, want: ""},
 		{name: "web MediaSource", platform: "web", deviceQuirks: true, dvProfile: 7, dvStrip: true, want: ""},
 		{name: "explicit native HLS Profile 7 strip", platform: "tvos", nativeHLS: true, dvProfile: 7, dvStrip: true, want: VideoSampleEntryHVC1},
 		{name: "explicit native HLS Profile 8 preserve", platform: "tvos", nativeHLS: true, dvProfile: 8, want: VideoSampleEntryDVH1},
@@ -1027,6 +1030,7 @@ func TestHLSVideoSampleEntryV3ScopesNativeRecipes(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			req := validStartRequestV3()
 			req.ClientPlaybackContext.Device.Platform = test.platform
+			req.ClientPlaybackContext.AppBuild = test.appBuild
 			if test.deviceQuirks {
 				req.ClientFeatures = append(req.ClientFeatures, FeatureDeviceQuirksV3)
 			}
@@ -1072,6 +1076,7 @@ func TestPlanPlaybackV3AndroidMedia3HLSRecipesAcrossSourceQualities(t *testing.T
 				req := validStartRequestV3()
 				req.QualityPreference = quality
 				req.ClientPlaybackContext.Device.Platform = "android"
+				req.ClientPlaybackContext.AppBuild = legacyAndroidMedia3HLSBuildV3
 				req.ClientFeatures = append(req.ClientFeatures, FeatureDeviceQuirksV3)
 				req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{{Codec: "hevc", Profiles: []string{"main 10"}, Levels: []int{153}, BitDepths: []int{10}, MaxWidth: 3840, MaxHeight: 2160, MaxFrameRate: 60, MaxBitrateKbps: 80_000, Hardware: true}}
 				req.Capabilities.HDRDetails = profile.hdr
