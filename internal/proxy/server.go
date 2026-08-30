@@ -26,6 +26,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/nodemetrics"
+	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
@@ -472,8 +473,49 @@ func (s *Server) verifyToken(w http.ResponseWriter, r *http.Request) *streamtoke
 	return claims
 }
 
-func (s *Server) handleDirectPlay(w http.ResponseWriter, r *http.Request) {
+func (s *Server) verifyPlaybackToken(w http.ResponseWriter, r *http.Request) *streamtoken.Claims {
 	claims := s.verifyToken(w, r)
+	if claims == nil {
+		return nil
+	}
+	if status := proxyEgressStatusV3(claims.RoutingWorkload, claims.RoutingExecution, claims.RoutingEgress); status != 0 {
+		writeProxyRouteStatusV3(w, status)
+		return nil
+	}
+	return claims
+}
+
+// proxyEgressStatusV3 enforces the media origin frozen into a routed playback
+// artifact. An entirely empty tuple predates node routing and remains usable
+// until its bounded token/grant lifetime expires; a partial tuple is an
+// uncommitted route and must not fail open on any proxy media endpoint.
+func proxyEgressStatusV3(workload, execution, egress string) int {
+	workload = strings.TrimSpace(workload)
+	execution = strings.TrimSpace(execution)
+	egress = strings.TrimSpace(egress)
+	if workload == "" && execution == "" && egress == "" {
+		return 0
+	}
+	if workload == "" || execution == "" || egress == "" {
+		return http.StatusConflict
+	}
+	if egress != string(noderouting.EgressProxy) {
+		return http.StatusServiceUnavailable
+	}
+	return 0
+}
+
+func writeProxyRouteStatusV3(w http.ResponseWriter, status int) {
+	switch status {
+	case http.StatusConflict:
+		http.Error(w, "playback route unbound", status)
+	default:
+		http.Error(w, "routing policy unsatisfied", status)
+	}
+}
+
+func (s *Server) handleDirectPlay(w http.ResponseWriter, r *http.Request) {
+	claims := s.verifyPlaybackToken(w, r)
 	if claims == nil {
 		return
 	}
@@ -640,7 +682,7 @@ func (s *Server) downloadBandwidthManager() *downloads.BandwidthManager {
 }
 
 func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
-	claims := s.verifyToken(w, r)
+	claims := s.verifyPlaybackToken(w, r)
 	if claims == nil {
 		return
 	}
@@ -656,7 +698,7 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAudioV2Remux(w http.ResponseWriter, r *http.Request) {
-	claims := s.verifyToken(w, r)
+	claims := s.verifyPlaybackToken(w, r)
 	if claims == nil {
 		return
 	}
@@ -711,7 +753,7 @@ func (s *Server) serveRemuxClaims(w http.ResponseWriter, r *http.Request, claims
 }
 
 func (s *Server) handleTranscodeManifest(w http.ResponseWriter, r *http.Request) {
-	claims := s.verifyToken(w, r)
+	claims := s.verifyPlaybackToken(w, r)
 	if claims == nil {
 		return
 	}
@@ -721,7 +763,7 @@ func (s *Server) handleTranscodeManifest(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleTranscodeSegment(w http.ResponseWriter, r *http.Request) {
-	claims := s.verifyToken(w, r)
+	claims := s.verifyPlaybackToken(w, r)
 	if claims == nil {
 		return
 	}
@@ -771,7 +813,7 @@ func sessionInfo(tr *nodesessions.Tracker, claims *streamtoken.Claims, kind stri
 }
 
 func (s *Server) handleSubtitle(w http.ResponseWriter, r *http.Request) {
-	claims := s.verifyToken(w, r)
+	claims := s.verifyPlaybackToken(w, r)
 	if claims == nil {
 		return
 	}
@@ -845,7 +887,7 @@ func (s *Server) handleSubtitle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSubtitleFonts(w http.ResponseWriter, r *http.Request) {
-	claims := s.verifyToken(w, r)
+	claims := s.verifyPlaybackToken(w, r)
 	if claims == nil {
 		return
 	}

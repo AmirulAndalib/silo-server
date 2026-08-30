@@ -107,6 +107,14 @@ func (s *Server) authorizeGrant(w http.ResponseWriter, r *http.Request) (*playba
 		writeGrantError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
 		return nil, false
 	}
+	if status := proxyEgressStatusV3(card.RoutingWorkload, card.RoutingExecution, card.RoutingEgress); status != 0 {
+		if status == http.StatusConflict {
+			writeGrantError(w, status, "playback_route_unbound", "Request a new playback plan before serving media")
+		} else {
+			writeGrantError(w, status, "routing_policy_unsatisfied", "The media request does not match the route bound by the playback plan")
+		}
+		return nil, false
+	}
 	return card, true
 }
 

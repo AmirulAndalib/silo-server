@@ -6,11 +6,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
+	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
+	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 )
@@ -72,6 +75,63 @@ func TestAudioV2RemuxClaimsRequireExactStereoEncodeShape(t *testing.T) {
 				t.Fatalf("validAudioV2RemuxClaims() = %t, want %t for %#v", got, test.want, claims)
 			}
 		})
+	}
+}
+
+func TestProxyTokenRoutesEnforceCommittedProxyEgress(t *testing.T) {
+	const secret = "proxy-route-secret"
+	mediaPath := writeSocketProxyMedia(t)
+	srv := newSocketProxyServer(t, secret, nil)
+	server := httptest.NewServer(srv.Handler())
+	t.Cleanup(server.Close)
+
+	sign := func(claims streamtoken.Claims) string {
+		t.Helper()
+		token, err := streamtoken.Sign(claims, secret, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return token
+	}
+	base := streamtoken.Claims{
+		SessionID: "route-bound", MediaPath: mediaPath, PlayMethod: string(playback.PlayDirect),
+		UserID: 7, ProfileID: "profile-1", MediaFileID: 42,
+		RoutingWorkload:  string(noderouting.WorkloadDirectPlay),
+		RoutingExecution: string(noderouting.ExecutionNone),
+		RoutingEgress:    string(noderouting.EgressAPI),
+	}
+	apiToken := sign(base)
+	for _, route := range []string{
+		"/stream/direct/" + apiToken,
+		"/stream/remux/" + apiToken,
+		"/stream/remux/audio-v2/" + apiToken,
+		"/stream/transcode/" + apiToken + "/master.m3u8",
+		"/stream/transcode/" + apiToken + "/segment/000.ts",
+		"/stream/subtitles/" + apiToken + "/0",
+		"/stream/subtitles/" + apiToken + "/0/fonts",
+	} {
+		t.Run(route, func(t *testing.T) {
+			response := socketProxyRequest(t, server.Client(), http.MethodGet, server.URL+route, nil)
+			if response.status != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503; body = %q", response.status, response.body)
+			}
+		})
+	}
+
+	partial := base
+	partial.RoutingWorkload = ""
+	partialToken := sign(partial)
+	partialResponse := socketProxyRequest(t, server.Client(), http.MethodGet, server.URL+"/stream/direct/"+partialToken, nil)
+	if partialResponse.status != http.StatusConflict {
+		t.Fatalf("partial route status = %d, want 409; body = %q", partialResponse.status, partialResponse.body)
+	}
+
+	proxy := base
+	proxy.RoutingEgress = string(noderouting.EgressProxy)
+	proxyToken := sign(proxy)
+	proxyResponse := socketProxyRequest(t, server.Client(), http.MethodGet, server.URL+"/stream/direct/"+proxyToken, nil)
+	if proxyResponse.status != http.StatusOK || proxyResponse.body != socketProxyMedia {
+		t.Fatalf("proxy route response = %d %q, want 200 %q", proxyResponse.status, proxyResponse.body, socketProxyMedia)
 	}
 }
 
