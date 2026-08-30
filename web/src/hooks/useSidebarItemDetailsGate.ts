@@ -6,6 +6,7 @@ interface ItemDetailsGateState {
   gatesItemDetails: boolean;
   pendingLocationKey: string | null;
   enteredItemFromHome: boolean;
+  itemChainStartedFromHome: boolean;
   returnedHomeFromItem: boolean;
 }
 
@@ -26,6 +27,7 @@ export function useSidebarItemDetailsGate(
     gatesItemDetails,
     pendingLocationKey: null,
     enteredItemFromHome: false,
+    itemChainStartedFromHome: false,
     returnedHomeFromItem: false,
   });
 
@@ -37,13 +39,19 @@ export function useSidebarItemDetailsGate(
   ) {
     const enteringItem = gatesItemDetails && !state.gatesItemDetails;
     const returnedHomeFromItem =
-      !gatesItemDetails && state.gatesItemDetails && pathname === "/" && state.enteredItemFromHome;
+      !gatesItemDetails &&
+      state.gatesItemDetails &&
+      pathname === "/" &&
+      state.itemChainStartedFromHome;
     currentState = {
       locationKey,
       pathname,
       gatesItemDetails,
       pendingLocationKey: enteringItem ? locationKey : null,
       enteredItemFromHome: enteringItem && state.pathname === "/",
+      itemChainStartedFromHome: enteringItem
+        ? state.pathname === "/"
+        : gatesItemDetails && state.itemChainStartedFromHome,
       returnedHomeFromItem,
     };
     // React discards this render and retries before rendering children, so the

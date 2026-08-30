@@ -67,6 +67,25 @@ describe("useSidebarItemDetailsGate", () => {
     expect(result.current.returnedHomeFromItem).toBe(false);
   });
 
+  it("keeps the Home return origin across item-to-item navigation without replaying entry state", () => {
+    const { result, rerender } = renderHook(
+      ({ locationKey, pathname, isItem }) =>
+        useSidebarItemDetailsGate(locationKey, pathname, isItem),
+      { initialProps: { locationKey: "home", pathname: "/", isItem: false } },
+    );
+
+    rerender({ locationKey: "movie-a", pathname: "/item/movie-a", isItem: true });
+    expect(result.current.enteredItemFromHome).toBe(true);
+
+    rerender({ locationKey: "movie-b", pathname: "/item/movie-b", isItem: true });
+    expect(result.current.itemDetailsReady).toBe(true);
+    expect(result.current.enteredItemFromHome).toBe(false);
+    expect(result.current.returnedHomeFromItem).toBe(false);
+
+    rerender({ locationKey: "home-again", pathname: "/", isItem: false });
+    expect(result.current.returnedHomeFromItem).toBe(true);
+  });
+
   it("does not mark non-Home item exits or unrelated Home arrivals as item returns", () => {
     const { result, rerender } = renderHook(
       ({ locationKey, pathname, isItem }) =>
@@ -77,6 +96,8 @@ describe("useSidebarItemDetailsGate", () => {
     );
 
     rerender({ locationKey: "movie", pathname: "/item/movie", isItem: true });
+    rerender({ locationKey: "episode", pathname: "/item/episode", isItem: true });
+    expect(result.current.enteredItemFromHome).toBe(false);
     rerender({ locationKey: "home", pathname: "/", isItem: false });
     expect(result.current.returnedHomeFromItem).toBe(false);
 
