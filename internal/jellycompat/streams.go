@@ -105,6 +105,11 @@ func (h *PlaybackHandler) requireCompatChildHLSRoute(w http.ResponseWriter, play
 		writeError(w, http.StatusConflict, compatPlaybackRouteUnboundCode, "Request the master manifest before child HLS resources")
 		return false
 	}
+	if playSession.UpstreamPlayMethod != string(playback.PlayTranscode) ||
+		playSession.Recipe.SessionID != playSession.UpstreamSessionID {
+		writeError(w, http.StatusServiceUnavailable, compatRoutingPolicyUnsatisfiedCode, "The child HLS request belongs to an obsolete playback route")
+		return false
+	}
 	if !compatChildHLSRouteMatches(source, playSession.Recipe, playSession.RoutingAssignment) {
 		writeError(w, http.StatusServiceUnavailable, compatRoutingPolicyUnsatisfiedCode, "The child HLS request does not match the route bound by the master manifest")
 		return false
@@ -2319,6 +2324,11 @@ func (h *PlaybackHandler) ensureUpstreamPlayback(ctx context.Context, compatSess
 		current.UpstreamSessionID = session.ID
 		current.UpstreamPlayMethod = method
 		current.TranscodeStarted = false
+		// A new upstream session has no committed HLS route yet. Retaining the
+		// previous recipe and assignment would let a late child playlist or
+		// segment revive that obsolete transport without running the resolver.
+		current.Recipe = nil
+		current.RoutingAssignment = nil
 		current.ProgressPersistenceKnown = true
 		current.DisableProgressPersistence = session.DisableProgressPersistence
 		return nil

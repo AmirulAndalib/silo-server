@@ -636,6 +636,33 @@ func TestHandleSubtitle_ExternalTextHEADDoesNotLoadTheArtifact(t *testing.T) {
 	}
 }
 
+func TestHandleSubtitleAllowsAPIAuxiliaryResourceForProxyRoutedSession(t *testing.T) {
+	file := &models.MediaFile{
+		ID:                42,
+		ContentID:         "movie-1",
+		FilePath:          "/missing/movie.mkv",
+		ExternalSubtitles: []models.ExternalSubtitle{{Path: "/missing/movie.en.srt", Language: "eng", Format: "srt"}},
+	}
+	manager := playback.NewSessionManager(0, 0)
+	manager.RegisterReconstructed(&playback.Session{
+		ID: "proxy-subtitle", UserID: 1, MediaFileID: file.ID, PlayMethod: playback.PlayDirect,
+		RoutingWorkload: string(noderouting.WorkloadDirectPlay), RoutingExecution: string(noderouting.ExecutionNone),
+		RoutingEgress: string(noderouting.EgressProxy),
+	})
+	handler := NewStreamHandler(manager, testPlaybackFileResolver{file: file})
+	recorder := httptest.NewRecorder()
+	handler.HandleSubtitle(recorder, playbackTestRequest(
+		http.MethodHead,
+		"/api/v1/stream/proxy-subtitle/subtitles/0.vtt",
+		nil,
+		map[string]string{"session_id": "proxy-subtitle", "track": "0.vtt"},
+	))
+
+	if recorder.Code != http.StatusOK || recorder.Body.Len() != 0 || !strings.HasPrefix(recorder.Header().Get("Content-Type"), "text/vtt") {
+		t.Fatalf("HEAD status=%d type=%q body=%q", recorder.Code, recorder.Header().Get("Content-Type"), recorder.Body.String())
+	}
+}
+
 func TestHandleSubtitle_EmbeddedPGSSupportsCachedHEADAndRange(t *testing.T) {
 	file := &models.MediaFile{
 		ID:        42,

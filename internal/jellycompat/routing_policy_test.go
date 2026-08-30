@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -185,5 +186,76 @@ func TestRecordNodeRoutingAssignmentPersistsChildRouteBinding(t *testing.T) {
 	stored, ok := store.Get("play-1")
 	if !ok || stored.RoutingAssignment == nil || *stored.RoutingAssignment != want {
 		t.Fatalf("stored route = %#v, want %#v", stored.RoutingAssignment, want)
+	}
+}
+
+func TestEnsureUpstreamPlaybackClearsStaleHLSRouteOnMethodSwitch(t *testing.T) {
+	for _, method := range []string{"direct", "remux"} {
+		t.Run(method, func(t *testing.T) {
+			source := testCompatSource(NewResourceIDCodec(), testCompatVersion())
+			recipe := playback.NewRecipeCard(7, "profile-1", source.FileID, "", playback.TranscodeOpts{SessionID: "old-upstream"})
+			assignment := playback.NodeRoutingAssignment{
+				Workload: string(noderouting.WorkloadVideoTranscode), Execution: string(noderouting.ExecutionAPI),
+				Egress: string(noderouting.EgressAPI),
+			}
+			store := NewPlaybackSessionStore(time.Hour, nil)
+			store.Put(PlaybackSession{
+				ID: "play-1", CompatToken: "compat-token", RouteItemID: "item-1",
+				UpstreamSessionID: "old-upstream", UpstreamPlayMethod: "transcode",
+				MediaSources: []PlaybackMediaSource{source}, Recipe: &recipe, RoutingAssignment: &assignment,
+			})
+			manager := &testCompatSessionManager{sessions: map[string]*playback.Session{
+				"old-upstream": {ID: "old-upstream", UserID: 7, MediaFileID: source.FileID, PlayMethod: playback.PlayTranscode},
+			}}
+			handler := &PlaybackHandler{playbackStore: store, sessionMgr: manager, tm: playback.NewTranscodeManager()}
+
+			updated, err := handler.ensureUpstreamPlayback(
+				t.Context(),
+				&Session{Token: "compat-token", StreamAppUserID: 7, ProfileID: "profile-1"},
+				"play-1", source, method,
+			)
+			if err != nil {
+				t.Fatalf("switch upstream method: %v", err)
+			}
+			if updated.UpstreamPlayMethod != method || updated.UpstreamSessionID == "old-upstream" {
+				t.Fatalf("updated upstream = %q/%q, want fresh %s session", updated.UpstreamPlayMethod, updated.UpstreamSessionID, method)
+			}
+			if updated.Recipe != nil || updated.RoutingAssignment != nil {
+				t.Fatalf("stale HLS route survived method switch: recipe=%#v assignment=%#v", updated.Recipe, updated.RoutingAssignment)
+			}
+
+			for _, endpoint := range []struct {
+				name    string
+				segment bool
+			}{
+				{name: "manifest"},
+				{name: "segment", segment: true},
+			} {
+				t.Run(endpoint.name, func(t *testing.T) {
+					request := httptest.NewRequest(http.MethodGet, "/Videos/item-1/hls/play-1/stream.m3u8", nil)
+					routeCtx := chi.NewRouteContext()
+					routeCtx.URLParams.Add("id", "item-1")
+					routeCtx.URLParams.Add("playlistId", "play-1")
+					if endpoint.segment {
+						routeCtx.URLParams.Add("segmentId", "0")
+						routeCtx.URLParams.Add("segmentContainer", "ts")
+					}
+					ctx := context.WithValue(t.Context(), chi.RouteCtxKey, routeCtx)
+					ctx = context.WithValue(ctx, compatSessionKey, &Session{Token: "compat-token", StreamAppUserID: 7})
+					recorder := httptest.NewRecorder()
+					if endpoint.segment {
+						handler.HandleHLSSegment(recorder, request.WithContext(ctx))
+					} else {
+						handler.HandleHLSManifest(recorder, request.WithContext(ctx))
+					}
+					if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), `"Error":"`+compatPlaybackRouteUnboundCode+`"`) {
+						t.Fatalf("child response = %d %s, want unbound-route conflict", recorder.Code, recorder.Body.String())
+					}
+					if manager.startCalls != 1 {
+						t.Fatalf("upstream starts = %d, want only the method-switch start", manager.startCalls)
+					}
+				})
+			}
+		})
 	}
 }

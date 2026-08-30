@@ -561,9 +561,12 @@ origin — the URLs above are an addition a plan may make, never one a client ma
 assume. The escalation described just above therefore applies only when no proxy
 origin is available to run the remux.
 
-Only media moves. Start, replan, route events, progress and every other
-control-plane call stay on the API origin, and the attempt's plan remains the
-sole authority for which URL to fetch.
+Only the primary audio/video transport moves. Start, replan, route events,
+progress and every other control-plane call stay on the API origin, and the
+attempt's plan remains the sole authority for which URL to fetch. Subtitle
+artifacts and font bundles are authenticated auxiliary resources: their
+inventory URLs remain API-relative even when node routing assigns the primary
+file, manifest, and segments to a proxy origin.
 
 The client must attach its current `Authorization: Bearer ...` header to the
 manifest/file request and every derived request, including HLS segments,

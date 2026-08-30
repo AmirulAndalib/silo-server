@@ -102,6 +102,7 @@ func TestHandleHLSSegmentRollsBackSessionWhenToneMapReconstructionFails(t *testi
 	store := NewPlaybackSessionStore(0, nil)
 	store.Put(PlaybackSession{
 		ID: "play-reconstruct", CompatToken: "compat-token", RouteItemID: "item", UpstreamSessionID: upstreamID,
+		UpstreamPlayMethod: "transcode",
 		MediaSources: []PlaybackMediaSource{{
 			ID: "source-42", FileID: 42, Version: catalog.FileVersion{FileID: 42},
 		}},
