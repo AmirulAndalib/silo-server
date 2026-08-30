@@ -89,7 +89,11 @@ func (p DeviceProfile) codecProfileCompatibility(version catalog.FileVersion, au
 
 func (p DeviceProfile) hlsRemuxCodecProfileCompatibility(version catalog.FileVersion, audioStreamIndex *int) codecProfileCompatibility {
 	values := buildConditionValues(version, audioStreamIndex)
-	if tag := playback.VideoSampleEntryForDVCopy(compatDolbyVisionProfile(compatPrimaryVideoTrack(version))); tag != "" {
+	// Derive the promised sample entry from the same value the serve paths use
+	// (PrimaryDVProfile, the probed integer field) — not from
+	// compatDolbyVisionProfile's descriptive-string fallback — so negotiation
+	// can never promise a dvh1 tag the muxer will not write.
+	if tag := playback.VideoSampleEntryForDVCopy(compatPrimaryVideoTrack(version).DVProfile); tag != "" {
 		values["videocodectag"] = conditionValue{text: tag}
 	}
 	return p.codecProfileCompatibilityWithValues(version, audioStreamIndex, values, "mp4", true)
@@ -148,11 +152,10 @@ func codecProfileApplies(
 	useSubContainer bool,
 ) bool {
 	profileContainers := profile.Container
-	profileContainer := strings.TrimSpace(profile.Container)
-	if useSubContainer &&
-		profileContainer != "" &&
-		!strings.HasPrefix(profileContainer, "-") &&
-		matchesCodecProfileContainer(profileContainer, compatHLSPathSegment) {
+	// Jellyfin's CodecProfile substitutes SubContainer only when Container is
+	// exactly "hls" (ordinal, case-insensitive) — a multi-token list such as
+	// "hls,dash" keeps the literal Container list.
+	if useSubContainer && strings.EqualFold(strings.TrimSpace(profile.Container), "hls") {
 		profileContainers = profile.SubContainer
 	}
 	if !matchesCodecProfileContainer(profileContainers, container) {

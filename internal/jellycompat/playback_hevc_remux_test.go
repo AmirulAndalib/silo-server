@@ -3,6 +3,7 @@ package jellycompat
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -111,7 +112,10 @@ func TestHLSRemuxCodecProfileUsesHLSSubContainer(t *testing.T) {
 	}
 }
 
-func TestHLSRemuxCodecProfileUsesSubContainerForHLSContainerList(t *testing.T) {
+func TestHLSRemuxCodecProfileKeepsLiteralContainerListWithHLSToken(t *testing.T) {
+	// Jellyfin substitutes SubContainer only when Container is exactly "hls".
+	// A multi-token list containing hls keeps its literal token list, so this
+	// incompatible profile never applies to the MP4 remux output.
 	profile, err := decodeDeviceProfile(strings.NewReader(`{
 		"TranscodingProfiles": [{
 			"Type": "Video", "Protocol": "hls", "Container": "mp4", "VideoCodec": "hevc", "AudioCodec": "eac3"
@@ -132,8 +136,8 @@ func TestHLSRemuxCodecProfileUsesSubContainerForHLSContainerList(t *testing.T) {
 		AudioTracks: []models.AudioTrack{{Codec: "eac3", Channels: 6, Default: true}},
 	}
 
-	if profile.SupportsHLSRemuxForAudioStream(version, defaultAudioStreamIndex(version)) {
-		t.Fatal("HLS MP4 remux was accepted despite an incompatible codec profile scoped to hls,dash with the MP4 sub-container")
+	if !profile.SupportsHLSRemuxForAudioStream(version, defaultAudioStreamIndex(version)) {
+		t.Fatal("HLS MP4 remux was rejected by an hls,dash-scoped codec profile that Jellyfin would never apply to MP4 output")
 	}
 }
 
@@ -217,6 +221,72 @@ func TestBuildPlaybackSourceHLSRemuxTranscodesAudioWhenCopyIsDisabled(t *testing
 	dto := h.mediaSourceDTO("item", "play", "token", source)
 	if dto.TranscodingURL == "" || dto.TranscodingContainer != "mp4" {
 		t.Fatalf("transcoding route = URL %q container %q, want usable MP4 HLS route", dto.TranscodingURL, dto.TranscodingContainer)
+	}
+}
+
+func TestBuildPlaybackSourceKeepsLegacyTranscodingGateWithoutHLSProfile(t *testing.T) {
+	// The client's DirectPlayProfiles accept the video codec but not the audio
+	// codec, and its only TranscodingProfile is progressive HTTP: no profile
+	// vouches for any HLS output, so no TranscodingURL may be minted.
+	profile := DeviceProfile{
+		DirectPlayProfiles: []DirectPlayProfile{{
+			Type: "Video", Container: "mp4", VideoCodec: "hevc", AudioCodec: "aac",
+		}},
+		TranscodingProfiles: []TranscodingProfile{{
+			Type: "Video", Protocol: "http", Container: "mp4", VideoCodec: "hevc", AudioCodec: "aac",
+		}},
+	}
+	version := catalog.FileVersion{
+		FileID: 42, Resolution: "2160p", Container: "mkv", CodecVideo: "hevc", CodecAudio: "eac3", HDR: true,
+		VideoTracks: []models.VideoTrack{{Codec: "hevc", DVProfile: 8, VideoRangeType: "DOVIWithHDR10"}},
+		AudioTracks: []models.AudioTrack{{Codec: "eac3", Channels: 6, Default: true}},
+	}
+
+	h := &PlaybackHandler{codec: NewResourceIDCodec()}
+	source := h.buildPlaybackSource("item", "play", version, profile, playbackInfoRequest{}, false)
+	if source.SupportsDirectPlay || source.SupportsDirectStream {
+		t.Fatalf("direct methods = play %v stream %v, want none", source.SupportsDirectPlay, source.SupportsDirectStream)
+	}
+	if source.SupportsTranscoding {
+		t.Fatal("SupportsTranscoding = true, want no unverified fMP4 HLS offer for an HTTP-only profile")
+	}
+	if dto := h.mediaSourceDTO("item", "play", "token", source); dto.TranscodingURL != "" {
+		t.Fatalf("TranscodingURL = %q, want empty", dto.TranscodingURL)
+	}
+}
+
+func TestSupportedHLSRemuxAudioStreamIndexesFreezeCodecAndChannelLayout(t *testing.T) {
+	// The copy playlist reuses the same EXT-X-MAP URL across a switch, so only
+	// tracks interchangeable with the selected track's init segment (same
+	// codec, same channel layout) may enter the switch allowlist even when the
+	// device profile accepts the other codecs.
+	profile := DeviceProfile{
+		DirectPlayProfiles: []DirectPlayProfile{{
+			Type: "Video", Container: "mp4", VideoCodec: "hevc", AudioCodec: "eac3,ac3",
+		}},
+		TranscodingProfiles: []TranscodingProfile{{
+			Type: "Video", Protocol: "hls", Container: "mp4", VideoCodec: "hevc", AudioCodec: "eac3,ac3",
+		}},
+	}
+	version := catalog.FileVersion{
+		FileID: 42, Resolution: "2160p", Container: "mkv", CodecVideo: "hevc", CodecAudio: "eac3", HDR: true,
+		VideoTracks: []models.VideoTrack{{Codec: "hevc", DVProfile: 8, VideoRangeType: "DOVIWithHDR10"}},
+		AudioTracks: []models.AudioTrack{
+			{Codec: "eac3", Channels: 6, Default: true},
+			{Codec: "ac3", Channels: 6},
+			{Codec: "eac3", Channels: 2},
+			{Codec: "eac3", Channels: 6},
+		},
+	}
+
+	source := (&PlaybackHandler{codec: NewResourceIDCodec()}).buildPlaybackSource(
+		"item", "play", version, profile, playbackInfoRequest{}, false,
+	)
+	if !source.HLSRemux || source.TranscodeAudio {
+		t.Fatalf("route = remux %v transcode-audio %v, want audio-copy remux", source.HLSRemux, source.TranscodeAudio)
+	}
+	if want := []int{1, 4}; !slices.Equal(source.HLSRemuxAudioStreamIndexes, want) {
+		t.Fatalf("HLSRemuxAudioStreamIndexes = %v, want %v (6-channel EAC3 tracks only)", source.HLSRemuxAudioStreamIndexes, want)
 	}
 }
 

@@ -1979,9 +1979,10 @@ func (h *PlaybackHandler) buildPlaybackSource(
 		allowAudioCopy &&
 		!supportsDirectPlay &&
 		profile.SupportsHLSRemuxForAudioStream(version, selectedAudioIndex)
-	hlsAudioTranscode := !allowAudioCopy &&
+	hlsAudioTranscode := !hlsAudioCopy &&
 		enableTranscoding &&
 		!supportsDirectPlay &&
+		(!allowAudioCopy || !audioSupported) &&
 		profile.supportsHLSRemuxWithAudioTranscodeForAudioStream(version, selectedAudioIndex)
 	transcodeAudio := !hlsAudioCopy &&
 		enableDirectStream &&
@@ -1991,7 +1992,7 @@ func (h *PlaybackHandler) buildPlaybackSource(
 	hlsRemux := hlsAudioCopy || transcodeAudio
 	var hlsRemuxAudioStreamIndexes []int
 	if hlsRemux && !transcodeAudio {
-		hlsRemuxAudioStreamIndexes = supportedHLSRemuxAudioStreamIndexes(version, profile)
+		hlsRemuxAudioStreamIndexes = supportedHLSRemuxAudioStreamIndexes(version, profile, selectedAudioIndex)
 	}
 	supportsDirectStream := !hlsRemux &&
 		enableDirectStream &&
@@ -1999,7 +2000,12 @@ func (h *PlaybackHandler) buildPlaybackSource(
 		videoSupported &&
 		allowAudioCopy &&
 		audioSupported
-	supportsTranscoding := enableTranscoding && (hlsRemux || profile.SupportsTranscoding(version))
+	// A remux route is only advertised when some transcoding profile vouched
+	// for it: the copy and AAC legs each verified the fMP4 HLS output above,
+	// and the legacy audio-transcode leg keeps the pre-remux SupportsTranscoding
+	// gate rather than minting a TranscodingURL no profile ever matched.
+	supportsTranscoding := enableTranscoding &&
+		(hlsAudioCopy || (transcodeAudio && hlsAudioTranscode) || profile.SupportsTranscoding(version))
 	// Don't offer full video encodes of 4K sources when allow_4k_transcode is
 	// off. HLS remuxes stream-copy the video and stay available regardless of
 	// whether their audio is copied or encoded.
@@ -2024,9 +2030,18 @@ func (h *PlaybackHandler) buildPlaybackSource(
 	}
 }
 
-func supportedHLSRemuxAudioStreamIndexes(version catalog.FileVersion, profile DeviceProfile) []int {
+// supportedHLSRemuxAudioStreamIndexes freezes the copy-safe switch targets. A
+// copy playlist reuses the same playlist and EXT-X-MAP URLs across a track
+// switch, so the client's SourceBuffer keeps the init segment negotiated for
+// the initial track; only tracks whose fMP4 init is interchangeable with it
+// (same codec and channel layout) are safe to switch without renegotiation.
+func supportedHLSRemuxAudioStreamIndexes(version catalog.FileVersion, profile DeviceProfile, selectedAudioIndex *int) []int {
+	selected := compatAudioTrack(version, selectedAudioIndex)
 	indexes := make([]int, 0, len(version.AudioTracks))
-	for audioTrackIndex := range version.AudioTracks {
+	for audioTrackIndex, track := range version.AudioTracks {
+		if !strings.EqualFold(track.Codec, selected.Codec) || track.Channels != selected.Channels {
+			continue
+		}
 		streamIndex := len(version.VideoTracks) + audioTrackIndex
 		if profile.SupportsHLSRemuxForAudioStream(version, &streamIndex) {
 			indexes = append(indexes, streamIndex)
