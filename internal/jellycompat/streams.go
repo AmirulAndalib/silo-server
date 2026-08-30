@@ -1076,7 +1076,8 @@ func (h *PlaybackHandler) prepareCompatSegmentRecipe(
 }
 
 // hlsSegmentErrorResponse maps a segment-retrieval error to a Jellyfin-faithful
-// HTTP status. A segment that is absent (ErrSegmentNotFound) or whose transcode
+// HTTP status. A manifest that is not ready is transient and remains retryable.
+// A segment that is absent (ErrSegmentNotFound) or whose transcode
 // process started and then exited non-zero (ErrTranscodeFailed, surfaced by
 // WaitForSegment after the recovery/restart path is exhausted) will never
 // materialize. Jellyfin serves both as 404: its DynamicHls segment handler falls
@@ -1091,6 +1092,8 @@ func hlsSegmentErrorResponse(err error) (status int, code, message string) {
 		return http.StatusServiceUnavailable, "TranscodeUnavailable", "Transcode is temporarily unavailable"
 	case errors.Is(err, playback.ErrToneMapExecutorUnavailable):
 		return http.StatusServiceUnavailable, "TranscodeUnavailable", "Transcode is temporarily unavailable"
+	case errors.Is(err, playback.ErrManifestNotReady):
+		return http.StatusServiceUnavailable, "NotReady", "Transcode playlist not ready"
 	case errors.Is(err, tonemap.ErrSourcePreflightRejected):
 		return http.StatusUnsupportedMediaType, "TranscodeUnsupported", "The media source is unsupported by the selected tone-map executor"
 	case errors.Is(err, playback.ErrSegmentNotFound), errors.Is(err, playback.ErrTranscodeFailed):
