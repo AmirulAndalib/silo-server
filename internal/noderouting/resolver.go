@@ -14,6 +14,14 @@ type localEgressSessionPlanner interface {
 	PlanTranscodeSessionWithLocalEgress(sessionID, currentTranscodeURL string, eligible func(*nodepool.Node) bool) nodepool.Plan
 }
 
+type sessionReservationReleaser interface {
+	ReleaseSession(sessionID string)
+}
+
+type sessionProxyReservationReleaser interface {
+	ReleaseSessionProxy(sessionID string)
+}
+
 type sessionPlannerAdapter struct {
 	planner nodepool.SessionPlanner
 }
@@ -40,7 +48,20 @@ func (a sessionPlannerAdapter) PlanRoute(request nodepool.RouteRequest) nodepool
 			break
 		}
 		plan = a.planSession(request, true, request.TranscodeEligible)
-		plan.ProxyNode = nil
+		if plan.ProxyNode != nil {
+			// Legacy transcode plans may reserve both halves. A local-egress
+			// route keeps the worker but must return the unused proxy capacity.
+			if releaser, ok := a.planner.(sessionProxyReservationReleaser); ok {
+				releaser.ReleaseSessionProxy(request.SessionID)
+			} else if releaser, ok := a.planner.(sessionReservationReleaser); ok {
+				// Without a half-release contract the transcode reservation cannot
+				// be kept without leaking the proxy half. Release both and let the
+				// resolver try another legal shape.
+				releaser.ReleaseSession(request.SessionID)
+				return nodepool.Plan{}
+			}
+			plan.ProxyNode = nil
+		}
 	case request.NeedsTranscode:
 		plan = a.planSession(request, true, request.TranscodeEligible)
 	case request.NeedsProxy:
@@ -53,12 +74,26 @@ func (a sessionPlannerAdapter) PlanRoute(request nodepool.RouteRequest) nodepool
 	// excluded; production *nodepool.Planner evaluates predicates before it
 	// reserves, so this guard is only a defensive adapter boundary.
 	if plan.TranscodeNode != nil && request.TranscodeEligible != nil && !request.TranscodeEligible(plan.TranscodeNode) {
+		a.releaseSession(request.SessionID)
 		return nodepool.Plan{}
 	}
 	if plan.ProxyNode != nil && request.ProxyEligible != nil && !request.ProxyEligible(plan.ProxyNode) {
+		a.releaseSession(request.SessionID)
+		return nodepool.Plan{}
+	}
+	if request.NeedsTranscode != (plan.TranscodeNode != nil) || request.NeedsProxy != (plan.ProxyNode != nil) {
+		if plan.TranscodeNode != nil || plan.ProxyNode != nil {
+			a.releaseSession(request.SessionID)
+		}
 		return nodepool.Plan{}
 	}
 	return plan
+}
+
+func (a sessionPlannerAdapter) releaseSession(sessionID string) {
+	if releaser, ok := a.planner.(sessionReservationReleaser); ok {
+		releaser.ReleaseSession(sessionID)
+	}
 }
 
 func (a sessionPlannerAdapter) planSession(request nodepool.RouteRequest, transcode bool, eligible func(*nodepool.Node) bool) nodepool.Plan {

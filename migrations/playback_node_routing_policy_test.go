@@ -52,4 +52,8 @@ func TestPlaybackNodeRoutingPolicyMigrationPreservesLegacyFallback(t *testing.T)
 	if !strings.Contains(down, "SELECT 'playback.local_transcode_fallback', 'false'") {
 		t.Fatal("down migration does not restore the legacy hard fallback setting")
 	}
+	downloadPredicate := "key = 'download.local_transcode_fallback' AND lower(trim(value)) = 'false'"
+	if !strings.Contains(down, downloadPredicate) {
+		t.Fatal("down migration does not restore the legacy fallback from prepared-download policy")
+	}
 }

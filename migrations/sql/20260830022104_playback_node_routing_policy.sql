@@ -64,11 +64,16 @@ SELECT 'playback.local_transcode_fallback', 'false'
 WHERE EXISTS (
     SELECT 1
     FROM server_settings
-    WHERE key IN (
-        'playback.routing.remux_execution',
-        'playback.routing.video_transcode_execution'
+    WHERE (
+        key IN (
+            'playback.routing.remux_execution',
+            'playback.routing.video_transcode_execution'
+        )
+        AND value = 'worker_only'
+    ) OR (
+        key = 'download.local_transcode_fallback'
+        AND lower(trim(value)) = 'false'
     )
-      AND value = 'worker_only'
 )
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 

@@ -64,6 +64,64 @@ func TestResolveUsesExactWorkerAPIRoute(t *testing.T) {
 	}
 }
 
+type reservingLegacyPlanner struct {
+	plan          nodepool.Plan
+	released      []string
+	releasedProxy []string
+}
+
+func (p *reservingLegacyPlanner) PlanSession(string, string, bool, int) nodepool.Plan {
+	return p.plan
+}
+
+func (p *reservingLegacyPlanner) ReleaseSession(sessionID string) {
+	p.released = append(p.released, sessionID)
+}
+
+func (p *reservingLegacyPlanner) ReleaseSessionProxy(sessionID string) {
+	p.releasedProxy = append(p.releasedProxy, sessionID)
+}
+
+func TestSessionPlannerAdapterReleasesDiscardedProxyReservation(t *testing.T) {
+	planner := &reservingLegacyPlanner{plan: nodepool.Plan{
+		TranscodeNode: &nodepool.Node{URL: "http://worker"},
+		ProxyNode:     &nodepool.Node{URL: "http://proxy"},
+	}}
+
+	plan := AdaptSessionPlanner(planner).PlanRoute(nodepool.RouteRequest{
+		SessionID: "session-1", NeedsTranscode: true,
+	})
+
+	if plan.TranscodeNode == nil || plan.ProxyNode != nil {
+		t.Fatalf("plan = %#v, want worker with local egress", plan)
+	}
+	if len(planner.releasedProxy) != 1 || planner.releasedProxy[0] != "session-1" {
+		t.Fatalf("released proxy reservations = %v, want session-1", planner.releasedProxy)
+	}
+	if len(planner.released) != 0 {
+		t.Fatalf("released full reservations = %v, want worker reservation retained", planner.released)
+	}
+}
+
+func TestSessionPlannerAdapterReleasesRejectedPlan(t *testing.T) {
+	planner := &reservingLegacyPlanner{plan: nodepool.Plan{
+		TranscodeNode: &nodepool.Node{URL: "http://excluded-worker"},
+		ProxyNode:     &nodepool.Node{URL: "http://proxy"},
+	}}
+
+	plan := AdaptSessionPlanner(planner).PlanRoute(nodepool.RouteRequest{
+		SessionID: "session-1", NeedsTranscode: true, NeedsProxy: true,
+		TranscodeEligible: func(*nodepool.Node) bool { return false },
+	})
+
+	if plan.TranscodeNode != nil || plan.ProxyNode != nil {
+		t.Fatalf("plan = %#v, want rejected plan", plan)
+	}
+	if len(planner.released) != 1 || planner.released[0] != "session-1" {
+		t.Fatalf("released reservations = %v, want session-1", planner.released)
+	}
+}
+
 func TestResolveCountsLowCardinalityDecisionMetric(t *testing.T) {
 	counter := routingDecisions.WithLabelValues(
 		string(WorkloadDirectPlay), string(ExecutionNone), string(EgressAPI),

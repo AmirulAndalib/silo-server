@@ -318,9 +318,10 @@ func TestPrepareTransportV3ReleasesTheProxyHalfWhenTheManifestIsNotProxyServed(t
 		{
 			// The legacy no-token fallback leaks the same half: no signable
 			// token means the proxy URL cannot be addressed at all.
-			name:   "legacy attempt with no signable token",
-			mode:   mediaAuthModeV3{},
-			grants: &recordingRecipeCardStoreV3{},
+			name:             "legacy attempt with no signable token",
+			mode:             mediaAuthModeV3{},
+			grants:           &recordingRecipeCardStoreV3{},
+			wantProxyRelease: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -766,17 +766,18 @@ request; **—** = the path never executes on that role (nothing to reconstruct)
   executor. Remux is different: progressive remux can run on a proxy, while HLS
   remux can run on a transcode node and leave through either the API relay or a
   proxy according to the committed node-routing assignment.
-- **The one conditional (⚠️)** is jellycompat transcode after a *transcode-node*
-  restart. The node-hop token is identity-only — not because a Jellyfin client
+- **Both conditionals (⚠️)** are jellycompat remote-HLS paths after a
+  *transcode-node* restart, and they share one cause. The node-hop token is
+  identity-only — not because a Jellyfin client
   cannot round-trip it (the token is server-minted and opaque to the client), but
   because the recipe is mutated in place under a stable session id and a
   third-party Jellyfin client cannot be driven to refresh a stale token, so a
   token snapshot could reconstruct a stale rendition (see §10). The node therefore
   rebuilds from the Redis `noderecipe` entry central overwrites on every switch
-  rather than from the token. Native transcode has no such dependency — every
-  native audio switch re-mints the token, so it is always recipe-complete and
-  current. This is the only native-vs-jellycompat asymmetry in reconstruction
-  (see §10).
+  rather than from the token. Native remote HLS has no such dependency: its
+  node-hop token is recipe-complete, and every native audio switch re-mints it,
+  so the recipe stays current. This is the only native-vs-jellycompat asymmetry
+  in reconstruction (see §10).
 
 Each live playback session stores its committed routing workload, executor
 kind/node, and egress kind/node separately from the active transcode recipe.
