@@ -1141,6 +1141,17 @@ func (h *PlaybackHandler) playbackRoutingPolicy() config.PlaybackRoutingPolicy {
 	return config.DefaultPlaybackRoutingPolicy()
 }
 
+// compatProgressiveRemuxRouteAvailable reports whether a Jellyfin client may
+// use any progressive-remux transport admitted by the current policy. This is
+// a structural check only: temporary node capacity remains a runtime concern.
+func compatProgressiveRemuxRouteAvailable(policy config.PlaybackRoutingPolicy, proxyAllowed bool) bool {
+	routes, err := noderouting.Candidates(noderouting.Request{
+		Workload: noderouting.WorkloadRemux, Delivery: noderouting.DeliveryProgressiveRemux,
+		Policy: policy, ProxyAllowed: proxyAllowed,
+	})
+	return err == nil && len(routes.Candidates) > 0
+}
+
 func (h *PlaybackHandler) compatTranscodeNodeID(nodeURL string, planned *nodepool.Node) int {
 	normalizedURL := strings.TrimRight(nodeURL, "/")
 	if planned != nil && strings.TrimRight(planned.URL, "/") == normalizedURL {
@@ -2162,6 +2173,13 @@ func (h *PlaybackHandler) buildPlaybackSource(
 		videoSupported &&
 		allowAudioCopy &&
 		audioSupported
+	// DirectStream means progressive remux when direct play is unavailable.
+	// Do not advertise a transport the routing policy structurally forbids;
+	// clients can then select the independently negotiated HLS route instead.
+	if supportsDirectStream && !supportsDirectPlay &&
+		!compatProgressiveRemuxRouteAvailable(h.playbackRoutingPolicy(), h.JWTSecret != "") {
+		supportsDirectStream = false
+	}
 	// A remux route is only advertised when some transcoding profile vouched
 	// for it: the copy and AAC legs each verified the fMP4 HLS output above,
 	// and the legacy audio-transcode leg keeps the pre-remux SupportsTranscoding
