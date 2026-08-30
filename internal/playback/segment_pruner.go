@@ -68,6 +68,14 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 	started := time.Now()
 	s.mu.Lock()
 	if generation != s.segmentGeneration || s.restarting != nil {
+		// A generation change means restart/shutdown bookkeeping already reset
+		// segmentPruneRunning (and may have scheduled a successor pass). A
+		// same-generation abort — a restart that is still validating and may
+		// yet fail without replacing the process — must release the flag here
+		// or pruning stays disabled for the rest of the generation.
+		if generation == s.segmentGeneration {
+			s.segmentPruneRunning = false
+		}
 		s.mu.Unlock()
 		return
 	}
@@ -199,6 +207,9 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 		// generated for a replacement timeline or session object.
 		s.mu.Lock()
 		if generation != s.segmentGeneration || s.restarting != nil {
+			if generation == s.segmentGeneration {
+				s.segmentPruneRunning = false
+			}
 			s.mu.Unlock()
 			return
 		}
@@ -328,6 +339,9 @@ func (s *TranscodeSession) finishSegmentPrune(
 		time.AfterFunc(retryAfter, func() {
 			s.mu.Lock()
 			if generation != s.segmentGeneration || s.restarting != nil {
+				if generation == s.segmentGeneration {
+					s.segmentPruneRunning = false
+				}
 				s.mu.Unlock()
 				return
 			}

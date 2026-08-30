@@ -321,6 +321,42 @@ func TestGenerationTokenRejectsPriorSessionIncarnation(t *testing.T) {
 	}
 }
 
+func TestPrunePassAbortedByRestartReleasesPruneFlag(t *testing.T) {
+	dir := t.TempDir()
+	session := &TranscodeSession{
+		outputDir:           dir,
+		opts:                TranscodeOpts{SegmentRetentionSeconds: 120, SegmentDuration: 2, SessionID: "abort-release"},
+		segmentPruneRunning: true,
+		restarting:          &restartFlight{done: make(chan struct{})},
+	}
+
+	// A pass observing an in-flight restart of its own generation must release
+	// the running flag: if that restart later fails validation and aborts, no
+	// bookkeeping block ever runs, and a leaked flag would disable pruning for
+	// the rest of the generation.
+	session.pruneDownloadedSegments(session.segmentGeneration, 500, false)
+
+	session.mu.Lock()
+	running := session.segmentPruneRunning
+	session.mu.Unlock()
+	if running {
+		t.Fatal("aborted prune pass left segmentPruneRunning set")
+	}
+
+	// A stale-generation pass must leave the flag alone: the generation owner
+	// already reset it and may have scheduled its own pass.
+	session.mu.Lock()
+	session.segmentPruneRunning = true
+	session.mu.Unlock()
+	session.pruneDownloadedSegments(session.segmentGeneration+1, 500, false)
+	session.mu.Lock()
+	running = session.segmentPruneRunning
+	session.mu.Unlock()
+	if !running {
+		t.Fatal("stale-generation prune pass cleared the current generation's flag")
+	}
+}
+
 func TestOpenSegmentWaitsThroughRestartInsteadOfLeasingStaleFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "seg_00001.ts")
