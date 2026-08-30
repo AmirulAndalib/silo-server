@@ -48,6 +48,22 @@ func compatRouteOutcomeCode(outcome noderouting.Outcome) string {
 	return compatRoutingPolicyUnsatisfiedCode
 }
 
+// compatLocalHLSRouteAllowed reports whether an API-hosted HLS runtime may
+// satisfy both halves of the workload's policy. Local execution necessarily
+// uses API egress; adopting it must not cross either hard boundary.
+func compatLocalHLSRouteAllowed(workload noderouting.Workload, policy config.PlaybackRoutingPolicy) bool {
+	switch workload {
+	case noderouting.WorkloadRemux:
+		return policy.RemuxExecution != config.PlaybackExecutionWorkerOnly &&
+			policy.RemuxEgress != config.PlaybackEgressProxyOnly
+	case noderouting.WorkloadVideoTranscode:
+		return policy.VideoTranscodeExecution != config.PlaybackExecutionWorkerOnly &&
+			policy.VideoTranscodeEgress != config.PlaybackEgressProxyOnly
+	default:
+		return false
+	}
+}
+
 // Jellyfin Web is sensitive to startup latency. Use shorter compat segments
 // than the native global playback default so the first requested HLS chunk and
 // the near-head follow-up segments arrive quickly enough for browser playback.
@@ -596,16 +612,9 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 		remoteNodeURL := tcNode.URL
 		startErr := h.startRemoteTranscodeWithToneMapMode(r.Context(), playSession.ID, playSession.UpstreamSessionID, *source, file, initialSeekSeconds, tcNode.URL, requiredToneMapMode)
 		if errors.Is(startErr, errRemoteStartAdoptedLocal) {
-			localAllowed := false
-			switch decision.Shape.Workload {
-			case noderouting.WorkloadRemux:
-				localAllowed = routingPolicy.RemuxExecution != config.PlaybackExecutionWorkerOnly
-			case noderouting.WorkloadVideoTranscode:
-				localAllowed = routingPolicy.VideoTranscodeExecution != config.PlaybackExecutionWorkerOnly
-			}
-			if !localAllowed {
+			if !compatLocalHLSRouteAllowed(decision.Shape.Workload, routingPolicy) {
 				h.teardownPlaySession(context.WithoutCancel(r.Context()), playSession, nil, nil)
-				writeError(w, http.StatusServiceUnavailable, compatRoutingPolicyUnsatisfiedCode, "A local transcode won a concurrent start but local execution is forbidden")
+				writeError(w, http.StatusServiceUnavailable, compatRoutingPolicyUnsatisfiedCode, "A local transcode won a concurrent start but local execution or API egress is forbidden")
 				return
 			}
 			localRoutingWorkload = decision.Shape.Workload

@@ -736,7 +736,7 @@ func (h *PlaybackHandler) compatToneMapCapabilityInventoryWithPolicy(
 		capabilities tonemap.Capabilities
 		err          error
 	}
-	localAllowed := routingPolicy.VideoTranscodeExecution != config.PlaybackExecutionWorkerOnly
+	localAllowed := compatLocalHLSRouteAllowed(noderouting.WorkloadVideoTranscode, routingPolicy)
 	var localResult capabilityResult
 	var localWG sync.WaitGroup
 	if localAllowed {
