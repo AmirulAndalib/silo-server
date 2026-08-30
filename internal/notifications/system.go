@@ -297,8 +297,13 @@ func (s *System) discordPosterURL(ctx context.Context, posterPath, posterSourceP
 // poster URL when an image resolver is configured.
 func (s *System) PayloadForRow(ctx context.Context, row DeliveryRow) DeliveryRowPayload {
 	payload := PayloadForRow(row)
-	if s != nil && s.images != nil && row.PosterPath != "" {
-		payload.PosterURL = s.images.PresignImageURL(ctx, row.PosterPath, "poster", "")
+	if payload.PosterPath != "" {
+		if s != nil && s.images != nil {
+			payload.PosterURL = s.images.PresignImageURL(ctx, payload.PosterPath, "poster", "")
+		}
+		if payload.PosterURL == "" {
+			payload.PosterURL = publicArtworkURL(payload.PosterPath)
+		}
 	}
 	return payload
 }
