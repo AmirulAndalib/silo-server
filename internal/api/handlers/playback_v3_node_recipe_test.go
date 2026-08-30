@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
@@ -135,10 +136,15 @@ func TestPrepareRemoteTransportV3RejectsOldNodeAfterStaleAudioCapabilityProbe(t 
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.JWTSecret = "test-secret"
 	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{TranscodeNode: &nodepool.Node{URL: node.URL}}}
-	_, transportErr := handler.prepareTransportV3(
+	policy := config.DefaultPlaybackRoutingPolicy()
+	// This test exercises the stale worker's start receipt, not fallback to the
+	// API host. Pin the executor boundary so the assertion cannot depend on a
+	// concurrent local FFmpeg capability probe.
+	policy.VideoTranscodeExecution = config.PlaybackExecutionWorkerOnly
+	_, transportErr := handler.prepareTransportWithPolicyV3(
 		httptest.NewRequest(http.MethodPost, "/", nil),
 		&playback.Session{ID: "session-stale-audio-node", UserID: 7, ProfileID: "profile-1"},
-		v3HandlerFixtureFile(t), remoteHLSResultV3(), mediaAuthModeV3{})
+		v3HandlerFixtureFile(t), remoteHLSResultV3(), mediaAuthModeV3{}, policy)
 	if transportErr == nil || transportErr.reason != transcodeStartFailedReasonV3 {
 		t.Fatalf("transport error = %#v, want %q", transportErr, transcodeStartFailedReasonV3)
 	}
