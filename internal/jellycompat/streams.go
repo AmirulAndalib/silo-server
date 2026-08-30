@@ -2094,36 +2094,19 @@ func (h *PlaybackHandler) ensureTranscodeManifestWithToneMapMode(
 		return nil, err
 	}
 
-	// When the duration fits the shared segment-count bound, Jellycompat serves
-	// its own synthetic VOD manifest. Longer media waits for FFmpeg's bounded
-	// real playlist so one request cannot allocate hundreds of thousands of
-	// segment entries.
+	// Encoded video uses a synthetic VOD manifest when its segment count stays
+	// bounded. Copy video must expose FFmpeg's real keyframe-aligned durations;
+	// longer encoded media also uses the bounded real playlist.
 	if shouldGenerateCompatFullManifest(source, h.compatSegmentDuration()) {
 		return nil, nil
 	}
 
-	// Poll for manifest readiness so clients that don't retry on 503 (e.g. MPV/Streamyfin)
-	// can still start playback. Typically ready within a few seconds.
-	const maxWait = 30 * time.Second
-	const pollInterval = 250 * time.Millisecond
-	deadline := time.After(maxWait)
-	for {
-		manifest, err := transcodeSession.GetManifest()
-		if err == nil {
-			return playback.AlignRealManifestToSourceTimeline(manifest, transcodeSession.Opts(), "")
-		}
-		if !errors.Is(err, playback.ErrManifestNotReady) {
-			return nil, err
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-deadline:
-			h.teardownPlaySession(ctx, playSession, nil, nil)
-			return nil, playback.ErrManifestNotReady
-		case <-time.After(pollInterval):
-		}
+	manifest, err := transcodeSession.BuildSourceAlignedPlaybackManifest("", "")
+	if err != nil {
+		h.teardownPlaySession(ctx, playSession, nil, nil)
+		return nil, err
 	}
+	return manifest, nil
 }
 
 var compatManifestStartupTimeout = playback.ManifestStartupTimeout
@@ -2405,6 +2388,9 @@ func compatLiveTranscodeMatchesAudioSource(transcodeSession *playback.TranscodeS
 }
 
 func shouldGenerateCompatFullManifest(source PlaybackMediaSource, segmentDuration int) bool {
+	if compatHLSCopiesVideo(source) {
+		return false
+	}
 	return playback.CanGenerateSyntheticManifest(float64(source.Version.Duration), segmentDuration)
 }
 

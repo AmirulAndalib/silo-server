@@ -433,6 +433,16 @@ func TestShouldGenerateCompatFullManifestBoundsSegmentCount(t *testing.T) {
 	}
 }
 
+func TestShouldGenerateCompatFullManifestUsesRealDurationsForVideoCopy(t *testing.T) {
+	copySource := PlaybackMediaSource{
+		Version:  catalog.FileVersion{Duration: 3600},
+		HLSRemux: true,
+	}
+	if shouldGenerateCompatFullManifest(copySource, 2) {
+		t.Fatal("copy-video HLS must use FFmpeg's keyframe-aligned real manifest")
+	}
+}
+
 func TestCompatInitialTranscodePositionStartsAtSourceZero(t *testing.T) {
 	short := PlaybackMediaSource{Version: catalog.FileVersion{Duration: 100_000}}
 	seek, segment := compatInitialTranscodePosition(short, 2, 17.3)
