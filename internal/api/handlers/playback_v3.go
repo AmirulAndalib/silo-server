@@ -790,9 +790,9 @@ func (h *PlaybackHandler) localHLSExecutionRegistryWithInputsV3(
 	return local
 }
 
-// hlsPlanningRegistryV3 returns the video-transcode registry exposed by the
-// capability endpoint. Playback planning uses workload-specific registries so
-// remux and video policy cannot leak executor capabilities into one another.
+// hlsPlanningRegistryV3 returns the video-transcode registry. Playback planning
+// uses workload-specific registries so remux and video policy cannot leak
+// executor capabilities into one another.
 func (h *PlaybackHandler) hlsPlanningRegistryV3(ctx context.Context) *playback.TransformationRegistryV3 {
 	settings := h.plannerSettingsV3(ctx)
 	inventory := hlsToneMapCapabilityInventoryV3{}
@@ -811,6 +811,23 @@ func (h *PlaybackHandler) hlsPlanningRegistryWithInputsV3(
 	inventory hlsToneMapCapabilityInventoryV3,
 ) *playback.TransformationRegistryV3 {
 	return h.hlsPlanningRegistryWithInputsForWorkloadV3(ctx, settings, inventory, noderouting.WorkloadVideoTranscode)
+}
+
+// hlsCapabilityRegistryWithInputsV3 reports the union of transformations that
+// can execute on any admitted HLS workload. The capability contract is not
+// workload-scoped, while planning must keep these registries separate.
+func (h *PlaybackHandler) hlsCapabilityRegistryWithInputsV3(
+	ctx context.Context,
+	settings playback.PlannerSettingsV3,
+	inventory hlsToneMapCapabilityInventoryV3,
+) *playback.TransformationRegistryV3 {
+	remux := h.hlsPlanningRegistryWithInputsForWorkloadV3(
+		ctx, settings, hlsToneMapCapabilityInventoryV3{}, noderouting.WorkloadRemux,
+	)
+	video := h.hlsPlanningRegistryWithInputsForWorkloadV3(
+		ctx, settings, inventory, noderouting.WorkloadVideoTranscode,
+	)
+	return remux.WithAdvertised(video.Advertised())
 }
 
 // hlsPlanningRegistryWithInputsForWorkloadV3 keeps transformation
@@ -1345,7 +1362,7 @@ func (h *PlaybackHandler) HandlePlaybackCapabilityV3(w http.ResponseWriter, r *h
 	if policy != tonemap.PolicyNone {
 		inventory, _ = h.hlsToneMapCapabilityInventoryV3(r.Context())
 	}
-	registry := h.hlsPlanningRegistryWithInputsV3(r.Context(), settings, inventory)
+	registry := h.hlsCapabilityRegistryWithInputsV3(r.Context(), settings, inventory)
 	toneMapAvailable := false
 	if policy != tonemap.PolicyNone {
 		for _, capability := range inventory.union {

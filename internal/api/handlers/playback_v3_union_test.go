@@ -483,6 +483,51 @@ func TestHLSPlanningCapabilitiesV3RespectWorkloadExecutionPolicy(t *testing.T) {
 	}
 }
 
+func TestHandlePlaybackCapabilityV3UnionsWorkloadRegistries(t *testing.T) {
+	var remoteProbes atomic.Int32
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		remoteProbes.Add(1)
+		writeJSON(w, http.StatusOK, playback.HWAccelInfo{Transformations: []playback.TransformationV3{{
+			Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3,
+			RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3,
+		}}})
+	}))
+	t.Cleanup(remote.Close)
+
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{remote.URL}}
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{
+		Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3,
+	}}))
+	policy := config.DefaultPlaybackRoutingPolicy()
+	policy.RemuxExecution = config.PlaybackExecutionWorkerOnly
+	policy.VideoTranscodeExecution = config.PlaybackExecutionAPIOnly
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{Routing: policy}
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/playback/capability", nil).WithContext(newAuthorizedPlaybackContext())
+	handler.HandlePlaybackCapabilityV3(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response playback.CapabilityResponseV3
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	for _, transformation := range response.Transformations {
+		if transformation.Name == playback.TransformationAudioToAACV3 {
+			if got := remoteProbes.Load(); got != 1 {
+				t.Fatalf("remote capability probes = %d, want one shared inventory request", got)
+			}
+			return
+		}
+	}
+	t.Fatal("remux-only worker transformation was omitted from the capability union")
+}
+
 func TestIncompleteToneMapPlanningBecomesRetryableStartFailure(t *testing.T) {
 	for _, reason := range []string{
 		playback.TerminalHDRTranscodeUnsupportedV3,
