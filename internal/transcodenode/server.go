@@ -340,6 +340,25 @@ func (s *Server) restartSessionLocked(ctx context.Context, sessionID string, ses
 	return session.Restart(ctx, seekSeconds, startSegment)
 }
 
+// restartSegmentLocked resolves and applies missing-segment recovery while the
+// node's lifecycle lock keeps the current manifest and live session stable.
+func (s *Server) restartSegmentLocked(
+	ctx context.Context,
+	sessionID string,
+	session *playback.TranscodeSession,
+	segNum int,
+) (playback.SegmentRecoveryTarget, bool, error) {
+	unlock := s.lockSessionLifecycle(sessionID)
+	defer unlock()
+	s.mu.RLock()
+	live, ok := s.sessions[sessionID]
+	s.mu.RUnlock()
+	if !ok || live != session {
+		return playback.SegmentRecoveryTarget{}, false, playback.ErrSessionSuperseded
+	}
+	return session.RestartSegment(ctx, segNum)
+}
+
 // NewServer creates a new transcode server.
 func NewServer(watcher *nodeconfig.Watcher, tracker *nodesessions.Tracker) *Server {
 	var trackerImpl sessionTracker
@@ -1959,12 +1978,19 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if err != nil && err == playback.ErrSegmentNotFound && decision.RestartOnTimeout {
-				seekSeconds, ok, seekErr := session.RestartSeekTarget(segNum)
-				if seekErr != nil && !errors.Is(seekErr, playback.ErrManifestNotReady) {
-					slog.ErrorContext(r.Context(), "resolve transcode node seek target", "component", "transcodenode", "error", seekErr, "segment", name, "session", sessionID, "playback_session_id", sessionID)
+				target, ok, restartErr := s.restartSegmentLocked(
+					r.Context(),
+					sessionID,
+					session,
+					segNum,
+				)
+				if restartErr != nil && !errors.Is(restartErr, playback.ErrManifestNotReady) {
+					slog.ErrorContext(r.Context(), "restart transcode node at missing segment", "component", "transcodenode", "error", restartErr, "segment", name, "session", sessionID, "playback_session_id", sessionID)
 				}
 
-				if ok {
+				if restartErr != nil {
+					err = restartErr
+				} else if ok {
 					slog.InfoContext(r.Context(), "transcode node seek restart", "component", "transcodenode",
 						"segment", name,
 						"requested_segment", segNum,
@@ -1974,24 +2000,16 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 						"last_produced_age_ms", lastProducedAgeMS,
 						"wait_timeout_ms", decision.WaitTimeout.Milliseconds(),
 						"reason", decision.Reason,
-						"seek_seconds", seekSeconds,
+						"seek_seconds", target.SeekSeconds,
+						"stream_origin_seconds", target.StreamOriginSeconds,
+						"resolved_start_segment", target.StartSegmentNumber,
 						"session", sessionID,
 						"playback_session_id", sessionID,
 					)
 
-					if restartErr := s.restartSessionLocked(
-						r.Context(),
-						sessionID,
-						session,
-						seekSeconds,
-						segNum,
-					); restartErr == nil {
-						segmentLease, err = session.WaitForOpenSegment(name, 30*time.Second)
-					} else {
-						err = restartErr
-					}
+					segmentLease, err = session.WaitForOpenSegment(name, 30*time.Second)
 				}
-				if !ok && session.IsCopyVideo() {
+				if !ok && restartErr == nil && session.IsCopyVideo() {
 					err = playback.ErrSegmentNotFound
 				}
 			}

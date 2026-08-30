@@ -881,10 +881,15 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 			}
 
 			if err != nil && errors.Is(err, playback.ErrSegmentNotFound) && decision.RestartOnTimeout {
-				seekSeconds, ok, seekErr := transcodeSession.RestartSeekTarget(segNum)
-				if seekErr != nil && !errors.Is(seekErr, playback.ErrManifestNotReady) {
-					slog.ErrorContext(r.Context(), "resolve transcode seek target", "component", "jellycompat",
-						"error", seekErr,
+				target, ok, restartErr := h.tm.RestartSegmentLocked(
+					r.Context(),
+					playSession.UpstreamSessionID,
+					transcodeSession,
+					segNum,
+				)
+				if restartErr != nil && !errors.Is(restartErr, playback.ErrManifestNotReady) {
+					slog.ErrorContext(r.Context(), "restart transcode at missing segment", "component", "jellycompat",
+						"error", restartErr,
 						"segment", segmentName,
 						"play_session", playSessionID,
 						"session", playSession.UpstreamSessionID,
@@ -898,11 +903,13 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 				// client retries while the session keeps producing manifest.
 				// Mirrors the transcode-node guard in
 				// internal/transcodenode/server.go.
-				if !ok && seekErr == nil && transcodeSession.IsCopyVideo() {
+				if !ok && restartErr == nil && transcodeSession.IsCopyVideo() {
 					err = playback.ErrSegmentNotFound
 				}
 
-				if ok {
+				if restartErr != nil {
+					err = restartErr
+				} else if ok {
 					slog.InfoContext(r.Context(), "transcode seek restart", "component", "jellycompat",
 						"segment", segmentName,
 						"requested_segment", segNum,
@@ -912,23 +919,15 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 						"last_produced_age_ms", lastProducedAgeMS,
 						"wait_timeout_ms", decision.WaitTimeout.Milliseconds(),
 						"reason", decision.Reason,
-						"seek_seconds", seekSeconds,
+						"seek_seconds", target.SeekSeconds,
+						"stream_origin_seconds", target.StreamOriginSeconds,
+						"resolved_start_segment", target.StartSegmentNumber,
 						"play_session", playSessionID,
 						"session", playSession.UpstreamSessionID,
 						"playback_session_id", playSession.UpstreamSessionID,
 					)
 
-					if restartErr := h.tm.RestartSessionLocked(
-						r.Context(),
-						playSession.UpstreamSessionID,
-						transcodeSession,
-						seekSeconds,
-						segNum,
-					); restartErr == nil {
-						segmentLease, err = transcodeSession.WaitForOpenSegment(segmentName, 30*time.Second)
-					} else {
-						err = restartErr
-					}
+					segmentLease, err = transcodeSession.WaitForOpenSegment(segmentName, 30*time.Second)
 				}
 			}
 		} else if transcodeSession.IsRunning() {

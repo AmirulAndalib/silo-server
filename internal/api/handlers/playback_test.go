@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -351,6 +352,84 @@ func TestHeaderAuthenticatedMediaEnforcesHLSOwnerOnEveryRequest(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestGetTranscodeSegment_CopyRecoveryUsesResolvedManifestNumber(t *testing.T) {
+	outputDir := t.TempDir()
+	ffmpegPath := filepath.Join(outputDir, "ffmpeg")
+	launchMarker := filepath.Join(outputDir, "launched")
+	manifest := "#EXTM3U\\n#EXT-X-VERSION:7\\n#EXT-X-TARGETDURATION:3\\n#EXT-X-MEDIA-SEQUENCE:9\\n#EXT-X-MAP:URI=\"init.mp4\"\\n#EXTINF:2.669000,\\nseg_00009.m4s\\n#EXTINF:1.669000,\\nseg_00010.m4s\\n#EXTINF:1.668000,\\nseg_00011.m4s\\n"
+	ffmpeg := `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "framecrc" ]; then
+    printf '%s\n' '#tb 0: 1/1000'
+    printf '%s\n' '0, 18000, 18000, 41, 1024, 0x12345678'
+    exit 0
+  fi
+done
+printf '%b' '` + manifest + `' > '` + filepath.Join(outputDir, "stream.m3u8") + `'
+if [ ! -e '` + launchMarker + `' ]; then
+  : > '` + launchMarker + `'
+  printf ahead > '` + filepath.Join(outputDir, "seg_00011.m4s") + `'
+else
+  printf recovered > '` + filepath.Join(outputDir, "seg_00010.m4s") + `'
+  printf ahead > '` + filepath.Join(outputDir, "seg_00011.m4s") + `'
+fi
+exec sleep 30
+`
+	if err := os.WriteFile(ffmpegPath, []byte(ffmpeg), 0o755); err != nil {
+		t.Fatalf("write fake ffmpeg: %v", err)
+	}
+
+	const sessionID = "copy-recovery-session"
+	transcodeSession, err := playback.StartTranscode(context.Background(), playback.TranscodeOpts{
+		SessionID:              sessionID,
+		InputPath:              "/media/movie.mkv",
+		OutputDir:              outputDir,
+		FFmpegPath:             ffmpegPath,
+		SeekSeconds:            18.261,
+		StreamOriginSeconds:    18,
+		CopySeekAnchorResolved: true,
+		TargetCodecVideo:       "copy",
+		TargetCodecAudio:       "copy",
+		SegmentDuration:        2,
+		StartSegmentNumber:     9,
+	})
+	if err != nil {
+		t.Fatalf("StartTranscode: %v", err)
+	}
+	t.Cleanup(func() { _ = transcodeSession.Close() })
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, statErr := os.Stat(filepath.Join(outputDir, "seg_00011.m4s")); statErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("initial fake transcode did not become observable")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	sessions := playback.NewSessionManager(0, 0)
+	sessions.RegisterReconstructed(&playback.Session{ID: sessionID, UserID: 1, PlayMethod: playback.PlayTranscode})
+	handler := NewPlaybackHandler(sessions)
+	handler.TranscodeManager().RegisterTranscodeSession(sessionID, transcodeSession)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/playback/transcode/"+sessionID+"/segment/seg_00010.m4s", nil)
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("session_id", sessionID)
+	routeCtx.URLParams.Add("name", "seg_00010.m4s")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+	rr := httptest.NewRecorder()
+	handler.HandleGetTranscodeSegment(rr, req)
+
+	if rr.Code != http.StatusOK || rr.Body.String() != "recovered" {
+		t.Fatalf("segment response = %d %q, want 200 recovered", rr.Code, rr.Body.String())
+	}
+	opts := transcodeSession.Opts()
+	if opts.StartSegmentNumber != 9 || !opts.CopySeekAnchorResolved || math.Abs(opts.StreamOriginSeconds-18) > 0.0001 {
+		t.Fatalf("recovery opts = %+v, want start=9 origin=18 resolved=true", opts)
 	}
 }
 

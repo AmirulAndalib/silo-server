@@ -282,6 +282,26 @@ func (m *TranscodeManager) RestartSessionLocked(ctx context.Context, sessionID s
 	})
 }
 
+// RestartSegmentLocked resolves and restarts one missing HLS segment under the
+// per-session lifecycle lock. Copy-video resolution reads the current manifest,
+// so keeping resolution and restart inside the same lock preserves the mapping
+// it observed.
+func (m *TranscodeManager) RestartSegmentLocked(
+	ctx context.Context,
+	sessionID string,
+	ts *TranscodeSession,
+	segNum int,
+) (SegmentRecoveryTarget, bool, error) {
+	var target SegmentRecoveryTarget
+	var ok bool
+	err := m.restartSessionLocked(sessionID, ts, func() error {
+		var restartErr error
+		target, ok, restartErr = ts.RestartSegment(ctx, segNum)
+		return restartErr
+	})
+	return target, ok, err
+}
+
 func (m *TranscodeManager) restartSessionLocked(sessionID string, ts *TranscodeSession, restart func() error) error {
 	unlock := m.LockSessionLifecycle(sessionID)
 	defer unlock()
