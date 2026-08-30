@@ -977,18 +977,9 @@ func localHLSVideoRouteAllowedV3(policy config.PlaybackRoutingPolicy) bool {
 	return localHLSRouteAllowedV3(noderouting.WorkloadVideoTranscode, policy)
 }
 
-func workerHLSVideoRouteAllowedV3(policy config.PlaybackRoutingPolicy) bool {
-	return workerHLSRouteAllowedV3(noderouting.WorkloadVideoTranscode, policy)
-}
-
 func localHLSRouteAllowedV3(workload noderouting.Workload, policy config.PlaybackRoutingPolicy) bool {
 	localAllowed, _ := hlsRouteExecutorAvailabilityV3(workload, policy)
 	return localAllowed
-}
-
-func workerHLSRouteAllowedV3(workload noderouting.Workload, policy config.PlaybackRoutingPolicy) bool {
-	_, workerAllowed := hlsRouteExecutorAvailabilityV3(workload, policy)
-	return workerAllowed
 }
 
 func hlsRouteExecutorAvailabilityV3(workload noderouting.Workload, policy config.PlaybackRoutingPolicy) (bool, bool) {
