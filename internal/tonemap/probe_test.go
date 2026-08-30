@@ -2,8 +2,10 @@ package tonemap
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -15,6 +17,55 @@ import (
 	"time"
 )
 
+// TestDecodeProbeFixtureCoversPascalNVDECMinimum prevents the embedded decoder
+// sample from regressing below the minimum frame size accepted by Pascal NVDEC.
+func TestDecodeProbeFixtureCoversPascalNVDECMinimum(t *testing.T) {
+	ffprobePath, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe is not installed")
+	}
+	fixturePath, cleanup, err := writeDecodeProbeFixture()
+	if err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	defer cleanup()
+
+	output, err := exec.Command(
+		ffprobePath,
+		"-v", "error",
+		"-select_streams", "v:0",
+		"-show_entries", "stream=width,height,pix_fmt",
+		"-of", "json",
+		fixturePath,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("probe fixture: %v: %s", err, output)
+	}
+	var result struct {
+		Streams []struct {
+			Width  int    `json:"width"`
+			Height int    `json:"height"`
+			PixFmt string `json:"pix_fmt"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("decode fixture metadata: %v: %s", err, output)
+	}
+	if len(result.Streams) != 1 {
+		t.Fatalf("fixture streams = %d, want 1", len(result.Streams))
+	}
+	const pascalNVDECMinimumDimension = 144
+	stream := result.Streams[0]
+	if stream.Width < pascalNVDECMinimumDimension || stream.Height < pascalNVDECMinimumDimension {
+		t.Fatalf("fixture dimensions = %dx%d, must be at least %dx%d for Pascal NVDEC", stream.Width, stream.Height, pascalNVDECMinimumDimension, pascalNVDECMinimumDimension)
+	}
+	if stream.PixFmt != "yuv420p10le" {
+		t.Fatalf("fixture pixel format = %q, want yuv420p10le", stream.PixFmt)
+	}
+}
+
+// TestHardwareSmokeFilterNVENCPreservesSourceBitDepth verifies that the CUDA
+// fallback graph downloads SDR base layers using their actual source bit depth.
 func TestHardwareSmokeFilterNVENCPreservesSourceBitDepth(t *testing.T) {
 	for _, test := range []struct {
 		name     string
