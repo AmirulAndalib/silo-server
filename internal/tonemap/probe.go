@@ -20,8 +20,13 @@ import (
 
 const (
 	probeCommandTimeout = 5 * time.Second
-	probeNegativeTTL    = 15 * time.Second
-	probeTimeoutSlack   = time.Second
+	// An NVENC smoke test initializes the NVIDIA driver, decoder, CUDA tone-map
+	// filter, and encoder in a fresh FFmpeg process. Older cards can take longer
+	// than the ordinary command budget on the first CUDA use even when the same
+	// pipeline is fully supported once initialized.
+	nvencProbeCommandTimeout = 30 * time.Second
+	probeNegativeTTL         = 15 * time.Second
+	probeTimeoutSlack        = time.Second
 	// probeEndpointSlack covers what a capability endpoint spends around the
 	// tone-map matrix itself: one bounded hardware detection walk (30s in
 	// playback.hwAccelWalkTimeout), the transformation registry's three 3s
@@ -272,13 +277,14 @@ func capabilityCoversAllSourceKinds(capabilities Capabilities, mode Mode, backen
 // ProbeTotalTimeout budgets one bounded deadline for every listing and smoke
 // command the selected backend and device set can execute.
 func ProbeTotalTimeout(hardwareBackend, hardwareDevice string) time.Duration {
-	commandCount := 2 + len(AllSourceKinds())
+	total := time.Duration(2+len(AllSourceKinds())) * probeCommandTimeout
 	backend := strings.ToLower(strings.TrimSpace(hardwareBackend))
 	switch backend {
 	case BackendQSV, BackendVAAPI, BackendNVENC, BackendVideoToolbox:
-		commandCount += len(AllSourceKinds()) * len(probeDevices(hardwareDevice, backend))
+		hardwareCommandCount := len(AllSourceKinds()) * len(probeDevices(hardwareDevice, backend))
+		total += time.Duration(hardwareCommandCount) * hardwareProbeCommandTimeout(backend)
 	}
-	return time.Duration(commandCount)*probeCommandTimeout + probeTimeoutSlack
+	return total + probeTimeoutSlack
 }
 
 // ProbeEndpointTimeout includes auto-backend discovery and response overhead
@@ -316,7 +322,7 @@ func MaxProbeRequestTimeout() time.Duration {
 	for i := range MaxProbedDevices {
 		devices = append(devices, defaultDRIRenderDevice+strconv.Itoa(i))
 	}
-	return ProbeRequestTimeout(BackendQSV, strings.Join(devices, ","))
+	return ProbeRequestTimeout(BackendNVENC, strings.Join(devices, ","))
 }
 
 // ProbeRequestTimeout gives a remote caller additional transport and response
@@ -352,7 +358,7 @@ func ProbeWithRunner(
 		softwareFilter = selected
 	}
 	if softwareFilter != "" && hasToken(encoders, "libx264") {
-		kinds := smokeSourceKinds(ctx, run, ffmpegPath, func(kind SourceKind) []string {
+		kinds := smokeSourceKinds(ctx, run, ffmpegPath, probeCommandTimeout, func(kind SourceKind) []string {
 			return softwareSmokeArgs(fixturePath, kind, softwareFilter)
 		})
 		if len(kinds) > 0 {
@@ -376,7 +382,7 @@ func hardwareSmokeSourceKinds(ctx context.Context, run CommandRunner, ffmpegPath
 	devices := probeDevices(hardwareDevice, backend)
 	validated := AllSourceKinds()
 	for _, device := range devices {
-		supported := smokeSourceKinds(ctx, run, ffmpegPath, func(kind SourceKind) []string {
+		supported := smokeSourceKinds(ctx, run, ffmpegPath, hardwareProbeCommandTimeout(backend), func(kind SourceKind) []string {
 			return hardwareSmokeArgs(fixturePath, backend, device, kind)
 		})
 		validated = intersectSourceKinds(validated, supported)
@@ -385,6 +391,15 @@ func hardwareSmokeSourceKinds(ctx context.Context, run CommandRunner, ffmpegPath
 		}
 	}
 	return validated
+}
+
+// hardwareProbeCommandTimeout allows CUDA and NVENC to finish cold driver
+// initialization without widening the command deadline for other backends.
+func hardwareProbeCommandTimeout(backend string) time.Duration {
+	if strings.EqualFold(strings.TrimSpace(backend), BackendNVENC) {
+		return nvencProbeCommandTimeout
+	}
+	return probeCommandTimeout
 }
 
 // probeDevices parses the configured device list and supplies the backend's
@@ -467,7 +482,13 @@ func runCommand(ctx context.Context, name string, args ...string) ([]byte, error
 // runBounded applies the per-command probe deadline within the caller's total
 // deadline.
 func runBounded(ctx context.Context, run CommandRunner, name string, args ...string) ([]byte, error) {
-	commandCtx, cancel := context.WithTimeout(ctx, probeCommandTimeout)
+	return runBoundedWithTimeout(ctx, probeCommandTimeout, run, name, args...)
+}
+
+// runBoundedWithTimeout executes one probe command under the supplied backend-
+// specific deadline while retaining the caller's total probe deadline.
+func runBoundedWithTimeout(ctx context.Context, timeout time.Duration, run CommandRunner, name string, args ...string) ([]byte, error) {
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return run(commandCtx, name, args...)
 }
@@ -500,11 +521,12 @@ func smokeSourceKinds(
 	ctx context.Context,
 	run CommandRunner,
 	ffmpegPath string,
+	commandTimeout time.Duration,
 	argsFor func(SourceKind) []string,
 ) []SourceKind {
 	kinds := make([]SourceKind, 0, len(AllSourceKinds()))
 	for _, kind := range AllSourceKinds() {
-		if _, err := runBounded(ctx, run, ffmpegPath, argsFor(kind)...); err == nil {
+		if _, err := runBoundedWithTimeout(ctx, commandTimeout, run, ffmpegPath, argsFor(kind)...); err == nil {
 			kinds = append(kinds, kind)
 		}
 	}
