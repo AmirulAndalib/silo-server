@@ -338,30 +338,37 @@ func TestClientObjectAvailableUsesExternalDeliveryPath(t *testing.T) {
 	}
 }
 
-func TestClientObjectAvailableUsesStorageForPresignedURLs(t *testing.T) {
+func TestClientObjectAvailableUsesStorageWithoutExternalDelivery(t *testing.T) {
 	t.Parallel()
 
-	srv := newS3TestServer(t)
-	client := NewClient(BucketConfig{
-		Endpoint:  srv.URL(),
-		Region:    "us-east-1",
-		Bucket:    "silo",
-		AccessKey: "test",
-		SecretKey: "test",
-		PathStyle: true,
-		URLAuth:   URLAuthPresigned,
-	})
+	for _, authMode := range []string{URLAuthPresigned, URLAuthPublic, URLAuthCloudflareToken} {
+		t.Run(authMode, func(t *testing.T) {
+			srv := newS3TestServer(t)
+			client := NewClient(BucketConfig{
+				Endpoint:  srv.URL(),
+				Region:    "us-east-1",
+				Bucket:    "silo",
+				AccessKey: "test",
+				SecretKey: "test",
+				PathStyle: true,
+				URLAuth:   authMode,
+			})
 
-	available, err := client.ObjectAvailable(t.Context(), client.Bucket(), "poster.webp")
-	if err != nil || !available {
-		t.Fatalf("ObjectAvailable() = %v, %v, want true, nil", available, err)
-	}
-	requests := srv.Requests()
-	if !containsRequest(requests, http.MethodHead, "/silo/poster.webp", "") {
-		t.Fatalf("requests = %#v, want storage HEAD", requests)
-	}
-	if containsRequest(requests, http.MethodGet, "/silo/poster.webp", "") {
-		t.Fatalf("requests = %#v, do not want a delivery GET for presigned S3", requests)
+			if client.UsesExternalDelivery() {
+				t.Fatal("UsesExternalDelivery() = true without a public endpoint")
+			}
+			available, err := client.ObjectAvailable(t.Context(), client.Bucket(), "poster.webp")
+			if err != nil || !available {
+				t.Fatalf("ObjectAvailable() = %v, %v, want true, nil", available, err)
+			}
+			requests := srv.Requests()
+			if !containsRequest(requests, http.MethodHead, "/silo/poster.webp", "") {
+				t.Fatalf("requests = %#v, want storage HEAD", requests)
+			}
+			if containsRequest(requests, http.MethodGet, "/silo/poster.webp", "") {
+				t.Fatalf("requests = %#v, do not want a delivery GET without external delivery", requests)
+			}
+		})
 	}
 }
 

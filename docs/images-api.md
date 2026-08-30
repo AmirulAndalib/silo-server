@@ -112,11 +112,13 @@ a broken URL, and no client action is required: the correct width appears once
 the pass completes. URLs served from a fallback carry a shortened expiry so the
 real rung is picked up promptly rather than a day later. Externally delivered
 wide-rung URLs are also revalidated on that shorter cadence, because public
-delivery health can change independently of the backing object. This safe
-fallback is why the capability endpoint can continue advertising the `large`
-request semantic while a deployment's wide-rung backfill is incomplete. The
-check observes the server's route to the public endpoint; a CDN may still send
-a remote client to a different edge with transient edge-local state.
+delivery health can change independently of the backing object. The first
+delivery error in a batch stops later entries from probing the same failing
+endpoint, bounding browse latency during an outage. This safe fallback is why
+the capability endpoint can continue advertising the `large` request semantic
+while a deployment's wide-rung backfill is incomplete. The check observes the
+server's route to the public endpoint; a CDN may still send a remote client to a
+different edge with transient edge-local state.
 
 ## Jellyfin compatibility
 

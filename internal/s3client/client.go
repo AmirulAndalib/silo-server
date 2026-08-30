@@ -339,10 +339,17 @@ func (c *Client) cloudflareTokenURL(key string) string {
 		"?" + c.tokenParam + "=" + ts + "-" + url.QueryEscape(token)
 }
 
-// UsesExternalAuth returns true if read URLs are served via a public endpoint
-// (token auth or public bucket) rather than S3 presigned URLs.
+// UsesExternalAuth reports whether the configured URL auth mode is public or
+// token-based. Use UsesExternalDelivery when endpoint availability matters.
 func (c *Client) UsesExternalAuth() bool {
 	return c.urlAuth == URLAuthCloudflareToken || c.urlAuth == URLAuthPublic
+}
+
+// UsesExternalDelivery reports whether generated read URLs actually use a
+// separately configured public or token-authenticated endpoint. An auth mode
+// without its endpoint still falls back to standard S3 presigning.
+func (c *Client) UsesExternalDelivery() bool {
+	return c.publicEndpoint != "" && c.UsesExternalAuth()
 }
 
 // PublicURL returns the deterministic public URL for an object based on the
@@ -443,7 +450,7 @@ func (c *Client) ObjectExists(ctx context.Context, bucket, key string) (bool, er
 // one-byte range avoids transferring the image body when the endpoint honors
 // ranges. Standard presigned delivery keeps using the cheaper storage HEAD.
 func (c *Client) ObjectAvailable(ctx context.Context, bucket, key string) (bool, error) {
-	if !c.UsesExternalAuth() || c.publicEndpoint == "" {
+	if !c.UsesExternalDelivery() {
 		return c.ObjectExists(ctx, bucket, key)
 	}
 

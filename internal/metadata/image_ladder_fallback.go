@@ -2,10 +2,12 @@ package metadata
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -43,7 +45,7 @@ type s3ImageExistenceChecker interface {
 // endpoint still returns 404.
 type s3ImageDeliveryChecker interface {
 	ObjectAvailable(ctx context.Context, bucket, key string) (bool, error)
-	UsesExternalAuth() bool
+	UsesExternalDelivery() bool
 }
 
 type imageAvailabilityCheck func(ctx context.Context, bucket, key string) (bool, error)
@@ -55,7 +57,7 @@ type imageAvailabilityPolicy struct {
 }
 
 func availabilityPolicy(presigner s3ImagePresigner) imageAvailabilityPolicy {
-	if checker, ok := presigner.(s3ImageDeliveryChecker); ok && checker.UsesExternalAuth() {
+	if checker, ok := presigner.(s3ImageDeliveryChecker); ok && checker.UsesExternalDelivery() {
 		return imageAvailabilityPolicy{
 			check:           checker.ObjectAvailable,
 			presentTTL:      externalAvailabilityCacheTTL,
@@ -69,6 +71,31 @@ func availabilityPolicy(presigner s3ImagePresigner) imageAvailabilityPolicy {
 		}
 	}
 	return imageAvailabilityPolicy{}
+}
+
+var errExternalDeliveryBatchUnavailable = errors.New("external artwork delivery unavailable for batch")
+
+// withBatchFailureCircuit stops a delivery outage from consuming one probe
+// timeout per worker wave. Checks already in flight may finish, but after the
+// first error no later entry in this batch reaches the external endpoint.
+func (p imageAvailabilityPolicy) withBatchFailureCircuit() imageAvailabilityPolicy {
+	if !p.fallbackOnError || p.check == nil {
+		return p
+	}
+
+	check := p.check
+	var failed atomic.Bool
+	p.check = func(ctx context.Context, bucket, key string) (bool, error) {
+		if failed.Load() {
+			return false, errExternalDeliveryBatchUnavailable
+		}
+		exists, err := check(ctx, bucket, key)
+		if err != nil && !failed.CompareAndSwap(false, true) {
+			return false, errExternalDeliveryBatchUnavailable
+		}
+		return exists, err
+	}
+	return p
 }
 
 // ladderTypesWithAddedRung lists the image types that gained a rung in the
@@ -160,6 +187,7 @@ func (r *PluginImageResolver) resolveLadderKeys(
 	if len(pending) == 0 {
 		return resolved
 	}
+	policy = policy.withBatchFailureCircuit()
 
 	var (
 		mu    sync.Mutex
@@ -208,7 +236,9 @@ func (r *PluginImageResolver) resolveLadderKey(ctx context.Context, policy image
 				slog.DebugContext(ctx, "artwork existence check failed", "component", "metadata", "key", candidate, "error", err)
 				return key, false
 			}
-			slog.WarnContext(ctx, "external artwork delivery check failed; using lower rung", "component", "metadata", "key", candidate, "error", err)
+			if !errors.Is(err, errExternalDeliveryBatchUnavailable) {
+				slog.WarnContext(ctx, "external artwork delivery check failed; using lower rung", "component", "metadata", "key", candidate, "error", err)
+			}
 			next, hasNext := imagesize.NextLower(imageType, keyVariant(candidate))
 			if !hasNext {
 				return variantKey(key, artworkkey.OriginalVariant), true

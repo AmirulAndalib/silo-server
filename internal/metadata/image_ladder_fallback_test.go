@@ -3,6 +3,7 @@ package metadata
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -12,15 +13,17 @@ import (
 // fakeS3ImageStore is a presigner that also answers existence checks, standing
 // in for *s3client.Client.
 type fakeS3ImageStore struct {
-	mu             sync.Mutex
-	existing       map[string]bool
-	deliverable    map[string]bool
-	deliveryErrors map[string]error
-	externalAuth   bool
-	err            error
-	checks         []string
-	deliveryChecks []string
-	presigns       []string
+	mu               sync.Mutex
+	existing         map[string]bool
+	deliverable      map[string]bool
+	deliveryErrors   map[string]error
+	externalDelivery bool
+	err              error
+	checks           []string
+	deliveryChecks   []string
+	presigns         []string
+	deliveryStarted  chan<- string
+	deliveryRelease  <-chan struct{}
 }
 
 func newFakeS3ImageStore(existing ...string) *fakeS3ImageStore {
@@ -33,7 +36,7 @@ func newFakeS3ImageStore(existing ...string) *fakeS3ImageStore {
 
 func (s *fakeS3ImageStore) Bucket() string { return "media" }
 
-func (s *fakeS3ImageStore) UsesExternalAuth() bool { return s.externalAuth }
+func (s *fakeS3ImageStore) UsesExternalDelivery() bool { return s.externalDelivery }
 
 func (s *fakeS3ImageStore) PresignGetURL(_ context.Context, bucket, key string, _ time.Duration) (string, error) {
 	s.mu.Lock()
@@ -52,17 +55,36 @@ func (s *fakeS3ImageStore) ObjectExists(_ context.Context, _ string, key string)
 	return s.existing[key], nil
 }
 
-func (s *fakeS3ImageStore) ObjectAvailable(_ context.Context, _ string, key string) (bool, error) {
+func (s *fakeS3ImageStore) ObjectAvailable(ctx context.Context, _ string, key string) (bool, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.deliveryChecks = append(s.deliveryChecks, key)
-	if err := s.deliveryErrors[key]; err != nil {
+	started := s.deliveryStarted
+	release := s.deliveryRelease
+	err := s.deliveryErrors[key]
+	if err == nil {
+		err = s.err
+	}
+	deliverable := s.deliverable[key]
+	s.mu.Unlock()
+
+	if started != nil {
+		select {
+		case started <- key:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+	if release != nil {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+	if err != nil {
 		return false, err
 	}
-	if s.err != nil {
-		return false, s.err
-	}
-	return s.deliverable[key], nil
+	return deliverable, nil
 }
 
 func (s *fakeS3ImageStore) checkCount() int {
@@ -165,7 +187,7 @@ func TestLadderFallbackUsesClientDeliveryAvailability(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newFakeS3ImageStore(tt.requested, tt.present)
-			store.externalAuth = true
+			store.externalDelivery = true
 			store.deliverable = map[string]bool{tt.present: true}
 			resolver := newResolverWithStore(t, store)
 
@@ -186,7 +208,7 @@ func TestLadderFallbackRechecksExternalDeliveryForPromotion(t *testing.T) {
 	const requested = "tmdb/movies/550/poster/w780.rev.webp"
 	const present = "tmdb/movies/550/poster/w500.rev.webp"
 	store := newFakeS3ImageStore(requested, present)
-	store.externalAuth = true
+	store.externalDelivery = true
 	store.deliverable = map[string]bool{present: true}
 	resolver := newResolverWithStore(t, store)
 
@@ -211,7 +233,7 @@ func TestLadderFallbackUsesLowerRungWhenDeliveryCheckErrors(t *testing.T) {
 	const requested = "tmdb/movies/550/poster/w780.rev.webp"
 	const present = "tmdb/movies/550/poster/w500.rev.webp"
 	store := newFakeS3ImageStore(requested, present)
-	store.externalAuth = true
+	store.externalDelivery = true
 	store.deliverable = map[string]bool{present: true}
 	store.deliveryErrors = map[string]error{requested: errors.New("delivery unavailable")}
 	resolver := newResolverWithStore(t, store)
@@ -221,6 +243,70 @@ func TestLadderFallbackUsesLowerRungWhenDeliveryCheckErrors(t *testing.T) {
 	}
 	if len(store.deliveryChecks) != 1 || store.deliveryChecks[0] != requested {
 		t.Fatalf("delivery checks = %v, want one bounded check of requested rung", store.deliveryChecks)
+	}
+}
+
+func TestLadderFallbackStopsDeliveryProbesAfterBatchFailure(t *testing.T) {
+	const entryCount = ladderExistenceConcurrency * 4
+
+	started := make(chan string, entryCount)
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(unblock)
+
+	store := newFakeS3ImageStore()
+	store.externalDelivery = true
+	store.err = errors.New("delivery unavailable")
+	store.deliveryStarted = started
+	store.deliveryRelease = release
+	resolver := newResolverWithStore(t, store)
+
+	entries := make([]resolveEntry, 0, entryCount)
+	for i := range entryCount {
+		entries = append(entries, resolveEntry{
+			originalPath: fmt.Sprintf("tmdb/movies/%d/poster/w780.rev.webp", i),
+		})
+	}
+
+	resolved := make(chan map[string]ladderKey, 1)
+	go func() {
+		resolved <- resolver.resolveLadderKeys(t.Context(), availabilityPolicy(store), store.Bucket(), entries)
+	}()
+
+	waitCtx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	for range ladderExistenceConcurrency {
+		select {
+		case <-started:
+		case <-waitCtx.Done():
+			t.Fatalf("delivery probes started = %d, want initial worker set of %d", len(started), ladderExistenceConcurrency)
+		}
+	}
+	select {
+	case key := <-started:
+		t.Fatalf("delivery probe %q exceeded the %d-worker limit before release", key, ladderExistenceConcurrency)
+	default:
+	}
+
+	unblock()
+	var got map[string]ladderKey
+	select {
+	case got = <-resolved:
+	case <-waitCtx.Done():
+		t.Fatal("ladder batch did not fall back after delivery failure")
+	}
+
+	store.mu.Lock()
+	deliveryChecks := append([]string(nil), store.deliveryChecks...)
+	store.mu.Unlock()
+	if len(deliveryChecks) > ladderExistenceConcurrency {
+		t.Fatalf("delivery checks = %d, want at most the initial worker set of %d", len(deliveryChecks), ladderExistenceConcurrency)
+	}
+	for _, entry := range entries {
+		want := strings.Replace(entry.originalPath, "/w780.", "/w500.", 1)
+		if result := got[entry.originalPath]; result.key != want || !result.fellBack {
+			t.Errorf("resolved[%q] = %#v, want fallback key %q", entry.originalPath, result, want)
+		}
 	}
 }
 
@@ -315,7 +401,7 @@ func TestLadderFallbackClampsResolvedURLLifetime(t *testing.T) {
 func TestLadderFallbackClampsExternallyVerifiedURLLifetime(t *testing.T) {
 	const requested = "tmdb/movies/550/poster/w780.abc123.webp"
 	store := newFakeS3ImageStore(requested)
-	store.externalAuth = true
+	store.externalDelivery = true
 	store.deliverable = map[string]bool{requested: true}
 	resolver := newResolverWithStore(t, store)
 
