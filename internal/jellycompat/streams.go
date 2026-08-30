@@ -2134,6 +2134,11 @@ func (h *PlaybackHandler) upstreamRecipeCard(ps *PlaybackSession, cs *Session, s
 	if ps != nil && !ps.CreatedAt.IsZero() {
 		card.OriginalStartedAt = ps.CreatedAt
 	}
+	if ps != nil && ps.RoutingAssignment != nil {
+		card.RoutingWorkload = ps.RoutingAssignment.Workload
+		card.RoutingExecution = ps.RoutingAssignment.Execution
+		card.RoutingEgress = ps.RoutingAssignment.Egress
+	}
 	return card
 }
 

@@ -1176,6 +1176,20 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 		AudioOnly:           file.IsAudioOnly(),
 		TranscodeNode:       transcodeNodeURL,
 		DVProfile:           file.PrimaryDVProfile(),
+		RoutingWorkload:     string(noderouting.WorkloadDirectPlay),
+		RoutingExecution:    string(noderouting.ExecutionNone),
+		RoutingEgress:       string(noderouting.EgressProxy),
+	}
+	switch method {
+	case string(playback.PlayRemux):
+		claims.RoutingWorkload = string(noderouting.WorkloadRemux)
+		claims.RoutingExecution = string(noderouting.ExecutionProxy)
+	case string(playback.PlayTranscode):
+		claims.RoutingWorkload = string(noderouting.WorkloadVideoTranscode)
+		if compatHLSCopiesVideo(source) {
+			claims.RoutingWorkload = string(noderouting.WorkloadRemux)
+		}
+		claims.RoutingExecution = string(noderouting.ExecutionTranscode)
 	}
 	if playback.IsAudioToAACStereoDownmixV3(claims.SourceAudioChannels, claims.TargetCodecAudio, claims.TargetAudioChannels) {
 		// Compatibility AAC output is stereo by default. Freeze that effective
@@ -1718,6 +1732,11 @@ func (h *PlaybackHandler) persistTranscodeRecipe(
 			card.IsJellyfinCompat = upstream.IsJellyfinCompat
 			if playSession != nil {
 				card.OriginalStartedAt = playSession.CreatedAt
+				if assignment := playSession.RoutingAssignment; assignment != nil {
+					card.RoutingWorkload = assignment.Workload
+					card.RoutingExecution = assignment.Execution
+					card.RoutingEgress = assignment.Egress
+				}
 			}
 			recipe = &card
 		}

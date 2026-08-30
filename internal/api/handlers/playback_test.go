@@ -23,9 +23,11 @@ import (
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/mediaprobe"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
 	"github.com/Silo-Server/silo-server/internal/settingskeys"
+	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 	"github.com/Silo-Server/silo-server/internal/userdb"
@@ -50,6 +52,109 @@ func TestWritePlaybackToneMapExecutionError(t *testing.T) {
 		if rr.Code != tt.wantStatus || rr.Header().Get(transcodenode.ToneMapExecutionErrorHeader) != tt.wantCode {
 			t.Fatalf("response = %d/%q, want %d/%q", rr.Code, rr.Header().Get(transcodenode.ToneMapExecutionErrorHeader), tt.wantStatus, tt.wantCode)
 		}
+	}
+}
+
+func TestRequireNativeAPIEgressV3(t *testing.T) {
+	for _, test := range []struct {
+		name                        string
+		workload, execution, egress string
+		want                        int
+	}{
+		{name: "legacy", want: http.StatusOK},
+		{name: "api", workload: string(noderouting.WorkloadRemux), execution: string(noderouting.ExecutionAPI), egress: string(noderouting.EgressAPI), want: http.StatusOK},
+		{name: "proxy", workload: string(noderouting.WorkloadRemux), execution: string(noderouting.ExecutionProxy), egress: string(noderouting.EgressProxy), want: http.StatusServiceUnavailable},
+		{name: "partial", workload: string(noderouting.WorkloadRemux), egress: string(noderouting.EgressAPI), want: http.StatusConflict},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			allowed := requireNativeAPIEgressV3(recorder, test.workload, test.execution, test.egress)
+			if test.want == http.StatusOK {
+				if !allowed {
+					t.Fatalf("route was rejected: %d %s", recorder.Code, recorder.Body.String())
+				}
+				return
+			}
+			if allowed || recorder.Code != test.want {
+				t.Fatalf("allowed = %t, response = %d %s, want %d", allowed, recorder.Code, recorder.Body.String(), test.want)
+			}
+		})
+	}
+}
+
+func TestNativeTranscodeHandlersRejectCommittedProxyEgress(t *testing.T) {
+	manager := playback.NewSessionManager(0, 0)
+	manager.RegisterReconstructed(&playback.Session{
+		ID: "proxy-hls", UserID: 1, PlayMethod: playback.PlayTranscode,
+		RoutingWorkload: string(noderouting.WorkloadVideoTranscode), RoutingExecution: string(noderouting.ExecutionTranscode),
+		RoutingEgress: string(noderouting.EgressProxy), TranscodeNodeURL: "http://worker.invalid",
+	})
+	handler := NewPlaybackHandler(manager)
+	for _, test := range []struct {
+		name   string
+		path   string
+		params map[string]string
+		handle func(http.ResponseWriter, *http.Request)
+	}{
+		{name: "manifest", path: "/api/v1/playback/transcode/proxy-hls/master.m3u8", params: map[string]string{"session_id": "proxy-hls"}, handle: handler.HandleGetTranscodeManifest},
+		{name: "segment", path: "/api/v1/playback/transcode/proxy-hls/segment/seg_0.m4s", params: map[string]string{"session_id": "proxy-hls", "name": "seg_0.m4s"}, handle: handler.HandleGetTranscodeSegment},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			test.handle(recorder, playbackTestRequest(http.MethodGet, test.path, nil, test.params))
+			if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"error":"routing_policy_unsatisfied"`) {
+				t.Fatalf("response = %d %s, want proxy-egress refusal", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestNativeTranscodeHandlersRejectProxyRecipeBeforeReconstruction(t *testing.T) {
+	const secret = "test-secret"
+	for _, test := range []struct {
+		name   string
+		path   string
+		params map[string]string
+		handle func(*PlaybackHandler, http.ResponseWriter, *http.Request)
+	}{
+		{
+			name: "manifest", path: "/api/v1/playback/transcode/lost-proxy-hls/master.m3u8",
+			params: map[string]string{"session_id": "lost-proxy-hls"},
+			handle: func(handler *PlaybackHandler, w http.ResponseWriter, r *http.Request) {
+				handler.HandleGetTranscodeManifest(w, r)
+			},
+		},
+		{
+			name: "segment", path: "/api/v1/playback/transcode/lost-proxy-hls/segment/seg_00001.m4s",
+			params: map[string]string{"session_id": "lost-proxy-hls", "name": "seg_00001.m4s"},
+			handle: func(handler *PlaybackHandler, w http.ResponseWriter, r *http.Request) {
+				handler.HandleGetTranscodeSegment(w, r)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			card := playback.RecipeCard{
+				SessionID: "lost-proxy-hls", UserID: 1, MediaFileID: 42, PlayMethod: playback.PlayTranscode,
+				RoutingWorkload: string(noderouting.WorkloadVideoTranscode), RoutingExecution: string(noderouting.ExecutionTranscode),
+				RoutingEgress: string(noderouting.EgressProxy),
+			}
+			token, err := streamtoken.Sign(card.ToClaims(), secret, time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager := playback.NewSessionManager(0, 0)
+			handler := NewPlaybackHandler(manager)
+			handler.JWTSecret = secret
+			recorder := httptest.NewRecorder()
+			test.handle(handler, recorder, playbackTestRequest(http.MethodGet, test.path+"?st="+token, nil, test.params))
+
+			if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"error":"routing_policy_unsatisfied"`) {
+				t.Fatalf("response = %d %s, want proxy-egress refusal", recorder.Code, recorder.Body.String())
+			}
+			if _, err := manager.GetSession(card.SessionID); !errors.Is(err, playback.ErrSessionNotFound) {
+				t.Fatalf("proxy recipe reconstructed a native session: %v", err)
+			}
+		})
 	}
 }
 

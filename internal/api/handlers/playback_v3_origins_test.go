@@ -311,6 +311,41 @@ func TestPrepareTransportV3AuthorizedOriginsRefuseLocalRemuxWhenTheGrantFails(t 
 	}
 }
 
+func TestPrepareTransportV3AuthorizedOriginsDoNotFallBackToAnIncapableAPI(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	stubCopySeekAnchorV3(handler)
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{
+		Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3,
+	}}))
+	proxy := capableProxyStubV3(t)
+	planner := &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: proxy.URL}}}
+	handler.NodePlanner = planner
+	handler.ProxyGrantStore = &recordingRecipeCardStoreV3{putErr: errors.New("redis is down")}
+
+	transport, transportErr := handler.prepareTransportV3(
+		httptest.NewRequest(http.MethodPost, "/", nil),
+		&playback.Session{ID: "session-origin-incapable-api", UserID: 7, ProfileID: "profile-1"},
+		v3HandlerFixtureFile(t),
+		playback.PlannerResultV3{
+			Plan: identityProxyPlanV3(playback.DeliveryRemuxProgressiveV3, playback.TransformationV3{
+				Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3,
+				RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3,
+			}),
+			PlayMethod: playback.PlayRemux, TranscodeAudio: true, TargetAudioCodec: "aac",
+		}, authorizedOriginsModeV3())
+	if transportErr == nil {
+		transport.rollback()
+		t.Fatalf("grant failure produced an API-local remux at %q even though the API lacks the recipe", transport.url)
+	}
+	if transportErr.reason != string(noderouting.OutcomeCapacityUnavailable) || !transportErr.retryable {
+		t.Fatalf("transport error = %#v, want a retryable proxy-egress capacity failure", transportErr)
+	}
+	if len(planner.released) != 1 {
+		t.Fatalf("planner releases = %v, want the unusable proxy reservation released", planner.released)
+	}
+}
+
 // Without the origins opt-in the mode is unchanged from what PR #723 shipped:
 // everything stays on the API, and no grant is written at all.
 func TestPrepareTransportV3HeaderAuthOnlyStaysOnTheAPIOrigin(t *testing.T) {

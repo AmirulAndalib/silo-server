@@ -5128,6 +5128,11 @@ func TestPrepareTransportV3RoutesDirectPlayThroughProxyNode(t *testing.T) {
 	if claims.PlayMethod != string(playback.PlayDirect) {
 		t.Fatalf("token play method = %q, want direct", claims.PlayMethod)
 	}
+	if claims.RoutingWorkload != string(noderouting.WorkloadDirectPlay) ||
+		claims.RoutingExecution != string(noderouting.ExecutionNone) ||
+		claims.RoutingEgress != string(noderouting.EgressProxy) {
+		t.Fatalf("token route = %q/%q/%q, want direct/none/proxy", claims.RoutingWorkload, claims.RoutingExecution, claims.RoutingEgress)
+	}
 }
 
 func TestPrepareTransportV3RoutesProgressiveRemuxThroughProxyNodeWithSeekAndDV(t *testing.T) {
@@ -5170,6 +5175,11 @@ func TestPrepareTransportV3RoutesProgressiveRemuxThroughProxyNodeWithSeekAndDV(t
 	}
 	if !claims.TranscodeAudio {
 		t.Fatal("token must tell the proxy to convert audio")
+	}
+	if claims.RoutingWorkload != string(noderouting.WorkloadRemux) ||
+		claims.RoutingExecution != string(noderouting.ExecutionProxy) ||
+		claims.RoutingEgress != string(noderouting.EgressProxy) {
+		t.Fatalf("token route = %q/%q/%q, want remux/proxy/proxy", claims.RoutingWorkload, claims.RoutingExecution, claims.RoutingEgress)
 	}
 }
 
@@ -5404,6 +5414,40 @@ func TestPrepareTransportV3KeepsBoostedDownmixLocalWhenProxyHasOldRecipe(t *test
 	// incapable proxy in the first place and none needs releasing.
 	if len(planner.released) != 0 {
 		t.Fatalf("released = %v, want no reservation taken on an incapable proxy", planner.released)
+	}
+}
+
+func TestPrepareTransportV3SkipsIncapablePreferredAPIForProgressiveRemux(t *testing.T) {
+	proxy := capableProxyStubV3(t)
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.JWTSecret = "test-secret"
+	stubCopySeekAnchorV3(handler)
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{
+		Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3,
+	}}))
+	handler.NodePlanner = &recordingNodePlannerV3{plan: nodepool.Plan{ProxyNode: &nodepool.Node{URL: proxy.URL}}}
+	policy := config.DefaultPlaybackRoutingPolicy()
+	policy.RemuxExecution = config.PlaybackExecutionPreferAPI
+	policy.RemuxEgress = config.PlaybackEgressPreferAPI
+	handler.PlaybackConfig = func() config.PlaybackConfig { return config.PlaybackConfig{Routing: policy} }
+
+	transport, transportErr := handler.prepareTransportV3(
+		httptest.NewRequest(http.MethodPost, "/", nil),
+		&playback.Session{ID: "session-proxy-only-recipe", UserID: 7, ProfileID: "profile-1"},
+		v3HandlerFixtureFile(t),
+		playback.PlannerResultV3{
+			Plan: identityProxyPlanV3(playback.DeliveryRemuxProgressiveV3, playback.TransformationV3{
+				Name: playback.TransformationAudioToAACV3, Executor: playback.ExecutorServerV3,
+				RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3,
+			}),
+			PlayMethod: playback.PlayRemux, TranscodeAudio: true, TargetAudioCodec: "aac",
+		}, mediaAuthModeV3{})
+	if transportErr != nil {
+		t.Fatalf("prepare identity transport: %v", transportErr)
+	}
+	defer transport.rollback()
+	if !strings.HasPrefix(transport.url, proxy.URL+"/stream/remux/") {
+		t.Fatalf("stream url = %q, want the capable proxy when the preferred API lacks the recipe", transport.url)
 	}
 }
 

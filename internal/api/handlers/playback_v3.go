@@ -362,6 +362,13 @@ func (h *PlaybackHandler) coldNodeProbeTimeoutV3(nodeURL string) time.Duration {
 			node = found
 		}
 	}
+	if node == nil {
+		if lookup, ok := h.NodePlanner.(proxyNodeLookupV3); ok {
+			if found, ok := lookup.ProxyNodeByURL(nodeURL); ok {
+				node = found
+			}
+		}
+	}
 	return playback.ColdCapabilityRequestTimeout(
 		node.StoredCapabilities(),
 		node.EffectiveHWAccel(cfg.HWAccel),
@@ -376,6 +383,10 @@ func (h *PlaybackHandler) coldNodeProbeTimeoutV3(nodeURL string) time.Duration {
 // to the cluster-wide setting. *nodepool.Planner implements it.
 type transcodeNodeLookupV3 interface {
 	TranscodeNodeByURL(nodeURL string) (*nodepool.Node, bool)
+}
+
+type proxyNodeLookupV3 interface {
+	ProxyNodeByURL(nodeURL string) (*nodepool.Node, bool)
 }
 
 // rememberNodeProbeBudgetV3 records what a node says its capability read costs.
@@ -813,21 +824,89 @@ func (h *PlaybackHandler) hlsPlanningRegistryWithInputsV3(
 	return h.hlsPlanningRegistryWithInputsForWorkloadV3(ctx, settings, inventory, noderouting.WorkloadVideoTranscode)
 }
 
+// progressiveRemuxPlanningRegistryWithInputsV3 reports only the remux
+// transformations executable by policy-eligible progressive routes. The API
+// and proxy pools are kept separate from HLS transcode nodes: capability in
+// one pool must not authorize a recipe on another delivery.
+func (h *PlaybackHandler) progressiveRemuxPlanningRegistryWithInputsV3(
+	ctx context.Context,
+	local *playback.TransformationRegistryV3,
+	proxyAllowed bool,
+) *playback.TransformationRegistryV3 {
+	local = local.OnlyAdvertised(progressiveRemuxTransformationsV3(local.Advertised()))
+	localAllowed, proxyExecutionAllowed := progressiveRemuxExecutorAvailabilityV3(
+		h.playbackRoutingPolicyForContextV3(ctx), proxyAllowed,
+	)
+	if !proxyExecutionAllowed {
+		if !localAllowed {
+			return local.OnlyAdvertised(nil)
+		}
+		return local
+	}
+	enumerator, ok := h.NodePlanner.(proxyNodeEnumeratorV3)
+	if !ok {
+		if !localAllowed {
+			return local.OnlyAdvertised(nil)
+		}
+		return local
+	}
+	var merged []playback.TransformationV3
+	for _, transformations := range h.pooledNodeTransformationsV3(ctx, enumerator.ProxyNodeURLs()) {
+		merged = append(merged, progressiveRemuxTransformationsV3(transformations)...)
+	}
+	if !localAllowed {
+		return local.OnlyAdvertised(merged)
+	}
+	return local.WithAdvertised(merged)
+}
+
+func progressiveRemuxTransformationsV3(transformations []playback.TransformationV3) []playback.TransformationV3 {
+	result := make([]playback.TransformationV3, 0, len(transformations))
+	for _, transformation := range transformations {
+		name := strings.TrimSpace(transformation.Name)
+		if strings.EqualFold(name, playback.TransformationAudioToAACV3) ||
+			strings.EqualFold(name, playback.TransformationServerDV7HDR10V3) {
+			result = append(result, transformation)
+		}
+	}
+	return result
+}
+
+func progressiveRemuxExecutorAvailabilityV3(policy config.PlaybackRoutingPolicy, proxyAllowed bool) (bool, bool) {
+	routes, err := noderouting.Candidates(noderouting.Request{
+		Workload: noderouting.WorkloadRemux, Delivery: noderouting.DeliveryProgressiveRemux,
+		Policy: policy, ProxyAllowed: proxyAllowed,
+	})
+	if err != nil {
+		return false, false
+	}
+	var localAllowed, proxyExecutionAllowed bool
+	for _, candidate := range routes.Candidates {
+		localAllowed = localAllowed || candidate.Execution == noderouting.ExecutionAPI
+		proxyExecutionAllowed = proxyExecutionAllowed || candidate.Execution == noderouting.ExecutionProxy
+	}
+	return localAllowed, proxyExecutionAllowed
+}
+
 // hlsCapabilityRegistryWithInputsV3 reports the union of transformations that
-// can execute on any admitted HLS workload. The capability contract is not
-// workload-scoped, while planning must keep these registries separate.
+// can execute on any admitted playback workload. The capability contract is
+// not workload-scoped, while planning must keep these registries separate.
 func (h *PlaybackHandler) hlsCapabilityRegistryWithInputsV3(
 	ctx context.Context,
 	settings playback.PlannerSettingsV3,
 	inventory hlsToneMapCapabilityInventoryV3,
 ) *playback.TransformationRegistryV3 {
+	local := h.localHLSExecutionRegistryWithInputsV3(ctx, settings, inventory)
+	progressive := h.progressiveRemuxPlanningRegistryWithInputsV3(
+		ctx, local, h.JWTSecret != "" || h.proxyEgressOriginsAvailableV3(),
+	)
 	remux := h.hlsPlanningRegistryWithInputsForWorkloadV3(
 		ctx, settings, hlsToneMapCapabilityInventoryV3{}, noderouting.WorkloadRemux,
 	)
 	video := h.hlsPlanningRegistryWithInputsForWorkloadV3(
 		ctx, settings, inventory, noderouting.WorkloadVideoTranscode,
 	)
-	return remux.WithAdvertised(video.Advertised())
+	return progressive.WithAdvertised(remux.Advertised()).WithAdvertised(video.Advertised())
 }
 
 // hlsPlanningRegistryWithInputsForWorkloadV3 keeps transformation
@@ -994,17 +1073,30 @@ func (h *PlaybackHandler) hlsToneMapCapabilitiesV3(ctx context.Context) tonemap.
 }
 
 type hlsPlanningSnapshotV3 struct {
-	handler           *PlaybackHandler
-	ctx               context.Context
-	settings          playback.PlannerSettingsV3
-	remuxOnce         sync.Once
-	remuxRegistry     *playback.TransformationRegistryV3
-	videoOnce         sync.Once
-	videoRegistry     *playback.TransformationRegistryV3
-	inventoryOnce     sync.Once
-	inventory         hlsToneMapCapabilityInventoryV3
-	inventoryErr      error
-	inventoryResolved bool
+	handler             *PlaybackHandler
+	ctx                 context.Context
+	settings            playback.PlannerSettingsV3
+	localRegistry       *playback.TransformationRegistryV3
+	proxyAllowed        bool
+	progressiveOnce     sync.Once
+	progressiveRegistry *playback.TransformationRegistryV3
+	remuxOnce           sync.Once
+	remuxRegistry       *playback.TransformationRegistryV3
+	videoOnce           sync.Once
+	videoRegistry       *playback.TransformationRegistryV3
+	inventoryOnce       sync.Once
+	inventory           hlsToneMapCapabilityInventoryV3
+	inventoryErr        error
+	inventoryResolved   bool
+}
+
+func (snapshot *hlsPlanningSnapshotV3) progressiveRemuxRegistry() *playback.TransformationRegistryV3 {
+	snapshot.progressiveOnce.Do(func() {
+		snapshot.progressiveRegistry = snapshot.handler.progressiveRemuxPlanningRegistryWithInputsV3(
+			snapshot.ctx, snapshot.localRegistry, snapshot.proxyAllowed,
+		)
+	})
+	return snapshot.progressiveRegistry
 }
 
 func (snapshot *hlsPlanningSnapshotV3) resolveInventory() {
@@ -1086,7 +1178,12 @@ func retryIncompletePlaybackSettingsV3(result playback.PlannerResultV3, settings
 }
 
 func (h *PlaybackHandler) planPlaybackWithCapabilitiesV3(ctx context.Context, input playback.PlannerInputV3) (playback.PlannerResultV3, error) {
-	snapshot := &hlsPlanningSnapshotV3{handler: h, ctx: ctx, settings: input.Settings}
+	mode := headerAuthenticatedMediaV3(input.Request.ClientFeatures)
+	proxyAllowed := !mode.headerAuth && h.JWTSecret != "" || mode.proxyEgress && h.proxyEgressOriginsAvailableV3()
+	snapshot := &hlsPlanningSnapshotV3{
+		handler: h, ctx: ctx, settings: input.Settings, localRegistry: input.Registry, proxyAllowed: proxyAllowed,
+	}
+	input.ProgressiveRemuxRegistry = snapshot.progressiveRemuxRegistry
 	input.HLSRemuxRegistry = snapshot.hlsRemuxRegistry
 	input.HLSVideoRegistry = snapshot.hlsVideoRegistry
 	input.HLSToneMapCapabilities = snapshot.toneMapCapabilities
@@ -2151,6 +2248,19 @@ func (h *PlaybackHandler) validateLocalTransportCapabilitiesV3(ctx context.Conte
 	return nil
 }
 
+func (h *PlaybackHandler) validateLocalProgressiveCapabilitiesV3(ctx context.Context, result playback.PlannerResultV3) *transportErrorV3 {
+	if !planRequiresServerTransformationsV3(result.Plan) {
+		return nil
+	}
+	if err := validateAdvertisedTransformationsV3(result.Plan, h.transformationRegistryV3(ctx).Advertised()); err != nil {
+		return &transportErrorV3{
+			reason: "route_capability_unavailable", message: "The API server cannot execute the selected progressive-remux recipe.",
+			retryable: true, cause: err,
+		}
+	}
+	return nil
+}
+
 func (h *PlaybackHandler) prepareTransportTimelineV3(ctx context.Context, session *playback.Session, file *models.MediaFile, result playback.PlannerResultV3) (preparedTimelineV3, *transportErrorV3) {
 	if result.Plan == nil {
 		return preparedTimelineV3{}, nil
@@ -2237,6 +2347,33 @@ func (h *PlaybackHandler) prepareIdentityTransportV3(r *http.Request, session *p
 	if proxyErr != nil {
 		return preparedTransportV3{}, proxyErr
 	}
+	if proxyNode != nil && planRequiresServerTransformationsV3(result.Plan) {
+		advertised, capabilityErr := h.remoteTransformationsV3(r.Context(), proxyNode.URL)
+		if capabilityErr == nil {
+			capabilityErr = validateAdvertisedTransformationsV3(result.Plan, advertised)
+		}
+		if capabilityErr != nil {
+			if releaser, ok := h.NodePlanner.(sessionReservationReleaserV3); ok {
+				releaser.ReleaseSession(session.ID)
+			}
+			return preparedTransportV3{}, &transportErrorV3{
+				reason: "route_capability_unavailable", message: "The selected proxy cannot execute the progressive-remux recipe.",
+				retryable: true, cause: capabilityErr,
+			}
+		}
+	}
+	routeSession.RoutingWorkload = string(routingWorkloadV3(result))
+	routeSession.RoutingExecution = string(noderouting.ExecutionNone)
+	if routeSession.RoutingWorkload == string(noderouting.WorkloadRemux) {
+		routeSession.RoutingExecution = string(noderouting.ExecutionAPI)
+	}
+	routeSession.RoutingEgress = string(noderouting.EgressAPI)
+	if proxyNode != nil {
+		routeSession.RoutingEgress = string(noderouting.EgressProxy)
+		if routeSession.RoutingWorkload == string(noderouting.WorkloadRemux) {
+			routeSession.RoutingExecution = string(noderouting.ExecutionProxy)
+		}
+	}
 	streamURL := fmt.Sprintf("/stream/%s", routeSession.ID)
 	servedByProxy := false
 	// priorGrant is the egress authority this attempt overwrote, if any. A
@@ -2273,7 +2410,7 @@ func (h *PlaybackHandler) prepareIdentityTransportV3(r *http.Request, session *p
 		// proxy-authority failure retryable, and a non-retryable answer would
 		// make a client give up on a route the next attempt can take.
 		releaseProxyReservation()
-		if !identityLocalFallbackAllowedV3(result, policy) {
+		if !identityLocalFallbackAllowedV3(result, policy) || h.validateLocalProgressiveCapabilitiesV3(r.Context(), result) != nil {
 			return preparedTransportV3{}, &transportErrorV3{
 				reason:    string(noderouting.OutcomeCapacityUnavailable),
 				message:   "The proxy egress route is temporarily unavailable.",
@@ -2515,13 +2652,18 @@ func (h *PlaybackHandler) planIdentityProxyV3(r *http.Request, sessionID string,
 		return nil, &transportErrorV3{reason: string(noderouting.OutcomePolicyUnsatisfied), message: "The playback delivery has no legal node route.", retryable: false}
 	}
 	proxyAllowed := mode.proxyEgress || (!mode.headerAuth && h.JWTSecret != "")
+	excludedShapes := make(map[string]struct{})
+	if result.Plan != nil && result.Plan.Delivery == playback.DeliveryRemuxProgressiveV3 &&
+		h.validateLocalProgressiveCapabilitiesV3(r.Context(), result) != nil {
+		excludedShapes["progressive_remux_api"] = struct{}{}
+	}
 	decision, err := noderouting.Resolve(noderouting.AdaptSessionPlanner(h.NodePlanner), noderouting.ResolveRequest{
 		Request: noderouting.Request{
 			Workload: workload, Delivery: delivery,
 			Policy: policy, ProxyAllowed: proxyAllowed,
 		},
 		SessionID: sessionID, EstimatedBitrateKbps: identityStreamBitrateKbpsV3(result),
-		ProxyEligible: h.identityProxyEligibilityV3(r.Context(), result),
+		ProxyEligible: h.identityProxyEligibilityV3(r.Context(), result), ExcludedShapeIDs: excludedShapes,
 	})
 	if err != nil {
 		return nil, &transportErrorV3{reason: string(noderouting.OutcomePolicyUnsatisfied), message: "The playback routing policy is invalid.", retryable: false, cause: err}
@@ -3106,6 +3248,9 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 	if !mode.headerAuth {
 		card := playback.NewRecipeCard(session.UserID, session.ProfileID, file.ID, "", ts.Opts())
 		card.OriginalStartedAt = session.StartedAt
+		card.RoutingWorkload = string(routingWorkloadV3(result))
+		card.RoutingExecution = string(noderouting.ExecutionAPI)
+		card.RoutingEgress = string(noderouting.EgressAPI)
 		url = appendStreamToken(url, h.signSessionToken(card, mode.headerAuth))
 	}
 	committed := false
@@ -3281,6 +3426,12 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 		confirmedToneMapMode = nodeResp.ToneMapMode
 	}
 	card := remoteTranscodeRecipeCardV3(session, file, node.URL, transportID, req, nodeResp, toneMapFilter)
+	card.RoutingWorkload = string(routingWorkloadV3(result))
+	card.RoutingExecution = string(noderouting.ExecutionTranscode)
+	card.RoutingEgress = string(noderouting.EgressAPI)
+	if nodePlan.ProxyNode != nil {
+		card.RoutingEgress = string(noderouting.EgressProxy)
+	}
 	confirmedHWAccel := card.HWAccel
 	url := fmt.Sprintf("/playback/transcode/%s/master.m3u8", session.ID)
 	// Either URL builder only returns an absolute proxy URL when a proxy was

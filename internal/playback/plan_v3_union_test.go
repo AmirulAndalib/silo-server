@@ -165,6 +165,67 @@ func TestPlanPlaybackV3AudioAdaptationOffloadsToHLSRemux(t *testing.T) {
 	}
 }
 
+func TestPlanPlaybackV3AudioAdaptationUsesProgressiveProxyToolchain(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.AudioTracks[0] = models.AudioTrack{Codec: "truehd", Channels: 8, Layout: "7.1"}
+	file.CodecAudio = "truehd"
+	req := validStartRequestV3()
+	req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{{Codec: "hevc", Profiles: []string{"main 10"}, Levels: []int{153}, BitDepths: []int{10}, MaxWidth: 3840, MaxHeight: 2160, MaxFrameRate: 60, MaxBitrateKbps: 80_000, Hardware: true}}
+	req.Capabilities.HDRDetails = &HDRCapabilitiesV3{HDR10: true}
+	delete(req.ClientPlaybackContext.Deliveries, DeliveryClassHLSV3)
+	local := NewTransformationRegistryV3([]TransformationSpecV3{{Name: TransformationAudioToAACV3, RecipeVersion: TransformationAudioToAACRecipeVersionV3}})
+	proxy := local.WithAdvertised([]TransformationV3{{Name: TransformationAudioToAACV3, Executor: ExecutorServerV3, RecipeVersion: TransformationAudioToAACRecipeVersionV3}})
+
+	result := PlanPlaybackV3(PlannerInputV3{
+		Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
+		Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, Registry: local,
+		ProgressiveRemuxRegistry: staticHLSRegistryV3(proxy),
+	})
+	if result.Plan == nil || result.Plan.Delivery != DeliveryRemuxProgressiveV3 || !result.TranscodeAudio || result.TargetAudioCodec != audioCodecAACV3 {
+		t.Fatalf("result = %s", ExplainPlannerResultV3(result))
+	}
+}
+
+func TestPlanPlaybackV3AudioOnlyUsesProgressiveProxyToolchain(t *testing.T) {
+	file := audioOnlyFixtureFileV3()
+	file.CodecAudio = "flac"
+	file.AudioTracks[0].Codec = "flac"
+	req := validStartRequestV3()
+	req.FileID = file.ID
+	req.Capabilities.Containers = []string{"mp4"}
+	local := NewTransformationRegistryV3([]TransformationSpecV3{{Name: TransformationAudioToAACV3, RecipeVersion: TransformationAudioToAACRecipeVersionV3}})
+	proxy := local.WithAdvertised([]TransformationV3{{Name: TransformationAudioToAACV3, Executor: ExecutorServerV3, RecipeVersion: TransformationAudioToAACRecipeVersionV3}})
+
+	result := PlanPlaybackV3(PlannerInputV3{
+		Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
+		Settings: PlannerSettingsV3{TranscodeEnabled: true}, Registry: local,
+		ProgressiveRemuxRegistry: staticHLSRegistryV3(proxy),
+	})
+	if result.Plan == nil || result.Plan.Delivery != DeliveryRemuxProgressiveV3 || !result.TranscodeAudio || result.TargetAudioCodec != audioCodecAACV3 {
+		t.Fatalf("result = %s", ExplainPlannerResultV3(result))
+	}
+}
+
+func TestPlanPlaybackV3AudioOnlyPureRemuxDoesNotConsultProxyCapabilities(t *testing.T) {
+	file := audioOnlyFixtureFileV3()
+	req := validStartRequestV3()
+	req.FileID = file.ID
+	req.Capabilities.Containers = []string{"mp4"}
+	delete(req.ClientPlaybackContext.Deliveries, DeliveryClassOriginalHTTPV3)
+
+	result := PlanPlaybackV3(PlannerInputV3{
+		Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
+		Settings: PlannerSettingsV3{TranscodeEnabled: true}, Registry: testTransformationRegistryV3(),
+		ProgressiveRemuxRegistry: func() *TransformationRegistryV3 {
+			t.Fatal("transformation-free audio remux must not inspect proxy capabilities")
+			return nil
+		},
+	})
+	if result.Plan == nil || result.Plan.Delivery != DeliveryRemuxProgressiveV3 || result.TranscodeAudio {
+		t.Fatalf("result = %s", ExplainPlannerResultV3(result))
+	}
+}
+
 // A source that direct-plays must never trigger the lazy node-capability
 // producer: building the widened registry can touch the network, and dead
 // nodes must not add latency to starts that never use them.
@@ -178,8 +239,39 @@ func TestPlanPlaybackV3DirectPlayNeverConsultsNodeCapabilities(t *testing.T) {
 		Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
 		Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true},
 		Registry: testTransformationRegistryV3(),
+		ProgressiveRemuxRegistry: func() *TransformationRegistryV3 {
+			t.Fatal("direct-play planning must not build the progressive capability registry")
+			return nil
+		},
 		HLSRegistry: func() *TransformationRegistryV3 {
 			t.Fatal("direct-play planning must not build the node capability registry")
+			return nil
+		},
+	})
+	if result.Plan == nil || result.Plan.Delivery != DeliveryOriginalHTTPV3 {
+		t.Fatalf("result = %s", ExplainPlannerResultV3(result))
+	}
+}
+
+func TestPlanPlaybackV3DirectDolbyVisionDoesNotConsultStripCapabilities(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.VideoTracks[0].DVProfile = 5
+	file.VideoTracks[0].VideoRange = "DolbyVision"
+	file.VideoTracks[0].VideoRangeType = "DOVI"
+	req := validStartRequestV3()
+	req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{{Codec: "hevc", Profiles: []string{"main 10"}, Levels: []int{153}, BitDepths: []int{10}, MaxWidth: 3840, MaxHeight: 2160, MaxFrameRate: 60, MaxBitrateKbps: 80_000, Hardware: true}}
+	req.Capabilities.HDRDetails = &HDRCapabilitiesV3{DolbyVisionProfiles: []int{5}}
+	req.ClientPlaybackContext.Output.HDRDetails = req.Capabilities.HDRDetails
+
+	result := PlanPlaybackV3(PlannerInputV3{
+		Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
+		Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, Registry: testTransformationRegistryV3(),
+		ProgressiveRemuxRegistry: func() *TransformationRegistryV3 {
+			t.Fatal("direct Dolby Vision planning must not inspect progressive strip capabilities")
+			return nil
+		},
+		HLSRemuxRegistry: func() *TransformationRegistryV3 {
+			t.Fatal("direct Dolby Vision planning must not inspect HLS strip capabilities")
 			return nil
 		},
 	})
@@ -245,5 +337,34 @@ func TestPlanPlaybackV3Profile7StripOffloadsToHLSRemux(t *testing.T) {
 	}
 	if offloaded.Plan.EffectiveRecipe.DynamicRange != "hdr10" || !offloaded.Plan.Claims.Video.HDR10 {
 		t.Fatalf("claims = %#v", offloaded.Plan.Claims)
+	}
+}
+
+func TestPlanPlaybackV3Profile7StripUsesProgressiveProxyToolchain(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.VideoTracks[0].DVProfile = 7
+	file.VideoTracks[0].DVBLCompatID = 6
+	file.VideoTracks[0].DVELPresent = false
+	file.VideoTracks[0].DVEnhancementLayer = ""
+	file.VideoTracks[0].VideoRange = "DolbyVision"
+	file.VideoTracks[0].VideoRangeType = "DOVIWithEL"
+	req := validStartRequestV3()
+	req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{{Codec: "hevc", Profiles: []string{"main 10"}, Levels: []int{153}, BitDepths: []int{10}, MaxWidth: 3840, MaxHeight: 2160, MaxFrameRate: 60, MaxBitrateKbps: 80_000, Hardware: true}}
+	req.Capabilities.HDRDetails = &HDRCapabilitiesV3{HDR10: true, DolbyVisionProfiles: []int{5, 8}}
+	req.ClientPlaybackContext.Output.HDRDetails = req.Capabilities.HDRDetails
+	delete(req.ClientPlaybackContext.Deliveries, DeliveryClassHLSV3)
+	local := NewTransformationRegistryV3([]TransformationSpecV3{{Name: TransformationServerDV7HDR10V3, RecipeVersion: "1"}})
+	proxy := local.WithAdvertised([]TransformationV3{{Name: TransformationServerDV7HDR10V3, Executor: ExecutorServerV3, RecipeVersion: "1"}})
+
+	result := PlanPlaybackV3(PlannerInputV3{
+		Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
+		Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, Registry: local,
+		ProgressiveRemuxRegistry: staticHLSRegistryV3(proxy),
+	})
+	if result.Plan == nil || result.Plan.Delivery != DeliveryRemuxProgressiveV3 {
+		t.Fatalf("result = %s", ExplainPlannerResultV3(result))
+	}
+	if len(result.Plan.Transformations) != 1 || result.Plan.Transformations[0].Name != TransformationServerDV7HDR10V3 {
+		t.Fatalf("transformations = %#v", result.Plan.Transformations)
 	}
 }

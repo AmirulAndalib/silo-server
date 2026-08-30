@@ -21,6 +21,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/mediaprobe"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
+	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
@@ -913,6 +914,19 @@ func TestProxyRedirectURLClaimGrowthBudget(t *testing.T) {
 			if claims.UserID != session.StreamAppUserID || claims.ProfileID != session.ProfileID || claims.MediaFileID != source.FileID || claims.OriginalStartedAtUnixNano != createdAt.UnixNano() {
 				t.Fatalf("ownership/start claims did not round trip: %#v", claims)
 			}
+			wantWorkload := string(noderouting.WorkloadDirectPlay)
+			wantExecution := string(noderouting.ExecutionNone)
+			switch method {
+			case string(playback.PlayRemux):
+				wantWorkload = string(noderouting.WorkloadRemux)
+				wantExecution = string(noderouting.ExecutionProxy)
+			case string(playback.PlayTranscode):
+				wantWorkload = string(noderouting.WorkloadVideoTranscode)
+				wantExecution = string(noderouting.ExecutionTranscode)
+			}
+			if claims.RoutingWorkload != wantWorkload || claims.RoutingExecution != wantExecution || claims.RoutingEgress != string(noderouting.EgressProxy) {
+				t.Fatalf("routing claims = %q/%q/%q, want %q/%q/%q", claims.RoutingWorkload, claims.RoutingExecution, claims.RoutingEgress, wantWorkload, wantExecution, noderouting.EgressProxy)
+			}
 		})
 	}
 }
@@ -974,13 +988,37 @@ func TestUpstreamRecipeCardOverlaysTopLevelCreatedAt(t *testing.T) {
 	}
 }
 
+func TestUpstreamRecipeCardOverlaysDurableRoutingAssignment(t *testing.T) {
+	assignment := playback.NodeRoutingAssignment{
+		Workload: string(noderouting.WorkloadVideoTranscode), Execution: string(noderouting.ExecutionTranscode),
+		Egress: string(noderouting.EgressProxy),
+	}
+	playSession := &PlaybackSession{
+		UpstreamSessionID: "upstream", RoutingAssignment: &assignment,
+		Recipe: &playback.RecipeCard{SessionID: "upstream", UserID: 42, MediaFileID: 77},
+	}
+	card := (&PlaybackHandler{}).upstreamRecipeCard(
+		playSession,
+		&Session{StreamAppUserID: 42, ProfileID: "profile-1"},
+		PlaybackMediaSource{FileID: 77},
+		string(playback.PlayTranscode),
+	)
+	if card.RoutingWorkload != assignment.Workload || card.RoutingExecution != assignment.Execution || card.RoutingEgress != assignment.Egress {
+		t.Fatalf("routing card = %q/%q/%q, want %#v", card.RoutingWorkload, card.RoutingExecution, card.RoutingEgress, assignment)
+	}
+}
+
 func TestPersistTranscodeRecipeCarriesTopLevelCreatedAt(t *testing.T) {
 	createdAt := time.Date(2026, 8, 16, 12, 34, 56, 987654321, time.UTC)
 	store := NewPlaybackSessionStore(time.Hour, nil)
 	// ExpiresAt must be set explicitly: the store derives a zero ExpiresAt as
 	// CreatedAt+ttl (playback_sessions.go:228), so a frozen CreatedAt would make
 	// this session read as already expired once wall-clock passes it.
-	store.Put(PlaybackSession{ID: "play", CreatedAt: createdAt, ExpiresAt: time.Now().Add(time.Hour)})
+	assignment := playback.NodeRoutingAssignment{
+		Workload: string(noderouting.WorkloadVideoTranscode), Execution: string(noderouting.ExecutionTranscode),
+		Egress: string(noderouting.EgressAPI),
+	}
+	store.Put(PlaybackSession{ID: "play", CreatedAt: createdAt, ExpiresAt: time.Now().Add(time.Hour), RoutingAssignment: &assignment})
 	manager := playback.NewSessionManager(0, 0)
 	manager.RegisterReconstructed(&playback.Session{ID: "upstream", UserID: 42, ProfileID: "profile-1", MediaFileID: 77, PlayMethod: playback.PlayTranscode})
 	h := &PlaybackHandler{playbackStore: store, sessionMgr: manager}
@@ -992,6 +1030,9 @@ func TestPersistTranscodeRecipeCarriesTopLevelCreatedAt(t *testing.T) {
 	got, ok := store.Get("play")
 	if !ok || got.Recipe == nil || !got.Recipe.OriginalStartedAt.Equal(createdAt) {
 		t.Fatalf("persisted recipe = %#v, want OriginalStartedAt %s", got, createdAt)
+	}
+	if got.Recipe.RoutingWorkload != assignment.Workload || got.Recipe.RoutingExecution != assignment.Execution || got.Recipe.RoutingEgress != assignment.Egress {
+		t.Fatalf("persisted recipe routing = %q/%q/%q, want %#v", got.Recipe.RoutingWorkload, got.Recipe.RoutingExecution, got.Recipe.RoutingEgress, assignment)
 	}
 }
 
