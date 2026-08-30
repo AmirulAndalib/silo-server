@@ -1199,6 +1199,11 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 		// promised as tone-mapped SDR.
 		claims.PlayMethod = streamtoken.PlayMethodToneMapTranscode
 	}
+	if method == string(playback.PlayTranscode) && compatHLSCopiesVideo(source) {
+		claims.PlayMethod = streamtoken.PlayMethodCopyFMP4Transcode
+		claims.CopyFMP4RecipeVersion = playback.CopyFMP4RecipeVersion
+		claims.CopyVideoMPEGTS = source.HLSRemuxMPEGTS
+	}
 	if compatSession != nil {
 		claims.UserID = compatSession.StreamAppUserID
 		claims.ProfileID = compatSession.ProfileID
@@ -1317,7 +1322,8 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		if current, ok := h.playbackStore.Get(playSessionID); ok && current.TranscodeStarted && current.Recipe != nil && current.Recipe.TranscodeNodeURL != "" &&
 			current.Recipe.MediaFileID == source.FileID &&
 			current.Recipe.SourceAudioChannels == expectedSourceAudioChannels &&
-			current.Recipe.AudioTrackIndex == expectedAudioTrackIndex {
+			current.Recipe.AudioTrackIndex == expectedAudioTrackIndex &&
+			playback.ValidateCopyFMP4RecipeCard(*current.Recipe) == nil {
 			if upstream, sessionErr := h.sessionMgr.GetSession(upstreamSessionID); sessionErr == nil && upstream != nil &&
 				strings.TrimRight(upstream.TranscodeNodeURL, "/") == strings.TrimRight(current.Recipe.TranscodeNodeURL, "/") {
 				return &remoteStartAdoptedRemoteError{nodeURL: current.Recipe.TranscodeNodeURL}
@@ -1452,6 +1458,8 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 	if compatHLSCopiesVideo(source) {
 		reqBody.TargetCodecVideo = compatCopyCodec
 		reqBody.VideoSampleEntry = playback.VideoSampleEntryForDVCopy(file.PrimaryDVProfile())
+		reqBody.CopyVideoMPEGTS = source.HLSRemuxMPEGTS
+		reqBody.CopyFMP4RecipeVersion = playback.CopyFMP4RecipeVersion
 	}
 	if !compatHLSTranscodesAudio(source) {
 		reqBody.TargetCodecAudio = compatCopyCodec
@@ -1580,6 +1588,10 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		h.tm.StopRemoteTranscode(upstreamSessionID, transcodeNodeURL)
 		return fmt.Errorf("%w: %w", errRemoteTranscodeStartFailed, err)
 	}
+	if err := transcodenode.ValidateCopyFMP4RecipeAttestation(reqBody, nodeResponse); err != nil {
+		h.tm.StopRemoteTranscode(upstreamSessionID, transcodeNodeURL)
+		return err
+	}
 	if reqBody.ToneMapMode != "" && nodeResponse.ToneMapMode != reqBody.ToneMapMode {
 		h.tm.StopRemoteTranscode(upstreamSessionID, transcodeNodeURL)
 		err := errors.New("remote transcode node did not confirm tone-map mode")
@@ -1638,6 +1650,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		TargetResolution:    reqBody.TargetResolution,
 		TargetBitrateKbps:   reqBody.TargetBitrateKbps,
 		VideoSampleEntry:    reqBody.VideoSampleEntry,
+		CopyVideoMPEGTS:     reqBody.CopyVideoMPEGTS,
 		SegmentDuration:     reqBody.SegmentDuration,
 		AudioTrackIndex:     reqBody.AudioTrackIndex,
 		SourceAudioChannels: reqBody.SourceAudioChannels,
@@ -1942,6 +1955,7 @@ func (h *PlaybackHandler) HandlePlaybackInfo(w http.ResponseWriter, r *http.Requ
 			requestedSubtitleIndex = intPtr(int(*req.SubtitleStreamIndex))
 		}
 		source.SelectedSubtitleStreamIndex = resolveSelectedSubtitleStreamIndex(source.Version, len(downloaded), downloadedKnown, requestedSubtitleIndex, source.DefaultSubtitleStreamIndex)
+		source.HLSRemuxMPEGTS = compatWebOSDVMPEGTS(r.UserAgent(), source)
 
 		sources = append(sources, source)
 		dto := h.mediaSourceDTO(routeItemID, playSessionID, session.Token, source)
@@ -2202,7 +2216,11 @@ func (h *PlaybackHandler) mediaSourceDTO(routeItemID, playSessionID, compatToken
 		}
 		dto.TranscodingURL = fmt.Sprintf("%s/master.m3u8?PlaySessionId=%s&MediaSourceId=%s", basePath, playSessionID, source.ID)
 		if compatHLSCopiesVideo(source) {
-			dto.TranscodingContainer = "mp4"
+			if source.HLSRemuxMPEGTS {
+				dto.TranscodingContainer = "ts"
+			} else {
+				dto.TranscodingContainer = compatContainerMP4
+			}
 		} else {
 			dto.TranscodingContainer = "ts"
 		}

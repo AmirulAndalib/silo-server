@@ -48,7 +48,10 @@ type TranscodeOpts struct {
 	SourceVideoBitDepth  int
 	VideoBitstreamFilter string // validated copy-mode BSF, e.g. dovi_rpu=strip=1
 	VideoSampleEntry     string // allowlisted copy-HLS sample entry: dvh1 or hvc1
-	SeekSeconds          float64
+	// CopyVideoMPEGTS packages copied video in MPEG-TS instead of fMP4. It is
+	// durable because the segment extension and bytes must survive restarts.
+	CopyVideoMPEGTS bool
+	SeekSeconds     float64
 	// StreamOriginSeconds is the keyframe timestamp at which a copy-video
 	// stream actually begins. SeekSeconds remains the client-requested -ss so
 	// FFmpeg performs exactly one demuxer seek; this origin keeps response and
@@ -82,6 +85,7 @@ type TranscodeOpts struct {
 	ToneMapSourceKind          tonemap.SourceKind
 	ToneMapFilter              string
 	ToneMapRecipeVersion       string
+	CopyFMP4RecipeVersion      string
 	ToneMapPreflightRequired   bool
 	ToneMapSourceRevision      tonemap.SourceRevision
 	ToneMapDVConfigPresent     bool
@@ -117,6 +121,11 @@ type TranscodeOpts struct {
 // DV7ToHDR10BitstreamFilter strips Dolby Vision RPU metadata during a
 // copy-mode HLS remux; the enhancement layer is dropped by stream mapping.
 const DV7ToHDR10BitstreamFilter = "dovi_rpu=strip=1"
+
+// CopyFMP4RecipeVersion identifies the byte-affecting copy-video HLS recipe.
+// Remote starts attest it so rolling clusters never silently mix the old
+// timestamp/bitstream recipe with the Jellyfin-compatible fMP4 recipe.
+const CopyFMP4RecipeVersion = "2"
 
 const (
 	VideoSampleEntryDVH1 = "dvh1"
@@ -303,6 +312,9 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	if !validVideoSampleEntry(opts.VideoSampleEntry) ||
 		opts.VideoSampleEntry != "" && !strings.EqualFold(opts.TargetCodecVideo, "copy") {
 		return nil, fmt.Errorf("unsupported video sample-entry recipe")
+	}
+	if opts.CopyVideoMPEGTS && !strings.EqualFold(opts.TargetCodecVideo, "copy") {
+		return nil, fmt.Errorf("copy-video MPEG-TS requires video copy")
 	}
 	if opts.VideoBitstreamFilter != "" &&
 		(opts.VideoBitstreamFilter != DV7ToHDR10BitstreamFilter || !strings.EqualFold(opts.TargetCodecVideo, "copy")) {
@@ -715,8 +727,18 @@ func buildFFmpegArgs(opts TranscodeOpts) []string {
 	// Video codec and encoding settings.
 	if isVideoCopy {
 		args = append(args, "-c:v", "copy")
+		videoBitstreamFilter := ""
+		if strings.EqualFold(opts.SourceVideoCodec, transcodeCodecHEVC) || strings.EqualFold(opts.SourceVideoCodec, "h265") {
+			videoBitstreamFilter = "hevc_mp4toannexb"
+		}
 		if opts.VideoBitstreamFilter == DV7ToHDR10BitstreamFilter {
-			args = append(args, "-bsf:v", opts.VideoBitstreamFilter)
+			if videoBitstreamFilter != "" {
+				videoBitstreamFilter += ","
+			}
+			videoBitstreamFilter += opts.VideoBitstreamFilter
+		}
+		if videoBitstreamFilter != "" {
+			args = append(args, "-bsf:v", videoBitstreamFilter)
 		}
 		switch opts.VideoSampleEntry {
 		case VideoSampleEntryDVH1:
@@ -754,7 +776,7 @@ func buildFFmpegArgs(opts TranscodeOpts) []string {
 	// race with fMP4 (hls.js #6337).
 	var segmentPattern string
 	segmentType := "mpegts"
-	copyVideoUsesFMP4 := isVideoCopy && !IsMPEG2VideoCodec(opts.SourceVideoCodec)
+	copyVideoUsesFMP4 := isVideoCopy && !opts.CopyVideoMPEGTS && !IsMPEG2VideoCodec(opts.SourceVideoCodec)
 	if copyVideoUsesFMP4 {
 		segmentType = "fmp4"
 		segmentPattern = filepath.Join(opts.OutputDir, "seg_%05d.m4s")
@@ -875,25 +897,16 @@ func appendStreamSelectionArgs(args []string, opts TranscodeOpts) []string {
 }
 
 // appendTimestampNormalizationArgs selects timestamp handling based on the
-// playback mode. Copy-video full-file starts use zero-based timestamps so
-// fMP4 fragments always have sane local durations. Copy-video resumes
-// preserve source timestamps so each fragment's TFDT matches its playlist
-// position (segment K sits at playlist-time K*segDur); zero-basing here
-// makes seg_K carry TFDT=0, and strict players (Jellyfin Android TV /
-// ExoPlayer) read EXT-X-START, jump to seg_K expecting media at K*segDur,
-// see TFDT=0, treat the gap as a discontinuity, reload init.mp4, and
-// eventually abort — the symptom that crashes ATV on a second resume.
-// Encoded transcodes keep the source-timestamp policy unconditionally.
+// playback mode. Jellyfin-compatible copy-video fMP4 preserves source timing
+// while start_at_zero makes the output presentation timeline begin at zero.
+// This keeps initial fragments decodable without losing the source-relative
+// timing required by segment-driven resume restarts.
 func appendTimestampNormalizationArgs(args []string, opts TranscodeOpts) []string {
 	if strings.EqualFold(opts.TargetCodecVideo, "copy") {
-		if opts.SeekSeconds > 0 {
-			return append(args,
-				"-copyts",
-				"-avoid_negative_ts", "disabled",
-			)
-		}
 		return append(args,
-			"-avoid_negative_ts", "make_zero",
+			"-copyts",
+			"-avoid_negative_ts", "disabled",
+			"-start_at_zero",
 		)
 	}
 	return append(args,
@@ -2308,7 +2321,7 @@ func parseManifestTimeline(manifest []byte) (manifestTimeline, error) {
 }
 
 func hlsSegmentExtension(opts TranscodeOpts) string {
-	if strings.EqualFold(opts.TargetCodecVideo, "copy") && !IsMPEG2VideoCodec(opts.SourceVideoCodec) {
+	if strings.EqualFold(opts.TargetCodecVideo, "copy") && !opts.CopyVideoMPEGTS && !IsMPEG2VideoCodec(opts.SourceVideoCodec) {
 		return ".m4s"
 	}
 	return ".ts"
@@ -2788,6 +2801,29 @@ func (s *TranscodeSession) RestartWithCopySeekAnchor(
 	return s.restart(ctx, seekSeconds, startSegment, streamOriginSeconds, true)
 }
 
+// RestartSegment resolves and applies one missing-segment recovery as a single
+// operation. Callers hold their session lifecycle lock around this method so
+// the manifest used for copy-anchor mapping cannot be replaced by another
+// restart before the resolved numbering is applied.
+func (s *TranscodeSession) RestartSegment(ctx context.Context, segNum int) (SegmentRecoveryTarget, bool, error) {
+	target, ok, err := s.ResolveSegmentRecoveryTarget(ctx, segNum)
+	if err != nil || !ok {
+		return SegmentRecoveryTarget{}, ok, err
+	}
+
+	if target.CopySeekAnchorResolved {
+		err = s.RestartWithCopySeekAnchor(
+			ctx,
+			target.SeekSeconds,
+			target.StartSegmentNumber,
+			target.StreamOriginSeconds,
+		)
+	} else {
+		err = s.Restart(ctx, target.SeekSeconds, target.StartSegmentNumber)
+	}
+	return target, true, err
+}
+
 // restartFlight carries the outcome of an in-flight restart so a concurrent
 // caller waits for it and receives the result instead of assuming success and
 // falling through to a stream the failed restart never produced.
@@ -3245,29 +3281,9 @@ func (s *TranscodeSession) IsCopyVideo() bool {
 // segment using the current on-disk manifest. The bool return is false when
 // the segment is not present in the manifest yet.
 func (s *TranscodeSession) SegmentStartTime(segNum int) (float64, bool, error) {
-	s.mu.Lock()
-	manifestPath := filepath.Join(s.outputDir, "stream.m3u8")
-	baseSeekSeconds := s.opts.SeekSeconds
-	if strings.EqualFold(s.opts.TargetCodecVideo, "copy") && s.opts.CopySeekAnchorResolved {
-		baseSeekSeconds = s.opts.StreamOriginSeconds
-	}
-	s.mu.Unlock()
-
-	manifest, err := os.ReadFile(manifestPath)
+	baseSeekSeconds, timeline, err := s.manifestTimelineSnapshot()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, false, ErrManifestNotReady
-		}
-		return 0, false, fmt.Errorf("read manifest: %w", err)
-	}
-
-	timeline, err := parseManifestTimeline(manifest)
-	if err != nil {
-		return 0, false, fmt.Errorf("parse manifest timeline: %w", err)
-	}
-
-	if len(timeline.entries) == 0 {
-		return 0, false, ErrManifestNotReady
+		return 0, false, err
 	}
 
 	currentTime := baseSeekSeconds
@@ -3279,6 +3295,104 @@ func (s *TranscodeSession) SegmentStartTime(segNum int) (float64, bool, error) {
 	}
 
 	return 0, false, nil
+}
+
+func (s *TranscodeSession) manifestTimelineSnapshot() (float64, manifestTimeline, error) {
+	s.mu.Lock()
+	manifestPath := filepath.Join(s.outputDir, "stream.m3u8")
+	baseSeekSeconds := s.opts.SeekSeconds
+	if strings.EqualFold(s.opts.TargetCodecVideo, "copy") && s.opts.CopySeekAnchorResolved {
+		baseSeekSeconds = s.opts.StreamOriginSeconds
+	}
+	s.mu.Unlock()
+
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, manifestTimeline{}, ErrManifestNotReady
+		}
+		return 0, manifestTimeline{}, fmt.Errorf("read manifest: %w", err)
+	}
+
+	timeline, err := parseManifestTimeline(manifest)
+	if err != nil {
+		return 0, manifestTimeline{}, fmt.Errorf("parse manifest timeline: %w", err)
+	}
+
+	if len(timeline.entries) == 0 {
+		return 0, manifestTimeline{}, ErrManifestNotReady
+	}
+	return baseSeekSeconds, timeline, nil
+}
+
+const copySegmentStartMatchTolerance = 50 * time.Millisecond
+
+// segmentNumberAtSourceTime maps an actual copied packet timestamp back onto
+// the existing playlist. Copy HLS segment durations follow source keyframes,
+// so fixed-duration arithmetic cannot preserve the URI numbering after a
+// restart. The timestamp must match a real segment boundary; returning false is
+// safer than publishing shifted content when the bounded manifest no longer
+// contains the preceding anchor.
+func (s *TranscodeSession) segmentNumberAtSourceTime(sourceSeconds float64) (int, bool, error) {
+	baseSeekSeconds, timeline, err := s.manifestTimelineSnapshot()
+	if err != nil {
+		return 0, false, err
+	}
+
+	currentTime := baseSeekSeconds
+	for _, entry := range timeline.entries {
+		if math.Abs(currentTime-sourceSeconds) <= copySegmentStartMatchTolerance.Seconds() {
+			return entry.number, true, nil
+		}
+		currentTime += entry.duration
+	}
+
+	return 0, false, nil
+}
+
+// SegmentRecoveryTarget describes the FFmpeg seek and HLS numbering for one
+// missing-segment recovery. Copy-video recovery may begin before the requested
+// segment when the demuxer emits pre-roll; encoded recovery remains exact.
+type SegmentRecoveryTarget struct {
+	SeekSeconds            float64
+	StreamOriginSeconds    float64
+	StartSegmentNumber     int
+	CopySeekAnchorResolved bool
+}
+
+// ResolveSegmentRecoveryTarget preserves the existing manifest's
+// URI-to-source-time mapping across a missing-segment restart.
+func (s *TranscodeSession) ResolveSegmentRecoveryTarget(ctx context.Context, segNum int) (SegmentRecoveryTarget, bool, error) {
+	seekSeconds, ok, err := s.RestartSeekTarget(segNum)
+	if err != nil || !ok {
+		return SegmentRecoveryTarget{}, ok, err
+	}
+
+	target := SegmentRecoveryTarget{SeekSeconds: seekSeconds, StartSegmentNumber: segNum}
+	opts := s.Opts()
+	if !strings.EqualFold(opts.TargetCodecVideo, "copy") {
+		return target, true, nil
+	}
+
+	streamOriginSeconds, _, err := ResolveCopySeekAnchor(
+		ctx,
+		opts.FFmpegPath,
+		opts.InputPath,
+		seekSeconds,
+		opts.SegmentDuration,
+	)
+	if err != nil {
+		return SegmentRecoveryTarget{}, false, err
+	}
+	startSegmentNumber, ok, err := s.segmentNumberAtSourceTime(streamOriginSeconds)
+	if err != nil || !ok {
+		return SegmentRecoveryTarget{}, ok, err
+	}
+
+	target.StreamOriginSeconds = streamOriginSeconds
+	target.StartSegmentNumber = startSegmentNumber
+	target.CopySeekAnchorResolved = true
+	return target, true, nil
 }
 
 // RestartSeekTarget resolves the source-timeline time to restart FFmpeg for

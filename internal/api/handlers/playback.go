@@ -1717,9 +1717,14 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 			// timeline position or return 404 for copy-mode segments outside the
 			// current manifest window.
 			if err != nil && errors.Is(err, playback.ErrSegmentNotFound) && decision.RestartOnTimeout {
-				seekSeconds, ok, seekErr := transcodeSession.RestartSeekTarget(segNum)
-				if seekErr != nil && !errors.Is(seekErr, playback.ErrManifestNotReady) {
-					slog.ErrorContext(r.Context(), "resolve transcode seek target", "component", "api", "error", seekErr, "segment", segmentName, "session", sessionID, "playback_session_id", sessionID)
+				target, ok, restartErr := h.tm.RestartSegmentLocked(
+					r.Context(),
+					sessionID,
+					transcodeSession,
+					segNum,
+				)
+				if restartErr != nil && !errors.Is(restartErr, playback.ErrManifestNotReady) {
+					slog.ErrorContext(r.Context(), "restart transcode at missing segment", "component", "api", "error", restartErr, "segment", segmentName, "session", sessionID, "playback_session_id", sessionID)
 				}
 
 				// Copy-mode with an unresolved seek target (ok=false, no error)
@@ -1728,11 +1733,13 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 				// client retries while the session keeps producing manifest.
 				// Mirrors the transcode-node guard in
 				// internal/transcodenode/server.go.
-				if !ok && seekErr == nil && transcodeSession.IsCopyVideo() {
+				if !ok && restartErr == nil && transcodeSession.IsCopyVideo() {
 					err = playback.ErrSegmentNotFound
 				}
 
-				if ok {
+				if restartErr != nil {
+					err = restartErr
+				} else if ok {
 					slog.InfoContext(r.Context(), "transcode seek restart", "component", "api",
 						"segment", segmentName,
 						"requested_segment", segNum,
@@ -1743,33 +1750,25 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 						"wait_timeout_ms", decision.WaitTimeout.Milliseconds(),
 						"restart_on_timeout", decision.RestartOnTimeout,
 						"reason", decision.Reason,
-						"seek_seconds", seekSeconds,
+						"seek_seconds", target.SeekSeconds,
+						"stream_origin_seconds", target.StreamOriginSeconds,
+						"resolved_start_segment", target.StartSegmentNumber,
 						"session", sessionID,
 						"playback_session_id", sessionID,
 					)
-					if restartErr := h.tm.RestartSessionLocked(
-						r.Context(),
-						sessionID,
-						transcodeSession,
-						seekSeconds,
-						segNum,
-					); restartErr == nil {
-						// Throttler + exit monitor re-arm via the session's
-						// restart hook.
-						segmentLease, err = transcodeSession.WaitForOpenSegment(segmentName, 30*time.Second)
-						if err == nil && strings.EqualFold(transcodeSession.Opts().TargetCodecVideo, "copy") {
-							// Copy-mode seeks can resume as soon as the target segment
-							// exists, but that sometimes leaves the player one segment
-							// away from stalling while FFmpeg catches up. Briefly wait
-							// for a single lookahead fragment when available so the
-							// first resumed playback window is less brittle.
-							nextSegmentName := fmt.Sprintf("seg_%05d.m4s", segNum+1)
-							if nextSegment, nextErr := transcodeSession.WaitForOpenSegment(nextSegmentName, 1200*time.Millisecond); nextErr == nil {
-								_ = nextSegment.Close()
-							}
+					// Throttler + exit monitor re-arm via the session's
+					// restart hook.
+					segmentLease, err = transcodeSession.WaitForOpenSegment(segmentName, 30*time.Second)
+					if err == nil && strings.EqualFold(transcodeSession.Opts().TargetCodecVideo, "copy") {
+						// Copy-mode seeks can resume as soon as the target segment
+						// exists, but that sometimes leaves the player one segment
+						// away from stalling while FFmpeg catches up. Briefly wait
+						// for a single lookahead fragment when available so the
+						// first resumed playback window is less brittle.
+						nextSegmentName := fmt.Sprintf("seg_%05d%s", segNum+1, filepath.Ext(segmentName))
+						if nextSegment, nextErr := transcodeSession.WaitForOpenSegment(nextSegmentName, 1200*time.Millisecond); nextErr == nil {
+							_ = nextSegment.Close()
 						}
-					} else {
-						err = restartErr
 					}
 				}
 			}

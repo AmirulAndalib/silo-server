@@ -81,10 +81,12 @@ type PlaybackMediaSource struct {
 	SupportsDirectPlay   bool
 	SupportsDirectStream bool
 	SupportsTranscoding  bool
-	// HLSRemux selects fragmented MP4 with video copy. TranscodeAudio remains
-	// the independent audio-encode decision, so a compatible audio codec can
-	// stay bit-for-bit copied.
+	// HLSRemux selects HLS with video copy. TranscodeAudio remains the
+	// independent audio-encode decision, so a compatible audio codec can stay
+	// bit-for-bit copied. HLSRemuxMPEGTS overrides the normal fMP4 packaging for
+	// clients whose Dolby Vision decoder requires MPEG-TS.
 	HLSRemux                    bool
+	HLSRemuxMPEGTS              bool
 	HLSRemuxAudioStreamIndexes  []int
 	TranscodeAudio              bool
 	DefaultAudioStreamIndex     *int

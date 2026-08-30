@@ -71,6 +71,43 @@ func TestStartRemoteTranscodeRequiresDurableNodeRecipe(t *testing.T) {
 	}
 }
 
+func TestStartRemoteCopyTranscodeDoesNotAdoptUnversionedRecipe(t *testing.T) {
+	var received transcodenode.TranscodeStartRequest
+	node := fakeTranscodeNode(t, &received)
+	recipeStore := &stubRecipeNodeStore{}
+	handler, _, playbackStore := newRemoteTranscodeHandler(t, node.URL, recipeStore)
+	source := testRemoteTranscodeSource()
+	source.HLSRemux = true
+	legacy := &playback.RecipeCard{
+		SessionID: "upstream-1", UserID: 7, ProfileID: "profile-1", MediaFileID: source.FileID,
+		TranscodeNodeURL: node.URL, PlayMethod: playback.PlayTranscode,
+		InputPath: "/media/movie.mkv", TargetCodecVideo: "copy", TargetCodecAudio: "copy",
+		SegmentDuration: compatSegmentDuration,
+		AudioTrackIndex: compatAudioTrackIndexOrDefault(source),
+	}
+	playbackStore.Put(PlaybackSession{
+		ID: "play-1", UpstreamSessionID: "upstream-1", TranscodeStarted: true, Recipe: legacy,
+	})
+
+	err := handler.startRemoteTranscode(
+		context.Background(), "play-1", "upstream-1", source,
+		&models.MediaFile{ID: 42, FilePath: "/media/movie.mkv", CodecVideo: "h264"}, 0, node.URL,
+	)
+	if err != nil {
+		t.Fatalf("startRemoteTranscode: %v", err)
+	}
+	if received.CopyFMP4RecipeVersion != playback.CopyFMP4RecipeVersion {
+		t.Fatalf("replacement request version = %q, want %q", received.CopyFMP4RecipeVersion, playback.CopyFMP4RecipeVersion)
+	}
+	stored, ok := playbackStore.Get("play-1")
+	if !ok || stored.Recipe == nil {
+		t.Fatal("replacement recipe was not stored")
+	}
+	if err := playback.ValidateCopyFMP4RecipeCard(*stored.Recipe); err != nil {
+		t.Fatalf("replacement stored an invalid copy recipe: %v", err)
+	}
+}
+
 func TestStartRemoteTranscodeRedactsInvalidNodeURL(t *testing.T) {
 	handler, _, _ := newRemoteTranscodeHandler(t, "http://node.invalid", &stubRecipeNodeStore{})
 	err := handler.startRemoteTranscode(
@@ -583,6 +620,49 @@ func TestMasterManifestGatesUnhealthyRemoteAdoption(t *testing.T) {
 	}
 }
 
+func TestMasterManifestWrapsRemoteCopyMediaPlaylistAsVariant(t *testing.T) {
+	const adoptedURL = "http://adopted.invalid"
+	handler, _, playbackStore := newRemoteTranscodeHandler(t, adoptedURL, &stubRecipeNodeStore{})
+	transcodes := nodepool.NewTranscodePool()
+	transcodes.SetNodes([]*nodepool.Node{{URL: adoptedURL, Enabled: true, Healthy: true}})
+	proxies := nodepool.NewProxyPool()
+	proxies.SetNodes([]*nodepool.Node{{URL: "https://proxy.example", Enabled: true, Healthy: true}})
+	handler.NodePlanner = nodepool.NewPlanner(proxies, transcodes)
+
+	source := testRemoteTranscodeSource()
+	source.HLSRemux = true
+	card := playback.NewRecipeCard(7, "profile-1", source.FileID, adoptedURL, playback.TranscodeOpts{
+		SessionID: "upstream-1", InputPath: "/media/movie.mkv",
+		TargetCodecVideo: "copy", TargetCodecAudio: "copy",
+		SegmentDuration: compatSegmentDuration,
+		AudioTrackIndex: compatAudioTrackIndexOrDefault(source),
+	})
+	playbackStore.Put(PlaybackSession{
+		ID: "play-1", CompatToken: "compat-token", RouteItemID: "item",
+		MediaSources: []PlaybackMediaSource{source}, UpstreamSessionID: "upstream-1",
+		UpstreamPlayMethod: "transcode", TranscodeStarted: true, Recipe: &card,
+	})
+	request := httptest.NewRequest(http.MethodGet, "/Videos/item/remux-v1/master.m3u8?PlaySessionId=play-1&MediaSourceId="+source.ID, nil)
+	request = withCompatRemuxV1Route(request)
+	request = request.WithContext(context.WithValue(request.Context(), compatSessionKey, &Session{
+		Token: "compat-token", StreamAppUserID: 7, ProfileID: "profile-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	handler.HandleMasterManifest(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	if location := recorder.Header().Get("Location"); location != "" {
+		t.Fatalf("copy master unexpectedly redirected to %q", location)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "#EXT-X-STREAM-INF:") || !strings.Contains(body, "https://proxy.example/stream/transcode/") {
+		t.Fatalf("copy master does not wrap the signed remote media playlist:\n%s", body)
+	}
+}
+
 // localSessionRegistry is a GetSession + RegisterReconstructed double for
 // exercising TranscodeManager reconstruction from the jellycompat package
 // (the playback package's own fake is not exported across packages).
@@ -654,11 +734,17 @@ func fakeTranscodeNode(t *testing.T, received *transcodenode.TranscodeStartReque
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		var request transcodenode.TranscodeStartRequest
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &request)
 		if received != nil {
-			body, _ := io.ReadAll(r.Body)
-			_ = json.Unmarshal(body, received)
+			*received = request
 		}
-		w.WriteHeader(http.StatusAccepted)
+		writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{
+			SessionID: request.SessionID, Status: "started",
+			AudioRecipeVersion:    request.AudioRecipeVersion,
+			CopyFMP4RecipeVersion: request.CopyFMP4RecipeVersion,
+		})
 	}))
 	t.Cleanup(srv.Close)
 	return srv

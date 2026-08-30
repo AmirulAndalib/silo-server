@@ -526,6 +526,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 			plan := cloneRemuxPlanCandidateV3(remuxBase)
 			plan.Delivery = DeliveryRemuxHLSV3
 			plan.Stream = StreamV3{Protocol: StreamHLSV3, Container: "hls", MIMEType: "application/vnd.apple.mpegurl", Headers: map[string]string{}, HeaderRefresh: HeaderRefreshNoneV3}
+			plan.EffectiveRecipe.VideoSampleEntry = hlsVideoSampleEntryV3(source, input.Request, dvStrip)
 			hlsAudioChannels := 0
 			if hlsTranscodeAudio {
 				if !input.hlsRemuxRegistry().Available(TransformationAudioToAACV3) {
@@ -590,6 +591,23 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 	}
 
 	return terminalPlannerResultV3("adaptation_unavailable", "No validated playback route is available for this source and output route.", false)
+}
+
+// Native HLS consumers use hvc1/dvh1 byte recipes. Web MediaSource clients
+// keep the server's existing FFmpeg-default labeling unless they explicitly
+// advertise the delivery-scoped native-HLS feature.
+func hlsVideoSampleEntryV3(source SourceDescriptorV3, request StartRequestV3, dvStrip bool) string {
+	if !strings.EqualFold(source.VideoCodec, "hevc") {
+		return ""
+	}
+	if !deliverySupportsFeatureV3(request, DeliveryClassHLSV3, ClientNativeHLSPlaybackV3) &&
+		!usesFirstPartyAndroidMedia3HLSV3(request) {
+		return ""
+	}
+	if !dvStrip && (source.DVProfile == 5 || source.DVProfile == 8) {
+		return VideoSampleEntryDVH1
+	}
+	return VideoSampleEntryHVC1
 }
 
 // availableQualitiesV3 publishes the server ladder rungs a client could

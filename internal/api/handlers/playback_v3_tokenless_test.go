@@ -252,7 +252,9 @@ func TestEscalateRefusedProgressiveRemuxV3EscalatesCopyOnlyRemuxes(t *testing.T)
 			if err := json.NewDecoder(r.Body).Decode(&start); err != nil {
 				t.Errorf("decode remote start: %v", err)
 			}
-			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: start.SessionID, Status: "started"})
+			writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{
+				SessionID: start.SessionID, Status: "started", CopyFMP4RecipeVersion: start.CopyFMP4RecipeVersion,
+			})
 		default:
 			w.WriteHeader(http.StatusNoContent)
 		}
