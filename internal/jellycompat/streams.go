@@ -34,14 +34,16 @@ import (
 // than the native global playback default so the first requested HLS chunk and
 // the near-head follow-up segments arrive quickly enough for browser playback.
 const (
-	compatSegmentDuration    = 2
-	compatHLSPathSegment     = "hls"
-	compatAudioV2PathSegment = "audio-v2"
-	compatRemuxV1PathSegment = "remux-v1"
+	compatSegmentDuration      = 2
+	compatHLSPathSegment       = "hls"
+	compatAudioV2PathSegment   = "audio-v2"
+	compatRemuxV1PathSegment   = "remux-v1"
+	compatRemuxTSV1PathSegment = "remux-ts-v1"
 )
 
 type compatAudioV2RouteContextKey struct{}
 type compatRemuxV1RouteContextKey struct{}
+type compatRemuxTSV1RouteContextKey struct{}
 
 func withCompatAudioV2Route(r *http.Request) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), compatAudioV2RouteContextKey{}, true))
@@ -61,6 +63,15 @@ func isCompatRemuxV1Route(r *http.Request) bool {
 	return marked
 }
 
+func withCompatRemuxTSV1Route(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), compatRemuxTSV1RouteContextKey{}, true))
+}
+
+func isCompatRemuxTSV1Route(r *http.Request) bool {
+	marked, _ := r.Context().Value(compatRemuxTSV1RouteContextKey{}).(bool)
+	return marked
+}
+
 func validateCompatAudioV2Route(w http.ResponseWriter, r *http.Request, required bool) bool {
 	if isCompatAudioV2Route(r) == required {
 		return true
@@ -71,6 +82,14 @@ func validateCompatAudioV2Route(w http.ResponseWriter, r *http.Request, required
 
 func validateCompatRemuxV1Route(w http.ResponseWriter, r *http.Request, required bool) bool {
 	if isCompatRemuxV1Route(r) == required {
+		return true
+	}
+	writeError(w, http.StatusNotFound, "NotFound", "Playback route not found")
+	return false
+}
+
+func validateCompatRemuxTSV1Route(w http.ResponseWriter, r *http.Request, required bool) bool {
+	if isCompatRemuxTSV1Route(r) == required {
 		return true
 	}
 	writeError(w, http.StatusNotFound, "NotFound", "Playback route not found")
@@ -114,13 +133,24 @@ func compatHLSUsesAudioCopyV1(source PlaybackMediaSource) bool {
 }
 
 func compatHLSRoutePathSegment(source PlaybackMediaSource) string {
-	if compatHLSUsesAudioCopyV1(source) {
+	if source.HLSRemuxMPEGTS {
+		return compatRemuxTSV1PathSegment
+	}
+	if compatHLSUsesRemuxV1Route(source) {
 		return compatRemuxV1PathSegment
 	}
-	if compatHLSRequiresAudioV2(source) {
+	if compatHLSUsesAudioV2Route(source) {
 		return compatAudioV2PathSegment
 	}
 	return ""
+}
+
+func compatHLSUsesAudioV2Route(source PlaybackMediaSource) bool {
+	return !source.HLSRemuxMPEGTS && compatHLSRequiresAudioV2(source)
+}
+
+func compatHLSUsesRemuxV1Route(source PlaybackMediaSource) bool {
+	return !source.HLSRemuxMPEGTS && compatHLSUsesAudioCopyV1(source)
 }
 
 func compatHLSCopiesVideo(source PlaybackMediaSource) bool {
@@ -205,6 +235,18 @@ func (h *PlaybackHandler) HandleRemuxV1HLSManifest(w http.ResponseWriter, r *htt
 
 func (h *PlaybackHandler) HandleRemuxV1HLSSegment(w http.ResponseWriter, r *http.Request) {
 	h.HandleHLSSegment(w, withCompatRemuxV1Route(r))
+}
+
+func (h *PlaybackHandler) HandleRemuxTSV1MasterManifest(w http.ResponseWriter, r *http.Request) {
+	h.HandleMasterManifest(w, withCompatRemuxTSV1Route(r))
+}
+
+func (h *PlaybackHandler) HandleRemuxTSV1HLSManifest(w http.ResponseWriter, r *http.Request) {
+	h.HandleHLSManifest(w, withCompatRemuxTSV1Route(r))
+}
+
+func (h *PlaybackHandler) HandleRemuxTSV1HLSSegment(w http.ResponseWriter, r *http.Request) {
+	h.HandleHLSSegment(w, withCompatRemuxTSV1Route(r))
 }
 
 // errUpstreamReplaced signals that a concurrent request attached a different
@@ -486,10 +528,13 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	if !validateCompatAudioV2RouteIdentity(w, r, playSession, source, chiURLParam(r, "id"), firstNonEmpty(r.URL.Query().Get("MediaSourceId"), r.URL.Query().Get("mediaSourceId"))) {
 		return
 	}
-	if !validateCompatAudioV2Route(w, r, compatHLSRequiresAudioV2(*source)) {
+	if !validateCompatAudioV2Route(w, r, compatHLSUsesAudioV2Route(*source)) {
 		return
 	}
-	if !validateCompatRemuxV1Route(w, r, compatHLSUsesAudioCopyV1(*source)) {
+	if !validateCompatRemuxV1Route(w, r, compatHLSUsesRemuxV1Route(*source)) {
+		return
+	}
+	if !validateCompatRemuxTSV1Route(w, r, source.HLSRemuxMPEGTS) {
 		return
 	}
 	// Attach BEFORE ensureUpstreamPlayback below: this route can start a
@@ -734,10 +779,13 @@ func (h *PlaybackHandler) HandleHLSManifest(w http.ResponseWriter, r *http.Reque
 	if !validateCompatAudioV2RouteIdentity(w, r, playSession, source, chiURLParam(r, "id"), firstNonEmpty(r.URL.Query().Get("MediaSourceId"), r.URL.Query().Get("mediaSourceId"))) {
 		return
 	}
-	if !validateCompatAudioV2Route(w, r, compatHLSRequiresAudioV2(*source)) {
+	if !validateCompatAudioV2Route(w, r, compatHLSUsesAudioV2Route(*source)) {
 		return
 	}
-	if !validateCompatRemuxV1Route(w, r, compatHLSUsesAudioCopyV1(*source)) {
+	if !validateCompatRemuxV1Route(w, r, compatHLSUsesRemuxV1Route(*source)) {
+		return
+	}
+	if !validateCompatRemuxTSV1Route(w, r, source.HLSRemuxMPEGTS) {
 		return
 	}
 	// Before ensureTranscodeManifest, for the same reason as the master manifest.
@@ -794,10 +842,13 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 	if !validateCompatAudioV2RouteIdentity(w, r, playSession, source, chiURLParam(r, "id"), firstNonEmpty(r.URL.Query().Get("MediaSourceId"), r.URL.Query().Get("mediaSourceId"))) {
 		return
 	}
-	if !validateCompatAudioV2Route(w, r, compatHLSRequiresAudioV2(*source)) {
+	if !validateCompatAudioV2Route(w, r, compatHLSUsesAudioV2Route(*source)) {
 		return
 	}
-	if !validateCompatRemuxV1Route(w, r, compatHLSUsesAudioCopyV1(*source)) {
+	if !validateCompatRemuxV1Route(w, r, compatHLSUsesRemuxV1Route(*source)) {
+		return
+	}
+	if !validateCompatRemuxTSV1Route(w, r, source.HLSRemuxMPEGTS) {
 		return
 	}
 	segmentSourceFileID := source.FileID
