@@ -566,7 +566,8 @@ progress and every other control-plane call stay on the API origin, and the
 attempt's plan remains the sole authority for which URL to fetch. Subtitle
 artifacts and font bundles are authenticated auxiliary resources: their
 inventory URLs remain API-relative even when node routing assigns the primary
-file, manifest, and segments to a proxy origin.
+file, manifest, and segments to a proxy origin. Jellyfin-compatible subtitle
+`DeliveryUrl` values follow the same API-origin rule.
 
 The client must attach its current `Authorization: Bearer ...` header to the
 manifest/file request and every derived request, including HLS segments,

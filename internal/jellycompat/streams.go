@@ -1326,6 +1326,9 @@ func (h *PlaybackHandler) HandleSubtitleStream(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Subtitle DeliveryUrls are authenticated API-origin auxiliaries published
+	// before the primary media route is selected. A proxy egress assignment
+	// therefore governs the file or HLS transport, not this sidecar resource.
 	playSession, source, err := h.resolvePlaybackRoute(r, session, chiURLParam(r, "routeMediaSourceId"), chiURLParam(r, "routeMediaSourceId"))
 	if err != nil || source == nil {
 		writeError(w, http.StatusNotFound, "NotFound", "Playback session not found")
