@@ -746,13 +746,38 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 			localRouteSelected = true
 			break
 		}
-		var adoptedRemote *remoteStartAdoptedRemoteError
-		if errors.As(startErr, &adoptedRemote) {
+		if adoptedRemote, adopted := errors.AsType[*remoteStartAdoptedRemoteError](startErr); adopted {
 			remoteNodeURL = adoptedRemote.nodeURL
 			if health, ok := h.NodePlanner.(compatTranscodeNodeHealth); ok && !health.TranscodeNodeHealthy(remoteNodeURL) {
 				startErr = fmt.Errorf("%w: adopted transcode node is unhealthy", errRemoteTranscodeStartFailed)
 			} else {
 				startErr = nil
+			}
+			if startErr == nil && strings.TrimRight(remoteNodeURL, "/") != strings.TrimRight(tcNode.URL, "/") {
+				adoptedDecision, adoptedRouteErr := h.resolveCompatHLSRouteOnNodeWithPolicy(
+					r.Context(), upstreamSession, file, *source, requiredToneMapMode, remoteNodeURL,
+					excludedNodes, excludedShapes, routingPolicy,
+				)
+				if adoptedRouteErr != nil {
+					// The published runtime belongs to the concurrent winner. This
+					// contender must not tear it down merely because it cannot bind a
+					// legal local route around that executor.
+					h.releaseCompatSessionReservation(playSession.UpstreamSessionID)
+					writeCompatTranscodeError(w, adoptedRouteErr)
+					return
+				}
+				if !adoptedDecision.Selected() || adoptedDecision.Shape.Execution != noderouting.ExecutionTranscode ||
+					adoptedDecision.Plan.TranscodeNode == nil ||
+					strings.TrimRight(adoptedDecision.Plan.TranscodeNode.URL, "/") != strings.TrimRight(remoteNodeURL, "/") {
+					h.releaseCompatSessionReservation(playSession.UpstreamSessionID)
+					writeError(w, http.StatusServiceUnavailable, compatRouteOutcomeCode(adoptedDecision.Outcome),
+						"The published transcode executor has no route satisfying the configured policy and current node availability")
+					return
+				}
+				decision = adoptedDecision
+				plan = decision.Plan
+				tcNode = plan.TranscodeNode
+				remoteNodeURL = tcNode.URL
 			}
 		}
 		if startErr != nil {

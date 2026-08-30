@@ -919,6 +919,27 @@ func (h *PlaybackHandler) resolveCompatHLSRouteWithPolicy(
 	excludedShapes map[string]struct{},
 	policy config.PlaybackRoutingPolicy,
 ) (noderouting.Decision, error) {
+	return h.resolveCompatHLSRouteOnNodeWithPolicy(
+		ctx, session, file, source, requiredToneMapMode, "", excludedNodes, excludedShapes, policy,
+	)
+}
+
+// resolveCompatHLSRouteOnNodeWithPolicy optionally pins worker execution to an
+// already-running transcode node. Concurrent master requests can plan different
+// nodes before one publishes its runtime; the losing request must then replace
+// its whole provisional route around the published executor, including the
+// executor reservation and any same-group proxy.
+func (h *PlaybackHandler) resolveCompatHLSRouteOnNodeWithPolicy(
+	ctx context.Context,
+	session *playback.Session,
+	file *models.MediaFile,
+	source PlaybackMediaSource,
+	requiredToneMapMode tonemap.Mode,
+	requiredTranscodeURL string,
+	excludedNodes map[string]struct{},
+	excludedShapes map[string]struct{},
+	policy config.PlaybackRoutingPolicy,
+) (noderouting.Decision, error) {
 	videoTranscode := !compatHLSCopiesVideo(source)
 	workload := noderouting.WorkloadRemux
 	delivery := noderouting.DeliveryHLSRemux
@@ -931,12 +952,22 @@ func (h *PlaybackHandler) resolveCompatHLSRouteWithPolicy(
 	if err != nil {
 		return noderouting.Decision{}, err
 	}
+	currentTranscodeURL := session.TranscodeNodeURL
+	if requiredTranscodeURL != "" {
+		requiredTranscodeURL = strings.TrimRight(requiredTranscodeURL, "/")
+		baseEligible := eligible
+		eligible = func(node *nodepool.Node) bool {
+			return node != nil && strings.TrimRight(node.URL, "/") == requiredTranscodeURL &&
+				(baseEligible == nil || baseEligible(node))
+		}
+		currentTranscodeURL = requiredTranscodeURL
+	}
 	return noderouting.Resolve(noderouting.AdaptSessionPlanner(h.NodePlanner), noderouting.ResolveRequest{
 		Request: noderouting.Request{
 			Workload: workload, Delivery: delivery,
 			Policy: policy, ProxyAllowed: h.JWTSecret != "",
 		},
-		SessionID: session.ID, CurrentTranscodeURL: session.TranscodeNodeURL,
+		SessionID: session.ID, CurrentTranscodeURL: currentTranscodeURL,
 		EstimatedBitrateKbps: source.Version.Bitrate,
 		TranscodeEligible:    eligible, ExcludedShapeIDs: excludedShapes,
 	})
