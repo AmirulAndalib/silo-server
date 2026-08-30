@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -40,6 +41,11 @@ const (
 // streamUploadPartSize bounds per-upload memory for unsized streaming uploads.
 // S3-compatible backends require parts of at least 5 MiB (except the last).
 const streamUploadPartSize = 8 * 1024 * 1024
+
+// publicDeliveryProbeTimeout bounds request-path latency when the external
+// artwork endpoint is unavailable. Ladder resolution probes candidates in
+// descending order, so an unbounded client could stall a whole browse page.
+const publicDeliveryProbeTimeout = 5 * time.Second
 
 // BucketConfig holds the configuration for connecting to a single S3 bucket.
 // Each bucket may have different credentials and endpoints, allowing per-bucket
@@ -429,6 +435,49 @@ func (c *Client) ObjectExists(ctx context.Context, bucket, key string) (bool, er
 	}
 
 	return true, nil
+}
+
+// ObjectAvailable reports whether a client-facing read URL is fetchable now.
+// Public and token-authenticated endpoints are a separate delivery path from
+// the S3 API, so they are probed with the same GET method clients use. A
+// one-byte range avoids transferring the image body when the endpoint honors
+// ranges. Standard presigned delivery keeps using the cheaper storage HEAD.
+func (c *Client) ObjectAvailable(ctx context.Context, bucket, key string) (bool, error) {
+	if !c.UsesExternalAuth() || c.publicEndpoint == "" {
+		return c.ObjectExists(ctx, bucket, key)
+	}
+
+	readURL, err := c.PresignGetURL(ctx, bucket, key, publicDeliveryProbeTimeout)
+	if err != nil {
+		return false, err
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, publicDeliveryProbeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, readURL, nil)
+	if err != nil {
+		return false, fmt.Errorf("s3 create public delivery probe for %s/%s", bucket, key)
+	}
+	req.Header.Set("Range", "bytes=0-0")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		// The underlying url.Error includes the signed URL, so do not wrap it:
+		// token-auth query values must never reach logs.
+		return false, fmt.Errorf("s3 public delivery probe for %s/%s failed", bucket, key)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		var firstByte [1]byte
+		if _, err := io.ReadFull(resp.Body, firstByte[:]); err != nil {
+			return false, fmt.Errorf("s3 public delivery probe for %s/%s returned no readable body", bucket, key)
+		}
+		return true, nil
+	}
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		return false, nil
+	}
+	return false, fmt.Errorf("s3 public delivery probe for %s/%s returned status %d", bucket, key, resp.StatusCode)
 }
 
 // ObjectMatches checks that an immutable object exists with the expected

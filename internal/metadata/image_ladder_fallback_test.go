@@ -12,11 +12,15 @@ import (
 // fakeS3ImageStore is a presigner that also answers existence checks, standing
 // in for *s3client.Client.
 type fakeS3ImageStore struct {
-	mu       sync.Mutex
-	existing map[string]bool
-	err      error
-	checks   []string
-	presigns []string
+	mu             sync.Mutex
+	existing       map[string]bool
+	deliverable    map[string]bool
+	deliveryErrors map[string]error
+	externalAuth   bool
+	err            error
+	checks         []string
+	deliveryChecks []string
+	presigns       []string
 }
 
 func newFakeS3ImageStore(existing ...string) *fakeS3ImageStore {
@@ -28,6 +32,8 @@ func newFakeS3ImageStore(existing ...string) *fakeS3ImageStore {
 }
 
 func (s *fakeS3ImageStore) Bucket() string { return "media" }
+
+func (s *fakeS3ImageStore) UsesExternalAuth() bool { return s.externalAuth }
 
 func (s *fakeS3ImageStore) PresignGetURL(_ context.Context, bucket, key string, _ time.Duration) (string, error) {
 	s.mu.Lock()
@@ -44,6 +50,19 @@ func (s *fakeS3ImageStore) ObjectExists(_ context.Context, _ string, key string)
 		return false, s.err
 	}
 	return s.existing[key], nil
+}
+
+func (s *fakeS3ImageStore) ObjectAvailable(_ context.Context, _ string, key string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deliveryChecks = append(s.deliveryChecks, key)
+	if err := s.deliveryErrors[key]; err != nil {
+		return false, err
+	}
+	if s.err != nil {
+		return false, s.err
+	}
+	return s.deliverable[key], nil
 }
 
 func (s *fakeS3ImageStore) checkCount() int {
@@ -115,6 +134,93 @@ func TestLadderFallbackWalksLogoLadder(t *testing.T) {
 
 	if got := resolvedKey(t, resolver, requested); got != present {
 		t.Fatalf("resolved key = %q, want %q", got, present)
+	}
+}
+
+// A storage HEAD is not proof that a separately authenticated public URL is
+// fetchable. The ladder must check the same delivery path the client will use.
+func TestLadderFallbackUsesClientDeliveryAvailability(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested string
+		present   string
+	}{
+		{
+			name:      "poster",
+			requested: "tmdb/movies/550/poster/w780.rev.webp",
+			present:   "tmdb/movies/550/poster/w500.rev.webp",
+		},
+		{
+			name:      "still",
+			requested: "tmdb/series/1396/seasons/1/episodes/1/still/w780.rev.webp",
+			present:   "tmdb/series/1396/seasons/1/episodes/1/still/w500.rev.webp",
+		},
+		{
+			name:      "logo",
+			requested: "tmdb/series/1396/logo/w1280.rev.webp",
+			present:   "tmdb/series/1396/logo/w500.rev.webp",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeS3ImageStore(tt.requested, tt.present)
+			store.externalAuth = true
+			store.deliverable = map[string]bool{tt.present: true}
+			resolver := newResolverWithStore(t, store)
+
+			if got := resolvedKey(t, resolver, tt.requested); got != tt.present {
+				t.Fatalf("resolved key = %q, want client-fetchable rung %q", got, tt.present)
+			}
+			if len(store.deliveryChecks) == 0 || store.deliveryChecks[0] != tt.requested {
+				t.Fatalf("delivery checks = %v, want requested rung checked first", store.deliveryChecks)
+			}
+			if len(store.checks) != 0 {
+				t.Fatalf("storage checks = %v, want client-delivery checks", store.checks)
+			}
+		})
+	}
+}
+
+func TestLadderFallbackRechecksExternalDeliveryForPromotion(t *testing.T) {
+	const requested = "tmdb/movies/550/poster/w780.rev.webp"
+	const present = "tmdb/movies/550/poster/w500.rev.webp"
+	store := newFakeS3ImageStore(requested, present)
+	store.externalAuth = true
+	store.deliverable = map[string]bool{present: true}
+	resolver := newResolverWithStore(t, store)
+
+	if got := resolvedKey(t, resolver, requested); got != present {
+		t.Fatalf("initial resolved key = %q, want fallback %q", got, present)
+	}
+
+	store.mu.Lock()
+	store.deliverable[requested] = true
+	store.mu.Unlock()
+	// Expiry drives these invalidations in production; do it directly so the
+	// unit test proves promotion without waiting for the real TTL.
+	resolver.existsCache.InvalidatePrefix("")
+	resolver.urlCache.InvalidatePrefix("")
+
+	if got := resolvedKey(t, resolver, requested); got != requested {
+		t.Fatalf("resolved key after delivery recovery = %q, want %q", got, requested)
+	}
+}
+
+func TestLadderFallbackUsesLowerRungWhenDeliveryCheckErrors(t *testing.T) {
+	const requested = "tmdb/movies/550/poster/w780.rev.webp"
+	const present = "tmdb/movies/550/poster/w500.rev.webp"
+	store := newFakeS3ImageStore(requested, present)
+	store.externalAuth = true
+	store.deliverable = map[string]bool{present: true}
+	store.deliveryErrors = map[string]error{requested: errors.New("delivery unavailable")}
+	resolver := newResolverWithStore(t, store)
+
+	if got := resolvedKey(t, resolver, requested); got != present {
+		t.Fatalf("resolved key = %q, want lower fetchable rung %q", got, present)
+	}
+	if len(store.deliveryChecks) != 1 || store.deliveryChecks[0] != requested {
+		t.Fatalf("delivery checks = %v, want one bounded check of requested rung", store.deliveryChecks)
 	}
 }
 
@@ -203,6 +309,22 @@ func TestLadderFallbackClampsResolvedURLLifetime(t *testing.T) {
 	}
 	if got := time.Until(*direct.ExpiresAt); got <= missingExistsCacheTTL+resolvedURLCacheSafetyMargin {
 		t.Fatalf("direct expiry in %v, want the full presign window", got)
+	}
+}
+
+func TestLadderFallbackClampsExternallyVerifiedURLLifetime(t *testing.T) {
+	const requested = "tmdb/movies/550/poster/w780.abc123.webp"
+	store := newFakeS3ImageStore(requested)
+	store.externalAuth = true
+	store.deliverable = map[string]bool{requested: true}
+	resolver := newResolverWithStore(t, store)
+
+	resolved := resolver.ResolveImageURLWithExpiry(t.Context(), requested, "featured")
+	if resolved.ExpiresAt == nil {
+		t.Fatal("externally verified URL has no expiry")
+	}
+	if got := time.Until(*resolved.ExpiresAt); got > externalAvailabilityCacheTTL+resolvedURLCacheSafetyMargin {
+		t.Fatalf("externally verified expiry in %v, want at most %v", got, externalAvailabilityCacheTTL+resolvedURLCacheSafetyMargin)
 	}
 }
 

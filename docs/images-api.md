@@ -102,13 +102,21 @@ The wide rungs (780px posters and stills, 1280px logos) were added after this
 ladder shipped, so artwork cached by an earlier version has no object at those
 keys. A one-shot background pass regenerates it, and until that pass reaches a
 given image the server serves the next narrower rung it does have, ending at the
-original.
+original. With public or token-authenticated delivery, the server checks the
+same client-facing GET path rather than treating an S3 storage HEAD as proof
+that the public URL works.
 
 The practical consequence for a client is that shortly after a server upgrade,
 `image_size=large` may return an image narrower than the table above. It is never
 a broken URL, and no client action is required: the correct width appears once
 the pass completes. URLs served from a fallback carry a shortened expiry so the
-real rung is picked up promptly rather than a day later.
+real rung is picked up promptly rather than a day later. Externally delivered
+wide-rung URLs are also revalidated on that shorter cadence, because public
+delivery health can change independently of the backing object. This safe
+fallback is why the capability endpoint can continue advertising the `large`
+request semantic while a deployment's wide-rung backfill is incomplete. The
+check observes the server's route to the public endpoint; a CDN may still send
+a remote client to a different edge with transient edge-local state.
 
 ## Jellyfin compatibility
 
