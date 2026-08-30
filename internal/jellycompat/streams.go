@@ -583,6 +583,13 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 					writeError(w, http.StatusInternalServerError, "ServerError", "Failed to sign proxy stream URL")
 					return
 				}
+				if compatHLSCopiesVideo(*source) {
+					w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+					w.Header().Set("Cache-Control", "no-store, max-age=0")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(generateCompatCopyVideoMasterManifestForVariant(*source, redirectURL))
+					return
+				}
 				http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 				return
 			}
@@ -639,6 +646,14 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 
 	if manifest == nil {
 		manifest = generateFullManifest(source.Version.Duration, segDuration, compatHLSCopiesVideo(*source), playSession.InitialSeekSeconds)
+	}
+	if compatHLSCopiesVideo(*source) {
+		manifest = generateCompatCopyVideoMasterManifest(
+			*source,
+			playSession.RouteItemID,
+			playSession.ID,
+			compatHLSRoutePathSegment(*source),
+		)
 	}
 
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
@@ -1387,9 +1402,21 @@ func (h *PlaybackHandler) cleanupPlaySession(
 // The compat transcode ladder always lands on H.264/AAC; these name the
 // target codecs the Jellyfin-compat pipeline hands to ffmpeg.
 const (
-	compatTargetVideoCodec = "h264"
-	compatTargetAudioCodec = "aac"
-	compatCopyCodec        = "copy"
+	compatTargetVideoCodec     = "h264"
+	compatTargetAudioCodec     = "aac"
+	compatCopyCodec            = "copy"
+	compatAudioCodecAC3        = "ac3"
+	compatAudioCodecEAC3       = "eac3"
+	compatAudioCodecFLAC       = "flac"
+	compatAudioCodecMP3        = "mp3"
+	compatAudioCodecOpus       = "opus"
+	compatRangeDOVI            = "DOVI"
+	compatRangeDOVIWithHLG     = "DOVIWithHLG"
+	compatRangeDOVIWithHDR     = "DOVIWithHDR10"
+	compatRangeDOVIWithHDRPlus = "DOVIWithHDR10Plus"
+	compatRangeHDR10Plus       = "HDR10Plus"
+	compatRangeHLG             = "HLG"
+	compatRangeSDR             = "SDR"
 )
 
 const (
@@ -2381,20 +2408,14 @@ func shouldGenerateCompatFullManifest(source PlaybackMediaSource, segmentDuratio
 	return playback.CanGenerateSyntheticManifest(float64(source.Version.Duration), segmentDuration)
 }
 
-// compatInitialTranscodePosition keeps FFmpeg close to the requested resume
-// position. Bounded synthetic manifests list the omitted source segments;
-// seeked real manifests receive an EXT-X-GAP timeline anchor before serving.
-func compatInitialTranscodePosition(source PlaybackMediaSource, segmentDuration int, requested float64) (float64, int) {
-	if requested <= 0 {
-		return 0, 0
-	}
-	if duration := float64(source.Version.Duration); duration > 0 && requested > duration {
-		requested = duration
-	}
-	if segmentDuration <= 0 {
-		segmentDuration = compatSegmentDuration
-	}
-	return requested, int(requested / float64(segmentDuration))
+// compatInitialTranscodePosition starts Jellyfin-compatible HLS at source zero.
+// Jellyfin 10.11's native webOS player must load init.mp4 and the beginning of
+// the source-aligned media playlist before it applies its own resume seek. A
+// pre-seeked process advertises segments 0..K-1 that can never exist and makes
+// the player's initial segment-zero request fail. Later segment-K requests use
+// the normal on-demand restart path.
+func compatInitialTranscodePosition(_ PlaybackMediaSource, _ int, _ float64) (float64, int) {
+	return 0, 0
 }
 
 // audioSelectionChanged reports whether an incoming AudioStreamIndex differs
@@ -2885,6 +2906,130 @@ func buildSegmentProxyPath(routeItemID, playlistID, mediaSourceID, current, rout
 		return fmt.Sprintf("%s/hls/%s/%s%s%s", basePath, playlistID, name, ext, qs)
 	}
 	return fmt.Sprintf("%s/hls/%s/%s%s", basePath, playlistID, base, qs)
+}
+
+func generateCompatCopyVideoMasterManifest(source PlaybackMediaSource, routeItemID, playlistID, routePathSegment string) []byte {
+	variantURL := buildSegmentProxyPath(routeItemID, playlistID, source.ID, "stream.m3u8", routePathSegment)
+	return generateCompatCopyVideoMasterManifestForVariant(source, variantURL)
+}
+
+func generateCompatCopyVideoMasterManifestForVariant(source PlaybackMediaSource, variantURL string) []byte {
+	video := compatPrimaryVideoTrack(source.Version)
+	audio := compatAudioTrack(source.Version, effectiveCompatAudioStreamIndex(source))
+
+	bandwidth := source.Version.Bitrate * 1000
+	if bandwidth <= 0 {
+		bandwidth = (video.Bitrate + audio.Bitrate) * 1000
+	}
+	if bandwidth <= 0 {
+		bandwidth = 1
+	}
+
+	attributes := []string{
+		fmt.Sprintf("BANDWIDTH=%d", bandwidth),
+		fmt.Sprintf("AVERAGE-BANDWIDTH=%d", bandwidth),
+	}
+	if videoRange := compatMasterVideoRange(video, source.Version.HDR); videoRange != "" {
+		attributes = append(attributes, "VIDEO-RANGE="+videoRange)
+	}
+	if codecs := compatMasterCodecs(source, video, audio); codecs != "" {
+		attributes = append(attributes, fmt.Sprintf("CODECS=%q", codecs))
+	}
+	if supplemental := compatMasterSupplementalCodec(video); supplemental != "" {
+		attributes = append(attributes, fmt.Sprintf("SUPPLEMENTAL-CODECS=%q", supplemental))
+	}
+	if video.Width > 0 && video.Height > 0 {
+		attributes = append(attributes, fmt.Sprintf("RESOLUTION=%dx%d", video.Width, video.Height))
+	}
+	if frameRate := parseCompatFrameRate(video.FrameRate); frameRate > 0 {
+		rounded := math.Round(frameRate*1000) / 1000
+		attributes = append(attributes, "FRAME-RATE="+strconv.FormatFloat(rounded, 'f', -1, 64))
+	}
+
+	return []byte("#EXTM3U\n#EXT-X-STREAM-INF:" + strings.Join(attributes, ",") + "\n" + variantURL + "\n")
+}
+
+func compatMasterVideoRange(video models.VideoTrack, versionHDR bool) string {
+	switch compatVideoRangeType(video, versionHDR) {
+	case compatRangeHLG, compatRangeDOVIWithHLG:
+		return compatRangeHLG
+	case "HDR10", compatRangeHDR10Plus, compatRangeDOVI, compatRangeDOVIWithHDR, compatRangeDOVIWithHDRPlus:
+		return "PQ"
+	case compatRangeSDR:
+		return compatRangeSDR
+	default:
+		return ""
+	}
+}
+
+func compatMasterCodecs(source PlaybackMediaSource, video models.VideoTrack, audio models.AudioTrack) string {
+	codecs := make([]string, 0, 2)
+	switch strings.ToLower(strings.TrimSpace(video.Codec)) {
+	case "hevc", "h265":
+		if video.Level > 0 {
+			profile := "1.4"
+			if strings.EqualFold(strings.ReplaceAll(video.Profile, " ", ""), "main10") {
+				profile = "2.4"
+			}
+			codecs = append(codecs, fmt.Sprintf("hvc1.%s.L%d.B0", profile, video.Level))
+		}
+	case "h264", "avc":
+		if video.Level > 0 {
+			profile := "4240"
+			switch strings.ToLower(strings.TrimSpace(video.Profile)) {
+			case "high":
+				profile = "6400"
+			case "main":
+				profile = "4D40"
+			case "baseline":
+				profile = "42E0"
+			}
+			codecs = append(codecs, fmt.Sprintf("avc1.%s%02X", profile, video.Level))
+		}
+	}
+
+	audioCodec := strings.ToLower(strings.TrimSpace(audio.Codec))
+	if compatHLSTranscodesAudio(source) {
+		audioCodec = compatTargetAudioCodec
+	}
+	switch audioCodec {
+	case compatTargetAudioCodec:
+		if strings.EqualFold(audio.Profile, "HE") && !compatHLSTranscodesAudio(source) {
+			codecs = append(codecs, "mp4a.40.5")
+		} else {
+			codecs = append(codecs, "mp4a.40.2")
+		}
+	case compatAudioCodecMP3:
+		codecs = append(codecs, "mp4a.40.34")
+	case compatAudioCodecAC3, "ac-3":
+		codecs = append(codecs, "ac-3")
+	case compatAudioCodecEAC3, "e-ac-3", "ec-3":
+		codecs = append(codecs, "ec-3")
+	case compatAudioCodecFLAC:
+		codecs = append(codecs, "fLaC")
+	case "alac":
+		codecs = append(codecs, "alac")
+	case compatAudioCodecOpus:
+		codecs = append(codecs, "Opus")
+	}
+	return strings.Join(codecs, ",")
+}
+
+func compatMasterSupplementalCodec(video models.VideoTrack) string {
+	if playback.VideoSampleEntryForDVCopy(video.DVProfile) != playback.VideoSampleEntryDVH1 || video.DVLevel <= 0 {
+		return ""
+	}
+	rangeID := ""
+	switch compatVideoRangeType(video, true) {
+	case compatRangeDOVIWithHDR, compatRangeDOVIWithHDRPlus:
+		rangeID = "db1p"
+	case compatRangeDOVIWithHLG:
+		rangeID = "db4h"
+	}
+	if rangeID == "" {
+		return ""
+	}
+	return fmt.Sprintf("dvh1.%02d.%02d/%s", video.DVProfile, video.DVLevel, rangeID)
 }
 
 func copyProxyResponse(w http.ResponseWriter, resp *http.Response) {

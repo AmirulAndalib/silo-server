@@ -1115,6 +1115,10 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 		// promised as tone-mapped SDR.
 		claims.PlayMethod = streamtoken.PlayMethodToneMapTranscode
 	}
+	if method == string(playback.PlayTranscode) && compatHLSCopiesVideo(source) {
+		claims.PlayMethod = streamtoken.PlayMethodCopyFMP4Transcode
+		claims.CopyFMP4RecipeVersion = playback.CopyFMP4RecipeVersion
+	}
 	if compatSession != nil {
 		claims.UserID = compatSession.StreamAppUserID
 		claims.ProfileID = compatSession.ProfileID
@@ -1233,7 +1237,8 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		if current, ok := h.playbackStore.Get(playSessionID); ok && current.TranscodeStarted && current.Recipe != nil && current.Recipe.TranscodeNodeURL != "" &&
 			current.Recipe.MediaFileID == source.FileID &&
 			current.Recipe.SourceAudioChannels == expectedSourceAudioChannels &&
-			current.Recipe.AudioTrackIndex == expectedAudioTrackIndex {
+			current.Recipe.AudioTrackIndex == expectedAudioTrackIndex &&
+			playback.ValidateCopyFMP4RecipeCard(*current.Recipe) == nil {
 			if upstream, sessionErr := h.sessionMgr.GetSession(upstreamSessionID); sessionErr == nil && upstream != nil &&
 				strings.TrimRight(upstream.TranscodeNodeURL, "/") == strings.TrimRight(current.Recipe.TranscodeNodeURL, "/") {
 				return &remoteStartAdoptedRemoteError{nodeURL: current.Recipe.TranscodeNodeURL}
@@ -1368,6 +1373,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 	if compatHLSCopiesVideo(source) {
 		reqBody.TargetCodecVideo = compatCopyCodec
 		reqBody.VideoSampleEntry = playback.VideoSampleEntryForDVCopy(file.PrimaryDVProfile())
+		reqBody.CopyFMP4RecipeVersion = playback.CopyFMP4RecipeVersion
 	}
 	if !compatHLSTranscodesAudio(source) {
 		reqBody.TargetCodecAudio = compatCopyCodec
@@ -1493,6 +1499,10 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		return startErr
 	}
 	if err := transcodenode.ValidateAudioRecipeAttestation(reqBody, nodeResponse); err != nil {
+		h.tm.StopRemoteTranscode(upstreamSessionID, transcodeNodeURL)
+		return err
+	}
+	if err := transcodenode.ValidateCopyFMP4RecipeAttestation(reqBody, nodeResponse); err != nil {
 		h.tm.StopRemoteTranscode(upstreamSessionID, transcodeNodeURL)
 		return err
 	}

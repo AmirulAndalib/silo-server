@@ -43,6 +43,7 @@ type TranscodeStartRequest struct {
 	SourceVideoBitDepth        int                    `json:"source_video_bit_depth,omitempty"`
 	SourceAudioChannels        int                    `json:"source_audio_channels,omitempty"`
 	AudioRecipeVersion         string                 `json:"audio_recipe_version,omitempty"`
+	CopyFMP4RecipeVersion      string                 `json:"copy_fmp4_recipe_version,omitempty"`
 	SoftwareVideoDecode        bool                   `json:"software_video_decode,omitempty"`
 	ToneMapPolicy              tonemap.Policy         `json:"tone_map_policy,omitempty"`
 	ToneMapMode                tonemap.Mode           `json:"tone_map_mode,omitempty"`
@@ -86,9 +87,13 @@ type TranscodeStartResponse struct {
 	// understood. An old node omits it, allowing current callers to stop the job
 	// before publishing bytes from a silently ignored SourceAudioChannels field.
 	AudioRecipeVersion string `json:"audio_recipe_version,omitempty"`
+	// CopyFMP4RecipeVersion attests the copy-video HLS timestamp and bitstream
+	// recipe. Old nodes omit it and are rejected before their bytes are exposed.
+	CopyFMP4RecipeVersion string `json:"copy_fmp4_recipe_version,omitempty"`
 }
 
 var ErrAudioRecipeAttestationMismatch = errors.New("transcode node audio recipe attestation mismatch")
+var ErrCopyFMP4RecipeAttestationMismatch = errors.New("transcode node copy-fmp4 recipe attestation mismatch")
 
 func validateAudioRecipeRequest(req TranscodeStartRequest) error {
 	if req.SourceAudioChannels == 0 && req.AudioRecipeVersion == "" {
@@ -112,6 +117,32 @@ func ValidateAudioRecipeAttestation(req TranscodeStartRequest, response Transcod
 	}
 	if req.AudioRecipeVersion != "" && response.AudioRecipeVersion != req.AudioRecipeVersion {
 		return fmt.Errorf("%w: got %q, want %q", ErrAudioRecipeAttestationMismatch, response.AudioRecipeVersion, req.AudioRecipeVersion)
+	}
+	return nil
+}
+
+func validateCopyFMP4RecipeRequest(req TranscodeStartRequest) error {
+	isCopy := strings.EqualFold(strings.TrimSpace(req.TargetCodecVideo), "copy")
+	if !isCopy && req.CopyFMP4RecipeVersion == "" {
+		return nil
+	}
+	if !isCopy || req.CopyFMP4RecipeVersion != playback.CopyFMP4RecipeVersion {
+		return fmt.Errorf("%w: target_codec=%q recipe_version=%q",
+			ErrCopyFMP4RecipeAttestationMismatch, req.TargetCodecVideo, req.CopyFMP4RecipeVersion)
+	}
+	return nil
+}
+
+// ValidateCopyFMP4RecipeAttestation requires current copy-video starts to be
+// acknowledged by the executor. Encoded starts remain compatible with older
+// nodes and their empty responses.
+func ValidateCopyFMP4RecipeAttestation(req TranscodeStartRequest, response TranscodeStartResponse) error {
+	if err := validateCopyFMP4RecipeRequest(req); err != nil {
+		return err
+	}
+	if req.CopyFMP4RecipeVersion != "" && response.CopyFMP4RecipeVersion != req.CopyFMP4RecipeVersion {
+		return fmt.Errorf("%w: got %q, want %q",
+			ErrCopyFMP4RecipeAttestationMismatch, response.CopyFMP4RecipeVersion, req.CopyFMP4RecipeVersion)
 	}
 	return nil
 }
@@ -1284,6 +1315,10 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid audio recipe", http.StatusBadRequest)
 		return
 	}
+	if err := validateCopyFMP4RecipeRequest(req); err != nil {
+		http.Error(w, "invalid copy-fmp4 recipe", http.StatusBadRequest)
+		return
+	}
 	if !s.requireApprovedInputPath(w, r, req.InputPath) {
 		return
 	}
@@ -1471,11 +1506,12 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(TranscodeStartResponse{
-		SessionID:          req.SessionID,
-		Status:             "started",
-		HWAccel:            effectiveHWAccel,
-		ToneMapMode:        session.Opts().ToneMapMode,
-		AudioRecipeVersion: req.AudioRecipeVersion,
+		SessionID:             req.SessionID,
+		Status:                "started",
+		HWAccel:               effectiveHWAccel,
+		ToneMapMode:           session.Opts().ToneMapMode,
+		AudioRecipeVersion:    req.AudioRecipeVersion,
+		CopyFMP4RecipeVersion: req.CopyFMP4RecipeVersion,
 	})
 }
 
@@ -1595,7 +1631,7 @@ func recipeServesTransport(card playback.RecipeCard, transportID string) bool {
 	if card.TranscodeTransportID != "" {
 		expected = card.TranscodeTransportID
 	}
-	return expected == transportID && (card.PlayMethod == "" || card.PlayMethod == playback.PlayTranscode)
+	return expected == transportID && card.IsTranscodeRecipe() && playback.ValidateCopyFMP4RecipeCard(card) == nil
 }
 
 // recipeIsComplete reports whether a recipe carries the encode parameters

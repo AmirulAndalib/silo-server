@@ -413,6 +413,9 @@ func TestStartRemoteSafariHEVCMKVRemuxCopiesAdvertisedCodecs(t *testing.T) {
 	if request.VideoSampleEntry != playback.VideoSampleEntryDVH1 {
 		t.Fatalf("VideoSampleEntry = %q, want dvh1", request.VideoSampleEntry)
 	}
+	if request.CopyFMP4RecipeVersion != playback.CopyFMP4RecipeVersion {
+		t.Fatalf("CopyFMP4RecipeVersion = %q, want %q", request.CopyFMP4RecipeVersion, playback.CopyFMP4RecipeVersion)
+	}
 	if request.SourceAudioChannels != 0 || request.TargetAudioChannels != 0 || request.AudioRecipeVersion != "" {
 		t.Fatalf("remote request unexpectedly encodes audio: %+v", request)
 	}

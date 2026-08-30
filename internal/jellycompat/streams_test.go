@@ -433,17 +433,106 @@ func TestShouldGenerateCompatFullManifestBoundsSegmentCount(t *testing.T) {
 	}
 }
 
-func TestCompatInitialTranscodePositionKeepsResumeNearRequestedSegment(t *testing.T) {
+func TestCompatInitialTranscodePositionStartsAtSourceZero(t *testing.T) {
 	short := PlaybackMediaSource{Version: catalog.FileVersion{Duration: 100_000}}
 	seek, segment := compatInitialTranscodePosition(short, 2, 17.3)
-	if seek != 17.3 || segment != 8 {
-		t.Fatalf("bounded manifest position = (%v, %d), want (17.3, 8)", seek, segment)
+	if seek != 0 || segment != 0 {
+		t.Fatalf("bounded manifest position = (%v, %d), want (0, 0)", seek, segment)
 	}
 
 	long := PlaybackMediaSource{Version: catalog.FileVersion{Duration: 1_000_000}}
 	seek, segment = compatInitialTranscodePosition(long, 2, 17.3)
-	if seek != 17.3 || segment != 8 {
-		t.Fatalf("real manifest position = (%v, %d), want (17.3, 8)", seek, segment)
+	if seek != 0 || segment != 0 {
+		t.Fatalf("real manifest position = (%v, %d), want (0, 0)", seek, segment)
+	}
+}
+
+func TestGenerateCompatCopyVideoMasterManifestAdvertisesDolbyVision(t *testing.T) {
+	selectedAudio := 1
+	source := PlaybackMediaSource{
+		ID: "source-1",
+		Version: catalog.FileVersion{
+			Bitrate: 24_000,
+			VideoTracks: []models.VideoTrack{{
+				Codec: "hevc", Profile: "Main 10", Level: 153,
+				Width: 3840, Height: 1606, FrameRate: "24000/1001",
+				DVProfile: 8, DVLevel: 6, VideoRangeType: "DOVIWithHDR10",
+			}},
+			AudioTracks: []models.AudioTrack{{Codec: "eac3", Channels: 6}},
+		},
+		HLSRemux:                 true,
+		SelectedAudioStreamIndex: &selectedAudio,
+	}
+
+	got := string(generateCompatCopyVideoMasterManifest(source, "item-1", "play-1", compatRemuxV1PathSegment))
+	for _, want := range []string{
+		"#EXTM3U\n",
+		"#EXT-X-STREAM-INF:BANDWIDTH=24000000,AVERAGE-BANDWIDTH=24000000",
+		"VIDEO-RANGE=PQ",
+		`CODECS="hvc1.2.4.L153.B0,ec-3"`,
+		`SUPPLEMENTAL-CODECS="dvh1.08.06/db1p"`,
+		"RESOLUTION=3840x1606",
+		"FRAME-RATE=23.976",
+		"/Videos/item-1/remux-v1/hls/play-1/stream.m3u8?MediaSourceId=source-1&PlaySessionId=play-1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("master manifest missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "#EXTINF:") {
+		t.Fatalf("master route returned a media playlist:\n%s", got)
+	}
+
+	remoteVariant := "https://proxy.example/stream/transcode/signed/master.m3u8?source_timeline=1"
+	remote := string(generateCompatCopyVideoMasterManifestForVariant(source, remoteVariant))
+	if !strings.Contains(remote, remoteVariant) || !strings.Contains(remote, `SUPPLEMENTAL-CODECS="dvh1.08.06/db1p"`) {
+		t.Fatalf("remote copy-video master lost its signed variant or Dolby Vision metadata:\n%s", remote)
+	}
+}
+
+func TestGenerateCompatCopyVideoMasterManifestOmitsDolbyVisionForHDR10(t *testing.T) {
+	source := PlaybackMediaSource{
+		ID: "source-1",
+		Version: catalog.FileVersion{
+			Bitrate: 12_000,
+			VideoTracks: []models.VideoTrack{{
+				Codec: "hevc", Profile: "Main 10", Level: 153,
+				Width: 3840, Height: 2160, VideoRangeType: "HDR10",
+			}},
+			AudioTracks: []models.AudioTrack{{Codec: "aac", Profile: "LC", Default: true}},
+		},
+		HLSRemux: true,
+	}
+
+	got := string(generateCompatCopyVideoMasterManifest(source, "item-1", "play-1", ""))
+	if !strings.Contains(got, "VIDEO-RANGE=PQ") || !strings.Contains(got, `CODECS="hvc1.2.4.L153.B0,mp4a.40.2"`) {
+		t.Fatalf("HDR10 master is missing base range/codec metadata:\n%s", got)
+	}
+	if strings.Contains(got, "SUPPLEMENTAL-CODECS") || strings.Contains(got, "dvh1") {
+		t.Fatalf("HDR10 master incorrectly advertises Dolby Vision:\n%s", got)
+	}
+}
+
+func TestGenerateCompatCopyVideoMasterManifestMatchesJellyfinForProfile5(t *testing.T) {
+	source := PlaybackMediaSource{
+		ID: "source-1",
+		Version: catalog.FileVersion{
+			Bitrate: 18_000,
+			VideoTracks: []models.VideoTrack{{
+				Codec: "hevc", Profile: "Main 10", Level: 153,
+				DVProfile: 5, DVLevel: 6, VideoRangeType: compatRangeDOVI,
+			}},
+			AudioTracks: []models.AudioTrack{{Codec: compatTargetAudioCodec, Default: true}},
+		},
+		HLSRemux: true,
+	}
+
+	got := string(generateCompatCopyVideoMasterManifest(source, "item-1", "play-1", ""))
+	if !strings.Contains(got, `CODECS="hvc1.2.4.L153.B0,mp4a.40.2"`) {
+		t.Fatalf("Profile 5 master is missing Jellyfin's base codec declaration:\n%s", got)
+	}
+	if strings.Contains(got, "SUPPLEMENTAL-CODECS") {
+		t.Fatalf("Profile 5 master must match Jellyfin 10.11 and omit a compatible-base-layer supplemental codec:\n%s", got)
 	}
 }
 
@@ -466,6 +555,30 @@ func TestBuildProxyRedirectURLRequestsSourceAlignedCompatManifest(t *testing.T) 
 	}
 	if !strings.HasSuffix(redirectURL, "/master.m3u8?"+playback.SourceTimelineQueryParam+"=1") {
 		t.Fatalf("redirect URL = %q, want source-timeline opt-in", redirectURL)
+	}
+}
+
+func TestBuildProxyRedirectURLMarksCopyFMP4ForOldReaderRejection(t *testing.T) {
+	h := &PlaybackHandler{JWTSecret: "test-secret"}
+	source := PlaybackMediaSource{HLSRemux: true}
+	redirectURL, err := h.buildProxyRedirectURL(
+		"play-1", "upstream-1", string(playback.PlayTranscode),
+		&models.MediaFile{FilePath: "/media/movie.mkv"}, source, nil, time.Time{},
+		"http://transcode-1", 0, &nodepool.Node{URL: "http://proxy-1"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := strings.TrimSuffix(
+		strings.TrimPrefix(redirectURL, "http://proxy-1/stream/transcode/"),
+		"/master.m3u8?"+playback.SourceTimelineQueryParam+"=1",
+	)
+	claims, err := streamtoken.Verify(token, h.JWTSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.PlayMethod != streamtoken.PlayMethodCopyFMP4Transcode || claims.CopyFMP4RecipeVersion != playback.CopyFMP4RecipeVersion {
+		t.Fatalf("copy proxy token discriminator/version = %q/%q", claims.PlayMethod, claims.CopyFMP4RecipeVersion)
 	}
 }
 

@@ -23,6 +23,9 @@ const (
 	// multichannel-to-stereo boost.
 	PlayMethodAudioDownmixTranscode = "transcode_audio_downmix_v1"
 	PlayMethodAudioDownmixRemux     = "remux_audio_downmix_v1"
+	// PlayMethodCopyFMP4Transcode makes the versioned copy-video timestamp and
+	// bitstream recipe fail closed on readers predating that recipe.
+	PlayMethodCopyFMP4Transcode = "transcode_copy_fmp4_v1"
 )
 
 // Claims holds everything a stateless proxy or transcode node needs
@@ -91,6 +94,7 @@ type Claims struct {
 	ToneMapMode                string  `json:"tmm,omitempty"`
 	ToneMapSourceKind          string  `json:"tms,omitempty"`
 	ToneMapRecipeVersion       string  `json:"tmv,omitempty"`
+	CopyFMP4RecipeVersion      string  `json:"cfv,omitempty"`
 	ToneMapPreflightRequired   bool    `json:"tmpf,omitempty"`
 	ToneMapSourceRevision      string  `json:"tmsr,omitempty"`
 	ToneMapDVConfigPresent     bool    `json:"tmdc,omitempty"`

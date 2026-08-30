@@ -136,10 +136,10 @@ func (s *Server) handleGrantIdentity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := card.ToClaims()
-	switch card.PlayMethod {
-	case playback.PlayRemux:
+	switch {
+	case card.PlayMethod == playback.PlayRemux:
 		s.serveRemuxClaims(w, r, &claims)
-	case playback.PlayTranscode:
+	case card.IsTranscodeRecipe():
 		writeGrantError(w, http.StatusBadRequest, "bad_request", "Transcode streams use manifest/segment endpoints")
 	default:
 		s.serveDirectPlayClaims(w, r, &claims)
