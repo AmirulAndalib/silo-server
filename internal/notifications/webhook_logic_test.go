@@ -501,8 +501,8 @@ func TestRequestApprovedPreservesPosterPath(t *testing.T) {
 		t.Fatalf("PayloadForRow PosterPath = %q, want /2nkPrhf4YIyMFelfe4zdOnGRYz5.jpg", payload.PosterPath)
 	}
 
-	sys := &System{}
-	sysPayload := sys.PayloadForRow(context.Background(), row)
+	sys := &System{images: fakePresigner{}}
+	sysPayload := sys.PayloadForRow(t.Context(), row)
 	if sysPayload.PosterPath != "/2nkPrhf4YIyMFelfe4zdOnGRYz5.jpg" {
 		t.Fatalf("System.PayloadForRow PosterPath = %q, want /2nkPrhf4YIyMFelfe4zdOnGRYz5.jpg", sysPayload.PosterPath)
 	}
