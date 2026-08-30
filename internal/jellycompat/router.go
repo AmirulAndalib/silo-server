@@ -15,6 +15,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/clientip"
+	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/httpstream"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/recommendations"
@@ -111,6 +112,12 @@ func NewRouter(deps Dependencies) chi.Router {
 			return cfg.Playback.SegmentRetentionSeconds
 		}
 		return startupSegmentRetention()
+	}
+	playbackHandler.PlaybackConfig = func() config.PlaybackConfig {
+		if cfg := deps.CurrentConfig(); cfg != nil {
+			return cfg.Playback
+		}
+		return config.PlaybackConfig{Routing: config.DefaultPlaybackRoutingPolicy()}
 	}
 	if deps.DB != nil {
 		playbackHandler.profileStaler = recommendations.NewRepo(deps.DB)

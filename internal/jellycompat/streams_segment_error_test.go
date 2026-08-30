@@ -102,10 +102,11 @@ func TestHandleHLSSegmentRollsBackSessionWhenToneMapReconstructionFails(t *testi
 	store := NewPlaybackSessionStore(0, nil)
 	store.Put(PlaybackSession{
 		ID: "play-reconstruct", CompatToken: "compat-token", RouteItemID: "item", UpstreamSessionID: upstreamID,
+		UpstreamPlayMethod: "transcode",
 		MediaSources: []PlaybackMediaSource{{
 			ID: "source-42", FileID: 42, Version: catalog.FileVersion{FileID: 42},
 		}},
-		Recipe: &card,
+		Recipe: &card, RoutingAssignment: compatLocalVideoAPIRoutingAssignment(),
 	})
 	handler := &PlaybackHandler{playbackStore: store, sessionMgr: sessions, tm: tm}
 
@@ -153,6 +154,7 @@ func TestHandleAudioV2HLSSegmentDoesNotReconstructStaleAudioRecipe(t *testing.T)
 	store.Put(PlaybackSession{
 		ID: "play-v2", CompatToken: "compat-token", RouteItemID: "item", UpstreamSessionID: upstreamID,
 		UpstreamPlayMethod: "transcode", MediaSources: []PlaybackMediaSource{source}, Recipe: &stale,
+		RoutingAssignment: compatLocalVideoAPIRoutingAssignment(),
 	})
 	var probes int
 	handler := &PlaybackHandler{
@@ -205,6 +207,7 @@ func TestHandleAudioV2HLSSegmentRejectsLiveRuntimeForDifferentAudioFacts(t *test
 	store.Put(PlaybackSession{
 		ID: "play-v2", CompatToken: "compat-token", RouteItemID: "item", UpstreamSessionID: "upstream-1",
 		UpstreamPlayMethod: "transcode", MediaSources: []PlaybackMediaSource{stereo},
+		RoutingAssignment: compatLocalVideoAPIRoutingAssignment(),
 	})
 	sessions := playback.NewSessionManager(0, 0)
 	sessions.RegisterReconstructed(&playback.Session{

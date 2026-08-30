@@ -106,21 +106,19 @@ exec sleep 30
 		t.Fatalf("live restart opts = %+v, want resolved copy timeline", opts)
 	}
 	deadline := time.Now().Add(2 * time.Second)
+	var args []byte
 	for {
-		if _, statErr := os.Stat(argsPath); statErr == nil {
+		args, err = os.ReadFile(argsPath)
+		if err == nil && strings.Contains(string(args), "-ss\n20.669\n") && strings.Contains(string(args), "-start_number\n9\n") {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("restart process did not record its arguments")
+			if err != nil {
+				t.Fatalf("read restart args: %v", err)
+			}
+			t.Fatalf("restart args do not preserve resolved timeline:\n%s", args)
 		}
 		time.Sleep(time.Millisecond)
-	}
-	args, err := os.ReadFile(argsPath)
-	if err != nil {
-		t.Fatalf("read restart args: %v", err)
-	}
-	if !strings.Contains(string(args), "-ss\n20.669\n") || !strings.Contains(string(args), "-start_number\n9\n") {
-		t.Fatalf("restart args do not preserve resolved timeline:\n%s", args)
 	}
 }
 

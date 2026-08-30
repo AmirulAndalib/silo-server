@@ -27,6 +27,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/markers"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
+	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
 	"github.com/Silo-Server/silo-server/internal/settingskeys"
@@ -399,6 +400,7 @@ func (h *PlaybackHandler) playbackConfig() config.PlaybackConfig {
 	return config.PlaybackConfig{
 		TranscodeEnabled: true,
 		TranscodeDir:     filepath.Join(os.TempDir(), "silo-transcode"),
+		Routing:          config.DefaultPlaybackRoutingPolicy(),
 	}
 }
 
@@ -539,12 +541,24 @@ func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID s
 		if requestUserID != 0 && session.UserID != requestUserID {
 			return nil, playback.SessionForbidden, nil, nil, nil
 		}
+		// A non-API or incomplete route is returned to the handler for the
+		// committed-egress guard below. Do not rebuild a local runtime first:
+		// even discarded output would cross the route's execution boundary.
+		if nativeAPIEgressStatusV3(session.RoutingWorkload, session.RoutingExecution, session.RoutingEgress) != 0 {
+			return session, playback.SessionLoaded, nil, nil, nil
+		}
 		if session.TranscodeNodeURL == "" && h.tm.GetTranscodeSession(sessionID) == nil {
 			// A live session whose runtime died can recover from the client's
 			// recipe token. Tone-mapped cards may back a provisional capability
 			// reconstruction; plain cards just respawn the encode. Either way the
 			// atomic playback+runtime operation is the same front door.
 			card, claims := verifiedStreamCardFromToken(r.URL.Query().Get(streamTokenParam), sessionID, h.JWTSecret)
+			if card != nil && nativeAPIEgressStatusV3(card.RoutingWorkload, card.RoutingExecution, card.RoutingEgress) != 0 {
+				// The live session may have been replanned since this token was
+				// issued. Its API assignment is authoritative; a stale proxy card
+				// cannot revive the old runtime on this origin.
+				return session, playback.SessionLoaded, nil, nil, nil
+			}
 			if card != nil {
 				if videoCopyReconstructRefused(r.Context(), h.fileResolver, h.CopySafetyRacer, card) {
 					return nil, playback.SessionMissing, nil, nil, nil
@@ -561,6 +575,11 @@ func (h *PlaybackHandler) loadTranscodeServeSession(r *http.Request, sessionID s
 	// Genuine miss (e.g. after a restart): now — and only now — pay for the token
 	// decode so the recipe is available for reconstruction.
 	card, claims := verifiedStreamCardFromToken(r.URL.Query().Get(streamTokenParam), sessionID, h.JWTSecret)
+	if card != nil {
+		if routeStatus := nativeAPIEgressStatusV3(card.RoutingWorkload, card.RoutingExecution, card.RoutingEgress); routeStatus != 0 {
+			return nil, playback.SessionUnavailable, card, claims, &nativeRouteBindingErrorV3{status: routeStatus}
+		}
+	}
 	// The copy-safety verdict gates the revival before it happens, not after.
 	// Reconstruction registers the playback session against the user's stream
 	// caps, so a refusal that ran later would leave a session nobody serves
@@ -595,6 +614,74 @@ func verifiedStreamCardFromToken(tokenStr, sessionID, secret string) (*playback.
 	}
 	card := playback.RecipeCardFromClaims(claims)
 	return &card, claims
+}
+
+// requireNativeAPIEgressV3 enforces the origin frozen into a v3 playback
+// assignment. Empty assignments predate node routing and remain API-compatible;
+// a partially populated assignment is a failed commit and must not fail open.
+func requireNativeAPIEgressV3(w http.ResponseWriter, workload, execution, egress string) bool {
+	status := nativeAPIEgressStatusV3(workload, execution, egress)
+	if status == 0 {
+		return true
+	}
+	writeNativeRouteStatusV3(w, status)
+	return false
+}
+
+func writeNativeRouteStatusV3(w http.ResponseWriter, status int) {
+	switch status {
+	case http.StatusConflict:
+		writeError(w, status, "playback_route_unbound", "Request a new playback plan before serving media")
+	default:
+		writeError(w, status, string(noderouting.OutcomePolicyUnsatisfied), "The media request does not match the route bound by the playback plan")
+	}
+}
+
+func nativeAPIEgressStatusV3(workload, execution, egress string) int {
+	workload = strings.TrimSpace(workload)
+	execution = strings.TrimSpace(execution)
+	egress = strings.TrimSpace(egress)
+	if workload == "" && execution == "" && egress == "" {
+		return 0
+	}
+	if workload == "" || execution == "" || egress == "" {
+		return http.StatusConflict
+	}
+	if egress != string(noderouting.EgressAPI) {
+		return http.StatusServiceUnavailable
+	}
+	return 0
+}
+
+func requireNativeSessionAPIEgressV3(w http.ResponseWriter, session *playback.Session) bool {
+	if session == nil {
+		return false
+	}
+	return requireNativeAPIEgressV3(w, session.RoutingWorkload, session.RoutingExecution, session.RoutingEgress)
+}
+
+func requireNativeRecipeAPIEgressV3(w http.ResponseWriter, card *playback.RecipeCard) bool {
+	if card == nil {
+		return true
+	}
+	return requireNativeAPIEgressV3(w, card.RoutingWorkload, card.RoutingExecution, card.RoutingEgress)
+}
+
+type nativeRouteBindingErrorV3 struct {
+	status int
+}
+
+func (e *nativeRouteBindingErrorV3) Error() string {
+	return "media request does not match its bound playback route"
+}
+
+func writeNativeRouteBindingErrorV3(w http.ResponseWriter, err error) bool {
+	var routeErr *nativeRouteBindingErrorV3
+	if !errors.As(err, &routeErr) {
+		return false
+	}
+	writeNativeRouteStatusV3(w, routeErr.status)
+	return true
 }
 
 func attachPlaybackSession(ctx context.Context, session *playback.Session, claims *streamtoken.Claims) {
@@ -692,6 +779,10 @@ func identityRecipeCard(s *playback.Session) playback.RecipeCard {
 		card = playback.NewDirectRecipeCard(s.ID, s.UserID, s.ProfileID, s.MediaFileID)
 	}
 	card.OriginalStartedAt = s.StartedAt
+	card.RoutingWorkload = s.RoutingWorkload
+	card.RoutingExecution = s.RoutingExecution
+	card.RoutingEgress = s.RoutingEgress
+	card.RoutingEgressNodeID = s.RoutingEgressNodeID
 	return card
 }
 
@@ -1509,6 +1600,9 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
 		return
 	case playback.SessionUnavailable:
+		if writeNativeRouteBindingErrorV3(w, reconstructErr) {
+			return
+		}
 		if writePlaybackToneMapExecutionError(w, reconstructErr) {
 			return
 		}
@@ -1521,6 +1615,9 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 			return
 		}
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode session is temporarily unavailable")
+		return
+	}
+	if !requireNativeSessionAPIEgressV3(w, session) {
 		return
 	}
 	attachPlaybackSession(r.Context(), session, claims)
@@ -1615,6 +1712,9 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
 		return
 	case playback.SessionUnavailable:
+		if writeNativeRouteBindingErrorV3(w, reconstructErr) {
+			return
+		}
 		if writePlaybackToneMapExecutionError(w, reconstructErr) {
 			return
 		}
@@ -1627,6 +1727,9 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 			return
 		}
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode session is temporarily unavailable")
+		return
+	}
+	if !requireNativeSessionAPIEgressV3(w, session) {
 		return
 	}
 	attachPlaybackSession(r.Context(), session, claims)
@@ -1812,9 +1915,13 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 // proxy authenticates from the token in the URL path alone. It gets the
 // API-local manifest path, which the client fetches with its own credential.
 func (h *PlaybackHandler) buildProxyManifestURL(card playback.RecipeCard, proxyNode *nodepool.Node, requireMediaAuth bool) string {
-	token := h.signSessionToken(card, requireMediaAuth)
 	localURL := fmt.Sprintf("/playback/transcode/%s/master.m3u8", card.SessionID)
-	if proxyNode == nil || token == "" {
+	if proxyNode == nil {
+		return appendStreamToken(localURL, h.signSessionToken(card, requireMediaAuth))
+	}
+	card.RoutingEgressNodeID = proxyNode.ID
+	token := h.signSessionToken(card, requireMediaAuth)
+	if token == "" {
 		return appendStreamToken(localURL, token)
 	}
 	return nodepool.NodeEndpoint(proxyNode.ClientURL(), "/stream/transcode/"+token+"/master.m3u8")
