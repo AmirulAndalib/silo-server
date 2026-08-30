@@ -829,17 +829,23 @@ func (h *PlaybackHandler) hlsPlanningRegistryWithInputsV3(
 }
 
 func (h *PlaybackHandler) localHLSToneMapCapabilitiesForTransportV3(ctx context.Context) (bool, tonemap.Capabilities, error) {
-	if h.playbackRoutingPolicyForContextV3(ctx).VideoTranscodeExecution == config.PlaybackExecutionWorkerOnly {
+	if !localHLSVideoRouteAllowedV3(h.playbackRoutingPolicyForContextV3(ctx)) {
 		return false, nil, nil
 	}
 	capabilities, err := h.localToneMapCapabilitiesForTransportV3(ctx)
 	return true, capabilities, err
 }
 
+func localHLSVideoRouteAllowedV3(policy config.PlaybackRoutingPolicy) bool {
+	policy = config.EffectivePlaybackRoutingPolicy(policy)
+	return policy.VideoTranscodeExecution != config.PlaybackExecutionWorkerOnly &&
+		policy.VideoTranscodeEgress != config.PlaybackEgressProxyOnly
+}
+
 // hlsToneMapCapabilityInventoryV3 snapshots local and pooled-node tone-map
 // capabilities for a single planning operation.
 func (h *PlaybackHandler) hlsToneMapCapabilityInventoryV3(ctx context.Context) (hlsToneMapCapabilityInventoryV3, error) {
-	localAllowed := h.playbackRoutingPolicyForContextV3(ctx).VideoTranscodeExecution != config.PlaybackExecutionWorkerOnly
+	localAllowed := localHLSVideoRouteAllowedV3(h.playbackRoutingPolicyForContextV3(ctx))
 	fetchCtx, cancel := context.WithTimeout(ctx, h.toneMapPlanningTimeoutV3(localAllowed))
 	defer cancel()
 

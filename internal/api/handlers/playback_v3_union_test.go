@@ -362,6 +362,34 @@ func TestHLSToneMapCapabilityInventoryV3StartsLocalAndRemoteConcurrently(t *test
 	}
 }
 
+func TestHLSToneMapCapabilityInventoryV3ExcludesLocalForProxyOnlyEgress(t *testing.T) {
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	policy := config.DefaultPlaybackRoutingPolicy()
+	policy.VideoTranscodeEgress = config.PlaybackEgressProxyOnly
+	handler.PlaybackConfig = func() config.PlaybackConfig {
+		return config.PlaybackConfig{Routing: policy}
+	}
+	var localProbes atomic.Int32
+	handler.v3ToneMapProbe = func(context.Context, string, string, string) (tonemap.Capabilities, error) {
+		localProbes.Add(1)
+		return tonemap.Capabilities{{Mode: tonemap.ModeSoftware, SourceKinds: []tonemap.SourceKind{tonemap.SourcePQ}}}, nil
+	}
+
+	inventory, err := handler.hlsToneMapCapabilityInventoryV3(context.Background())
+	if err != nil {
+		t.Fatalf("capability inventory error = %v", err)
+	}
+	if inventory.localTranscodeFallbackOK || len(inventory.local) != 0 || len(inventory.union) != 0 {
+		t.Fatalf("capability inventory = %#v, want no local executor under proxy-only egress", inventory)
+	}
+	if got := localProbes.Load(); got != 0 {
+		t.Fatalf("local capability probes = %d, want 0 under proxy-only egress", got)
+	}
+	if allowed, capabilities, transportErr := handler.localHLSToneMapCapabilitiesForTransportV3(context.Background()); allowed || len(capabilities) != 0 || transportErr != nil {
+		t.Fatalf("transport capability check = allowed %t, capabilities %#v, error %v", allowed, capabilities, transportErr)
+	}
+}
+
 func TestIncompleteToneMapPlanningBecomesRetryableStartFailure(t *testing.T) {
 	for _, reason := range []string{
 		playback.TerminalHDRTranscodeUnsupportedV3,
