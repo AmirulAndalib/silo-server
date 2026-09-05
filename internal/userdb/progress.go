@@ -262,6 +262,17 @@ func MarkWatchedBatch(
 	}
 	defer tx.Rollback() //nolint:errcheck // rollback after commit is a no-op
 
+	written, err := markWatchedBatchTx(ctx, tx, profileID, targets, entries)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit mark watched batch: %w", err)
+	}
+	return written, nil
+}
+
+func markWatchedBatchTx(ctx context.Context, tx *sql.Tx, profileID string, targets []userstore.MarkWatchedTarget, entries []userstore.WatchHistoryEntry) ([]userstore.WatchHistoryEntry, error) {
 	now := nowUTC()
 	seen := make(map[string]struct{}, len(targets))
 	marked := make(map[string]bool, len(targets))
@@ -326,9 +337,6 @@ func MarkWatchedBatch(
 		written = append(written, entry)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit mark watched batch: %w", err)
-	}
 	return written, nil
 }
 
