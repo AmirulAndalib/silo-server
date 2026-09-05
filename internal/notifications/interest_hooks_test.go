@@ -600,3 +600,46 @@ func TestInterestTrackingOptionalCapabilityResolution(t *testing.T) {
 		t.Fatal("decorator invented backend support")
 	}
 }
+
+func TestInterestTrackingStorePreservesJellycompatProgress(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := userdb.InitSchema(db); err != nil {
+		t.Fatal(err)
+	}
+	provider := WrapUserStoreProvider(preferenceTransactionTestProvider{store: userdb.NewSQLiteUserStore(db)}, &System{})
+	wrapped, err := provider.ForUser(t.Context(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wrapped.CreateProfile(t.Context(), userstore.Profile{ID: "profile-1", Name: "Profile"}); err != nil {
+		t.Fatal(err)
+	}
+	writer, ok := wrapped.(interface {
+		SetJellycompatProgress(context.Context, string, string, float64, float64, bool, time.Time) error
+	})
+	if !ok {
+		t.Fatal("production decorator lost explicit progress writer")
+	}
+	date := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
+	if err := writer.SetJellycompatProgress(t.Context(), "profile-1", "item-1", 123, 600, false, date); err != nil {
+		t.Fatal(err)
+	}
+	reader, ok := wrapped.(interface {
+		ListJellycompatProgressDates(context.Context, string, []string) (map[string]string, error)
+	})
+	if !ok {
+		t.Fatal("production decorator lost progress dates reader")
+	}
+	dates, err := reader.ListJellycompatProgressDates(t.Context(), "profile-1", []string{"item-1"})
+	if err != nil || dates["item-1"] != date.Format(time.RFC3339Nano) {
+		t.Fatalf("dates=%+v err=%v", dates, err)
+	}
+	progress, err := wrapped.GetProgress(t.Context(), "profile-1", "item-1")
+	if err != nil || progress == nil || progress.PositionSeconds != 123 {
+		t.Fatalf("progress=%+v err=%v", progress, err)
+	}
+}
