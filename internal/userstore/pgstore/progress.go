@@ -341,6 +341,8 @@ func (s *PostgresUserStore) MarkWatchedBatch(
 
 	mediaItemIDs := make([]string, 0, len(targets))
 	durations := make([]float64, 0, len(targets))
+	eventDates := make([]*time.Time, 0, len(targets))
+	explicitDates := false
 	seen := make(map[string]struct{}, len(targets))
 	for _, target := range targets {
 		mediaItemID := strings.TrimSpace(target.MediaItemID)
@@ -357,6 +359,8 @@ func (s *PostgresUserStore) MarkWatchedBatch(
 		}
 		mediaItemIDs = append(mediaItemIDs, mediaItemID)
 		durations = append(durations, duration)
+		eventDates = append(eventDates, target.EventAt)
+		explicitDates = explicitDates || target.EventAt != nil
 	}
 	if len(mediaItemIDs) == 0 {
 		return nil, nil
@@ -413,16 +417,22 @@ func (s *PostgresUserStore) MarkWatchedBatch(
 	if err != nil {
 		return nil, fmt.Errorf("begin mark watched batch: %w", err)
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck
+	defer func() { _ = tx.Rollback(ctx) }()
+	if explicitDates {
+		if _, err := tx.Exec(ctx, "SELECT set_config('silo.explicit_progress_event_time', 'on', true)"); err != nil {
+			return nil, fmt.Errorf("set explicit batch progress dates: %w", err)
+		}
+	}
 
 	markedRows, err := tx.Query(ctx, `
-		WITH target(media_item_id, duration_seconds) AS (
-			SELECT * FROM unnest($3::text[], $4::double precision[])
+		WITH target(media_item_id, duration_seconds, event_at) AS (
+			SELECT * FROM unnest($3::text[], $4::double precision[], $6::timestamptz[])
 		),
 		visible AS (
 			SELECT
 				t.media_item_id,
 				t.duration_seconds,
+				t.event_at,
 				CASE
 					WHEN hhi.hidden_before IS NOT NULL AND $5::timestamptz <= hhi.hidden_before
 					THEN hhi.hidden_before + interval '1 second'
@@ -435,8 +445,8 @@ func (s *PostgresUserStore) MarkWatchedBatch(
 			 AND hhi.media_item_id = t.media_item_id
 		)
 		INSERT INTO user_watch_progress
-			(user_id, profile_id, media_item_id, position_seconds, duration_seconds, completed, updated_at)
-		SELECT $1, $2, media_item_id, 0, duration_seconds, TRUE, updated_at
+			(user_id, profile_id, media_item_id, position_seconds, duration_seconds, completed, updated_at, event_at)
+		SELECT $1, $2, media_item_id, 0, duration_seconds, TRUE, updated_at, COALESCE(event_at, updated_at)
 		FROM visible
  ORDER BY media_item_id
 		ON CONFLICT (user_id, profile_id, media_item_id) DO UPDATE SET
@@ -450,14 +460,14 @@ func (s *PostgresUserStore) MarkWatchedBatch(
 			END,
 			completed = TRUE,
 			updated_at = EXCLUDED.updated_at,
-			event_at = EXCLUDED.updated_at
+			event_at = EXCLUDED.event_at
  WHERE NOT user_watch_progress.completed OR EXISTS (
   SELECT 1 FROM user_history_hidden_items hhi
   WHERE hhi.user_id = user_watch_progress.user_id AND hhi.profile_id = user_watch_progress.profile_id
   AND hhi.media_item_id = user_watch_progress.media_item_id AND user_watch_progress.updated_at <= hhi.hidden_before
  )
  RETURNING media_item_id`,
-		s.userID, profileID, mediaItemIDs, durations, now,
+		s.userID, profileID, mediaItemIDs, durations, now, eventDates,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("marking watched batch: %w", err)

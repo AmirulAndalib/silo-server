@@ -91,3 +91,7 @@ func TestSQLiteProgressPage(t *testing.T) {
 func TestSQLitePersonalListPage(t *testing.T) {
 	storetest.RunPersonalListPage(t, newConformanceStore)
 }
+
+func TestSQLiteDatedMarkWatchedBatchAtomic(t *testing.T) {
+	storetest.RunDatedMarkWatchedBatch(t, newConformanceStore(t))
+}
