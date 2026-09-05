@@ -1507,7 +1507,7 @@ func splitNonemptyGenres(raw string) []string {
 func parseBrowseYears(raw string) []int {
 	var out []int
 	for value := range strings.SplitSeq(raw, ",") {
-		if n, err := strconv.Atoi(value); err == nil && n > 0 {
+		if n, err := strconv.Atoi(strings.TrimSpace(value)); err == nil && n > 0 {
 			out = append(out, n)
 		}
 	}
