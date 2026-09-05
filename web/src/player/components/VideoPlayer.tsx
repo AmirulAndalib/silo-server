@@ -2114,6 +2114,8 @@ export function VideoPlayer({
   // -- Subtitle cue matching --
   // Returns active cue texts for custom rendering instead of native TextTrack
   // (which has browser bugs with stale cues persisting after seek).
+  const [textSubtitleState, setTextSubtitleState] = useState("idle");
+  const [assSubtitleState, setASSSubtitleState] = useState("idle");
   const activeCueTexts = useSubtitleTracks(
     videoRef,
     effectiveSubtitleTracks,
@@ -2125,6 +2127,7 @@ export function VideoPlayer({
     liveCues,
     liveTranslation?.trackKey ?? null,
     subtitleStreamGeneration,
+    setTextSubtitleState,
   );
 
   // -- ASS/SSA subtitle rendering via JASSUB (client-side libass) --
@@ -2135,7 +2138,9 @@ export function VideoPlayer({
     isDetached,
     timelineOffsetSeconds,
     subtitleDelayMs,
+    setASSSubtitleState,
   );
+  const subtitleLoadState = isASSActive ? assSubtitleState : textSubtitleState;
 
   // -- Authoritative subtitle track selection --
   // Some tracks (bitmap PGS/DVD/DVB) cannot be delivered as a sidecar and are
@@ -2955,6 +2960,21 @@ export function VideoPlayer({
         playsInline
         style={!isPlayerReady ? { visibility: "hidden" } : undefined}
       />
+
+      {!isDetached &&
+        activeSubtitleIndex !== null &&
+        (subtitleLoadState === "loading" || subtitleLoadState === "error") && (
+          <div
+            role="status"
+            className="pointer-events-none absolute inset-x-0 top-20 z-40 flex justify-center"
+          >
+            <span className="rounded bg-black/75 px-3 py-2 text-sm text-white">
+              {subtitleLoadState === "loading"
+                ? "Loading subtitles…"
+                : "Subtitles couldn't load. Retrying…"}
+            </span>
+          </div>
+        )}
 
       {/* Subtitle overlay — suppressed when JASSUB (ASS) is rendering; bitmap
           tracks are burned into the video server-side and never reach here.
