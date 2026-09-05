@@ -2149,6 +2149,12 @@ export function VideoPlayer({
       : null;
   const requestedSubtitleTrackChangeRef = useRef<string | null>(null);
   useEffect(() => {
+    // Live AI cues belong to the client overlay, not the server inventory.
+    // Leave the current plan alone until a real downloaded track is ready.
+    if (activeSubtitleIndex === LIVE_SUBTITLE_INDEX) {
+      requestedSubtitleTrackChangeRef.current = null;
+      return;
+    }
     const desiredServerIndex = pendingServerSubtitleSelection(
       plan.subtitle.mode,
       plan.selected_tracks.subtitle?.index ?? null,
@@ -3037,6 +3043,7 @@ export function VideoPlayer({
           muted={muted}
           isFullscreen={isFullscreen}
           subtitleTracks={effectiveSubtitleTracks}
+          preferredSubtitleLanguage={preferredSubtitleLanguage}
           activeSubtitleIndex={activeSubtitleIndex}
           onSubtitleSelect={handleSubtitleSelect}
           subtitleDelayMs={subtitleDelayMs}
