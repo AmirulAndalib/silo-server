@@ -434,7 +434,7 @@ func (s *directContentService) BrowseItems(ctx context.Context, session *Session
 			filters.IsPlayed = new(parseBool(isPlayedFilter, false))
 		}
 		filters.Limit = requestedLimit
-		result, err := s.browseConfiguredUserState(ctx, session, filters, func(page catalog.BrowseFilters) ([]upstreamListItem, bool, error) {
+		result, err := s.browseConfiguredUserState(ctx, session, filters, includeTotal, func(page catalog.BrowseFilters) ([]upstreamListItem, bool, error) {
 			result, err := s.browseRepo.BrowsePage(ctx, page, false)
 			if err != nil {
 				return nil, false, err
@@ -456,9 +456,7 @@ func (s *directContentService) BrowseItems(ctx context.Context, session *Session
 		}
 		presignCompatListItems(ctx, s.detailSvc, result.Items)
 		fillListItemDurations(ctx, s.detailSvc, result.Items)
-		if !includeTotal {
-			result.Total = 0
-		}
+		s.EnrichSeriesUserData(ctx, session, result.Items)
 		return result, nil
 	}
 
