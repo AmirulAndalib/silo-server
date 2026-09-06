@@ -2311,7 +2311,6 @@ func (h *PlaybackHandler) buildPlaybackSource(
 	transcodeAudio := !hlsAudioCopy &&
 		enableDirectStream &&
 		allowVideoCopy &&
-		videoSupported &&
 		hlsAudioTranscode
 	hlsRemux := hlsAudioCopy || transcodeAudio
 	var hlsRemuxAudioStreamIndexes []int
