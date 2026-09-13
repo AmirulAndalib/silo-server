@@ -1550,6 +1550,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		SubtitleTrackIndex:     source.SubtitleTrackIndex,
 		SubtitleCodec:          source.SubtitleCodec,
 		TargetBitrateKbps:      source.TargetBitrateKbps,
+		TargetResolution:       source.TargetResolution,
 		TargetAudioChannels:    source.TargetAudioChannels,
 		TargetCodecVideo:       compatTargetVideoCodec,
 		TargetCodecAudio:       compatTargetAudioCodec,
@@ -2354,6 +2355,7 @@ func (h *PlaybackHandler) buildPlaybackSource(
 	return PlaybackMediaSource{
 		CanBurnSubtitle:            enableTranscoding && (maxBitrate <= 0 || targetBitrateKbps >= 64) && (allow4KTranscode || !is4KResolution(version.Resolution)) && canEncodeOutput,
 		TargetBitrateKbps:          max(targetBitrateKbps, 0),
+		TargetResolution:           compatMaxResolutionForBitrateKbps(maxBitrate / 1000),
 		TargetAudioChannels:        targetAudioChannels,
 		ID:                         sourceID,
 		FileID:                     version.FileID,

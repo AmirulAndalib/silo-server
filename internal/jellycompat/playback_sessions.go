@@ -90,6 +90,7 @@ type PlaybackMediaSource struct {
 	SubtitleCodec            string
 	CanBurnSubtitle          bool
 	TargetBitrateKbps        int
+	TargetResolution         string
 	TargetAudioChannels      int
 	ID                       string
 	FileID                   int
