@@ -1067,6 +1067,21 @@ func compatVideoToolboxToneMapBitrateKbps(version catalog.FileVersion, recipe co
 	}
 }
 
+func compatMaxResolutionForBitrateKbps(kbps int) string {
+	switch {
+	case kbps <= 0:
+		return ""
+	case kbps < 2000:
+		return "480p"
+	case kbps < 6000:
+		return "720p"
+	case kbps < 20000:
+		return "1080p"
+	default:
+		return ""
+	}
+}
+
 // NewPlaybackHandler creates a playback handler.
 func NewPlaybackHandler(
 	cfg *config.Config,
