@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - apiv2
   workflow_dispatch:
 
 concurrency:
@@ -216,6 +217,7 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=build-${{ needs.prepare.outputs.build_number }},enable={{is_default_branch}}
+            type=raw,value=apiv2,enable=${{ github.ref == 'refs/heads/apiv2' }}
             type=sha,prefix=,format=short
 
       - name: Create and push manifest list

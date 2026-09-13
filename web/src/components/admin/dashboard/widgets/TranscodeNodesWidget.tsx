@@ -89,7 +89,10 @@ export function TranscodeNodesWidget() {
 /** Type first so each fleet reads as a block, then name for a stable order. */
 function sortNodes(nodes: StreamNode[]): StreamNode[] {
   return [...nodes].sort(
-    (a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name) || a.id - b.id,
+    (a, b) =>
+      a.type.localeCompare(b.type) ||
+      a.name.localeCompare(b.name) ||
+      String(a.id).localeCompare(String(b.id)),
   );
 }
 

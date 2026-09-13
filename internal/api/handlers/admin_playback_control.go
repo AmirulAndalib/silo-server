@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -21,6 +22,16 @@ const (
 
 type AdminPlaybackControlHandler struct {
 	playback *PlaybackHandler
+
+	// commandLedgers holds the per-session sequenced command receipts the v2
+	// port applies once (see admin_playback_commands.go). The frozen v1
+	// handlers above never consult it.
+	commandMu      sync.Mutex
+	commandLedgers map[string]*adminPlaybackCommandLedger
+
+	// terminateLocks serialize v2 terminates per session (admin_playback_terminate.go).
+	terminateMu    sync.Mutex
+	terminateLocks map[string]*sync.Mutex
 }
 
 type playbackControlRequest struct {
