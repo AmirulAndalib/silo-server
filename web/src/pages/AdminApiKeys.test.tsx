@@ -28,18 +28,25 @@ vi.mock("@/hooks/queries/admin/users", () => ({
 }));
 
 vi.mock("@/hooks/queries/admin/apiKeys", () => ({
+  useAdminApiKeyCapabilities: () => ({ data: { available: true } }),
   useAdminApiKeys: () => ({
-    data: [
-      {
-        id: 7,
-        user_id: 1,
-        username: "admin",
-        label: "CI",
-        key: "silo_listed_key_0123456789",
-        rate_tier: "standard",
-        created_at: "2026-09-01T00:00:00Z",
-      },
-    ],
+    data: {
+      pages: [
+        {
+          items: [
+            {
+              id: 7,
+              user_id: 1,
+              username: "admin",
+              label: "CI",
+              key: "silo_listed_key_0123456789",
+              rate_tier: "standard",
+              created_at: "2026-09-01T00:00:00Z",
+            },
+          ],
+        },
+      ],
+    },
     isLoading: false,
   }),
   useAdminCreateApiKey: () => ({ mutate: mocks.createKey, isPending: false }),
