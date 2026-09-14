@@ -3,6 +3,7 @@ package metadata
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -17,7 +18,7 @@ import (
 )
 
 const (
-	artworkRevisionGCBatchSize = 100
+	artworkRevisionGCBatchSize = 10000
 	artworkRevisionGCLease     = 15 * time.Minute
 	// artworkRevisionDormantRecheck bounds how stale a parked (referenced)
 	// revision may get before the sweep re-verifies it. Displacement triggers
@@ -105,21 +106,15 @@ func (g *ArtworkRevisionGarbageCollector) Run(ctx context.Context) (ArtworkRevis
 
 	pendingHeals, batchStats, batchErr := g.processCandidatesToHeal(ctx, due, workerID)
 	if batchErr != nil {
-		slog.WarnContext(ctx, "artwork revision GC: batched deletion failed; falling back per candidate",
-			"component", "metadata", "error", batchErr)
-		batchStats, err = processArtworkRevisionGCBatch(
-			due,
-			func(candidate artworkRevisionGCCandidate) (artworkRevisionGCOutcome, error) {
-				outcome, pending, processErr := g.processCandidateToHeal(ctx, candidate, workerID)
-				if pending != nil {
-					pendingHeals = append(pendingHeals, *pending)
-				}
-				return outcome, processErr
-			},
-			func(candidate artworkRevisionGCCandidate, cause error) error {
-				return g.retry(ctx, candidate, workerID, cause)
-			},
-		)
+		stats.Claimed = len(candidates)
+		var firstRetryErr error
+		for _, candidate := range due {
+			if retryErr := g.retry(ctx, candidate, workerID, batchErr); retryErr != nil && firstRetryErr == nil {
+				firstRetryErr = retryErr
+			}
+			stats.Retried++
+		}
+		return stats, errors.Join(batchErr, firstRetryErr)
 	}
 	stats.Claimed = len(candidates)
 	stats.Deleted = batchStats.Deleted
@@ -366,51 +361,32 @@ func (g *ArtworkRevisionGarbageCollector) processCandidatesToHeal(
 			return nil, stats, fmt.Errorf("artwork revision GC: park referenced revisions: %w", err)
 		}
 	}
+	var deleteErr error
 	if len(keys) > 0 {
-		deleted, deleteErr := g.s3.DeleteObjects(ctx, g.s3.Bucket(), keys)
-		if deleteErr != nil || deleted != len(keys) {
-			// The count cannot identify failed keys. Retry each manifest while
-			// retaining the locks and reference decision, so a successful
-			// deletion still reaches healing even if another candidate fails.
-			slog.WarnContext(ctx, "artwork revision GC: batched delete incomplete; retrying individual manifests",
-				"component", "metadata", "keys", len(keys), "deleted", deleted, "error", deleteErr)
-			confirmed := pending[:0]
-			deletedIDs = deletedIDs[:0]
-			for _, item := range pending {
-				objectKeys := item.candidate.objectKeys
-				var err error
-				if len(objectKeys) > 0 {
-					var count int
-					count, err = g.s3.DeleteObjects(ctx, g.s3.Bucket(), objectKeys)
-					if err == nil && count != len(objectKeys) {
-						err = fmt.Errorf("deleted %d of %d artwork objects", count, len(objectKeys))
-					}
-				}
-				if err != nil {
-					if retryErr := retryArtworkRevisionCandidate(ctx, tx, item.candidate, workerID, err); retryErr != nil {
-						return nil, ArtworkRevisionGCStats{}, retryErr
-					}
-					stats.Retried++
-					continue
-				}
-				confirmed = append(confirmed, item)
-				deletedIDs = append(deletedIDs, item.candidate.id)
-			}
-			pending = confirmed
+		count, err := g.s3.DeleteObjects(ctx, g.s3.Bucket(), keys)
+		deleteErr = err
+		if err == nil && count != len(keys) {
+			deleteErr = fmt.Errorf("deleted %d of %d artwork objects", count, len(keys))
 		}
 	}
-	// Keep successful deletions durable until the final reference guard and
-	// healing complete. Storage deletion and this commit are not atomic.
+	// A partial response cannot identify which objects disappeared. Persist
+	// every attempted revision so retries cannot park a broken reference.
+	// Cancellation also needs a bounded opportunity to commit these tombstones.
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	if len(deletedIDs) > 0 {
-		if _, err := tx.Exec(ctx, `
+		if _, err := tx.Exec(persistCtx, `
 			UPDATE artwork_revision_gc_candidates
 			SET deleted_at = COALESCE(deleted_at, NOW()), locked_at = NOW(), updated_at = NOW()
 			WHERE id = ANY($1) AND locked_by = $2`, deletedIDs, workerID); err != nil {
-			return nil, ArtworkRevisionGCStats{}, fmt.Errorf("artwork revision GC: mark deleted: %w", err)
+			return nil, ArtworkRevisionGCStats{}, errors.Join(deleteErr, err)
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, ArtworkRevisionGCStats{}, fmt.Errorf("artwork revision GC: commit deletion: %w", err)
+	if err := tx.Commit(persistCtx); err != nil {
+		return nil, ArtworkRevisionGCStats{}, errors.Join(deleteErr, err)
+	}
+	if deleteErr != nil {
+		return nil, stats, deleteErr
 	}
 	stats.Referenced = len(parked)
 	return pending, stats, nil

@@ -178,11 +178,11 @@ func TestArtworkRevisionGCRunRetriesIncompleteBatch(t *testing.T) {
 				return 0, nil
 			})
 			stats, err := NewArtworkRevisionGarbageCollector(pool, deleter).Run(ctx)
-			if err != nil {
-				t.Fatal(err)
+			if err == nil {
+				t.Fatal("expected the partial batch error")
 			}
-			if calls != 3 || stats.Deleted != 1 || stats.Retried != 1 || stats.Healed != 1 {
-				t.Fatalf("calls = %d, stats = %+v, want three calls, one deletion and one retry", calls, stats)
+			if calls != 1 || stats.Deleted != 0 || stats.Retried != 2 {
+				t.Fatalf("calls = %d, stats = %+v, want one call and two durable retries", calls, stats)
 			}
 			var tombstone bool
 			var attempts int
@@ -192,7 +192,7 @@ func TestArtworkRevisionGCRunRetriesIncompleteBatch(t *testing.T) {
     FROM artwork_revision_gc_candidates WHERE original_path = $1`, paths[1]).Scan(&tombstone, &attempts, &nextAttempt, &lockedBy); err != nil {
 				t.Fatal(err)
 			}
-			if tombstone || attempts != 1 || !nextAttempt.After(time.Now()) || lockedBy != "" {
+			if !tombstone || attempts != 1 || !nextAttempt.After(time.Now()) || lockedBy != "" {
 				t.Fatalf("failed candidate: tombstone=%t attempts=%d next=%v locked_by=%q", tombstone, attempts, nextAttempt, lockedBy)
 			}
 		})
