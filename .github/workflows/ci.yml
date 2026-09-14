@@ -163,10 +163,11 @@ jobs:
       # Spec lint and the semantic diff against the PR's base. A breaking
       # change fails unless contracts/api/v2/breaking-approvals.json names
       # that exact operation, rule and fingerprint; after the LOCKED marker
-      # nothing is approvable. On a push to main the base is main itself and
-      # the diff is empty by construction; the lint still runs. The base is
-      # read through the environment, as the lint step does, never
-      # interpolated into the script.
+      # nothing is approvable. On a push to main the base is main itself, so
+      # both documents are identical and the diff tool compares nothing (an
+      # approval a just-merged PR carried is not stale there); the lint still
+      # runs. The base is read through the environment, as the lint step
+      # does, never interpolated into the script.
       - name: Verify the v2 contract diff and spec lint
         env:
           BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
