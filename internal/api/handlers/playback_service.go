@@ -376,10 +376,9 @@ func (h *PlaybackHandler) progressSideEffectLock(sessionID string) func() {
 // attempt is terminal, so a long-lived replica does not retain one entry per
 // historical session.
 func (h *PlaybackHandler) forgetProgressSideEffectLock(sessionID string) {
-	if h == nil {
-		return
-	}
-	h.progressSideEffectLocks.Delete(sessionID)
+	// Keep the mutex identity for the lifetime of the handler. Deleting it
+	// while a writer still holds the old mutex lets a late writer create a
+	// second mutex for the same session and run side effects concurrently.
 }
 
 func (h *PlaybackHandler) scrobblePauseTransitionV2(ctx context.Context, sess *playback.Session, wasPaused bool) {
@@ -474,7 +473,24 @@ func (h *PlaybackHandler) finalizeStopV2(ctx context.Context, store playback.Pro
 		return receipt
 	}
 	if !claimed {
-		return receipt
+		for {
+			if replay, _, err := store.StopAttempt(ctx, sessionID, receipt.StopID, nil); err == nil && replay.Finalized {
+				return replay
+			}
+			if !receipt.FinalizingUntil.IsZero() && !time.Now().Before(receipt.FinalizingUntil) {
+				claimed, err = store.ClaimStopFinalization(ctx, sessionID, time.Now().Add(stopFinalizationLease))
+				if err == nil && claimed {
+					break
+				}
+			}
+			timer := time.NewTimer(25 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return receipt
+			case <-timer.C:
+			}
+		}
 	}
 	receipt.HistoryID = h.finishStopV2(ctx, record, sessionID, receipt.Accepted)
 	receipt.Finalized = true
