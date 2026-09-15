@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -47,6 +48,17 @@ const (
 func ArtworkStorageIdentity(endpoint, bucket, keyPrefix string) string {
 	insensitive := func(v string) string { return strings.ToLower(strings.TrimSpace(v)) }
 	return insensitive(endpoint) + "|" + insensitive(bucket) + "|" + s3client.NormalizeKeyPrefix(keyPrefix)
+}
+
+// ArtworkLocalStorageIdentity returns the stable identity for a local artwork
+// root. The absolute path distinguishes mounts while remaining independent of
+// the process working directory.
+func ArtworkLocalStorageIdentity(root string) string {
+	absolute, err := filepath.Abs(strings.TrimSpace(root))
+	if err != nil {
+		absolute = strings.TrimSpace(root)
+	}
+	return "local|" + filepath.Clean(absolute)
 }
 
 // ArtworkReconcileSettingsStore is the server-settings surface the task needs.

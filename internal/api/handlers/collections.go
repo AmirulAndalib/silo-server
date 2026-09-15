@@ -12,6 +12,8 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/artworkstore"
+	"github.com/Silo-Server/silo-server/internal/artworkurl"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/s3client"
 	"github.com/Silo-Server/silo-server/internal/userstore"
@@ -24,6 +26,8 @@ type CollectionHandler struct {
 	Executor           *catalog.QueryExecutor
 	ItemReader         collectionMutationItemReader
 	S3GP               *s3client.Client
+	ArtworkStore       artworkstore.Store
+	ArtworkResolver    artworkurl.Resolver
 	HTTPClient         *http.Client
 	PresignTTL         time.Duration
 }
@@ -528,13 +532,17 @@ func (h *CollectionHandler) processCollectionPoster(
 		fileData = downloaded
 	}
 
-	if h.S3GP == nil {
+	artwork := h.ArtworkStore
+	if artwork == nil && h.S3GP != nil {
+		artwork = artworkstore.NewS3(h.S3GP)
+	}
+	if artwork == nil {
 		return true, fmt.Errorf("poster upload requires configured object storage")
 	}
-	if err := removeCollectionImageVariants(ctx, h.S3GP, userCollectionImagePrefix, collectionID, "poster"); err != nil {
+	if err := removeCollectionImageVariants(ctx, artwork, userCollectionImagePrefix, collectionID, "poster"); err != nil {
 		return true, fmt.Errorf("clearing previous poster: %w", err)
 	}
-	s3Path, thumbhash, err := uploadCollectionImageVariants(ctx, h.S3GP, userCollectionImagePrefix, collectionID, "poster", fileData)
+	s3Path, thumbhash, err := uploadCollectionImageVariants(ctx, artwork, userCollectionImagePrefix, collectionID, "poster", fileData)
 	if err != nil {
 		return true, fmt.Errorf("poster: %w", err)
 	}
@@ -565,6 +573,10 @@ func (h *CollectionHandler) presignUserCollectionPoster(ctx context.Context, pat
 	}
 	if strings.HasPrefix(path, "/") {
 		return path
+	}
+	if h.ArtworkResolver != nil {
+		key := cardThumbnailPath(path)
+		return h.ArtworkResolver.ResolveURLs(ctx, []string{key})[key].URL
 	}
 	if h.S3GP == nil {
 		return ""

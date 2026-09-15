@@ -42,6 +42,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
 
+const artworkActiveBackendKey = "artwork.storage_backend_active"
+
 // AdminMetadataRefresher can refresh metadata for individual items.
 type AdminMetadataRefresher interface {
 	RefreshItem(ctx context.Context, contentID string) error
@@ -156,13 +158,6 @@ type AdminHandler struct {
 	// would be pure waste. Nil when the handler was built without the
 	// constructor (tests): the counts are then simply uncached.
 	logLevelCounts *cache.TTLCache[adminLogLevelCounts]
-	// PublicStorageConfigured reports whether the public object-storage client
-	// is active in this process — the same condition that gates branding asset
-	// uploads (branding.Service.HasStorage) and the metadata image cacher, both
-	// of which are only wired when the public S3 client exists. A nil func
-	// means "not configured". See publicBucketConfigured for the full rule,
-	// which also accepts a bucket that is saved but not live yet.
-	PublicStorageConfigured func() bool
 }
 
 // NewAdminHandler creates a new AdminHandler backed by the given
@@ -2060,102 +2055,7 @@ type updateSettingsResponse struct {
 	RestartRequiredKeys []string          `json:"restart_required_keys,omitempty"`
 }
 
-// settingMetadataCacheImages copies provider artwork into the public bucket, so
-// it cannot be turned on without one. settingPublicBucketLegacy is the
-// pre-rename alias config.db_loader still falls back to.
-const (
-	settingMetadataCacheImages = "metadata.cache_images"
-	settingPublicBucket        = "s3.public_bucket"
-	settingPublicBucketLegacy  = "s3.operational_bucket"
-)
-
-// errCodeStorageUnavailable is the API error code for a setting that needs
-// object storage this deployment has not configured.
 const errCodeStorageUnavailable = "storage_unavailable"
-
-// errPublicStorageUnavailable is returned when a write would leave
-// metadata.cache_images enabled with no public bucket anywhere: the image cacher
-// is wired off the public S3 client, so caching could never start.
-var errPublicStorageUnavailable = errors.New(
-	"S3 image caching requires a configured public storage bucket: metadata.cache_images cannot be " +
-		"enabled while s3.public_bucket is empty (Infrastructure \u2192 Public storage)")
-
-// publicBucketConfigured reports whether a public object-storage bucket exists
-// from the server's point of view. A bucket that is only saved counts: an admin
-// editing an inactive-but-saved deployment is one restart away. Only the live
-// client proves caching starts immediately, so the UI still badges the pending
-// restart — but the API must not block a legitimate save.
-//
-// This is the single-key endpoint's view: it writes one setting against
-// whatever is already stored. The batch endpoint uses
-// prospectivePublicBucketConfigured instead, because a bucket written or
-// cleared by the same request has not reached the store yet.
-func (h *AdminHandler) publicBucketConfigured(ctx context.Context) bool {
-	if h == nil {
-		return false
-	}
-	if h.PublicStorageConfigured != nil && h.PublicStorageConfigured() {
-		return true
-	}
-	for _, key := range []string{settingPublicBucket, settingPublicBucketLegacy} {
-		if h.BootstrapSensitiveConfigured[key] &&
-			strings.TrimSpace(h.BootstrapSensitiveValues[key]) != "" {
-			return true
-		}
-		if h.SettingsRepo == nil {
-			continue
-		}
-		if stored, err := h.SettingsRepo.Get(ctx, key); err == nil && strings.TrimSpace(stored) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-// prospectivePublicBucketConfigured reports whether the settings a batch is
-// about to persist still describe a public bucket. effective is the stored
-// state overlaid with the batch and the environment and run through
-// config.EffectiveAdminSettings, so the legacy s3.operational_bucket fallback
-// LoadFromDB applies is already folded into settingPublicBucket; changed is the
-// batch itself.
-//
-// A bucket key the batch does not mention leaves the live public client as
-// evidence, because the bucket may come from a source the settings store cannot
-// see. An explicitly empty bucket in the batch is a clear, not an absence: the
-// live client only reflects what this process booted with, so it cannot vouch
-// for storage the saved settings no longer describe.
-func (h *AdminHandler) prospectivePublicBucketConfigured(effective, changed map[string]string) bool {
-	if h == nil {
-		return false
-	}
-	if strings.TrimSpace(effective[settingPublicBucket]) != "" {
-		return true
-	}
-	for _, key := range []string{settingPublicBucket, settingPublicBucketLegacy} {
-		if _, cleared := changed[key]; cleared {
-			return false
-		}
-	}
-	return h.PublicStorageConfigured != nil && h.PublicStorageConfigured()
-}
-
-// validateProspectiveImageCaching rejects a batch whose final state leaves image
-// caching enabled with nowhere to write. Both directions matter: enabling
-// caching while clearing the bucket in the same request, and clearing the bucket
-// while stored settings already have caching on. Either way the image cacher
-// cannot start after the next restart.
-func (h *AdminHandler) validateProspectiveImageCaching(effective, changed map[string]string) error {
-	// ParseBool matches config.LoadFromDB, which reads the stored value the same
-	// way; anything it rejects is not a deployment running with caching on.
-	enabled, _ := strconv.ParseBool(strings.TrimSpace(effective[settingMetadataCacheImages]))
-	if !enabled {
-		return nil
-	}
-	if h.prospectivePublicBucketConfigured(effective, changed) {
-		return nil
-	}
-	return errPublicStorageUnavailable
-}
 
 func (h *AdminHandler) normalizeBatchSetting(
 	ctx context.Context,
@@ -2433,7 +2333,7 @@ func (h *AdminHandler) UpdateAdminSettings(ctx context.Context, values map[strin
 		if strings.TrimSpace(key) == "" {
 			return AdminSettingsUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "Setting key is required"}
 		}
-		if machineManagedSettingKeys[key] {
+		if machineManagedSettingKeys[key] || key == artworkActiveBackendKey {
 			return AdminSettingsUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: key + " is managed internally"}
 		}
 		if h.BootstrapSensitiveConfigured[key] {
@@ -2479,11 +2379,6 @@ func (h *AdminHandler) UpdateAdminSettings(ctx context.Context, values map[strin
 			// Cross-field checks run against the complete prospective state, so a
 			// value the batch clears is gone even when the store still has it and
 			// the current process is still running on it.
-			if err := h.validateProspectiveImageCaching(after, normalized); err != nil {
-				validationErr = err
-				validationCode = errCodeStorageUnavailable
-				return nil, err
-			}
 			validationSnapshot := adminSettingsValidationSnapshot(activeProspective, normalized)
 			if err := validateProspectiveAdminSettings(validationSnapshot, h.RedisBootstrapAvailable); err != nil {
 				validationErr = err
@@ -2564,7 +2459,7 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "bad_request", "Setting key is required")
 		return
 	}
-	if machineManagedSettingKeys[key] {
+	if machineManagedSettingKeys[key] || key == artworkActiveBackendKey {
 		writeError(w, http.StatusBadRequest, "bad_request", key+" is managed internally")
 		return
 	}
@@ -2600,7 +2495,7 @@ func (h *AdminHandler) UpdateAdminSetting(ctx context.Context, key, value string
 	if key == "" {
 		return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "Setting key is required"}
 	}
-	if machineManagedSettingKeys[key] {
+	if machineManagedSettingKeys[key] || key == artworkActiveBackendKey {
 		return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: key + " is managed internally"}
 	}
 	if h.BootstrapSensitiveConfigured[key] {
@@ -2660,10 +2555,6 @@ func (h *AdminHandler) UpdateAdminSetting(ctx context.Context, key, value string
 			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "policy.editor_enabled must be true or false"}
 		}
 		req.Value = strconv.FormatBool(enabled)
-	case settingMetadataCacheImages:
-		if req.Value == "true" && !h.publicBucketConfigured(ctx) {
-			return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: errCodeStorageUnavailable, Message: errPublicStorageUnavailable.Error()}
-		}
 	case diagnostics.KeyUploadsEnabled:
 		enabled, err := strconv.ParseBool(strings.TrimSpace(req.Value))
 		if err != nil {
@@ -2861,16 +2752,6 @@ func (h *AdminHandler) UpdateAdminSetting(ctx context.Context, key, value string
 			// Image caching's bucket is the other durable prerequisite: clearing
 			// it here while metadata.cache_images is stored on would leave the
 			// cacher unable to start after restart. Disable caching first.
-			if key == settingPublicBucket || key == settingPublicBucketLegacy {
-				if err := h.validateProspectiveImageCaching(
-					h.effectiveAdminSettings(prospective),
-					map[string]string{key: req.Value},
-				); err != nil {
-					validationErr = err
-					validationCode = errCodeStorageUnavailable
-					return nil, err
-				}
-			}
 
 			before := h.effectiveAdminSettings(stored)
 			after = h.effectiveAdminSettings(prospective)

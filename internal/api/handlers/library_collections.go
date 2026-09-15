@@ -25,6 +25,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/adminjob"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/artworkstore"
+	"github.com/Silo-Server/silo-server/internal/artworkurl"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/collage"
 	"github.com/Silo-Server/silo-server/internal/collections/templates"
@@ -45,6 +47,8 @@ type LibraryCollectionHandler struct {
 	presignTTL            time.Duration
 	httpClient            *http.Client
 	s3GP                  *s3client.Client
+	ArtworkStore          artworkstore.Store
+	ArtworkResolver       artworkurl.Resolver
 	FrontendFS            fs.FS
 	SectionRepo           *sections.Repository
 	UserCollectionPool    *pgxpool.Pool
@@ -110,8 +114,8 @@ func (h *LibraryCollectionHandler) SetDetailService(svc *catalog.DetailService) 
 // SetupCollage enables automatic poster collage generation for collections.
 // Must be called after SetDetailService.
 func (h *LibraryCollectionHandler) SetupCollage() {
-	if h.s3GP == nil || h.detailSvc == nil {
-		slog.Info("collage: auto-generation disabled", "s3_configured", h.s3GP != nil, "detail_svc_configured", h.detailSvc != nil)
+	if h.artworkStore() == nil || h.detailSvc == nil {
+		slog.Info("collage: auto-generation disabled", "artwork_configured", h.artworkStore() != nil, "detail_svc_configured", h.detailSvc != nil)
 		return
 	}
 	h.service.CollageGen = h
@@ -125,7 +129,7 @@ func (h *LibraryCollectionHandler) storeBundledTemplatePoster(
 ) (bool, string, string, error) {
 	storedPath, thumbhash, stored, err := storeBundledCollectionPosterIfS3Configured(
 		ctx,
-		h.s3GP,
+		h.artworkStore(),
 		h.FrontendFS,
 		collectionID,
 		adminCollectionImagePrefix,
@@ -1024,20 +1028,13 @@ func (h *LibraryCollectionHandler) cleanupDeletedCollection(ctx context.Context,
 	if h.SortPreferenceCleaner != nil {
 		h.SortPreferenceCleaner.DeleteForCollection(ctx, userstore.CollectionKindLibrary, collectionID)
 	}
-	if h.s3GP == nil {
+	store := h.artworkStore()
+	if store == nil {
 		return
 	}
 	prefix := fmt.Sprintf("collection-images/%s/", collectionID)
-	keys, err := h.s3GP.ListObjects(ctx, h.s3GP.Bucket(), prefix)
-	if err != nil {
-		slog.WarnContext(ctx, "collection delete: listing S3 images failed; image keys may leak", "component", "api",
-			"collection_id", collectionID, "error", err)
-	}
-	for _, key := range keys {
-		if err := h.s3GP.DeleteObject(ctx, h.s3GP.Bucket(), key); err != nil {
-			slog.WarnContext(ctx, "collection delete: removing S3 image failed; key leaks", "component", "api",
-				"collection_id", collectionID, "error", err)
-		}
+	if _, err := store.DeletePrefix(ctx, prefix); err != nil {
+		slog.WarnContext(ctx, "collection delete: removing artwork failed", "component", "api", "collection_id", collectionID, "error", err)
 	}
 }
 
@@ -2687,6 +2684,10 @@ func (h *LibraryCollectionHandler) presignGPURLCtx(ctx context.Context, path str
 	if strings.HasPrefix(path, "/") {
 		return path
 	}
+	if h.ArtworkResolver != nil {
+		key := cardThumbnailPath(path)
+		return h.ArtworkResolver.ResolveURLs(ctx, []string{key})[key].URL
+	}
 	if h.s3GP == nil {
 		return ""
 	}
@@ -3108,11 +3109,21 @@ func (h *LibraryCollectionHandler) processCollectionImage(
 	imageType string,
 	fileData []byte,
 ) (s3Path string, thumbhashStr string, err error) {
-	return uploadCollectionImageVariants(ctx, h.s3GP, adminCollectionImagePrefix, collectionID, imageType, fileData)
+	return uploadCollectionImageVariants(ctx, h.artworkStore(), adminCollectionImagePrefix, collectionID, imageType, fileData)
 }
 
 func (h *LibraryCollectionHandler) deleteCollectionImages(ctx context.Context, collectionID, imageType string) error {
-	return removeCollectionImageVariants(ctx, h.s3GP, adminCollectionImagePrefix, collectionID, imageType)
+	return removeCollectionImageVariants(ctx, h.artworkStore(), adminCollectionImagePrefix, collectionID, imageType)
+}
+
+func (h *LibraryCollectionHandler) artworkStore() artworkstore.Store {
+	if h.ArtworkStore != nil {
+		return h.ArtworkStore
+	}
+	if h.s3GP != nil {
+		return artworkstore.NewS3(h.s3GP)
+	}
+	return nil
 }
 
 func (h *LibraryCollectionHandler) processArtworkInputs(r *http.Request, collectionID, posterSourceURL, backdropSourceURL string) error {

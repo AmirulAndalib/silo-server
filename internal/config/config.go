@@ -13,6 +13,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const artworkBackendAuto = "auto"
+
 // ServerConfig holds HTTP server settings.
 type ServerConfig struct {
 	Listen    string `yaml:"listen"`
@@ -354,6 +356,11 @@ type ClientIPConfig struct {
 	TrustedProxies string `yaml:"-"`
 }
 
+type ArtworkConfig struct {
+	StorageBackend string `yaml:"storage_backend"`
+	LocalPath      string `yaml:"local_path"`
+}
+
 // Config is the top-level configuration for Silo.
 type Config struct {
 	Server               ServerConfig               `yaml:"server"`
@@ -362,6 +369,7 @@ type Config struct {
 	UserDB               UserDBConfig               `yaml:"-"`
 	Scanner              ScannerConfig              `yaml:"-"`
 	Matcher              MatcherConfig              `yaml:"matcher"`
+	Artwork              ArtworkConfig              `yaml:"artwork"`
 	Metadata             MetadataConfig             `yaml:"-"`
 	Playback             PlaybackConfig             `yaml:"playback"`
 	Redis                RedisConfig                `yaml:"redis"`
@@ -387,6 +395,7 @@ type configRaw struct {
 	S3             s3ConfigRaw             `yaml:"s3"`
 	UserDB         userDBConfigRaw         `yaml:"user_db"`
 	Scanner        scannerConfigRaw        `yaml:"scanner"`
+	Artwork        ArtworkConfig           `yaml:"artwork"`
 	Matcher        MatcherConfig           `yaml:"matcher"`
 	Playback       PlaybackConfig          `yaml:"playback"`
 	Redis          RedisConfig             `yaml:"redis"`
@@ -495,6 +504,7 @@ func setDefaults() *configRaw {
 			MaxConcurrentLibraries: 1,
 			MaxConcurrentScoped:    2,
 		},
+		Artwork: ArtworkConfig{StorageBackend: artworkBackendAuto, LocalPath: "/var/lib/silo/artwork"},
 		Matcher: MatcherConfig{
 			Workers:                 8,
 			BatchSize:               500,

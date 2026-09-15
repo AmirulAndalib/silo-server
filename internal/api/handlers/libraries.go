@@ -20,6 +20,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/adminjob"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/artworkstore"
+	"github.com/Silo-Server/silo-server/internal/artworkurl"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/cache"
 	"github.com/Silo-Server/silo-server/internal/catalog"
@@ -60,6 +62,8 @@ type LibraryHandler struct {
 	SectionRepo           *sections.Repository
 	StoreProvider         userstore.UserStoreProvider
 	S3Meta                LibraryImageStore
+	ArtworkStore          artworkstore.Store
+	ArtworkResolver       artworkurl.Resolver
 	PresignTTL            time.Duration
 	appCtx                context.Context
 	EventBus              cache.EventBus
@@ -400,8 +404,10 @@ func toLibraryResponse(f *models.MediaFolder) libraryResponse {
 // and presigns the poster URL if a poster path is set.
 func (h *LibraryHandler) toLibraryResponseWithPoster(ctx context.Context, f *models.MediaFolder) libraryResponse {
 	resp := toLibraryResponse(f)
-	resp.ChapterThumbnailsSupported = h.S3Meta != nil
-	if f.PosterPath != "" && h.S3Meta != nil {
+	resp.ChapterThumbnailsSupported = h.ArtworkStore != nil || h.S3Meta != nil
+	if f.PosterPath != "" && h.ArtworkResolver != nil {
+		resp.PosterURL = h.ArtworkResolver.ResolveURLs(ctx, []string{f.PosterPath})[f.PosterPath].URL
+	} else if f.PosterPath != "" && h.S3Meta != nil {
 		ttl := h.PresignTTL
 		if ttl <= 0 {
 			ttl = 4 * time.Hour
@@ -1361,7 +1367,7 @@ func (h *LibraryHandler) HandleConfirmEmptyRootCleanup(w http.ResponseWriter, r 
 // HandleUploadPoster handles PUT /libraries/{id}/poster.
 // Accepts a multipart form upload with a single "poster" file field.
 func (h *LibraryHandler) HandleUploadPoster(w http.ResponseWriter, r *http.Request) {
-	if h.S3Meta == nil {
+	if h.S3Meta == nil && h.ArtworkStore == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "Image storage is not configured")
 		return
 	}
@@ -1417,7 +1423,7 @@ func (h *LibraryHandler) HandleUploadPoster(w http.ResponseWriter, r *http.Reque
 
 // HandleDeletePoster handles DELETE /libraries/{id}/poster.
 func (h *LibraryHandler) HandleDeletePoster(w http.ResponseWriter, r *http.Request) {
-	if h.S3Meta == nil {
+	if h.S3Meta == nil && h.ArtworkStore == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "Image storage is not configured")
 		return
 	}

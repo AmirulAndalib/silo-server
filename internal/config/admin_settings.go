@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/mail"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -88,7 +89,9 @@ var adminSettingDefaults = map[string]string{
 	"matcher.batch_size":                   "500",
 	"matcher.enable_tv_series_root_queue":  "true",
 	"matcher.enable_tv_series_group_queue": "false",
-	"metadata.cache_images":                "false",
+	"metadata.cache_images":                "true",
+	"artwork.storage_backend":              "auto",
+	"artwork.local_path":                   "/var/lib/silo/artwork",
 	"markers.mode":                         "local",
 	"markers.lazy_playback":                "false",
 
@@ -349,6 +352,14 @@ func NormalizeAdminSetting(key, raw string) (string, error) {
 		"catalog.search.meilisearch.semantic_enabled", "catalog.search.meilisearch.binary_quantized",
 		"s3.public_path_style", "s3.private_path_style", "s3.user_db_path_style":
 		return normalizeAdminBool(key, value)
+
+	case "artwork.storage_backend":
+		return normalizeAdminEnum(key, value, "auto", "local", "s3")
+	case "artwork.local_path":
+		if value == "" || !filepath.IsAbs(value) {
+			return "", fmt.Errorf("%s must be an absolute path", key)
+		}
+		return filepath.Clean(value), nil
 
 	case "database.max_connections":
 		return normalizeAdminInt(key, value, 1, 10000)

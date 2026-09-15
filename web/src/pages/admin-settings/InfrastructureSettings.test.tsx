@@ -27,11 +27,11 @@ vi.mock("@/hooks/useSettingsForm", async (importOriginal) => {
   };
 });
 
-// Mirrors the server registry's restart prefixes: every s3/redis/database/
+// Mirrors the server registry's restart prefixes: every artwork/s3/redis/database/
 // userdb key restarts; nothing else on this page does. Tests that need a
 // different registry override the mock.
 const restartKeysMock = vi.fn(() => ({
-  has: (key: string) => /^(s3|redis|database|userdb)\./.test(key),
+  has: (key: string) => /^(artwork|s3|redis|database|userdb)\./.test(key),
 }));
 
 vi.mock("@/hooks/useRestartKeys", () => ({
@@ -54,6 +54,7 @@ function mockForm(overrides: FormOverrides = {}) {
   const form = {
     isLoading: false,
     getValue: (key: string) => (key === "s3.public_url_auth" ? "presigned" : ""),
+    getPersistedValue: () => "",
     setValue: vi.fn(),
     resetValue: vi.fn(),
     dirtyCount: 0,
@@ -81,9 +82,35 @@ describe("InfrastructureSettings", () => {
 
     const markup = renderToStaticMarkup(<InfrastructureSettings />);
 
-    for (const heading of ["Redis", "Public storage", "Private storage", "Database", "Logs"]) {
+    for (const heading of [
+      "Artwork storage",
+      "Redis",
+      "Public storage",
+      "Private storage",
+      "Database",
+      "Logs",
+    ]) {
       expect(markup).toContain(heading);
     }
+  });
+
+  it("shows a saved backend mismatch and a read-only path", () => {
+    mockForm({
+      getPersistedValue: (key: string) => (key === "artwork.storage_backend" ? "s3" : ""),
+      getValue: (key: string) => (key === "artwork.storage_backend_active" ? "local" : ""),
+    });
+    render(<InfrastructureSettings />);
+    expect(screen.getByText(/Saved artwork backend differs/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Local artwork path")).toBeDisabled();
+  });
+
+  it("resolves automatic S3 storage with the default AWS endpoint", () => {
+    mockForm({
+      getPersistedValue: (key: string) => (key === "s3.public_bucket" ? "artwork" : ""),
+      getValue: (key: string) => (key === "artwork.storage_backend_active" ? "s3" : ""),
+    });
+    render(<InfrastructureSettings />);
+    expect(screen.queryByText(/Saved artwork backend differs/)).not.toBeInTheDocument();
   });
 
   it("renders the page header on its own, with no description or status strip", () => {
@@ -111,9 +138,9 @@ describe("InfrastructureSettings", () => {
     expect(
       screen.queryByText("Changes on this page apply after a restart."),
     ).not.toBeInTheDocument();
-    // Redis, both storage buckets, and Database each say it once; their
+    // Artwork, Redis, both storage buckets, and Database each say it once; their
     // fields drop the per-field chips.
-    expect(screen.getAllByText(/Changes apply after a restart/)).toHaveLength(4);
+    expect(screen.getAllByText(/Changes apply after a restart/)).toHaveLength(5);
     expect(screen.queryAllByLabelText("Takes effect after a server restart")).toHaveLength(0);
     const logsGroup = within(screen.getByRole("group", { name: "Logs" }));
     expect(logsGroup.queryByText(/Changes apply after a restart/)).not.toBeInTheDocument();
@@ -171,8 +198,7 @@ describe("InfrastructureSettings", () => {
     expect(keys).toEqual(
       expect.arrayContaining(["s3.public_bucket", "s3.private_bucket", OPSLOG_BUCKET_POLICIES_KEY]),
     );
-    // Artwork storage lives on Library & Metadata, beside the rest of the
-    // metadata behavior; this page only owns the buckets it writes into.
+    // Provider caching remains on Library & Metadata. This page selects storage.
     expect(keys).not.toContain("metadata.cache_images");
     // The disabled Litestream storage tab is gone; its keys keep working through the API.
     expect(keys.filter((key) => key.startsWith("s3.user_db_"))).toEqual([]);

@@ -14,6 +14,8 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/artworkstore"
+	"github.com/Silo-Server/silo-server/internal/artworkurl"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/collections/templates"
 	"github.com/Silo-Server/silo-server/internal/collectionutil"
@@ -27,14 +29,16 @@ import (
 // import + sync endpoints. Authorization rules (only the creator can sync) are
 // enforced here; the underlying sync.Service is intentionally unauthenticated.
 type UserCollectionImportHandler struct {
-	storeProvider userstore.UserStoreProvider
-	sync          *usercollections.Service
-	scheduler     *usercollections.Scheduler
-	registry      *templates.Registry
-	mdblist       *mdblist.Client
-	s3GP          *s3client.Client
-	frontendFS    fs.FS
-	presignTTL    time.Duration
+	storeProvider   userstore.UserStoreProvider
+	sync            *usercollections.Service
+	scheduler       *usercollections.Scheduler
+	registry        *templates.Registry
+	mdblist         *mdblist.Client
+	s3GP            *s3client.Client
+	ArtworkStore    artworkstore.Store
+	ArtworkResolver artworkurl.Resolver
+	frontendFS      fs.FS
+	presignTTL      time.Duration
 }
 
 func NewUserCollectionImportHandler(
@@ -312,7 +316,7 @@ func (h *UserCollectionImportHandler) storeBundledTemplatePoster(
 	}
 	storedPath, thumbhash, stored, err := storeBundledCollectionPosterIfS3Configured(
 		ctx,
-		h.s3GP,
+		h.artworkBackend(),
 		h.frontendFS,
 		collection.ID,
 		userCollectionImagePrefix,
@@ -348,6 +352,16 @@ func (h *UserCollectionImportHandler) storeBundledTemplatePoster(
 	return nil
 }
 
+func (h *UserCollectionImportHandler) artworkBackend() artworkstore.Store {
+	if h.ArtworkStore != nil {
+		return h.ArtworkStore
+	}
+	if h.s3GP != nil {
+		return artworkstore.NewS3(h.s3GP)
+	}
+	return nil
+}
+
 // collectionView renders a stored collection with its poster presigned.
 func (h *UserCollectionImportHandler) collectionView(ctx context.Context, c userstore.Collection) PersonalCollectionView {
 	resp := toCollectionResponse(c)
@@ -364,6 +378,10 @@ func (h *UserCollectionImportHandler) presignCollectionPoster(ctx context.Contex
 	}
 	if strings.HasPrefix(path, "/") {
 		return path
+	}
+	if h.ArtworkResolver != nil {
+		key := cardThumbnailPath(path)
+		return h.ArtworkResolver.ResolveURLs(ctx, []string{key})[key].URL
 	}
 	if h.s3GP == nil {
 		return ""

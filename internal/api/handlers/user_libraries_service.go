@@ -66,7 +66,9 @@ func (h *LibraryHandler) ListUserLibraries(ctx context.Context, userID int) ([]U
 			Type:      f.Type,
 			SortOrder: f.SortOrder,
 		}
-		if f.PosterPath != "" && h.S3Meta != nil {
+		if f.PosterPath != "" && h.ArtworkResolver != nil {
+			entry.PosterURL = h.ArtworkResolver.ResolveURLs(ctx, []string{f.PosterPath})[f.PosterPath].URL
+		} else if f.PosterPath != "" && h.S3Meta != nil {
 			ttl := h.PresignTTL
 			if ttl <= 0 {
 				ttl = 4 * time.Hour

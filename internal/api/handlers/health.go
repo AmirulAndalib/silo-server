@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
+	"time"
 )
 
 // PGPinger is the interface used to check PostgreSQL connectivity.
@@ -18,6 +20,11 @@ type PGPinger interface {
 type S3HealthChecker interface {
 	HeadBucket(ctx context.Context, bucket string) error
 	Bucket() string
+}
+
+// ArtworkHealthChecker is the backend-neutral artwork storage probe.
+type ArtworkHealthChecker interface {
+	Probe(ctx context.Context) error
 }
 
 // healthStatus represents the JSON response for the health endpoint.
@@ -38,6 +45,7 @@ type readyStatus struct {
 	Status   string `json:"status"`
 	Postgres *bool  `json:"postgres,omitempty"`
 	S3       *bool  `json:"s3,omitempty"`
+	Artwork  *bool  `json:"artwork,omitempty"`
 }
 
 // HealthHandler responds to liveness probes and advertises the server's
@@ -73,15 +81,23 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // ReadyHandler checks the health of PostgreSQL and S3 dependencies.
 type ReadyHandler struct {
-	pg PGPinger
-	s3 S3HealthChecker
+	pg             PGPinger
+	s3             S3HealthChecker
+	artwork        ArtworkHealthChecker
+	artworkMu      sync.Mutex
+	artworkChecked time.Time
+	artworkOK      bool
 }
 
 // NewReadyHandler creates a ReadyHandler with the given PG and S3 dependencies.
 // Either dependency may be nil: a nil PG pinger means PG is unavailable,
 // and a nil S3 checker means S3 is not configured (treated as healthy).
-func NewReadyHandler(pg PGPinger, s3 S3HealthChecker) *ReadyHandler {
-	return &ReadyHandler{pg: pg, s3: s3}
+func NewReadyHandler(pg PGPinger, s3 S3HealthChecker, artwork ...ArtworkHealthChecker) *ReadyHandler {
+	var checker ArtworkHealthChecker
+	if len(artwork) > 0 {
+		checker = artwork[0]
+	}
+	return &ReadyHandler{pg: pg, s3: s3, artwork: checker}
 }
 
 // ServeHTTP checks both PostgreSQL and S3 health and responds with the
@@ -91,15 +107,17 @@ func (h *ReadyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	pgOK := h.checkPostgres(ctx)
 	s3OK := h.checkS3(ctx)
+	artworkOK := h.checkArtwork(ctx)
 
 	status := readyStatus{
 		Status: "ok",
 	}
 
-	if !pgOK || !s3OK {
+	if !pgOK || !s3OK || !artworkOK {
 		status.Status = "error"
 		status.Postgres = new(pgOK)
 		status.S3 = new(s3OK)
+		status.Artwork = new(artworkOK)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -110,6 +128,22 @@ func (h *ReadyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(status)
+}
+
+func (h *ReadyHandler) checkArtwork(ctx context.Context) bool {
+	if h.artwork == nil {
+		return true
+	}
+	h.artworkMu.Lock()
+	defer h.artworkMu.Unlock()
+	if !h.artworkChecked.IsZero() && time.Since(h.artworkChecked) < 30*time.Second {
+		return h.artworkOK
+	}
+	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	h.artworkOK = h.artwork.Probe(probeCtx) == nil
+	h.artworkChecked = time.Now()
+	return h.artworkOK
 }
 
 // checkPostgres pings the PG pool. Returns false if the pool is nil or

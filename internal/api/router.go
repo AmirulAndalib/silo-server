@@ -25,6 +25,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/api/handlers"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/apiv2"
+	"github.com/Silo-Server/silo-server/internal/artworkstore"
+	"github.com/Silo-Server/silo-server/internal/artworkurl"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/autoscan"
 	"github.com/Silo-Server/silo-server/internal/branding"
@@ -103,10 +105,17 @@ type Dependencies struct {
 	// graceful-shutdown deadline. Nil is valid in tests and embedded routers.
 	RegisterShutdownWork func(<-chan struct{})
 
-	DB                *pgxpool.Pool
-	SecretCipher      *secret.Cipher // at-rest credential cipher (required when DB is set)
-	FrontendFS        fs.FS
-	S3Public          *s3client.Client              // public assets bucket client (may be nil)
+	DB              *pgxpool.Pool
+	SecretCipher    *secret.Cipher // at-rest credential cipher (required when DB is set)
+	FrontendFS      fs.FS
+	S3Public        *s3client.Client   // public assets bucket client (may be nil)
+	Artwork         artworkstore.Store // backend-neutral artwork store
+	ArtworkBackend  string             // resolved artwork backend name
+	ArtworkSigner   *artworkurl.Signer
+	ArtworkResolver artworkurl.Resolver
+	ArtworkRepair   interface {
+		EnqueueArtworkRepair(context.Context, []string, int) (int, error)
+	}
 	S3Private         *s3client.Client              // private internal bucket client (may be nil)
 	S3UserDB          *s3client.Client              // user-db bucket client (may be nil)
 	BrandingService   *branding.Service             // white-label branding (nil when DB unavailable)
@@ -323,7 +332,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		pgPinger = deps.DB
 	}
 
-	readyHandler := handlers.NewReadyHandler(pgPinger, s3Checker)
+	readyHandler := handlers.NewReadyHandler(pgPinger, s3Checker, deps.Artwork)
 
 	// Resolves whether a declared profile belongs to the user and is the
 	// household primary profile. Nil (no user store) disables the
@@ -594,6 +603,8 @@ func newChiRouter(deps Dependencies) chi.Router {
 
 		// Library poster uploads are writable client-facing assets, so they
 		// belong in the public assets bucket.
+		libraryHandler.ArtworkStore = deps.Artwork
+		libraryHandler.ArtworkResolver = deps.ArtworkResolver
 		if deps.S3Public != nil {
 			libraryHandler.S3Meta = deps.S3Public
 		}
@@ -916,7 +927,10 @@ func newChiRouter(deps Dependencies) chi.Router {
 		profileHandler.UserRepo = userRepo
 		profileHandler.EventsHub = deps.EventsHub
 		profileHandler.ProfileTokens = profileTokenService
-		profileHandler.AvatarStore = deps.S3Private
+		// Private S3 preserves existing avatar keys and presigned delivery. Local
+		// avatars use the signed artwork endpoint. Never use public S3 here.
+		profileHandler.AvatarStore = handlers.NewProfileAvatarStore(deps.Artwork, deps.S3Private, deps.ArtworkBackend)
+		profileHandler.AvatarResolver = deps.ArtworkResolver
 		profileHandler.SessionsReader = playbackSessionsLoader
 		personalDataHandler = handlers.NewPersonalDataHandler(deps.UserStoreProvider, itemRepo)
 		if detailSvc != nil {
@@ -947,6 +961,8 @@ func newChiRouter(deps Dependencies) chi.Router {
 			collectionHandler.S3GP = deps.S3Public
 			collectionHandler.PresignTTL = 4 * time.Hour
 		}
+		collectionHandler.ArtworkStore = deps.Artwork
+		collectionHandler.ArtworkResolver = deps.ArtworkResolver
 		// The import handler is built beside the collection handler so the v1
 		// route group and the v2 operations share one instance; the v1 routes
 		// keep their userImportHandler != nil condition.
@@ -961,6 +977,8 @@ func newChiRouter(deps Dependencies) chi.Router {
 				deps.FrontendFS,
 				4*time.Hour,
 			)
+			userImportHandler.ArtworkStore = deps.Artwork
+			userImportHandler.ArtworkResolver = deps.ArtworkResolver
 		}
 		settingsHandler = handlers.NewSettingsHandler(deps.UserStoreProvider)
 		settingsHandler.EventsHub = deps.EventsHub
@@ -1313,11 +1331,6 @@ func newChiRouter(deps Dependencies) chi.Router {
 		adminHandler.RestartStatus = restartStatus
 		adminHandler.CatalogSearchStatus = catalogSearchService
 		adminHandler.DiagnosticsStore = diagnosticsStore
-		// Same source branding asset uploads and the metadata image cacher use:
-		// the public S3 client only exists when a public bucket is configured,
-		// and both features are wired off it.
-		publicAssetStore := deps.S3Public
-		adminHandler.PublicStorageConfigured = func() bool { return publicAssetStore != nil }
 		if settingsRepo != nil {
 			adminHandler.SettingsRepo = settingsRepo
 		}
@@ -1731,6 +1744,8 @@ func newChiRouter(deps Dependencies) chi.Router {
 			nil,
 			deps.S3Public,
 		)
+		libraryCollectionHandler.ArtworkStore = deps.Artwork
+		libraryCollectionHandler.ArtworkResolver = deps.ArtworkResolver
 		libraryCollectionHandler.FrontendFS = deps.FrontendFS
 		libraryCollectionHandler.Executor = &catalog.QueryExecutor{Pool: deps.DB}
 		libraryCollectionHandler.SectionRepo = sectionRepo
@@ -4579,6 +4594,10 @@ func v2Dependencies(
 		ViewerAccess:    viewer,
 		ActingAdmin:     actingAdmin,
 		PermissionGates: map[string]func(http.Handler) http.Handler{},
+		ArtworkStore:    deps.Artwork,
+		ArtworkBackend:  deps.ArtworkBackend,
+		ArtworkSigner:   deps.ArtworkSigner,
+		ArtworkRepair:   deps.ArtworkRepair,
 	}
 	if metadataCuration != nil {
 		out.PermissionGates[policy.PermissionMetadataCuration] = metadataCuration

@@ -119,6 +119,16 @@ func TestArtworkStorageIdentityNormalizes(t *testing.T) {
 	}
 }
 
+func TestArtworkLocalStorageIdentity(t *testing.T) {
+	got := ArtworkLocalStorageIdentity("./artwork")
+	if !strings.HasPrefix(got, "local|") {
+		t.Fatalf("identity = %q", got)
+	}
+	if got != ArtworkLocalStorageIdentity("./artwork/") {
+		t.Fatalf("trailing slash changed identity: %q", got)
+	}
+}
+
 func TestReconcileArtworkCacheShouldRun(t *testing.T) {
 	runner := &fakeReconcileRunner{}
 	store := &fakeSettingsStore{values: map[string]string{}}

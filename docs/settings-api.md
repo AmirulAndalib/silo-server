@@ -950,3 +950,13 @@ Content-Type: application/json
 
 The five accepted `client_family` values are also returned by the capability
 endpoint so admin tooling does not need to invent them.
+
+### Artwork storage settings
+
+The server admin settings include `artwork.storage_backend` (`auto`, `local`, or
+`s3`) and `artwork.local_path` (an absolute filesystem path, defaulting to
+`/var/lib/silo/artwork`). Artwork storage settings take effect after a server
+restart.
+
+`metadata.cache_images` defaults to `true` on fresh installations. It no longer
+requires a public S3 bucket because local artwork storage is available.

@@ -95,7 +95,14 @@ const LOG_ADVANCED_KEYS = [
 
 const LOG_KEYS = [...LOG_ESSENTIAL_KEYS, ...LOG_ADVANCED_KEYS];
 
-const KEYS = [...REDIS_KEYS, ...DATABASE_KEYS, ...PUBLIC_S3_KEYS, ...PRIVATE_S3_KEYS, ...LOG_KEYS];
+const KEYS = [
+  "artwork.storage_backend",
+  ...REDIS_KEYS,
+  ...DATABASE_KEYS,
+  ...PUBLIC_S3_KEYS,
+  ...PRIVATE_S3_KEYS,
+  ...LOG_KEYS,
+];
 
 function countDirty(form: SettingsForm, keys: string[]): number {
   return keys.filter((key) => form.isDirty(key)).length;
@@ -801,6 +808,43 @@ export default function InfrastructureSettings() {
       <SettingsPageHeader title="Storage & Database" className="mb-8" />
 
       <div className="flex-1 space-y-5">
+        <FieldGroup label="Artwork storage" restartAll={restartKeys.has("artwork.storage_backend")}>
+          <SettingField
+            label="Backend"
+            type="select"
+            value={form.getValue("artwork.storage_backend") || "auto"}
+            onChange={(value) => form.setValue("artwork.storage_backend", value)}
+            options={[
+              { value: "auto", label: "Automatic" },
+              { value: "local", label: "Local disk" },
+              { value: "s3", label: "S3" },
+            ]}
+            restartRequired={restartKeys.has("artwork.storage_backend")}
+          />
+          <SettingField
+            label="Local artwork path"
+            value={form.getValue("artwork.local_path") || "/var/lib/silo/artwork"}
+            onChange={() => {}}
+            disabled
+            description="Set by configuration; mount a volume here in Docker"
+          />
+          {(() => {
+            const saved = form.getPersistedValue("artwork.storage_backend") || "auto";
+            const active = form.getValue("artwork.storage_backend_active");
+            const resolved =
+              saved === "auto"
+                ? form.getPersistedValue("s3.public_bucket")
+                  ? "s3"
+                  : "local"
+                : saved;
+            return active && active !== resolved ? (
+              <p role="status" className="text-muted-foreground mt-3 text-sm">
+                Saved artwork backend differs from the active backend ({active}). Copy existing
+                artwork to the new storage and clear the active-backend record before restarting.
+              </p>
+            ) : null;
+          })()}
+        </FieldGroup>
         <RedisGroup form={form} restartKeys={restartKeys} secrets={secrets} />
         <S3Group
           form={form}

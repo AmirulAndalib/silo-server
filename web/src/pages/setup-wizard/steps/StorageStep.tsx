@@ -43,7 +43,13 @@ const PRIVATE_S3_KEYS = [
 
 const META_KEYS = ["metadata.cache_images"];
 
-const ALL_KEYS = [...REDIS_KEYS, ...PUBLIC_S3_KEYS, ...PRIVATE_S3_KEYS, ...META_KEYS];
+const ALL_KEYS = [
+  "artwork.storage_backend",
+  ...REDIS_KEYS,
+  ...PUBLIC_S3_KEYS,
+  ...PRIVATE_S3_KEYS,
+  ...META_KEYS,
+];
 
 const S3_URL_AUTH_OPTIONS = [
   { value: "presigned", label: "Signed links (recommended)" },
@@ -260,18 +266,18 @@ export function StorageStep() {
   const serverStatus = useAdminServerStatus(redisSaved || redisManaged);
   const redisConfigured = form.getValue("redis.url").trim() !== "" || redisSaved;
   const redisStatus = redisStatusFor(redisSaved, redisManaged, serverStatus.data?.health?.redis);
-  const publicConfigured =
-    form.getValue("s3.public_bucket").trim() !== "" &&
-    form.getValue("s3.public_endpoint").trim() !== "";
+  const publicConfigured = form.getValue("s3.public_bucket").trim() !== "";
   const privateConfigured =
     form.getValue("s3.private_bucket").trim() !== "" &&
     form.getValue("s3.private_endpoint").trim() !== "";
 
+  const artworkBackend = form.getValue("artwork.storage_backend") || "auto";
+  const usesS3 = artworkBackend === "s3" || (artworkBackend === "auto" && publicConfigured);
   const storageParts = [
     redisConfigured ? "Redis" : null,
-    publicConfigured || privateConfigured ? "S3" : null,
+    usesS3 ? "S3 artwork" : "Local artwork",
   ].filter(Boolean);
-  useStepSummary("storage", storageParts.length ? storageParts.join(" + ") : "Built-in storage");
+  useStepSummary("storage", storageParts.join(" + "));
 
   if (form.isPending) return <StepSkeleton rows={3} />;
 
@@ -285,6 +291,37 @@ export function StorageStep() {
       footnote="All of this is in Admin › Settings › Infrastructure."
     >
       <StepSection>
+        <SettingField
+          label="Artwork storage"
+          type="select"
+          value={artworkBackend}
+          options={[
+            { value: "auto", label: "Automatic" },
+            { value: "local", label: "Local disk" },
+            { value: "s3", label: "S3" },
+          ]}
+          onChange={(value) => {
+            form.setValue("artwork.storage_backend", value);
+            if (value === "s3") setOpen((o) => ({ ...o, public: true }));
+          }}
+        />
+        <SettingField
+          label="Local artwork path"
+          value={form.getValue("artwork.local_path") || "/var/lib/silo/artwork"}
+          disabled
+          onChange={() => {}}
+          description="Set by configuration; mount a volume here in Docker"
+        />
+        <SettingFieldRow
+          label="Keep provider artwork"
+          description="Copies posters and backdrops into your artwork storage."
+        >
+          <Switch
+            checked={form.getValue("metadata.cache_images") !== "false"}
+            onCheckedChange={(v) => form.setValue("metadata.cache_images", v ? "true" : "false")}
+            aria-label="Keep provider artwork"
+          />
+        </SettingFieldRow>
         <Backend
           title="Redis"
           description={
@@ -319,23 +356,13 @@ export function StorageStep() {
           />
         </Backend>
         <Backend
-          title="Artwork bucket"
+          title="Use S3 object storage for artwork (recommended for multi-node)"
           description="Public S3 storage for posters, backdrops, chapter thumbnails, and subtitles."
           configured={publicConfigured}
           open={open.public}
           onToggle={() => setOpen((o) => ({ ...o, public: !o.public }))}
         >
           <S3Fields form={form} prefix="public" check={publicCheck} disabled={busy} />
-          <SettingFieldRow
-            label="Keep provider artwork in the bucket"
-            description="Copies posters and backdrops from metadata providers into your bucket instead of linking to them remotely."
-          >
-            <Switch
-              checked={form.getValue("metadata.cache_images") === "true"}
-              onCheckedChange={(v) => form.setValue("metadata.cache_images", v ? "true" : "false")}
-              aria-label="Keep provider artwork in the bucket"
-            />
-          </SettingFieldRow>
         </Backend>
         <Backend
           title="Private bucket"
