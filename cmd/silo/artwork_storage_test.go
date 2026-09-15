@@ -31,7 +31,7 @@ func TestWorkerModesDoNotOpenArtworkStorage(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Artwork.StorageBackend = "s3"
 			cfg.Artwork.LocalPath = filepath.Join(t.TempDir(), "unused")
-			settings := &artworkBackendSettings{active: "s3"}
+			settings := &artworkBackendSettings{active: "s3|https://s3.example|artwork|"}
 			deps := &api.Dependencies{}
 			if err := configureArtworkStorage(t.Context(), mode, cfg, deps, settings); err != nil {
 				t.Fatal(err)
@@ -53,11 +53,11 @@ func TestCatalogModesEnforceArtworkBackend(t *testing.T) {
 			cfg.Artwork.StorageBackend = "local"
 			cfg.Artwork.LocalPath = t.TempDir()
 			deps := &api.Dependencies{}
-			settings := &artworkBackendSettings{active: "s3"}
+			settings := &artworkBackendSettings{active: "s3|https://s3.example|artwork|"}
 			if err := configureArtworkStorage(t.Context(), mode, cfg, deps, settings); err == nil || !strings.Contains(err.Error(), "recorded as") {
-				t.Fatalf("expected backend mismatch, got %v", err)
+				t.Fatalf("expected storage mismatch, got %v", err)
 			}
-			settings.active = "local"
+			settings.active = ""
 			if err := configureArtworkStorage(t.Context(), mode, cfg, deps, settings); err != nil {
 				t.Fatal(err)
 			}

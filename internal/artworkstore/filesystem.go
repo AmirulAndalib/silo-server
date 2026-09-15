@@ -422,6 +422,10 @@ func (f *Filesystem) Probe(ctx context.Context) error {
 	return err
 }
 
+// Identity is the absolute root, so two mounts of different directories never
+// share a catalog by accident.
+func (f *Filesystem) Identity() string { return BackendLocal + "|" + f.root }
+
 var _ Store = (*Filesystem)(nil)
 
 // Remove only abandoned temporary files. Writers hold the lock

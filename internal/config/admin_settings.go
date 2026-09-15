@@ -48,6 +48,11 @@ const (
 // edited through the administrator settings API.
 const ArtworkStorageReconcileCheckpointKey = "s3.public_storage_reconcile_checkpoint"
 
+// ArtworkStorageSweepCheckpointKey is the machine-managed cursor for the
+// artwork storage sweep, kept out of the administrator settings API for the
+// same reason as the reconcile checkpoint.
+const ArtworkStorageSweepCheckpointKey = "artwork.storage_sweep_checkpoint"
+
 // adminSettingDefaults is the effective value shown by the Admin UI when no
 // row exists in server_settings. Keep these values aligned with the runtime
 // readers that own each setting. The UI must never invent a second set of

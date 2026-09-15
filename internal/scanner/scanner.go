@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -163,7 +164,6 @@ type Scanner struct {
 	// file that reappears (flapping mount, reverted upgrade) restores cheaply.
 	fileRemovalGrace     time.Duration
 	markerFetcher        func(context.Context, string) *IntroCreditsMarkers
-	markerReader         func(context.Context, string) ([]byte, error)
 	metadataQueue        MetadataQueueProducer
 	ebookEnrichmentQueue EbookEnrichmentQueue
 	movieQueueSyncer     MovieQueueSyncer
@@ -174,11 +174,6 @@ type Scanner struct {
 // SetImageCacher installs the imagecache.Cacher used by book scanners to push
 // embedded cover art into the public assets bucket. Optional; if unset, local
 // covers are not extracted.
-// SetMarkerReader preserves the separate storage path for marker JSON artifacts.
-func (s *Scanner) SetMarkerReader(reader func(context.Context, string) ([]byte, error)) {
-	s.markerReader = reader
-}
-
 func (s *Scanner) SetImageCacher(cacher scannerImageCacher) {
 	if s == nil {
 		return
@@ -3945,16 +3940,23 @@ func (s *Scanner) probeFile(ctx context.Context, filePath string) (*ProbeData, s
 	return nil, "local"
 }
 
-// fetchMarkers checks S3 for intro/credits markers for the given file hash.
+// fetchMarkers reads intro/credits markers for the given file hash from
+// artwork storage, where an external process may have placed them under
+// markers/{hash}.json.
 func (s *Scanner) fetchMarkers(ctx context.Context, fileHash string) *IntroCreditsMarkers {
-	if fileHash == "" || s.markerReader == nil {
+	if fileHash == "" || s.artworkStore == nil {
 		return nil
 	}
 
 	key := fmt.Sprintf("markers/%s.json", fileHash)
-	data, err := s.markerReader(ctx, key)
+	reader, _, err := s.artworkStore.Get(ctx, key)
 	if err != nil {
 		// Not found is expected; don't log it.
+		return nil
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, 1<<20))
+	_ = reader.Close()
+	if err != nil {
 		return nil
 	}
 

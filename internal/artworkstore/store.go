@@ -18,6 +18,11 @@ const (
 	BackendS3    = "s3"
 )
 
+// IdentitySettingKey is the server_settings row that records the storage the
+// catalog's artwork keys belong to. The first successful write records the
+// store's Identity; Open refuses a store whose Identity differs.
+const IdentitySettingKey = "artwork.storage_identity"
+
 type DirectURLer interface {
 	DirectURL(ctx context.Context, key string, ttl time.Duration) (string, error)
 }
@@ -42,4 +47,9 @@ type Store interface {
 	List(ctx context.Context, prefix, cursor string, limit int) ([]ObjectInfo, string, error)
 	// Probe checks storage access. Callers cache readiness probes for 30 seconds.
 	Probe(ctx context.Context) error
+	// Identity names where objects live: the backend followed by the fields
+	// that select a location (a local root, or an S3 endpoint, bucket, and key
+	// prefix). Delivery settings such as a public read endpoint do not
+	// participate, so changing how objects are served never reads as a move.
+	Identity() string
 }

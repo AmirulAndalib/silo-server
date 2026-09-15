@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -305,5 +306,27 @@ func TestProbeReclaimsRootOrphansPastFreshFiles(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(dir, ".probe-link")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFilesystemIdentityIsAbsoluteRoot(t *testing.T) {
+	root := t.TempDir()
+	a, err := NewFilesystem(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewFilesystem(root + string(filepath.Separator))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Identity() != b.Identity() || !strings.HasPrefix(a.Identity(), BackendLocal+"|"+string(filepath.Separator)) {
+		t.Fatalf("identities %q and %q", a.Identity(), b.Identity())
+	}
+	other, err := NewFilesystem(filepath.Join(root, "other"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Identity() == a.Identity() {
+		t.Fatal("different roots share an identity")
 	}
 }

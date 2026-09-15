@@ -20,7 +20,6 @@ import (
 	"github.com/Silo-Server/silo-server/internal/collections/templates"
 	"github.com/Silo-Server/silo-server/internal/collectionutil"
 	"github.com/Silo-Server/silo-server/internal/mdblist"
-	"github.com/Silo-Server/silo-server/internal/s3client"
 	"github.com/Silo-Server/silo-server/internal/usercollections"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
@@ -34,11 +33,9 @@ type UserCollectionImportHandler struct {
 	scheduler       *usercollections.Scheduler
 	registry        *templates.Registry
 	mdblist         *mdblist.Client
-	s3GP            *s3client.Client
 	ArtworkStore    artworkstore.Store
 	ArtworkResolver artworkurl.Resolver
 	frontendFS      fs.FS
-	presignTTL      time.Duration
 }
 
 func NewUserCollectionImportHandler(
@@ -47,9 +44,7 @@ func NewUserCollectionImportHandler(
 	scheduler *usercollections.Scheduler,
 	registry *templates.Registry,
 	mdblistClient *mdblist.Client,
-	s3GP *s3client.Client,
 	frontendFS fs.FS,
-	presignTTL time.Duration,
 ) *UserCollectionImportHandler {
 	if registry == nil {
 		registry = templates.Default
@@ -60,9 +55,7 @@ func NewUserCollectionImportHandler(
 		scheduler:     scheduler,
 		registry:      registry,
 		mdblist:       mdblistClient,
-		s3GP:          s3GP,
 		frontendFS:    frontendFS,
-		presignTTL:    presignTTL,
 	}
 }
 
@@ -353,13 +346,7 @@ func (h *UserCollectionImportHandler) storeBundledTemplatePoster(
 }
 
 func (h *UserCollectionImportHandler) artworkBackend() artworkstore.Store {
-	if h.ArtworkStore != nil {
-		return h.ArtworkStore
-	}
-	if h.s3GP != nil {
-		return artworkstore.NewS3(h.s3GP)
-	}
-	return nil
+	return h.ArtworkStore
 }
 
 // collectionView renders a stored collection with its poster presigned.
@@ -379,22 +366,11 @@ func (h *UserCollectionImportHandler) presignCollectionPoster(ctx context.Contex
 	if strings.HasPrefix(path, "/") {
 		return path
 	}
-	if h.ArtworkResolver != nil {
-		key := cardThumbnailPath(path)
-		return h.ArtworkResolver.ResolveURLs(ctx, []string{key})[key].URL
-	}
-	if h.s3GP == nil {
+	if h.ArtworkResolver == nil {
 		return ""
 	}
-	ttl := h.presignTTL
-	if ttl <= 0 {
-		ttl = 4 * time.Hour
-	}
-	url, err := h.s3GP.PresignGetURL(ctx, h.s3GP.Bucket(), cardThumbnailPath(path), ttl)
-	if err != nil {
-		return ""
-	}
-	return url
+	key := cardThumbnailPath(path)
+	return h.ArtworkResolver.ResolveURLs(ctx, []string{key})[key].URL
 }
 
 func (h *UserCollectionImportHandler) HandleSync(w http.ResponseWriter, r *http.Request) {

@@ -153,6 +153,12 @@ func (c *Client) Bucket() string {
 	return c.bucket
 }
 
+// Endpoint returns the S3 API endpoint objects are written to.
+func (c *Client) Endpoint() string { return c.endpoint }
+
+// KeyPrefix returns the normalized key prefix applied to every object key.
+func (c *Client) KeyPrefix() string { return c.keyPrefix }
+
 // GetObject fetches the object at the given key and returns its contents.
 // Returns ErrNotFound if the object does not exist.
 func (c *Client) GetObject(ctx context.Context, bucket, key string) ([]byte, error) {

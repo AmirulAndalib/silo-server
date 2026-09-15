@@ -201,3 +201,28 @@ func TestS3ArtworkPrefixAndCursor(t *testing.T) {
 		t.Fatalf("prefix remains: %v %v", page, err)
 	}
 }
+
+func TestS3IdentityCoversStorageLocationOnly(t *testing.T) {
+	build := func(endpoint, bucket, prefix, readEndpoint string) string {
+		return NewS3(s3client.NewClient(s3client.BucketConfig{
+			Endpoint: endpoint, Bucket: bucket, KeyPrefix: prefix, PublicEndpoint: readEndpoint,
+			PathStyle: true, AccessKey: "test", SecretKey: "test",
+		})).Identity()
+	}
+	base := build("https://s3.example", "artwork", "silo/prod", "")
+	if base != build(" https://S3.Example ", "Artwork", " /silo/prod/ ", "https://images.example") {
+		t.Fatal("case, whitespace, slashes, and the read endpoint must not change the identity")
+	}
+	for name, other := range map[string]string{
+		"endpoint": build("https://other.example", "artwork", "silo/prod", ""),
+		"bucket":   build("https://s3.example", "other", "silo/prod", ""),
+		"prefix":   build("https://s3.example", "artwork", "silo/Prod", ""),
+	} {
+		if other == base {
+			t.Fatalf("%s change did not change the identity", name)
+		}
+	}
+	if !strings.HasPrefix(base, BackendS3+"|") {
+		t.Fatalf("identity = %q", base)
+	}
+}

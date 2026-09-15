@@ -79,7 +79,8 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ReadyHandler checks the health of PostgreSQL and S3 dependencies.
+// ReadyHandler checks the health of PostgreSQL and the storage dependencies.
+// Only PostgreSQL gates readiness; storage health is informational.
 type ReadyHandler struct {
 	pg             PGPinger
 	s3             S3HealthChecker
@@ -100,8 +101,9 @@ func NewReadyHandler(pg PGPinger, s3 S3HealthChecker, artwork ...ArtworkHealthCh
 	return &ReadyHandler{pg: pg, s3: s3, artwork: checker}
 }
 
-// ServeHTTP checks both PostgreSQL and S3 health and responds with the
-// combined status. Returns 200 if all checks pass, 503 if any fail.
+// ServeHTTP checks PostgreSQL and storage health. It returns 503 when
+// PostgreSQL is unreachable and 200 otherwise, with "degraded" in the body when
+// a configured storage backend failed its probe.
 func (h *ReadyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -109,25 +111,39 @@ func (h *ReadyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s3OK := h.checkS3(ctx)
 	artworkOK := h.checkArtwork(ctx)
 
+	// Readiness answers "can this node serve requests", which the database
+	// decides. Object and artwork storage are reported so operators can see an
+	// outage, but a missing poster must not pull a node out of rotation: the
+	// API keeps working, artwork routes answer 503 or fall back on their own,
+	// and readiness follows storage recovery without a restart.
 	status := readyStatus{
-		Status: "ok",
+		Status:  "ok",
+		S3:      optionalReady(h.s3 != nil, s3OK),
+		Artwork: optionalReady(h.artwork != nil, artworkOK),
 	}
-
-	if !pgOK || !s3OK || !artworkOK {
+	if !pgOK {
 		status.Status = "error"
 		status.Postgres = new(pgOK)
-		status.S3 = new(s3OK)
-		status.Artwork = new(artworkOK)
-
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(status)
 		return
 	}
+	if !s3OK || !artworkOK {
+		status.Status = "degraded"
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(status)
+}
+
+// optionalReady reports a dependency's health only when it is configured.
+func optionalReady(configured, ok bool) *bool {
+	if !configured {
+		return nil
+	}
+	return &ok
 }
 
 func (h *ReadyHandler) checkArtwork(ctx context.Context) bool {

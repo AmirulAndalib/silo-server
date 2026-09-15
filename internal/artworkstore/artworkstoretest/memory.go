@@ -112,5 +112,6 @@ func (m *Memory) List(_ context.Context, prefix, cursor string, limit int) ([]ar
 	return out, next, nil
 }
 func (m *Memory) Probe(context.Context) error { return nil }
+func (m *Memory) Identity() string            { return "memory" }
 
 var _ artworkstore.Store = (*Memory)(nil)

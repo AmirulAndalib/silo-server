@@ -40,11 +40,11 @@ func TestRecordingStoreForwardsMatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings := &testSettings{values: map[string]string{}}
-	recorded := &recordingStore{Store: store, settings: settings, backend: BackendLocal}
+	recorded := &recordingStore{Store: store, settings: settings}
 	if ok, err := recorded.Matches(ctx, "a.webp", []byte("abc")); err != nil || !ok {
 		t.Fatalf("match: %v %v", ok, err)
 	}
-	if settings.values[activeBackendKey] != BackendLocal {
+	if settings.values[IdentitySettingKey] != store.Identity() {
 		t.Fatal("existing content did not pin backend")
 	}
 }
@@ -65,7 +65,7 @@ func TestMatchingRetryRecordsBackendAfterWriteRecordingFailure(t *testing.T) {
 	if matched, err := matcher.Matches(ctx, "a.webp", []byte("abc")); err != nil || !matched {
 		t.Fatalf("retry: %v %v", matched, err)
 	}
-	if settings.values[activeBackendKey] != BackendLocal {
+	if settings.values[IdentitySettingKey] != store.Identity() {
 		t.Fatalf("backend not recorded: %#v", settings.values)
 	}
 }

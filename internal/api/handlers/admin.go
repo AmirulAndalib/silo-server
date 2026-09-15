@@ -25,6 +25,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/adminjob"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/artworkstore"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/cache"
 	"github.com/Silo-Server/silo-server/internal/catalog"
@@ -41,8 +42,6 @@ import (
 	subtitleai "github.com/Silo-Server/silo-server/internal/subtitles/ai"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
-
-const artworkActiveBackendKey = "artwork.storage_backend_active"
 
 // AdminMetadataRefresher can refresh metadata for individual items.
 type AdminMetadataRefresher interface {
@@ -1590,6 +1589,7 @@ var sensitiveSettingKeys = catalog.SensitiveSettingKeys
 // server_settings store but is not part of the administrator settings API.
 var machineManagedSettingKeys = map[string]bool{
 	config.ArtworkStorageReconcileCheckpointKey: true,
+	config.ArtworkStorageSweepCheckpointKey:     true,
 }
 
 func redactAdminSettings(values map[string]string) {
@@ -2333,7 +2333,7 @@ func (h *AdminHandler) UpdateAdminSettings(ctx context.Context, values map[strin
 		if strings.TrimSpace(key) == "" {
 			return AdminSettingsUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "Setting key is required"}
 		}
-		if machineManagedSettingKeys[key] || key == artworkActiveBackendKey {
+		if machineManagedSettingKeys[key] || key == artworkstore.IdentitySettingKey {
 			return AdminSettingsUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: key + " is managed internally"}
 		}
 		if h.BootstrapSensitiveConfigured[key] {
@@ -2459,7 +2459,7 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "bad_request", "Setting key is required")
 		return
 	}
-	if machineManagedSettingKeys[key] || key == artworkActiveBackendKey {
+	if machineManagedSettingKeys[key] || key == artworkstore.IdentitySettingKey {
 		writeError(w, http.StatusBadRequest, "bad_request", key+" is managed internally")
 		return
 	}
@@ -2495,7 +2495,7 @@ func (h *AdminHandler) UpdateAdminSetting(ctx context.Context, key, value string
 	if key == "" {
 		return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "Setting key is required"}
 	}
-	if machineManagedSettingKeys[key] || key == artworkActiveBackendKey {
+	if machineManagedSettingKeys[key] || key == artworkstore.IdentitySettingKey {
 		return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: key + " is managed internally"}
 	}
 	if h.BootstrapSensitiveConfigured[key] {

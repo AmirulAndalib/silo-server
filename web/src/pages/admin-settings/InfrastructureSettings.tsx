@@ -830,7 +830,9 @@ export default function InfrastructureSettings() {
           />
           {(() => {
             const saved = form.getPersistedValue("artwork.storage_backend") || "auto";
-            const active = form.getValue("artwork.storage_backend_active");
+            // The identity is "<backend>|<location>", recorded on the first
+            // artwork write; only the backend half is comparable here.
+            const active = (form.getValue("artwork.storage_identity") || "").split("|")[0];
             const resolved =
               saved === "auto"
                 ? form.getPersistedValue("s3.public_bucket")
@@ -840,7 +842,8 @@ export default function InfrastructureSettings() {
             return active && active !== resolved ? (
               <p role="status" className="text-muted-foreground mt-3 text-sm">
                 Saved artwork backend differs from the active backend ({active}). Copy existing
-                artwork to the new storage and clear the active-backend record before restarting.
+                artwork to the new storage and clear the recorded storage identity before
+                restarting.
               </p>
             ) : null;
           })()}

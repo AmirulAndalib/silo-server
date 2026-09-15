@@ -49,15 +49,28 @@ func TestOpenLocalRecordsBackendOnFirstPut(t *testing.T) {
 	if err = store.Put(context.Background(), "a.webp", []byte("x")); err != nil {
 		t.Fatal(err)
 	}
-	if settings.values[activeBackendKey] != BackendLocal || settings.writes != 1 {
+	if settings.values[IdentitySettingKey] != store.Identity() || settings.writes != 1 {
 		t.Fatalf("settings=%#v writes=%d", settings.values, settings.writes)
 	}
 }
-func TestOpenRejectsActiveBackendMismatch(t *testing.T) {
-	settings := &testSettings{values: map[string]string{activeBackendKey: BackendS3}}
-	_, _, err := Open(context.Background(), Options{Backend: BackendLocal, LocalPath: t.TempDir(), Settings: settings})
-	if err == nil {
-		t.Fatal("mismatch accepted")
+func TestOpenRejectsRecordedStorageMismatch(t *testing.T) {
+	root := t.TempDir()
+	current, err := NewFilesystem(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, recorded := range map[string]string{
+		"other backend": BackendS3 + "|https://s3.example|artwork|",
+		"other root":    BackendLocal + "|" + filepath.Join(root, "elsewhere"),
+	} {
+		settings := &testSettings{values: map[string]string{IdentitySettingKey: recorded}}
+		if _, _, err := Open(context.Background(), Options{Backend: BackendLocal, LocalPath: root, Settings: settings}); err == nil {
+			t.Fatalf("%s: mismatch accepted", name)
+		}
+	}
+	settings := &testSettings{values: map[string]string{IdentitySettingKey: current.Identity()}}
+	if _, _, err := Open(context.Background(), Options{Backend: BackendLocal, LocalPath: root, Settings: settings}); err != nil {
+		t.Fatalf("same root rejected: %v", err)
 	}
 }
 
@@ -73,7 +86,7 @@ func TestOpenRetriesBackendRecordingAfterSettingsFailure(t *testing.T) {
 	if err := store.Put(context.Background(), "a.webp", []byte("x")); err != nil {
 		t.Fatal(err)
 	}
-	if settings.values[activeBackendKey] != BackendLocal {
+	if settings.values[IdentitySettingKey] != store.Identity() {
 		t.Fatalf("settings = %#v", settings.values)
 	}
 }

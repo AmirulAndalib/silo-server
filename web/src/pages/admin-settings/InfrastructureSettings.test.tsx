@@ -97,7 +97,8 @@ describe("InfrastructureSettings", () => {
   it("shows a saved backend mismatch and a read-only path", () => {
     mockForm({
       getPersistedValue: (key: string) => (key === "artwork.storage_backend" ? "s3" : ""),
-      getValue: (key: string) => (key === "artwork.storage_backend_active" ? "local" : ""),
+      getValue: (key: string) =>
+        key === "artwork.storage_identity" ? "local|/var/lib/silo/artwork" : "",
     });
     render(<InfrastructureSettings />);
     expect(screen.getByText(/Saved artwork backend differs/)).toBeInTheDocument();
@@ -107,7 +108,8 @@ describe("InfrastructureSettings", () => {
   it("resolves automatic S3 storage with the default AWS endpoint", () => {
     mockForm({
       getPersistedValue: (key: string) => (key === "s3.public_bucket" ? "artwork" : ""),
-      getValue: (key: string) => (key === "artwork.storage_backend_active" ? "s3" : ""),
+      getValue: (key: string) =>
+        key === "artwork.storage_identity" ? "s3|https://s3.example|artwork|" : "",
     });
     render(<InfrastructureSettings />);
     expect(screen.queryByText(/Saved artwork backend differs/)).not.toBeInTheDocument();

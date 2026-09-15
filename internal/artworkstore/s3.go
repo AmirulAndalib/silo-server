@@ -100,6 +100,14 @@ func (s *S3) ObjectAvailable(ctx context.Context, key string) (bool, error) {
 	return s.client.ObjectAvailable(ctx, s.client.Bucket(), key)
 }
 
+// Identity covers the endpoint, bucket, and key prefix. Endpoints and bucket
+// names are case-insensitive; the key prefix feeds case-sensitive object keys
+// and is normalized exactly as the client applies it.
+func (s *S3) Identity() string {
+	insensitive := func(v string) string { return strings.ToLower(strings.TrimSpace(v)) }
+	return BackendS3 + "|" + insensitive(s.client.Endpoint()) + "|" + insensitive(s.client.Bucket()) + "|" + s.client.KeyPrefix()
+}
+
 var _ Store = (*S3)(nil)
 var _ DirectURLer = (*S3)(nil)
 

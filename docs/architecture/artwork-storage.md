@@ -34,19 +34,32 @@ extensions. The `.tmp-` and `.probe-` filename prefixes are reserved. Listings
 reclaim abandoned temporary files older than 24 hours; readiness also cleans
 temporary files in the root. Cleanup preserves files locked by active writers.
 
-## Changing backend
+## Storage identity
 
-The first successful write records `artwork.storage_backend_active` in
-`server_settings`. Startup refuses a different resolved backend. To move:
+Every store reports an `Identity()`: `local|<absolute root>` or
+`s3|<endpoint>|<bucket>|<key prefix>`. It names where objects live and nothing
+about how they are read, so changing a public read endpoint never counts as a
+move. The first successful write records it as `artwork.storage_identity` in
+`server_settings`, and startup refuses a store with a different identity. The
+reconcile task certifies the same row after a manual sweep, and the storage
+sweep scopes its cursor to it. To move artwork:
 
 1. Stop artwork writers.
 2. Copy the artwork tree to the new store, preserving logical keys.
 3. Update the backend configuration.
-4. Delete the `artwork.storage_backend_active` row and restart.
+4. Delete the `artwork.storage_identity` row and restart.
 
 This guard does not migrate data. There is no portability format, storage
 health state machine, generation marker, or mount sentinel. Existing revision
 tracking, reconciliation, and garbage collection continue to own lifecycle.
+
+## Readiness
+
+`/ready` fails only when PostgreSQL is unreachable. Artwork and S3 probes are
+reported in the body (`"status":"degraded"` with `artwork: false` or
+`s3: false`) but do not remove a node from service: the API keeps answering,
+artwork routes return 503 on their own, and readiness follows storage recovery
+without a restart. Artwork probes are cached for 30 seconds.
 
 ## Delivery
 
@@ -59,6 +72,17 @@ the route does not reveal whether a key exists.
 Revisioned URLs are cacheable for their remaining lifetime and marked immutable;
 mutable uploads use private caching. S3 installations continue to use direct
 presigned or public URLs.
+
+Local storage publishes each object with an atomic rename, and direct S3 reads
+see an object as soon as its upload returns, so catalog responses resolve the
+manifest key they hold and a missing object answers 404 and enqueues repair.
+Only external delivery (a public or token-authenticated read endpoint in front
+of S3) can lag behind a write. That configuration alone runs the
+`verify_artwork_delivery` task and consults the verified-keys manifest when
+choosing which variant to advertise.
+
+Intro and credits markers that an external process places under
+`markers/<file hash>.json` are read through the same store.
 
 Profile avatars use private S3 whenever it is configured, preserving existing
 uploads even when catalog artwork uses local storage. Without private S3,

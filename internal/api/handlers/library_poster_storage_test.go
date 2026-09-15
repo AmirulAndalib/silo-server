@@ -8,30 +8,12 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Silo-Server/silo-server/internal/artworkstore"
+	"github.com/Silo-Server/silo-server/internal/artworkstore/artworkstoretest"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-type posterS3Store struct {
-	deleted []string
-	written []string
-}
-
-func (*posterS3Store) Bucket() string { return "artwork" }
-func (s *posterS3Store) PutObject(_ context.Context, _, key string, _ []byte) error {
-	s.written = append(s.written, key)
-	return nil
-}
-func (s *posterS3Store) DeleteObject(_ context.Context, _, key string) error {
-	s.deleted = append(s.deleted, key)
-	return nil
-}
-func (*posterS3Store) PresignGetURL(_ context.Context, _, key string, _ time.Duration) (string, error) {
-	return "https://example.invalid/" + key, nil
-}
 
 type failedPosterStore struct{ artworkstore.Store }
 
@@ -39,7 +21,7 @@ func (failedPosterStore) Put(context.Context, string, []byte) error {
 	return errors.New("no space left on device")
 }
 
-func TestLibraryPosterStorageFallbackAndFailureLog(t *testing.T) {
+func TestLibraryPosterReplacementAndFailureLog(t *testing.T) {
 	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("SILO_TEST_DATABASE_URL is not set")
@@ -61,13 +43,19 @@ INSERT INTO media_folders (id,type,name,enabled,poster_path) VALUES (7,'movies',
 		t.Fatal(err)
 	}
 	h := NewLibraryHandler(catalog.NewFolderRepository(pool), nil, nil, nil, nil)
-	s3 := &posterS3Store{}
-	h.S3Meta = s3
+	store := artworkstoretest.New()
+	if err := store.Put(t.Context(), "library-posters/7.jpg", []byte("old")); err != nil {
+		t.Fatal(err)
+	}
+	h.ArtworkStore = store
 	if _, err := h.UploadLibraryPoster(t.Context(), 7, "image/png", []byte("poster")); err != nil {
 		t.Fatal(err)
 	}
-	if len(s3.deleted) != 1 || s3.deleted[0] != "library-posters/7.jpg" || len(s3.written) != 1 || s3.written[0] != "library-posters/7.png" {
-		t.Fatalf("replacement storage operations: deleted=%v written=%v", s3.deleted, s3.written)
+	if _, ok := store.Objects["library-posters/7.jpg"]; ok {
+		t.Fatal("replaced poster was not deleted")
+	}
+	if string(store.Objects["library-posters/7.png"]) != "poster" {
+		t.Fatalf("replacement poster missing: %v", store.Calls)
 	}
 	var logs bytes.Buffer
 	previousLogger := slog.Default()

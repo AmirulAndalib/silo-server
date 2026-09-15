@@ -1351,11 +1351,6 @@ func main() {
 
 		ffprobePath := scanner.FFprobePathFromFFmpeg(cfg.Playback.FFmpegPath)
 		s := scanner.NewScanner(fileRepo, ffprobePath, deps.Artwork, cfg.Scanner.Workers, cfg.Scanner.EmptyTrashAfterScan, cfg.Scanner.FileRemovalGrace)
-		if deps.S3Public != nil {
-			s.SetMarkerReader(func(ctx context.Context, key string) ([]byte, error) {
-				return deps.S3Public.GetObject(ctx, deps.S3Public.Bucket(), key)
-			})
-		}
 		s.SetSearchIndexProvider(activeCatalogSearchProvider)
 		configWatcher.OnChange(func(_, updated *config.Config) {
 			s.SetWorkers(updated.Scanner.Workers)
@@ -1661,21 +1656,16 @@ func main() {
 			reloadImageResolvers(appCtx)
 		}
 		if deps.Artwork != nil {
-			presignTTL := cfg.S3.MetadataPresignExpiry
-			if presignTTL <= 0 {
-				presignTTL = 4 * time.Hour
-			}
-			scope := tasks.ArtworkLocalStorageIdentity(cfg.Artwork.LocalPath)
-			external := false
-			if deps.ArtworkBackend == artworkstore.BackendS3 && deps.S3Public != nil {
-				imageResolver.SetS3Presigner(deps.S3Public, deps.S3Public.EffectivePresignTTL(presignTTL))
-				scope = deps.S3Public.ArtworkDeliveryScope()
-				external = deps.S3Public.UsesExternalDelivery()
-			}
 			imageResolver.SetArtworkResolver(deps.ArtworkResolver)
-			imageResolver.SetArtworkAvailabilityReader(metadata.NewArtworkDeliveryStore(
-				deps.DB, scope, external,
-			))
+			// Local storage publishes with an atomic rename, so the catalog
+			// can trust the manifest as written. Only external delivery (a
+			// public or token-authenticated read endpoint in front of S3)
+			// can lag behind a write and needs the verified-keys lookup.
+			if deps.ArtworkDelivery.External {
+				imageResolver.SetArtworkAvailabilityReader(metadata.NewArtworkDeliveryStore(
+					deps.DB, deps.ArtworkDelivery.Scope, true,
+				))
+			}
 		}
 		deps.ImageResolver = imageResolver
 		deps.PluginImageResolver = imageResolver
@@ -2588,26 +2578,12 @@ func main() {
 			taskMgr.Register(tasks.NewBackfillMetadataImagesTask(metadataImageCacheProcessor))
 		}
 		if deps.Artwork != nil {
-			identity := tasks.ArtworkLocalStorageIdentity(cfg.Artwork.LocalPath)
-			if deps.ArtworkBackend == "s3" {
-				identity = tasks.ArtworkStorageIdentity(cfg.S3.Public.Endpoint, cfg.S3.Public.Bucket, cfg.S3.Public.KeyPrefix)
-			}
-			deliveryScope := identity
-			externalDelivery := false
-			if deps.ArtworkBackend == "s3" {
-				deliveryScope = deps.S3Public.ArtworkDeliveryScope()
-				externalDelivery = deps.S3Public.UsesExternalDelivery()
-			}
-			taskMgr.Register(tasks.NewVerifyArtworkDeliveryTask(
-				metadata.NewArtworkDeliveryStore(deps.DB, deliveryScope, externalDelivery),
-				deps.Artwork,
-			))
-			// Seed the fingerprint on first boot. After a provider change the
-			// stored (old) identity survives this call, so the startup preflight
-			// can warn without mutating artwork; an administrator must migrate
-			// objects and run the reconcile task explicitly.
-			if _, err := settingsRepo.SetIfAbsent(appCtx, tasks.ArtworkStorageIdentityKey, identity); err != nil {
-				slog.Warn("artwork reconcile: seeding storage identity failed", "error", err)
+			identity := deps.Artwork.Identity()
+			if deps.ArtworkDelivery.External {
+				taskMgr.Register(tasks.NewVerifyArtworkDeliveryTask(
+					metadata.NewArtworkDeliveryStore(deps.DB, deps.ArtworkDelivery.Scope, true),
+					deps.Artwork,
+				))
 			}
 			var brandingReconciler tasks.BrandingAssetReconciler
 			if brandingSvc != nil {
@@ -2968,9 +2944,7 @@ func main() {
 				collectionRepo,
 				deps.CollectionService,
 				itemRepo,
-				4*time.Hour,
 				nil,
-				deps.S3Public,
 			)
 			collectionHandler.ArtworkStore = deps.Artwork
 			collectionHandler.ArtworkResolver = deps.ArtworkResolver
@@ -3106,7 +3080,6 @@ func main() {
 			}
 
 			if deps.S3Public != nil {
-				compatDeps.PosterPresigner = deps.S3Public
 				compatDeps.S3Client = deps.S3Public
 				compatDeps.S3Bucket = deps.S3Public.Bucket()
 			}
@@ -3404,12 +3377,17 @@ func configureArtworkStorage(ctx context.Context, mode string, cfg *config.Confi
 	deps.ArtworkBackend = backend
 	deps.ArtworkSigner = artworkurl.NewSigner(cfg.Auth.JWTSecret, cfg.S3.MetadataPresignExpiry)
 	deps.ArtworkResolver = artworkurl.NewServerResolver(deps.ArtworkSigner)
+	deps.ArtworkDelivery = api.ArtworkDelivery{Scope: store.Identity()}
 	if direct, ok := store.(artworkstore.DirectURLer); ok {
 		ttl := cfg.S3.MetadataPresignExpiry
 		if ttl <= 0 {
 			ttl = 4 * time.Hour
 		}
 		deps.ArtworkResolver = artworkurl.NewDirectResolver(direct, deps.S3Public.EffectivePresignTTL(ttl))
+		deps.ArtworkDelivery = api.ArtworkDelivery{
+			Scope:    deps.S3Public.ArtworkDeliveryScope(),
+			External: deps.S3Public.UsesExternalDelivery(),
+		}
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

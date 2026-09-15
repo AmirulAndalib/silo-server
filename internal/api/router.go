@@ -89,6 +89,16 @@ import (
 )
 
 // Dependencies holds all shared dependencies that handlers need.
+// ArtworkDelivery describes how clients read artwork. External is true only
+// when reads go through a separately configured public or token endpoint that
+// can lag behind a storage write; that is the one case the delivery verifier
+// and the per-response published-variant lookup exist for. Scope changes when
+// the delivery configuration does, invalidating earlier verification.
+type ArtworkDelivery struct {
+	Scope    string
+	External bool
+}
+
 type Dependencies struct {
 	Config *config.Config
 	// LiveConfig returns the current hot-reloaded config. May be nil (tests,
@@ -111,6 +121,7 @@ type Dependencies struct {
 	S3Public        *s3client.Client   // public assets bucket client (may be nil)
 	Artwork         artworkstore.Store // backend-neutral artwork store
 	ArtworkBackend  string             // resolved artwork backend name
+	ArtworkDelivery ArtworkDelivery
 	ArtworkSigner   *artworkurl.Signer
 	ArtworkResolver artworkurl.Resolver
 	ArtworkRepair   interface {
@@ -605,9 +616,6 @@ func newChiRouter(deps Dependencies) chi.Router {
 		// belong in the public assets bucket.
 		libraryHandler.ArtworkStore = deps.Artwork
 		libraryHandler.ArtworkResolver = deps.ArtworkResolver
-		if deps.S3Public != nil {
-			libraryHandler.S3Meta = deps.S3Public
-		}
 
 		// Wire provider chain repos for per-library provider priority management.
 		if deps.DB != nil && deps.PluginService != nil {
@@ -957,10 +965,6 @@ func newChiRouter(deps Dependencies) chi.Router {
 		if deps.DB != nil {
 			collectionHandler.Executor = &catalog.QueryExecutor{Pool: deps.DB}
 		}
-		if deps.S3Public != nil {
-			collectionHandler.S3GP = deps.S3Public
-			collectionHandler.PresignTTL = 4 * time.Hour
-		}
 		collectionHandler.ArtworkStore = deps.Artwork
 		collectionHandler.ArtworkResolver = deps.ArtworkResolver
 		// The import handler is built beside the collection handler so the v1
@@ -973,9 +977,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 				deps.UserCollectionScheduler,
 				nil,
 				deps.MDBListClient,
-				deps.S3Public,
 				deps.FrontendFS,
-				4*time.Hour,
 			)
 			userImportHandler.ArtworkStore = deps.Artwork
 			userImportHandler.ArtworkResolver = deps.ArtworkResolver
@@ -1740,9 +1742,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 			libraryCollectionRepo,
 			libraryCollectionService,
 			itemRepo,
-			4*time.Hour,
 			nil,
-			deps.S3Public,
 		)
 		libraryCollectionHandler.ArtworkStore = deps.Artwork
 		libraryCollectionHandler.ArtworkResolver = deps.ArtworkResolver

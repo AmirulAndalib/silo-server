@@ -2,7 +2,10 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -50,3 +53,31 @@ func TestArtworkReadinessRecoversAfterFailedProbeExpires(t *testing.T) {
 		t.Fatal("storage recovery was not observed")
 	}
 }
+
+func TestReadinessReportsStorageWithoutGatingOnIt(t *testing.T) {
+	failing := artworkProbeFunc(func(context.Context) error { return errors.New("storage unavailable") })
+	h := NewReadyHandler(pingerFunc(func(context.Context) error { return nil }), nil, failing)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("artwork outage removed the node from service: %d %s", rec.Code, rec.Body.String())
+	}
+	var body readyStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status != "degraded" || body.Artwork == nil || *body.Artwork || body.S3 != nil {
+		t.Fatalf("degraded storage not reported: %+v", body)
+	}
+
+	down := NewReadyHandler(pingerFunc(func(context.Context) error { return errors.New("down") }), nil, nil)
+	rec = httptest.NewRecorder()
+	down.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("database outage left the node ready: %d", rec.Code)
+	}
+}
+
+type pingerFunc func(context.Context) error
+
+func (f pingerFunc) Ping(ctx context.Context) error { return f(ctx) }

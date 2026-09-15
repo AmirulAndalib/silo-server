@@ -16,10 +16,11 @@ with either backend. The setup wizard can finish without configuring S3.
 1. Stop the server's artwork writers.
 2. Copy the artwork tree to the target store, keeping the same logical keys.
 3. Save the new backend setting.
-4. Delete the `artwork.storage_backend_active` row from `server_settings`.
+4. Delete the `artwork.storage_identity` row from `server_settings`.
 5. Restart the server and verify artwork loads.
 
-The server refuses to start if the configured backend differs from the recorded
-one. Clearing the record alone does not move files. Profile avatars remain in
-private S3 when configured. Otherwise they use local storage; the public artwork
-bucket cannot receive avatar uploads.
+The server refuses to start if the configured storage differs from the recorded
+one, including a different bucket or local directory. Clearing the record alone
+does not move files. Profile avatars remain in private S3 when configured.
+Otherwise they use local storage; the public artwork bucket cannot receive
+avatar uploads.

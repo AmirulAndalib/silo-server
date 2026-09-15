@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Silo-Server/silo-server/internal/artworkstore"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/usercollections"
 	"github.com/Silo-Server/silo-server/internal/userstore"
@@ -347,11 +346,7 @@ func (h *CollectionHandler) DeletePersonalCollectionImage(ctx context.Context, u
 		return err
 	}
 
-	artwork := h.ArtworkStore
-	if artwork == nil && h.S3GP != nil {
-		artwork = artworkstore.NewS3(h.S3GP)
-	}
-	if err := removeCollectionImageVariants(ctx, artwork, userCollectionImagePrefix, collectionID, imageType); err != nil {
+	if err := removeCollectionImageVariants(ctx, h.ArtworkStore, userCollectionImagePrefix, collectionID, imageType); err != nil {
 		return apiError(http.StatusInternalServerError, "internal_error", "Failed to delete images")
 	}
 	empty := ""
