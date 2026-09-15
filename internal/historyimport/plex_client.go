@@ -295,7 +295,7 @@ func (c *PlexClient) fetchSectionItems(ctx context.Context, baseURL, token, sect
 // The discover listing does not honor includeGuids, so items usually arrive
 // without external ids. Each id-less item gets a follow-up per-item metadata
 // fetch to resolve its Guid array; failures there degrade to warnings so the
-// rest of the watchlist still imports (matching falls back to title/year).
+// remaining watchlist items can still import.
 func (c *PlexClient) FetchWatchlist(ctx context.Context, accountToken string) ([]PlexItem, []string, error) {
 	base := c.discoverBaseURL
 	if base == "" {
@@ -344,7 +344,7 @@ func (c *PlexClient) FetchWatchlist(ctx context.Context, accountToken string) ([
 			continue
 		}
 		allItems[i].Guid, allItems[i].Year = applyPlexMetadataFallback(
-			allItems[i].Guid, allItems[i].Year, allItems[i].Type, detail)
+			allItems[i].Guid, allItems[i].Year, detail)
 	}
 	if unresolved > 0 {
 		warnings = append(warnings, plexUnresolvedIDsWarning("watchlist", "items", unresolved, attempted, firstErr))

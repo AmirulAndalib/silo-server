@@ -109,8 +109,8 @@ func TestFetchWatchlistPaginatesDiscoverAPI(t *testing.T) {
 
 // The discover listing does not honor includeGuids in practice: items arrive
 // without external ids, and some detail responses key their payload on
-// "Video" instead of "Metadata". Both must be handled or matching silently
-// degrades to exact title/year.
+// "Video" instead of "Metadata". Both must be handled so the items have a
+// matchable identity.
 func TestFetchWatchlistResolvesGuidsViaItemMetadata(t *testing.T) {
 	detailCalls := map[string]int{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -166,8 +166,8 @@ func TestFetchWatchlistResolvesGuidsViaItemMetadata(t *testing.T) {
 	}
 }
 
-// A failed per-item metadata fetch must not sink the watchlist: the item
-// falls back to title/year matching and the fetch reports one warning.
+// A failed per-item metadata fetch must not sink the watchlist: the unresolved
+// item remains unmatched and the fetch reports one warning.
 func TestFetchWatchlistWarnsWhenGuidResolutionFails(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
