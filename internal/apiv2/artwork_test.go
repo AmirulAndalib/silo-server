@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/artworkstore"
+	"github.com/Silo-Server/silo-server/internal/artworkstore/artworkstoretest"
 	"github.com/Silo-Server/silo-server/internal/artworkurl"
 )
 
@@ -146,5 +147,37 @@ func TestArtworkMutableCachePolicy(t *testing.T) {
 	cache := got.Header().Get("Cache-Control")
 	if got.Code != http.StatusOK || !strings.HasPrefix(cache, "private, max-age=") || strings.Contains(cache, "immutable") {
 		t.Fatalf("status = %d, cache = %q", got.Code, cache)
+	}
+}
+
+func TestArtworkRangesOnForwardOnlyStreams(t *testing.T) {
+	// S3 bodies are not seekable. Ranges, HEAD, and full reads must still work
+	// without buffering the object.
+	store := artworkstoretest.New()
+	key := "tmdb/movies/123/poster/w500.rev.webp"
+	if err := store.Put(t.Context(), key, []byte("0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	signer := artworkurl.NewSigner("test-secret", time.Hour)
+	h := NewHandler(Dependencies{ArtworkStore: store, ArtworkSigner: signer})
+	u, _ := signer.Sign(key, time.Now())
+	if got := do(t, h, http.MethodGet, u, "", nil); got.Code != 200 || got.Body.String() != "0123456789" || got.Header().Get("Content-Length") != "10" {
+		t.Fatalf("GET: %d %q %v", got.Code, got.Body.String(), got.Header())
+	}
+	if head := do(t, h, http.MethodHead, u, "", nil); head.Code != 200 || head.Body.Len() != 0 || head.Header().Get("Content-Length") != "10" {
+		t.Fatalf("HEAD: %d %v", head.Code, head.Header())
+	}
+	partial := do(t, h, http.MethodGet, u, "", map[string]string{"Range": "bytes=3-5"})
+	if partial.Code != 206 || partial.Body.String() != "345" || partial.Header().Get("Content-Range") != "bytes 3-5/10" {
+		t.Fatalf("range: %d %q %v", partial.Code, partial.Body.String(), partial.Header())
+	}
+	if tail := do(t, h, http.MethodGet, u, "", map[string]string{"Range": "bytes=-2"}); tail.Code != 206 || tail.Body.String() != "89" {
+		t.Fatalf("suffix range: %d %q", tail.Code, tail.Body.String())
+	}
+	if multi := do(t, h, http.MethodGet, u, "", map[string]string{"Range": "bytes=0-1,5-6"}); multi.Code != 200 || multi.Body.String() != "0123456789" {
+		t.Fatalf("multi-range: %d %q", multi.Code, multi.Body.String())
+	}
+	if bad := do(t, h, http.MethodGet, u, "", map[string]string{"Range": "bytes=20-30"}); bad.Code != http.StatusRequestedRangeNotSatisfiable {
+		t.Fatalf("unsatisfiable range: %d", bad.Code)
 	}
 }

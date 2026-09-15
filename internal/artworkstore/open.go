@@ -102,7 +102,7 @@ func (s *recordingStore) recordBackend(ctx context.Context) error {
 	if s.recorded {
 		return nil
 	}
-	identity := s.Store.Identity()
+	identity := s.Identity()
 	inserted, err := s.settings.SetIfAbsent(ctx, IdentitySettingKey, identity)
 	if err != nil {
 		return fmt.Errorf("record artwork storage: %w", err)

@@ -1590,6 +1590,7 @@ var sensitiveSettingKeys = catalog.SensitiveSettingKeys
 var machineManagedSettingKeys = map[string]bool{
 	config.ArtworkStorageReconcileCheckpointKey: true,
 	config.ArtworkStorageSweepCheckpointKey:     true,
+	artworkstore.IdentitySettingKey:             true,
 }
 
 func redactAdminSettings(values map[string]string) {
@@ -2333,7 +2334,7 @@ func (h *AdminHandler) UpdateAdminSettings(ctx context.Context, values map[strin
 		if strings.TrimSpace(key) == "" {
 			return AdminSettingsUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "Setting key is required"}
 		}
-		if machineManagedSettingKeys[key] || key == artworkstore.IdentitySettingKey {
+		if machineManagedSettingKeys[key] {
 			return AdminSettingsUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: key + " is managed internally"}
 		}
 		if h.BootstrapSensitiveConfigured[key] {
@@ -2459,7 +2460,7 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "bad_request", "Setting key is required")
 		return
 	}
-	if machineManagedSettingKeys[key] || key == artworkstore.IdentitySettingKey {
+	if machineManagedSettingKeys[key] {
 		writeError(w, http.StatusBadRequest, "bad_request", key+" is managed internally")
 		return
 	}
@@ -2495,7 +2496,7 @@ func (h *AdminHandler) UpdateAdminSetting(ctx context.Context, key, value string
 	if key == "" {
 		return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: "Setting key is required"}
 	}
-	if machineManagedSettingKeys[key] || key == artworkstore.IdentitySettingKey {
+	if machineManagedSettingKeys[key] {
 		return AdminSettingUpdateResult{}, &APIError{Status: http.StatusBadRequest, Code: "bad_request", Message: key + " is managed internally"}
 	}
 	if h.BootstrapSensitiveConfigured[key] {

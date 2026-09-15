@@ -111,14 +111,62 @@ func (reg *Registry) serveArtwork(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	if content, ok := reader.(io.ReadSeeker); ok {
-		http.ServeContent(w, r, path.Base(key), info.ModTime, content)
-		return
+	content, ok := reader.(io.ReadSeeker)
+	if !ok {
+		// Object storage streams are forward-only. ServeContent only needs the
+		// size and a forward seek to a single range start, so wrap the stream
+		// rather than buffer the object. A multi-range request would seek
+		// backwards; answer it with the whole object, which HTTP permits.
+		if strings.Contains(r.Header.Get(artworkRangeHeader), ",") {
+			r.Header.Del(artworkRangeHeader)
+		}
+		content = &forwardSeeker{reader: reader, size: info.Size}
 	}
-	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
-	if r.Method != http.MethodHead {
-		_, _ = io.Copy(w, reader)
+	http.ServeContent(w, r, path.Base(key), info.ModTime, content)
+}
+
+// forwardSeeker adapts a forward-only stream of known size to io.ReadSeeker
+// for http.ServeContent, which seeks to the end for the size and then forward
+// to the requested offset. Skipped bytes are read and discarded.
+type forwardSeeker struct {
+	reader io.Reader
+	size   int64
+	pos    int64
+}
+
+func (f *forwardSeeker) Read(p []byte) (int, error) {
+	n, err := f.reader.Read(p)
+	f.pos += int64(n)
+	return n, err
+}
+
+func (f *forwardSeeker) Seek(offset int64, whence int) (int64, error) {
+	var target int64
+	switch whence {
+	case io.SeekStart:
+		target = offset
+	case io.SeekCurrent:
+		target = f.pos + offset
+	case io.SeekEnd:
+		target = f.size + offset
+	default:
+		return 0, errors.New("artwork: invalid seek")
 	}
+	if target < 0 {
+		return 0, errors.New("artwork: negative seek")
+	}
+	if target == f.size {
+		// ServeContent reads the size this way; nothing has to be consumed.
+		return target, nil
+	}
+	if target < f.pos {
+		return 0, errors.New("artwork: backward seek on a stream")
+	}
+	if _, err := io.CopyN(io.Discard, f.reader, target-f.pos); err != nil {
+		return 0, err
+	}
+	f.pos = target
+	return target, nil
 }
 
 func originalRepairKey(key string) string {
