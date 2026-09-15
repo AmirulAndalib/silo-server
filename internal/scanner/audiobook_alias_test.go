@@ -169,7 +169,7 @@ func TestAudiobookAliasesConcurrentIdentity(t *testing.T) {
 				if txErr != nil {
 					err = txErr
 				} else {
-					err = s.upsertAudiobookMediaFilesTx(ctx, tx, folder, id, path, book)
+					err = s.upsertAudiobookPresentationTx(ctx, tx, folder, id, path, book)
 					if err == nil {
 						err = tx.Commit(ctx)
 					} else {
@@ -243,5 +243,94 @@ func TestClaimAudiobookIdentityRefreshesExistingClaim(t *testing.T) {
 	}
 	if !last.After(old) {
 		t.Fatalf("last_seen_at was not refreshed: %v", last)
+	}
+}
+
+// Force the review's interleaving without sleeps: resolve A, resolve B, commit
+// B's presentation, then A's. Metadata must follow the committed presentation.
+func TestAudiobookAliasMetadataFollowsPresentation(t *testing.T) {
+	pool := newDeadRootTestPool(t)
+	ctx := t.Context()
+	folderID := seedDeadRootTestFolder(t, pool, "audiobooks", "Alias metadata ordering")
+	folder := &models.MediaFolder{ID: folderID, Type: "audiobooks"}
+	root := t.TempDir()
+	physical := filepath.Join(root, "recording")
+	if err := os.Mkdir(physical, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(physical, "track.mp3"), []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{filepath.Join(root, "Title A"), filepath.Join(root, "Title B")}
+	s := NewScanner(NewFileRepository(pool), "", nil, 2, false, 0)
+	books := make([]*parsedAudiobook, 2)
+	var id string
+	for i, path := range paths {
+		if err := os.Symlink(physical, path); err != nil {
+			t.Fatal(err)
+		}
+		file := filepath.Join(path, "track.mp3")
+		info, err := os.Stat(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		books[i] = &parsedAudiobook{Files: []parsedAudiobookFile{{Path: file, Size: info.Size(), ModifiedAt: normalizeFileModifiedAt(info.ModTime())}}}
+		books[i].applyFilesystemFallbacks(path, []string{file})
+		got, err := s.upsertAudiobookMediaItem(ctx, folderID, path, books[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			id = got
+			t.Cleanup(func() {
+				_, _ = pool.Exec(context.WithoutCancel(ctx), `DELETE FROM media_items WHERE content_id=$1`, id)
+			})
+		} else if got != id {
+			t.Fatalf("identity changed: %s -> %s", id, got)
+		}
+	}
+	commit := func(i int, rollback bool) {
+		t.Helper()
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+		if err := s.upsertAudiobookPresentationTx(ctx, tx, folder, id, paths[i], books[i]); err != nil {
+			t.Fatal(err)
+		}
+		if !rollback {
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	check := func(i int) {
+		t.Helper()
+		item, err := s.itemRepo.GetByID(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, err := s.fileRepo.GetByContentIDPresentation(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(files) != 1 || filepath.Dir(files[0].FilePath) != paths[i] {
+			t.Fatalf("unexpected playable alias: %+v", files)
+		}
+		if item.Title != books[i].Title {
+			t.Fatalf("playable alias %s has catalog title %q, want %q", paths[i], item.Title, books[i].Title)
+		}
+	}
+	commit(1, false)
+	check(1)
+	commit(0, false)
+	check(0)
+	// A failed replacement must roll back its metadata along with its files.
+	commit(1, true)
+	check(0)
+	_, skip, err := s.audiobookFolderShouldSkip(ctx, folder, paths[0])
+	if err != nil || !skip {
+		t.Fatalf("unchanged alias skip=%v err=%v", skip, err)
 	}
 }

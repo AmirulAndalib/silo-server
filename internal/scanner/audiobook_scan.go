@@ -657,7 +657,7 @@ func (s *Scanner) reconcileAudiobookFolder(ctx context.Context, folder *models.M
 	if err != nil {
 		return fmt.Errorf("upsert audiobook item: %w", err)
 	}
-	// Keep the file rows and the folder-level audiobook indexes in one
+	// Keep item metadata, file rows, and folder-level audiobook indexes in one
 	// transaction. A multi-part book must not become visible with only some of
 	// its parts after a worker or database failure.
 	tx, err := s.fileRepo.Pool().Begin(ctx)
@@ -667,8 +667,8 @@ func (s *Scanner) reconcileAudiobookFolder(ctx context.Context, folder *models.M
 	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancelCleanup()
 	defer func() { _ = tx.Rollback(cleanupCtx) }()
-	if err := s.upsertAudiobookMediaFilesTx(ctx, tx, folder, contentID, folderPath, parsed); err != nil {
-		return fmt.Errorf("upsert audiobook files: %w", err)
+	if err := s.upsertAudiobookPresentationTx(ctx, tx, folder, contentID, folderPath, parsed); err != nil {
+		return fmt.Errorf("upsert audiobook presentation: %w", err)
 	}
 	if err := s.upsertAudiobookSeriesTx(ctx, tx, contentID, parsed); err != nil {
 		return fmt.Errorf("upsert audiobook series: %w", err)
@@ -813,9 +813,6 @@ func (s *Scanner) upsertAudiobookMediaItem(ctx context.Context, folderID int, fo
 	if err != nil {
 		return "", err
 	}
-	if err := s.updateExistingAudiobookMediaItem(ctx, contentID, book); err != nil {
-		return "", err
-	}
 	return contentID, nil
 }
 
@@ -870,20 +867,16 @@ func lockAudiobookRoot(ctx context.Context, tx pgx.Tx, folderID int, physical st
 	return err
 }
 
-func (s *Scanner) updateExistingAudiobookMediaItem(ctx context.Context, contentID string, book *parsedAudiobook) error {
-	items, err := s.itemRepo.GetByIDs(ctx, []string{contentID})
+func (s *Scanner) updateAudiobookMediaItemTx(ctx context.Context, tx pgx.Tx, contentID string, book *parsedAudiobook) error {
+	item, err := s.itemRepo.GetByIDTx(ctx, tx, contentID)
 	if err != nil {
 		return fmt.Errorf("get audiobook media item %s: %w", contentID, err)
 	}
-	if len(items) == 0 || items[0] == nil {
-		return fmt.Errorf("audiobook media item %s not found", contentID)
-	}
-	item := items[0]
 	applyBookToMediaItem(item, book)
 	if item.SortTitle == "" {
 		item.SortTitle = titleutil.DeriveDefaultSortTitle(item.Title)
 	}
-	return s.itemRepo.Upsert(ctx, item)
+	return s.itemRepo.UpsertTx(ctx, tx, item)
 }
 
 func resolveAudiobookMediaItem(
@@ -1148,10 +1141,10 @@ func mergeUniqueStrings(existing, additions []string) []string {
 	return out
 }
 
-// upsertAudiobookMediaFiles writes one media_files row per audio file in the
-// parsed audiobook. The content_id ties each file back to the media_items row.
-// folderPath is used as the canonical_root_path / observed_root_path.
-func (s *Scanner) upsertAudiobookMediaFilesTx(
+// upsertAudiobookPresentationTx writes item metadata and one row per audio
+// file under the physical root lock. File and observed-root paths retain the
+// selected logical alias; canonical-root paths identify the physical book.
+func (s *Scanner) upsertAudiobookPresentationTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	folder *models.MediaFolder,
@@ -1164,6 +1157,11 @@ func (s *Scanner) upsertAudiobookMediaFilesTx(
 		return fmt.Errorf("resolve audiobook root: %w", err)
 	}
 	if err := lockAudiobookRoot(ctx, tx, folder.ID, physical); err != nil {
+		return err
+	}
+	// The selected alias supplies both filesystem-derived metadata and files.
+	// Keep them under the same lock and commit so concurrent scans agree.
+	if err := s.updateAudiobookMediaItemTx(ctx, tx, contentID, book); err != nil {
 		return err
 	}
 	partTotal := len(book.Files)
