@@ -2104,6 +2104,9 @@ type AccessFilterOptions struct {
 	SelectedFileID int
 	// PresentationLibraryID scopes the read to one library; nil for none.
 	PresentationLibraryID *int
+	// ScopeFilesToLibrary also limits file versions to PresentationLibraryID;
+	// see catalog.AccessFilter.ScopeFilesToLibrary.
+	ScopeFilesToLibrary bool
 	// ImageSize is the artwork variant to presign; Unset picks defaults.
 	ImageSize imagesize.Size
 }
@@ -2122,6 +2125,7 @@ func (h *ItemsHandler) ContextAccessFilter(ctx context.Context, opts AccessFilte
 			MaxContentRating:          scope.MaxContentRating,
 			MaxPlaybackQuality:        scope.MaxPlaybackQuality,
 			PresentationLibraryID:     opts.PresentationLibraryID,
+			ScopeFilesToLibrary:       opts.ScopeFilesToLibrary,
 			ProfilePreferredLanguage:  scope.PreferredMetadataLanguage,
 			MetadataLanguageOverrides: scope.MetadataLanguageOverrides,
 			SelectedFileID:            opts.SelectedFileID,
@@ -2158,6 +2162,7 @@ func (h *ItemsHandler) ContextAccessFilter(ctx context.Context, opts AccessFilte
 		AllowedLibraryIDs:     libraryIDs,
 		MaxPlaybackQuality:    maxPlaybackQuality,
 		PresentationLibraryID: opts.PresentationLibraryID,
+		ScopeFilesToLibrary:   opts.ScopeFilesToLibrary,
 		SelectedFileID:        opts.SelectedFileID,
 		ImageSize:             opts.ImageSize,
 		UserID:                apimw.GetUserID(ctx),
