@@ -40,6 +40,13 @@ type healthStatus struct {
 	ServerID   string `json:"server_id,omitempty"`
 }
 
+// Readiness status values. The v1 shape is frozen; "degraded" is additive.
+const (
+	readyStatusOK       = "ok"
+	readyStatusError    = "error"
+	readyStatusDegraded = "degraded"
+)
+
 // readyStatus represents the JSON response for the readiness endpoint.
 type readyStatus struct {
 	Status   string `json:"status"`
@@ -120,7 +127,7 @@ func (h *ReadyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The v1 body shape is frozen: a healthy answer carries only status, and
 	// any other answer carries every dependency boolean, with an unconfigured
 	// dependency reporting true. "degraded" is additive to that contract.
-	status := readyStatus{Status: "ok"}
+	status := readyStatus{Status: readyStatusOK}
 	if !pgOK || !s3OK || !artworkOK {
 		status.Postgres = new(pgOK)
 		status.S3 = new(s3OK)
@@ -129,10 +136,10 @@ func (h *ReadyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch {
 	case !pgOK:
-		status.Status = "error"
+		status.Status = readyStatusError
 		w.WriteHeader(http.StatusServiceUnavailable)
 	case !s3OK || !artworkOK:
-		status.Status = "degraded"
+		status.Status = readyStatusDegraded
 		w.WriteHeader(http.StatusOK)
 	default:
 		w.WriteHeader(http.StatusOK)
