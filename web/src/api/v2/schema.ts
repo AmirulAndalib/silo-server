@@ -1870,6 +1870,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v2/admin/jobs/{id}/artifact": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Stream a completed job's artifact through the API host. Authorized by the signed capability in the download URL, not by a session. */
+    get: operations["downloadAdminJobArtifact"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v2/admin/libraries/{library_id}/collection-groups": {
     parameters: {
       query?: never;
@@ -14524,6 +14541,8 @@ export interface components {
       library_name?: string;
       library_result?: components["schemas"]["AdminTaskJobLibraryResult"];
       progress?: components["schemas"]["JobProgress"];
+      /** @description Whether this server can mint a shareable seven-day link. False when exports are stored locally, because only storage-side presigning produces a URL usable off this server. */
+      public_link_supported: boolean;
       public_url?: string;
       refresh_result?: components["schemas"]["LibraryRefreshJobResult"];
       source_label?: string;
@@ -43805,6 +43824,47 @@ export interface operations {
         content: {
           "application/problem+json": components["schemas"]["Problem"];
         };
+      };
+    };
+  };
+  downloadAdminJobArtifact: {
+    parameters: {
+      query: {
+        exp: number;
+        sig: string;
+      };
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Gzip-compressed job artifact */
+      200: {
+        headers: {
+          "Content-Disposition"?: string;
+          "Content-Length"?: number;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/gzip": string;
+        };
+      };
+      /** @description Artifact not found, or the capability is invalid or expired */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Artifact storage unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
       };
     };
   };

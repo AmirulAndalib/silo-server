@@ -13373,6 +13373,10 @@
           "progress": {
             "$ref": "#/components/schemas/JobProgress"
           },
+          "public_link_supported": {
+            "description": "Whether this server can mint a shareable seven-day link. False when exports are stored locally, because only storage-side presigning produces a URL usable off this server.",
+            "type": "boolean"
+          },
           "public_url": {
             "type": "string"
           },
@@ -13402,6 +13406,7 @@
         "required": [
           "library_ids",
           "artifact_size_bytes",
+          "public_link_supported",
           "id",
           "kind",
           "state",
@@ -67996,6 +68001,80 @@
           "admin-tasks"
         ],
         "x-silo-class": "authenticated",
+        "x-silo-service-backed": true
+      }
+    },
+    "/api/v2/admin/jobs/{id}/artifact": {
+      "get": {
+        "operationId": "downloadAdminJobArtifact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exp",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sig",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/gzip": {
+                "schema": {
+                  "contentMediaType": "application/octet-stream",
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Gzip-compressed job artifact",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Artifact not found, or the capability is invalid or expired"
+          },
+          "503": {
+            "description": "Artifact storage unavailable"
+          }
+        },
+        "summary": "Stream a completed job's artifact through the API host. Authorized by the signed capability in the download URL, not by a session.",
+        "tags": [
+          "admin-tasks"
+        ],
+        "x-silo-class": "public",
+        "x-silo-raw-protocol": "job-artifact",
+        "x-silo-raw-reason": "Artifact bytes must not pass through JSON encoding, and the signed capability replaces the presigned storage URL a session-gated route could not provide.",
         "x-silo-service-backed": true
       }
     },
