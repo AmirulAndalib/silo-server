@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -100,12 +101,26 @@ func (s *S3) ObjectAvailable(ctx context.Context, key string) (bool, error) {
 	return s.client.ObjectAvailable(ctx, s.client.Bucket(), key)
 }
 
-// Identity covers the endpoint, bucket, and key prefix. Endpoints and bucket
-// names are case-insensitive; the key prefix feeds case-sensitive object keys
-// and is normalized exactly as the client applies it.
+// Identity covers the endpoint, bucket, and key prefix. Bucket names and the
+// endpoint's scheme and host are case-insensitive; an endpoint path (a
+// gateway tenant, for example) and the key prefix address case-sensitive
+// storage and are kept as configured, the prefix normalized exactly as the
+// client applies it.
 func (s *S3) Identity() string {
-	insensitive := func(v string) string { return strings.ToLower(strings.TrimSpace(v)) }
-	return BackendS3 + "|" + insensitive(s.client.Endpoint()) + "|" + insensitive(s.client.Bucket()) + "|" + s.client.KeyPrefix()
+	return BackendS3 + "|" + normalizeEndpoint(s.client.Endpoint()) + "|" + strings.ToLower(strings.TrimSpace(s.client.Bucket())) + "|" + s.client.KeyPrefix()
+}
+
+// normalizeEndpoint lowercases only the case-insensitive parts of an endpoint
+// URL. An endpoint that does not parse is lowercased whole, as before.
+func normalizeEndpoint(raw string) string {
+	raw = strings.TrimSpace(raw)
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return strings.ToLower(raw)
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	return parsed.String()
 }
 
 var _ Store = (*S3)(nil)

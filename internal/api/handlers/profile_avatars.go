@@ -110,7 +110,7 @@ func resolveProfileAvatar(ctx context.Context, store profileAvatarStore, ttl tim
 			return "upload", ""
 		}
 		if len(resolvers) > 0 && resolvers[0] != nil {
-			if resolved := resolvers[0].ResolveURLs(ctx, []string{displayKey})[displayKey]; resolved.URL != "" {
+			if resolved, ok := artworkurl.ResolveURLFor(ctx, resolvers[0], displayKey, presignTTL); ok {
 				return "upload", resolved.URL
 			}
 		}

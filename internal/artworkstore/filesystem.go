@@ -123,7 +123,8 @@ func (f *Filesystem) Put(ctx context.Context, key string, data []byte) error {
 	if err = check(root, key); err != nil {
 		return err
 	}
-	if err = root.MkdirAll(path.Dir(key), 0755); err != nil {
+	created, err := mkdirAllTracked(root, path.Dir(key))
+	if err != nil {
 		return err
 	}
 	tmp, name, err := temporary(root, path.Dir(key), ".tmp-")
@@ -147,7 +148,40 @@ func (f *Filesystem) Put(ctx context.Context, key string, data []byte) error {
 	// The data is durable once the file is synced, but the name is not until
 	// the directory entry is. A crash between the rename and the directory
 	// flush would leave the catalog referencing a key the store never shows.
-	return syncDir(root, path.Dir(key))
+	// Directories this write created are new entries in their parents, so
+	// each parent is flushed too, from the leaf up to the first one that
+	// already existed.
+	if err = syncDir(root, path.Dir(key)); err != nil {
+		return err
+	}
+	for _, dir := range created {
+		if err = syncDir(root, path.Dir(dir)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// mkdirAllTracked creates dir and any missing ancestors inside root and
+// returns the directories it created, deepest first, so the caller can sync
+// each one's parent after publishing a file.
+func mkdirAllTracked(root *os.Root, dir string) ([]string, error) {
+	var missing []string
+	for probe := dir; probe != "." && probe != "/" && probe != ""; probe = path.Dir(probe) {
+		if _, err := root.Stat(probe); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+		missing = append(missing, probe)
+	}
+	if len(missing) == 0 {
+		return nil, nil
+	}
+	if err := root.MkdirAll(dir, 0755); err != nil {
+		return nil, err
+	}
+	return missing, nil
 }
 
 // syncDir flushes a directory's entries so a published rename survives a

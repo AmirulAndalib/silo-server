@@ -159,3 +159,54 @@ func TestSignerMinimumLifetimeAndStableBuckets(t *testing.T) {
 		})
 	}
 }
+
+func TestSignForHonorsRequestedTTL(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+	signer := NewSigner("secret", 4*time.Hour)
+	_, exp := signer.SignFor("a.webp", now, 15*time.Minute)
+	if got := exp.Sub(now); got != 30*time.Minute {
+		t.Fatalf("15m capability lived %s", got)
+	}
+	// Non-positive falls back to the signer default; out of range clamps.
+	if _, exp := signer.SignFor("a.webp", now, 0); exp.Sub(now) != 4*time.Hour+15*time.Minute {
+		t.Fatalf("default TTL not applied: %s", exp.Sub(now))
+	}
+	if _, exp := signer.SignFor("a.webp", now, time.Second); exp.Sub(now) != 2*time.Minute {
+		t.Fatalf("minimum not clamped: %s", exp.Sub(now))
+	}
+	path, exp := signer.SignFor("a.webp", now, 15*time.Minute)
+	parsed, _ := url.Parse(path)
+	if err := signer.Verify("a.webp", exp.Unix(), parsed.Query().Get("sig"), now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResolveURLForUsesLifetimeOnBothResolvers(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	server := NewServerResolver(NewSigner("secret", 4*time.Hour))
+	resolved, ok := ResolveURLFor(ctx, server, "a.webp", 15*time.Minute)
+	if !ok || resolved.ExpiresAt == nil || resolved.ExpiresAt.Sub(now) > 31*time.Minute {
+		t.Fatalf("server resolver ignored the lifetime: %+v", resolved)
+	}
+	direct := NewDirectResolver(ttlRecordingDirect{}, time.Hour)
+	resolved, ok = ResolveURLFor(ctx, direct, "a.webp", 15*time.Minute)
+	if !ok || resolved.URL != "https://example/a.webp?ttl=15m0s" {
+		t.Fatalf("direct resolver ignored the lifetime: %+v", resolved)
+	}
+	if _, ok := ResolveURLFor(ctx, direct, "missing", 15*time.Minute); ok {
+		t.Fatal("missing object resolved")
+	}
+	if _, ok := ResolveURLFor(ctx, nil, "a.webp", time.Minute); ok {
+		t.Fatal("nil resolver resolved")
+	}
+}
+
+type ttlRecordingDirect struct{}
+
+func (ttlRecordingDirect) DirectURL(_ context.Context, key string, ttl time.Duration) (string, error) {
+	if key == "missing" {
+		return "", errors.New("unavailable")
+	}
+	return "https://example/" + key + "?ttl=" + ttl.String(), nil
+}

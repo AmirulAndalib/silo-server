@@ -23,4 +23,13 @@ DELETE FROM server_settings
 WHERE key IN ('artwork.storage_backend_active', 's3.public_storage_identity', 's3.public_storage_sweep_checkpoint');
 
 -- +goose Down
+-- Give the previous release back the S3 fingerprint it wrote, so a rolled-back
+-- server still detects a changed bucket instead of seeding the next configured
+-- location as authoritative. A local identity has no legacy form; the earlier
+-- release ignores it.
+INSERT INTO server_settings (key, value)
+SELECT 's3.public_storage_identity', substr(value, length('s3|') + 1)
+FROM server_settings
+WHERE key = 'artwork.storage_identity' AND value LIKE 's3|%'
+  AND NOT EXISTS (SELECT 1 FROM server_settings WHERE key = 's3.public_storage_identity');
 DELETE FROM server_settings WHERE key = 'artwork.storage_identity';

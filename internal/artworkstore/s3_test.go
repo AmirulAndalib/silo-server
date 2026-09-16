@@ -225,4 +225,12 @@ func TestS3IdentityCoversStorageLocationOnly(t *testing.T) {
 	if !strings.HasPrefix(base, BackendS3+"|") {
 		t.Fatalf("identity = %q", base)
 	}
+	// Only the scheme and host of an endpoint are case-insensitive; a path
+	// names case-sensitive upstream storage on gateways.
+	if build("https://gateway.example/TenantA", "artwork", "", "") == build("https://gateway.example/tenanta", "artwork", "", "") {
+		t.Fatal("endpoint path case must change the identity")
+	}
+	if build("HTTPS://Gateway.Example/TenantA", "artwork", "", "") != build("https://gateway.example/TenantA", "artwork", "", "") {
+		t.Fatal("scheme and host case must not change the identity")
+	}
 }

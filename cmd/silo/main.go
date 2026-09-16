@@ -2125,11 +2125,11 @@ func main() {
 	deps.PlaybackRealtimeHub = playback.NewRealtimeHub()
 	if chapterThumbService != nil {
 		chapterThumbnailResolver := deps.ArtworkResolver
-		chapterThumbnailURLs := playback.ChapterThumbnailURLResolver(func(ctx context.Context, key string, _ time.Duration) (string, error) {
+		chapterThumbnailURLs := playback.ChapterThumbnailURLResolver(func(ctx context.Context, key string, ttl time.Duration) (string, error) {
 			if chapterThumbnailResolver == nil {
 				return "", fmt.Errorf("artwork resolver unavailable")
 			}
-			if value := chapterThumbnailResolver.ResolveURLs(ctx, []string{key})[key]; value.URL != "" {
+			if value, ok := artworkurl.ResolveURLFor(ctx, chapterThumbnailResolver, key, ttl); ok {
 				return value.URL, nil
 			}
 			return "", fmt.Errorf("artwork URL unavailable")

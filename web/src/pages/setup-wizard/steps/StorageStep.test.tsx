@@ -70,7 +70,7 @@ describe("StorageStep", () => {
     const { markDone, setSummary, save } = setup();
     render(<StorageStep />);
     expect(screen.queryByLabelText("Bucket")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Local artwork path")).toBeDisabled();
+    expect(screen.getByLabelText("Local artwork path")).toBeEnabled();
     expect(setSummary).toHaveBeenCalledWith("storage", "Local artwork");
     await userEvent.click(screen.getByRole("button", { name: /Continue/ }));
     await waitFor(() => expect(markDone).toHaveBeenCalledWith("storage"));

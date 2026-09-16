@@ -100,6 +100,7 @@ const LOG_KEYS = [...LOG_ESSENTIAL_KEYS, ...LOG_ADVANCED_KEYS];
 
 const KEYS = [
   "artwork.storage_backend",
+  "artwork.local_path",
   ...REDIS_KEYS,
   ...DATABASE_KEYS,
   ...PUBLIC_S3_KEYS,
@@ -840,10 +841,16 @@ export default function InfrastructureSettings() {
           />
           <SettingField
             label="Local artwork path"
-            value={form.getValue("artwork.local_path") || "/var/lib/silo/artwork"}
-            onChange={() => {}}
-            disabled
-            description="Set by configuration; mount a volume here in Docker"
+            hint="/var/lib/silo/artwork"
+            value={form.getValue("artwork.local_path")}
+            onChange={(value) => form.setValue("artwork.local_path", value)}
+            disabled={artworkLocked}
+            description={
+              artworkLocked
+                ? "Locked: artwork has been stored here. Mount a volume at this path in Docker."
+                : "Absolute path on the server. Mount a volume here in Docker."
+            }
+            restartRequired={restartKeys.has("artwork.local_path")}
           />
         </FieldGroup>
         <RedisGroup form={form} restartKeys={restartKeys} secrets={secrets} />

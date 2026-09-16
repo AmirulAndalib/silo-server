@@ -107,7 +107,7 @@ describe("InfrastructureSettings", () => {
     render(<InfrastructureSettings />);
     expect(screen.getByRole("combobox", { name: "Backend" })).toBeEnabled();
     expect(screen.queryByText(/Locked to/)).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Local artwork path")).toBeDisabled();
+    expect(screen.getByLabelText("Local artwork path")).toBeEnabled();
   });
 
   it("locks the backend once artwork has been stored", () => {
@@ -116,6 +116,7 @@ describe("InfrastructureSettings", () => {
     render(<InfrastructureSettings />);
     expect(screen.getByRole("combobox", { name: "Backend" })).toBeDisabled();
     expect(screen.getByText(/Locked to S3/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Local artwork path")).toBeDisabled();
     serverStatus.current = undefined;
   });
 

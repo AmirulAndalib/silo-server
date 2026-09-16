@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -305,6 +306,42 @@ func TestProbeReclaimsRootOrphansPastFreshFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(filepath.Join(dir, ".probe-link")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPutTracksCreatedAncestors(t *testing.T) {
+	dir := t.TempDir()
+	fs, err := NewFilesystem(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(fs.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	created, err := mkdirAllTracked(root, "a/b/c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"a/b/c", "a/b", "a"}; !slices.Equal(created, want) {
+		t.Fatalf("created = %v, want %v", created, want)
+	}
+	created, err = mkdirAllTracked(root, "a/b/d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"a/b/d"}; !slices.Equal(created, want) {
+		t.Fatalf("created = %v, want %v", created, want)
+	}
+	if created, err = mkdirAllTracked(root, "a/b/d"); err != nil || len(created) != 0 {
+		t.Fatalf("existing dir reported as created: %v, %v", created, err)
+	}
+	if err := fs.Put(t.Context(), "x/y/z/file.webp", []byte("ok")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(fs.root, "x/y/z/file.webp")); err != nil {
 		t.Fatal(err)
 	}
 }

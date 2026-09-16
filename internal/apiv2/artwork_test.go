@@ -145,7 +145,7 @@ func TestArtworkMutableCachePolicy(t *testing.T) {
 	u, _ := signer.Sign(key, time.Now())
 	got := do(t, h, http.MethodGet, u, "", nil)
 	cache := got.Header().Get("Cache-Control")
-	if got.Code != http.StatusOK || !strings.HasPrefix(cache, "private, max-age=") || strings.Contains(cache, "immutable") {
+	if got.Code != http.StatusOK || cache != "private, no-cache" {
 		t.Fatalf("status = %d, cache = %q", got.Code, cache)
 	}
 }

@@ -45,6 +45,7 @@ const META_KEYS = ["metadata.cache_images"];
 
 const ALL_KEYS = [
   "artwork.storage_backend",
+  "artwork.local_path",
   ...REDIS_KEYS,
   ...PUBLIC_S3_KEYS,
   ...PRIVATE_S3_KEYS,
@@ -314,10 +315,11 @@ export function StorageStep() {
         />
         <SettingField
           label="Local artwork path"
-          value={form.getValue("artwork.local_path") || "/var/lib/silo/artwork"}
-          disabled
-          onChange={() => {}}
-          description="Set by configuration; mount a volume here in Docker"
+          hint="/var/lib/silo/artwork"
+          value={form.getValue("artwork.local_path")}
+          onChange={(value) => form.setValue("artwork.local_path", value)}
+          disabled={artworkLocked}
+          description="Absolute path on the server. Mount a volume here in Docker."
         />
         <SettingFieldRow
           label="Keep provider artwork"

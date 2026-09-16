@@ -98,13 +98,14 @@ func (reg *Registry) serveArtwork(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
-	seconds := exp - time.Now().Unix()
-	if seconds < 0 {
-		seconds = 0
-	}
-	cache := "private, max-age=" + strconv.FormatInt(seconds, 10)
+	// A revisioned key never changes content, so it may be cached for the
+	// URL's remaining lifetime. A mutable key (an avatar, library poster, or
+	// collection image replaced in place) keeps its URL within the issuance
+	// bucket, so clients must revalidate; the ETag turns that into a 304.
+	cache := cacheControlPrivateNoCache
 	if artworkkey.Revision(key) != "" {
-		cache += ", immutable"
+		seconds := max(exp-time.Now().Unix(), 0)
+		cache = "private, max-age=" + strconv.FormatInt(seconds, 10) + ", immutable"
 	}
 	w.Header().Set("Cache-Control", cache)
 	if r.Header.Get(ifNoneMatchField) != "" && r.Header.Get(ifNoneMatchField) == info.ETag {
