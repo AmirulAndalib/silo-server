@@ -2,6 +2,7 @@ package blobstore
 
 import (
 	"context"
+	"fmt"
 	"io"
 )
 
@@ -36,7 +37,21 @@ func (b *ByteStore) Get(ctx context.Context, key string) ([]byte, error) {
 	return GetBytes(ctx, b.store, key)
 }
 
+// Delete removes one object. An absent key counts as deleted, matching the
+// store contract, so cleanup after a failed publish is not an error.
+//
+// The count is checked rather than discarded. S3 batch deletion reports
+// per-object failures in its response body and still returns a nil error with a
+// short count, so ignoring it would report success while the object remains.
+// Subtitle deletion removes the database row before the object, and a silent
+// success there leaves an orphan nothing will ever look for again.
 func (b *ByteStore) Delete(ctx context.Context, key string) error {
-	_, err := b.store.Delete(ctx, []string{key})
-	return err
+	deleted, err := b.store.Delete(ctx, []string{key})
+	if err != nil {
+		return err
+	}
+	if deleted != 1 {
+		return fmt.Errorf("blobstore: delete %q reported %d of 1 objects removed", key, deleted)
+	}
+	return nil
 }
