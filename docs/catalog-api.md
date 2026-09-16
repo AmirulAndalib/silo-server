@@ -69,13 +69,8 @@ The administrator setting `catalog.scope_versions_to_library` (default `false`)
 makes those reads answer only the versions stored in the named library. A read
 without `library_id` is unaffected, and so is `getWatchDetail`, watch-together
 selection, and the Jellyfin compatibility surface: an item always plays from its
-full accessible version list.
-
-`GET /api/v2/capabilities/catalog` (`getCatalogCapability`) returns a
-`CatalogCapability` document whose `versions_scoped_to_library` boolean reports
-the effective setting, so a client that shows a version picker knows whether the
-list it received is the whole item or one library's slice of it. The document
-supports `If-None-Match`.
+full accessible version list. No client change is needed: the setting only
+changes what an existing `library_id` request returns.
 
 ## Section quality badges
 

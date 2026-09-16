@@ -616,16 +616,11 @@ type fakeCatalogSettings map[string]string
 func (f fakeCatalogSettings) Get(_ context.Context, key string) (string, error) { return f[key], nil }
 
 // The library scope is opt-in through catalog.scope_versions_to_library and
-// only reaches a read that named a library; the capability document reports it.
+// only reaches a read that named a library.
 func TestGetCatalogItemScopesVersionsToLibraryWhenEnabled(t *testing.T) {
 	deps, fake := catalogDeps(t)
 	deps.CatalogSettings = fakeCatalogSettings{"catalog.scope_versions_to_library": "true"}
 	h := newTestHandler(t, deps)
-
-	rec := do(t, h, http.MethodGet, "/api/v2/capabilities/catalog", "", viewerHeaders())
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"versions_scoped_to_library":true`) || !strings.Contains(rec.Body.String(), `"state":"available"`) {
-		t.Fatalf("%d %s", rec.Code, rec.Body.String())
-	}
 
 	if rec := do(t, h, http.MethodGet, "/api/v2/catalog/items/movie:heat-1995?library_id=2", "", viewerHeaders()); rec.Code != 200 {
 		t.Fatal(rec.Body.String())
@@ -643,9 +638,10 @@ func TestGetCatalogItemScopesVersionsToLibraryWhenEnabled(t *testing.T) {
 
 	deps.CatalogSettings = nil
 	h = newTestHandler(t, deps)
-	rec = do(t, h, http.MethodGet, "/api/v2/capabilities/catalog", "", viewerHeaders())
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"versions_scoped_to_library":false`) {
-		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	if rec := do(t, h, http.MethodGet, "/api/v2/catalog/items/movie:heat-1995?library_id=2", "", viewerHeaders()); rec.Code != 200 {
+		t.Fatal(rec.Body.String())
 	}
-	requireProblem(t, do(t, h, http.MethodGet, "/api/v2/capabilities/catalog", "", nil), TypeAuthenticationRequired)
+	if fake.lastViewer.Access.ScopeFilesToLibrary {
+		t.Fatalf("viewer = %+v", fake.lastViewer.Access)
+	}
 }

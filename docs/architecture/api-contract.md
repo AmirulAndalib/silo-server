@@ -1524,9 +1524,7 @@ envelopes, `getSeriesSeason` answers the season itself, and `getCatalogItem` lea
 **Section catalog-items (Phase 4), stage B.** Nine more profile-scoped operations under the
 `catalog` tag complete the section: `listSeasonEpisodes`, the capability documents
 `getTrailersCapability` (`/capabilities/trailers`) and `getMetadataAICapability`
-(`/capabilities/metadata-ai`) — later joined by `getCatalogCapability`
-(`/capabilities/catalog`), which reports whether `library_id` narrows an item's version
-list — the actions `refreshCatalogItemTrailers` and
+(`/capabilities/metadata-ai`), the actions `refreshCatalogItemTrailers` and
 `translateCatalogItemDescription`, `listPeople`, `getPerson`, `refreshPerson`, and
 `getLiteraryWork`. The v1 handlers and these operations share the seams in
 `internal/api/handlers/catalog_actions_service.go`; `handlers.APIError` gained `RetryAfter` so

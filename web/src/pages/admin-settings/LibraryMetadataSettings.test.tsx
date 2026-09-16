@@ -93,7 +93,13 @@ describe("LibraryMetadataSettings", () => {
   it("renders every field group heading", () => {
     const rendered = text(render({ "catalog.search.provider": "meilisearch" }));
 
-    for (const heading of ["Artwork", "Browsing", "Scanning", "Intro and credits markers", "Search"]) {
+    for (const heading of [
+      "Artwork",
+      "Browsing",
+      "Scanning",
+      "Intro and credits markers",
+      "Search",
+    ]) {
       expect(rendered).toContain(heading);
     }
   });
