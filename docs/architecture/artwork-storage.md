@@ -58,9 +58,10 @@ tracking, reconciliation, and garbage collection continue to own lifecycle.
 
 ## Readiness
 
-`/ready` fails only when PostgreSQL is unreachable. Artwork and S3 probes are
-reported in the body (`"status":"degraded"` with `artwork: false` or
-`s3: false`) but do not remove a node from service: the API keeps answering,
+`/ready` fails only when PostgreSQL is unreachable. A failed artwork or S3
+probe answers 200 with `"status":"degraded"` and the same per-dependency
+booleans the error shape carries, so a storage outage is visible without
+removing the node from service: the API keeps answering,
 artwork routes return 503 on their own, and readiness follows storage recovery
 without a restart. Artwork probes are cached for 30 seconds.
 

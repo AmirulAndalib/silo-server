@@ -116,34 +116,28 @@ func (h *ReadyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// outage, but a missing poster must not pull a node out of rotation: the
 	// API keeps working, artwork routes answer 503 or fall back on their own,
 	// and readiness follows storage recovery without a restart.
-	status := readyStatus{
-		Status:  "ok",
-		S3:      optionalReady(h.s3 != nil, s3OK),
-		Artwork: optionalReady(h.artwork != nil, artworkOK),
-	}
-	if !pgOK {
-		status.Status = "error"
+	//
+	// The v1 body shape is frozen: a healthy answer carries only status, and
+	// any other answer carries every dependency boolean, with an unconfigured
+	// dependency reporting true. "degraded" is additive to that contract.
+	status := readyStatus{Status: "ok"}
+	if !pgOK || !s3OK || !artworkOK {
 		status.Postgres = new(pgOK)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(status)
-		return
+		status.S3 = new(s3OK)
+		status.Artwork = new(artworkOK)
 	}
-	if !s3OK || !artworkOK {
-		status.Status = "degraded"
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(status)
-}
-
-// optionalReady reports a dependency's health only when it is configured.
-func optionalReady(configured, ok bool) *bool {
-	if !configured {
-		return nil
+	switch {
+	case !pgOK:
+		status.Status = "error"
+		w.WriteHeader(http.StatusServiceUnavailable)
+	case !s3OK || !artworkOK:
+		status.Status = "degraded"
+		w.WriteHeader(http.StatusOK)
+	default:
+		w.WriteHeader(http.StatusOK)
 	}
-	return &ok
+	_ = json.NewEncoder(w).Encode(status)
 }
 
 func (h *ReadyHandler) checkArtwork(ctx context.Context) bool {

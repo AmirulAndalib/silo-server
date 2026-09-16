@@ -66,8 +66,8 @@ func TestReadinessReportsStorageWithoutGatingOnIt(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Status != "degraded" || body.Artwork == nil || *body.Artwork || body.S3 != nil {
-		t.Fatalf("degraded storage not reported: %+v", body)
+	if body.Status != "degraded" || body.Artwork == nil || *body.Artwork || body.S3 == nil || !*body.S3 || body.Postgres == nil || !*body.Postgres {
+		t.Fatalf("degraded storage not reported with the frozen failure shape: %+v", body)
 	}
 
 	down := NewReadyHandler(pingerFunc(func(context.Context) error { return errors.New("down") }), nil, nil)
