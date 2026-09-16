@@ -2566,6 +2566,10 @@ func main() {
 			taskMgr.Register(tasks.NewRefreshMetadataTask(refreshWorker, metadataService))
 		}
 		if metadataImageCacheProcessor != nil {
+			tasks.SetImageWorkers(cfg.Metadata.ImageWorkers)
+			configWatcher.OnChange(func(_, updated *config.Config) {
+				tasks.SetImageWorkers(updated.Metadata.ImageWorkers)
+			})
 			cacheImagesTask := tasks.NewCacheMetadataImagesTask(metadataImageCacheProcessor)
 			// Artwork cached under an older variant ladder is missing the rungs
 			// a client can now ask for. Arm the one-shot regeneration pass; it

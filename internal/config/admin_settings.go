@@ -53,6 +53,10 @@ const ArtworkStorageReconcileCheckpointKey = "s3.public_storage_reconcile_checkp
 // same reason as the reconcile checkpoint.
 const ArtworkStorageSweepCheckpointKey = "artwork.storage_sweep_checkpoint"
 
+// MetadataImageWorkersSettingKey sizes the artwork encode pool. 0 means one
+// worker per CPU core, resolved when the task runs.
+const MetadataImageWorkersSettingKey = "metadata.image_workers"
+
 // adminSettingDefaults is the effective value shown by the Admin UI when no
 // row exists in server_settings. Keep these values aligned with the runtime
 // readers that own each setting. The UI must never invent a second set of
@@ -86,6 +90,7 @@ var adminSettingDefaults = map[string]string{
 	"userdb.idle_timeout":        "12h",
 
 	"scanner.workers":                      "8",
+	MetadataImageWorkersSettingKey:         "0",
 	"scanner.max_concurrent_libraries":     "1",
 	"scanner.max_concurrent_scoped":        "2",
 	"scanner.file_removal_grace":           "24h",
@@ -375,6 +380,8 @@ func NormalizeAdminSetting(key, raw string) (string, error) {
 		return normalizeAdminInt(key, value, 1, 1024)
 	case "matcher.batch_size":
 		return normalizeAdminInt(key, value, 1, 100000)
+	case MetadataImageWorkersSettingKey:
+		return normalizeAdminInt(key, value, 0, 256)
 	case "playback.chapter_thumbnail_workers", "playback.chapter_thumbnail_node_capacity":
 		return normalizeAdminInt(key, value, 1, 1024)
 	case "playback.watched_threshold":

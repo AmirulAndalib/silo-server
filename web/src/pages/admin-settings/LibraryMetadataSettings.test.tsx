@@ -141,6 +141,7 @@ describe("LibraryMetadataSettings", () => {
         "scanner.workers",
         "matcher.workers",
         "matcher.batch_size",
+        "metadata.image_workers",
         "markers.mode",
         "markers.lazy_playback",
         "catalog.search.provider",
@@ -175,6 +176,9 @@ describe("LibraryMetadataSettings", () => {
     expect(text(render({ "catalog.search.provider": "postgres" }, ["scanner.workers"]))).toContain(
       "Scanner workers",
     );
+    expect(
+      text(render({ "catalog.search.provider": "postgres" }, ["metadata.image_workers"])),
+    ).toContain("Image encoding workers");
   });
 
   it("hides Meilisearch connection fields until that engine is selected", () => {

@@ -22,7 +22,12 @@ import { SettingField, SettingFieldStatus } from "./SettingField";
 
 const ARTWORK_KEYS = ["metadata.cache_images"];
 
-const SCANNER_KEYS = ["scanner.workers", "matcher.workers", "matcher.batch_size"];
+const SCANNER_KEYS = [
+  "scanner.workers",
+  "matcher.workers",
+  "matcher.batch_size",
+  "metadata.image_workers",
+];
 
 const MARKER_KEYS = ["markers.mode", "markers.lazy_playback"];
 
@@ -130,6 +135,14 @@ export default function LibraryMetadataSettings() {
               value={form.getValue("scanner.workers")}
               onChange={(value) => form.setValue("scanner.workers", value)}
               restartRequired={restartKeys.has("scanner.workers")}
+            />
+            <SettingField
+              label="Image encoding workers"
+              type="number"
+              description="How many artwork images Silo encodes at once. 0 uses one per CPU core."
+              value={form.getValue("metadata.image_workers")}
+              onChange={(value) => form.setValue("metadata.image_workers", value)}
+              restartRequired={restartKeys.has("metadata.image_workers")}
             />
             <SettingField
               label="Matcher workers"

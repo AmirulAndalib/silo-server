@@ -320,6 +320,11 @@ func LoadFromDB(m map[string]string) (*Config, error) {
 		return nil, err
 	}
 	cfg.Metadata.CacheImages = cacheImages
+	imageWorkers, err := intOr(m, MetadataImageWorkersSettingKey, 0)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Metadata.ImageWorkers = imageWorkers
 
 	// Playback
 	cfg.Playback.FFmpegPath = stringOr(m, "playback.ffmpeg_path", "")

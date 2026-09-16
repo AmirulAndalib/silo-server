@@ -222,6 +222,9 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
         groups: ["Artwork", "Scanning", "Intro and credits markers", "Search"],
         keywords: [
           "scanner workers",
+          "image encoding workers",
+          "image workers",
+          "cpu",
           "matcher",
           "batch size",
           "artwork",

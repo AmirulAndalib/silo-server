@@ -351,6 +351,9 @@ type PolicyConfig struct {
 // MetadataConfig holds metadata pipeline settings.
 type MetadataConfig struct {
 	CacheImages bool `yaml:"-"`
+	// ImageWorkers is how many artwork encodes run at once. Zero means one
+	// per CPU core.
+	ImageWorkers int `yaml:"-"`
 }
 
 // ClientIPConfig holds client IP resolution settings.
