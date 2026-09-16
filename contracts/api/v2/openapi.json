@@ -1069,6 +1069,21 @@
         },
         "type": "object"
       },
+      "AdminArtworkStorageStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "type": "string"
+          },
+          "locked": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "locked"
+        ],
+        "type": "object"
+      },
       "AdminAuditLog": {
         "additionalProperties": false,
         "properties": {
@@ -12113,6 +12128,9 @@
       "AdminServerStatus": {
         "additionalProperties": false,
         "properties": {
+          "artwork_storage": {
+            "$ref": "#/components/schemas/AdminArtworkStorageStatus"
+          },
           "health": {
             "$ref": "#/components/schemas/AdminServerHealth"
           },
@@ -12162,7 +12180,8 @@
           "restart_required",
           "restart_mark_count",
           "restart_requested",
-          "health"
+          "health",
+          "artwork_storage"
         ],
         "type": "object"
       },

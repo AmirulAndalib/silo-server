@@ -10320,6 +10320,10 @@ export interface components {
       /** @enum {string} */
       rate_tier: "standard" | "elevated";
     };
+    AdminArtworkStorageStatus: {
+      backend?: string;
+      locked: boolean;
+    };
     AdminAuditLog: {
       client_ip: string;
       /** Format: int64 */
@@ -14115,6 +14119,7 @@ export interface components {
       title?: string;
     };
     AdminServerStatus: {
+      artwork_storage: components["schemas"]["AdminArtworkStorageStatus"];
       health: components["schemas"]["AdminServerHealth"];
       /** Format: int64 */
       restart_mark_count: number;

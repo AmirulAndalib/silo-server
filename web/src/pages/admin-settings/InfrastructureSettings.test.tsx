@@ -44,7 +44,14 @@ vi.mock("@/hooks/queries/admin/settings", () => ({
   useAdminServerSettings: () => ({ data: serverSettings.current, isLoading: false }),
   useAdminSensitiveStatus: () => ({ data: sensitiveStatus.current, isError: false }),
   useUpdateServerSettings: () => ({ mutateAsync: updateSettingsMock, isPending: false }),
+  useAdminServerStatus: () => ({ data: serverStatus.current }),
 }));
+
+const serverStatus: {
+  current: { artwork_storage?: { backend?: string; locked: boolean } } | undefined;
+} = {
+  current: undefined,
+};
 
 useCheckAdminSettingsConnectionMock.mockReturnValue({ isPending: false, mutateAsync: vi.fn() });
 
@@ -94,25 +101,22 @@ describe("InfrastructureSettings", () => {
     }
   });
 
-  it("shows a saved backend mismatch and a read-only path", () => {
-    mockForm({
-      getPersistedValue: (key: string) => (key === "artwork.storage_backend" ? "s3" : ""),
-      getValue: (key: string) =>
-        key === "artwork.storage_identity" ? "local|/var/lib/silo/artwork" : "",
-    });
+  it("keeps the backend editable until artwork has been stored", () => {
+    serverStatus.current = { artwork_storage: { backend: "local", locked: false } };
+    mockForm();
     render(<InfrastructureSettings />);
-    expect(screen.getByText(/Saved artwork backend differs/)).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Backend" })).toBeEnabled();
+    expect(screen.queryByText(/Locked to/)).not.toBeInTheDocument();
     expect(screen.getByLabelText("Local artwork path")).toBeDisabled();
   });
 
-  it("resolves automatic S3 storage with the default AWS endpoint", () => {
-    mockForm({
-      getPersistedValue: (key: string) => (key === "s3.public_bucket" ? "artwork" : ""),
-      getValue: (key: string) =>
-        key === "artwork.storage_identity" ? "s3|https://s3.example|artwork|" : "",
-    });
+  it("locks the backend once artwork has been stored", () => {
+    serverStatus.current = { artwork_storage: { backend: "s3", locked: true } };
+    mockForm({ getValue: (key: string) => (key === "artwork.storage_backend" ? "s3" : "") });
     render(<InfrastructureSettings />);
-    expect(screen.queryByText(/Saved artwork backend differs/)).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Backend" })).toBeDisabled();
+    expect(screen.getByText(/Locked to S3/)).toBeInTheDocument();
+    serverStatus.current = undefined;
   });
 
   it("renders the page header on its own, with no description or status strip", () => {

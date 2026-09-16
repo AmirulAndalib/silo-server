@@ -42,11 +42,14 @@ about how they are read, so changing a public read endpoint never counts as a
 move. The first successful write records it as `artwork.storage_identity` in
 `server_settings`, and startup refuses a store with a different identity. The
 reconcile task certifies the same row after a manual sweep, and the storage
-sweep scopes its cursor to it. To move artwork:
+sweep scopes its cursor to it. Once recorded, the admin settings API rejects a
+change to `artwork.storage_backend` with `409 artwork_storage_locked`, and
+`GET /admin/server/status` reports `artwork_storage.locked` so the UI disables
+the control. Moving artwork is a manual operation:
 
 1. Stop artwork writers.
 2. Copy the artwork tree to the new store, preserving logical keys.
-3. Update the backend configuration.
+3. Update the backend configuration in the database directly.
 4. Delete the `artwork.storage_identity` row and restart.
 
 This guard does not migrate data. There is no portability format, storage

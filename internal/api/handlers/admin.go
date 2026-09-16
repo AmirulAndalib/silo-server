@@ -135,6 +135,7 @@ type AdminHandler struct {
 	DownloadsStatsSource         AdminDownloadsStatsSource
 	RedisClient                  *redis.Client // health reporting only; nil means this deployment runs without Redis
 	Config                       *config.Config
+	ArtworkBackend               string // resolved artwork backend for the settings status; empty when unopened
 	EventBus                     cache.EventBus
 	EventsHub                    *evt.Hub
 	SettingsRepo                 ServerSettingsStore
@@ -1593,6 +1594,38 @@ var machineManagedSettingKeys = map[string]bool{
 	artworkstore.IdentitySettingKey:             true,
 }
 
+// artworkStorageLocked reports whether the artwork backend can still change.
+// The first artwork write records the store identity; after that the catalog's
+// keys live in exactly one place and there is no migrator, so the backend
+// setting is read-only. Its default is auto, which is what a fresh install
+// keeps until it writes something.
+func artworkStorageLocked(stored map[string]string) bool {
+	return strings.TrimSpace(stored[artworkstore.IdentitySettingKey]) != ""
+}
+
+var errArtworkStorageLocked = &APIError{
+	Status:  http.StatusConflict,
+	Code:    "artwork_storage_locked",
+	Message: "artwork.storage_backend cannot change once artwork has been stored; the catalog's artwork keys belong to the recorded storage",
+}
+
+// rejectArtworkBackendChange refuses a write that would move the artwork
+// backend after storage has been recorded. Saving the same value is allowed so
+// a settings form that includes the key can still submit.
+func rejectArtworkBackendChange(stored map[string]string, key, value string) error {
+	if key != "artwork.storage_backend" || !artworkStorageLocked(stored) {
+		return nil
+	}
+	current := stored[key]
+	if current == "" {
+		current = config.ArtworkBackendAuto
+	}
+	if value == current {
+		return nil
+	}
+	return errArtworkStorageLocked
+}
+
 func redactAdminSettings(values map[string]string) {
 	for key := range sensitiveSettingKeys {
 		delete(values, key)
@@ -2370,6 +2403,12 @@ func (h *AdminHandler) UpdateAdminSettings(ctx context.Context, values map[strin
 				}
 			}
 
+			for key, value := range normalized {
+				if err := rejectArtworkBackendChange(stored, key, value); err != nil {
+					preconditionErr = err
+					return nil, err
+				}
+			}
 			prospective := maps.Clone(stored)
 			for key, value := range normalized {
 				prospective[key] = value
@@ -2724,6 +2763,10 @@ func (h *AdminHandler) UpdateAdminSetting(ctx context.Context, key, value string
 				}
 			}
 
+			if err := rejectArtworkBackendChange(stored, key, req.Value); err != nil {
+				preconditionErr = err
+				return nil, err
+			}
 			prospective := maps.Clone(stored)
 			prospective[key] = req.Value
 			if isPlaybackRoutingPairSetting(key) {

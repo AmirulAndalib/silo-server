@@ -17,7 +17,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useCheckAdminSettingsConnection } from "@/hooks/queries/admin/settings";
+import {
+  useAdminServerStatus,
+  useCheckAdminSettingsConnection,
+} from "@/hooks/queries/admin/settings";
 import { useRestartKeys, type RestartKeyMatcher } from "@/hooks/useRestartKeys";
 import { useSettingsForm } from "@/hooks/useSettingsForm";
 
@@ -732,6 +735,8 @@ function LogsGroup({ form, restartKeys }: { form: SettingsForm; restartKeys: Res
 export default function InfrastructureSettings() {
   const form = useSettingsForm({ keys: useMemo(() => KEYS, []) });
   const restartKeys = useRestartKeys();
+  const artworkStorage = useAdminServerStatus().data?.artwork_storage;
+  const artworkLocked = artworkStorage?.locked === true;
   const [saveInProgress, setSaveInProgress] = useState(false);
   const saveInProgressRef = useRef(false);
 
@@ -819,6 +824,12 @@ export default function InfrastructureSettings() {
               { value: "local", label: "Local disk" },
               { value: "s3", label: "S3" },
             ]}
+            disabled={artworkLocked}
+            description={
+              artworkLocked
+                ? `Locked to ${artworkStorage?.backend === "s3" ? "S3" : "local disk"}: artwork has been stored here and cannot be moved between backends.`
+                : undefined
+            }
             restartRequired={restartKeys.has("artwork.storage_backend")}
           />
           <SettingField
@@ -828,25 +839,6 @@ export default function InfrastructureSettings() {
             disabled
             description="Set by configuration; mount a volume here in Docker"
           />
-          {(() => {
-            const saved = form.getPersistedValue("artwork.storage_backend") || "auto";
-            // The identity is "<backend>|<location>", recorded on the first
-            // artwork write; only the backend half is comparable here.
-            const active = (form.getValue("artwork.storage_identity") || "").split("|")[0];
-            const resolved =
-              saved === "auto"
-                ? form.getPersistedValue("s3.public_bucket")
-                  ? "s3"
-                  : "local"
-                : saved;
-            return active && active !== resolved ? (
-              <p role="status" className="text-muted-foreground mt-3 text-sm">
-                Saved artwork backend differs from the active backend ({active}). Copy existing
-                artwork to the new storage and clear the recorded storage identity before
-                restarting.
-              </p>
-            ) : null;
-          })()}
         </FieldGroup>
         <RedisGroup form={form} restartKeys={restartKeys} secrets={secrets} />
         <S3Group

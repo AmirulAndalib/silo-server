@@ -13,7 +13,11 @@ import (
 	"github.com/google/uuid"
 )
 
-const artworkBackendAuto = "auto"
+// ArtworkBackendAuto selects S3 when a public bucket is configured and local
+// storage otherwise. It is the artwork.storage_backend default.
+const ArtworkBackendAuto = "auto"
+
+const artworkBackendAuto = ArtworkBackendAuto
 
 // ServerConfig holds HTTP server settings.
 type ServerConfig struct {

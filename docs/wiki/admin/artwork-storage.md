@@ -11,16 +11,19 @@ hosts share a catalog, so every host can read the same artwork.
 Provider artwork caching is enabled by default on new installations and works
 with either backend. The setup wizard can finish without configuring S3.
 
-## Move artwork to another backend
+## The backend is fixed once artwork is stored
 
-1. Stop the server's artwork writers.
-2. Copy the artwork tree to the target store, keeping the same logical keys.
-3. Save the new backend setting.
-4. Delete the `artwork.storage_identity` row from `server_settings`.
-5. Restart the server and verify artwork loads.
+Choose the backend during setup, or before the first library scan. The first
+artwork write records where artwork lives, and after that the backend selector
+is locked in the settings UI and the API rejects a change. Silo does not move
+artwork between backends.
 
-The server refuses to start if the configured storage differs from the recorded
-one, including a different bucket or local directory. Clearing the record alone
-does not move files. Profile avatars remain in private S3 when configured.
-Otherwise they use local storage; the public artwork bucket cannot receive
-avatar uploads.
+If you must move anyway, treat it as a manual migration: stop the server, copy
+the artwork tree to the new store keeping the same keys, save the new backend
+setting directly, delete the `artwork.storage_identity` row from
+`server_settings`, and restart. The server refuses to start if the configured
+storage differs from the recorded one, including a different bucket or local
+directory. Clearing the record alone does not move files.
+
+Profile avatars remain in private S3 when configured. Otherwise they use local
+storage; the public artwork bucket cannot receive avatar uploads.

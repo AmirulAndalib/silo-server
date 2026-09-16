@@ -263,7 +263,8 @@ export function StorageStep() {
   const redisManaged = form.sensitiveManagedByEnv.includes("redis.url");
   // The health probe pings Redis and Postgres; only worth it once there is a
   // Redis to report on.
-  const serverStatus = useAdminServerStatus(redisSaved || redisManaged);
+  const serverStatus = useAdminServerStatus();
+  const artworkLocked = serverStatus.data?.artwork_storage?.locked === true;
   const redisConfigured = form.getValue("redis.url").trim() !== "" || redisSaved;
   const redisStatus = redisStatusFor(redisSaved, redisManaged, serverStatus.data?.health?.redis);
   const publicConfigured = form.getValue("s3.public_bucket").trim() !== "";
@@ -300,6 +301,12 @@ export function StorageStep() {
             { value: "local", label: "Local disk" },
             { value: "s3", label: "S3" },
           ]}
+          disabled={artworkLocked}
+          description={
+            artworkLocked
+              ? "Locked: artwork has already been stored on this backend and cannot be moved."
+              : undefined
+          }
           onChange={(value) => {
             form.setValue("artwork.storage_backend", value);
             if (value === "s3") setOpen((o) => ({ ...o, public: true }));

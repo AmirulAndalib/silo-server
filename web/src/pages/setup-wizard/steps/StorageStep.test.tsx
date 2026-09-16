@@ -10,8 +10,9 @@ vi.mock("@/hooks/useSettingsForm", () => ({
   useSettingsForm: (...args: unknown[]) => formMock(...args),
 }));
 vi.mock("../WizardContext", () => ({ useWizardContext: () => wizardMock() }));
+const serverStatusMock = vi.fn(() => ({ data: undefined as unknown }));
 vi.mock("@/hooks/queries/admin/settings", () => ({
-  useAdminServerStatus: () => ({ data: undefined }),
+  useAdminServerStatus: () => serverStatusMock(),
   useCheckAdminSettingsConnection: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
@@ -50,7 +51,20 @@ function setup() {
 }
 
 describe("StorageStep", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    serverStatusMock.mockReturnValue({ data: undefined });
+  });
+
+  it("locks the backend when artwork is already stored", () => {
+    serverStatusMock.mockReturnValue({
+      data: { artwork_storage: { backend: "local", locked: true } },
+    });
+    setup();
+    render(<StorageStep />);
+    expect(screen.getByRole("combobox", { name: "Artwork storage" })).toBeDisabled();
+    expect(screen.getByText(/Locked: artwork has already been stored/)).toBeInTheDocument();
+  });
 
   it("completes without S3 and reports local artwork", async () => {
     const { markDone, setSummary, save } = setup();

@@ -1337,6 +1337,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 			adminHandler.SettingsRepo = settingsRepo
 		}
 		adminHandler.Config = deps.Config
+		adminHandler.ArtworkBackend = deps.ArtworkBackend
 		if deps.OnUserSessionsRevoked != nil {
 			adminHandler.OnUserSessionsRevoked = deps.OnUserSessionsRevoked
 		}
