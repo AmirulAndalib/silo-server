@@ -474,27 +474,24 @@ func (h *ItemsHandler) handlePersonItem(w http.ResponseWriter, r *http.Request, 
 		dto.PremiereDate = person.BirthDate.Format(time.RFC3339)
 	}
 
-	providerIDs := map[string]string{}
+	providerIDs := providerIDMap(person.ImdbID, person.TmdbID, person.TvdbID)
 	var externalURLs []map[string]any
-	if person.TmdbID != "" {
-		providerIDs["Tmdb"] = person.TmdbID
+	if id, ok := providerIDs[providerKeyTMDB]; ok {
 		externalURLs = append(externalURLs, map[string]any{
 			"Name": "TMDB",
-			"Url":  "https://www.themoviedb.org/person/" + person.TmdbID,
+			"Url":  "https://www.themoviedb.org/person/" + id,
 		})
 	}
-	if person.ImdbID != "" {
-		providerIDs["Imdb"] = person.ImdbID
+	if id, ok := providerIDs[providerKeyIMDB]; ok {
 		externalURLs = append(externalURLs, map[string]any{
 			"Name": "IMDb",
-			"Url":  "https://www.imdb.com/name/" + person.ImdbID,
+			"Url":  "https://www.imdb.com/name/" + id,
 		})
 	}
-	if person.TvdbID != "" {
-		providerIDs["Tvdb"] = person.TvdbID
+	if id, ok := providerIDs[providerKeyTVDB]; ok {
 		externalURLs = append(externalURLs, map[string]any{
 			"Name": "TheTVDB",
-			"Url":  "https://www.thetvdb.com/people/" + person.TvdbID,
+			"Url":  "https://www.thetvdb.com/people/" + id,
 		})
 	}
 	if len(providerIDs) > 0 {
