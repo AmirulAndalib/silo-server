@@ -236,6 +236,7 @@ export const v2Operations = {
   "GET /api/v2/autoscan/capabilities": "getAutoscanDeliveryCapabilities",
   "GET /api/v2/branding/assets/{kind}": "getBrandingAsset",
   "GET /api/v2/calendar": "getCalendar",
+  "GET /api/v2/capabilities/catalog": "getCatalogCapability",
   "GET /api/v2/capabilities/downloads": "getDownloadCapability",
   "GET /api/v2/capabilities/ebooks": "getEbookCapability",
   "GET /api/v2/capabilities/metadata-ai": "getMetadataAICapability",

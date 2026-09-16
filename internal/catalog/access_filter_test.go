@@ -106,30 +106,40 @@ func TestFilterMediaFilesByAccessPresentationLibrary(t *testing.T) {
 			want:   files,
 		},
 		{
-			name:   "selected library narrows accessible files",
+			name:   "selected library without the scope keeps every version",
 			filter: AccessFilter{AllowedLibraryIDs: []int{1, 2}, PresentationLibraryID: &libraryID},
+			want:   files,
+		},
+		{
+			name:   "scope without a selected library keeps every version",
+			filter: AccessFilter{AllowedLibraryIDs: []int{1, 2}, ScopeFilesToLibrary: true},
+			want:   files,
+		},
+		{
+			name:   "selected library narrows accessible files",
+			filter: AccessFilter{AllowedLibraryIDs: []int{1, 2}, PresentationLibraryID: &libraryID, ScopeFilesToLibrary: true},
 			want:   []*models.MediaFile{second},
 		},
 		{
 			name:   "selected library without access restrictions",
-			filter: AccessFilter{PresentationLibraryID: &libraryID},
+			filter: AccessFilter{PresentationLibraryID: &libraryID, ScopeFilesToLibrary: true},
 			want:   []*models.MediaFile{second},
 		},
 		{
 			name:   "selected library cannot bypass allowlist",
-			filter: AccessFilter{AllowedLibraryIDs: []int{1}, PresentationLibraryID: &libraryID},
+			filter: AccessFilter{AllowedLibraryIDs: []int{1}, PresentationLibraryID: &libraryID, ScopeFilesToLibrary: true},
 		},
 		{
 			name:   "selected library cannot bypass disabled libraries",
-			filter: AccessFilter{DisabledLibraryIDs: []int{2}, PresentationLibraryID: &libraryID},
+			filter: AccessFilter{DisabledLibraryIDs: []int{2}, PresentationLibraryID: &libraryID, ScopeFilesToLibrary: true},
 		},
 		{
 			name:   "selected library cannot bypass quality ceiling",
-			filter: AccessFilter{MaxPlaybackQuality: "1080p", PresentationLibraryID: &libraryID},
+			filter: AccessFilter{MaxPlaybackQuality: "1080p", PresentationLibraryID: &libraryID, ScopeFilesToLibrary: true},
 		},
 		{
 			name:   "selected file cannot bypass library scope",
-			filter: AccessFilter{AllowedLibraryIDs: []int{1, 2}, PresentationLibraryID: &libraryID, SelectedFileID: first.ID},
+			filter: AccessFilter{AllowedLibraryIDs: []int{1, 2}, PresentationLibraryID: &libraryID, ScopeFilesToLibrary: true, SelectedFileID: first.ID},
 			want:   []*models.MediaFile{second},
 		},
 	} {

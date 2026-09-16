@@ -65,6 +65,22 @@ type TrailersCapability struct {
 	SupportedTypes  []string `json:"supported_types" doc:"Item types the action applies to; empty when not configured"`
 }
 
+// CatalogCapability reports how this server answers library-scoped catalog
+// reads. It is server-wide: an item in several libraries has one answer for
+// every viewer.
+type CatalogCapability struct {
+	Capability
+	VersionsScopedToLibrary bool `json:"versions_scoped_to_library" doc:"When true, getCatalogItem, listCatalogItemVersions, and the episode reads answer only the versions stored in the library_id they were given; when false, library_id picks presentation but every accessible version is returned"`
+}
+
+// CatalogCapabilityOutput is the getCatalogCapability response.
+type CatalogCapabilityOutput struct {
+	Status       int
+	ETag         string `header:"ETag"`
+	CacheControl string `header:"Cache-Control"`
+	Body         CatalogCapability
+}
+
 // TrailersCapabilityOutput is the getTrailersCapability response.
 type TrailersCapabilityOutput struct {
 	Status       int
@@ -245,6 +261,8 @@ const (
 )
 
 func registerCatalogActions(reg *Registry) {
+	Register(reg, viewerOperation(humaOp(http.MethodGet, Prefix+"/capabilities/catalog", "getCatalogCapability", "catalog",
+		"How library-scoped catalog reads answer on this server: whether library_id narrows an item's versions to that library.")), reg.getCatalogCapability)
 	Register(reg, viewerOperation(humaOp(http.MethodGet, Prefix+"/capabilities/trailers", "getTrailersCapability", "catalog",
 		"Whether this server offers the viewer-facing trailer fetch, its cooldown, and the statuses the action answers.")), reg.getTrailersCapability)
 	refresh := humaOp(http.MethodPost, Prefix+"/catalog/items/{id}/trailers/refresh", "refreshCatalogItemTrailers", "catalog",
@@ -308,6 +326,11 @@ func catalogActionProblem(err error) *Problem {
 		}
 	}
 	return serviceProblem(err)
+}
+
+func (reg *Registry) getCatalogCapability(ctx context.Context, _ *CapabilityInput) (*CatalogCapabilityOutput, error) {
+	doc := CatalogCapability{Capability: Capability{State: StateAvailable}, VersionsScopedToLibrary: reg.versionsScopedToLibrary(ctx)}
+	return &CatalogCapabilityOutput{CacheControl: cacheControlPrivateNoCache, Body: doc}, nil
 }
 
 func (reg *Registry) getTrailersCapability(_ context.Context, _ *CapabilityInput) (*TrailersCapabilityOutput, error) {
