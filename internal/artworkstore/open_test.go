@@ -118,6 +118,18 @@ func TestOpenUpgradesLegacyLowercasedS3Identity(t *testing.T) {
 	if _, _, err := openRecorded(context.Background(), other, settings); err == nil {
 		t.Fatal("different tenant accepted")
 	}
+	// The legacy fingerprint kept key-prefix case, so a case-only prefix
+	// change is a real move and must not ride the endpoint upgrade.
+	prefixCase := &identityStore{Store: store.Store, identity: BackendS3 + "|https://gateway.example/TenantA|artwork|Silo"}
+	prefixSettings := &testSettings{values: map[string]string{IdentitySettingKey: BackendS3 + "|https://gateway.example/tenanta|artwork|silo"}}
+	if _, _, err := openRecorded(context.Background(), prefixCase, prefixSettings); err == nil {
+		t.Fatal("key-prefix case change accepted")
+	}
+	// A recorded bucket in mixed case never came from the legacy writer.
+	bucketCase := &testSettings{values: map[string]string{IdentitySettingKey: BackendS3 + "|https://gateway.example/tenanta|Artwork|silo"}}
+	if _, _, err := openRecorded(context.Background(), store, bucketCase); err == nil {
+		t.Fatal("mixed-case recorded bucket accepted")
+	}
 	// Local identities never had a legacy form; case differences are moves.
 	local := &identityStore{Store: store.Store, identity: BackendLocal + "|/srv/Art"}
 	localSettings := &testSettings{values: map[string]string{IdentitySettingKey: BackendLocal + "|/srv/art"}}

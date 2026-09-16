@@ -43,8 +43,9 @@ move. The first successful write records it as `artwork.storage_identity` in
 `server_settings`, and startup refuses a store with a different identity. Only
 the scheme and host of an S3 endpoint are case-insensitive; an endpoint path
 and the key prefix keep their case. Releases before the identity row
-lowercased the whole endpoint, so startup accepts a recorded S3 identity that
-equals the configured one lowercased and rewrites the row in the exact form.
+lowercased the whole endpoint, so startup accepts a recorded S3 identity whose
+endpoint equals the configured one lowercased, with the bucket and key prefix
+matching exactly, and rewrites the row in the exact form.
 The reconcile task certifies the same row after a manual sweep, and the storage
 sweep scopes its cursor to it. Once recorded, the admin settings API rejects
 any write that would resolve to a different identity with

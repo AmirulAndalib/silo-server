@@ -92,14 +92,22 @@ func openRecorded(ctx context.Context, store Store, settings SettingsStore) (Sto
 // legacyIdentityMatches reports whether recorded is the pre-1.0 S3 fingerprint
 // of current. Releases before the single identity row lowercased the entire
 // endpoint, path included, and the migration carries that value over as
-// "s3|<fingerprint>". An endpoint path is case-sensitive, so a lowercase
-// recorded path against a mixed-case configured one is ambiguous between
-// "same store, older normalization" and "moved to a sibling tenant"; the
-// upgrade path takes the first reading, because a move that differs only by
-// path case while the bucket and prefix stay put is not a deployment anyone
-// performs by accident.
+// "s3|<fingerprint>". Only the endpoint is compared that way: the bucket was
+// always lowercased, and the key prefix always kept its case, so both must
+// match exactly. A recorded lowercase endpoint path against a mixed-case
+// configured one is ambiguous between "same store, older normalization" and
+// "moved to a sibling tenant"; the upgrade path takes the first reading,
+// because a move that differs only by path case while the bucket and prefix
+// stay put is not a deployment anyone performs by accident.
 func legacyIdentityMatches(recorded, current string) bool {
-	return strings.HasPrefix(current, BackendS3+"|") && recorded == strings.ToLower(current)
+	recordedParts := strings.Split(recorded, "|")
+	currentParts := strings.Split(current, "|")
+	if len(recordedParts) != 4 || len(currentParts) != 4 || currentParts[0] != BackendS3 || recordedParts[0] != BackendS3 {
+		return false
+	}
+	return recordedParts[1] == strings.ToLower(currentParts[1]) &&
+		recordedParts[2] == currentParts[2] &&
+		recordedParts[3] == currentParts[3]
 }
 
 type recordingStore struct {
