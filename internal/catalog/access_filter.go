@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/Silo-Server/silo-server/internal/access"
+	"github.com/Silo-Server/silo-server/internal/imagesize"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -14,7 +15,7 @@ const LibraryCollectionVisibilityVisible = "visible"
 type AccessFilter struct {
 	AllowedLibraryIDs     []int
 	AllowedContentIDs     []string
-	DisabledLibraryIDs    []int // user-disabled libraries (only set when AllowedLibraryIDs is nil)
+	DisabledLibraryIDs    []int // libraries whose membership globally hides an item
 	PresentationLibraryID *int
 	PresentationLanguage  string
 	// ProfilePreferredLanguage is the viewer profile's preferred metadata
@@ -35,6 +36,13 @@ type AccessFilter struct {
 	// DeviceID identifies the requesting client for device-scoped setting
 	// resolution. It does not participate in catalog access control.
 	DeviceID string
+	// ImageSize is the artwork size the client asked for on this request, and
+	// like DeviceID it does not participate in access control. It rides here
+	// because detail building fans out through a dozen helpers that already
+	// carry the filter, and every artwork URL in one response has to agree on a
+	// size. Unset means the caller expressed no preference, and the per-context
+	// defaults apply. See internal/imagesize.
+	ImageSize imagesize.Size
 	// NamePrefix, when non-empty, restricts results to items whose
 	// LOWER(COALESCE(NULLIF(BTRIM(sort_title),''), title)) starts with the
 	// given (case-insensitive) prefix. Pushed into the SQL WHERE clause so
@@ -142,6 +150,35 @@ func appendLibraryAccessConditions(keyColumn string, filter AccessFilter, condit
 	*conditions = append(*conditions, libraryAccessConditions(keyColumn, allowedIdx, disabledIdx)...)
 }
 
+// ApplyLibraryAccessFilter appends the canonical item-level library allow/deny
+// predicates for keyColumn. It is exported for query builders outside the
+// catalog package that must enforce the same dual-membership invariant.
+func ApplyLibraryAccessFilter(keyColumn string, filter AccessFilter, conditions *[]string, args *[]any, argIdx *int) {
+	appendLibraryAccessConditions(keyColumn, filter, conditions, args, argIdx)
+}
+
+// episodeParentSeriesIDExpr resolves an episode row to its parent series for
+// listing queries that do not already project series_id. The subquery is a PK
+// lookup on episodes.content_id.
+func episodeParentSeriesIDExpr(episodeIDExpr string) string {
+	return fmt.Sprintf("(SELECT e_parent.series_id FROM episodes e_parent WHERE e_parent.content_id = %s)", episodeIDExpr)
+}
+
+// appendEpisodeParentLibraryAccess applies the series-level dual-membership
+// predicates that detail and playback already enforce via
+// EnsureAccessible(series_id). Episode file membership (episode_libraries) can
+// diverge from series membership for multi-folder shows; listing without this
+// check surfaces episodes of a globally hidden series as unopenable tiles.
+// Callers that already join episodes or a read model should pass the projected
+// series ID directly to avoid a redundant correlated lookup.
+func appendEpisodeParentLibraryAccess(seriesIDExpr string, filter AccessFilter, conditions *[]string, args *[]any, argIdx *int) {
+	appendLibraryAccessConditions(seriesIDExpr, filter, conditions, args, argIdx)
+}
+
+func appendEpisodeParentLibraryAccessByEpisodeID(episodeIDExpr string, filter AccessFilter, conditions *[]string, args *[]any, argIdx *int) {
+	appendEpisodeParentLibraryAccess(episodeParentSeriesIDExpr(episodeIDExpr), filter, conditions, args, argIdx)
+}
+
 // ApplySectionAccessFilter applies non-library access constraints to section queries.
 func ApplySectionAccessFilter(alias string, filter AccessFilter, conditions *[]string, args *[]any, argIdx *int) {
 	applyAccessFilter(alias, filter, conditions, args, argIdx)
@@ -190,4 +227,59 @@ func FilterMediaFilesByAccess(files []*models.MediaFile, filter AccessFilter) []
 		}
 	}
 	return filtered
+}
+
+// SQLTrimSpaceChars is a PostgreSQL E-string holding exactly the runes Go's
+// strings.TrimSpace strips: ASCII whitespace plus every rune with the Unicode
+// White_Space property. Pass it as BTRIM's second argument wherever SQL has to
+// trim a value the way Go would, so a resolution such as "\u00a02160p" ranks
+// the same on both sides instead of falling through to the ELSE branch.
+//
+// Use octal \013 for vertical tab; PostgreSQL treats \v as a literal v. The
+// \uXXXX escapes need a UTF-8 database, which Silo requires anyway.
+const SQLTrimSpaceChars = `E' \t\n\013\f\r\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004` +
+	`\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000'`
+
+// MediaFileQualityCeilingSQL renders the playback-quality ceiling as a SQL
+// condition over the given media_files alias, or "" when the filter sets no
+// ceiling. It mirrors access.QualityAllowed, trimming whitespace the way Go
+// does (see SQLTrimSpaceChars).
+func MediaFileQualityCeilingSQL(alias string, maxPlaybackQuality string) string {
+	quality := access.NormalizePlaybackQuality(maxPlaybackQuality)
+	if quality == "" {
+		return ""
+	}
+	maxRank := 3
+	if quality == access.PlaybackQuality4K {
+		maxRank = 4
+	}
+	return fmt.Sprintf(`CASE UPPER(BTRIM(COALESCE(%s.resolution, ''), %s))
+		WHEN '480P' THEN 1 WHEN '720P' THEN 2 WHEN '1080P' THEN 3
+		WHEN '2160P' THEN 4 WHEN '4320P' THEN 5 ELSE 0 END <= %d`, alias, SQLTrimSpaceChars, maxRank)
+}
+
+// MediaFileAccessSQL renders FileAllowedByAccess as SQL conditions over the
+// given media_files alias, appending any bind values to args and numbering
+// placeholders from the resulting argument positions. Callers must append the
+// returned args in order.
+//
+// This is the SQL mirror of FileAllowedByAccess and must stay in step with it:
+// it exists so queries that would otherwise ship every candidate file to Go can
+// filter and reduce inside PostgreSQL instead.
+func MediaFileAccessSQL(alias string, filter AccessFilter, args []any) ([]string, []any) {
+	conditions := make([]string, 0, 3)
+
+	if filter.AllowedLibraryIDs != nil {
+		args = append(args, filter.AllowedLibraryIDs)
+		conditions = append(conditions, fmt.Sprintf("%s.media_folder_id = ANY($%d)", alias, len(args)))
+	}
+	if len(filter.DisabledLibraryIDs) > 0 {
+		args = append(args, filter.DisabledLibraryIDs)
+		conditions = append(conditions, fmt.Sprintf("NOT (%s.media_folder_id = ANY($%d))", alias, len(args)))
+	}
+	if ceiling := MediaFileQualityCeilingSQL(alias, filter.MaxPlaybackQuality); ceiling != "" {
+		conditions = append(conditions, ceiling)
+	}
+
+	return conditions, args
 }

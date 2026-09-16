@@ -1,3 +1,4 @@
+import type { PersonalizedSorts } from "@/lib/querySortOptions";
 import { useState } from "react";
 
 import { createEmptyQueryDefinition, type QueryDefinition } from "@/api/types";
@@ -58,7 +59,7 @@ interface CatalogFilterSheetProps {
   allowLibrarySelection: boolean;
   showMediaScopeSelector?: boolean;
   allowPersonalizedFilters: boolean;
-  allowPersonalizedSorts: boolean;
+  allowPersonalizedSorts: PersonalizedSorts;
   sortRelevanceScope?: QuerySortRelevanceScope;
   editorMode: "guided" | "advanced";
   onEditorModeChange: (mode: "guided" | "advanced") => void;
@@ -68,7 +69,7 @@ interface CatalogFilterSheetProps {
   filtersLoading?: boolean;
   libraryType?: string;
   // Forwarded into the editor so audiobook-native facet sections can
-  // typeahead-search /api/v1/catalog/filters/search at the same scope.
+  // typeahead-search /api/v2/catalog/filters/search at the same scope.
   catalogState?: CatalogSearchState;
 }
 

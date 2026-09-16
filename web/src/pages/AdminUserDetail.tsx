@@ -1,4 +1,13 @@
-import { useId, useMemo, useState } from "react";
+import { AdminUserDeleteDialog } from "@/components/AdminUserDeleteDialog";
+import {
+  adminUserScope,
+  captureAdminUserAuthority,
+  requireAdminUserAuthority,
+  getAdminUser,
+  type AdminUserEditor,
+} from "@/api/v2/adminUsers";
+import { V2ProblemError } from "@/api/v2/request";
+import { useId, useMemo, useState, useRef } from "react";
 import type { FormEvent } from "react";
 import { useParams, Link } from "react-router";
 import {
@@ -7,7 +16,7 @@ import {
   type AdminUserSettingEntry,
   useAdminUser,
   useUpdateUser,
-  useDeleteUser,
+  useAdminUserCapabilities,
   useImpersonateUser,
   useAdminUserDeviceSettings,
   useAdminUserSettings,
@@ -25,8 +34,14 @@ import { useUserIPs } from "@/hooks/queries/admin/ips";
 import type { AdminUser, AdminUserProfile, UpdateUserRequest, UserIPEntry } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { LibraryAccessSelector } from "@/components/LibraryAccessSelector";
-import { UserTranscodeLimitField } from "@/components/UserTranscodeLimitField";
+import {
+  PolicyAccessFields,
+  PolicyLimitFields,
+  effectiveAccessGroupID,
+  policyInheritHints,
+  policyStateFromUser,
+  policyUpdateFields,
+} from "@/components/UserPolicyFields";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -39,13 +54,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -57,13 +66,8 @@ import { ArrowUpRight, ChevronRight, Pencil, RotateCcw, Settings2, UserCircle } 
 import { useNavigate } from "react-router";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useAuth } from "@/hooks/useAuth";
-import {
-  PLAYBACK_QUALITY_OPTIONS,
-  formatPlaybackQualityPreset,
-  playbackQualityPresetFromValue,
-  playbackQualityValueFromPreset,
-  type PlaybackQualityPreset,
-} from "@/lib/playback-quality";
+import { formatPlaybackQualityPreset } from "@/lib/playback-quality";
+import { INVALID_EMAIL_MESSAGE, isValidEmail } from "@/lib/email";
 import {
   PERMISSION_MARKER_EDIT,
   PERMISSION_METADATA_CURATION,
@@ -86,22 +90,32 @@ import {
   shortenId,
   type DeviceProfileTabEntry,
 } from "@/components/admin/deviceOverrides";
-import { toast } from "sonner";
 import {
   formatDate as formatPreferredDate,
   formatDateTime as formatDateTimePreferred,
 } from "@/lib/datetime";
 
 export default function AdminUserDetail() {
+  useAuth();
+  const { id } = useParams<{ id: string }>();
+  return <AdminUserDetailPage key={`${adminUserScope()}:${id}`} />;
+}
+function AdminUserDetailPage() {
   const { id } = useParams<{ id: string }>();
   const userId = Number(id);
   const navigate = useNavigate();
   const { beginImpersonation } = useAuth();
   const { data: user, isLoading, error } = useAdminUser(userId);
   const [editOpen, setEditOpen] = useState(false);
-  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [deleteEditor, setDeleteEditor] = useState<AdminUserEditor | null>(null);
+  const [editEditor, setEditEditor] = useState<AdminUserEditor | null>(null);
+  const [authority] = useState(captureAdminUserAuthority);
+  const busy = useRef(false);
+  const formBusy = useRef(false);
+  const [actionError, setActionError] = useState("");
+  const capabilities = useAdminUserCapabilities();
+  const available = capabilities.data?.available === true;
   const [confirmImpersonateOpen, setConfirmImpersonateOpen] = useState(false);
-  const deleteMutation = useDeleteUser();
   const impersonateMutation = useImpersonateUser();
 
   if (isLoading) return <div className="page-shell py-8">Loading user...</div>;
@@ -110,12 +124,31 @@ export default function AdminUserDetail() {
 
   const impersonationDisabled = user.role === "admin" || !user.enabled;
 
+  async function loadEditor(deleting = false) {
+    if (busy.current || !available) return;
+    busy.current = true;
+    setActionError("");
+    try {
+      const editor = await getAdminUser(userId, authority);
+      if (deleting) setDeleteEditor(editor);
+      else {
+        setEditEditor(editor);
+        setEditOpen(true);
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not load user.");
+    } finally {
+      busy.current = false;
+    }
+  }
   function handleDelete() {
-    setConfirmDeleteOpen(true);
+    void loadEditor(true);
   }
 
   return (
     <div className="page-shell space-y-6 py-4 sm:py-6">
+      {actionError && <p role="alert">{actionError}</p>}
+      {!available && <p role="status">User administration is unavailable.</p>}
       <nav
         aria-label="Breadcrumb"
         className="text-muted-foreground flex items-center gap-1.5 text-sm"
@@ -148,21 +181,38 @@ export default function AdminUserDetail() {
             size="sm"
             className="flex-1 sm:flex-none"
             onClick={() => setConfirmImpersonateOpen(true)}
-            disabled={impersonationDisabled || impersonateMutation.isPending}
+            disabled={!available || impersonationDisabled || impersonateMutation.isPending}
           >
             Impersonate
           </Button>
-          <Dialog open={editOpen} onOpenChange={setEditOpen}>
-            <DialogTrigger asChild>
-              <Button variant="outline" size="sm" className="flex-1 sm:flex-none">
-                <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
-              </Button>
-            </DialogTrigger>
+          <Dialog
+            open={editOpen}
+            onOpenChange={(open) => {
+              if (!formBusy.current && !open) setEditOpen(false);
+            }}
+          >
+            <Button
+              disabled={!available}
+              onClick={() => void loadEditor()}
+              variant="outline"
+              size="sm"
+              className="flex-1 sm:flex-none"
+            >
+              <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
+            </Button>
             <DialogContent className="sm:max-w-2xl">
               <DialogHeader>
                 <DialogTitle>Edit User</DialogTitle>
               </DialogHeader>
-              <EditUserForm user={user} onClose={() => setEditOpen(false)} />
+              {editEditor && (
+                <EditUserForm
+                  initialEditor={editEditor}
+                  onBusy={(value) => {
+                    formBusy.current = value;
+                  }}
+                  onClose={() => setEditOpen(false)}
+                />
+              )}
             </DialogContent>
           </Dialog>
           <Button
@@ -170,7 +220,7 @@ export default function AdminUserDetail() {
             size="sm"
             className="flex-1 sm:flex-none"
             onClick={handleDelete}
-            disabled={deleteMutation.isPending}
+            disabled={!available}
           >
             Delete
           </Button>
@@ -212,40 +262,40 @@ export default function AdminUserDetail() {
       <ConfirmDialog
         open={confirmImpersonateOpen}
         onOpenChange={(open) => {
-          if (!open) setConfirmImpersonateOpen(false);
+          if (!open && !busy.current) setConfirmImpersonateOpen(false);
         }}
         title="Impersonate user"
         description={`Continue as "${user.username}"? Admin access will be removed until you end impersonation.`}
         confirmLabel="Impersonate"
+        isPending={impersonateMutation.isPending}
         onConfirm={() => {
-          setConfirmImpersonateOpen(false);
+          if (busy.current || !available) return;
+          busy.current = true;
+          setActionError("");
           void impersonateMutation
-            .mutateAsync(user.id)
+            .mutateAsync({ id: user.id, profileContext: authority })
             .then((result) => {
-              beginImpersonation(result, `/admin/users/${user.id}`);
+              requireAdminUserAuthority(result.profileContext);
+              beginImpersonation(result.session, `/admin/users/${user.id}`);
+              impersonateMutation.reset();
+              setConfirmImpersonateOpen(false);
               navigate("/profiles");
             })
-            .catch((error: unknown) => {
-              toast.error(error instanceof Error ? error.message : "Failed to start impersonation");
+            .catch((err: unknown) => {
+              setActionError(err instanceof Error ? err.message : "Failed to start impersonation");
+            })
+            .finally(() => {
+              busy.current = false;
             });
         }}
       />
-      <ConfirmDialog
-        open={confirmDeleteOpen}
-        onOpenChange={(open) => {
-          if (!open) setConfirmDeleteOpen(false);
-        }}
-        title="Delete user"
-        description={`Delete user "${user.username}"? This cannot be undone.`}
-        confirmLabel="Delete"
-        variant="destructive"
-        onConfirm={() => {
-          setConfirmDeleteOpen(false);
-          deleteMutation.mutate(user.id, {
-            onSuccess: () => navigate("/admin/users"),
-          });
-        }}
-      />
+      {deleteEditor && (
+        <AdminUserDeleteDialog
+          initialEditor={deleteEditor}
+          onClose={() => setDeleteEditor(null)}
+          onDeleted={() => navigate("/admin/users")}
+        />
+      )}
     </div>
   );
 }
@@ -254,12 +304,13 @@ function OverviewTab({ user }: { user: AdminUser }) {
   const { data: libraries = [] } = useAdminLibraries();
   const { data: accessGroups = [] } = useAccessGroups();
 
+  const effective = user.effective_policy;
   const libraryNames =
-    user.library_ids === null
+    effective.library_ids === null
       ? "All libraries"
-      : user.library_ids.length === 0
+      : effective.library_ids.length === 0
         ? "None"
-        : user.library_ids
+        : effective.library_ids
             .map((id) => {
               const lib = libraries.find((l) => l.id === id);
               return lib ? lib.name : `#${id}`;
@@ -270,6 +321,10 @@ function OverviewTab({ user }: { user: AdminUser }) {
       ? "None"
       : (accessGroups.find((group) => group.id === user.access_group_id)?.name ??
         `#${user.access_group_id}`);
+
+  // Effective values, annotated when the account overrides its group.
+  const overridden = (isOverride: boolean) => (isOverride ? " (override)" : "");
+  const allowed = (value: boolean) => (value ? "Allowed" : "Not allowed");
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -290,55 +345,73 @@ function OverviewTab({ user }: { user: AdminUser }) {
       <div className="surface-panel overflow-hidden rounded-2xl border-0">
         <div className="border-border border-b px-4 py-3">
           <h3 className="text-sm font-medium">Permissions & Limits</h3>
+          <p className="text-muted-foreground text-xs">
+            Effective values. Fields marked (override) are set on this account; everything else
+            follows the group.
+          </p>
         </div>
         <div className="divide-border divide-y">
           <DetailRow label="Group" value={groupName} />
-          <DetailRow label="Library Access" value={libraryNames} />
+          <DetailRow
+            label="Library Access"
+            value={libraryNames + overridden(user.library_ids !== null)}
+          />
           <DetailRow
             label="Marker Editing"
-            value={
-              hasAssignedPermission(user.permissions, PERMISSION_MARKER_EDIT)
-                ? "Allowed"
-                : "Not allowed"
-            }
+            value={allowed(hasAssignedPermission(effective.permissions, PERMISSION_MARKER_EDIT))}
           />
           <DetailRow
             label="Metadata Curation"
-            value={
-              hasAssignedPermission(user.permissions, PERMISSION_METADATA_CURATION)
-                ? "Allowed"
-                : "Not allowed"
-            }
+            value={allowed(
+              hasAssignedPermission(effective.permissions, PERMISSION_METADATA_CURATION),
+            )}
           />
           <DetailRow
             label="Max Playback Quality"
-            value={formatPlaybackQualityPreset(user.max_playback_quality)}
+            value={
+              formatPlaybackQualityPreset(effective.max_playback_quality) +
+              overridden(user.max_playback_quality !== null)
+            }
           />
           <DetailRow
             label="Max Streams"
-            value={user.max_streams === 0 ? "Unlimited" : String(user.max_streams)}
+            value={
+              (effective.max_streams === 0 ? "Unlimited" : String(effective.max_streams)) +
+              overridden(user.max_streams !== null)
+            }
           />
           <DetailRow
             label="Max Transcodes"
             value={
-              !user.transcode_allowed
+              (!effective.transcode_allowed
                 ? "Disabled"
-                : user.max_transcodes === 0
+                : effective.max_transcodes === 0
                   ? "Unlimited"
-                  : String(user.max_transcodes)
+                  : String(effective.max_transcodes)) + overridden(user.max_transcodes !== null)
             }
           />
-          {!user.transcode_allowed && (
-            <DetailRow
-              label="Audio Transcodes"
-              value={user.audio_transcode_allowed ? "Allowed" : "Not allowed"}
-            />
-          )}
+          <DetailRow
+            label="Audio Transcodes"
+            value={
+              allowed(effective.audio_transcode_allowed) +
+              overridden(user.audio_transcode_allowed !== null)
+            }
+          />
           <DetailRow label="Max Profiles" value={String(user.max_profiles)} />
-          <DetailRow label="Downloads" value={user.download_allowed ? "Allowed" : "Not allowed"} />
+          <DetailRow
+            label="Downloads"
+            value={allowed(effective.download_allowed) + overridden(user.download_allowed !== null)}
+          />
           <DetailRow
             label="Download Transcode"
-            value={user.download_transcode_allowed ? "Allowed" : "Not allowed"}
+            value={
+              allowed(effective.download_transcode_allowed) +
+              overridden(user.download_transcode_allowed !== null)
+            }
+          />
+          <DetailRow
+            label="Media Requests"
+            value={allowed(effective.requests_allowed) + overridden(user.requests_allowed !== null)}
           />
         </div>
       </div>
@@ -356,11 +429,20 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 }
 
 function ProfilesTab({ userId }: { userId: number }) {
-  const { data: profiles, isLoading } = useAdminUserProfiles(userId);
+  const query = useAdminUserProfiles(userId);
+  const { data: profiles, isLoading } = query;
 
   if (isLoading)
     return (
       <div className="text-muted-foreground py-8 text-center text-sm">Loading profiles...</div>
+    );
+
+  if (query.isError)
+    return (
+      <div role="alert">
+        Could not load profiles.{" "}
+        <Button onClick={() => void query.refetch()}>Reload profiles</Button>
+      </div>
     );
 
   if (!profiles || profiles.length === 0)
@@ -487,14 +569,15 @@ function WatchHistoryTab({ userId }: { userId: number }) {
 }
 
 function IPHistoryTab({ userId }: { userId: number }) {
-  const { data: ips = [], isLoading } = useUserIPs(userId);
+  const history = useUserIPs(userId);
+  const { data: ips = [], isLoading } = history;
 
   if (isLoading)
     return (
       <div className="text-muted-foreground py-8 text-center text-sm">Loading IP history...</div>
     );
 
-  if (ips.length === 0)
+  if (ips.length === 0 && !history.isError)
     return (
       <div className="surface-panel text-muted-foreground rounded-2xl py-10 text-center text-sm">
         No IP history found for this user.
@@ -503,6 +586,17 @@ function IPHistoryTab({ userId }: { userId: number }) {
 
   return (
     <div className="surface-panel overflow-x-auto rounded-2xl border-0">
+      {history.isError && (
+        <div role="alert">
+          Could not load IP history.{" "}
+          <Button onClick={() => void history.restart()}>Reload history</Button>
+        </div>
+      )}
+      {history.hasNextPage && (
+        <Button disabled={history.isFetchingNextPage} onClick={() => void history.fetchNextPage()}>
+          Load more
+        </Button>
+      )}
       <Table>
         <TableHeader>
           <TableRow>
@@ -1021,7 +1115,41 @@ function DeviceOverridesTab({ userId }: { userId: number }) {
   );
 }
 
-function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void }) {
+function EditUserForm({
+  initialEditor,
+  onClose,
+  onBusy,
+}: {
+  initialEditor: AdminUserEditor;
+  onClose: () => void;
+  onBusy: (value: boolean) => void;
+}) {
+  const [editor, setEditor] = useState(initialEditor);
+  const user = editor.user;
+  const busy = useRef(false);
+  const [conflict, setConflict] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
+  const [reloading, setReloading] = useState(false);
+  async function reload() {
+    if (busy.current) return;
+    busy.current = true;
+    setReloading(true);
+    onBusy(true);
+    try {
+      setEditor(await getAdminUser(user.id, editor.profileContext));
+      setConflict(false);
+      setError("");
+      if (saved) onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not reload user.");
+    } finally {
+      busy.current = false;
+      setReloading(false);
+      onBusy(false);
+    }
+  }
+
   const { data: libraries = [] } = useAdminLibraries();
   const { data: accessGroups = [] } = useAccessGroups();
   const [username, setUsername] = useState(user.username);
@@ -1030,54 +1158,78 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
   const [role, setRole] = useState(user.role);
   const [enabled, setEnabled] = useState(user.enabled);
   const [permissions, setPermissions] = useState<string[]>(user.permissions ?? []);
-  const [libraryIDs, setLibraryIDs] = useState<number[] | null>(user.library_ids);
   const [accessGroupID, setAccessGroupID] = useState<number | null>(user.access_group_id);
-  const [maxStreams, setMaxStreams] = useState(user.max_streams);
-  const [maxTranscodes, setMaxTranscodes] = useState(user.max_transcodes);
-  const [transcodeAllowed, setTranscodeAllowed] = useState(user.transcode_allowed);
-  const [audioTranscodeAllowed, setAudioTranscodeAllowed] = useState(user.audio_transcode_allowed);
+  const [policy, setPolicy] = useState(() => policyStateFromUser(user));
   const [maxProfiles, setMaxProfiles] = useState(user.max_profiles);
-  const [maxPlaybackQualityPreset, setMaxPlaybackQualityPreset] = useState<PlaybackQualityPreset>(
-    playbackQualityPresetFromValue(user.max_playback_quality),
-  );
-  const [downloadAllowed, setDownloadAllowed] = useState(user.download_allowed);
-  const [downloadTranscodeAllowed, setDownloadTranscodeAllowed] = useState(
-    user.download_transcode_allowed,
-  );
   const accessGroupSelectId = useId();
-  const maxTranscodesId = useId();
+  const roleSelectId = useId();
   const markerEditId = useId();
   const metadataCurationId = useId();
   const updateMutation = useUpdateUser();
   const accessGroupValue = accessGroupID === null ? "none" : String(accessGroupID);
+  // Hints come from the group selected right now, so they follow the picker
+  // instead of describing the group the account was last saved with. When that
+  // group is not in the loaded list, fall back to the resolved policy the
+  // server sent — but only while the saved group is still the selected one.
+  // An admin inherits from no group, so preview the no-group policy while the
+  // picked group is kept for toggling the role back.
+  const hintGroupID = effectiveAccessGroupID(role, accessGroupID);
+  const inheritHints =
+    policyInheritHints(hintGroupID, accessGroups) ??
+    (hintGroupID === user.access_group_id ? user.effective_policy : undefined);
   const selectedGroupMissing =
     accessGroupID !== null && !accessGroups.some((group) => group.id === accessGroupID);
 
-  function handleSubmit(e: FormEvent) {
+  async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (busy.current || conflict || saved) return;
+    if (!isValidEmail(email)) {
+      setError(INVALID_EMAIL_MESSAGE);
+      return;
+    }
+    busy.current = true;
+    onBusy(true);
+    setError("");
     const body: UpdateUserRequest = {
       username,
       email,
       role,
       permissions,
       enabled,
-      library_ids: libraryIDs,
-      access_group_id: accessGroupID,
-      max_streams: maxStreams,
-      max_transcodes: maxTranscodes,
-      transcode_allowed: transcodeAllowed,
-      audio_transcode_allowed: audioTranscodeAllowed,
+      // Admins are never grouped; derive it here so flipping the role back
+      // before saving keeps the picked group.
+      access_group_id: effectiveAccessGroupID(role, accessGroupID),
       max_profiles: maxProfiles,
-      max_playback_quality: playbackQualityValueFromPreset(maxPlaybackQualityPreset),
-      download_allowed: downloadAllowed,
-      download_transcode_allowed: downloadTranscodeAllowed,
+      ...policyUpdateFields(policy),
     };
     if (password) body.password = password;
-    updateMutation.mutate({ id: user.id, body }, { onSuccess: onClose });
+    try {
+      await updateMutation.mutateAsync({ editor, body });
+      setSaved(true);
+      await getAdminUser(user.id, editor.profileContext);
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save user.");
+      if (err instanceof V2ProblemError && err.status === 412) setConflict(true);
+    } finally {
+      busy.current = false;
+      onBusy(false);
+    }
   }
 
   return (
     <form onSubmit={handleSubmit} className="flex max-h-[70vh] flex-col">
+      {error && <p role="alert">{error}</p>}
+      {(conflict || saved) && (
+        <div>
+          {saved
+            ? "Saved. Reload to confirm the current state."
+            : "Your draft is preserved. Reload before submitting again."}
+          <Button type="button" disabled={reloading} onClick={() => void reload()}>
+            Reload current user
+          </Button>
+        </div>
+      )}
       <Tabs defaultValue="account" className="min-h-0 flex-1">
         <TabsList variant="line" className="border-border mb-4 w-full justify-start border-b pb-1">
           <TabsTrigger value="account" className="flex-none px-1">
@@ -1116,9 +1268,9 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
                 />
               </div>
               <div className="space-y-2">
-                <Label>Role</Label>
+                <Label htmlFor={roleSelectId}>Role</Label>
                 <Select value={role} onValueChange={setRole}>
-                  <SelectTrigger>
+                  <SelectTrigger id={roleSelectId}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1150,6 +1302,7 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
                 onValueChange={(value) => {
                   setAccessGroupID(value === "none" ? null : Number(value));
                 }}
+                disabled={role === "admin"}
               >
                 <SelectTrigger id={accessGroupSelectId} className="w-full">
                   <SelectValue />
@@ -1167,11 +1320,6 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
                 </SelectContent>
               </Select>
             </div>
-            <LibraryAccessSelector
-              libraries={libraries}
-              value={libraryIDs}
-              onChange={setLibraryIDs}
-            />
             <div className="border-border flex items-center justify-between rounded-md border px-3 py-2">
               <div>
                 <Label htmlFor={markerEditId}>Marker Editing</Label>
@@ -1206,85 +1354,35 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
                 }
               />
             </div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <div className="border-border flex items-center justify-between rounded-md border px-3 py-2">
-                <Label>Downloads Allowed</Label>
-                <Switch checked={downloadAllowed} onCheckedChange={setDownloadAllowed} />
-              </div>
-              <div className="border-border flex items-center justify-between rounded-md border px-3 py-2">
-                <Label>Download Transcode Allowed</Label>
-                <Switch
-                  checked={downloadTranscodeAllowed}
-                  onCheckedChange={setDownloadTranscodeAllowed}
-                />
-              </div>
-            </div>
+            <PolicyAccessFields
+              state={policy}
+              onChange={setPolicy}
+              effective={inheritHints}
+              libraries={libraries}
+            />
           </TabsContent>
 
           <TabsContent value="limits" className="mt-0 space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1">
-                <Label>Max Streams</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={maxStreams}
-                  onChange={(e) => setMaxStreams(Number(e.target.value))}
-                />
-                <p className="text-muted-foreground text-xs">0 = unlimited</p>
-              </div>
-              <UserTranscodeLimitField
-                id={maxTranscodesId}
-                maxTranscodes={maxTranscodes}
-                onMaxTranscodesChange={setMaxTranscodes}
-                transcodeAllowed={transcodeAllowed}
-                onTranscodeAllowedChange={setTranscodeAllowed}
-                audioTranscodeAllowed={audioTranscodeAllowed}
-                onAudioTranscodeAllowedChange={setAudioTranscodeAllowed}
+            <PolicyLimitFields state={policy} onChange={setPolicy} effective={inheritHints} />
+            <div className="space-y-1">
+              <Label>Max Profiles</Label>
+              <Input
+                type="number"
+                min={1}
+                value={maxProfiles}
+                onChange={(e) => setMaxProfiles(Number(e.target.value))}
               />
-              <div className="space-y-1">
-                <Label>Max Profiles</Label>
-                <Input
-                  type="number"
-                  min={1}
-                  value={maxProfiles}
-                  onChange={(e) => setMaxProfiles(Number(e.target.value))}
-                />
-              </div>
-              <div className="space-y-1 sm:col-span-2">
-                <Label>Max Playback Quality</Label>
-                <Select
-                  value={maxPlaybackQualityPreset}
-                  onValueChange={(value) =>
-                    setMaxPlaybackQualityPreset(value as PlaybackQualityPreset)
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {PLAYBACK_QUALITY_OPTIONS.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-muted-foreground text-xs">
-                  {
-                    PLAYBACK_QUALITY_OPTIONS.find(
-                      (option) => option.value === maxPlaybackQualityPreset,
-                    )?.description
-                  }
-                </p>
-              </div>
             </div>
           </TabsContent>
         </div>
       </Tabs>
 
       <div className="border-border mt-4 border-t pt-4">
-        <Button type="submit" className="w-full" disabled={updateMutation.isPending}>
+        <Button
+          type="submit"
+          className="w-full"
+          disabled={updateMutation.isPending || conflict || saved || reloading}
+        >
           {updateMutation.isPending ? "Saving..." : "Save"}
         </Button>
       </div>

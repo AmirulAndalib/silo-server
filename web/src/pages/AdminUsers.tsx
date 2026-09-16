@@ -1,16 +1,25 @@
-import { useState, useId, useMemo } from "react";
+import { useState, useId, useMemo, useRef } from "react";
 import type { FormEvent, ReactNode } from "react";
-import { Link } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import type { AdminUser, CreateUserRequest, UpdateUserRequest } from "@/api/types";
 import {
   useAdminUsers,
   useCreateUser,
   useUpdateUser,
-  useDeleteUser,
+  useAdminUserCapabilities,
 } from "@/hooks/queries/admin/users";
+import { useAdminServerSettings } from "@/hooks/queries/admin/settings";
 import { useAdminLibraries } from "@/hooks/queries/admin/libraries";
-import { LibraryAccessSelector } from "@/components/LibraryAccessSelector";
-import { UserTranscodeLimitField } from "@/components/UserTranscodeLimitField";
+import { useAccessGroups } from "@/hooks/queries/admin/accessGroups";
+import {
+  PolicyAccessFields,
+  PolicyLimitFields,
+  effectiveAccessGroupID,
+  policyCreateFields,
+  policyInheritHints,
+  policyStateFromUser,
+  policyUpdateFields,
+} from "@/components/UserPolicyFields";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -40,6 +49,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  ArrowRight,
   ChevronDown,
   ChevronUp,
   History,
@@ -50,16 +60,18 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { AdminUserDeleteDialog } from "@/components/AdminUserDeleteDialog";
+import { useAuth } from "@/hooks/useAuth";
+import {
+  adminUserScope,
+  captureAdminUserAuthority,
+  getAdminUser,
+  type AdminUserEditor,
+} from "@/api/v2/adminUsers";
+import { V2ProblemError } from "@/api/v2/request";
 import { Skeleton } from "@/components/ui/skeleton";
 import InvitationsTab from "./admin-settings/InvitationsTab";
 import InviteCodesTab from "./admin-settings/InviteCodesTab";
-import {
-  PLAYBACK_QUALITY_OPTIONS,
-  playbackQualityPresetFromValue,
-  playbackQualityValueFromPreset,
-  type PlaybackQualityPreset,
-} from "@/lib/playback-quality";
 import {
   PERMISSION_MARKER_EDIT,
   PERMISSION_METADATA_CURATION,
@@ -67,17 +79,41 @@ import {
   setAssignedPermission,
 } from "@/lib/permissions";
 import { formatDateTime as formatDateTimePreferred } from "@/lib/datetime";
+import { INVALID_EMAIL_MESSAGE, isValidEmail } from "@/lib/email";
 
 const PAGE_SIZE_OPTIONS = ["25", "50", "100"] as const;
 type UserSortField = "username" | "email" | "role" | "enabled" | "created_at" | "last_active_at";
 type SortDirection = "asc" | "desc";
 
+// Tab ids are a URL contract: other pages deep-link here (General settings
+// points at ?tab=invite-codes), so reuse the trigger values verbatim.
+const ADMIN_USERS_TABS = ["users", "invitations", "invite-codes"] as const;
+type AdminUsersTab = (typeof ADMIN_USERS_TABS)[number];
+
+function normalizeAdminUsersTab(value: string | null): AdminUsersTab {
+  return ADMIN_USERS_TABS.includes(value as AdminUsersTab) ? (value as AdminUsersTab) : "users";
+}
+
 export default function AdminUsers() {
-  const { data: users = [], isLoading } = useAdminUsers();
+  useAuth();
+  return <AdminUsersPage key={adminUserScope()} />;
+}
+function AdminUsersPage() {
+  const usersQuery = useAdminUsers();
+  const { data: users = [], isLoading } = usersQuery;
+  const capabilities = useAdminUserCapabilities();
+  const available = capabilities.data?.available === true;
+  const [authority] = useState(captureAdminUserAuthority);
+  const [actionError, setActionError] = useState("");
+  const busy = useRef(false);
+  const formBusy = useRef(false);
+  const { data: serverSettings } = useAdminServerSettings();
+  const signupsEnabled = serverSettings?.["signup.enabled"] === "true";
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = normalizeAdminUsersTab(searchParams.get("tab"));
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
-  const [confirmDeleteUser, setConfirmDeleteUser] = useState<AdminUser | null>(null);
-  const deleteMutation = useDeleteUser();
+  const [editingUser, setEditingUser] = useState<AdminUserEditor | null>(null);
+  const [confirmDeleteUser, setConfirmDeleteUser] = useState<AdminUserEditor | null>(null);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(25);
@@ -110,8 +146,39 @@ export default function AdminUsers() {
     setSortDir(field === "created_at" || field === "last_active_at" ? "desc" : "asc");
   }
 
+  async function loadEditor(u: AdminUser, deleting = false) {
+    if (busy.current || !available) return;
+    busy.current = true;
+    setActionError("");
+    try {
+      const editor = await getAdminUser(u.id, authority);
+      if (deleting) setConfirmDeleteUser(editor);
+      else {
+        setEditingUser(editor);
+        setDialogOpen(true);
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not load user.");
+    } finally {
+      busy.current = false;
+    }
+  }
   function handleDelete(u: AdminUser) {
-    setConfirmDeleteUser(u);
+    void loadEditor(u, true);
+  }
+
+  function setActiveTab(value: string) {
+    const nextTab = normalizeAdminUsersTab(value);
+    const next = new URLSearchParams(searchParams);
+
+    // The default tab stays the bare /admin/users URL.
+    if (nextTab === "users") {
+      next.delete("tab");
+    } else {
+      next.set("tab", nextTab);
+    }
+
+    setSearchParams(next, { replace: true });
   }
 
   if (isLoading)
@@ -126,26 +193,45 @@ export default function AdminUsers() {
 
   return (
     <div className="space-y-6">
-      <ConfirmDialog
-        open={confirmDeleteUser !== null}
-        onOpenChange={(open) => {
-          if (!open) setConfirmDeleteUser(null);
-        }}
-        title="Delete user"
-        description={`Delete user "${confirmDeleteUser?.username}"? This action cannot be undone.`}
-        confirmLabel="Delete"
-        variant="destructive"
-        onConfirm={() => {
-          if (confirmDeleteUser) deleteMutation.mutate(confirmDeleteUser.id);
-          setConfirmDeleteUser(null);
-        }}
-      />
+      {confirmDeleteUser && (
+        <AdminUserDeleteDialog
+          initialEditor={confirmDeleteUser}
+          onClose={() => setConfirmDeleteUser(null)}
+          onDeleted={() => setConfirmDeleteUser(null)}
+        />
+      )}
+      {actionError && <p role="alert">{actionError}</p>}
+      {usersQuery.isError && (
+        <div role="alert">
+          Could not load users.{" "}
+          <Button onClick={() => void usersQuery.refetch()}>Reload users</Button>
+        </div>
+      )}
+      {!available && <p role="status">User administration is unavailable.</p>}
       <div className="page-header">
         <div className="space-y-3">
           <h1 className="page-title text-[clamp(2rem,4vw,3rem)]">Users</h1>
           <p className="page-subtitle text-sm sm:text-base">
             Manage access, defaults, and invite flow for the people using Silo.
           </p>
+          {serverSettings !== undefined && (
+            <Link
+              to="/admin/settings/general"
+              className="inline-flex w-fit items-center gap-1 hover:opacity-80"
+            >
+              <Badge
+                variant={signupsEnabled ? "outline" : "secondary"}
+                className={
+                  signupsEnabled
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-500"
+                    : undefined
+                }
+              >
+                {signupsEnabled ? "Public signups on" : "Public signups off"}
+                <ArrowRight className="h-3 w-3" aria-hidden="true" />
+              </Badge>
+            </Link>
+          )}
         </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" asChild>
@@ -156,6 +242,7 @@ export default function AdminUsers() {
           <Dialog
             open={dialogOpen}
             onOpenChange={(open) => {
+              if (formBusy.current || (open && !available)) return;
               setDialogOpen(open);
               if (!open) setEditingUser(null);
             }}
@@ -170,7 +257,10 @@ export default function AdminUsers() {
                 <DialogTitle>{editingUser ? "Edit User" : "Create User"}</DialogTitle>
               </DialogHeader>
               <UserForm
-                user={editingUser}
+                initialEditor={editingUser}
+                onBusy={(value) => {
+                  formBusy.current = value;
+                }}
                 onClose={() => {
                   setDialogOpen(false);
                   setEditingUser(null);
@@ -181,7 +271,7 @@ export default function AdminUsers() {
         </div>
       </div>
 
-      <Tabs defaultValue="users">
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList variant="line" className="border-border w-full justify-start border-b">
           <TabsTrigger value="users">Users</TabsTrigger>
           <TabsTrigger value="invitations">Invitations</TabsTrigger>
@@ -307,8 +397,7 @@ export default function AdminUsers() {
                           className="h-7 w-7"
                           aria-label={`Edit ${u.username}`}
                           onClick={() => {
-                            setEditingUser(u);
-                            setDialogOpen(true);
+                            void loadEditor(u);
                           }}
                         >
                           <Pencil className="h-3 w-3" aria-hidden="true" />
@@ -513,8 +602,46 @@ function formatRelativeTime(value?: string | null, fallback = "-") {
   return fallback;
 }
 
-function UserForm({ user, onClose }: { user: AdminUser | null; onClose: () => void }) {
+function UserForm({
+  initialEditor,
+  onClose,
+  onBusy,
+}: {
+  initialEditor: AdminUserEditor | null;
+  onClose: () => void;
+  onBusy: (busy: boolean) => void;
+}) {
+  const [editor, setEditor] = useState(initialEditor);
+  const user = editor?.user;
+  const [authority] = useState(captureAdminUserAuthority);
+  const busy = useRef(false);
+  const [error, setError] = useState("");
+  const [conflict, setConflict] = useState(false);
+  const [reloading, setReloading] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const capabilities = useAdminUserCapabilities();
+  const [createDefaultProfile, setCreateDefaultProfile] = useState(true);
+  async function reload() {
+    if (!editor || busy.current) return;
+    busy.current = true;
+    setReloading(true);
+    onBusy(true);
+    try {
+      setEditor(await getAdminUser(editor.user.id, editor.profileContext));
+      setConflict(false);
+      setError("");
+      if (saved) onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not reload user.");
+    } finally {
+      busy.current = false;
+      setReloading(false);
+      onBusy(false);
+    }
+  }
+
   const { data: libraries = [] } = useAdminLibraries();
+  const { data: accessGroups = [] } = useAccessGroups();
   const [username, setUsername] = useState(user?.username ?? "");
   const [email, setEmail] = useState(user?.email ?? "");
   const [password, setPassword] = useState("");
@@ -523,23 +650,9 @@ function UserForm({ user, onClose }: { user: AdminUser | null; onClose: () => vo
   const [permissions, setPermissions] = useState<string[]>(
     user?.permissions ?? [PERMISSION_MARKER_EDIT],
   );
-  const [libraryIDs, setLibraryIDs] = useState<number[] | null>(user?.library_ids ?? null);
-  // New users start unrestricted at the user layer (0 / any / allowed); the
-  // access group is the source of default policy and composes on top.
-  const [maxStreams, setMaxStreams] = useState<number>(user?.max_streams ?? 0);
-  const [maxTranscodes, setMaxTranscodes] = useState<number>(user?.max_transcodes ?? 0);
-  const [transcodeAllowed, setTranscodeAllowed] = useState(user?.transcode_allowed ?? true);
-  const [audioTranscodeAllowed, setAudioTranscodeAllowed] = useState(
-    user?.audio_transcode_allowed ?? true,
-  );
+  // Policy fields inherit from the access group unless explicitly overridden.
+  const [policy, setPolicy] = useState(() => policyStateFromUser(user ?? null));
   const [maxProfiles, setMaxProfiles] = useState<number>(user?.max_profiles ?? 5);
-  const [maxPlaybackQualityPreset, setMaxPlaybackQualityPreset] = useState<PlaybackQualityPreset>(
-    playbackQualityPresetFromValue(user?.max_playback_quality),
-  );
-  const [downloadAllowed, setDownloadAllowed] = useState(user?.download_allowed ?? true);
-  const [downloadTranscodeAllowed, setDownloadTranscodeAllowed] = useState(
-    user?.download_transcode_allowed ?? true,
-  );
   const usernameId = useId();
   const emailId = useId();
   const passwordId = useId();
@@ -547,61 +660,105 @@ function UserForm({ user, onClose }: { user: AdminUser | null; onClose: () => vo
   const enabledId = useId();
   const markerEditId = useId();
   const metadataCurationId = useId();
-  const downloadAllowedId = useId();
-  const downloadTranscodeAllowedId = useId();
-  const maxStreamsId = useId();
-  const maxTranscodesId = useId();
   const maxProfilesId = useId();
-  const maxPlaybackQualityId = useId();
   const createMutation = useCreateUser();
   const updateMutation = useUpdateUser();
   const isPending = createMutation.isPending || updateMutation.isPending;
+  // This form has no group picker: editing keeps the account's group, while a
+  // new account lands on the default group — except an admin, which the server
+  // deliberately leaves ungrouped (auth.Repository.CreateUser).
+  const defaultGroupID = accessGroups.find((group) => group.is_default)?.id ?? null;
+  const inheritGroupID = effectiveAccessGroupID(role, user ? user.access_group_id : defaultGroupID);
+  const inheritHints =
+    policyInheritHints(inheritGroupID, accessGroups) ??
+    (role === "admin" ? undefined : user?.effective_policy);
 
-  function handleSubmit(e: FormEvent) {
+  async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    if (user) {
-      const body: UpdateUserRequest = {
-        username,
-        email,
-        role,
-        permissions,
-        enabled,
-        library_ids: libraryIDs,
-        max_streams: maxStreams,
-        max_transcodes: maxTranscodes,
-        transcode_allowed: transcodeAllowed,
-        audio_transcode_allowed: audioTranscodeAllowed,
-        max_profiles: maxProfiles,
-        max_playback_quality: playbackQualityValueFromPreset(maxPlaybackQualityPreset),
-        download_allowed: downloadAllowed,
-        download_transcode_allowed: downloadTranscodeAllowed,
-      };
-      if (password) body.password = password;
-      updateMutation.mutate({ id: user.id, body }, { onSuccess: onClose });
-    } else {
-      const body: CreateUserRequest = {
-        username,
-        email,
-        password,
-        role,
-        permissions,
-        create_default_profile: true,
-        max_streams: maxStreams,
-        max_transcodes: maxTranscodes,
-        transcode_allowed: transcodeAllowed,
-        audio_transcode_allowed: audioTranscodeAllowed,
-        max_profiles: maxProfiles,
-        max_playback_quality: playbackQualityValueFromPreset(maxPlaybackQualityPreset) || undefined,
-        download_allowed: downloadAllowed,
-        download_transcode_allowed: downloadTranscodeAllowed,
-      };
-      if (libraryIDs !== null) body.library_ids = libraryIDs;
-      createMutation.mutate(body, { onSuccess: onClose });
+    if (
+      busy.current ||
+      conflict ||
+      saved ||
+      !capabilities.data?.available ||
+      (!user && createDefaultProfile && !capabilities.data.default_profile)
+    )
+      return;
+    if (!isValidEmail(email)) {
+      setError(INVALID_EMAIL_MESSAGE);
+      return;
+    }
+    busy.current = true;
+    onBusy(true);
+    setError("");
+    try {
+      if (user && editor) {
+        const body: UpdateUserRequest = {
+          username,
+          email,
+          role,
+          permissions,
+          enabled,
+          max_profiles: maxProfiles,
+          ...policyUpdateFields(policy),
+        };
+        if (role === "admin") {
+          body.access_group_id = effectiveAccessGroupID(role, user.access_group_id);
+        }
+        if (password) body.password = password;
+        await updateMutation.mutateAsync({ editor, body });
+        setSaved(true);
+        await getAdminUser(user.id, editor.profileContext);
+        onClose();
+      } else {
+        const body: CreateUserRequest = {
+          username,
+          email,
+          password,
+          role,
+          permissions,
+          create_default_profile: createDefaultProfile,
+          max_profiles: maxProfiles,
+          ...policyCreateFields(policy),
+        };
+        await createMutation.mutateAsync({ body, profileContext: authority });
+        createMutation.reset();
+        onClose();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save user.");
+      if (err instanceof V2ProblemError && err.status === 412) setConflict(true);
+    } finally {
+      busy.current = false;
+      onBusy(false);
     }
   }
 
   return (
     <form onSubmit={handleSubmit} className="flex max-h-[70vh] flex-col">
+      {error && <p role="alert">{error}</p>}
+      {(conflict || saved) && (
+        <div>
+          {saved
+            ? "Saved. Reload the user to confirm the current state."
+            : "Your draft is preserved. Reload before submitting again."}
+          <Button type="button" disabled={reloading} onClick={() => void reload()}>
+            Reload current user
+          </Button>
+        </div>
+      )}
+      {!user && (
+        <label className="mb-3 flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={createDefaultProfile}
+            onChange={(event) => setCreateDefaultProfile(event.target.checked)}
+          />
+          Create a default profile
+          {!capabilities.data?.default_profile &&
+            " (unavailable; uncheck to create only the account)"}
+        </label>
+      )}
+
       <Tabs defaultValue="account" className="min-h-0 flex-1">
         <TabsList variant="line" className="border-border mb-4 w-full justify-start border-b pb-1">
           <TabsTrigger value="account" className="flex-none px-1">
@@ -681,11 +838,6 @@ function UserForm({ user, onClose }: { user: AdminUser | null; onClose: () => vo
           </TabsContent>
 
           <TabsContent value="access" className="mt-0 space-y-4">
-            <LibraryAccessSelector
-              libraries={libraries}
-              value={libraryIDs}
-              onChange={setLibraryIDs}
-            />
             <div className="border-border flex items-center justify-between rounded-md border px-3 py-2">
               <div>
                 <Label htmlFor={markerEditId}>Marker Editing</Label>
@@ -720,92 +872,43 @@ function UserForm({ user, onClose }: { user: AdminUser | null; onClose: () => vo
                 }
               />
             </div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <div className="border-border flex items-center justify-between rounded-md border px-3 py-2">
-                <Label htmlFor={downloadAllowedId}>Downloads Allowed</Label>
-                <Switch
-                  id={downloadAllowedId}
-                  checked={downloadAllowed}
-                  onCheckedChange={setDownloadAllowed}
-                />
-              </div>
-              <div className="border-border flex items-center justify-between rounded-md border px-3 py-2">
-                <Label htmlFor={downloadTranscodeAllowedId}>Download Transcode Allowed</Label>
-                <Switch
-                  id={downloadTranscodeAllowedId}
-                  checked={downloadTranscodeAllowed}
-                  onCheckedChange={setDownloadTranscodeAllowed}
-                />
-              </div>
-            </div>
+            <PolicyAccessFields
+              state={policy}
+              onChange={setPolicy}
+              effective={inheritHints}
+              libraries={libraries}
+            />
           </TabsContent>
 
           <TabsContent value="limits" className="mt-0 space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1">
-                <Label htmlFor={maxStreamsId}>Max Streams</Label>
-                <Input
-                  id={maxStreamsId}
-                  type="number"
-                  min={0}
-                  value={maxStreams}
-                  onChange={(e) => setMaxStreams(Number(e.target.value))}
-                />
-                <p className="text-muted-foreground text-xs">0 = unlimited</p>
-              </div>
-              <UserTranscodeLimitField
-                id={maxTranscodesId}
-                maxTranscodes={maxTranscodes}
-                onMaxTranscodesChange={setMaxTranscodes}
-                transcodeAllowed={transcodeAllowed}
-                onTranscodeAllowedChange={setTranscodeAllowed}
-                audioTranscodeAllowed={audioTranscodeAllowed}
-                onAudioTranscodeAllowedChange={setAudioTranscodeAllowed}
+            <PolicyLimitFields state={policy} onChange={setPolicy} effective={inheritHints} />
+            <div className="space-y-1">
+              <Label htmlFor={maxProfilesId}>Max Profiles</Label>
+              <Input
+                id={maxProfilesId}
+                type="number"
+                min={1}
+                value={maxProfiles}
+                onChange={(e) => setMaxProfiles(Number(e.target.value))}
               />
-              <div className="space-y-1">
-                <Label htmlFor={maxProfilesId}>Max Profiles</Label>
-                <Input
-                  id={maxProfilesId}
-                  type="number"
-                  min={1}
-                  value={maxProfiles}
-                  onChange={(e) => setMaxProfiles(Number(e.target.value))}
-                />
-              </div>
-              <div className="space-y-1 sm:col-span-2">
-                <Label htmlFor={maxPlaybackQualityId}>Max Playback Quality</Label>
-                <Select
-                  value={maxPlaybackQualityPreset}
-                  onValueChange={(value) =>
-                    setMaxPlaybackQualityPreset(value as PlaybackQualityPreset)
-                  }
-                >
-                  <SelectTrigger id={maxPlaybackQualityId}>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {PLAYBACK_QUALITY_OPTIONS.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-muted-foreground text-xs">
-                  {
-                    PLAYBACK_QUALITY_OPTIONS.find(
-                      (option) => option.value === maxPlaybackQualityPreset,
-                    )?.description
-                  }
-                </p>
-              </div>
             </div>
           </TabsContent>
         </div>
       </Tabs>
 
       <div className="border-border mt-4 border-t pt-4">
-        <Button type="submit" className="w-full" disabled={isPending}>
+        <Button
+          type="submit"
+          className="w-full"
+          disabled={
+            isPending ||
+            conflict ||
+            saved ||
+            reloading ||
+            !capabilities.data?.available ||
+            (!user && createDefaultProfile && !capabilities.data.default_profile)
+          }
+        >
           {isPending ? "Saving..." : "Save"}
         </Button>
       </div>

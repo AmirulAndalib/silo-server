@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -46,6 +47,8 @@ type serviceFakeRepo struct {
 	settings               map[string]string
 	syncRuns               []SyncRun
 	historyExports         []HistoryExport
+	historyLookupIDs       []string
+	historyLookupLimit     int
 	listItemStates         []ListItemState
 	scrobbleConnections    []Connection
 	scrobbleSessions       []ScrobbleSession
@@ -337,6 +340,27 @@ func (r *serviceFakeRepo) ListPendingHistoryExports(_ context.Context, connectio
 	var exports []HistoryExport
 	for _, export := range r.historyExports {
 		if export.ConnectionID == connectionID &&
+			(export.Status == historyExportStatusPending || export.Status == historyExportStatusFailed) && export.AttemptCount < 5 {
+			exports = append(exports, export)
+			if limit > 0 && len(exports) >= limit {
+				break
+			}
+		}
+	}
+	return exports, nil
+}
+
+func (r *serviceFakeRepo) ListPendingHistoryExportsByHistoryIDs(_ context.Context, connectionID string, historyIDs []string, limit int) ([]HistoryExport, error) {
+	r.historyLookupIDs = append([]string(nil), historyIDs...)
+	r.historyLookupLimit = limit
+	wanted := make(map[string]struct{}, len(historyIDs))
+	for _, historyID := range historyIDs {
+		wanted[historyID] = struct{}{}
+	}
+	var exports []HistoryExport
+	for _, export := range r.historyExports {
+		_, matches := wanted[export.HistoryID]
+		if export.ConnectionID == connectionID && matches &&
 			(export.Status == historyExportStatusPending || export.Status == historyExportStatusFailed) && export.AttemptCount < 5 {
 			exports = append(exports, export)
 			if limit > 0 && len(exports) >= limit {
@@ -790,8 +814,18 @@ func (p progressBatchImporterStub) FetchProgressBatch(context.Context, ServerCon
 type watchedExporterStub struct {
 	exportErr    error
 	exportResult ExportResult
+	exported     *[]LocalPlay
 	key          string
 	source       userstore.WatchHistorySource
+}
+
+type singleBatchWatchedExporterStub struct {
+	watchedExporterStub
+	batchSize int
+}
+
+func (p singleBatchWatchedExporterStub) ExportBatchSize() int {
+	return p.batchSize
 }
 
 func (p watchedExporterStub) Key() string {
@@ -813,7 +847,10 @@ func (p watchedExporterStub) FetchHistory(context.Context, ServerConfig, Connect
 	return nil, nil
 }
 
-func (p watchedExporterStub) ExportHistory(context.Context, ServerConfig, Connection, []LocalPlay) (ExportResult, error) {
+func (p watchedExporterStub) ExportHistory(_ context.Context, _ ServerConfig, _ Connection, plays []LocalPlay) (ExportResult, error) {
+	if p.exported != nil {
+		*p.exported = append(*p.exported, plays...)
+	}
 	return p.exportResult, p.exportErr
 }
 
@@ -2672,6 +2709,12 @@ func TestServiceConfirmedStopSerializesConcurrentConfirmation(t *testing.T) {
 	}
 }
 
+func TestConfirmedStopLeaseExceedsDispatchTimeout(t *testing.T) {
+	if confirmedStopLease <= confirmedStopDispatchTimeout {
+		t.Fatalf("confirmed stop lease %s must exceed dispatch timeout %s", confirmedStopLease, confirmedStopDispatchTimeout)
+	}
+}
+
 func TestServiceConfirmedStopCannotCompleteReclaimedLease(t *testing.T) {
 	repo := newServiceFakeRepo()
 	repo.scrobbleConnections = []Connection{{
@@ -3215,6 +3258,74 @@ func TestServicePluginTransportFailureLeavesExportPending(t *testing.T) {
 	}
 }
 
+func TestServiceLocalWatchEventBypassesHistoricalExportBacklog(t *testing.T) {
+	repo := newServiceFakeRepo()
+	for i := 0; i < 100; i++ {
+		repo.historyExports = append(repo.historyExports, HistoryExport{
+			ID:           fmt.Sprintf("old-export-%d", i),
+			ConnectionID: "conn-1",
+			HistoryID:    fmt.Sprintf("old-history-%d", i),
+			Status:       historyExportStatusPending,
+			WatchedAt:    time.Date(2025, time.January, 1, 0, i, 0, 0, time.UTC),
+		})
+	}
+	var exported []LocalPlay
+	service := NewService(repo, NewRegistry())
+	play := LocalPlay{
+		HistoryID:       "new-history",
+		MediaItemID:     testMovieMediaID,
+		ProviderItemKey: testMovieProviderItemKey,
+		WatchedAt:       time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC),
+	}
+	err := service.exportLocalPlays(context.Background(), Connection{ID: "conn-1"}, ServerConfig{}, watchedExporterStub{
+		exported:     &exported,
+		exportResult: ExportResult{Sent: []string{play.HistoryID}},
+	}, []LocalPlay{play})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exported) != 1 || exported[0].HistoryID != play.HistoryID {
+		t.Fatalf("exported = %#v, want only the live event", exported)
+	}
+	if got := repo.historyExports[len(repo.historyExports)-1].Status; got != historyExportStatusSent {
+		t.Fatalf("new export status = %q, want %q", got, historyExportStatusSent)
+	}
+}
+
+func TestServiceLocalWatchEventBoundsHistoryLookupToProviderBatch(t *testing.T) {
+	repo := newServiceFakeRepo()
+	var exported []LocalPlay
+	plays := make([]LocalPlay, 0, 25)
+	for i := 0; i < 25; i++ {
+		plays = append(plays, LocalPlay{
+			HistoryID:       fmt.Sprintf("history-%d", i),
+			MediaItemID:     testMovieMediaID,
+			ProviderItemKey: testMovieProviderItemKey,
+			WatchedAt:       time.Date(2026, time.August, 6, 12, i, 0, 0, time.UTC),
+		})
+	}
+	service := NewService(repo, NewRegistry())
+	err := service.exportLocalPlays(
+		context.Background(),
+		Connection{ID: "conn-1"},
+		ServerConfig{},
+		singleBatchWatchedExporterStub{
+			watchedExporterStub: watchedExporterStub{exported: &exported},
+			batchSize:           1,
+		},
+		plays,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repo.historyLookupLimit != 1 {
+		t.Fatalf("history lookup limit = %d, want 1", repo.historyLookupLimit)
+	}
+	if len(exported) != 1 {
+		t.Fatalf("exported %d plays, want 1", len(exported))
+	}
+}
+
 func TestServicePluginInvalidCredentialLeavesExportPendingAndRecordsConnectionError(t *testing.T) {
 	repo := newServiceFakeRepo()
 	client := &fakeWatchSyncPluginClient{applyResponse: &pluginv1.WatchSyncApplyEventsResponse{
@@ -3607,4 +3718,59 @@ func TestServiceIncrementalFavoriteAbsenceIsNotRemoval(t *testing.T) {
 	if result.Removed != 0 || len(favorites) != 1 || !repo.listItemStates[0].RemotePresent || !repo.listItemStates[0].LocalPresent {
 		t.Fatalf("result=%#v favorites=%#v state=%#v", result, favorites, repo.listItemStates[0])
 	}
+}
+
+func (r *serviceFakeRepo) UpdateConnectionSettings(ctx context.Context, provider string, userID int, profileID string, expected *ConnectionVersion, update ConnectionUpdate, before func(Connection) error) (Connection, error) {
+	current, ok, err := r.GetConnection(ctx, provider, userID, profileID)
+	if err != nil {
+		return Connection{}, err
+	}
+	if !ok {
+		return Connection{}, ErrConnectionNotFound
+	}
+	if expected != nil && (current.ID != expected.ID || !current.UpdatedAt.Equal(expected.UpdatedAt)) {
+		return Connection{}, ErrStaleConnection
+	}
+	if before != nil {
+		if err := before(current); err != nil {
+			return Connection{}, err
+		}
+	}
+	if update.ImportWatchedEnabled != nil {
+		current.ImportWatchedEnabled = *update.ImportWatchedEnabled
+	}
+	if update.ImportProgressEnabled != nil {
+		current.ImportProgressEnabled = *update.ImportProgressEnabled
+	}
+	if update.ExportWatchedEnabled != nil {
+		current.ExportWatchedEnabled = *update.ExportWatchedEnabled
+	}
+	if update.ExportUnwatchedEnabled != nil {
+		current.ExportUnwatchedEnabled = *update.ExportUnwatchedEnabled
+	}
+	if update.ImportFavoritesEnabled != nil {
+		current.ImportFavoritesEnabled = *update.ImportFavoritesEnabled
+	}
+	if update.ExportFavoritesEnabled != nil {
+		current.ExportFavoritesEnabled = *update.ExportFavoritesEnabled
+	}
+	if update.SyncFavoriteRemovalsEnabled != nil {
+		current.SyncFavoriteRemovalsEnabled = *update.SyncFavoriteRemovalsEnabled
+	}
+	if update.ImportWatchlistEnabled != nil {
+		current.ImportWatchlistEnabled = *update.ImportWatchlistEnabled
+	}
+	if update.ExportWatchlistEnabled != nil {
+		current.ExportWatchlistEnabled = *update.ExportWatchlistEnabled
+	}
+	if update.SyncWatchlistRemovalsEnabled != nil {
+		current.SyncWatchlistRemovalsEnabled = *update.SyncWatchlistRemovalsEnabled
+	}
+	if update.SyncWatchlistOrderEnabled != nil {
+		current.SyncWatchlistOrderEnabled = *update.SyncWatchlistOrderEnabled
+	}
+	if update.ScrobbleEnabled != nil {
+		current.ScrobbleEnabled = *update.ScrobbleEnabled
+	}
+	return r.UpsertConnection(ctx, current)
 }

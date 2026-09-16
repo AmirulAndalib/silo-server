@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -13,19 +14,29 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/Silo-Server/silo-server/internal/clientip"
+	"github.com/Silo-Server/silo-server/internal/httpstream"
 )
 
-// excludedPrefixes are paths that should not be logged.
+// excludedPrefixes are paths that should not be logged. The admin log
+// endpoints are excluded on both majors because the log viewer polls them:
+// logging a read of the activity log into the activity log feeds itself.
+// Keep the v1 and v2 entries in step — /api/v2/admin/logs covers the app,
+// audit, ws, ws-ticket and ws/capabilities operations under that prefix.
 var excludedPrefixes = []string{
 	"/api/v1/health",
 	"/api/v1/ready",
 	"/api/v1/admin/logs",
+	"/api/v2/admin/logs",
 }
 
 // streamPrefixes are paths logged only at session-start (not per-chunk).
+// Both majors serve the same segment/manifest/subtitle shapes, so a v2
+// playback session would otherwise write one activity row per chunk.
 var streamPrefixes = []string{
 	"/api/v1/stream/",
 	"/api/v1/playback/transcode/",
+	"/api/v2/stream/",
+	"/api/v2/playback/transcode/",
 }
 
 // LogContext is a mutable holder stored in context BEFORE auth middleware.
@@ -172,7 +183,11 @@ func RedactSecretPathParams(r *http.Request, path string) string {
 }
 
 // isStreamChunk returns true if the path looks like a stream segment/manifest
-// chunk rather than a session-start request.
+// chunk rather than a session-start request. The match is on path shape, not
+// on the API major: /api/v{1,2}/stream/{session_id} is a session start, while
+// its /subtitles/{track}[/fonts] children and the
+// /playback/transcode/{session_id}/{master.m3u8,segment/{name}} routes are
+// per-chunk fetches.
 func isStreamChunk(path string) bool {
 	return strings.Contains(path, "/segment/") ||
 		strings.Contains(path, "/master.m3u8") ||
@@ -199,6 +214,13 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 		w.wroteHeader = true
 	}
 	return w.ResponseWriter.Write(b)
+}
+
+func (w *statusWriter) ReadFrom(src io.Reader) (int64, error) {
+	if !w.wroteHeader {
+		w.status, w.wroteHeader = http.StatusOK, true
+	}
+	return httpstream.ForwardReadFrom(w.ResponseWriter, w, src, 0, nil)
 }
 
 // Hijack implements http.Hijacker, required for WebSocket upgrades.

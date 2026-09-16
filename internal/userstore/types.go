@@ -47,7 +47,9 @@ type DeviceEntry struct {
 	DeviceID       string
 	DeviceName     string
 	DevicePlatform string
-	LastSeenAt     string
+	// LastSeenAt is an RFC3339 timestamp. Every store formats it the same way so
+	// callers can parse it and compare it against other RFC3339 timestamps.
+	LastSeenAt string
 }
 
 // UpdateProfileInput holds optional fields for updating a profile.
@@ -70,6 +72,37 @@ type UpdateProfileInput struct {
 	LibraryRestrictionsEnabled *bool
 	AllowedLibraryIDs          *[]int
 	MaxPlaybackQuality         *string
+}
+
+// ProgressKey is the keyset position ListProgressPage resumes after: the
+// (UpdatedAt, MediaItemID) of the last row a caller already holds, copied
+// verbatim from a WatchProgress that ListProgressPage returned. The pair is
+// unique per profile (media_item_id is in the primary key), so together with
+// the fixed ORDER BY updated_at DESC, media_item_id DESC it orders every row
+// totally. UpdatedAt keeps whatever sub-second precision the store keeps, so
+// a round trip through the string compares equal to the stored value.
+type ProgressKey struct {
+	UpdatedAt   string
+	MediaItemID string
+}
+
+// ListKey is the keyset position ListFavoritesPage and ListWatchlistPage
+// resume after: the (AddedAt, MediaItemID) of the last row a caller already
+// holds, copied verbatim from a Favorite or WatchlistEntry the page returned.
+// media_item_id is unique per profile in both tables, so with the fixed
+// ORDER BY added_at DESC, media_item_id DESC the pair orders every row
+// totally, and a row added or removed between pages neither repeats nor
+// hides another.
+type ListKey struct {
+	AddedAt     string
+	MediaItemID string
+}
+
+// HistoryKey is the keyset position of one visible history row in
+// (watched_at DESC, id DESC) order, in the store's own string form.
+type HistoryKey struct {
+	WatchedAt string
+	ID        string
 }
 
 // WatchProgress represents watch progress for a media item.
@@ -253,16 +286,21 @@ type CreateCollectionInput struct {
 }
 
 type UpdateCollectionInput struct {
-	ID                         string
-	RequestProfileID           string
-	Name                       *string
-	Description                *string
-	IsShared                   *bool
-	AllowedProfileIDs          *[]string
-	QueryDefinition            *string
-	SortConfig                 *string
-	SourceURL                  *string
-	SourceConfig               *string
+	// ExpectedRevision, when set, is atomically checked in the mutation transaction.
+	ExpectedRevision  *int64
+	ID                string
+	RequestProfileID  string
+	Name              *string
+	Description       *string
+	IsShared          *bool
+	AllowedProfileIDs *[]string
+	QueryDefinition   *string
+	SortConfig        *string
+	SourceURL         *string
+	SourceConfig      *string
+	// SourceConfigPatch atomically merges only present top-level source config members.
+	// Imported collections are supported only by the PostgreSQL store.
+	SourceConfigPatch          *string
 	SyncSchedule               *string
 	ClearSyncSchedule          bool
 	NextSyncAt                 *time.Time
@@ -377,17 +415,21 @@ type SeriesPlaybackPreference struct {
 }
 
 // Collection kinds for CollectionSortPreference. Collection ids are unique
-// within a kind but not across the two id spaces, so the kind is part of the
-// preference's identity.
+// within a kind, so the kind is part of the preference's identity. Personal
+// list sources use PersonalSortPreferenceCollectionID because they have no
+// collection resource id of their own.
 const (
-	CollectionKindLibrary = "library"
-	CollectionKindUser    = "user"
+	CollectionKindLibrary   = "library"
+	CollectionKindUser      = "user"
+	CollectionKindWatchlist = "watchlist"
+	CollectionKindFavorites = "favorites"
+
+	PersonalSortPreferenceCollectionID = "personal"
 )
 
 // CollectionSortPreference records that a profile changed the sort order while
-// browsing a collection, overriding whatever default the collection's creator
-// configured. An empty SortField is a real choice — "show me this collection in
-// its own source order" — and is distinct from having no preference row at all.
+// browsing a collection or personal list. An empty SortField is a real choice
+// to use source order and is distinct from having no preference row at all.
 type CollectionSortPreference struct {
 	ProfileID      string `json:"profile_id"`
 	CollectionKind string `json:"collection_kind"`

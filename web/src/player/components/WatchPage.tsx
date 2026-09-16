@@ -5,15 +5,18 @@ import type { PlaybackRealtimeEventEnvelope } from "../realtime-protocol";
 import type { SubtitleInventoryItemV3 } from "../protocol-v3";
 import { usePlaybackSession } from "../hooks/usePlaybackSession";
 import { usePlayerConfig } from "../context/PlayerConfigContext";
-import { playerFetch } from "../player-fetch";
 import { resolvePlayableSubtitles } from "../utils/playableSubtitles";
 import { patchVersionMarkers, resolveActiveVersionMarkers } from "../utils/watchPageMarkers";
-import { buildSubtitleChoiceRequests } from "../utils/subtitleChoicePersistence";
+import {
+  buildSubtitleChoiceRequests,
+  sendSubtitleChoiceRequest,
+} from "../utils/subtitleChoicePersistence";
 import { VideoPlayer } from "./VideoPlayer";
 import { fetchWatchDetail } from "@/hooks/queries/items";
 import { itemKeys } from "@/hooks/queries/keys";
 import { useWatchPlaybackController } from "@/playback/watchPlaybackContext";
 import { useWatchTogetherRoomConnection } from "../hooks/useWatchTogetherRoomConnection";
+import { toast } from "sonner";
 
 function patchChapterThumbnail(
   versions: PlayerFileVersion[],
@@ -73,12 +76,14 @@ export function WatchPage({
   qualityPreference,
   maxBitrateKbps,
   explicitAudioTrackIndex,
+  initialSubtitleTrackIndexByFileId,
+  initialBitmapSubtitleTrackIndexByFileId,
   preferredSubtitleLanguage,
   preferredSubtitleTrackSignature,
   subtitleMode,
   showForcedSubtitles,
   profileLanguage,
-  autoSkipIntro,
+  introSkipMode,
   autoSkipRecap,
   autoPlayNextPreview,
   canEditMarkers,
@@ -128,7 +133,20 @@ export function WatchPage({
     maxBitrateKbps,
     resumeHints,
     explicitAudioTrackIndex,
+    initialSubtitleTrackIndexByFileId,
+    initialBitmapSubtitleTrackIndexByFileId,
   );
+
+  const initialSubtitleErrorKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!session.initialSubtitleError || !session.playbackAttemptId) return;
+    const key = `${session.playbackAttemptId}:${session.initialSubtitleError}`;
+    if (initialSubtitleErrorKeyRef.current === key) return;
+    initialSubtitleErrorKeyRef.current = key;
+    toast.error(session.initialSubtitleErrorTitle ?? "That subtitle track can't be used", {
+      description: session.initialSubtitleError,
+    });
+  }, [session.initialSubtitleError, session.initialSubtitleErrorTitle, session.playbackAttemptId]);
 
   const audioTracks = useMemo(
     () => playbackVersions.find((v) => v.file_id === session.mediaFileId)?.audio_tracks ?? [],
@@ -198,10 +216,7 @@ export function WatchPage({
         showForcedSubtitles,
       });
       for (const request of requests) {
-        void playerFetch(config, request.path, {
-          method: "PUT",
-          body: JSON.stringify(request.body),
-        }).catch(() => {
+        void sendSubtitleChoiceRequest(config, request).catch(() => {
           // Best effort.
         });
       }
@@ -450,15 +465,16 @@ export function WatchPage({
       onQualitySelect={session.changeQuality}
       onSubtitleTrackChange={session.changeSubtitleTrack}
       onPlanFailure={session.recoverFromFailure}
+      onPlanInvalidated={session.invalidatePlan}
       onReanchorSeek={session.reanchorSeek}
       onApplySubtitleTrack={session.applySubtitleTrack}
       preferredSubtitleLanguage={preferredSubtitleLanguage}
       preferredSubtitleTrackSignature={preferredSubtitleTrackSignature}
-      subtitleMode={subtitleMode}
-      showForcedSubtitles={showForcedSubtitles}
+      subtitleMode={session.initialSubtitleError ? "off" : subtitleMode}
+      showForcedSubtitles={session.initialSubtitleError ? false : showForcedSubtitles}
       profileLanguage={profileLanguage}
       intro={activeMarkers.intro}
-      autoSkipIntro={autoSkipIntro}
+      introSkipMode={introSkipMode}
       credits={activeMarkers.credits}
       recap={activeMarkers.recap}
       autoSkipRecap={autoSkipRecap}

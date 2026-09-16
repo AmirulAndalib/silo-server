@@ -242,7 +242,7 @@ function DeviceDetail({
   const capabilities = useSettingsCapabilities();
   const supportedKeys = useMemo(
     () =>
-      deviceSettingKeysForRevision(capabilities.data?.revision).filter((key) =>
+      deviceSettingKeysForRevision(capabilities.data?.manifest_revision).filter((key) =>
         settingsCapabilitiesSupportKey(capabilities.data, key),
       ),
     [capabilities.data],
@@ -427,6 +427,7 @@ function DeviceDetail({
       ) : (
         <DeviceSettingGroups
           settings={settings}
+          keys={supportedKeys}
           ownerLabel={ownerLabel}
           devicePlatform={device.device_platform}
           disabled={setValue.isPending || clearValue.isPending}

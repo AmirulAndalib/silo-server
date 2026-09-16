@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -93,6 +94,9 @@ func (s stubStore) GetProgress(context.Context, string, string) (*userstore.Watc
 func (s stubStore) ListProgress(context.Context, string, string, int, int) ([]userstore.WatchProgress, error) {
 	panic("unused")
 }
+func (s stubStore) ListProgressPage(context.Context, string, string, *userstore.ProgressKey, int) ([]userstore.WatchProgress, error) {
+	panic("unused")
+}
 func (s stubStore) ListProgressFiltered(context.Context, string, string, []string, *int, int, int) ([]userstore.WatchProgress, error) {
 	panic("unused")
 }
@@ -107,6 +111,9 @@ func (s stubStore) AddHistoryIfMissing(context.Context, userstore.WatchHistoryEn
 	panic("unused")
 }
 func (s stubStore) ListHistory(context.Context, string, int, int) ([]userstore.WatchHistoryEntry, error) {
+	panic("unused")
+}
+func (s stubStore) ListHistoryPage(context.Context, string, *userstore.HistoryKey, int) ([]userstore.WatchHistoryEntry, error) {
 	panic("unused")
 }
 func (s stubStore) ListCompletedHistory(context.Context, userstore.CompletedHistoryQuery) ([]userstore.WatchHistoryEntry, error) {
@@ -140,11 +147,20 @@ func (s stubStore) RemoveFavorite(context.Context, string, string) error {
 func (s stubStore) ListFavorites(context.Context, string, int, int) ([]userstore.Favorite, error) {
 	panic("unused")
 }
+func (s stubStore) ListFavoritesPage(context.Context, string, *userstore.ListKey, int) ([]userstore.Favorite, error) {
+	panic("unused")
+}
 func (s stubStore) ListFavoritesByMediaItems(context.Context, string, []string) (map[string]bool, error) {
 	panic("unused")
 }
 func (s stubStore) IsFavorite(context.Context, string, string) (bool, error) { panic("unused") }
-func (s stubStore) AddToWatchlist(context.Context, string, string) error     { panic("unused") }
+func (s stubStore) GetFavorite(context.Context, string, string) (*userstore.Favorite, error) {
+	panic("unused")
+}
+func (s stubStore) GetWatchlistEntry(context.Context, string, string) (*userstore.WatchlistEntry, error) {
+	panic("unused")
+}
+func (s stubStore) AddToWatchlist(context.Context, string, string) error { panic("unused") }
 func (s stubStore) AddToWatchlistAt(context.Context, string, string, time.Time) (bool, error) {
 	panic("unused")
 }
@@ -156,6 +172,9 @@ func (s stubStore) ReplaceWatchlistOrder(context.Context, string, []string) erro
 	panic("unused")
 }
 func (s stubStore) ListWatchlist(context.Context, string, int, int) ([]userstore.WatchlistEntry, error) {
+	panic("unused")
+}
+func (s stubStore) ListWatchlistPage(context.Context, string, *userstore.ListKey, int) ([]userstore.WatchlistEntry, error) {
 	panic("unused")
 }
 func (s stubStore) ListWatchlistByMediaItems(context.Context, string, []string) (map[string]bool, error) {
@@ -308,6 +327,9 @@ func (s stubStore) ListSettingValuesForResolution(context.Context, userstore.Set
 func (s stubStore) ListAllSettingValues(context.Context) ([]userstore.SettingValue, error) {
 	panic("unused")
 }
+func (s stubStore) ListSettingValuesByScope(context.Context, string, settingscontract.Scope, []string) ([]userstore.SettingValue, error) {
+	panic("unused")
+}
 func (s stubStore) UpsertSettingValue(context.Context, userstore.SettingIdentity, json.RawMessage) (*userstore.SettingValue, error) {
 	panic("unused")
 }
@@ -367,7 +389,7 @@ func TestResolver_UnrestrictedAccountRestrictedProfile(t *testing.T) {
 
 func TestResolver_RestrictedAccountInheritingProfile(t *testing.T) {
 	resolver := NewResolver(
-		stubUserRepo{user: &models.User{ID: 1, LibraryIDs: []int{1, 3}, MaxPlaybackQuality: "1080p", AccessPolicyRevision: 4}},
+		stubUserRepo{user: &models.User{ID: 1, LibraryIDs: []int{1, 3}, MaxPlaybackQuality: ptr("1080p"), AccessPolicyRevision: 4}},
 		stubStoreProvider{store: stubStore{profile: &userstore.Profile{ID: "prof-1"}}},
 		nil,
 	)
@@ -646,34 +668,60 @@ func TestResolver_MetadataLanguageIgnoresLegacyColumn(t *testing.T) {
 }
 
 func TestResolver_AppliesGroupPolicy(t *testing.T) {
-	resolver := NewResolver(
-		stubUserRepo{user: &models.User{
-			ID:                   1,
-			LibraryIDs:           []int{1, 2, 3},
-			MaxPlaybackQuality:   PlaybackQuality4K,
-			AccessPolicyRevision: 5,
-		}},
-		stubStoreProvider{store: stubStore{}},
-		nil,
-		stubGroupProvider{group: &GroupPolicy{
-			LibraryIDs:               []int{2, 4},
-			MaxPlaybackQuality:       PlaybackQualityStandard,
-			DownloadAllowed:          true,
-			DownloadTranscodeAllowed: true,
-			RequestsAllowed:          true,
-		}},
-	)
+	groupID := int64(9)
+	group := &GroupPolicy{
+		LibraryIDs:               []int{2, 4},
+		MaxPlaybackQuality:       PlaybackQualityStandard,
+		DownloadAllowed:          true,
+		DownloadTranscodeAllowed: true,
+		TranscodeAllowed:         true,
+		AudioTranscodeAllowed:    true,
+		RequestsAllowed:          true,
+	}
 
-	scope, err := resolver.Resolve(context.Background(), ResolveInput{UserID: 1})
-	if err != nil {
-		t.Fatalf("Resolve() error: %v", err)
-	}
-	if !scope.LibrariesRestricted || len(scope.AllowedLibraryIDs) != 1 || scope.AllowedLibraryIDs[0] != 2 {
-		t.Fatalf("scope libraries = restricted %t ids %#v, want [2]", scope.LibrariesRestricted, scope.AllowedLibraryIDs)
-	}
-	if scope.MaxPlaybackQuality != PlaybackQualityStandard {
-		t.Fatalf("MaxPlaybackQuality = %q, want %q", scope.MaxPlaybackQuality, PlaybackQualityStandard)
-	}
+	t.Run("unset account fields inherit the group", func(t *testing.T) {
+		resolver := NewResolver(
+			stubUserRepo{user: &models.User{ID: 1, AccessGroupID: &groupID, AccessPolicyRevision: 5}},
+			stubStoreProvider{store: stubStore{}},
+			nil,
+			stubGroupProvider{group: group},
+		)
+		scope, err := resolver.Resolve(context.Background(), ResolveInput{UserID: 1})
+		if err != nil {
+			t.Fatalf("Resolve() error: %v", err)
+		}
+		if !scope.LibrariesRestricted || !reflect.DeepEqual(scope.AllowedLibraryIDs, []int{2, 4}) {
+			t.Fatalf("scope libraries = restricted %t ids %#v, want [2 4]", scope.LibrariesRestricted, scope.AllowedLibraryIDs)
+		}
+		if scope.MaxPlaybackQuality != PlaybackQualityStandard {
+			t.Fatalf("MaxPlaybackQuality = %q, want %q", scope.MaxPlaybackQuality, PlaybackQualityStandard)
+		}
+	})
+
+	t.Run("account overrides replace the group values", func(t *testing.T) {
+		resolver := NewResolver(
+			stubUserRepo{user: &models.User{
+				ID:                   1,
+				AccessGroupID:        &groupID,
+				LibraryIDs:           []int{1, 2, 3},
+				MaxPlaybackQuality:   ptr(PlaybackQuality4K),
+				AccessPolicyRevision: 5,
+			}},
+			stubStoreProvider{store: stubStore{}},
+			nil,
+			stubGroupProvider{group: group},
+		)
+		scope, err := resolver.Resolve(context.Background(), ResolveInput{UserID: 1})
+		if err != nil {
+			t.Fatalf("Resolve() error: %v", err)
+		}
+		if !scope.LibrariesRestricted || !reflect.DeepEqual(scope.AllowedLibraryIDs, []int{1, 2, 3}) {
+			t.Fatalf("scope libraries = restricted %t ids %#v, want [1 2 3]", scope.LibrariesRestricted, scope.AllowedLibraryIDs)
+		}
+		if scope.MaxPlaybackQuality != PlaybackQuality4K {
+			t.Fatalf("MaxPlaybackQuality = %q, want %q", scope.MaxPlaybackQuality, PlaybackQuality4K)
+		}
+	})
 }
 
 type stubGroupProvider struct {
@@ -683,4 +731,8 @@ type stubGroupProvider struct {
 
 func (p stubGroupProvider) GetPolicyForUser(context.Context, int) (*GroupPolicy, error) {
 	return p.group, p.err
+}
+
+func (s stubStore) LatestHistoryIDs(context.Context, string, map[string][]string) (map[string]string, error) {
+	return nil, nil
 }

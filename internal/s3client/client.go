@@ -14,17 +14,20 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/telemetry"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go/middleware"
 )
 
 // ErrNotFound is returned when the requested S3 object does not exist.
@@ -41,10 +44,15 @@ const (
 // S3-compatible backends require parts of at least 5 MiB (except the last).
 const streamUploadPartSize = 8 * 1024 * 1024
 
+// publicDeliveryProbeTimeout bounds background artwork delivery verification.
+const publicDeliveryProbeTimeout = 5 * time.Second
+
 // BucketConfig holds the configuration for connecting to a single S3 bucket.
 // Each bucket may have different credentials and endpoints, allowing per-bucket
 // configuration for metadata, operational, and user-db buckets.
 type BucketConfig struct {
+	// Role is an operational category, never a bucket name or endpoint.
+	Role           string
 	Endpoint       string
 	PublicEndpoint string // optional: public CDN domain for reads (e.g. R2 custom domain)
 	Region         string
@@ -61,6 +69,7 @@ type BucketConfig struct {
 
 // Client wraps an AWS SDK v2 S3 client configured for a specific bucket.
 type Client struct {
+	role           string
 	s3Client       *s3.Client
 	presignClient  *s3.PresignClient
 	bucket         string
@@ -89,7 +98,10 @@ func NewClient(cfg BucketConfig) *Client {
 		region = "us-east-1"
 	}
 
+	role := telemetry.Role(cfg.Role)
 	s3Client := s3.New(s3.Options{
+		APIOptions:   []func(*middleware.Stack) error{observeS3(role)},
+		HTTPClient:   observedHTTPClient{inner: sharedHTTPClient(), role: role},
 		Region:       region,
 		BaseEndpoint: aws.String(cfg.Endpoint),
 		Credentials: credentials.NewStaticCredentialsProvider(
@@ -100,7 +112,13 @@ func NewClient(cfg BucketConfig) *Client {
 		UsePathStyle: cfg.PathStyle,
 	})
 
-	presignClient := s3.NewPresignClient(s3Client)
+	// URL signing is local work, so it must not appear as a storage call.
+	presignClient := s3.NewPresignClient(s3Client, s3.WithPresignClientFromClientOptions(func(o *s3.Options) {
+		o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
+			_, _ = stack.Initialize.Remove("SiloObserve")
+			return nil
+		})
+	}))
 
 	tokenParam := cfg.TokenParam
 	if tokenParam == "" {
@@ -113,6 +131,7 @@ func NewClient(cfg BucketConfig) *Client {
 	keyPrefix := NormalizeKeyPrefix(cfg.KeyPrefix)
 
 	return &Client{
+		role:           role,
 		s3Client:       s3Client,
 		presignClient:  presignClient,
 		bucket:         cfg.Bucket,
@@ -333,10 +352,17 @@ func (c *Client) cloudflareTokenURL(key string) string {
 		"?" + c.tokenParam + "=" + ts + "-" + url.QueryEscape(token)
 }
 
-// UsesExternalAuth returns true if read URLs are served via a public endpoint
-// (token auth or public bucket) rather than S3 presigned URLs.
+// UsesExternalAuth reports whether the configured URL auth mode is public or
+// token-based. Use UsesExternalDelivery when endpoint availability matters.
 func (c *Client) UsesExternalAuth() bool {
 	return c.urlAuth == URLAuthCloudflareToken || c.urlAuth == URLAuthPublic
+}
+
+// UsesExternalDelivery reports whether generated read URLs actually use a
+// separately configured public or token-authenticated endpoint. An auth mode
+// without its endpoint still falls back to standard S3 presigning.
+func (c *Client) UsesExternalDelivery() bool {
+	return c.publicEndpoint != "" && c.UsesExternalAuth()
 }
 
 // PublicURL returns the deterministic public URL for an object based on the
@@ -429,6 +455,62 @@ func (c *Client) ObjectExists(ctx context.Context, bucket, key string) (bool, er
 	}
 
 	return true, nil
+}
+
+// ArtworkDeliveryScope invalidates verification when storage or delivery
+// endpoint or URL policy changes. Credentials are excluded from this persisted
+// digest. Rotated credentials sign fresh URLs and use normal background checks.
+func (c *Client) ArtworkDeliveryScope() string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		c.endpoint, c.bucket, c.keyPrefix, c.publicEndpoint, c.urlAuth,
+		c.tokenParam,
+	}, "\x00")))
+	return hex.EncodeToString(sum[:])
+}
+
+// ObjectAvailable reports whether a client-facing read URL is fetchable now.
+// Public and token-authenticated endpoints are a separate delivery path from
+// the S3 API, so they are probed with the same GET method clients use. A
+// one-byte range avoids transferring the image body when the endpoint honors
+// ranges. Standard presigned delivery keeps using the cheaper storage HEAD.
+func (c *Client) ObjectAvailable(ctx context.Context, bucket, key string) (bool, error) {
+	if !c.UsesExternalDelivery() {
+		return c.ObjectExists(ctx, bucket, key)
+	}
+
+	readURL, err := c.PresignGetURL(ctx, bucket, key, publicDeliveryProbeTimeout)
+	if err != nil {
+		return false, err
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, publicDeliveryProbeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, readURL, nil)
+	if err != nil {
+		return false, fmt.Errorf("s3 create public delivery probe for %s/%s", bucket, key)
+	}
+	req.Header.Set("Range", "bytes=0-0")
+
+	// The probe shares the S3 transport and its dial metrics: external
+	// delivery GETs are part of the same verifier burst as the storage HEADs.
+	resp, err := observedHTTPClient{inner: sharedDeliveryHTTPClient, role: c.role}.Do(req)
+	if err != nil {
+		// The underlying url.Error includes the signed URL, so do not wrap it:
+		// token-auth query values must never reach logs.
+		return false, fmt.Errorf("s3 public delivery probe for %s/%s failed", bucket, key)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		var firstByte [1]byte
+		if _, err := io.ReadFull(resp.Body, firstByte[:]); err != nil {
+			return false, fmt.Errorf("s3 public delivery probe for %s/%s returned no readable body", bucket, key)
+		}
+		return true, nil
+	}
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		return false, nil
+	}
+	return false, fmt.Errorf("s3 public delivery probe for %s/%s returned status %d", bucket, key, resp.StatusCode)
 }
 
 // ObjectMatches checks that an immutable object exists with the expected

@@ -7,10 +7,11 @@ import {
   useCreateHistoryImportRun,
   useHistoryImportRun,
   useHistoryImportRuns,
+  type PersonalImportRun,
   useHistoryImportSources,
   useLoginEmbyConnect,
 } from "@/hooks/queries/history-import";
-import type { EmbyConnectLoginResponse, HistoryImportRun } from "@/api/types";
+import type { EmbyConnectLoginResponse } from "@/api/types";
 import { SettingsGroup } from "@/components/settings/SettingsGroup";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -38,7 +39,7 @@ import {
 } from "./HistoryImportSettings.utils";
 import { cn } from "@/lib/utils";
 import { AlertTriangle, CheckCircle2, CircleSlash2, Clock, Loader2, XCircle } from "lucide-react";
-import { formatDate } from "@/lib/datetime";
+import { formatRelativeTime as formatRelativeTimeBase } from "@/lib/date";
 
 const STATUS_CONFIG = {
   queued: {
@@ -65,6 +66,13 @@ const STATUS_CONFIG = {
     colorClass: "text-destructive",
     bgClass: "bg-destructive/10 border-destructive/20",
     label: "Failed",
+  },
+  canceling: {
+    icon: Loader2,
+    colorClass: "text-muted-foreground",
+    bgClass: "bg-muted border-border",
+    label: "Cancelling",
+    spin: true,
   },
   cancelled: {
     icon: CircleSlash2,
@@ -112,7 +120,11 @@ export default function HistoryImportSettings() {
 
   const loginMutation = useLoginEmbyConnect();
   const createRunMutation = useCreateHistoryImportRun();
-  const { data: activeRun } = useHistoryImportRun(activeRunId);
+  const {
+    data: activeRun,
+    error: runError,
+    refetch: refreshRun,
+  } = useHistoryImportRun(activeRunId ?? recentRuns[0]?.id);
 
   const displayRun = activeRun ?? recentRuns[0] ?? null;
   const pending = loginMutation.isPending || createRunMutation.isPending || plexAuthPending;
@@ -629,6 +641,16 @@ export default function HistoryImportSettings() {
             : "Results from the most recent import run."
         }
       >
+        {runError && (
+          <div role="alert" className="text-destructive mb-3 text-sm">
+            <p>
+              Import status could not be refreshed. Check its status before starting another import.
+            </p>
+            <Button variant="outline" size="sm" onClick={() => void refreshRun()}>
+              Refresh status
+            </Button>
+          </div>
+        )}
         <RunSummary run={displayRun} />
       </SettingsGroup>
 
@@ -766,7 +788,7 @@ function EmptyNotice({ children }: { children: React.ReactNode }) {
   );
 }
 
-function RunStatusIndicator({ status }: { status: HistoryImportRun["status"] }) {
+function RunStatusIndicator({ status }: { status: PersonalImportRun["status"] }) {
   const config = STATUS_CONFIG[status];
   const Icon = config.icon;
   const shouldSpin = "spin" in config && config.spin;
@@ -785,7 +807,7 @@ function RunStatusIndicator({ status }: { status: HistoryImportRun["status"] }) 
   );
 }
 
-function RunSummary({ run }: { run: HistoryImportRun | null }) {
+function RunSummary({ run }: { run: PersonalImportRun | null }) {
   if (!run) {
     return (
       <div className="surface-panel-subtle flex flex-col items-center justify-center rounded-[1.2rem] py-10 text-center">
@@ -938,7 +960,7 @@ function HistoryRunCard({
   active,
   onClick,
 }: {
-  run: HistoryImportRun;
+  run: PersonalImportRun;
   active: boolean;
   onClick: () => void;
 }) {
@@ -987,16 +1009,13 @@ function HistoryRunCard({
    ──────────────────────────────────────────────────────────── */
 
 function formatRelativeTime(dateStr: string): string {
-  const diffMs = Date.now() - new Date(dateStr).getTime();
-  const minutes = Math.floor(diffMs / 60_000);
-  const hours = Math.floor(minutes / 60);
-  const days = Math.floor(hours / 24);
-
-  if (minutes < 1) return "Just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  if (hours < 24) return `${hours}h ago`;
-  if (days < 7) return `${days}d ago`;
-  return formatDate(dateStr);
+  return (
+    formatRelativeTimeBase(dateStr, {
+      rounding: "floor",
+      justNowLabel: "Just now",
+      absoluteAfterDays: 7,
+    }) ?? ""
+  );
 }
 
 function formatDuration(startStr: string, endStr: string): string {

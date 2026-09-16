@@ -16,6 +16,7 @@ import (
 )
 
 type Repository interface {
+	UpdateConnectionSettings(context.Context, string, int, string, *ConnectionVersion, ConnectionUpdate, func(Connection) error) (Connection, error)
 	GetServerSetting(ctx context.Context, key string) (string, error)
 	UpsertAuthSession(ctx context.Context, session DeviceAuthSession) (DeviceAuthSession, error)
 	GetAuthSession(ctx context.Context, id string) (DeviceAuthSession, error)
@@ -34,6 +35,7 @@ type Repository interface {
 	ListListEventConnections(ctx context.Context, userID int, profileID string, list ListKind) ([]Connection, error)
 	UpsertHistoryExports(ctx context.Context, exports []HistoryExport) error
 	ListPendingHistoryExports(ctx context.Context, connectionID string, limit int) ([]HistoryExport, error)
+	ListPendingHistoryExportsByHistoryIDs(ctx context.Context, connectionID string, historyIDs []string, limit int) ([]HistoryExport, error)
 	MarkHistoryExportStatus(ctx context.Context, id string, status string, lastError string) error
 	MarkHistoryExportSatisfiedByScrobble(ctx context.Context, connectionID string, historyID string) error
 	UpsertListItemStates(ctx context.Context, states []ListItemState) error
@@ -242,18 +244,6 @@ func (r *PostgresRepository) UpsertConnection(ctx context.Context, conn Connecti
 			refresh_token = EXCLUDED.refresh_token,
 			token_expires_at = EXCLUDED.token_expires_at,
 			plugin_credentials = EXCLUDED.plugin_credentials,
-			import_watched_enabled = EXCLUDED.import_watched_enabled,
-			import_progress_enabled = EXCLUDED.import_progress_enabled,
-			export_watched_enabled = EXCLUDED.export_watched_enabled,
-			export_unwatched_enabled = EXCLUDED.export_unwatched_enabled,
-			import_favorites_enabled = EXCLUDED.import_favorites_enabled,
-			export_favorites_enabled = EXCLUDED.export_favorites_enabled,
-			sync_favorite_removals_enabled = EXCLUDED.sync_favorite_removals_enabled,
-			import_watchlist_enabled = EXCLUDED.import_watchlist_enabled,
-			export_watchlist_enabled = EXCLUDED.export_watchlist_enabled,
-			sync_watchlist_removals_enabled = EXCLUDED.sync_watchlist_removals_enabled,
-			sync_watchlist_order_enabled = EXCLUDED.sync_watchlist_order_enabled,
-			scrobble_enabled = EXCLUDED.scrobble_enabled,
 			last_inbound_sync_at = EXCLUDED.last_inbound_sync_at,
 			last_progress_sync_at = EXCLUDED.last_progress_sync_at,
 			last_outbound_sync_at = EXCLUDED.last_outbound_sync_at,
@@ -263,7 +253,7 @@ func (r *PostgresRepository) UpsertConnection(ctx context.Context, conn Connecti
 			last_error = EXCLUDED.last_error,
 			rate_limited_until = EXCLUDED.rate_limited_until,
 			sync_cursors = EXCLUDED.sync_cursors,
-			updated_at = now()
+			updated_at = GREATEST(clock_timestamp(), watch_provider_connections.updated_at + interval '1 microsecond')
 		RETURNING `+connectionColumns+`
 	`,
 		conn.ID,
@@ -417,7 +407,7 @@ func (r *PostgresRepository) DeferConnectionsForAccount(
 	}
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE watch_provider_connections
-		SET rate_limited_until = $1, last_error = $2, updated_at = now()
+		SET rate_limited_until = $1, last_error = $2, updated_at = GREATEST(clock_timestamp(), updated_at + interval '1 microsecond')
 		WHERE provider = $3 AND provider_account_id = $4
 	`, until, lastError, provider, providerAccountID)
 	if err != nil {
@@ -761,6 +751,60 @@ func (r *PostgresRepository) ListPendingHistoryExports(ctx context.Context, conn
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate pending history exports: %w", err)
+	}
+	return exports, nil
+}
+
+func (r *PostgresRepository) ListPendingHistoryExportsByHistoryIDs(
+	ctx context.Context,
+	connectionID string,
+	historyIDs []string,
+	limit int,
+) ([]HistoryExport, error) {
+	if len(historyIDs) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 || limit > len(historyIDs) {
+		limit = len(historyIDs)
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id::text, connection_id::text, history_id, media_item_id, watched_at,
+			provider_item_key, status, attempt_count, last_attempt_at, last_error, created_at, updated_at
+		FROM watch_provider_history_exports
+		WHERE connection_id = $1::uuid
+		  AND history_id = ANY($2::text[])
+		  AND status IN ('pending', 'failed')
+		  AND attempt_count < 5
+		ORDER BY watched_at ASC
+		LIMIT $3
+	`, connectionID, historyIDs, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list pending history exports by history ids: %w", err)
+	}
+	defer rows.Close()
+	var exports []HistoryExport
+	for rows.Next() {
+		var export HistoryExport
+		if err := rows.Scan(
+			&export.ID,
+			&export.ConnectionID,
+			&export.HistoryID,
+			&export.MediaItemID,
+			&export.WatchedAt,
+			&export.ProviderItemKey,
+			&export.Status,
+			&export.AttemptCount,
+			&export.LastAttemptAt,
+			&export.LastError,
+			&export.CreatedAt,
+			&export.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan pending history export by history ids: %w", err)
+		}
+		exports = append(exports, export)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pending history exports by history ids: %w", err)
 	}
 	return exports, nil
 }

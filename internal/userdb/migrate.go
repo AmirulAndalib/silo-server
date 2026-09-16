@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 19
+const schemaVersion = 25
 
 func runMigrations(db *sql.DB) error {
 	version, err := userVersion(db)
@@ -187,7 +187,86 @@ func runMigrations(db *sql.DB) error {
 		}
 	}
 
+	if version < 20 {
+		if err := migrateToV20(tx); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 20"); err != nil {
+			return fmt.Errorf("setting sqlite user_version 20: %w", err)
+		}
+	}
+
+	if version < 21 {
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_watch_history_item_witness ON watch_history (profile_id, media_item_id, watched_at DESC, id DESC)`); err != nil {
+			return fmt.Errorf("migration v21 failed: %w", err)
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 21"); err != nil {
+			return err
+		}
+	}
+
+	if version < 22 {
+		// Normalize legacy NULLs once; all future direct writes are normalized by
+		// the schema triggers, preserving indexed tuple continuation.
+		if _, err := tx.Exec(`UPDATE personal_collection_items SET position = 0 WHERE position IS NULL`); err != nil {
+			return fmt.Errorf("migration v22 failed: %w", err)
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 22"); err != nil {
+			return err
+		}
+	}
+
+	if version < 23 {
+		if _, err := tx.Exec(playbackSinkSchema); err != nil {
+			return fmt.Errorf("migration v23 failed: %w", err)
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 23"); err != nil {
+			return err
+		}
+	}
+
+	if version < 24 {
+		if _, err := tx.Exec(playbackSourceSchema); err != nil {
+			return fmt.Errorf("migration v24 failed: %w", err)
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 24"); err != nil {
+			return err
+		}
+	}
+	if version < 25 {
+		// InitSchema runs before migrations and creates the current table when
+		// opening pre-v14 stores, which did not yet have onboarding state.
+		if !columnExists(tx, "profile_onboarding", "revision") {
+			if _, err := tx.Exec(`ALTER TABLE profile_onboarding ADD COLUMN revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0)`); err != nil {
+				return fmt.Errorf("migration v25 failed: %w", err)
+			}
+		}
+		if _, err := tx.Exec(onboardingRevisionSchema); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 25"); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
+}
+
+// migrateToV20 widens collection sort preferences to include the two personal
+// catalog list sources while preserving every existing preference row.
+func migrateToV20(tx *sql.Tx) error {
+	if _, err := tx.Exec(`
+ALTER TABLE collection_sort_preferences RENAME TO collection_sort_preferences_v19;
+` + collectionSortPreferencesSchema + `
+INSERT INTO collection_sort_preferences (
+    profile_id, collection_kind, collection_id, sort_field, sort_order, updated_at
+)
+SELECT profile_id, collection_kind, collection_id, sort_field, sort_order, updated_at
+FROM collection_sort_preferences_v19;
+DROP TABLE collection_sort_preferences_v19;
+`); err != nil {
+		return fmt.Errorf("widening collection sort preference kinds: %w", err)
+	}
+	return nil
 }
 
 // migrateToV19 adds the per-profile collection sort override table. An empty

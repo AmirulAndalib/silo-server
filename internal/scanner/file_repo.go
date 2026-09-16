@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/markers"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/pathscope"
+	"github.com/Silo-Server/silo-server/internal/scanbatch"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -20,11 +22,21 @@ import (
 // Sentinel errors for file repository operations.
 var (
 	ErrFileNotFound = errors.New("media file not found")
+	// ErrStaleCopySafetyScan reports that a multi-PPS verdict was computed from
+	// a generation of the file the row no longer holds — it was rewritten (or
+	// removed) while the scan ran. The verdict is not wrong, it just describes
+	// bytes nobody is serving any more, so it must not overwrite the row and
+	// must not be pushed at live sessions.
+	ErrStaleCopySafetyScan = errors.New("copy-safety verdict superseded by a newer generation of the file")
 )
 
 // FileRepository provides CRUD operations for the media_files table.
 type FileRepository struct {
 	pool *pgxpool.Pool
+}
+
+type fileQueryer interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 type RawMatchBacklogMode string
@@ -59,7 +71,9 @@ const fileColumns = `id, content_id, episode_id, extra_id, season_number, episod
 	edition_raw, edition_key, edition_confidence, edition_source,
 	presentation_kind, presentation_group_key, presentation_part_index, presentation_part_total,
 	multi_episode_start, multi_episode_end,
-	probe_source, probe_updated_at, match_attempted_at, missing_since, created_at, updated_at`
+	multiple_pps, multiple_pps_scan_size, multiple_pps_scan_mtime,
+	probe_source, probe_updated_at, match_attempted_at, missing_since,
+	first_seen_scan_run_id, created_at, updated_at`
 
 const overlayFileColumns = `content_id, episode_id, media_folder_id, file_path,
 	codec_video, codec_audio, resolution, audio_channels, hdr, container,
@@ -82,7 +96,9 @@ const mfFileColumns = `mf.id, mf.content_id, mf.episode_id, mf.extra_id, mf.seas
 	mf.edition_raw, mf.edition_key, mf.edition_confidence, mf.edition_source,
 	mf.presentation_kind, mf.presentation_group_key, mf.presentation_part_index, mf.presentation_part_total,
 	mf.multi_episode_start, mf.multi_episode_end,
-	mf.probe_source, mf.probe_updated_at, mf.match_attempted_at, mf.missing_since, mf.created_at, mf.updated_at`
+	mf.multiple_pps, mf.multiple_pps_scan_size, mf.multiple_pps_scan_mtime,
+	mf.probe_source, mf.probe_updated_at, mf.match_attempted_at, mf.missing_since,
+	mf.first_seen_scan_run_id, mf.created_at, mf.updated_at`
 
 // scanMediaFile scans a single row into a *models.MediaFile.
 func scanMediaFile(row pgx.Row) (*models.MediaFile, error) {
@@ -116,6 +132,7 @@ func scanMediaFile(row pgx.Row) (*models.MediaFile, error) {
 	var presentationPartIndex, presentationPartTotal *int
 	var multiEpisodeStart, multiEpisodeEnd *int
 	var presentationKind, presentationGroupKey *string
+	var firstSeenScanRunID *string
 	var chapterThumbnailRetryAfter *time.Time
 	var videoTracksJSON, audioTracksJSON, subtitleTracksJSON, externalSubtitlesJSON, chaptersJSON []byte
 
@@ -196,10 +213,14 @@ func scanMediaFile(row pgx.Row) (*models.MediaFile, error) {
 		&presentationPartTotal,
 		&multiEpisodeStart,
 		&multiEpisodeEnd,
+		&f.MultiplePPS,
+		&f.MultiplePPSScanSize,
+		&f.MultiplePPSScanMtime,
 		&probeSource,
 		&f.ProbeUpdatedAt,
 		&f.MatchAttemptedAt,
 		&f.MissingSince,
+		&firstSeenScanRunID,
 		&f.CreatedAt,
 		&f.UpdatedAt,
 	)
@@ -310,6 +331,9 @@ func scanMediaFile(row pgx.Row) (*models.MediaFile, error) {
 	}
 	if presentationGroupKey != nil {
 		f.PresentationGroupKey = *presentationGroupKey
+	}
+	if firstSeenScanRunID != nil {
+		f.FirstSeenScanRunID = *firstSeenScanRunID
 	}
 	if presentationPartIndex != nil {
 		f.PresentationPartIndex = *presentationPartIndex
@@ -426,6 +450,7 @@ func scanMediaFiles(rows pgx.Rows) ([]*models.MediaFile, error) {
 		var presentationPartIndex, presentationPartTotal *int
 		var multiEpisodeStart, multiEpisodeEnd *int
 		var presentationKind, presentationGroupKey *string
+		var firstSeenScanRunID *string
 		var chapterThumbnailRetryAfter *time.Time
 		var videoTracksJSON, audioTracksJSON, subtitleTracksJSON, externalSubtitlesJSON, chaptersJSON []byte
 
@@ -506,10 +531,14 @@ func scanMediaFiles(rows pgx.Rows) ([]*models.MediaFile, error) {
 			&presentationPartTotal,
 			&multiEpisodeStart,
 			&multiEpisodeEnd,
+			&f.MultiplePPS,
+			&f.MultiplePPSScanSize,
+			&f.MultiplePPSScanMtime,
 			&probeSource,
 			&f.ProbeUpdatedAt,
 			&f.MatchAttemptedAt,
 			&f.MissingSince,
+			&firstSeenScanRunID,
 			&f.CreatedAt,
 			&f.UpdatedAt,
 		)
@@ -616,6 +645,9 @@ func scanMediaFiles(rows pgx.Rows) ([]*models.MediaFile, error) {
 		}
 		if presentationGroupKey != nil {
 			f.PresentationGroupKey = *presentationGroupKey
+		}
+		if firstSeenScanRunID != nil {
+			f.FirstSeenScanRunID = *firstSeenScanRunID
 		}
 		if presentationPartIndex != nil {
 			f.PresentationPartIndex = *presentationPartIndex
@@ -799,6 +831,70 @@ func serializeJSONB(v any) ([]byte, error) {
 // Upsert inserts or updates a media file by file_path (ON CONFLICT DO UPDATE).
 // Returns the resulting row.
 func (r *FileRepository) Upsert(ctx context.Context, mf models.MediaFile) (*models.MediaFile, error) {
+	return r.upsertWithQueryer(ctx, r.pool, mf)
+}
+
+// UpsertTx inserts or updates a media file inside the caller's transaction.
+// Audiobook folder scans use this to commit the item and all of its parts as
+// one unit instead of leaving half-indexed books when one file write fails.
+func (r *FileRepository) UpsertTx(ctx context.Context, tx pgx.Tx, mf models.MediaFile) (*models.MediaFile, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("media file upsert: nil transaction")
+	}
+	return r.upsertWithQueryer(ctx, tx, mf)
+}
+
+// UpsertBatchTx queues media-file upserts on one transaction and sends them as
+// a single PostgreSQL batch. This keeps multipart audiobook reconciliation
+// atomic while reducing one client/server round trip per part.
+func (r *FileRepository) UpsertBatchTx(ctx context.Context, tx pgx.Tx, files []models.MediaFile) error {
+	if tx == nil {
+		return fmt.Errorf("media file batch upsert: nil transaction")
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	batch := &pgx.Batch{}
+	for i := range files {
+		capture := &fileUpsertCapture{}
+		if _, err := r.upsertWithQueryer(ctx, capture, files[i]); err != nil {
+			return err
+		}
+		query := capture.query
+		if idx := strings.Index(query, "RETURNING "); idx >= 0 {
+			query = query[:idx]
+		}
+		batch.Queue(query, capture.args...)
+	}
+	results := tx.SendBatch(ctx, batch)
+	defer results.Close()
+	for range files {
+		if _, err := results.Exec(); err != nil {
+			return fmt.Errorf("media file batch upsert: %w", err)
+		}
+	}
+	return nil
+}
+
+// fileUpsertCapture lets UpsertBatchTx reuse the canonical upsert SQL and
+// argument normalization without duplicating its large column list.
+type fileUpsertCapture struct {
+	query string
+	args  []any
+}
+
+func (c *fileUpsertCapture) QueryRow(_ context.Context, query string, args ...any) pgx.Row {
+	c.query = query
+	c.args = append([]any(nil), args...)
+	return c
+}
+
+func (c *fileUpsertCapture) Scan(...any) error { return nil }
+
+func (r *FileRepository) upsertWithQueryer(ctx context.Context, queryer fileQueryer, mf models.MediaFile) (*models.MediaFile, error) {
+	if queryer == nil {
+		return nil, fmt.Errorf("media file upsert: nil queryer")
+	}
 	subtitleTracksJSON, err := serializeJSONB(mf.SubtitleTracks)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling subtitle_tracks: %w", err)
@@ -855,7 +951,7 @@ func (r *FileRepository) Upsert(ctx context.Context, mf models.MediaFile) (*mode
 		edition_raw, edition_key, edition_confidence, edition_source,
 		presentation_kind, presentation_group_key, presentation_part_index, presentation_part_total,
 		multi_episode_start, multi_episode_end,
-		probe_source, probe_updated_at, missing_since
+		probe_source, probe_updated_at, missing_since, first_seen_scan_run_id
 	) VALUES (
 		$1, $2, $3, $4, $5,
 		$6, $7, $8, $9, $10,
@@ -867,7 +963,7 @@ func (r *FileRepository) Upsert(ctx context.Context, mf models.MediaFile) (*mode
 		$39, $40, $41, $42,
 		$43, $44, $45, $46,
 		$47, $48,
-		$49, $50, $51
+		$49, $50, $51, $52
 	)
 	ON CONFLICT (file_path) DO UPDATE SET
 		content_id = CASE
@@ -930,7 +1026,7 @@ func (r *FileRepository) Upsert(ctx context.Context, mf models.MediaFile) (*mode
 		updated_at = NOW()
 	RETURNING ` + fileColumns
 
-	row := r.pool.QueryRow(ctx, query,
+	row := queryer.QueryRow(ctx, query,
 		contentID,
 		episodeID,
 		extraID,
@@ -982,7 +1078,11 @@ func (r *FileRepository) Upsert(ctx context.Context, mf models.MediaFile) (*mode
 		probeSource,
 		mf.ProbeUpdatedAt,
 		mf.MissingSince,
+		nilIfEmpty(scanbatch.RunID(ctx)),
 	)
+	if _, ok := queryer.(*fileUpsertCapture); ok {
+		return nil, nil
+	}
 
 	return scanMediaFile(row)
 }
@@ -1021,6 +1121,20 @@ func identityColumnDefaults(mf models.MediaFile) (groupKeyVersion int, identityC
 // track/chapter JSONB payloads along for millions of rows. Returns
 // ErrFileNotFound when the row no longer exists.
 func (r *FileRepository) UpdateIdentity(ctx context.Context, mf models.MediaFile) (int, error) {
+	return r.updateIdentity(ctx, mf, nil)
+}
+
+// UpdateIdentityAndExternalSubtitles applies sidecar and identity changes
+// without replacing probe-derived columns after a failed repair attempt.
+func (r *FileRepository) UpdateIdentityAndExternalSubtitles(ctx context.Context, mf models.MediaFile) (int, error) {
+	externalSubtitlesJSON, err := serializeJSONB(mf.ExternalSubtitles)
+	if err != nil {
+		return 0, fmt.Errorf("marshaling external_subtitles: %w", err)
+	}
+	return r.updateIdentity(ctx, mf, externalSubtitlesJSON)
+}
+
+func (r *FileRepository) updateIdentity(ctx context.Context, mf models.MediaFile, externalSubtitlesJSON []byte) (int, error) {
 	groupKeyVersion, identityConfidence, identityJSON := identityColumnDefaults(mf)
 
 	query := `UPDATE media_files SET
@@ -1046,6 +1160,7 @@ func (r *FileRepository) UpdateIdentity(ctx context.Context, mf models.MediaFile
 		presentation_part_total = $21,
 		multi_episode_start = $22,
 		multi_episode_end = $23,
+		external_subtitles = COALESCE($24, external_subtitles),
 		match_suppressed_at = NULL,
 		updated_at = NOW()
 	WHERE file_path = $1
@@ -1076,6 +1191,7 @@ func (r *FileRepository) UpdateIdentity(ctx context.Context, mf models.MediaFile
 		nilIfZero(mf.PresentationPartTotal),
 		nilIfZero(mf.MultiEpisodeStart),
 		nilIfZero(mf.MultiEpisodeEnd),
+		externalSubtitlesJSON,
 	).Scan(&id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1168,6 +1284,61 @@ func (r *FileRepository) SetChapterThumbnailFailure(
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrFileNotFound
+	}
+	return nil
+}
+
+// UpdateMultiplePPS records the H.264 multi-PPS copy-safety verdict together
+// with the size and mtime it was computed from, so a later read can tell
+// whether the file has been rewritten since. A nil scanMtime records a verdict
+// for a row that has no file mtime; reading it back validates on size alone.
+//
+// It deliberately does not go through Upsert: that path also clears
+// match_suppressed_at and missing_since, which a copy-safety scan has no
+// business touching.
+//
+// The write is conditional on the row still holding the generation that was
+// scanned. A scan reads the opening seconds of a file over storage that can be
+// slow, so an old-generation scan finishing late would otherwise stamp its
+// verdict — and its stale size and mtime — over the replacement generation's,
+// re-validating a verdict for bytes that are gone and condemning (or clearing
+// the condemnation of) a file nobody scanned. A superseded write reports
+// ErrStaleCopySafetyScan rather than succeeding silently, because the caller
+// must also refrain from notifying live sessions on the strength of it.
+//
+// Both sides of the mtime predicate are normalized to microseconds, exactly as
+// MediaFile.PersistedVideoCopyVerdict normalizes them when it reads the verdict
+// back: Postgres stores timestamptz at microsecond resolution while a
+// filesystem mtime carries nanoseconds, so comparing the raw values would make
+// every write for a row whose mtime came from a stat call fail.
+func (r *FileRepository) UpdateMultiplePPS(ctx context.Context, fileID int, multiplePPS bool, scanSize int64, scanMtime *time.Time) error {
+	var normalizedMtime *time.Time
+	if scanMtime != nil {
+		normalized := models.NormalizeFileModifiedAt(*scanMtime)
+		normalizedMtime = &normalized
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE media_files
+		SET multiple_pps = $2,
+		    multiple_pps_scan_size = $3,
+		    multiple_pps_scan_mtime = $4,
+		    updated_at = NOW()
+		WHERE id = $1
+		  AND file_size = $3
+		  AND date_trunc('microseconds', file_modified_at) IS NOT DISTINCT FROM $4::timestamptz`,
+		fileID,
+		multiplePPS,
+		scanSize,
+		normalizedMtime,
+	)
+	if err != nil {
+		return fmt.Errorf("updating multiple pps verdict: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// The row is gone, or it no longer carries the size and mtime that were
+		// scanned. Both mean the same thing to every caller: this verdict does
+		// not describe the file as it stands.
+		return ErrStaleCopySafetyScan
 	}
 	return nil
 }
@@ -1927,7 +2098,7 @@ func (r *FileRepository) GetByIDs(ctx context.Context, ids []int) ([]*models.Med
 	rows, err := r.pool.Query(ctx, `
 		SELECT `+fileColumns+`
 		FROM media_files
-		WHERE id = ANY($1::int[])
+		WHERE id = ANY($1::bigint[])
 	`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("querying media files by ids: %w", err)
@@ -2932,7 +3103,8 @@ func (r *FileRepository) ListByObservedRootPath(ctx context.Context, folderID in
 }
 
 // GetByContentID returns all media files linked to the given content ID,
-// ordered by resolution (highest first), excluding files that are missing.
+// excluding files that are missing. This preserves the long-standing id order
+// used by the general catalog and playback paths.
 func (r *FileRepository) GetByContentID(ctx context.Context, contentID string) ([]*models.MediaFile, error) {
 	query := `SELECT ` + fileColumns + ` FROM media_files
 		WHERE content_id = $1 AND missing_since IS NULL
@@ -2944,6 +3116,54 @@ func (r *FileRepository) GetByContentID(ctx context.Context, contentID string) (
 	defer rows.Close()
 
 	return scanMediaFiles(rows)
+}
+
+// GetByContentIDPresentation is the audiobook presentation ordering variant.
+// Multipart books use the scanner-assigned part index. Rows that predate the
+// column have no index and SQL cannot apply naturalPathLess to them, so those
+// legacy rows are re-sorted in Go after the query; part10.m4b must follow
+// part2.m4b for them too. Keeping this separate avoids changing ordering
+// assumptions in movie and series playback.
+func (r *FileRepository) GetByContentIDPresentation(ctx context.Context, contentID string) ([]*models.MediaFile, error) {
+	query := `SELECT ` + fileColumns + ` FROM media_files
+		WHERE content_id = $1 AND missing_since IS NULL
+		ORDER BY COALESCE(presentation_part_index, 2147483647), file_path ASC, id ASC`
+	rows, err := r.pool.Query(ctx, query, contentID)
+	if err != nil {
+		return nil, fmt.Errorf("querying presentation files by content_id: %w", err)
+	}
+	defer rows.Close()
+	files, err := scanMediaFiles(rows)
+	if err != nil {
+		return nil, err
+	}
+	sortPresentationFiles(files)
+	return files, nil
+}
+
+// sortPresentationFiles orders multipart rows for one content ID: indexed rows
+// by part index, then legacy rows without one by natural file path. The SQL
+// ordering already places the null-index group last, so this only fixes the
+// intra-group lexical order (part10 before part2) that SQL cannot express.
+func sortPresentationFiles(files []*models.MediaFile) {
+	sort.SliceStable(files, func(i, j int) bool {
+		a, b := files[i], files[j]
+		if a == nil || b == nil {
+			return b == nil && a != nil
+		}
+		aIndexed := a.PresentationPartIndex > 0
+		bIndexed := b.PresentationPartIndex > 0
+		switch {
+		case aIndexed && bIndexed:
+			return a.PresentationPartIndex < b.PresentationPartIndex
+		case aIndexed != bIndexed:
+			return aIndexed
+		}
+		if a.FilePath != b.FilePath {
+			return naturalPathLess(a.FilePath, b.FilePath)
+		}
+		return a.ID < b.ID
+	})
 }
 
 // FirstDurationsByContentIDs returns the probed duration (seconds) of the
@@ -3364,10 +3584,12 @@ func (r *FileRepository) UpdateEpisodeLink(ctx context.Context, fileID int, epis
 				episode_number = $3,
 				updated_at = NOW()
 			WHERE id = $4
-			RETURNING episode_id, media_folder_id, created_at, missing_since
+			RETURNING episode_id, media_folder_id, created_at, missing_since, first_seen_scan_run_id
 		)
-		INSERT INTO episode_libraries (episode_id, media_folder_id, first_seen_at)
-		SELECT episode_id, media_folder_id, created_at
+		INSERT INTO episode_libraries (
+			episode_id, media_folder_id, first_seen_at, first_seen_scan_run_id
+		)
+		SELECT episode_id, media_folder_id, created_at, first_seen_scan_run_id
 		FROM updated
 		WHERE episode_id IS NOT NULL
 		  AND missing_since IS NULL
@@ -3433,11 +3655,16 @@ func (r *FileRepository) BulkLinkEpisodesBySeries(ctx context.Context, seriesCon
 			  AND e.series_id = $1
 			  AND mf.season_number = e.season_number
 			  AND mf.episode_number = e.episode_number
-			RETURNING mf.episode_id, mf.media_folder_id, mf.created_at
+			RETURNING mf.id, mf.episode_id, mf.media_folder_id, mf.created_at, mf.first_seen_scan_run_id
 		),
 		inserted AS (
-			INSERT INTO episode_libraries (episode_id, media_folder_id, first_seen_at)
-			SELECT episode_id, media_folder_id, MIN(created_at)
+			INSERT INTO episode_libraries (
+				episode_id, media_folder_id, first_seen_at, first_seen_scan_run_id
+			)
+			SELECT episode_id,
+			       media_folder_id,
+			       MIN(created_at),
+			       (array_agg(first_seen_scan_run_id ORDER BY created_at ASC, id ASC))[1]
 			FROM updated
 			GROUP BY episode_id, media_folder_id
 			ON CONFLICT (episode_id, media_folder_id) DO NOTHING

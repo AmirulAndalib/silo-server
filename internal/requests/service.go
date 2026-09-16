@@ -64,6 +64,7 @@ type Service struct {
 	router            RequestRouterProvider
 	entitlements      EntitlementResolver
 	groupProvider     access.GroupPolicyProvider
+	users             access.UserRepository
 	requesterIdentity RequesterIdentityResolver
 	notifier          FulfillmentNotifier
 	lifecycle         LifecycleNotifier
@@ -99,6 +100,10 @@ func (s *Service) SetRouterProvider(p RequestRouterProvider) { s.router = p }
 func (s *Service) SetEntitlementResolver(r EntitlementResolver) { s.entitlements = r }
 
 func (s *Service) SetGroupPolicyProvider(p access.GroupPolicyProvider) { s.groupProvider = p }
+
+// SetUserRepository wires the account loader so the per-user requests_allowed
+// override is honored on top of the access group's gate.
+func (s *Service) SetUserRepository(users access.UserRepository) { s.users = users }
 
 func (s *Service) SetRequesterIdentityResolver(r RequesterIdentityResolver) {
 	s.requesterIdentity = r
@@ -1065,15 +1070,24 @@ func (s *Service) ensureRequestsEnabled(ctx context.Context) error {
 	return nil
 }
 
+// ensureViewerRequestsAllowed enforces the viewer's resolved requests gate
+// (account override on top of the access group). The account loader is
+// required: without it the gate could only see the group layer, which would
+// silently ignore a per-user deny, so a missing repository is a wiring error
+// rather than a permissive fallback.
 func (s *Service) ensureViewerRequestsAllowed(ctx context.Context, userID int) error {
-	if s.groupProvider == nil {
-		return nil
+	if s.users == nil {
+		return fmt.Errorf("requests: user repository is not configured")
 	}
-	group, err := s.groupProvider.GetPolicyForUser(ctx, userID)
+	user, err := s.users.GetByID(ctx, userID)
 	if err != nil {
 		return ErrForbidden
 	}
-	if group != nil && !group.RequestsAllowed {
+	effective, err := access.EffectivePolicyForUser(ctx, user, s.groupProvider)
+	if err != nil {
+		return ErrForbidden
+	}
+	if !effective.RequestsAllowed {
 		return ErrForbidden
 	}
 	return nil
@@ -1095,6 +1109,17 @@ func (s *Service) GetUserLimit(ctx context.Context, viewer Viewer, userID int) (
 	}
 	if userID <= 0 {
 		return nil, fmt.Errorf("%w: invalid user id", ErrInvalidInput)
+	}
+	if store, ok := s.store.(interface {
+		UserExists(context.Context, int) (bool, error)
+	}); ok {
+		exists, err := store.UserExists(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			return nil, ErrNotFound
+		}
 	}
 	limit, err := s.store.GetUserLimit(ctx, userID)
 	if err != nil {
@@ -1305,7 +1330,42 @@ func (s *Service) LoadIntegrationOptions(ctx context.Context, viewer Viewer, int
 		return nil, fmt.Errorf("no fulfillment backend configured")
 	}
 	conn := ResolvedRouterConnection{ID: integration.ID, BaseURL: integration.BaseURL, APIKey: apiKey, Config: integration.PluginConfig}
-	return s.router.ListConfigOptions(ctx, *integration.InstallationID, integration.CapabilityID, conn)
+	options, err := s.router.ListConfigOptions(ctx, *integration.InstallationID, integration.CapabilityID, conn)
+	if err != nil {
+		return nil, classifyIntegrationTransportError(err)
+	}
+	return options, nil
+}
+
+// classifyIntegrationTransportError marks a failure to reach the configured
+// integration as a dependency failure. Errors the router already classifies
+// (plugin validation results and the request-domain sentinels) pass through
+// untouched so the API keeps rendering them as client problems.
+func classifyIntegrationTransportError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var validation *ValidationError
+	if errors.As(err, &validation) {
+		return err
+	}
+	for _, sentinel := range []error{
+		ErrInvalidInput,
+		ErrInvalidMediaType,
+		ErrRequestsDisabled,
+		ErrUserBlocked,
+		ErrQuotaExceeded,
+		ErrAlreadyAvailable,
+		ErrAlreadyRequested,
+		ErrNotFound,
+		ErrForbidden,
+		ErrInvalidState,
+	} {
+		if errors.Is(err, sentinel) {
+			return err
+		}
+	}
+	return fmt.Errorf("%w: %w", ErrIntegrationUnreachable, err)
 }
 
 func (s *Service) EffectivePolicy(ctx context.Context, userID int) (EffectivePolicy, error) {

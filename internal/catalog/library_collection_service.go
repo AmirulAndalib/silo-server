@@ -103,6 +103,11 @@ type CollageGenerator interface {
 
 var ErrLibraryCollectionSyncUnsupported = errors.New("smart collections cannot be synchronized")
 
+// ErrLibraryCollectionSyncModeUnsupported reports a collection whose source
+// mode has no importer. Manual collections carry no mode at all, so a sync
+// request for one lands here; it is a caller mistake, not a server fault.
+var ErrLibraryCollectionSyncModeUnsupported = errors.New("unsupported collection sync mode")
+
 type LibraryCollectionService struct {
 	collections  *LibraryCollectionRepository
 	items        *ItemRepository
@@ -136,9 +141,7 @@ func NewLibraryCollectionService(
 	libraryItems *LibraryItemRepository,
 	httpClient *http.Client,
 ) *LibraryCollectionService {
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
+	httpClient = collectionutil.MDBListHTTPClient(httpClient)
 
 	return &LibraryCollectionService{
 		collections:  collections,
@@ -242,7 +245,7 @@ func (s *LibraryCollectionService) SyncCollectionWithOptions(ctx context.Context
 	case "trakt_list":
 		return s.syncTraktListCollection(ctx, collection, source, opts)
 	default:
-		return nil, fmt.Errorf("unsupported collection sync mode: %s", source.Mode)
+		return nil, fmt.Errorf("%w: %s", ErrLibraryCollectionSyncModeUnsupported, source.Mode)
 	}
 }
 
@@ -1268,7 +1271,10 @@ func traktCandidatesByPriority(lookup *ExternalIDLookup, entry TraktCollectionEn
 }
 
 func (s *LibraryCollectionService) fetchMDBListEntries(ctx context.Context, listURL string) ([]mdblistEntry, error) {
-	listURL = collectionutil.NormalizeMDBListURL(listURL)
+	listURL, err := collectionutil.CanonicalMDBListURL(listURL)
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, listURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating mdblist request: %w", err)

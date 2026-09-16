@@ -1,3 +1,4 @@
+import { buildLibraryCollectionCatalogHref } from "./catalogSearchParams";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { HomeSectionItemsResponse, ResolvedSection } from "@/api/types";
@@ -19,6 +20,7 @@ import { collectCachedHomeSections } from "./homeSectionCache";
 import { isAudiobookLibraryType } from "./libraryPageSearchParams";
 import { useUICustomization } from "@/hooks/useUICustomization";
 import { carouselCardWidthClasses } from "@/lib/uiCustomization";
+import { useSectionRefreshSignal } from "./homeSurfaceRefresh";
 
 interface LibraryRecommendedProps {
   libraryId: number;
@@ -42,6 +44,7 @@ export default function LibraryRecommended({
 }: LibraryRecommendedProps) {
   const queryClient = useQueryClient();
   const { data, isLoading } = useLibraryLayout(libraryId);
+  const { data: sectionRefreshSignal = 0 } = useSectionRefreshSignal();
   const [loadedSections, setLoadedSections] = useState<Map<string, ResolvedSection>>(new Map());
   const [failedIds, setFailedIds] = useState<Set<string>>(new Set());
   const [inFlightIds, setInFlightIds] = useState<Set<string>>(new Set());
@@ -78,7 +81,7 @@ export default function LibraryRecommended({
         });
       });
     };
-  }, [libraryId, layout, layoutResetKey, queryClient]);
+  }, [libraryId, layout, layoutResetKey, queryClient, sectionRefreshSignal]);
 
   useEffect(() => {
     if (layout.length === 0) return;
@@ -324,18 +327,23 @@ function PinnedCollectionCarousel({
   collectionId: string;
   name: string;
 }) {
-  const { data: items, isLoading } = useLibraryCollectionItems(libraryId, collectionId);
-  const { prefs: overlayPrefs } = useOverlayPrefs();
+  const { data, isLoading } = useLibraryCollectionItems(libraryId, collectionId);
+  const items = data?.items ?? [];
+  const { prefs: overlayPrefs, quickActionMode } = useOverlayPrefs();
   const { cardPresentation } = useUICustomization();
   const posterWidthClasses = carouselCardWidthClasses(cardPresentation.poster_size);
 
-  if (!isLoading && (!items || items.length === 0)) return null;
+  if (items.length === 0 && !isLoading && !data?.has_more) return null;
 
   return (
-    <MediaCarousel title={name} loading={isLoading}>
-      {(items ?? []).map((item) => (
+    <MediaCarousel
+      title={name}
+      titleHref={buildLibraryCollectionCatalogHref(collectionId, name, libraryId)}
+      loading={isLoading}
+    >
+      {items.map((item) => (
         <div key={item.content_id} className={posterWidthClasses}>
-          <ItemCard item={item} overlayPrefs={overlayPrefs} />
+          <ItemCard item={item} overlayPrefs={overlayPrefs} quickActionMode={quickActionMode} />
         </div>
       ))}
     </MediaCarousel>

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/historyimport"
+	"github.com/Silo-Server/silo-server/internal/plugins"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
 
@@ -72,6 +73,18 @@ type authoritativeRefreshProvider interface {
 // working unchanged.
 type APIKeyAuthProvider interface {
 	ConnectWithAPIKey(ctx context.Context, apiKey string) (TokenSet, ProviderAccount, error)
+}
+
+// ConnectionConfigValues contains manifest-declared, per-connection setup
+// values keyed first by config-schema key and then by field key.
+type ConnectionConfigValues map[string]map[string]any
+
+type configuredAPIKeyAuthProvider interface {
+	ConnectWithAPIKeyConfig(ctx context.Context, apiKey string, config ConnectionConfigValues) (TokenSet, ProviderAccount, error)
+}
+
+type connectionConfigProvider interface {
+	ConnectionConfigSchema() []plugins.ConfigSchemaView
 }
 
 type WatchedImporter interface {
@@ -660,38 +673,51 @@ func (f RemoteFavorite) HistoryRecord() historyimport.Record {
 }
 
 type ProviderSummary struct {
-	Key          string       `json:"key"`
-	DisplayName  string       `json:"display_name"`
-	Capabilities Capabilities `json:"capabilities"`
+	Key                    string                     `json:"key"`
+	DisplayName            string                     `json:"display_name"`
+	Capabilities           Capabilities               `json:"capabilities"`
+	ConnectionConfigSchema []plugins.ConfigSchemaView `json:"connection_config_schema,omitempty"`
 }
 
+// ConnectionVersion identifies a precise persisted connection generation.
+type ConnectionVersion struct {
+	ID        string
+	UpdatedAt time.Time
+}
+
+var ErrStaleConnection = errors.New("watch provider connection changed")
+var ErrSettingsCleanupUnavailable = errors.New("watchlist ordering cleanup unavailable")
+
 type ConnectionStatus struct {
-	Provider                     string       `json:"provider"`
-	DisplayName                  string       `json:"display_name"`
-	Capabilities                 Capabilities `json:"capabilities"`
-	AuthMethod                   string       `json:"auth_method"`
-	Connected                    bool         `json:"connected"`
-	ProviderUsername             string       `json:"provider_username,omitempty"`
-	ImportWatchedEnabled         bool         `json:"import_watched_enabled"`
-	ImportProgressEnabled        bool         `json:"import_progress_enabled"`
-	ExportWatchedEnabled         bool         `json:"export_watched_enabled"`
-	ExportUnwatchedEnabled       bool         `json:"export_unwatched_enabled"`
-	ImportFavoritesEnabled       bool         `json:"import_favorites_enabled"`
-	ExportFavoritesEnabled       bool         `json:"export_favorites_enabled"`
-	SyncFavoriteRemovalsEnabled  bool         `json:"sync_favorite_removals_enabled"`
-	ImportWatchlistEnabled       bool         `json:"import_watchlist_enabled"`
-	ExportWatchlistEnabled       bool         `json:"export_watchlist_enabled"`
-	SyncWatchlistRemovalsEnabled bool         `json:"sync_watchlist_removals_enabled"`
-	SyncWatchlistOrderEnabled    bool         `json:"sync_watchlist_order_enabled"`
-	ScrobbleEnabled              bool         `json:"scrobble_enabled"`
-	CredentialsConfigured        bool         `json:"credentials_configured"`
-	LastInboundSyncAt            *time.Time   `json:"last_inbound_sync_at,omitempty"`
-	LastProgressSyncAt           *time.Time   `json:"last_progress_sync_at,omitempty"`
-	LastOutboundSyncAt           *time.Time   `json:"last_outbound_sync_at,omitempty"`
-	LastFavoritesSyncAt          *time.Time   `json:"last_favorites_sync_at,omitempty"`
-	LastWatchlistSyncAt          *time.Time   `json:"last_watchlist_sync_at,omitempty"`
-	LastScrobbleErrorAt          *time.Time   `json:"last_scrobble_error_at,omitempty"`
-	LastError                    string       `json:"last_error,omitempty"`
+	Version ConnectionVersion `json:"-"`
+
+	Provider                     string                     `json:"provider"`
+	DisplayName                  string                     `json:"display_name"`
+	Capabilities                 Capabilities               `json:"capabilities"`
+	AuthMethod                   string                     `json:"auth_method"`
+	Connected                    bool                       `json:"connected"`
+	ProviderUsername             string                     `json:"provider_username,omitempty"`
+	ImportWatchedEnabled         bool                       `json:"import_watched_enabled"`
+	ImportProgressEnabled        bool                       `json:"import_progress_enabled"`
+	ExportWatchedEnabled         bool                       `json:"export_watched_enabled"`
+	ExportUnwatchedEnabled       bool                       `json:"export_unwatched_enabled"`
+	ImportFavoritesEnabled       bool                       `json:"import_favorites_enabled"`
+	ExportFavoritesEnabled       bool                       `json:"export_favorites_enabled"`
+	SyncFavoriteRemovalsEnabled  bool                       `json:"sync_favorite_removals_enabled"`
+	ImportWatchlistEnabled       bool                       `json:"import_watchlist_enabled"`
+	ExportWatchlistEnabled       bool                       `json:"export_watchlist_enabled"`
+	SyncWatchlistRemovalsEnabled bool                       `json:"sync_watchlist_removals_enabled"`
+	SyncWatchlistOrderEnabled    bool                       `json:"sync_watchlist_order_enabled"`
+	ScrobbleEnabled              bool                       `json:"scrobble_enabled"`
+	CredentialsConfigured        bool                       `json:"credentials_configured"`
+	ConnectionConfigSchema       []plugins.ConfigSchemaView `json:"connection_config_schema,omitempty"`
+	LastInboundSyncAt            *time.Time                 `json:"last_inbound_sync_at,omitempty"`
+	LastProgressSyncAt           *time.Time                 `json:"last_progress_sync_at,omitempty"`
+	LastOutboundSyncAt           *time.Time                 `json:"last_outbound_sync_at,omitempty"`
+	LastFavoritesSyncAt          *time.Time                 `json:"last_favorites_sync_at,omitempty"`
+	LastWatchlistSyncAt          *time.Time                 `json:"last_watchlist_sync_at,omitempty"`
+	LastScrobbleErrorAt          *time.Time                 `json:"last_scrobble_error_at,omitempty"`
+	LastError                    string                     `json:"last_error,omitempty"`
 }
 
 type ConnectionUpdate struct {
@@ -708,3 +734,53 @@ type ConnectionUpdate struct {
 	SyncWatchlistOrderEnabled    *bool `json:"sync_watchlist_order_enabled,omitempty"`
 	ScrobbleEnabled              *bool `json:"scrobble_enabled,omitempty"`
 }
+
+// UnknownProviderError reports a provider key the registry does not know.
+// Its message is the one the service has always produced.
+type UnknownProviderError struct {
+	Key string
+}
+
+func (e UnknownProviderError) Error() string { return fmt.Sprintf("unknown provider %q", e.Key) }
+
+// Sentinel errors the service answers for a missing connection and for a
+// device-authorization session that can no longer complete. The messages are
+// unchanged so the v1 responses stay byte-identical; the v2 listener
+// classifies on the values.
+var (
+	ErrConnectionNotFound   = errors.New("watch provider connection not found")
+	ErrAuthSessionMismatch  = errors.New("auth session does not match active profile")
+	ErrAuthSessionCompleted = errors.New("auth session is already completed")
+	ErrAuthSessionExpired   = errors.New("auth session has expired")
+	// ErrInvalidCredential reports a provider's rejection of the credential the
+	// profile supplied. Built-in providers wrap it so the listeners classify an
+	// API-key rejection as a client problem; plugin providers signal the same
+	// condition through the INVALID_CREDENTIAL fault code.
+	ErrInvalidCredential = errors.New("watch provider rejected the supplied credential")
+)
+
+// IsDeviceAuthPending reports whether err is the provider's "not yet
+// authorized" answer to a device-code poll.
+func IsDeviceAuthPending(err error) bool {
+	var pending deviceAuthorizationPendingError
+	return errors.As(err, &pending)
+}
+
+// IsInvalidCredentialError reports whether err is a provider's rejection of
+// the supplied credential.
+func IsInvalidCredentialError(err error) bool { return isWatchSyncInvalidCredentialError(err) }
+
+// IsRetryableProviderError reports whether err is a temporary provider fault.
+func IsRetryableProviderError(err error) bool {
+	var retryable retryableProviderError
+	return errors.As(err, &retryable)
+}
+
+// ProviderCapabilityError reports an authorization method or configuration
+// the named provider does not offer. The message is the service's original.
+type ProviderCapabilityError struct {
+	Key  string
+	What string
+}
+
+func (e ProviderCapabilityError) Error() string { return fmt.Sprintf("provider %q %s", e.Key, e.What) }

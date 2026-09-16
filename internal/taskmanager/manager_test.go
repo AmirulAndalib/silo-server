@@ -153,6 +153,10 @@ type conditionalStubTask struct {
 	executeCalls    int
 }
 
+type manualOnlyStubTask struct{ stubTask }
+
+func (manualOnlyStubTask) ManualOnly() bool { return true }
+
 func (t *conditionalStubTask) ShouldRun(context.Context) (bool, error) {
 	select {
 	case t.shouldRunCalled <- struct{}{}:
@@ -323,6 +327,35 @@ func TestTaskManagerRunTaskNotifiesAfterTriggerRearm(t *testing.T) {
 	}
 }
 
+func TestTaskManagerRejectsScheduledTriggersForManualOnlyTask(t *testing.T) {
+	const taskKey = "manual-backfill"
+	triggerRepo := &fakeTriggerRepository{triggers: map[string][]taskmanager.TriggerConfig{}}
+	manager := taskmanager.New(
+		triggerRepo,
+		fakeExecutionRepository{},
+		newFakeTrigger,
+		slog.New(slog.DiscardHandler),
+	)
+	manager.Register(manualOnlyStubTask{stubTask{key: taskKey}})
+
+	if info := manager.GetTaskInfo(taskKey); !info.ManualOnly {
+		t.Fatal("TaskInfo.ManualOnly = false, want true")
+	}
+	err := manager.UpdateTriggers(taskKey, []taskmanager.TriggerConfig{{
+		Type:       taskmanager.TriggerTypeInterval,
+		IntervalMs: int64(time.Hour / time.Millisecond),
+	}})
+	if !errors.Is(err, taskmanager.ErrTaskManualOnly) {
+		t.Fatalf("UpdateTriggers() error = %v, want ErrTaskManualOnly", err)
+	}
+	if _, wrote := triggerRepo.setCalls[taskKey]; wrote {
+		t.Fatal("manual-only trigger rejection wrote to the trigger repository")
+	}
+	if err := manager.UpdateTriggers(taskKey, nil); err != nil {
+		t.Fatalf("clearing manual-only triggers error = %v", err)
+	}
+}
+
 func TestTaskManagerTriggerSkipsConditionalTaskWithoutHistory(t *testing.T) {
 	triggerRepo := &fakeTriggerRepository{
 		triggers: map[string][]taskmanager.TriggerConfig{
@@ -449,5 +482,39 @@ func TestTaskManagerTriggerSkipsConditionalTaskOnPreflightError(t *testing.T) {
 	if !triggers[0].next.After(beforeTrigger) {
 		t.Fatalf("next run = %s, want rearmed after skipped preflight error",
 			triggers[0].next.Format(time.RFC3339Nano))
+	}
+}
+
+type reservedTask struct {
+	stubTask
+	entered chan struct{}
+	done    chan struct{}
+}
+
+func (t reservedTask) Execute(ctx context.Context, _ taskmanager.ProgressReporter) error {
+	close(t.entered)
+	<-ctx.Done()
+	close(t.done)
+	return ctx.Err()
+}
+func TestStartTaskReservesBeforeAcknowledgment(t *testing.T) {
+	task := reservedTask{stubTask: stubTask{key: "reserved"}, entered: make(chan struct{}), done: make(chan struct{})}
+	manager := taskmanager.New(&fakeTriggerRepository{}, fakeExecutionRepository{}, nil, nil)
+	manager.Register(task)
+	info, err := manager.StartTask(task.Key())
+	if err != nil || info.State != taskmanager.TaskStateRunning {
+		t.Fatalf("start: %+v, %v", info, err)
+	}
+	t.Cleanup(manager.Stop)
+	if _, err := manager.StartTask(task.Key()); !errors.Is(err, taskmanager.ErrTaskAlreadyRunning) {
+		t.Fatalf("second start: %v", err)
+	}
+	if err := manager.CancelTask(task.Key()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-task.done:
+	case <-time.After(time.Second):
+		t.Fatal("reserved work did not receive cancellation")
 	}
 }

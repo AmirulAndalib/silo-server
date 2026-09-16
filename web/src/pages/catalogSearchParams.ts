@@ -26,6 +26,10 @@ export interface CatalogSearchState {
   // True when the UI is displaying a collection sort resolved by the server,
   // rather than an explicit sort read from the URL or chosen by the viewer.
   sort_from_server?: boolean;
+  // True when the sort was read from the URL or chosen by the viewer. Without
+  // it the client default sort is a placeholder and a query-source request
+  // leaves ordering to the server (relevance for text search).
+  explicit_sort?: boolean;
   query_definition: QueryDefinition;
 }
 
@@ -72,9 +76,14 @@ function isCollectionSource(source: CatalogSource): boolean {
 
 // Sources whose default ordering is the stored list order rather than a sort
 // field. The watchlist's stored order can mirror a watch provider's list
-// order (e.g. MDBList) via sort_index.
+// order (e.g. MDBList) via sort_index; favorites use their entry order.
 export function catalogSourceSupportsSourceOrder(source: CatalogSource): boolean {
-  return isCollectionSource(source) || source === "watchlist";
+  return (
+    isCollectionSource(source) ||
+    source === "watchlist" ||
+    source === "favorites" ||
+    source === "history"
+  );
 }
 
 export function catalogSourceAllowsOverlay(source: CatalogSource): boolean {
@@ -175,6 +184,7 @@ export function parseCatalogSearchParams(searchParams: URLSearchParams): Catalog
     limit: queryLimit,
   });
   baseState.uses_source_order = catalogSourceSupportsSourceOrder(source) && !hasExplicitSort;
+  baseState.explicit_sort = hasExplicitSort;
 
   return baseState;
 }
@@ -233,11 +243,9 @@ export function buildCatalogQueryUpdateHref(state: CatalogSearchState, q: string
 }
 
 export function buildQueryCatalogHref(q?: string): string {
-  return buildCatalogHref({
-    source: "query",
-    q,
-    query_definition: createEmptyQueryDefinition(),
-  });
+  const params = new URLSearchParams({ source: "query" });
+  if (q) params.set("q", q);
+  return `/catalog?${params.toString()}`;
 }
 
 export function buildPersonalCatalogHref(source: "favorites" | "watchlist" | "history"): string {
@@ -391,12 +399,15 @@ export function buildCatalogApiSearchParams(state: CatalogSearchState): URLSearc
     !state.sort_from_server &&
     state.query_definition.sort.field &&
     (state.query_definition.sort.field !== "added_at" ||
-      (state.source === "query" && effectiveLibraryID != null) ||
-      // Watchlist defaults to source order, so an explicit Date Added pick
+      // A library browse defaults to Date Added; an unscoped query only sends
+      // it when the viewer or an editor chose it, so text search keeps the
+      // server's relevance ranking.
+      (state.source === "query" && (effectiveLibraryID != null || state.explicit_sort)) ||
+      // These sources default to source order, so an explicit Date Added pick
       // must be sent to distinguish it (the server maps it to list added-at).
-      state.source === "watchlist" ||
-      state.source === "library_collection" ||
-      state.source === "user_collection")
+      // Dropping it would round-trip back through parse as source order and
+      // save the wrong browse preference.
+      catalogSourceSupportsSourceOrder(state.source))
   ) {
     params.set("sort", state.query_definition.sort.field);
     if (state.query_definition.sort.order) {
