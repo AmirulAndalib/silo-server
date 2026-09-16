@@ -108,7 +108,7 @@ func TestFetchWatchlistPaginatesDiscoverAPI(t *testing.T) {
 }
 
 // The discover listing does not honor includeGuids in practice: items arrive
-// without external ids, and some detail responses key their payload on
+// without matchable provider ids, and some detail responses key their payload on
 // "Video" instead of "Metadata". Both must be handled so the items have a
 // matchable identity.
 func TestFetchWatchlistResolvesGuidsViaItemMetadata(t *testing.T) {
@@ -118,7 +118,8 @@ func TestFetchWatchlistResolvesGuidsViaItemMetadata(t *testing.T) {
 		switch r.URL.Path {
 		case "/library/sections/watchlist/all":
 			_, _ = fmt.Fprint(w, `{"MediaContainer":{"totalSize":2,"Metadata":[
-				{"ratingKey":"wl-movie","type":"movie","title":"Dune: Part Two","year":2024},
+				{"ratingKey":"wl-movie","type":"movie","title":"Dune: Part Two","year":2024,
+				 "Guid":[{"id":"plex://movie/5d776825880197001ec90c72"}]},
 				{"ratingKey":"wl-show","type":"show","title":"Severance","year":2022}
 			]}}`)
 		case "/library/metadata/wl-movie":
@@ -163,6 +164,42 @@ func TestFetchWatchlistResolvesGuidsViaItemMetadata(t *testing.T) {
 	show := NormalizePlexWatchlistItem(items[1])
 	if show.TVDBID != "371980" {
 		t.Fatalf("show tvdb id = %q, want resolved from detail fetch", show.TVDBID)
+	}
+}
+
+func TestFetchWatchlistWarnsWhenDetailHasNoProviderID(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/library/sections/watchlist/all":
+			_, _ = fmt.Fprint(w, `{"MediaContainer":{"totalSize":1,"Metadata":[
+				{"ratingKey":"wl-movie","type":"movie","title":"Dune: Part Two","year":2024}
+			]}}`)
+		case "/library/metadata/wl-movie":
+			_, _ = fmt.Fprint(w, `{"MediaContainer":{"Video":[
+				{"ratingKey":"wl-movie","type":"movie","title":"Dune: Part Two","year":2024,
+				 "Guid":[{"id":"plex://movie/5d776825880197001ec90c72"}]}
+			]}}`)
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := NewPlexClient()
+	client.discoverBaseURL = server.URL
+	items, warnings, err := client.FetchWatchlist(context.Background(), "tok")
+	if err != nil {
+		t.Fatalf("FetchWatchlist: %v", err)
+	}
+	if len(items) != 1 || hasMatchablePlexGuid(items[0].Guid) {
+		t.Fatalf("items = %+v, want one item without a matchable provider id", items)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "1 of 1 items") {
+		t.Fatalf("warnings = %v, want one unresolved lookup out of one attempted lookup", warnings)
 	}
 }
 

@@ -331,7 +331,7 @@ func (c *PlexClient) FetchWatchlist(ctx context.Context, accountToken string) ([
 	unresolved := 0
 	attempted := 0
 	for i := range allItems {
-		if len(allItems[i].Guid) > 0 {
+		if hasMatchablePlexGuid(allItems[i].Guid) {
 			continue
 		}
 		attempted++
@@ -345,6 +345,9 @@ func (c *PlexClient) FetchWatchlist(ctx context.Context, accountToken string) ([
 		}
 		allItems[i].Guid, allItems[i].Year = applyPlexMetadataFallback(
 			allItems[i].Guid, allItems[i].Year, detail)
+		if !hasMatchablePlexGuid(allItems[i].Guid) {
+			unresolved++
+		}
 	}
 	if unresolved > 0 {
 		warnings = append(warnings, plexUnresolvedIDsWarning("watchlist", "items", unresolved, attempted, firstErr))
