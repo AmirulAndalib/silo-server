@@ -181,6 +181,20 @@ describe("LibraryMetadataSettings", () => {
     ).toContain("Image encoding workers");
   });
 
+  it("offers to restore worker defaults only while a value differs from them", () => {
+    const untouched = { "catalog.search.provider": "postgres", "scanner.workers": "8" };
+    expect(text(render(untouched))).not.toContain("Restore defaults");
+
+    const form = makeForm({ ...untouched, "metadata.image_workers": "2" });
+    useSettingsFormMock.mockReturnValue(form);
+    const markup = renderToStaticMarkup(
+      <MemoryRouter>
+        <LibraryMetadataSettings />
+      </MemoryRouter>,
+    );
+    expect(text(markup)).toContain("Restore defaults");
+  });
+
   it("hides Meilisearch connection fields until that engine is selected", () => {
     expect(text(render({ "catalog.search.provider": "postgres" }))).not.toContain(
       "Meilisearch URL",

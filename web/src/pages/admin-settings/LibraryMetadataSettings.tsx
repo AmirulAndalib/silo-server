@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, RotateCcw } from "lucide-react";
 import { Link } from "react-router";
 
 import type { ConnectionCheckResponse } from "@/api/types";
@@ -7,6 +7,7 @@ import { ConnectionCheckAction } from "@/components/admin/ConnectionCheckAction"
 import { AdvancedSection } from "@/components/settings/AdvancedSection";
 import { SecretField } from "@/components/settings/SecretField";
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   useCatalogSearchStatus,
@@ -19,6 +20,7 @@ import { MarkerTasksCard } from "./MarkerTasksCard";
 import { SaveBar } from "./SaveBar";
 import { SearchStatusPanel } from "./SearchStatusPanel";
 import { SettingField, SettingFieldStatus } from "./SettingField";
+import { WORKER_SETTING_DEFAULTS, hasWorkerOverrides } from "./settingsWorkerDefaults";
 
 const ARTWORK_KEYS = ["metadata.cache_images"];
 
@@ -64,6 +66,15 @@ export default function LibraryMetadataSettings() {
   const { data: searchStatus } = useCatalogSearchStatus(meiliEnabled);
   const anyDirty = (keys: string[]) => keys.some((key) => form.isDirty(key));
   const allRestart = (keys: string[]) => keys.every((key) => restartKeys.has(key));
+  // Restoring stages every worker value at once; the save bar still confirms
+  // it. The button is only offered while something differs from the default,
+  // so an untouched group never shows a control that would do nothing.
+  const workerOverrides = hasWorkerOverrides(form.getValue);
+  function restoreWorkerDefaults() {
+    for (const [key, fallback] of Object.entries(WORKER_SETTING_DEFAULTS)) {
+      if (form.getValue(key) !== fallback) form.setValue(key, fallback);
+    }
+  }
   // Staged Meilisearch edits stay reachable after switching the provider back,
   // so the save bar can never count a change the admin cannot see.
   const showMeili = meiliEnabled || anyDirty(MEILI_KEYS);
@@ -122,7 +133,25 @@ export default function LibraryMetadataSettings() {
           />
         </FieldGroup>
 
-        <FieldGroup label="Scanning" restartAll={allRestart(SCANNER_KEYS)}>
+        <FieldGroup
+          label="Scanning"
+          restartAll={allRestart(SCANNER_KEYS)}
+          dirty={anyDirty(SCANNER_KEYS)}
+          actions={
+            workerOverrides ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className="text-muted-foreground hover:text-foreground"
+                onClick={restoreWorkerDefaults}
+              >
+                <RotateCcw aria-hidden="true" />
+                Restore defaults
+              </Button>
+            ) : undefined
+          }
+        >
           <AdvancedSection
             id="library.scanning"
             count={SCANNER_KEYS.length}
