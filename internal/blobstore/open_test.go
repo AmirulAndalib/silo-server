@@ -127,6 +127,30 @@ func TestOpenS3KeepsBucketsSeparateAndLeavesPrivateUnrecorded(t *testing.T) {
 	}
 }
 
+// Avatars have always lived in the private bucket, whatever backed artwork. An
+// install that configured one and then moved artwork to disk must keep reading
+// its existing profile-avatars keys, so a configured private bucket owns the
+// operational store even on a local backend.
+func TestOpenLocalStillPrefersAConfiguredPrivateBucket(t *testing.T) {
+	private := newTestS3Client(t, "operational")
+	stores, backend, err := Open(context.Background(), Options{
+		Backend: BackendLocal, LocalPath: t.TempDir(), S3Private: private,
+		Settings: &testSettings{values: map[string]string{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backend != BackendLocal {
+		t.Fatalf("backend=%q", backend)
+	}
+	if stores.Operational == stores.Assets || stores.Local() {
+		t.Fatal("local backend overrode the configured private bucket")
+	}
+	if !strings.Contains(stores.Operational.Identity(), "operational") {
+		t.Fatalf("operational identity = %q", stores.Operational.Identity())
+	}
+}
+
 // An S3 backend without a private bucket leaves Operational nil, which is how
 // callers detect that diagnostics and job artifacts have nowhere to go.
 func TestOpenS3WithoutPrivateBucketLeavesOperationalNil(t *testing.T) {

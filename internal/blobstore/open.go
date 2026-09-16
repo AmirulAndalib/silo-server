@@ -22,27 +22,30 @@ type Options struct {
 	// chapter thumbnails, and downloaded subtitles.
 	S3 *s3client.Client
 	// S3Private is the private operational bucket. It backs diagnostic bundles,
-	// job artifacts, and profile avatars. Nil when unconfigured, which leaves
-	// Stores.Operational nil on an S3 backend.
+	// job artifacts, and profile avatars. A configured private bucket always
+	// wins for those, including when Backend is local, so an install that has
+	// been keeping avatars there keeps reading them after artwork moves to disk.
 	S3Private *s3client.Client
 	Settings  SettingsStore
 }
 
-// Stores are the blob stores a process owns. On an S3 backend they are two
-// different buckets, because the public one can serve browsers directly under
-// token auth and the private one never does. A filesystem has no such
-// distinction, so a local backend puts both in one root and the key prefixes
-// each caller already uses keep the namespaces apart.
+// Stores are the blob stores a process owns. They are separate because the
+// public bucket can serve browsers directly under token auth and the private
+// one never does. A filesystem has no such distinction, so a local backend with
+// no private bucket puts both in one root and the key prefixes each caller
+// already uses keep the namespaces apart.
 type Stores struct {
 	// Assets backs artwork, branding, markers, chapter thumbnails, and
 	// downloaded subtitles. It carries the recorded storage identity.
 	Assets Store
 	// Operational backs diagnostic bundles, job artifacts, and profile avatars.
-	// Nil when an S3 backend has no private bucket configured.
+	// Nil only when there is nowhere to put them: an S3 backend with no private
+	// bucket configured.
 	Operational Store
 }
 
-// Local reports whether both stores are one filesystem root.
+// Local reports whether both stores are one filesystem root. False when a
+// private bucket owns the operational store, even on a local backend.
 func (s Stores) Local() bool { return s.Assets != nil && s.Assets == s.Operational }
 
 func Open(ctx context.Context, opts Options) (Stores, string, error) {
@@ -54,7 +57,7 @@ func Open(ctx context.Context, opts Options) (Stores, string, error) {
 			backend = BackendLocal
 		}
 	}
-	var assets, operational Store
+	var assets Store
 	var err error
 	switch backend {
 	case BackendLocal:
@@ -64,9 +67,6 @@ func Open(ctx context.Context, opts Options) (Stores, string, error) {
 			return Stores{}, "", fmt.Errorf("blob storage backend s3 is configured but no S3 client is available")
 		}
 		assets = NewS3(opts.S3)
-		if opts.S3Private != nil {
-			operational = NewS3(opts.S3Private)
-		}
 	default:
 		return Stores{}, "", fmt.Errorf("unknown blob storage backend %q", opts.Backend)
 	}
@@ -81,12 +81,18 @@ func Open(ctx context.Context, opts Options) (Stores, string, error) {
 		}
 		assets = recorded
 	}
-	// A local backend shares the recorded store, so a first write through any
-	// caller records the identity. The private S3 bucket is deliberately left
-	// unwrapped: recording its identity would name it as the catalog's assets
-	// location and refuse the real assets store on the next start.
-	if backend == BackendLocal {
-		operational = assets
+	// A configured private bucket owns operational blobs whatever the backend
+	// is. Avatars in particular have always lived there, so a catalog moving to
+	// local artwork must not strand the profile-avatars keys already uploaded.
+	// It stays unwrapped: recording its identity would name it as the catalog's
+	// assets location and refuse the real assets store on the next start.
+	operational := assets
+	if opts.S3Private != nil {
+		operational = NewS3(opts.S3Private)
+	} else if backend == BackendS3 {
+		// The public bucket is never a substitute: it is world-readable in some
+		// configurations, and these blobs are not.
+		operational = nil
 	}
 	return Stores{Assets: assets, Operational: operational}, backend, nil
 }
