@@ -21,6 +21,11 @@ func (s *artworkBackendSettings) Get(context.Context, string) (string, error) {
 	return s.active, nil
 }
 
+func (s *artworkBackendSettings) Set(_ context.Context, _, value string) error {
+	s.active = value
+	return nil
+}
+
 func (s *artworkBackendSettings) SetIfAbsent(context.Context, string, string) (bool, error) {
 	return false, nil
 }

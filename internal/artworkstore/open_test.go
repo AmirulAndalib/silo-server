@@ -3,6 +3,7 @@ package artworkstore
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -25,6 +26,14 @@ func (s *flakySettings) SetIfAbsent(ctx context.Context, key, value string) (boo
 }
 
 func (s *testSettings) Get(_ context.Context, key string) (string, error) { return s.values[key], nil }
+func (s *testSettings) Set(_ context.Context, key, value string) error {
+	s.writes++
+	if s.values == nil {
+		s.values = map[string]string{}
+	}
+	s.values[key] = value
+	return nil
+}
 func (s *testSettings) SetIfAbsent(_ context.Context, key, value string) (bool, error) {
 	s.writes++
 	if s.values[key] != "" {
@@ -90,3 +99,36 @@ func TestOpenRetriesBackendRecordingAfterSettingsFailure(t *testing.T) {
 		t.Fatalf("settings = %#v", settings.values)
 	}
 }
+
+// A release before the identity row lowercased the whole S3 endpoint. The
+// migration carries that fingerprint over verbatim, so a mixed-case endpoint
+// path must still open and the row is rewritten in the exact form.
+func TestOpenUpgradesLegacyLowercasedS3Identity(t *testing.T) {
+	const current = BackendS3 + "|https://gateway.example/TenantA|artwork|silo"
+	settings := &testSettings{values: map[string]string{IdentitySettingKey: strings.ToLower(current)}}
+	store := &identityStore{Store: &Filesystem{root: "/unused"}, identity: current}
+	if _, _, err := openRecorded(context.Background(), store, settings); err != nil {
+		t.Fatalf("legacy fingerprint rejected: %v", err)
+	}
+	if settings.values[IdentitySettingKey] != current {
+		t.Fatalf("identity not upgraded: %q", settings.values[IdentitySettingKey])
+	}
+	// A genuinely different path is still a move.
+	other := &identityStore{Store: store.Store, identity: BackendS3 + "|https://gateway.example/TenantB|artwork|silo"}
+	if _, _, err := openRecorded(context.Background(), other, settings); err == nil {
+		t.Fatal("different tenant accepted")
+	}
+	// Local identities never had a legacy form; case differences are moves.
+	local := &identityStore{Store: store.Store, identity: BackendLocal + "|/srv/Art"}
+	localSettings := &testSettings{values: map[string]string{IdentitySettingKey: BackendLocal + "|/srv/art"}}
+	if _, _, err := openRecorded(context.Background(), local, localSettings); err == nil {
+		t.Fatal("local case difference accepted")
+	}
+}
+
+type identityStore struct {
+	Store
+	identity string
+}
+
+func (s *identityStore) Identity() string { return s.identity }

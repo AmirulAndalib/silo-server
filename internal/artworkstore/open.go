@@ -11,6 +11,7 @@ import (
 
 type SettingsStore interface {
 	Get(context.Context, string) (string, error)
+	Set(context.Context, string, string) error
 	SetIfAbsent(context.Context, string, string) (bool, error)
 }
 
@@ -50,21 +51,55 @@ func Open(ctx context.Context, opts Options) (Store, string, error) {
 	if opts.Settings == nil {
 		return store, backend, nil
 	}
+	recorded, _, err := openRecorded(ctx, store, opts.Settings)
+	if err != nil {
+		return nil, "", err
+	}
+	return recorded, backend, nil
+}
+
+// openRecorded binds store to the identity recorded in settings: it refuses a
+// store the catalog does not belong to and wraps the store so its first write
+// records the identity. The middle return is the recorded identity after any
+// legacy upgrade, for tests.
+func openRecorded(ctx context.Context, store Store, settings SettingsStore) (Store, string, error) {
 	// The catalog's keys belong to exactly one storage location. Opening a
 	// different one, whether another backend or another bucket or root, would
 	// serve a catalog whose objects live elsewhere.
-	active, err := opts.Settings.Get(ctx, IdentitySettingKey)
+	active, err := settings.Get(ctx, IdentitySettingKey)
 	if err != nil {
 		return nil, "", fmt.Errorf("read %s: %w", IdentitySettingKey, err)
 	}
 	if active != "" && active != store.Identity() {
-		return nil, "", fmt.Errorf("artwork storage is recorded as %q but configured as %q; copy the artwork tree to the new storage, then delete the %s row", active, store.Identity(), IdentitySettingKey)
+		if !legacyIdentityMatches(active, store.Identity()) {
+			return nil, "", fmt.Errorf("artwork storage is recorded as %q but configured as %q; copy the artwork tree to the new storage, then delete the %s row", active, store.Identity(), IdentitySettingKey)
+		}
+		// The row was translated from a release that lowercased the whole
+		// endpoint. It names this store; rewrite it in the exact form so the
+		// next start compares equal without this detour.
+		if err := settings.Set(ctx, IdentitySettingKey, store.Identity()); err != nil {
+			return nil, "", fmt.Errorf("upgrade %s: %w", IdentitySettingKey, err)
+		}
+		active = store.Identity()
 	}
-	recorded := &recordingStore{Store: store, settings: opts.Settings}
+	wrapped := &recordingStore{Store: store, settings: settings}
 	if direct, ok := store.(DirectURLer); ok {
-		return &recordingDirectStore{recordingStore: recorded, DirectURLer: direct}, backend, nil
+		return &recordingDirectStore{recordingStore: wrapped, DirectURLer: direct}, active, nil
 	}
-	return recorded, backend, nil
+	return wrapped, active, nil
+}
+
+// legacyIdentityMatches reports whether recorded is the pre-1.0 S3 fingerprint
+// of current. Releases before the single identity row lowercased the entire
+// endpoint, path included, and the migration carries that value over as
+// "s3|<fingerprint>". An endpoint path is case-sensitive, so a lowercase
+// recorded path against a mixed-case configured one is ambiguous between
+// "same store, older normalization" and "moved to a sibling tenant"; the
+// upgrade path takes the first reading, because a move that differs only by
+// path case while the bucket and prefix stay put is not a deployment anyone
+// performs by accident.
+func legacyIdentityMatches(recorded, current string) bool {
+	return strings.HasPrefix(current, BackendS3+"|") && recorded == strings.ToLower(current)
 }
 
 type recordingStore struct {

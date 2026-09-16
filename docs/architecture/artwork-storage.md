@@ -40,8 +40,12 @@ Every store reports an `Identity()`: `local|<absolute root>` or
 `s3|<endpoint>|<bucket>|<key prefix>`. It names where objects live and nothing
 about how they are read, so changing a public read endpoint never counts as a
 move. The first successful write records it as `artwork.storage_identity` in
-`server_settings`, and startup refuses a store with a different identity. The
-reconcile task certifies the same row after a manual sweep, and the storage
+`server_settings`, and startup refuses a store with a different identity. Only
+the scheme and host of an S3 endpoint are case-insensitive; an endpoint path
+and the key prefix keep their case. Releases before the identity row
+lowercased the whole endpoint, so startup accepts a recorded S3 identity that
+equals the configured one lowercased and rewrites the row in the exact form.
+The reconcile task certifies the same row after a manual sweep, and the storage
 sweep scopes its cursor to it. Once recorded, the admin settings API rejects
 any write that would resolve to a different identity with
 `409 artwork_storage_locked`: a different backend, `artwork.local_path` for a
