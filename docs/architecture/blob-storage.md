@@ -1,7 +1,48 @@
-# Artwork storage
+# Blob storage
 
-Artwork writes and cleanup use `internal/artworkstore.Store`. The store owns
-its filesystem root or S3 bucket; callers use the existing logical artwork keys.
+Every blob Silo owns is written and cleaned up through `internal/blobstore.Store`.
+The store owns its filesystem root or S3 bucket; callers use their own logical
+keys.
+
+## The two stores
+
+`blobstore.Open` returns a `Stores` pair:
+
+- **Assets** — artwork, branding assets, intro/credit markers, chapter
+  thumbnails, and downloaded subtitles. Carries the recorded storage identity.
+- **Operational** — diagnostic bundles, job artifacts, and profile avatars.
+
+On an S3 backend these are two different buckets, because the public one can
+serve browsers directly under token auth and the private one never does. A
+filesystem has no such distinction, so a local backend puts both in one root and
+the key prefixes each caller already uses keep the namespaces apart:
+
+| Prefix | Owner |
+|---|---|
+| `<provider>/<kind>/<id>/<imageType>/…` | artwork (`internal/artworkkey`) |
+| `branding/…` | branding assets |
+| `markers/…` | intro and credit markers |
+| `subtitles/…` | downloaded subtitles |
+| `diagnostics/…` | diagnostic bundles |
+| `catalog-seeds/…` | admin job artifacts |
+| `profile-avatars/…` | profile avatars |
+
+Artwork keys start with a metadata provider segment, so they do not collide with
+the reserved prefixes. That is convention rather than enforcement:
+`PluginProvider.Slug()` returns a plugin's capability ID unvalidated, so a
+metadata plugin whose ID is one of those names would write into that namespace.
+The same hazard already existed when artwork and subtitles shared the public
+bucket.
+
+Nothing walks a store root unbounded. The artwork sweep names its prefixes
+explicitly and refuses an empty one, because `parseArtworkObjectKey` accepts any
+`a.b.c` filename and would read a bundle name as a revisioned variant.
+
+Only the Assets store is wrapped to record the storage identity. A local backend
+shares that wrapper with Operational, so a first write through any caller records
+it. The private S3 bucket is deliberately left unwrapped: recording its identity
+would name it as the catalog's assets location and refuse the real assets store
+on the next start.
 
 ## Backends
 
@@ -10,7 +51,13 @@ when the public bucket is configured and local storage otherwise. The local
 root defaults to `/var/lib/silo/artwork`; containers must persist that directory.
 S3 is recommended when multiple hosts serve the same catalog.
 
-Only API and integrated processes open artwork storage. Worker processes do not
+The setting keys keep their original artwork-era names. They govern every blob
+listed above, not just artwork, and renaming them would cost a migration and an
+upgrade hazard for no operator benefit. An S3 backend with no private bucket
+configured leaves Operational nil, which is how diagnostics and job artifacts
+detect that they have nowhere to write.
+
+Only API and integrated processes open blob storage. Worker processes do not
 probe it or compare the catalog's recorded backend with their local settings.
 Startup probes the selected backend with a five-second timeout. Temporary storage
 failures allow the process to start with degraded readiness; invalid paths and

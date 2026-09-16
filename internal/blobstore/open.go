@@ -1,4 +1,4 @@
-package artworkstore
+package blobstore
 
 import (
 	"context"
@@ -18,11 +18,34 @@ type SettingsStore interface {
 type Options struct {
 	Backend   string
 	LocalPath string
-	S3        *s3client.Client
+	// S3 is the public assets bucket. It backs artwork, branding, markers,
+	// chapter thumbnails, and downloaded subtitles.
+	S3 *s3client.Client
+	// S3Private is the private operational bucket. It backs diagnostic bundles,
+	// job artifacts, and profile avatars. Nil when unconfigured, which leaves
+	// Stores.Operational nil on an S3 backend.
+	S3Private *s3client.Client
 	Settings  SettingsStore
 }
 
-func Open(ctx context.Context, opts Options) (Store, string, error) {
+// Stores are the blob stores a process owns. On an S3 backend they are two
+// different buckets, because the public one can serve browsers directly under
+// token auth and the private one never does. A filesystem has no such
+// distinction, so a local backend puts both in one root and the key prefixes
+// each caller already uses keep the namespaces apart.
+type Stores struct {
+	// Assets backs artwork, branding, markers, chapter thumbnails, and
+	// downloaded subtitles. It carries the recorded storage identity.
+	Assets Store
+	// Operational backs diagnostic bundles, job artifacts, and profile avatars.
+	// Nil when an S3 backend has no private bucket configured.
+	Operational Store
+}
+
+// Local reports whether both stores are one filesystem root.
+func (s Stores) Local() bool { return s.Assets != nil && s.Assets == s.Operational }
+
+func Open(ctx context.Context, opts Options) (Stores, string, error) {
 	backend := strings.ToLower(strings.TrimSpace(opts.Backend))
 	if backend == "" || backend == "auto" {
 		if opts.S3 != nil {
@@ -31,31 +54,41 @@ func Open(ctx context.Context, opts Options) (Store, string, error) {
 			backend = BackendLocal
 		}
 	}
-	var store Store
+	var assets, operational Store
 	var err error
 	switch backend {
 	case BackendLocal:
-		store, err = NewFilesystem(opts.LocalPath)
+		assets, err = NewFilesystem(opts.LocalPath)
 	case BackendS3:
 		if opts.S3 == nil {
-			return nil, "", fmt.Errorf("artwork storage backend s3 is configured but no S3 client is available")
+			return Stores{}, "", fmt.Errorf("blob storage backend s3 is configured but no S3 client is available")
 		}
-		store = NewS3(opts.S3)
+		assets = NewS3(opts.S3)
+		if opts.S3Private != nil {
+			operational = NewS3(opts.S3Private)
+		}
 	default:
-		return nil, "", fmt.Errorf("unknown artwork storage backend %q", opts.Backend)
+		return Stores{}, "", fmt.Errorf("unknown blob storage backend %q", opts.Backend)
 	}
 	if err != nil {
-		return nil, "", err
+		return Stores{}, "", err
 	}
 	// Availability is checked by readiness through Probe, allowing outage recovery.
-	if opts.Settings == nil {
-		return store, backend, nil
+	if opts.Settings != nil {
+		recorded, _, recordErr := openRecorded(ctx, assets, opts.Settings)
+		if recordErr != nil {
+			return Stores{}, "", recordErr
+		}
+		assets = recorded
 	}
-	recorded, _, err := openRecorded(ctx, store, opts.Settings)
-	if err != nil {
-		return nil, "", err
+	// A local backend shares the recorded store, so a first write through any
+	// caller records the identity. The private S3 bucket is deliberately left
+	// unwrapped: recording its identity would name it as the catalog's assets
+	// location and refuse the real assets store on the next start.
+	if backend == BackendLocal {
+		operational = assets
 	}
-	return recorded, backend, nil
+	return Stores{Assets: assets, Operational: operational}, backend, nil
 }
 
 // openRecorded binds store to the identity recorded in settings: it refuses a
