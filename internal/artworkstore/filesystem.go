@@ -141,7 +141,28 @@ func (f *Filesystem) Put(ctx context.Context, key string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	return root.Rename(name, key)
+	if err = root.Rename(name, key); err != nil {
+		return err
+	}
+	// The data is durable once the file is synced, but the name is not until
+	// the directory entry is. A crash between the rename and the directory
+	// flush would leave the catalog referencing a key the store never shows.
+	return syncDir(root, path.Dir(key))
+}
+
+// syncDir flushes a directory's entries so a published rename survives a
+// crash. Filesystems that do not support fsync on directories report EINVAL
+// or ENOTSUP; the rename itself already ordered the write there.
+func syncDir(root *os.Root, dir string) error {
+	d, err := root.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	if err := d.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) && !errors.Is(err, syscall.ENOTSUP) {
+		return err
+	}
+	return nil
 }
 func fileInfo(key string, info os.FileInfo) ObjectInfo {
 	return ObjectInfo{Key: key, Size: info.Size(), ModTime: info.ModTime(), ETag: "\"" + strconv.FormatInt(info.Size(), 10) + "-" + strconv.FormatInt(info.ModTime().UnixNano(), 36) + "\""}

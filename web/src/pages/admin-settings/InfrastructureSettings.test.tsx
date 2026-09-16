@@ -264,13 +264,26 @@ describe("InfrastructureSettings", () => {
     expect(markup).toContain("Advanced · 2 settings");
   });
 
-  it("warns about the artwork cache when a public storage identity field is edited", () => {
+  it("warns that the first artwork write locks a public storage identity field", () => {
+    serverStatus.current = { artwork_storage: { backend: "local", locked: false } };
     mockForm({ isDirty: (key: string) => key === "s3.public_bucket", dirtyCount: 1 });
 
     const markup = renderToStaticMarkup(<InfrastructureSettings />);
 
     expect(markup).toContain("Storage location change");
-    expect(markup).toContain("will not change artwork cache records");
+    expect(markup).toContain("records this location and locks it");
+    serverStatus.current = undefined;
+  });
+
+  it("explains the rejection when a locked S3 identity field is edited", () => {
+    serverStatus.current = { artwork_storage: { backend: "s3", locked: true } };
+    mockForm({ isDirty: (key: string) => key === "s3.public_bucket", dirtyCount: 1 });
+
+    const markup = renderToStaticMarkup(<InfrastructureSettings />);
+
+    expect(markup).toContain("Storage location change");
+    expect(markup).toContain("the server will reject a change");
+    serverStatus.current = undefined;
   });
 
   it("keeps a saved credential when its input is emptied", async () => {

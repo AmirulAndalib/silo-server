@@ -1594,11 +1594,21 @@ var machineManagedSettingKeys = map[string]bool{
 	artworkstore.IdentitySettingKey:             true,
 }
 
-// artworkStorageLocked reports whether the artwork backend can still change.
-// The first artwork write records the store identity; after that the catalog's
-// keys live in exactly one place and there is no migrator, so the backend
-// setting is read-only. Its default is auto, which is what a fresh install
-// keeps until it writes something.
+// Setting keys that decide where artwork lives. The s3 keys are the canonical
+// names; the effective settings map already applies the operational aliases.
+const (
+	artworkStorageBackendKey = "artwork.storage_backend"
+	artworkLocalPathKey      = "artwork.local_path"
+	s3PublicEndpointKey      = "s3.public_endpoint"
+	s3PublicBucketKey        = "s3.public_bucket"
+	s3PublicKeyPrefixKey     = "s3.public_key_prefix"
+	s3OperationalBucketKey   = "s3.operational_bucket"
+)
+
+// artworkStorageLocked reports whether the artwork storage location can still
+// change. The first artwork write records the store identity; after that the
+// catalog's keys live in exactly one place and there is no migrator, so every
+// setting that selects that place is read-only.
 func artworkStorageLocked(stored map[string]string) bool {
 	return strings.TrimSpace(stored[artworkstore.IdentitySettingKey]) != ""
 }
@@ -1606,24 +1616,52 @@ func artworkStorageLocked(stored map[string]string) bool {
 var errArtworkStorageLocked = &APIError{
 	Status:  http.StatusConflict,
 	Code:    "artwork_storage_locked",
-	Message: "artwork.storage_backend cannot change once artwork has been stored; the catalog's artwork keys belong to the recorded storage",
+	Message: "artwork storage cannot change once artwork has been stored; the catalog's artwork keys belong to the recorded storage",
 }
 
-// rejectArtworkBackendChange refuses a write that would move the artwork
-// backend after storage has been recorded. Saving the same value is allowed so
-// a settings form that includes the key can still submit.
-func rejectArtworkBackendChange(stored map[string]string, key, value string) error {
-	if key != "artwork.storage_backend" || !artworkStorageLocked(stored) {
-		return nil
+// artworkIdentityInputs names the effective settings that decide where
+// artwork lives: the resolved backend and, for that backend, the fields the
+// store folds into its identity. The s3 keys are the canonical names; the
+// effective map already applies the legacy operational aliases.
+func artworkIdentityInputs(effective map[string]string) (backend string, inputs map[string]string) {
+	backend = strings.ToLower(strings.TrimSpace(effective[artworkStorageBackendKey]))
+	if backend == "" || backend == config.ArtworkBackendAuto {
+		backend = artworkstore.BackendLocal
+		if strings.TrimSpace(effective[s3PublicBucketKey]) != "" {
+			backend = artworkstore.BackendS3
+		}
 	}
-	current := stored[key]
-	if current == "" {
-		current = config.ArtworkBackendAuto
+	inputs = map[string]string{}
+	switch backend {
+	case artworkstore.BackendS3:
+		for _, key := range []string{s3PublicEndpointKey, s3PublicBucketKey, s3PublicKeyPrefixKey} {
+			inputs[key] = strings.TrimSpace(effective[key])
+		}
+	default:
+		inputs[artworkLocalPathKey] = strings.TrimSpace(effective[artworkLocalPathKey])
 	}
-	if value == current {
-		return nil
+	return backend, inputs
+}
+
+// rejectArtworkIdentityChange refuses a write that would move artwork storage
+// after it has been recorded: a backend other than the recorded one, or a
+// different value for any setting that backend's identity is built from.
+// Writes that leave the location as it is, including re-saving the same
+// values or adding a bucket an explicit local backend ignores, are allowed so
+// a settings form that includes the keys can still submit.
+func rejectArtworkIdentityChange(recorded string, before, after map[string]string) error {
+	recordedBackend, _, _ := strings.Cut(strings.TrimSpace(recorded), "|")
+	_, beforeInputs := artworkIdentityInputs(before)
+	afterBackend, afterInputs := artworkIdentityInputs(after)
+	if afterBackend != recordedBackend {
+		return errArtworkStorageLocked
 	}
-	return errArtworkStorageLocked
+	for key, value := range beforeInputs {
+		if afterInputs[key] != value {
+			return errArtworkStorageLocked
+		}
+	}
+	return nil
 }
 
 func redactAdminSettings(values map[string]string) {
@@ -2180,6 +2218,7 @@ var adminSettingDependencyGroups = [][]string{
 	{config.PlaybackRoutingRemuxExecutionSettingKey, config.PlaybackRoutingRemuxEgressSettingKey},
 	{config.PlaybackRoutingVideoTranscodeExecutionSettingKey, config.PlaybackRoutingVideoTranscodeEgressSettingKey},
 	{"s3.public_endpoint", "s3.public_bucket"},
+	{artworkStorageBackendKey, s3PublicEndpointKey, s3PublicBucketKey},
 	{"s3.public_access_key", "s3.public_secret_key"},
 	{"s3.private_endpoint", "s3.private_bucket"},
 	{"s3.private_access_key", "s3.private_secret_key"},
@@ -2403,15 +2442,15 @@ func (h *AdminHandler) UpdateAdminSettings(ctx context.Context, values map[strin
 				}
 			}
 
-			for key, value := range normalized {
-				if err := rejectArtworkBackendChange(stored, key, value); err != nil {
-					preconditionErr = err
-					return nil, err
-				}
-			}
 			prospective := maps.Clone(stored)
 			for key, value := range normalized {
 				prospective[key] = value
+			}
+			if artworkStorageLocked(stored) {
+				if err := rejectArtworkIdentityChange(stored[artworkstore.IdentitySettingKey], h.effectiveAdminSettings(stored), h.effectiveAdminSettings(prospective)); err != nil {
+					preconditionErr = err
+					return nil, err
+				}
 			}
 			activeProspective := h.activeAdminSettings(prospective)
 			before := h.effectiveAdminSettings(stored)
@@ -2763,12 +2802,14 @@ func (h *AdminHandler) UpdateAdminSetting(ctx context.Context, key, value string
 				}
 			}
 
-			if err := rejectArtworkBackendChange(stored, key, req.Value); err != nil {
-				preconditionErr = err
-				return nil, err
-			}
 			prospective := maps.Clone(stored)
 			prospective[key] = req.Value
+			if artworkStorageLocked(stored) {
+				if err := rejectArtworkIdentityChange(stored[artworkstore.IdentitySettingKey], h.effectiveAdminSettings(stored), h.effectiveAdminSettings(prospective)); err != nil {
+					preconditionErr = err
+					return nil, err
+				}
+			}
 			if isPlaybackRoutingPairSetting(key) {
 				changed := map[string]string{key: req.Value}
 				validationSnapshot := adminSettingsValidationSnapshot(h.activeAdminSettings(prospective), changed)
@@ -2793,9 +2834,16 @@ func (h *AdminHandler) UpdateAdminSetting(ctx context.Context, key, value string
 					return nil, err
 				}
 			}
-			// Image caching's bucket is the other durable prerequisite: clearing
-			// it here while metadata.cache_images is stored on would leave the
-			// cacher unable to start after restart. Disable caching first.
+			// The artwork backend is the other durable prerequisite: an explicit
+			// S3 backend without a public bucket cannot open after restart, whether
+			// this write selects the backend or clears the bucket under it.
+			if key == artworkStorageBackendKey || key == s3PublicBucketKey || key == s3OperationalBucketKey {
+				if err := config.ValidateArtworkStorageSettings(h.effectiveAdminSettings(prospective)); err != nil {
+					validationErr = err
+					validationCode = "invalid_settings"
+					return nil, err
+				}
+			}
 
 			before := h.effectiveAdminSettings(stored)
 			after = h.effectiveAdminSettings(prospective)

@@ -958,12 +958,18 @@ The server admin settings include `artwork.storage_backend` (`auto`, `local`, or
 `/var/lib/silo/artwork`). Artwork storage settings take effect after a server
 restart.
 
-`artwork.storage_backend` can only be chosen before any artwork is stored. The
+The artwork location can only be chosen before any artwork is stored. The
 first artwork write records the storage identity, and from then on a write that
-would change the backend is rejected with `409` and the problem code
-`artwork_storage_locked`. Re-saving the current value is accepted.
+would move artwork is rejected with `409` and the problem code
+`artwork_storage_locked`: a change of `artwork.storage_backend`, of
+`artwork.local_path` for a local store, or of `s3.public_endpoint`,
+`s3.public_bucket`, or `s3.public_key_prefix` for an S3 store. Adding a public
+bucket while an `auto` backend is recorded as local is also rejected, since it
+would change what `auto` resolves to. Re-saving the current values is accepted.
 `GET /api/v2/admin/server/status` reports `artwork_storage.locked` so a settings
-form can disable the control.
+form can disable the control. Selecting `s3` without a configured
+`s3.public_bucket`, or clearing the bucket while `s3` is selected, is rejected
+as `invalid_settings`.
 
 `metadata.cache_images` defaults to `true` on fresh installations. It no longer
 requires a public S3 bucket because local artwork storage is available.

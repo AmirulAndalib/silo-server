@@ -608,6 +608,10 @@ func ValidateAdminSettingsWithCapabilities(values map[string]string, capabilitie
 		}
 	}
 
+	if err := ValidateArtworkStorageSettings(effective); err != nil {
+		return err
+	}
+
 	switch effective["s3.public_url_auth"] {
 	case "", "presigned":
 	case "public", cloudflareURLMode:
@@ -709,6 +713,19 @@ func normalizeAdminDuration(key, value string) (string, error) {
 		return "", fmt.Errorf("%s must be a positive duration", key)
 	}
 	return value, nil
+}
+
+// ValidateArtworkStorageSettings rejects an explicit S3 artwork backend with
+// no public bucket to back it. artworkstore.Open fails on that combination, so
+// accepting it here would only surface as a fatal restart.
+func ValidateArtworkStorageSettings(effective map[string]string) error {
+	if strings.ToLower(strings.TrimSpace(effective["artwork.storage_backend"])) != "s3" {
+		return nil
+	}
+	if strings.TrimSpace(effective["s3.public_bucket"]) == "" {
+		return fmt.Errorf("artwork.storage_backend s3 requires s3.public_bucket")
+	}
+	return nil
 }
 
 func normalizeAdminEnum(key, value string, allowed ...string) (string, error) {

@@ -15,8 +15,10 @@ with either backend. The setup wizard can finish without configuring S3.
 
 Choose the backend during setup, or before the first library scan. The first
 artwork write records where artwork lives, and after that the backend selector
-is locked in the settings UI and the API rejects a change. Silo does not move
-artwork between backends.
+is locked in the settings UI and the API rejects a change. The same lock covers
+the local artwork path and, for S3, the public endpoint, bucket, and key prefix,
+since changing any of them would point the catalog at a different store. Silo
+does not move artwork between backends.
 
 If you must move anyway, treat it as a manual migration: stop the server, copy
 the artwork tree to the new store keeping the same keys, save the new backend

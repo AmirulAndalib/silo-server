@@ -3150,7 +3150,8 @@ func main() {
 	// Mirrors the Jellyfin compat layout above. See newAudiobookshelfListener.
 	var absSrv *http.Server
 	if (mode == "integrated" || mode == "api") && deps.ABSHandler != nil && cfg.AudiobookshelfCompat.Listen != "" {
-		absSrv = newAudiobookshelfListener(cfg.AudiobookshelfCompat.Listen, deps.ABSHandler, ipResolver)
+		absSrv = newAudiobookshelfListener(cfg.AudiobookshelfCompat.Listen, deps.ABSHandler,
+			apiv2.NewArtworkHandler(deps.Artwork, deps.ArtworkSigner, deps.ArtworkRepair), ipResolver)
 	}
 
 	// Run non-critical startup work in the background so it doesn't delay the

@@ -70,9 +70,9 @@ const PUBLIC_S3_KEYS = [
   "s3.public_token_ttl",
 ];
 
-// Changing any of these moves where cached artwork objects live. Silo detects
-// that change after restart but requires an explicit manual reconcile so an
-// incomplete bucket migration cannot rewrite the artwork catalog.
+// Changing any of these moves where cached artwork objects live. Once artwork
+// has been stored in S3 the server rejects the write (artwork_storage_locked);
+// before that it warns, because a later scan will record whatever is saved.
 const PUBLIC_S3_IDENTITY_KEYS = ["s3.public_endpoint", "s3.public_bucket", "s3.public_key_prefix"];
 
 const PRIVATE_S3_KEYS = [
@@ -236,6 +236,7 @@ function S3Group({
   label,
   description,
   checkKind,
+  artworkLockedBackend,
 }: {
   form: SettingsForm;
   restartKeys: RestartKeyMatcher;
@@ -244,6 +245,7 @@ function S3Group({
   label: string;
   description: string;
   checkKind: "s3_public" | "s3_private";
+  artworkLockedBackend?: string;
 }) {
   const checkConnection = useCheckAdminSettingsConnection();
   const [connectionResult, setConnectionResult] = useState<ConnectionCheckResponse | null>(null);
@@ -306,15 +308,19 @@ function S3Group({
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
           <div className="text-[13px] leading-relaxed">
             <p className="font-medium text-amber-500">Storage location change</p>
-            <p className="text-muted-foreground mt-1">
-              Artwork is cached in this bucket. Silo will not change artwork cache records
-              automatically after restart. Copy or migrate the existing bucket objects first, then
-              manually run Reconcile Artwork Cache only if you intend every missing record to be
-              reset or cleared. Re-downloading those reset provider images is a separate, manual
-              Backfill Metadata Images action; normal scheduled caching only processes artwork
-              queued by new or changed metadata. Uploaded images (custom posters, collection
-              artwork, branding) cannot be re-downloaded.
-            </p>
+            {artworkLockedBackend === "s3" ? (
+              <p className="text-muted-foreground mt-1">
+                Artwork is stored in this bucket, so the server will reject a change to the
+                endpoint, bucket, or key prefix. To move artwork, copy the objects to the new
+                location and follow the manual migration steps in the artwork storage documentation.
+              </p>
+            ) : (
+              <p className="text-muted-foreground mt-1">
+                The first artwork write records this location and locks it. Uploaded images (custom
+                posters, collection artwork, branding) cannot be re-downloaded, so choose the bucket
+                before scanning.
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -849,6 +855,7 @@ export default function InfrastructureSettings() {
           label="Public storage"
           description="Files clients download directly: cached artwork, uploaded posters, and branding images."
           checkKind="s3_public"
+          artworkLockedBackend={artworkLocked ? artworkStorage?.backend : undefined}
         />
         <S3Group
           form={form}

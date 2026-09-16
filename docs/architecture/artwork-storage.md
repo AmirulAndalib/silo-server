@@ -42,10 +42,16 @@ about how they are read, so changing a public read endpoint never counts as a
 move. The first successful write records it as `artwork.storage_identity` in
 `server_settings`, and startup refuses a store with a different identity. The
 reconcile task certifies the same row after a manual sweep, and the storage
-sweep scopes its cursor to it. Once recorded, the admin settings API rejects a
-change to `artwork.storage_backend` with `409 artwork_storage_locked`, and
+sweep scopes its cursor to it. Once recorded, the admin settings API rejects
+any write that would resolve to a different identity with
+`409 artwork_storage_locked`: a different backend, `artwork.local_path` for a
+local store, or the public endpoint, bucket, or key prefix for an S3 store. An
+`auto` backend that resolved to local also cannot gain a public bucket, because
+that would flip the resolution on restart; an explicit `local` backend can.
 `GET /admin/server/status` reports `artwork_storage.locked` so the UI disables
-the control. Moving artwork is a manual operation:
+the control. Independently of the lock, an explicit `s3` backend without a
+public bucket is rejected as invalid, since the store could not open on
+restart. Moving artwork is a manual operation:
 
 1. Stop artwork writers.
 2. Copy the artwork tree to the new store, preserving logical keys.
@@ -63,7 +69,9 @@ probe answers 200 with `"status":"degraded"` and the same per-dependency
 booleans the error shape carries, so a storage outage is visible without
 removing the node from service: the API keeps answering,
 artwork routes return 503 on their own, and readiness follows storage recovery
-without a restart. Artwork probes are cached for 30 seconds.
+without a restart. Artwork probes are cached for 30 seconds. This changes the
+retained `/api/v1/ready` contract, which previously answered 503 on an S3
+`HeadBucket` failure; the contract document records the new behavior.
 
 ## Delivery
 
@@ -84,6 +92,17 @@ Only external delivery (a public or token-authenticated read endpoint in front
 of S3) can lag behind a write. That configuration alone runs the
 `verify_artwork_delivery` task and consults the verified-keys manifest when
 choosing which variant to advertise.
+
+Local URLs are root-relative, which is enough for clients of the API listener
+and for the Jellyfin and Audiobookshelf compatibility listeners, which mount
+the same signed artwork route so their cover redirects resolve on their own
+port. Consumers outside the server, such as Discord embeds, anchor them to
+`server.public_url` and send no image when it is unset.
+
+Local storage publishes an object by writing to a temporary file, syncing it,
+renaming it into place, and syncing the containing directory, so a crash after
+`Put` returns cannot leave the catalog referencing a key the store does not
+show.
 
 Intro and credits markers that an external process places under
 `markers/<file hash>.json` are read through the same store.
