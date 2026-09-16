@@ -88,6 +88,7 @@ func TestProfileAvatarStoreAllowsOnlyLocalWithoutPrivateS3(t *testing.T) {
 type avatarStorageSettings struct{}
 
 func (avatarStorageSettings) Get(context.Context, string) (string, error) { return "", nil }
+func (avatarStorageSettings) Set(context.Context, string, string) error   { return nil }
 func (avatarStorageSettings) SetIfAbsent(context.Context, string, string) (bool, error) {
 	return true, nil
 }
