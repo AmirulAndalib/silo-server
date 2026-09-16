@@ -476,22 +476,22 @@ func (h *ItemsHandler) handlePersonItem(w http.ResponseWriter, r *http.Request, 
 
 	providerIDs := providerIDMap(person.ImdbID, person.TmdbID, person.TvdbID)
 	var externalURLs []map[string]any
-	if id, ok := providerIDs[providerKeyTMDB]; ok {
+	if person.TmdbID != "" {
 		externalURLs = append(externalURLs, map[string]any{
 			"Name": "TMDB",
-			"Url":  "https://www.themoviedb.org/person/" + id,
+			"Url":  "https://www.themoviedb.org/person/" + person.TmdbID,
 		})
 	}
-	if id, ok := providerIDs[providerKeyIMDB]; ok {
+	if person.ImdbID != "" {
 		externalURLs = append(externalURLs, map[string]any{
 			"Name": "IMDb",
-			"Url":  "https://www.imdb.com/name/" + id,
+			"Url":  "https://www.imdb.com/name/" + person.ImdbID,
 		})
 	}
-	if id, ok := providerIDs[providerKeyTVDB]; ok {
+	if person.TvdbID != "" {
 		externalURLs = append(externalURLs, map[string]any{
 			"Name": "TheTVDB",
-			"Url":  "https://www.thetvdb.com/people/" + id,
+			"Url":  "https://www.thetvdb.com/people/" + person.TvdbID,
 		})
 	}
 	if len(providerIDs) > 0 {
