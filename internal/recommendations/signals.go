@@ -145,9 +145,9 @@ func (s *SignalReader) RecentCompletedItemIDs(ctx context.Context, userID int, p
 	}
 	candidates = recentDistinctCompletedRows(candidates, limit)
 
-	offset := 0
+	var after *userstore.ProgressKey
 	for {
-		progress, err := store.ListProgress(ctx, profileID, "completed", signalPageSize, offset)
+		progress, err := store.ListProgressPage(ctx, profileID, "completed", after, signalPageSize)
 		if err != nil {
 			return nil, fmt.Errorf("list completed progress from store: %w", err)
 		}
@@ -176,7 +176,10 @@ func (s *SignalReader) RecentCompletedItemIDs(ctx context.Context, userID int, p
 		if len(progress) < signalPageSize {
 			break
 		}
-		offset += len(progress)
+		last := progress[len(progress)-1]
+		after = &userstore.ProgressKey{UpdatedAt: last.UpdatedAt, MediaItemID: last.MediaItemID}
+		// Read every page tied at the cutoff: a later leaf can resolve to a
+		// canonical ID that sorts ahead of the current last anchor.
 		if len(candidates) == limit && !oldestPageTime.IsZero() &&
 			oldestPageTime.Before(candidates[len(candidates)-1].UpdatedAt) {
 			break
