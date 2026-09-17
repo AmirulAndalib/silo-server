@@ -48,6 +48,61 @@ func TestBucketAPIRoundTripsIgnoringBucket(t *testing.T) {
 	}
 }
 
+// A local reader never blocks on the network, so an upload deadline would
+// otherwise elapse unnoticed and the object would still be published. The admin
+// job runner's upload timeout exists to bound exactly these large writes.
+func TestPutStreamStopsOnACanceledContext(t *testing.T) {
+	fs, err := NewFilesystem(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	const key = "catalog-seeds/2026/09/16/job.json.gz"
+	if err := fs.PutStream(ctx, key, strings.NewReader("a large export"), "application/gzip"); err == nil {
+		t.Fatal("canceled write completed")
+	}
+	if _, err := fs.Stat(context.Background(), key); err == nil {
+		t.Fatal("canceled write published an object")
+	}
+}
+
+// Cancellation partway through must not publish a truncated object either: the
+// temporary file is discarded rather than renamed.
+func TestPutStreamDiscardsAPartialWriteOnCancellation(t *testing.T) {
+	fs, err := NewFilesystem(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	const key = "diagnostics/1/report.tar.gz"
+	// Cancel after the first chunk, so the copy has begun before it stops.
+	reader := &cancelAfterFirstRead{cancel: cancel, data: strings.NewReader(strings.Repeat("x", 128*1024))}
+
+	if err := fs.PutStream(ctx, key, reader, "application/gzip"); err == nil {
+		t.Fatal("interrupted write completed")
+	}
+	if _, err := fs.Stat(context.Background(), key); err == nil {
+		t.Fatal("interrupted write published a truncated object")
+	}
+}
+
+type cancelAfterFirstRead struct {
+	cancel context.CancelFunc
+	data   *strings.Reader
+	read   bool
+}
+
+func (c *cancelAfterFirstRead) Read(p []byte) (int, error) {
+	n, err := c.data.Read(p)
+	if !c.read {
+		c.read = true
+		c.cancel()
+	}
+	return n, err
+}
+
 func TestBucketAPIUploadFileReportsSize(t *testing.T) {
 	api, fs := localBucketAPI(t)
 	ctx := context.Background()

@@ -306,7 +306,7 @@ func writeCatalogSeedError(w http.ResponseWriter, status int, code, message stri
 const defaultLocalImportDir = "/catalog-seeds"
 
 var (
-	errCatalogSeedImportSourceUnavailable = errors.New("Catalog imports from stored artifacts require configured storage")
+	errCatalogSeedImportSourceUnavailable = errors.New("catalog imports from stored artifacts require configured storage")
 	errCatalogSeedImportInvalidLocalPath  = errors.New("Local path must point to an existing .json.gz file")
 	errCatalogSeedImportInvalidRemoteURL  = errors.New("Remote URL must point to an http(s) .json.gz file")
 )

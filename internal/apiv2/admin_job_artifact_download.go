@@ -2,6 +2,7 @@ package apiv2
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"mime"
@@ -16,10 +17,53 @@ import (
 	"github.com/Silo-Server/silo-server/internal/api/handlers"
 )
 
+// dispositionFilenameParam is the Content-Disposition parameter naming the file
+// a browser saves.
+const dispositionFilenameParam = "filename"
+
 // AdminJobArtifactService opens a completed job's artifact. It exists so a
 // store that cannot presign still has a way to deliver bytes.
 type AdminJobArtifactService interface {
 	OpenAdminJobArtifact(context.Context, string) (handlers.AdminJobArtifactDownload, error)
+}
+
+// AdminJobArtifactCapabilities tells an administrator client what this server's
+// artifact storage can do before it asks for a job. Both answers depend on the
+// configured backend, not on the release, so version sniffing cannot derive
+// them.
+type AdminJobArtifactCapabilities struct {
+	Capability
+	ArtifactDownload bool `json:"artifact_download" doc:"Whether completed job artifacts can be downloaded from this server"`
+	PublicLinks      bool `json:"public_links" doc:"Whether a shareable seven-day link can be minted. False when artifacts are stored locally, because only storage-side presigning produces a URL usable off this server"`
+}
+
+type AdminJobArtifactCapabilitiesOutput struct {
+	Status       int
+	ETag         string `header:"ETag"`
+	CacheControl string `header:"Cache-Control"`
+	Body         AdminJobArtifactCapabilities
+}
+
+func registerAdminJobArtifactCapabilities(reg *Registry) {
+	Register(reg, Operation{
+		Operation: humaOp(http.MethodGet, Prefix+"/admin/jobs/capabilities", "getAdminJobCapabilities", "admin-tasks",
+			"Artifact download and public-link support for administrator jobs."),
+		Class: ClassActingAdmin, ServiceBacked: true,
+	}, func(context.Context, *CapabilityInput) (*AdminJobArtifactCapabilitiesOutput, error) {
+		if reg.deps.AdminTaskJobs == nil {
+			return nil, unavailable("admin jobs")
+		}
+		// Downloading needs somewhere to stream from or a bucket to presign
+		// against; a server with neither reports both false rather than
+		// advertising an action that cannot complete.
+		publicLinks := reg.deps.AdminTaskJobs.AdminTaskJobPublicLinkSupported()
+		download := publicLinks || reg.deps.AdminJobArtifacts != nil
+		return &AdminJobArtifactCapabilitiesOutput{Body: AdminJobArtifactCapabilities{
+			Capability:       Capability{State: StateAvailable},
+			ArtifactDownload: download,
+			PublicLinks:      publicLinks,
+		}}, nil
+	})
 }
 
 // registerAdminJobArtifactDownload serves an artifact to a signed capability
@@ -33,16 +77,16 @@ func registerAdminJobArtifactDownload(reg *Registry) {
 		"Stream a completed job's artifact through the API host. Authorized by the signed capability in the download URL, not by a session.")
 	operation.Parameters = []*huma.Param{
 		{Name: "id", In: paramInPath, Required: true, Schema: &huma.Schema{Type: huma.TypeString, MinLength: new(1), MaxLength: new(128)}},
-		{Name: "exp", In: artworkParamQuery, Required: true, Schema: &huma.Schema{Type: artworkIntegerType, Format: "int64"}},
+		{Name: "exp", In: artworkParamQuery, Required: true, Schema: &huma.Schema{Type: artworkIntegerType, Format: playbackIntegerFormat}},
 		{Name: "sig", In: artworkParamQuery, Required: true, Schema: &huma.Schema{Type: huma.TypeString}},
 	}
 	operation.Responses = map[string]*huma.Response{
 		"200": {
 			Description: "Gzip-compressed job artifact",
-			Content:     map[string]*huma.MediaType{"application/gzip": {Schema: &huma.Schema{Type: huma.TypeString, Format: artworkBinaryFormat}}},
+			Content:     map[string]*huma.MediaType{mediaTypeCatalogGzip: {Schema: &huma.Schema{Type: huma.TypeString, Format: artworkBinaryFormat}}},
 			Headers: map[string]*huma.Param{
-				"Content-Disposition": {Schema: &huma.Schema{Type: huma.TypeString}},
-				"Content-Length":      {Schema: &huma.Schema{Type: artworkIntegerType}},
+				directDisposition:         {Schema: &huma.Schema{Type: huma.TypeString}},
+				adminSubtitleLengthHeader: {Schema: &huma.Schema{Type: artworkIntegerType}},
 			},
 		},
 		"404": {Description: "Artifact not found, or the capability is invalid or expired"},
@@ -69,18 +113,30 @@ func registerAdminJobArtifactDownload(reg *Registry) {
 			writeProblem(w, r, NewProblem(TypeNotFound, "Job artifact not found."))
 			return
 		}
+		// The capability has verified by this point, so the caller has proven it
+		// was given a URL for this job. Hiding an outage behind 404 from here on
+		// would tell an authorized administrator their artifact is permanently
+		// gone when storage is only down; only a genuinely absent job or
+		// artifact is 404.
 		download, err := reg.deps.AdminJobArtifacts.OpenAdminJobArtifact(r.Context(), id)
-		if err != nil || download.Body == nil {
+		switch {
+		case errors.Is(err, handlers.ErrJobArtifactNotFound):
+			writeProblem(w, r, NewProblem(TypeNotFound, "Job artifact not found."))
+			return
+		case err != nil:
+			writeProblem(w, r, unavailable("job artifacts"))
+			return
+		case download.Body == nil:
 			writeProblem(w, r, NewProblem(TypeNotFound, "Job artifact not found."))
 			return
 		}
 		defer func() { _ = download.Body.Close() }()
-		w.Header().Set("Content-Type", "application/gzip")
-		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": download.Filename}))
+		w.Header().Set("Content-Type", mediaTypeCatalogGzip)
+		w.Header().Set(directDisposition, mime.FormatMediaType("attachment", map[string]string{dispositionFilenameParam: download.Filename}))
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Accept-Ranges", "none")
 		if download.Size != nil && *download.Size >= 0 {
-			w.Header().Set("Content-Length", strconv.FormatInt(*download.Size, 10))
+			w.Header().Set(adminSubtitleLengthHeader, strconv.FormatInt(*download.Size, 10))
 		}
 		w.WriteHeader(http.StatusOK)
 		if _, err := io.Copy(w, download.Body); err != nil {

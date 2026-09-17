@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -26,6 +27,12 @@ type artifactStreamer interface {
 	GetObjectStream(ctx context.Context, bucket, key string) (io.ReadCloser, error)
 }
 
+// ErrJobArtifactNotFound reports that a job or its artifact does not exist, as
+// distinct from storage being unreachable. Callers answer 404 for this and a
+// service error for anything else, so an outage does not read to an authorized
+// administrator as a permanently missing download.
+var ErrJobArtifactNotFound = errors.New("job artifact not found")
+
 // OpenAdminJobArtifact streams a completed job's artifact. The caller has
 // already verified the signed capability for this job ID; authorization does
 // not happen here.
@@ -34,11 +41,14 @@ func (h *AdminJobsHandler) OpenAdminJobArtifact(ctx context.Context, id string) 
 		return AdminJobArtifactDownload{}, fmt.Errorf("admin job artifacts are not configured")
 	}
 	job, err := h.repo.GetByID(ctx, id)
+	if errors.Is(err, adminjob.ErrJobNotFound) {
+		return AdminJobArtifactDownload{}, ErrJobArtifactNotFound
+	}
 	if err != nil {
 		return AdminJobArtifactDownload{}, err
 	}
 	if job.Status != adminjob.StatusCompleted || job.ArtifactBucket == "" || job.ArtifactKey == "" {
-		return AdminJobArtifactDownload{}, fmt.Errorf("job %s has no artifact", id)
+		return AdminJobArtifactDownload{}, fmt.Errorf("%w: job %s", ErrJobArtifactNotFound, id)
 	}
 	streamer, ok := h.store.(artifactStreamer)
 	if !ok {

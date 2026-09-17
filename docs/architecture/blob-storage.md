@@ -4,12 +4,9 @@
 The store owns its filesystem root or S3 bucket; callers use their own logical
 keys.
 
-Artwork, branding assets, intro/credit markers, chapter thumbnails, and
-downloaded subtitles go through it today. Diagnostic bundles and job artifacts
-still use their own bucket-oriented code in `internal/diagnostics` and
-`internal/adminjob`, and still require S3; they move onto the store in a later
-change. The prefixes reserved for them are listed below so the namespaces do not
-have to be renegotiated when they do.
+Every blob Silo owns goes through it: artwork, branding assets, intro/credit
+markers, chapter thumbnails, downloaded subtitles, diagnostic bundles, job
+artifacts, and profile avatars.
 
 ## The two stores
 
@@ -100,6 +97,15 @@ a feature that would always fail. Three consequences:
 - **Seven-day public links** cannot exist without presigning. The API answers
   `409` and the job projection carries `public_link_supported` so the UI hides
   the action instead of offering one that always fails.
+
+`GET /api/v2/admin/jobs/capabilities` reports both answers before a client
+fetches a job, since each depends on the configured backend rather than the
+release.
+
+Once the capability on an artifact URL verifies, the caller has proven it was
+given that URL, so only a genuinely absent job or artifact answers 404 from
+there; unreachable storage answers 503 rather than reporting a download as
+permanently gone.
 
 Only API and integrated processes open blob storage. Worker processes do not
 probe it or compare the catalog's recorded backend with their local settings.

@@ -100,7 +100,7 @@ func TestAdminJobArtifactDownloadRejectsBadCapabilities(t *testing.T) {
 }
 
 func TestAdminJobArtifactDownloadHidesMissingArtifacts(t *testing.T) {
-	stub := &jobArtifactStub{err: errors.New("job has no artifact")}
+	stub := &jobArtifactStub{err: handlers.ErrJobArtifactNotFound}
 	h, signer := jobArtifactHandler(t, stub)
 	path, _ := signer.SignFor("job-abc", time.Now(), 15*time.Minute)
 
@@ -111,4 +111,56 @@ func TestAdminJobArtifactDownloadHidesMissingArtifacts(t *testing.T) {
 	if stub.calls != 1 {
 		t.Fatalf("calls = %d", stub.calls)
 	}
+}
+
+// Once the capability verifies, the caller has proven it holds a URL for this
+// job. Reporting an outage as 404 from there would tell an administrator their
+// artifact is gone when storage is only unreachable.
+func TestAdminJobArtifactDownloadReportsStorageOutagesAsUnavailable(t *testing.T) {
+	stub := &jobArtifactStub{err: errors.New("storage unreachable")}
+	h, signer := jobArtifactHandler(t, stub)
+	path, _ := signer.SignFor("job-abc", time.Now(), 15*time.Minute)
+
+	rec := do(t, h, "GET", path, "", nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+}
+
+// Clients need to know whether downloading and public links work before they
+// fetch a job, because both depend on the configured backend.
+func TestAdminJobCapabilitiesReportBackendSupport(t *testing.T) {
+	for name, tc := range map[string]struct {
+		publicLinks bool
+		artifacts   bool
+		wantPublic  string
+		wantDownloa string
+	}{
+		"s3":    {publicLinks: true, artifacts: false, wantPublic: `"public_links":true`, wantDownloa: `"artifact_download":true`},
+		"local": {publicLinks: false, artifacts: true, wantPublic: `"public_links":false`, wantDownloa: `"artifact_download":true`},
+		"none":  {publicLinks: false, artifacts: false, wantPublic: `"public_links":false`, wantDownloa: `"artifact_download":false`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeAdminTasks()
+			f.publicLinks = tc.publicLinks
+			deps, _ := libraryDeps(t)
+			deps.AdminTaskJobs = f
+			if tc.artifacts {
+				deps.AdminJobArtifacts = &jobArtifactStub{}
+			}
+			h := newTestHandler(t, deps)
+			rec := do(t, h, "GET", Prefix+"/admin/jobs/capabilities", "", bearer(adminToken))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%d %s", rec.Code, rec.Body)
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantPublic) || !strings.Contains(rec.Body.String(), tc.wantDownloa) {
+				t.Fatalf("body = %s", rec.Body)
+			}
+		})
+	}
+	// Administrator-only, like every other admin job operation.
+	f := newFakeAdminTasks()
+	deps, _ := libraryDeps(t)
+	deps.AdminTaskJobs = f
+	requireProblem(t, do(t, newTestHandler(t, deps), "GET", Prefix+"/admin/jobs/capabilities", "", bearer(memberToken)), TypePermissionDenied)
 }

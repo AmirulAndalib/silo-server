@@ -580,6 +580,7 @@ func registerAll(reg *Registry) {
 	registerAdminPluginCatalogSettings(reg)
 	registerAdminDiagnosticDownload(reg)
 	registerAdminJobArtifactDownload(reg)
+	registerAdminJobArtifactCapabilities(reg)
 	registerAdminDiagnosticReads(reg)
 	registerAdminDiagnosticDelete(reg)
 	registerAdminDashboardInsights(reg)
