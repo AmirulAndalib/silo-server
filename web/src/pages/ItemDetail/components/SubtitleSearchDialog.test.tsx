@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { FileVersion } from "@/api/types";
 import SubtitleSearchDialog from "./SubtitleSearchDialog";
@@ -44,4 +44,20 @@ it.each([
   expect(screen.getByText("Upload form")).toBeInTheDocument();
   expect(screen.getByText("Search online")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Search" })).toBeInTheDocument();
+});
+
+it("keeps focus inside the dialog when a late probe removes the focused search control", async () => {
+  mocks.providerStatus.mockReturnValue({ data: undefined });
+  const view = render(
+    <SubtitleSearchDialog open onOpenChange={() => {}} version={version} title="Synthetic" />,
+  );
+  screen.getByRole("button", { name: "Search" }).focus();
+  mocks.providerStatus.mockReturnValue({ data: { enabled: false, providers: [] } });
+  view.rerender(
+    <SubtitleSearchDialog open onOpenChange={() => {}} version={version} title="Synthetic" />,
+  );
+  expect(screen.queryByRole("button", { name: "Search" })).not.toBeInTheDocument();
+  await waitFor(() =>
+    expect(screen.getByRole("dialog").contains(document.activeElement)).toBe(true),
+  );
 });

@@ -98,6 +98,8 @@ export function SubtitleMenu({
   // probe failures keep today's behavior. Manual upload never depends on it.
   useEffect(() => {
     if (!playerConfig) return;
+    // A previous server's answer must not hide search on this one.
+    setOnlineSearchEnabled(true);
     let cancelled = false;
     playerV2(playerConfig, "GET /api/v2/subtitles/providers/status", {})
       .then((res) => {
