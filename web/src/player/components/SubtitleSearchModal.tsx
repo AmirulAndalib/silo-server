@@ -78,6 +78,16 @@ export function SubtitleSearchModal({
     return () => clearTimeout(timer);
   }, [isOpen]);
 
+  // The provider probe can resolve after the modal opened. If it hides online
+  // search, the focused language select unmounts; keep focus inside the modal.
+  useEffect(() => {
+    if (!isOpen || onlineSearchEnabled) return;
+    const modal = modalRef.current;
+    if (modal && !modal.contains(document.activeElement)) {
+      modal.querySelector<HTMLElement>("button")?.focus();
+    }
+  }, [isOpen, onlineSearchEnabled]);
+
   useEffect(() => {
     if (!isOpen) return;
 

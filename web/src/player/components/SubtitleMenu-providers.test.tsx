@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { SubtitleMenu } from "./SubtitleMenu";
+import { SubtitleSearchModal } from "./SubtitleSearchModal";
 import type { PlayerConfig } from "../context/PlayerConfigContext";
 
 const mocks = vi.hoisted(() => ({ v2: vi.fn() }));
@@ -71,4 +72,18 @@ it.each([
   expect(screen.getByText("Upload form")).toBeInTheDocument();
   expect(screen.getByText("Search online")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Search" })).toBeInTheDocument();
+});
+
+it("keeps focus in the modal when a late probe hides online search", async () => {
+  const props = {
+    mediaFileId: 42,
+    playerConfig: config,
+    isOpen: true,
+    onClose: () => {},
+    onSubtitleDownloaded: () => {},
+  };
+  const view = render(<SubtitleSearchModal {...props} onlineSearchEnabled />);
+  await waitFor(() => expect(screen.getByRole("combobox", { name: "Language" })).toHaveFocus());
+  view.rerender(<SubtitleSearchModal {...props} onlineSearchEnabled={false} />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Close" })).toHaveFocus());
 });
