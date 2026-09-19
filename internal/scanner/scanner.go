@@ -1064,12 +1064,6 @@ func (s *Scanner) scanPaths(
 		}
 	}
 
-	if allowEmptyRootGuard && len(walkFailures) == 0 && (len(filePaths) > 0 || allowEmptyCleanup) {
-		if err := s.folderRepo.ClearScanWarning(ctx, folder.ID); err != nil {
-			return nil, fmt.Errorf("clearing scan warning for folder %d: %w", folder.ID, err)
-		}
-	}
-
 	return result, nil
 }
 
@@ -1096,6 +1090,10 @@ func (s *Scanner) scanFolderByRoots(
 	walkRoots []string,
 	reconcileRoots []string,
 ) (*ScanResult, error) {
+	warning, err := s.scanWarningBeforeWalk(ctx, folder.ID, true)
+	if err != nil {
+		return nil, err
+	}
 	result := &ScanResult{}
 	configuredRoots := cleanScanRoots(reconcileRoots)
 	if len(configuredRoots) == 0 {
@@ -1491,11 +1489,11 @@ func (s *Scanner) scanFolderByRoots(
 			return nil, err
 		}
 	case seenAnyFiles || allowEmptyCleanup:
-		if err := s.folderRepo.ClearScanWarning(ctx, folder.ID); err != nil {
+		if err := s.folderRepo.UpdateScanWarningIfUnchanged(ctx, folder.ID, warning, catalog.ScanWarning{}); err != nil {
 			return nil, fmt.Errorf("clearing scan warning for folder %d: %w", folder.ID, err)
 		}
 	default:
-		if err := s.clearPartialWalkWarning(ctx, folder.ID); err != nil {
+		if err := s.clearPartialWalkWarning(ctx, folder.ID, warning); err != nil {
 			return nil, err
 		}
 	}
@@ -2114,30 +2112,37 @@ func (s *Scanner) setPartialWalkWarning(ctx context.Context, folderID, failures 
 	return nil
 }
 
+// Snapshot before walking: a scoped scan may publish a warning while a full
+// scan is running. Only the warning this scan observed can be cleared afterward.
+func (s *Scanner) scanWarningBeforeWalk(ctx context.Context, folderID int, fullScan bool) (catalog.ScanWarning, error) {
+	if s.folderRepo == nil || !fullScan {
+		return catalog.ScanWarning{}, nil
+	}
+	warning, err := s.folderRepo.GetScanWarning(ctx, folderID)
+	if err != nil {
+		return catalog.ScanWarning{}, fmt.Errorf("reading scan warning for folder %d: %w", folderID, err)
+	}
+	return warning, nil
+}
+
 // A healthy full walk clears a stale partial warning, including when it found
 // no media. Preserve empty/dead-root warnings raised by the cleanup guards.
-func (s *Scanner) clearPartialWalkWarning(ctx context.Context, folderID int) error {
+func (s *Scanner) clearPartialWalkWarning(ctx context.Context, folderID int, warning catalog.ScanWarning) error {
 	if s.folderRepo == nil {
 		return nil
 	}
-	folder, err := s.folderRepo.GetByID(ctx, folderID)
-	if err != nil {
-		return fmt.Errorf("reading scan warning for folder %d: %w", folderID, err)
-	}
-	if folder.ScanWarningCode != nil && *folder.ScanWarningCode == partialWalkWarningCode {
-		if err := s.folderRepo.ClearScanWarning(ctx, folderID); err != nil {
+	if warning.Code != nil && *warning.Code == partialWalkWarningCode {
+		if err := s.folderRepo.UpdateScanWarningIfUnchanged(ctx, folderID, warning, catalog.ScanWarning{}); err != nil {
 			return fmt.Errorf("clearing partial-walk warning for folder %d: %w", folderID, err)
 		}
-	} else if folder.ScanWarningCode != nil && folder.ScanWarningMessage != nil {
-		// A previous partial walk may have appended its count to a stronger
-		// warning. Remove the recovered walk's suffix without dismissing the
-		// underlying cleanup/outage warning or consuming its allowance.
-		if message, _, found := strings.Cut(*folder.ScanWarningMessage, "\nPartial scan: "); found {
-			warnedAt := time.Now().UTC()
-			if folder.ScanWarningAt != nil {
-				warnedAt = *folder.ScanWarningAt
-			}
-			if err := s.folderRepo.SetScanWarning(ctx, folderID, *folder.ScanWarningCode, message, warnedAt); err != nil {
+	} else if warning.Code != nil && warning.Message != nil {
+		// Remove only the recovered suffix, retaining the stronger warning's
+		// timestamp and cleanup allowance. Compare the whole original warning
+		// atomically so a concurrent warning cannot be rewritten here.
+		if message, _, found := strings.Cut(*warning.Message, "\nPartial scan: "); found {
+			replacement := warning
+			replacement.Message = &message
+			if err := s.folderRepo.UpdateScanWarningIfUnchanged(ctx, folderID, warning, replacement); err != nil {
 				return fmt.Errorf("clearing partial-walk warning suffix for folder %d: %w", folderID, err)
 			}
 		}

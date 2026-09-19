@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/idgen"
 	"github.com/Silo-Server/silo-server/internal/imageutil"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -135,6 +136,10 @@ func (s *Scanner) scanEbookPaths(ctx context.Context, folder *models.MediaFolder
 	if s == nil || folder == nil {
 		return fmt.Errorf("scanEbookPaths: nil scanner or folder")
 	}
+	warning, err := s.scanWarningBeforeWalk(ctx, folder.ID, fullScan)
+	if err != nil {
+		return err
+	}
 	scans, err := collectEbookRootScans(ctx, folder.ID, roots)
 	if err != nil {
 		return err
@@ -148,7 +153,7 @@ func (s *Scanner) scanEbookPaths(ctx context.Context, folder *models.MediaFolder
 	}
 
 	if len(candidates) == 0 {
-		return s.reconcileEbookScan(ctx, folder, scans, nil, fullScan)
+		return s.reconcileEbookScan(ctx, folder, scans, nil, fullScan, warning)
 	}
 
 	workers := ebookScanWorkers()
@@ -251,7 +256,7 @@ func (s *Scanner) scanEbookPaths(ctx context.Context, folder *models.MediaFolder
 	for _, p := range candidates {
 		seenPaths[p] = true
 	}
-	return s.reconcileEbookScan(ctx, folder, scans, seenPaths, fullScan)
+	return s.reconcileEbookScan(ctx, folder, scans, seenPaths, fullScan, warning)
 }
 
 // ebookCleanupGuardRepo is the slice of catalog.FolderRepository the
@@ -367,7 +372,7 @@ func (s *Scanner) emptyCleanupDecision(
 
 // reconcileEbookScan applies the post-walk safety policy and then performs
 // missing-file reconciliation for the roots that walked cleanly.
-func (s *Scanner) reconcileEbookScan(ctx context.Context, folder *models.MediaFolder, scans []ebookRootScan, seenPaths map[string]bool, fullScan bool) error {
+func (s *Scanner) reconcileEbookScan(ctx context.Context, folder *models.MediaFolder, scans []ebookRootScan, seenPaths map[string]bool, fullScan bool, warning catalog.ScanWarning) error {
 	if folder != nil {
 		defer s.reconcileMissingEbookEnrichment(ctx, folder.ID)
 	}
@@ -426,7 +431,7 @@ func (s *Scanner) reconcileEbookScan(ctx context.Context, folder *models.MediaFo
 	if fullScan && s.folderRepo != nil {
 		// The cleanup either ran with files present or was explicitly
 		// confirmed; any prior empty-root warning is stale now.
-		if err := s.folderRepo.ClearScanWarning(ctx, folder.ID); err != nil {
+		if err := s.folderRepo.UpdateScanWarningIfUnchanged(ctx, folder.ID, warning, catalog.ScanWarning{}); err != nil {
 			return fmt.Errorf("clearing scan warning for folder %d: %w", folder.ID, err)
 		}
 	}

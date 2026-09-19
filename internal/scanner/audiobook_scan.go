@@ -430,6 +430,11 @@ func (s *Scanner) ScanAudiobookFolder(ctx context.Context, folder *models.MediaF
 		return fmt.Errorf("ScanAudiobookFolder: nil scanner or folder")
 	}
 
+	warning, err := s.scanWarningBeforeWalk(ctx, folder.ID, fullScan)
+	if err != nil {
+		return err
+	}
+
 	// Phase 1: walk the tree to collect candidate book folders. This is
 	// I/O-light (no ffprobe), and avoids holding the worker pool open
 	// for the duration of a 240k-folder scan.
@@ -468,7 +473,7 @@ func (s *Scanner) ScanAudiobookFolder(ctx context.Context, folder *models.MediaF
 			return s.setPartialWalkWarning(ctx, folder.ID, walkFailures, true)
 		}
 		if fullScan {
-			return s.clearPartialWalkWarning(ctx, folder.ID)
+			return s.clearPartialWalkWarning(ctx, folder.ID, warning)
 		}
 		return nil
 	}
@@ -578,7 +583,7 @@ func (s *Scanner) ScanAudiobookFolder(ctx context.Context, folder *models.MediaF
 		return s.setPartialWalkWarning(ctx, folder.ID, walkFailures, true)
 	}
 	if fullScan {
-		return s.clearPartialWalkWarning(ctx, folder.ID)
+		return s.clearPartialWalkWarning(ctx, folder.ID, warning)
 	}
 	return nil
 }
