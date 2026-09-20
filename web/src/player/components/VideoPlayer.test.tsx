@@ -9,7 +9,7 @@ import type {
   PlaybackRealtimeCommandEnvelope,
   PlaybackRealtimeEventEnvelope,
 } from "../realtime-protocol";
-import type { PlayerSubtitleInfo } from "../types";
+import type { PlayerSubtitleInfo, VideoFitMode } from "../types";
 import { HLS_STARTUP_TIMEOUT_MS } from "../utils/hlsStartupGuard";
 import { VideoPlayer } from "./VideoPlayer";
 
@@ -29,6 +29,8 @@ const controls = vi.hoisted(() => ({
     onSurfaceTap?: (event: React.MouseEvent<HTMLElement>) => void;
     isFullscreen?: boolean;
     onFullscreenToggle?: () => void;
+    videoFit?: VideoFitMode;
+    onVideoFitToggle?: () => void;
     onSubtitleJobAccepted?: (jobId: string) => void;
   },
 }));
@@ -118,6 +120,8 @@ vi.mock("./PlayerControls", () => ({
       onSurfaceTap?: (event: React.MouseEvent<HTMLElement>) => void;
       isFullscreen?: boolean;
       onFullscreenToggle?: () => void;
+      videoFit?: VideoFitMode;
+      onVideoFitToggle?: () => void;
     }) => {
       controls.current = props;
       return null;
@@ -1696,5 +1700,24 @@ describe("VideoPlayer translation handoff", () => {
     });
 
     expect(controls.current?.isFullscreen).toBe(false);
+  });
+
+  it("toggles the video between Fit and Fill modes", () => {
+    const { container } = renderPlayer();
+    const video = container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+
+    expect(video).toHaveClass("object-contain");
+    expect(controls.current?.videoFit).toBe("contain");
+
+    act(() => controls.current?.onVideoFitToggle?.());
+
+    expect(video).toHaveClass("object-cover");
+    expect(controls.current?.videoFit).toBe("cover");
+
+    act(() => controls.current?.onVideoFitToggle?.());
+
+    expect(video).toHaveClass("object-contain");
+    expect(controls.current?.videoFit).toBe("contain");
   });
 });

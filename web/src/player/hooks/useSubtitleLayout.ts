@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type CSSProperties, type RefObject } from "react";
 import { computeSubtitleFontScale, computeSubtitlePositionStyle } from "@/lib/subtitleAppearance";
 import type { SubtitleAppearance } from "@/lib/subtitleAppearance";
+import type { VideoFitMode } from "../types";
 
 export interface SubtitleLayout {
   positionStyle: CSSProperties;
@@ -12,14 +13,16 @@ export interface SubtitleLayout {
  * Tracks the player container size and the video's intrinsic aspect ratio,
  * then produces a position CSS style and a font scale. The Bottom position is
  * anchored to the player window, while Lower Third and Top are anchored to a
- * 16:9 reference frame centered on the actually-rendered video area
- * (object-fit: contain). Falls back to container-relative percentages and
- * scale 1 until measurements are available.
+ * 16:9 reference frame centered on the actually-rendered video area. Fill mode
+ * anchors subtitles to the visible viewport because the video's outer edges
+ * are cropped. Falls back to container-relative percentages and scale 1 until
+ * measurements are available.
  */
 export function useSubtitleLayout(
   containerRef: RefObject<HTMLElement | null>,
   videoRef: RefObject<HTMLVideoElement | null>,
   position: SubtitleAppearance["position"],
+  videoFit: VideoFitMode = "contain",
 ): SubtitleLayout {
   const [playerSize, setPlayerSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
   const [videoAspect, setVideoAspect] = useState(0);
@@ -58,9 +61,10 @@ export function useSubtitleLayout(
         playerSize.w,
         playerSize.h,
         videoAspect,
+        videoFit,
       ),
-      fontScale: computeSubtitleFontScale(playerSize.w, playerSize.h, videoAspect),
+      fontScale: computeSubtitleFontScale(playerSize.w, playerSize.h, videoAspect, videoFit),
     }),
-    [position, playerSize.w, playerSize.h, videoAspect],
+    [position, playerSize.w, playerSize.h, videoAspect, videoFit],
   );
 }

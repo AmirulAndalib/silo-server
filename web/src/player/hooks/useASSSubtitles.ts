@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type JASSUB from "jassub";
-import type { PlayerSubtitleInfo } from "../types";
+import type { PlayerSubtitleInfo, VideoFitMode } from "../types";
 import { isASSCodec } from "../utils/subtitleCodecs";
 import {
   fallbackFontForSubtitle,
@@ -36,6 +36,7 @@ export function useASSSubtitles(
   streamOriginSeconds: number,
   subtitleDelayMs: number,
   onLoadState?: (state: "idle" | "loading" | "ready" | "error") => void,
+  videoFit: VideoFitMode = "contain",
 ): { isActive: boolean } {
   const onLoadStateRef = useRef(onLoadState);
   onLoadStateRef.current = onLoadState;
@@ -197,6 +198,7 @@ export function useASSSubtitles(
       }
 
       jassubRef.current = instance;
+      instance._canvas.classList.toggle("player-ass-fill", videoFit === "cover");
       await instance.ready;
       if (!cancelled && !signal.aborted) onLoadStateRef.current?.("ready");
     }
@@ -268,6 +270,21 @@ export function useASSSubtitles(
         }
       });
   }, [effectiveOffset, activeUrl]);
+
+  // JASSUB sizes its canvas as if the video always uses object-fit: contain.
+  // Keep the canvas on the same Fit/Fill path as the video, then ask libass to
+  // repaint after switching modes.
+  useEffect(() => {
+    const instance = jassubRef.current;
+    if (!instance || !activeUrl) return;
+
+    instance._canvas.classList.toggle("player-ass-fill", videoFit === "cover");
+    void instance.resize(true).catch((err) => {
+      if (jassubRef.current === instance) {
+        console.error("[useASSSubtitles] Unable to resize subtitles:", err);
+      }
+    });
+  }, [activeUrl, videoFit]);
 
   // Cleanup on unmount.
   useEffect(() => {
