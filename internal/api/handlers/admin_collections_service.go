@@ -208,28 +208,8 @@ func (h *LibraryCollectionHandler) updateAdminCollection(ctx context.Context, co
 	if err != nil {
 		return none, apiError(http.StatusNotFound, "not_found", "Collection not found")
 	}
-	proposedType := existing.CollectionType
-	if req.CollectionType != nil {
-		proposedType = *req.CollectionType
-	}
-	proposedConfig := existing.SourceConfig
-	if len(req.SourceConfig) > 0 {
-		proposedConfig = req.SourceConfig
-	}
-	proposedURL := existing.SourceURL
-	if req.SourceURL != nil {
-		proposedURL = *req.SourceURL
-	}
-	wasTrakt := existing.CollectionType == adminCollectionTrakt || isTraktCollectionSourceConfig(existing.SourceConfig)
-	willBeTrakt := proposedType == adminCollectionTrakt || isTraktCollectionSourceConfig(proposedConfig)
-	if !wasTrakt && willBeTrakt {
-		return none, apiError(http.StatusBadRequest, "unsupported_source", "new Trakt collections are not supported")
-	}
-	if wasTrakt {
-		activatesSchedule := req.SyncSchedule != nil && strings.TrimSpace(*req.SyncSchedule) != "" && (existing.SyncSchedule == nil || strings.TrimSpace(*existing.SyncSchedule) == "")
-		if proposedType != existing.CollectionType || !jsonConfigEqual(existing.SourceConfig, proposedConfig) || proposedURL != existing.SourceURL || activatesSchedule {
-			return none, apiError(http.StatusBadRequest, "legacy_source_immutable", "legacy Trakt collection sources cannot be changed or reactivated")
-		}
+	if err := validateAdminCollectionSourceUpdate(existing, req); err != nil {
+		return none, err
 	}
 	queryDefinition := req.QueryDefinition
 	if len(req.QueryDefinition) > 0 {
@@ -316,6 +296,52 @@ func (h *LibraryCollectionHandler) updateAdminCollection(ctx context.Context, co
 		h.refreshSmartCountAsync(collectionID)
 	}
 	return h.libraryCollectionResponseOf(ctx, updated), nil
+}
+
+func validateAdminCollectionSourceUpdate(existing *models.LibraryCollection, req AdminCollectionUpdate) error {
+	proposedType := existing.CollectionType
+	if req.CollectionType != nil {
+		proposedType = *req.CollectionType
+	}
+	proposedConfig := existing.SourceConfig
+	if len(req.SourceConfig) > 0 {
+		proposedConfig = req.SourceConfig
+	}
+	proposedURL := existing.SourceURL
+	if req.SourceURL != nil {
+		proposedURL = *req.SourceURL
+	}
+	wasTrakt := existing.CollectionType == adminCollectionTrakt || isTraktCollectionSourceConfig(existing.SourceConfig)
+	willBeTrakt := proposedType == adminCollectionTrakt || isTraktCollectionSourceConfig(proposedConfig)
+	if !wasTrakt && willBeTrakt {
+		return apiError(http.StatusBadRequest, "unsupported_source", "new Trakt collections are not supported")
+	}
+	if wasTrakt {
+		activatesSchedule := req.SyncSchedule != nil && strings.TrimSpace(*req.SyncSchedule) != "" && (existing.SyncSchedule == nil || strings.TrimSpace(*existing.SyncSchedule) == "")
+		changesLibraries := req.LibraryIDs != nil && !samePositiveIntSet(existing.LibraryIDs, *req.LibraryIDs)
+		if proposedType != existing.CollectionType || !jsonConfigEqual(existing.SourceConfig, proposedConfig) || proposedURL != existing.SourceURL || activatesSchedule || changesLibraries {
+			return apiError(http.StatusBadRequest, "legacy_source_immutable", "legacy Trakt collection sources cannot be changed or reactivated")
+		}
+	}
+	return nil
+}
+
+func samePositiveIntSet(left, right []int) bool {
+	left = uniquePositiveInts(left)
+	right = uniquePositiveInts(right)
+	if len(left) != len(right) {
+		return false
+	}
+	rightSet := make(map[int]struct{}, len(right))
+	for _, id := range right {
+		rightSet[id] = struct{}{}
+	}
+	for _, id := range left {
+		if _, ok := rightSet[id]; !ok {
+			return false
+		}
+	}
+	return true
 }
 func (h *LibraryCollectionHandler) UpdateAdminCollection(ctx context.Context, collectionID string, req AdminCollectionUpdate) (AdminCollection, error) {
 	if req.PosterSourceURL != nil || req.BackdropSourceURL != nil {
