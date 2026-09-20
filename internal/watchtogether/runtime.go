@@ -293,6 +293,24 @@ func (s *Service) publishRoomStateAfterCommit(ctx context.Context, room Room) {
 func (s *Service) reconcileRoom(ctx context.Context, roomID string) error {
 	_, err := withRoomOperation(ctx, s, roomID, func(ctx context.Context) (struct{}, error) {
 		s.mu.Lock()
+		pending := make([]pendingDisconnect, 0)
+		if live := s.rooms[roomID]; live != nil {
+			for _, disconnect := range live.pendingDisconnects {
+				pending = append(pending, disconnect)
+			}
+		}
+		s.mu.Unlock()
+		for _, disconnect := range pending {
+			s.disconnect(ctx, disconnect.registration, disconnect.explicit)
+			afterRoomCommit(ctx, func() {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				if live := s.rooms[roomID]; live != nil && live.pendingDisconnects[disconnect.registration.memberKey].registration == disconnect.registration {
+					delete(live.pendingDisconnects, disconnect.registration.memberKey)
+				}
+			})
+		}
+		s.mu.Lock()
 		live := s.rooms[roomID]
 		if live == nil {
 			s.mu.Unlock()
@@ -366,11 +384,8 @@ func (s *Service) runReconciler() {
 			s.mu.Lock()
 			rooms := make([]string, 0, len(s.rooms))
 			for id, live := range s.rooms {
-				for _, member := range live.members {
-					if member.connection != nil {
-						rooms = append(rooms, id)
-						break
-					}
+				if hasLocalRoomWork(live) {
+					rooms = append(rooms, id)
 				}
 			}
 			s.mu.Unlock()
@@ -414,10 +429,31 @@ func (s *Service) Connect(ctx context.Context, roomID string, user int, profile 
 }
 
 func (s *Service) Disconnect(reg *Registration, explicit bool) {
-	if reg == nil {
+	if s == nil || reg == nil {
 		return
 	}
-	_, _ = withRoomOperation(context.Background(), s, reg.roomID, func(ctx context.Context) (struct{}, error) { s.disconnect(ctx, reg, explicit); return struct{}{}, nil })
+	_, err := withRoomOperation(context.Background(), s, reg.roomID, func(ctx context.Context) (struct{}, error) { s.disconnect(ctx, reg, explicit); return struct{}{}, nil })
+	if err == nil {
+		return
+	}
+	// Socket teardown is irreversible even when its database transaction rolls
+	// back. Stop renewing the closed connection and retry through reconciliation.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	live := s.rooms[reg.roomID]
+	if live == nil {
+		return
+	}
+	member := live.members[reg.memberKey]
+	if member == nil || member.connection != reg.connection {
+		return
+	}
+	member.connection = nil
+	member.remoteConnected = false
+	if live.pendingDisconnects == nil {
+		live.pendingDisconnects = make(map[string]pendingDisconnect)
+	}
+	live.pendingDisconnects[reg.memberKey] = pendingDisconnect{registration: reg, explicit: explicit}
 }
 
 func (s *Service) AttachSessionForConnection(ctx context.Context, reg *Registration, user int, profile, sessionID string) (Snapshot, error) {

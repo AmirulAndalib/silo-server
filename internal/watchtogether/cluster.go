@@ -118,7 +118,7 @@ func (s *Service) queueRoomReconciliation(roomID string) {
 	default:
 	}
 	live := s.rooms[roomID]
-	if live == nil || !hasLocalMembers(live) {
+	if live == nil || !hasLocalRoomWork(live) {
 		s.mu.Unlock()
 		return
 	}

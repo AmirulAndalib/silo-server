@@ -124,9 +124,15 @@ type WatchTogetherSelectionResolver interface {
 }
 
 type Registration struct {
-	roomID     string
-	memberKey  string
-	connection RoomConnection
+	roomID       string
+	memberKey    string
+	connection   RoomConnection
+	connectionID string
+}
+
+type pendingDisconnect struct {
+	registration *Registration
+	explicit     bool
 }
 
 type memberState struct {
@@ -152,16 +158,17 @@ type memberState struct {
 }
 
 type liveRoom struct {
-	operationMu      sync.Mutex
-	activeOperations int
-	reconciling      bool
-	reconcilePending bool
-	broadcastState   string
-	command          *TransportCommand
-	room             Room
-	members          map[string]*memberState
-	hostCloseTimer   *time.Timer
-	waitingTimer     *time.Timer
+	operationMu        sync.Mutex
+	activeOperations   int
+	reconciling        bool
+	reconcilePending   bool
+	pendingDisconnects map[string]pendingDisconnect
+	broadcastState     string
+	command            *TransportCommand
+	room               Room
+	members            map[string]*memberState
+	hostCloseTimer     *time.Timer
+	waitingTimer       *time.Timer
 	// waitingEpoch identifies the current waiting period; deadline callbacks
 	// carry the epoch they were armed for so a stale timer cannot act on a
 	// newer waiting period.
@@ -414,6 +421,7 @@ func (s *Service) connect(
 		live.hostCloseTimer = nil
 	}
 
+	connectionID := current.connectionID
 	snapshot := s.buildSnapshotLocked(live, userID, profileID)
 	dispatches := s.prepareSnapshotDispatchesLocked(live)
 	s.mu.Unlock()
@@ -422,7 +430,7 @@ func (s *Service) connect(
 		afterRoomCommit(ctx, func() { _ = previousConn.Close() })
 	}
 	s.sendDispatches(ctx, dispatches)
-	return &Registration{roomID: roomID, memberKey: memberKey, connection: conn}, snapshot, nil
+	return &Registration{roomID: roomID, memberKey: memberKey, connection: conn, connectionID: connectionID}, snapshot, nil
 }
 
 func (s *Service) disconnect(ctx context.Context, reg *Registration, explicitLeave bool) {
@@ -438,7 +446,8 @@ func (s *Service) disconnect(ctx context.Context, reg *Registration, explicitLea
 	}
 
 	member := live.members[reg.memberKey]
-	if member == nil || member.connection != reg.connection {
+	if member == nil || (reg.connectionID != "" && member.connectionID != reg.connectionID) ||
+		(reg.connectionID == "" && member.connection != reg.connection) {
 		s.mu.Unlock()
 		return
 	}
@@ -1337,7 +1346,7 @@ func (s *Service) runJanitor() {
 func (s *Service) sweepIdleRooms() {
 	s.mu.Lock()
 	for roomID, live := range s.rooms {
-		if live == nil || (live.activeOperations == 0 && !hasLocalMembers(live)) {
+		if live == nil || (live.activeOperations == 0 && !hasLocalRoomWork(live)) {
 			// Room state is fully persisted; it reloads on next access. Any
 			// pending host-close timer keeps working from the database.
 			if live != nil && live.waitingTimer != nil {
@@ -2208,7 +2217,10 @@ func (s *Service) lookupSession(ctx context.Context, sessionID string) (*playbac
 	return session, err
 }
 
-func hasLocalMembers(live *liveRoom) bool {
+func hasLocalRoomWork(live *liveRoom) bool {
+	if len(live.pendingDisconnects) > 0 {
+		return true
+	}
 	for _, member := range live.members {
 		if member != nil && member.connection != nil {
 			return true

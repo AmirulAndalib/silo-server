@@ -22,6 +22,11 @@ reconnect grace period; attaching that same session only synchronizes that viewe
 The durable playback-attempt store validates sessions started on another API
 server. Legacy playback sessions still use the local session manager.
 
+A failed disconnect immediately drops the closed local socket and queues its
+connection identity for reconciliation. The room stays scheduled until that
+disconnect commits. A replacement connection has a new identity, so an old retry
+cannot remove it. Database failure cannot keep renewing a dead socket's lease.
+
 Presence leases last 45 seconds and are refreshed at most every 15 seconds by the
 server holding the socket. An expired lease stops contributing to membership and
 readiness. Host disconnect checks use shared presence and the current disconnect
