@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
@@ -21,6 +22,25 @@ func TestAdminCollectionServiceRejectsArtworkInDefinition(t *testing.T) {
 		if e, ok := errors.AsType[*APIError](err); !ok || e.Status != 400 {
 			t.Fatalf("invalid artwork: %v", err)
 		}
+	}
+}
+
+func TestAdminCollectionLookupAPIErrorPreservesFailureClass(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "missing", err: fmt.Errorf("lookup: %w", catalog.ErrLibraryCollectionNotFound), wantStatus: 404, wantCode: "not_found"},
+		{name: "backend failure", err: errors.New("database unavailable"), wantStatus: 500, wantCode: "internal_error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			apiErr, ok := adminCollectionLookupAPIError(tc.err).(*APIError)
+			if !ok || apiErr.Status != tc.wantStatus || apiErr.Code != tc.wantCode {
+				t.Fatalf("error = %#v, want status=%d code=%s", apiErr, tc.wantStatus, tc.wantCode)
+			}
+		})
 	}
 }
 

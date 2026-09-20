@@ -774,19 +774,22 @@ func (h *SectionHandler) SaveProfileOverrides(ctx context.Context, q SectionOver
 	seenIDs := make(map[string]struct{}, len(writes))
 	retainedSectionIDs := make(map[string]string, len(writes))
 	baseSections := make(map[string]*sections.PageSection)
-	loadBaseSection := func(sectionID string) (*sections.PageSection, bool) {
+	loadBaseSection := func(sectionID string) (*sections.PageSection, bool, error) {
 		if sectionID == "" || h.sectionReader == nil {
-			return nil, false
+			return nil, false, nil
 		}
 		if section, ok := baseSections[sectionID]; ok {
-			return section, true
+			return section, true, nil
 		}
 		section, err := h.sectionReader.GetByID(ctx, sectionID)
+		if errors.Is(err, sections.ErrSectionNotFound) {
+			return nil, false, nil
+		}
 		if err != nil {
-			return nil, false
+			return nil, false, apiError(http.StatusInternalServerError, "internal_error", "Failed to load section")
 		}
 		baseSections[sectionID] = section
-		return section, true
+		return section, true, nil
 	}
 	for i := range writes {
 		o := &writes[i]
@@ -804,7 +807,10 @@ func (h *SectionHandler) SaveProfileOverrides(ctx context.Context, q SectionOver
 		o.IsUserAdded = isUserAdded
 		if !isUserAdded {
 			cfg := o.Config
-			base, hasBase := loadBaseSection(o.SectionID)
+			base, hasBase, err := loadBaseSection(o.SectionID)
+			if err != nil {
+				return err
+			}
 			if !hasSectionConfig(cfg) && hasBase {
 				cfg = base.Config
 			}
@@ -886,7 +892,11 @@ func (h *SectionHandler) SaveProfileOverrides(ctx context.Context, q SectionOver
 		}
 		oldConfig := json.RawMessage(old.Config)
 		if old.SectionID != "" {
-			if base, found := loadBaseSection(old.SectionID); found && !hasSectionConfig(oldConfig) {
+			base, found, err := loadBaseSection(old.SectionID)
+			if err != nil {
+				return err
+			}
+			if found && !hasSectionConfig(oldConfig) {
 				oldConfig = base.Config
 			}
 		} else if old.UserConfig != "" {
@@ -910,7 +920,11 @@ func (h *SectionHandler) SaveProfileOverrides(ctx context.Context, q SectionOver
 			oldType := old.SectionType
 			oldConfig := json.RawMessage(old.Config)
 			if old.SectionID != "" {
-				if base, ok := loadBaseSection(old.SectionID); ok {
+				base, ok, err := loadBaseSection(old.SectionID)
+				if err != nil {
+					return err
+				}
+				if ok {
 					oldType = string(base.SectionType)
 					oldConfig = base.Config
 					if hasSectionConfig(json.RawMessage(old.Config)) {
@@ -992,7 +1006,13 @@ func (h *SectionHandler) rejectLegacyTraktReactivationByRemoval(ctx context.Cont
 			continue
 		}
 		base, err := h.sectionReader.GetByID(ctx, old.SectionID)
-		if err != nil || !base.Enabled || !isTraktBackedSection(string(base.SectionType), base.Config) {
+		if errors.Is(err, sections.ErrSectionNotFound) {
+			continue
+		}
+		if err != nil {
+			return apiError(http.StatusInternalServerError, "internal_error", "Failed to load section")
+		}
+		if !base.Enabled || !isTraktBackedSection(string(base.SectionType), base.Config) {
 			continue
 		}
 

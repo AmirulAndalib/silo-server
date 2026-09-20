@@ -206,7 +206,7 @@ func (h *LibraryCollectionHandler) updateAdminCollection(ctx context.Context, co
 	var none AdminCollection
 	existing, err := h.repo.GetByID(ctx, collectionID)
 	if err != nil {
-		return none, apiError(http.StatusNotFound, "not_found", "Collection not found")
+		return none, adminCollectionLookupAPIError(err)
 	}
 	if err := validateAdminCollectionSourceUpdate(existing, req); err != nil {
 		return none, err
@@ -296,6 +296,13 @@ func (h *LibraryCollectionHandler) updateAdminCollection(ctx context.Context, co
 		h.refreshSmartCountAsync(collectionID)
 	}
 	return h.libraryCollectionResponseOf(ctx, updated), nil
+}
+
+func adminCollectionLookupAPIError(err error) error {
+	if errors.Is(err, catalog.ErrLibraryCollectionNotFound) {
+		return apiError(http.StatusNotFound, "not_found", "Collection not found")
+	}
+	return apiError(http.StatusInternalServerError, "internal_error", "Failed to load collection")
 }
 
 func validateAdminCollectionSourceUpdate(existing *models.LibraryCollection, req AdminCollectionUpdate) error {

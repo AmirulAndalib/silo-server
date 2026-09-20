@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -45,14 +46,56 @@ func (r sourcePolicyRefresher) RefreshConfig(_ context.Context, config json.RawM
 
 type sourcePolicySectionReader struct {
 	sections map[string]*sectionspkg.PageSection
+	err      error
 }
 
 func (r sourcePolicySectionReader) GetByID(_ context.Context, id string) (*sectionspkg.PageSection, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
 	section, ok := r.sections[id]
 	if !ok {
 		return nil, sectionspkg.ErrSectionNotFound
 	}
 	return section, nil
+}
+
+func TestProfileOverrideSaveStopsOnBaseSectionReadFailure(t *testing.T) {
+	store := &sourcePolicyStore{overrides: []userstore.SectionOverride{{
+		ID: "existing", SectionID: "admin-trending", Hidden: true,
+	}}}
+	h := &SectionHandler{
+		StoreProvider: sourcePolicyProvider{store: store},
+		sectionReader: sourcePolicySectionReader{err: errors.New("database unavailable")},
+	}
+	err := h.SaveProfileOverrides(t.Context(), SectionOverridesQuery{UserID: 1, ProfileID: "p1", Scope: "home"}, []SectionOverrideWrite{{
+		ID: "existing", SectionID: "admin-trending",
+	}})
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.Status != 500 || apiErr.Code != "internal_error" {
+		t.Fatalf("error = %#v, want internal_error", err)
+	}
+	if len(store.overrides) != 1 || store.overrides[0].ID != "existing" || !store.overrides[0].Hidden {
+		t.Fatalf("failed lookup mutated overrides: %+v", store.overrides)
+	}
+}
+
+func TestProfileOverrideResetStopsOnBaseSectionReadFailure(t *testing.T) {
+	store := &sourcePolicyStore{overrides: []userstore.SectionOverride{{
+		ID: "existing", SectionID: "admin-trending", Hidden: true,
+	}}}
+	h := &SectionHandler{
+		StoreProvider: sourcePolicyProvider{store: store},
+		sectionReader: sourcePolicySectionReader{err: errors.New("database unavailable")},
+	}
+	err := h.ResetProfileOverrides(t.Context(), SectionOverridesQuery{UserID: 1, ProfileID: "p1", Scope: "home"})
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.Status != 500 || apiErr.Code != "internal_error" {
+		t.Fatalf("error = %#v, want internal_error", err)
+	}
+	if len(store.overrides) != 1 || store.overrides[0].ID != "existing" || !store.overrides[0].Hidden {
+		t.Fatalf("failed lookup mutated overrides: %+v", store.overrides)
+	}
 }
 
 func TestProfileCannotCreateTraktTrendingSection(t *testing.T) {

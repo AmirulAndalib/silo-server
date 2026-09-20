@@ -34,7 +34,7 @@ func (s *PostgresUserStore) ListAllSectionOverrides(ctx context.Context) ([]user
 	rows, err := s.pool.Query(ctx, `
 		SELECT value
 		FROM user_settings
-		WHERE user_id = $1 AND key LIKE 'section_overrides:%'`, s.userID)
+		WHERE user_id = $1 AND starts_with(key, 'section_overrides:')`, s.userID)
 	if err != nil {
 		return nil, err
 	}
