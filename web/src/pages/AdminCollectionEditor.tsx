@@ -17,7 +17,6 @@ import {
   MDBListImportForm,
   SourceTypeSelector,
   TMDBPresetForm,
-  TraktPresetForm,
   type CollectionSourceType,
 } from "./adminCollectionsShared";
 import SmartCollectionWizard from "./SmartCollectionWizard";
@@ -231,13 +230,6 @@ export default function AdminCollectionEditor() {
         />
       ) : null}
 
-      {!collection && activeSourceType === "trakt" ? (
-        <TraktPresetForm
-          libraries={libraries}
-          initialLibraryId={initialLibraryId}
-          onClose={() => navigate(returnPath)}
-        />
-      ) : null}
     </div>
   );
 }

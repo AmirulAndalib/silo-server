@@ -1630,6 +1630,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 		}
 		sections.InstallRecipeDelegate(sectionFetcher)
 		sectionHandler = handlers.NewSectionHandler(sectionRepo, sectionFetcher)
+		if deps.TrendingRefresher != nil {
+			sectionHandler.TrendingRefresher = deps.TrendingRefresher
+		}
 		sectionHandler.CollectionRepo = sectionFetcher.CollectionRepo
 		sectionHandler.FolderRepo = deps.FolderRepo
 		if deps.UserStoreProvider != nil {
