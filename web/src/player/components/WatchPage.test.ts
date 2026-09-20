@@ -120,6 +120,22 @@ describe("derivePersistedSubtitleMode", () => {
 });
 
 describe("WatchPage playback errors", () => {
+  it("pins the room file and disables version changes while keeping quality controls", () => {
+    playbackSessionMock.mockReturnValue(playbackSession());
+    render(
+      createElement(WatchPage, {
+        ...watchPageProps,
+        fileId: 7,
+        watchTogetherRoomId: "room-1",
+        watchTogetherRoomToken: "room-token",
+      }),
+    );
+
+    expect(videoPlayerMock.mock.calls.at(-1)?.[0].onSwitchVersion).toBeUndefined();
+    expect(videoPlayerMock.mock.calls.at(-1)?.[0].onQualitySelect).toBeTypeOf("function");
+    expect(playbackSessionMock.mock.calls.at(-1)?.[12]).toBe(false);
+  });
+
   it("keeps the player mounted when a replan fails with an active plan", () => {
     playbackSessionMock.mockReturnValue(
       playbackSession({ errorTitle: "Quality change failed", error: "Temporary server error" }),

@@ -25,7 +25,8 @@ features, deliveries}` with `Cache-Control: private, no-cache` and an `ETag`; cl
 and `allowed` is `true`; a server without playback wired answers
 `not_configured` with `allowed: false`. `installation_id` is the persisted
 server instance UUID that diagnostics also report. `protocol_versions` is
-`[3]`. `features` is the v3 server feature set plus `sequenced_progress_v1`.
+`[3]`. `features` is the v3 server feature set plus `sequenced_progress_v1`
+and `fixed_media_file_v1`.
 `deliveries` lists `original_http`, `server_remux_progressive`,
 `server_remux_hls` and, when transcoding is enabled, `server_transcode_hls`.
 `revision` is a digest of the rest.
@@ -55,6 +56,19 @@ budget includes backoff and response-body reads; each request gets at most
 the request or backoff. A 4xx refusal ends that start, and a later user Play
 uses the newly selected file and a new attempt ID. The web client does not
 restore pending START requests across page reloads.
+
+Servers advertising `fixed_media_file_v1` accept the optional start field
+`allow_alternate_versions`. Setting it to `false` keeps this attempt on the
+requested file through quality, track, output, seek, and recovery replans.
+Transcoding and delivery changes remain available for that file. If it cannot
+play, the server returns an adaptation refusal instead of substituting another
+version with a potentially different timeline. Omitted or `true` retains the
+existing alternate-version behavior. The choice is persisted with the attempt
+and cannot be relaxed by a replan.
+
+The web Watch Party player requires this capability and sends `false`. Ordinary
+web, Apple, Android, and Jellyfin playback keep their existing behavior; Apple
+has no active room caller and Android's room UI remains disabled.
 
 ## Progress and stop
 

@@ -3358,6 +3358,7 @@ export function VideoPlayer({
           isTranscoding={replanning}
           qualityError={replanError}
           onQualitySelect={handleQualitySelect}
+          versionLocked={!!watchTogetherRoomId}
           versions={
             versions.length > 1
               ? versions.map((v) => ({
@@ -3371,7 +3372,9 @@ export function VideoPlayer({
               : undefined
           }
           onSwitchVersion={
-            onSwitchVersion ? (fileId) => onSwitchVersion(fileId, currentTime) : undefined
+            onSwitchVersion && !watchTogetherRoomId
+              ? (fileId) => onSwitchVersion(fileId, currentTime)
+              : undefined
           }
           onTogglePiP={handleTogglePiP}
           onPlayPause={handlePlayPause}

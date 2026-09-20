@@ -267,6 +267,7 @@ export function usePlaybackSession(
   explicitAudioTrackIndex?: number | null,
   initialSubtitleTrackIndexByFileId?: Record<number, number>,
   initialBitmapSubtitleTrackIndexByFileId?: Record<number, number>,
+  allowAlternateVersions = true,
 ): UsePlaybackSessionResult {
   const config = usePlayerConfig();
   const probe = useCodecDetection();
@@ -522,6 +523,7 @@ export function usePlaybackSession(
         profileId: config.getProfileId() ?? "",
         playbackAttemptId,
         qualityPreference: qualityRef.current,
+        allowAlternateVersions,
         position,
         forceStartPosition,
         explicitAudioTrackIndex,
@@ -535,7 +537,14 @@ export function usePlaybackSession(
 
       return await startPlaybackV2(config, body);
     },
-    [clientCapabilities, clientPlaybackContext, config, explicitAudioTrackIndex, maxBitrateKbps],
+    [
+      allowAlternateVersions,
+      clientCapabilities,
+      clientPlaybackContext,
+      config,
+      explicitAudioTrackIndex,
+      maxBitrateKbps,
+    ],
   );
 
   const stopSession = useCallback(
@@ -1284,6 +1293,7 @@ export function usePlaybackSession(
 
   const switchVersion = useCallback(
     (newFileId: number, currentPosition: number) => {
+      if (!allowAlternateVersions) return;
       if (switchingRef.current) return;
       if (newFileId === stateRef.current.mediaFileId) return;
       switchingRef.current = true;
@@ -1306,7 +1316,7 @@ export function usePlaybackSession(
         }
       })();
     },
-    [loadSession],
+    [allowAlternateVersions, loadSession],
   );
 
   return {

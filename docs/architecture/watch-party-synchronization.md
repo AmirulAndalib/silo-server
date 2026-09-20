@@ -46,6 +46,20 @@ while the player waits for the replacement stream.
 
 ## Deployment and clients
 
+Every viewer uses the room's selected source file. For automatic selection, the
+server prefers the highest-quality SDR version up to 1080p in the catalogue's
+preferred edition and presentation part, then other SDR sources, then HDR. This
+avoids unnecessary HDR and 4K conversion requirements; it is a compatibility
+preference, not a claim that every viewer's device has been negotiated. Each
+viewer still receives a playback plan for their own capabilities. Explicit file
+selections retain their existing meaning.
+
+The web player disables version switching while in a room and starts with
+`allow_alternate_versions: false`, requiring the playback capability
+`fixed_media_file_v1`. That constraint survives every replan, so decoder recovery
+cannot silently move one viewer to another timeline. Streaming quality and audio
+or subtitle adaptations can still use the same source.
+
 Apply the runtime-column migration before the updated API servers. All API
 instances serving a room must run this coordinator; older instances do not
 participate in its leases or transactions. Update the complete API fleet before
@@ -54,7 +68,7 @@ IDs, but their seek position must still reach the destination. Updated clients
 send the command ID so the server can also reject superseded acknowledgements.
 
 The additive member status fields are optional in raw socket frames and HTTP v2
-snapshots. No new endpoint or capability is introduced. Apple has no active Watch
+snapshots. Apple has no active Watch
 Party implementation; Android's surface remains disabled. Jellyfin compatibility
 does not use these room sockets.
 

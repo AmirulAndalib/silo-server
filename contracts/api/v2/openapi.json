@@ -31095,6 +31095,10 @@
       "PlaybackStartBody": {
         "additionalProperties": false,
         "properties": {
+          "allow_alternate_versions": {
+            "description": "False keeps the requested source file for this attempt, including quality changes and failure recovery. Omitted or true allows alternate versions.",
+            "type": "boolean"
+          },
           "audio_track_id": {
             "type": "string"
           },

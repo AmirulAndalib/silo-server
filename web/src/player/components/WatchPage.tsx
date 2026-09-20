@@ -135,6 +135,7 @@ export function WatchPage({
     explicitAudioTrackIndex,
     initialSubtitleTrackIndexByFileId,
     initialBitmapSubtitleTrackIndexByFileId,
+    !watchTogetherRoomId,
   );
 
   const initialSubtitleErrorKeyRef = useRef<string | null>(null);
@@ -459,7 +460,7 @@ export function WatchPage({
       versions={playbackVersions}
       activeFileId={session.mediaFileId}
       chapters={activeChapters}
-      onSwitchVersion={handleSwitchVersion}
+      onSwitchVersion={watchTogetherRoomId ? undefined : handleSwitchVersion}
       subtitleUrls={playableSubtitles}
       initialPosition={session.initialPosition}
       onQualitySelect={session.changeQuality}

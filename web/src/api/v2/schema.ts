@@ -21451,6 +21451,8 @@ export interface components {
       width?: number;
     };
     PlaybackStartBody: {
+      /** @description False keeps the requested source file for this attempt, including quality changes and failure recovery. Omitted or true allows alternate versions. */
+      allow_alternate_versions?: boolean;
       audio_track_id?: string;
       /** Format: int64 */
       audio_track_index?: number;

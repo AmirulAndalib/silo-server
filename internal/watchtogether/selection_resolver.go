@@ -70,7 +70,40 @@ func (r *CatalogSelectionResolver) ResolveSelection(
 		return nil, ErrInvalidSelection
 	}
 
-	resolvedFileID := detail.Versions[0].FileID
-	resolved.FileID = &resolvedFileID
+	resolved.FileID = new(preferredRoomVersion(detail.Versions).FileID)
 	return resolved, nil
+}
+
+// A room has one source timeline. Prefer SDR at standard resolutions so viewers
+// can adapt the same source without requiring HDR or 4K conversion. Keep the
+// catalogue's preferred edition and presentation part, and choose the highest
+// quality within that compatibility tier. Device-specific planning still runs
+// for each viewer; this does not claim that every device can decode every file.
+func preferredRoomVersion(versions []catalog.FileVersion) catalog.FileVersion {
+	best := versions[0]
+	for _, candidate := range versions[1:] {
+		if candidate.EditionKey != best.EditionKey || candidate.PresentationKind != best.PresentationKind ||
+			candidate.PresentationGroupKey != best.PresentationGroupKey || candidate.PresentationPartIndex != best.PresentationPartIndex {
+			continue
+		}
+		candidateRank, bestRank := roomVersionRank(candidate), roomVersionRank(best)
+		quality := access.CompareQuality(candidate.Resolution, best.Resolution)
+		if candidateRank < bestRank || (candidateRank == bestRank &&
+			(quality > 0 || (quality == 0 && candidate.FileSize > best.FileSize))) {
+			best = candidate
+		}
+	}
+	return best
+}
+
+func roomVersionRank(version catalog.FileVersion) int {
+	if version.HDR {
+		return 2
+	}
+	switch strings.ToLower(strings.TrimSpace(version.Resolution)) {
+	case "480p", "720p", access.PlaybackQualityStandard:
+		return 0
+	default:
+		return 1
+	}
 }

@@ -286,6 +286,14 @@ or change to the room's existing waiting deadline.
 
 ### Room membership and buffering
 
+Room playback uses one selected source file for all viewers. Automatic selection
+prefers the highest-quality SDR source up to 1080p within the selected edition,
+then other SDR versions, then HDR. Device-specific playback planning can adapt
+that source. The web player disables version switching and requires
+`fixed_media_file_v1` from playback capabilities, starting with
+`allow_alternate_versions: false` to prevent automatic file fallback during
+recovery. Streaming quality remains adjustable on the same file.
+
 Room snapshots include members connected through all API servers. Each member can
 include additive `is_ready`, `is_buffering`, and `is_syncing` booleans; absent fields
 mean false. `is_syncing` identifies an attached member still blocking the current

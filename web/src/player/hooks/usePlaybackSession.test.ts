@@ -99,6 +99,17 @@ const replanBase = {
 };
 
 describe("buildStartRequestV3", () => {
+  it("pins the room source without changing the requested streaming quality", () => {
+    expect(
+      buildStartRequestV3({
+        ...startBase,
+        allowAlternateVersions: false,
+        qualityPreference: "720p",
+      }),
+    ).toMatchObject({ allow_alternate_versions: false, quality_preference: "720p" });
+    expect(buildStartRequestV3(startBase)).not.toHaveProperty("allow_alternate_versions");
+  });
+
   // Feature tokens are promises the server enforces, so a surface advertises
   // only what it implements: the base set alone unless the caller names more.
   it("advertises only the surface's own features", () => {
