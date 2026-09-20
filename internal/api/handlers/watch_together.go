@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -131,11 +133,12 @@ type watchTogetherFrame struct {
 	ping bool
 }
 type watchTogetherRoomConn struct {
-	conn           watchTogetherSocket
-	outgoing       chan watchTogetherFrame
-	done           chan struct{}
-	closeOnce      sync.Once
-	pingSentAtNano atomic.Int64
+	conn                watchTogetherSocket
+	outgoing            chan watchTogetherFrame
+	done                chan struct{}
+	closeOnce           sync.Once
+	pingSentAtNano      atomic.Int64
+	includeMemberStatus bool
 }
 
 func newWatchTogetherRoomConn(conn watchTogetherSocket) *watchTogetherRoomConn {
@@ -144,6 +147,15 @@ func newWatchTogetherRoomConn(conn watchTogetherSocket) *watchTogetherRoomConn {
 	return c
 }
 func (c *watchTogetherRoomConn) WriteJSON(v any) error {
+	if !c.includeMemberStatus {
+		if payload, ok := v.(map[string]any); ok {
+			if snapshot, ok := payload["room"].(watchtogether.Snapshot); ok {
+				payload = maps.Clone(payload)
+				payload["room"] = watchTogetherSnapshotV1(snapshot)
+				v = payload
+			}
+		}
+	}
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -656,7 +668,7 @@ func (h *WatchTogetherHandler) buildRoomResponse(
 	userID int,
 	profileID string,
 ) (watchTogetherRoomResponse, error) {
-	response := watchTogetherRoomResponse{Room: snapshot}
+	response := watchTogetherRoomResponse{Room: watchTogetherSnapshotV1(snapshot)}
 	if h == nil || h.TokenService == nil {
 		return response, nil
 	}
@@ -671,6 +683,18 @@ func (h *WatchTogetherHandler) buildRoomResponse(
 	}
 	response.RoomAccessToken = token
 	return response, nil
+}
+
+// watchTogetherSnapshotV1 preserves the frozen member payload without mutating
+// the roster shared with v2 viewers and the coordinator.
+func watchTogetherSnapshotV1(snapshot watchtogether.Snapshot) watchtogether.Snapshot {
+	snapshot.Members = slices.Clone(snapshot.Members)
+	for i := range snapshot.Members {
+		snapshot.Members[i].IsReady = false
+		snapshot.Members[i].IsBuffering = false
+		snapshot.Members[i].IsSyncing = false
+	}
+	return snapshot
 }
 
 func (h *WatchTogetherHandler) validateRoomAccessToken(
@@ -749,6 +773,7 @@ func (h *WatchTogetherHandler) HandleRoomWebSocket(w http.ResponseWriter, r *htt
 // serveRoomConnection preserves the existing room message and disconnect loop.
 func (h *WatchTogetherHandler) serveRoomConnection(parent context.Context, conn *websocket.Conn, roomID string, userID int, profileID string) {
 	realtimeConn := newWatchTogetherRoomConn(conn)
+	realtimeConn.includeMemberStatus = conn.Subprotocol() == watchtogether.RoomSocketProtocol
 	defer func() { _ = realtimeConn.Close() }()
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()

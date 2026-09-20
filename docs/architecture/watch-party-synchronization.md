@@ -136,7 +136,7 @@ through `watch_party_coordinator_v1` in playback capabilities. An absent flag
 means these guarantees and status fields are unsupported; an omitted false status
 on a supported server means false.
 
-The additive member status fields are optional in raw socket frames and HTTP v2
+The additive member status fields are optional in v2 socket frames and HTTP v2
 snapshots. Apple has no active Watch
 Party implementation; Android's surface remains disabled. Jellyfin compatibility
 does not use these room sockets.

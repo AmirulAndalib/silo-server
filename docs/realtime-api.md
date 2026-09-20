@@ -325,11 +325,12 @@ cannot cause a second fallback. No candidate returns `409`; disconnected or
 unauthorized viewers receive `403`. Clients retain the playback refusal if the
 fallback fails and must not independently substitute another file.
 
-Room snapshots include members connected through all API servers. Each member can
+V2 room snapshots include members connected through all API servers. Each member can
 include additive `is_ready`, `is_buffering`, and `is_syncing` booleans; absent fields
 mean false. `is_syncing` identifies an attached member still blocking the current
 readiness barrier. HTTP v2 snapshots and raw socket snapshots expose these fields.
-The web player lists viewer status and names the viewers it is waiting for.
+The frozen v1 HTTP responses and room socket omit these status fields. The web
+player lists viewer status and names the viewers it is waiting for.
 
 The web player reports buffering after 500 ms without playable media. Recovery,
 a changed command/session, pause, a phase change, disconnect, and unmount cancel

@@ -2,10 +2,13 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Silo-Server/silo-server/internal/watchtogether"
 )
 
 type roomWriterSocket struct {
@@ -79,5 +82,64 @@ func TestWatchTogetherSlowWriterDoesNotBlockOtherViewers(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
 		}
+	}
+}
+
+func TestWatchTogetherMemberStatusIsV2Only(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	snapshot := watchtogether.Snapshot{RoomID: "room", Members: []watchtogether.MemberSummary{{UserID: 7, ProfileID: "host", Connected: true, IsReady: true, IsBuffering: true, IsSyncing: true}}}
+	frame := map[string]any{"type": "snapshot", "room": snapshot}
+	assertStatus := func(t *testing.T, data []byte, wantStatus bool) {
+		t.Helper()
+		var payload struct {
+			Room struct {
+				RoomID  string           `json:"room_id"`
+				Members []map[string]any `json:"members"`
+			} `json:"room"`
+		}
+		if err := json.Unmarshal(data, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Room.RoomID != "room" || len(payload.Room.Members) != 1 || payload.Room.Members[0]["connected"] != true {
+			t.Fatalf("existing snapshot fields changed: %s", data)
+		}
+		for _, key := range []string{"is_ready", "is_buffering", "is_syncing"} {
+			value, present := payload.Room.Members[0][key]
+			if present != wantStatus || (present && value != true) {
+				t.Fatalf("%s = %v, present %v; want status %v", key, value, present, wantStatus)
+			}
+		}
+	}
+	t.Run("v1 HTTP", func(t *testing.T) {
+		response, err := new(WatchTogetherHandler).buildRoomResponse(ctx, snapshot, 7, "host")
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertStatus(t, data, false)
+	})
+	for _, version := range []string{"v1", "v2"} {
+		t.Run(version+" socket", func(t *testing.T) {
+			socket := newRoomWriterSocket(false)
+			conn := newWatchTogetherRoomConn(socket)
+			conn.includeMemberStatus = version == "v2"
+			t.Cleanup(func() { _ = conn.Close() })
+			if err := conn.WriteJSON(frame); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case data := <-socket.frames:
+				assertStatus(t, []byte(data), version == "v2")
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+		})
+	}
+	if member := frame["room"].(watchtogether.Snapshot).Members[0]; !member.IsReady || !member.IsBuffering || !member.IsSyncing {
+		t.Fatal("v1 projection mutated the snapshot shared with v2 viewers")
 	}
 }
