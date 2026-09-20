@@ -664,6 +664,7 @@ export function VideoPlayer({
 
   useEffect(() => {
     setNotice(null);
+    setVideoFit("contain");
   }, [sessionId]);
 
   useEffect(() => {

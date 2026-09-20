@@ -274,6 +274,31 @@ describe("useASSSubtitles time offset", () => {
 });
 
 describe("useASSSubtitles video fit", () => {
+  it("applies a fit change made before JASSUB finishes initializing", async () => {
+    let resolveFetch!: (response: Response) => void;
+    vi.mocked(fetch).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFetch = resolve;
+      }),
+    );
+    const videoRef = makeVideoRef();
+    const { rerender } = renderHook(
+      ({ videoFit }: { videoFit: VideoFitMode }) =>
+        useASSSubtitles(videoRef, [germanTrack], 6, false, 0, 0, undefined, videoFit),
+      { initialProps: { videoFit: "contain" as VideoFitMode } },
+    );
+    await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+
+    rerender({ videoFit: "cover" });
+    await act(async () => {
+      resolveFetch(mockFetchResponse(""));
+    });
+
+    await waitFor(() => expect(instances).toHaveLength(1));
+    expect(instances[0]!._canvas).toHaveClass("player-ass-fill");
+    expect(instances[0]!.resize).toHaveBeenCalledWith(true);
+  });
+
   it("keeps the ASS canvas in sync with Fit and Fill mode", async () => {
     const videoRef = makeVideoRef();
     const { rerender } = renderHook(

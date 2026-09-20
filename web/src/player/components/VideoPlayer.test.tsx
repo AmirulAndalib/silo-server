@@ -1702,8 +1702,8 @@ describe("VideoPlayer translation handoff", () => {
     expect(controls.current?.isFullscreen).toBe(false);
   });
 
-  it("toggles the video between Fit and Fill modes", () => {
-    const { container } = renderPlayer();
+  it("toggles video fit and resets it for a new playback session", () => {
+    const { container, rerenderPlayer } = renderPlayer();
     const video = container.querySelector("video");
     if (!video) throw new Error("expected video element");
 
@@ -1715,7 +1715,7 @@ describe("VideoPlayer translation handoff", () => {
     expect(video).toHaveClass("object-cover");
     expect(controls.current?.videoFit).toBe("cover");
 
-    act(() => controls.current?.onVideoFitToggle?.());
+    rerenderPlayer({ sessionId: "session-2" });
 
     expect(video).toHaveClass("object-contain");
     expect(controls.current?.videoFit).toBe("contain");

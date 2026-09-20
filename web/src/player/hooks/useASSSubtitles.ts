@@ -40,6 +40,8 @@ export function useASSSubtitles(
 ): { isActive: boolean } {
   const onLoadStateRef = useRef(onLoadState);
   onLoadStateRef.current = onLoadState;
+  const videoFitRef = useRef(videoFit);
+  videoFitRef.current = videoFit;
   const jassubRef = useRef<JASSUB | null>(null);
   const jassubImportRef = useRef<Promise<typeof JASSUB> | null>(null);
   // Effective JASSUB time offset. JASSUB renders the ASS event matching
@@ -198,9 +200,18 @@ export function useASSSubtitles(
       }
 
       jassubRef.current = instance;
-      instance._canvas.classList.toggle("player-ass-fill", videoFit === "cover");
+      instance._canvas.classList.toggle("player-ass-fill", videoFitRef.current === "cover");
       await instance.ready;
-      if (!cancelled && !signal.aborted) onLoadStateRef.current?.("ready");
+      if (cancelled || signal.aborted || jassubRef.current !== instance) return;
+
+      // Fit can change while the subtitle source, fonts, or renderer are still
+      // loading. Re-read it after readiness so the first rendered frame cannot
+      // inherit the mode captured when this effect started.
+      instance._canvas.classList.toggle("player-ass-fill", videoFitRef.current === "cover");
+      await instance.resize(true);
+      if (!cancelled && !signal.aborted && jassubRef.current === instance) {
+        onLoadStateRef.current?.("ready");
+      }
     }
 
     async function load() {
