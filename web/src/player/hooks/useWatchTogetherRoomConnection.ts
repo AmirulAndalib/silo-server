@@ -1,3 +1,7 @@
+import {
+  fallbackRoomSource,
+  type SourceFallbackRequest,
+} from "@/api/v2/watchTogetherSourceFallback";
 import { useOptionalAuth } from "@/hooks/useAuth";
 import { mintRoomSocketTicket, roomSocketURL } from "@/api/v2/watchTogetherSocket";
 import type { SuggestionCreationDraft } from "@/api/v2/watchTogetherSuggestionCreate";
@@ -50,6 +54,7 @@ export interface WatchTogetherRoomConnectionResult {
   selectItem: (
     input: SelectWatchTogetherRoomItemInput,
   ) => Promise<WatchTogetherRoomSnapshot | null>;
+  fallbackSource: (input: SourceFallbackRequest) => Promise<WatchTogetherRoomSnapshot | null>;
   closeRoom: () => Promise<void>;
   createSuggestion: (draft: SuggestionCreationDraft) => Promise<void>;
   deleteSuggestion: (suggestionId: string) => Promise<void>;
@@ -157,7 +162,12 @@ export function useWatchTogetherRoomConnection({
         if (cancelled || !readAuthority || !isCapturedProfileAuthorityActive(readAuthority)) {
           return;
         }
-        setRoom(response.room);
+        setRoom((current) =>
+          current?.room_id === response.room.room_id &&
+          current.generation > response.room.generation
+            ? current
+            : response.room,
+        );
       })
       .catch((error: unknown) => {
         if (cancelled || !readAuthority || !isCapturedProfileAuthorityActive(readAuthority)) {
@@ -283,7 +293,11 @@ export function useWatchTogetherRoomConnection({
           case "snapshot": {
             const payload = message.room as WatchTogetherRoomSnapshot | undefined;
             if (payload) {
-              setRoom(payload);
+              setRoom((current) =>
+                current?.room_id === payload.room_id && current.generation > payload.generation
+                  ? current
+                  : payload,
+              );
             }
             return;
           }
@@ -581,6 +595,26 @@ export function useWatchTogetherRoomConnection({
     [roomId, roomToken, promotionAuthority],
   );
 
+  const fallbackAuthority = captureProfileRequestContext();
+  const fallbackRoomRef = useRef(roomId);
+  useLayoutEffect(() => {
+    fallbackRoomRef.current = roomId;
+  }, [roomId, roomToken]);
+  const fallbackSource = useCallback(
+    async (input: SourceFallbackRequest) => {
+      if (!roomId || !roomToken || fallbackRoomRef.current !== roomId) return null;
+      const response = await fallbackRoomSource(roomId, roomToken, input, fallbackAuthority);
+      if (fallbackRoomRef.current !== roomId) return null;
+      setRoom((current) =>
+        current?.room_id === roomId && current.generation <= response.room.generation
+          ? response.room
+          : current,
+      );
+      return response.room;
+    },
+    [roomId, roomToken, fallbackAuthority],
+  );
+
   return {
     connectionState,
     room,
@@ -591,6 +625,7 @@ export function useWatchTogetherRoomConnection({
     sendRoomMessage,
     updatePolicy,
     selectItem,
+    fallbackSource,
     closeRoom,
     createSuggestion,
     deleteSuggestion,

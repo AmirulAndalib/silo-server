@@ -67,6 +67,7 @@ interface PlaybackSessionState {
   replacing: boolean;
   replanning: boolean;
   errorTitle: string | null;
+  errorReason?: string | null;
   error: string | null;
   initialSubtitleErrorTitle: string | null;
   initialSubtitleError: string | null;
@@ -199,6 +200,7 @@ function planToSessionState(
     replacing: false,
     replanning: false,
     errorTitle: null,
+    errorReason: null,
     error: null,
     initialSubtitleErrorTitle: null,
     initialSubtitleError: null,
@@ -296,6 +298,7 @@ export function usePlaybackSession(
     replacing: false,
     replanning: false,
     errorTitle: null,
+    errorReason: null,
     error: null,
     initialSubtitleErrorTitle: null,
     initialSubtitleError: null,
@@ -462,6 +465,7 @@ export function usePlaybackSession(
           replacing: false,
           replanning: false,
           errorTitle: failure.title,
+          errorReason: decision.terminal?.reason ?? null,
           error: failure.message,
         }));
         return false;
@@ -642,6 +646,7 @@ export function usePlaybackSession(
         loading: !hasExistingSession,
         replacing: hasExistingSession,
         errorTitle: hasExistingSession ? current.errorTitle : null,
+        errorReason: null,
         error: hasExistingSession ? current.error : null,
         initialSubtitleErrorTitle: hasExistingSession ? current.initialSubtitleErrorTitle : null,
         initialSubtitleError: hasExistingSession ? current.initialSubtitleError : null,
@@ -757,6 +762,7 @@ export function usePlaybackSession(
             loading: false,
             replacing: false,
             errorTitle: previousState.errorTitle,
+            errorReason: previousState.errorReason,
             error: previousState.error,
           }));
           return;
@@ -971,6 +977,7 @@ export function usePlaybackSession(
         ...current,
         replanning: true,
         errorTitle: null,
+        errorReason: null,
         error: null,
       }));
 
@@ -1028,6 +1035,7 @@ export function usePlaybackSession(
           ...current,
           replanning: false,
           errorTitle: nextError.title,
+          errorReason: null,
           error: nextError.message,
         }));
         return false;

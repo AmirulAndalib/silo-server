@@ -2212,6 +2212,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		v2deps.WatchTogetherPolicy = watchTogetherHandler
 		v2deps.WatchTogetherJoin = watchTogetherHandler
 		v2deps.WatchTogetherSelection = watchTogetherHandler
+		v2deps.WatchTogetherSourceFallback = watchTogetherHandler
 		v2deps.WatchTogetherCreate = watchTogetherHandler
 		if deps.RedisClient != nil && sessionRepo != nil && userRepo != nil {
 			socket := handlers.NewWatchTogetherSocketV2(watchTogetherHandler, watchtogether.NewRoomSocketCredentialStore(deps.RedisClient), sessionRepo, userRepo, viewerResolver, checkPrimaryProfile, deps.PublicURL)

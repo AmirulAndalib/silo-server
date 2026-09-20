@@ -1,3 +1,5 @@
+import { isSourceFallbackReason } from "@/api/v2/watchTogetherSourceFallback";
+import { playbackCapabilitiesV2 } from "../start-v2";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { PlayerFileVersion, PlayerPlaybackStateChange, WatchPageProps } from "../types";
@@ -137,6 +139,59 @@ export function WatchPage({
     initialBitmapSubtitleTrackIndexByFileId,
     !watchTogetherRoomId,
   );
+
+  const fallbackHandledRef = useRef<string | null>(null);
+  const [pendingFallbackKey, setPendingFallbackKey] = useState<string | null>(null);
+  const fallbackRoom = watchTogetherConnection.room;
+  const fallbackSource = watchTogetherConnection.fallbackSource;
+  const fallbackReason = session.errorReason;
+  const fallbackKey =
+    watchTogetherRoomId &&
+    fallbackRoom &&
+    fileId === fallbackRoom.selected_file_id &&
+    isSourceFallbackReason(fallbackReason)
+      ? `${watchTogetherRoomId}:${fallbackRoom.selection_revision}:${fileId}:${session.playbackAttemptId}:${fallbackReason}`
+      : null;
+  const fallingBack = fallbackKey !== null && pendingFallbackKey === fallbackKey;
+
+  useEffect(() => {
+    if (
+      !fallbackKey ||
+      fallbackHandledRef.current === fallbackKey ||
+      !fallbackRoom ||
+      !fileId ||
+      !isSourceFallbackReason(fallbackReason) ||
+      !fallbackRoom.members?.some((member) => member.is_self && member.connected) ||
+      watchTogetherConnection.connectionState !== "connected"
+    )
+      return;
+    fallbackHandledRef.current = fallbackKey;
+    setPendingFallbackKey(fallbackKey);
+    void playbackCapabilitiesV2(config)
+      .then((capabilities) => {
+        if (!capabilities.features.includes("watch_party_source_fallback_v1")) return null;
+        return fallbackSource({
+          selectionRevision: fallbackRoom.selection_revision,
+          failedFileId: fileId,
+          reason: fallbackReason,
+        });
+      })
+      .catch(() => {
+        // Keep the original playback refusal if there is no common fallback or
+        // the request fails. A fresh playback attempt can try again.
+      })
+      .finally(() => {
+        setPendingFallbackKey((current) => (current === fallbackKey ? null : current));
+      });
+  }, [
+    config,
+    fallbackKey,
+    fallbackRoom,
+    fallbackReason,
+    fallbackSource,
+    fileId,
+    watchTogetherConnection.connectionState,
+  ]);
 
   const initialSubtitleErrorKeyRef = useRef<string | null>(null);
   useEffect(() => {
@@ -395,12 +450,14 @@ export function WatchPage({
   // The plan is the player's contract: without one there is no transport, no
   // timeline and no track inventory to render against.
   if (!session.plan || !session.streamUrl || !session.sessionId) {
-    if (session.loading) {
+    if (session.loading || fallingBack) {
       return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black">
           <div className="flex flex-col items-center gap-3">
             <div className="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white" />
-            <span className="text-sm text-white/60">Loading player...</span>
+            <span className="text-sm text-white/60">
+              {fallingBack ? "Finding a compatible version for everyone..." : "Loading player..."}
+            </span>
           </div>
         </div>
       );
@@ -453,7 +510,7 @@ export function WatchPage({
       planRevision={session.planRevision}
       shouldAutoPlay={session.shouldAutoPlay}
       replanning={session.replanning}
-      replanError={session.error}
+      replanError={fallingBack ? null : session.error}
       replanErrorTitle={session.errorTitle}
       sessionId={session.sessionId}
       selectedVersion={selectedVersion}

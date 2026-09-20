@@ -579,6 +579,7 @@ export function VideoPlayer({
       sendRoomMessage: () => ({ ok: false }),
       updatePolicy: async () => null,
       selectItem: async () => null,
+      fallbackSource: async () => null,
       closeRoom: async () => {},
       createSuggestion: async () => {},
       deleteSuggestion: async () => {},

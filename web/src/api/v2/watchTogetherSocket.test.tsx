@@ -250,3 +250,51 @@ it("fresh reconnect delegates an already-rotated access token under the same cap
   expect(headers.get("X-Room-Token")).toBe("original-room-proof");
   expect(headers.get("X-Profile-Token")).toBe("pin-A");
 });
+
+it("keeps the fallback receipt when an older socket snapshot arrives", async () => {
+  const replacement = {
+    room_id: "room",
+    generation: 10,
+    selection_revision: 2,
+    selected_file_id: "8",
+    selected_content_id: "movie",
+    phase: "playing",
+    playback_state: "waiting",
+    selection_mode: "host_pick",
+    guest_control_policy: "host_only",
+    self_role: "guest",
+    anchor_updated_at: "2026-01-01T00:00:00Z",
+  };
+  const fetch = vi.fn(async (url: string) =>
+    url.endsWith("/source-fallback")
+      ? new Response(JSON.stringify({ room: replacement, room_access_token: "proof" }), {
+          headers: { "Content-Type": "application/json" },
+        })
+      : ticket(),
+  );
+  vi.stubGlobal("fetch", fetch);
+  const view = renderHook(() =>
+    useWatchTogetherRoomConnection({ roomId: "room", roomToken: "proof" }),
+  );
+  await waitFor(() => expect(RoomSocket.all.length).toBe(1));
+  const socket = RoomSocket.all[0]!;
+  act(() => socket.open());
+  const report = { selectionRevision: 1, failedFileId: 7, reason: "no_alternate_version" as const };
+  await act(async () => {
+    await view.result.current.fallbackSource(report);
+  });
+  expect(view.result.current.room?.selected_file_id).toBe(8);
+  act(() =>
+    socket.message({
+      type: "snapshot",
+      room: { ...replacement, selected_file_id: 7, generation: 9, selection_revision: 1 },
+    }),
+  );
+  expect(view.result.current.room?.generation).toBe(10);
+  expect(view.result.current.room?.selected_file_id).toBe(8);
+  const oldFallback = view.result.current.fallbackSource;
+  const calls = fetch.mock.calls.length;
+  setProfileToken("pin-B");
+  await expect(oldFallback(report)).rejects.toThrow();
+  expect(fetch).toHaveBeenCalledTimes(calls);
+});

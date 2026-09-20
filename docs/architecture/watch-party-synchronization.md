@@ -59,14 +59,27 @@ tone-mapping settings and available executors. Clients must report their actual
 decode and output capabilities; a fixed file does not require identical delivery,
 resolution, bitrate, or dynamic range across viewers.
 
-Room selection does not collect or negotiate all viewers' capabilities in
-advance. If a viewer cannot play the selected source and the server cannot adapt
-it, playback returns a refusal. It must not silently substitute a different file
-or change the room's timeline to accommodate a late joiner.
+Room selection starts with the best source and responds to actual playback
+refusals. A connected viewer can request `source-fallback` with the failed file,
+selection revision, and refusal reason. The server selects a lower-ranked file
+within the same edition and presentation part. A 4K conversion refusal skips
+same-resolution files; an HDR conversion refusal prefers an SDR source without
+imposing a resolution ceiling. If no candidate remains, the original refusal
+stays visible.
+
+Fallback changes the room's shared source under the same Postgres lock as normal
+selection. It preserves the current anchor and resume intent, advances the
+selection revision, clears every attachment and readiness report, and broadcasts
+the new selection. Viewers restart against that file and join the readiness
+barrier. Stale or concurrent reports return the current snapshot without another
+change. Candidate order strictly decreases, preventing clients with different
+capabilities from cycling between previously refused sources. This works in
+host-pick and vote rooms without changing the selected content.
 
 The web player disables version switching while in a room and starts with
 `allow_alternate_versions: false`, requiring the playback capability
-`fixed_media_file_v1`. That constraint survives every replan, so decoder recovery
+`fixed_media_file_v1`. Clients discover coordinated fallback through the playback
+capability `watch_party_source_fallback_v1`. That file constraint survives every replan, so decoder recovery
 cannot silently move one viewer to another timeline. Streaming quality and audio
 or subtitle adaptations can still use the same source.
 

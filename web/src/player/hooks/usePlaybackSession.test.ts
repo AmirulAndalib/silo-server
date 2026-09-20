@@ -1378,6 +1378,7 @@ describe("usePlaybackSession version switches", () => {
     await waitFor(() => {
       expect(result.current.plan).toBeNull();
       expect(result.current.error).toBe("The next item has no playable route.");
+      expect(result.current.errorReason).toBe("no_playable_route");
     });
     expect(result.current.streamUrl).toBeNull();
     expect(result.current.sessionId).toBeNull();

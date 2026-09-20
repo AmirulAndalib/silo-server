@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,6 +11,10 @@ import { WatchPage } from "./WatchPage";
 const playbackSessionMock = vi.hoisted(() => vi.fn());
 const videoPlayerMock = vi.hoisted(() => vi.fn());
 const toastErrorMock = vi.hoisted(() => vi.fn());
+const roomConnectionMock = vi.hoisted(() => vi.fn());
+const playbackCapabilitiesMock = vi.hoisted(() => vi.fn());
+const startPlaybackMock = vi.hoisted(() => vi.fn());
+vi.mock("../start-v2", () => ({ playbackCapabilitiesV2: playbackCapabilitiesMock }));
 
 vi.mock("../hooks/usePlaybackSession", () => ({
   usePlaybackSession: playbackSessionMock,
@@ -33,10 +37,10 @@ vi.mock("@tanstack/react-query", () => ({
   useQueryClient: () => ({ fetchQuery: vi.fn() }),
 }));
 vi.mock("@/playback/watchPlaybackContext", () => ({
-  useWatchPlaybackController: () => ({ startPlayback: vi.fn() }),
+  useWatchPlaybackController: () => ({ startPlayback: startPlaybackMock }),
 }));
 vi.mock("../hooks/useWatchTogetherRoomConnection", () => ({
-  useWatchTogetherRoomConnection: () => ({ room: null }),
+  useWatchTogetherRoomConnection: roomConnectionMock,
 }));
 vi.mock("sonner", () => ({
   toast: { error: toastErrorMock },
@@ -104,6 +108,11 @@ function playbackSession(
 }
 
 beforeEach(() => {
+  roomConnectionMock.mockReset().mockReturnValue({ room: null });
+  playbackCapabilitiesMock
+    .mockReset()
+    .mockResolvedValue({ features: ["watch_party_source_fallback_v1"] });
+  startPlaybackMock.mockReset();
   playbackSessionMock.mockReset();
   videoPlayerMock.mockReset();
   toastErrorMock.mockReset();
@@ -216,5 +225,123 @@ describe("WatchPage playback state", () => {
 
     expect(updatePlaybackState).toHaveBeenCalledWith(321, true);
     expect(onPlaybackStateChange).toHaveBeenCalledWith(state);
+  });
+});
+
+describe("Watch Party source fallback", () => {
+  function refusedRoom(selfRole = "host") {
+    const room = {
+      room_id: "room-1",
+      phase: "playing",
+      selected_content_id: "content-1",
+      selected_file_id: 7,
+      selection_revision: 1,
+      self_role: selfRole,
+      members: [{ is_self: true, connected: true }],
+      generation: 1,
+    };
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        plan: null,
+        streamUrl: null,
+        sessionId: null,
+        mediaFileId: null,
+        errorReason: "no_alternate_version",
+        errorTitle: "Playback unavailable",
+        error: "A lower-resolution source is required because 4K transcoding is disabled.",
+      }),
+    );
+    return room;
+  }
+  const props = {
+    ...watchPageProps,
+    fileId: 7,
+    watchTogetherRoomId: "room-1",
+    watchTogetherRoomToken: "proof",
+  };
+
+  it.each(["host", "guest"])(
+    "automatically requests one shared fallback for a %s",
+    async (role) => {
+      const room = refusedRoom(role);
+      let finish!: () => void;
+      const fallbackSource = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      roomConnectionMock.mockReturnValue({ room, connectionState: "connected", fallbackSource });
+      const view = render(createElement(WatchPage, props));
+      await waitFor(() =>
+        expect(fallbackSource).toHaveBeenCalledWith({
+          selectionRevision: 1,
+          failedFileId: 7,
+          reason: "no_alternate_version",
+        }),
+      );
+      expect(screen.getByText("Finding a compatible version for everyone...")).toBeTruthy();
+      view.rerender(createElement(WatchPage, props));
+      expect(fallbackSource).toHaveBeenCalledTimes(1);
+      roomConnectionMock.mockReturnValue({
+        room: { ...room, selected_file_id: 8, selection_revision: 2, generation: 2 },
+        connectionState: "connected",
+        fallbackSource,
+      });
+      view.rerender(createElement(WatchPage, props));
+      await waitFor(() =>
+        expect(startPlaybackMock).toHaveBeenCalledWith(
+          expect.objectContaining({ fileId: 8, roomId: "room-1", restart: true }),
+        ),
+      );
+      finish();
+      view.unmount();
+    },
+  );
+
+  it("waits for confirmed membership before reporting the refusal", async () => {
+    const room = refusedRoom();
+    const fallbackSource = vi.fn().mockResolvedValue(null);
+    roomConnectionMock.mockReturnValue({
+      room: { ...room, members: [] },
+      connectionState: "connected",
+      fallbackSource,
+    });
+    const view = render(createElement(WatchPage, props));
+    expect(fallbackSource).not.toHaveBeenCalled();
+    roomConnectionMock.mockReturnValue({ room, connectionState: "connected", fallbackSource });
+    view.rerender(createElement(WatchPage, props));
+    await waitFor(() => expect(fallbackSource).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not apply an old file's refusal to a newer room selection", async () => {
+    const room = refusedRoom();
+    const fallbackSource = vi.fn();
+    roomConnectionMock.mockReturnValue({
+      room: { ...room, selected_file_id: 8, selection_revision: 2 },
+      connectionState: "connected",
+      fallbackSource,
+    });
+    render(createElement(WatchPage, props));
+    await waitFor(() => expect(startPlaybackMock).toHaveBeenCalled());
+    expect(fallbackSource).not.toHaveBeenCalled();
+    expect(playbackCapabilitiesMock).not.toHaveBeenCalled();
+  });
+
+  it("retains the refusal without looping when no shared fallback exists", async () => {
+    const room = refusedRoom();
+    const fallbackSource = vi.fn().mockRejectedValue(new Error("No alternative room source"));
+    roomConnectionMock.mockReturnValue({ room, connectionState: "connected", fallbackSource });
+    const view = render(createElement(WatchPage, props));
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "A lower-resolution source is required because 4K transcoding is disabled.",
+        ),
+      ).toBeTruthy(),
+    );
+    expect(fallbackSource).toHaveBeenCalledTimes(1);
+    view.rerender(createElement(WatchPage, props));
+    expect(fallbackSource).toHaveBeenCalledTimes(1);
   });
 });

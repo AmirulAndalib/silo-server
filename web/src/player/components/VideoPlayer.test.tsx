@@ -231,6 +231,7 @@ function roomConnection(
     sendRoomMessage: vi.fn(() => ({ ok: true })),
     updatePolicy: vi.fn(async () => null),
     selectItem: vi.fn(async () => null),
+    fallbackSource: vi.fn(async () => null),
     closeRoom: vi.fn(async () => {}),
     createSuggestion: vi.fn(async () => {}),
     deleteSuggestion: vi.fn(async () => {}),

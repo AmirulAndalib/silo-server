@@ -25,8 +25,8 @@ features, deliveries}` with `Cache-Control: private, no-cache` and an `ETag`; cl
 and `allowed` is `true`; a server without playback wired answers
 `not_configured` with `allowed: false`. `installation_id` is the persisted
 server instance UUID that diagnostics also report. `protocol_versions` is
-`[3]`. `features` is the v3 server feature set plus `sequenced_progress_v1`
-and `fixed_media_file_v1`.
+`[3]`. `features` is the v3 server feature set plus `sequenced_progress_v1`,
+`fixed_media_file_v1`, and `watch_party_source_fallback_v1`.
 `deliveries` lists `original_http`, `server_remux_progressive`,
 `server_remux_hls` and, when transcoding is enabled, `server_transcode_hls`.
 `revision` is a digest of the rest.
@@ -66,7 +66,11 @@ version with a potentially different timeline. Omitted or `true` retains the
 existing alternate-version behavior. The choice is persisted with the attempt
 and cannot be relaxed by a replan.
 
-The web Watch Party player requires this capability and sends `false`. Ordinary
+The web Watch Party player requires this capability and sends `false`. When a
+source cannot be adapted, `watch_party_source_fallback_v1` allows connected
+viewers to request a shared replacement through the room's `source-fallback`
+operation (see [Realtime API](realtime-api.md#room-membership-and-buffering)).
+Every viewer then starts a new fixed-file attempt for that room selection. Ordinary
 web, Apple, Android, and Jellyfin playback keep their existing behavior; Apple
 has no active room caller and Android's room UI remains disabled.
 

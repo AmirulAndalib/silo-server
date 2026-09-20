@@ -997,14 +997,33 @@ func (s *Service) selectItemInRoom(
 		return Snapshot{}, ErrRoomClosed
 	}
 
+	conflict, updateErr := s.applySelectionLocked(ctx, live, resolved, 0, true)
+	if updateErr != nil {
+		s.mu.Unlock()
+		return Snapshot{}, updateErr
+	}
+	snapshot := s.buildSnapshotLocked(live, userID, profileID)
+	if conflict {
+		s.mu.Unlock()
+		return snapshot, nil
+	}
+	dispatches := s.prepareSnapshotDispatchesLocked(live)
+	s.mu.Unlock()
+
+	s.sendDispatches(ctx, dispatches)
+	return snapshot, nil
+}
+
+// applySelectionLocked replaces the shared source and invalidates every old attachment.
+func (s *Service) applySelectionLocked(ctx context.Context, live *liveRoom, resolved *ResolvedSelection, position float64, resume bool) (bool, error) {
 	now := s.now()
 	live.room.Phase = RoomPhasePlaying
 	live.room.PlaybackState = RoomPlaybackStateWaiting
-	live.room.ResumeOnReady = true
+	live.room.ResumeOnReady = resume
 	live.room.SelectedContentID = &resolved.ContentID
 	live.room.SelectedFileID = resolved.FileID
 	live.room.SelectedLibraryID = resolved.LibraryID
-	live.room.AnchorPositionSeconds = 0
+	live.room.AnchorPositionSeconds = position
 	live.room.IsPaused = true
 	live.room.AnchorUpdatedAt = now
 	live.room.SelectionRevision++
@@ -1019,13 +1038,15 @@ func (s *Service) selectItemInRoom(
 		member.isReady = false
 		member.isBuffering = false
 		member.ignoreWait = false
+		member.waitingCommand = nil
+		member.lastCommandID = ""
 	}
 	s.disarmWaitingDeadlineLocked(live)
 
-	conflict, updateErr := s.persistRoomChangeLocked(ctx, live, func(room Room, expectedGeneration int64) (*Room, error) {
+	return s.persistRoomChangeLocked(ctx, live, func(room Room, expectedGeneration int64) (*Room, error) {
 		return s.repo.UpdateSelection(
 			ctx,
-			roomID,
+			live.room.ID,
 			SelectItemInput{
 				ContentID: resolved.ContentID,
 				FileID:    resolved.FileID,
@@ -1042,20 +1063,6 @@ func (s *Service) selectItemInRoom(
 			expectedGeneration,
 		)
 	})
-	if updateErr != nil {
-		s.mu.Unlock()
-		return Snapshot{}, updateErr
-	}
-	snapshot := s.buildSnapshotLocked(live, userID, profileID)
-	if conflict {
-		s.mu.Unlock()
-		return snapshot, nil
-	}
-	dispatches := s.prepareSnapshotDispatchesLocked(live)
-	s.mu.Unlock()
-
-	s.sendDispatches(ctx, dispatches)
-	return snapshot, nil
 }
 
 func (s *Service) closeRoom(ctx context.Context, roomID string, userID int, profileID string) error {

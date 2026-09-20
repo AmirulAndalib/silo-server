@@ -290,12 +290,31 @@ Room playback uses one selected source file for all viewers. Automatic selection
 uses the catalogue's quality ordering within the selected edition, without a
 room-specific resolution or dynamic range limit. Each viewer's playback plan can
 direct play, remux, transcode, or tone map that file according to their device
-capabilities and server settings. Room selection does not negotiate all viewers'
-capabilities in advance; an unsupported source produces a playback refusal when
-no permitted adaptation is available. The web player disables version switching and requires
+capabilities and server settings. When that source cannot be adapted, a connected
+viewer can request coordinated source fallback as described below. The web player
+disables version switching and requires
 `fixed_media_file_v1` from playback capabilities, starting with
 `allow_alternate_versions: false` to prevent automatic file fallback during
 recovery. Streaming quality remains adjustable on the same file.
+
+`POST /api/v2/watch-together/rooms/{room_id}/source-fallback`
+(`fallbackWatchTogetherSource`) requires authenticated profile authority, room
+proof in `X-Room-Token`, and connected room membership. Discover support through
+`watch_party_source_fallback_v1` in playback capabilities. The body contains
+`selection_revision`, `failed_file_id` (a positive string ID), and `reason`:
+`no_alternate_version`, `hdr_transcode_unsupported`,
+`subtitle_conversion_unsupported`, or `transcoding_disabled`.
+
+The server chooses a lower-ranked source in the same edition and presentation
+part. `no_alternate_version` requires lower resolution; an HDR refusal requires
+SDR. It preserves the shared position and resume intent, advances the selection
+revision, clears attachments/readiness, and returns/broadcasts the new snapshot.
+All clients must follow that selection and attach again, including the host.
+This changes the file for the existing content in both host-pick and vote rooms.
+A stale file or revision returns the current snapshot without a write, so replay
+cannot cause a second fallback. No candidate returns `409`; disconnected or
+unauthorized viewers receive `403`. Clients retain the playback refusal if the
+fallback fails and must not independently substitute another file.
 
 Room snapshots include members connected through all API servers. Each member can
 include additive `is_ready`, `is_buffering`, and `is_syncing` booleans; absent fields
