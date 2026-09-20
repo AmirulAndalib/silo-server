@@ -596,15 +596,20 @@ export function useWatchTogetherRoomConnection({
   );
 
   const fallbackAuthority = captureProfileRequestContext();
-  const fallbackRoomRef = useRef(roomId);
+  const fallbackContextRef = useRef({ roomId, roomToken });
   useLayoutEffect(() => {
-    fallbackRoomRef.current = roomId;
+    fallbackContextRef.current = { roomId, roomToken };
+    return () => {
+      fallbackContextRef.current = { roomId: null, roomToken: null };
+    };
   }, [roomId, roomToken]);
   const fallbackSource = useCallback(
     async (input: SourceFallbackRequest) => {
-      if (!roomId || !roomToken || fallbackRoomRef.current !== roomId) return null;
+      const context = fallbackContextRef.current;
+      if (!roomId || !roomToken || context.roomId !== roomId || context.roomToken !== roomToken)
+        return null;
       const response = await fallbackRoomSource(roomId, roomToken, input, fallbackAuthority);
-      if (fallbackRoomRef.current !== roomId) return null;
+      if (fallbackContextRef.current !== context) return null;
       setRoom((current) =>
         current?.room_id === roomId && current.generation <= response.room.generation
           ? response.room

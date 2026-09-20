@@ -147,10 +147,11 @@ export function WatchPage({
   const fallbackReason = session.errorReason;
   const fallbackKey =
     watchTogetherRoomId &&
+    watchTogetherRoomToken &&
     fallbackRoom &&
     fileId === fallbackRoom.selected_file_id &&
     isSourceFallbackReason(fallbackReason)
-      ? `${watchTogetherRoomId}:${fallbackRoom.selection_revision}:${fileId}:${session.playbackAttemptId}:${fallbackReason}`
+      ? `${watchTogetherRoomId}:${watchTogetherRoomToken}:${fallbackRoom.selection_revision}:${fileId}:${session.playbackAttemptId}:${fallbackReason}`
       : null;
   const fallingBack = fallbackKey !== null && pendingFallbackKey === fallbackKey;
 

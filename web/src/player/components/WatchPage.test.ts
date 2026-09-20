@@ -328,6 +328,18 @@ describe("Watch Party source fallback", () => {
     expect(playbackCapabilitiesMock).not.toHaveBeenCalled();
   });
 
+  it("retries the same refusal once after the room proof is renewed", async () => {
+    const room = refusedRoom();
+    const fallbackSource = vi.fn().mockRejectedValue(new Error("Expired room proof"));
+    roomConnectionMock.mockReturnValue({ room, connectionState: "connected", fallbackSource });
+    const view = render(createElement(WatchPage, props));
+    await waitFor(() => expect(fallbackSource).toHaveBeenCalledTimes(1));
+    view.rerender(createElement(WatchPage, { ...props, watchTogetherRoomToken: "renewed-proof" }));
+    await waitFor(() => expect(fallbackSource).toHaveBeenCalledTimes(2));
+    view.rerender(createElement(WatchPage, { ...props, watchTogetherRoomToken: "renewed-proof" }));
+    expect(fallbackSource).toHaveBeenCalledTimes(2);
+  });
+
   it("retains the refusal without looping when no shared fallback exists", async () => {
     const room = refusedRoom();
     const fallbackSource = vi.fn().mockRejectedValue(new Error("No alternative room source"));

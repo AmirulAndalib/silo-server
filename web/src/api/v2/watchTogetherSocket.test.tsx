@@ -298,3 +298,60 @@ it("keeps the fallback receipt when an older socket snapshot arrives", async () 
   await expect(oldFallback(report)).rejects.toThrow();
   expect(fetch).toHaveBeenCalledTimes(calls);
 });
+
+it("fences source fallback callbacks and receipts when the room proof changes", async () => {
+  let finish!: (response: Response) => void;
+  const fetch = vi.fn((url: string) =>
+    url.endsWith("/source-fallback")
+      ? new Promise<Response>((resolve) => {
+          finish = resolve;
+        })
+      : Promise.resolve(ticket()),
+  );
+  vi.stubGlobal("fetch", fetch);
+  const view = renderHook(
+    ({ proof }) => useWatchTogetherRoomConnection({ roomId: "room", roomToken: proof }),
+    { initialProps: { proof: "original-proof" } },
+  );
+  await waitFor(() => expect(RoomSocket.all.length).toBe(1));
+  act(() => RoomSocket.all[0]!.open());
+  const original = view.result.current.fallbackSource;
+  const report = { selectionRevision: 1, failedFileId: 7, reason: "no_alternate_version" as const };
+  let pending!: ReturnType<typeof original>;
+  act(() => {
+    pending = original(report);
+  });
+  await waitFor(() => expect(finish).toBeTypeOf("function"));
+  view.rerender({ proof: "renewed-proof" });
+  await act(async () => {
+    finish(
+      new Response(
+        JSON.stringify({
+          room: {
+            room_id: "room",
+            generation: 10,
+            selection_revision: 2,
+            selected_file_id: "8",
+            selected_content_id: "movie",
+            phase: "playing",
+            playback_state: "waiting",
+            selection_mode: "host_pick",
+            guest_control_policy: "host_only",
+            self_role: "guest",
+            anchor_updated_at: "2026-01-01T00:00:00Z",
+          },
+          room_access_token: "original-proof",
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    expect(await pending).toBeNull();
+  });
+  expect(view.result.current.room?.generation).not.toBe(10);
+  expect(await original(report)).toBeNull();
+  expect(fetch.mock.calls.filter(([url]) => url.endsWith("/source-fallback"))).toHaveLength(1);
+  const latest = view.result.current.fallbackSource;
+  view.unmount();
+  expect(await latest(report)).toBeNull();
+  expect(fetch.mock.calls.filter(([url]) => url.endsWith("/source-fallback"))).toHaveLength(1);
+});
