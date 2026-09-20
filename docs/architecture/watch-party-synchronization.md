@@ -46,13 +46,23 @@ while the player waits for the replacement stream.
 
 ## Deployment and clients
 
-Every viewer uses the room's selected source file. For automatic selection, the
-server prefers the highest-quality SDR version up to 1080p in the catalogue's
-preferred edition and presentation part, then other SDR sources, then HDR. This
-avoids unnecessary HDR and 4K conversion requirements; it is a compatibility
-preference, not a claim that every viewer's device has been negotiated. Each
-viewer still receives a playback plan for their own capabilities. Explicit file
-selections retain their existing meaning.
+Every viewer uses the room's selected source file. Automatic selection uses the
+catalogue's quality ordering within the preferred edition and presentation part:
+resolution, then HDR, then file size. Watch Party adds no resolution or dynamic
+range ceiling. Existing access policies still apply. Explicit file selections
+retain their existing meaning.
+
+Each viewer receives an independent playback plan for that source. A capable
+client can play 4K/HDR directly while another viewer receives a transcode or
+tone-mapped stream from the same file, subject to the server's transcoding and
+tone-mapping settings and available executors. Clients must report their actual
+decode and output capabilities; a fixed file does not require identical delivery,
+resolution, bitrate, or dynamic range across viewers.
+
+Room selection does not collect or negotiate all viewers' capabilities in
+advance. If a viewer cannot play the selected source and the server cannot adapt
+it, playback returns a refusal. It must not silently substitute a different file
+or change the room's timeline to accommodate a late joiner.
 
 The web player disables version switching while in a room and starts with
 `allow_alternate_versions: false`, requiring the playback capability

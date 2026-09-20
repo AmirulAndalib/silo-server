@@ -287,9 +287,12 @@ or change to the room's existing waiting deadline.
 ### Room membership and buffering
 
 Room playback uses one selected source file for all viewers. Automatic selection
-prefers the highest-quality SDR source up to 1080p within the selected edition,
-then other SDR versions, then HDR. Device-specific playback planning can adapt
-that source. The web player disables version switching and requires
+uses the catalogue's quality ordering within the selected edition, without a
+room-specific resolution or dynamic range limit. Each viewer's playback plan can
+direct play, remux, transcode, or tone map that file according to their device
+capabilities and server settings. Room selection does not negotiate all viewers'
+capabilities in advance; an unsupported source produces a playback refusal when
+no permitted adaptation is available. The web player disables version switching and requires
 `fixed_media_file_v1` from playback capabilities, starting with
 `allow_alternate_versions: false` to prevent automatic file fallback during
 recovery. Streaming quality remains adjustable on the same file.
