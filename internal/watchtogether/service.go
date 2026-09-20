@@ -51,6 +51,9 @@ const (
 	// maxBufferingAnchorDriftSeconds bounds how far a buffering member's
 	// reported position may move the shared room anchor.
 	maxBufferingAnchorDriftSeconds = 5.0
+	// readySeekToleranceSeconds allows media clock rounding after a seek,
+	// while rejecting readiness from the stream that is being replaced.
+	readySeekToleranceSeconds = 1.0
 	// maxPositionSeconds rejects corrupt client reports before they can poison
 	// the shared anchor or produce unusable transport commands.
 	maxPositionSeconds = 7 * 24 * 60 * 60
@@ -130,6 +133,8 @@ type memberState struct {
 	connection  RoomConnection
 	isReady     bool
 	isBuffering bool
+	// waitingCommand is the command this member must finish before resuming.
+	waitingCommand *TransportCommand
 	// ignoreWait excludes a member from room-wide readiness barriers. It is
 	// set when the member fails to become ready before waitingResumeDeadline
 	// and cleared once they attach or report ready again.
@@ -723,6 +728,9 @@ func (s *Service) HandleReadyForConnection(
 	if reg == nil {
 		return Snapshot{}, ErrRoomForbidden
 	}
+	if !validPosition(report.PositionSeconds) {
+		return Snapshot{}, ErrInvalidPosition
+	}
 
 	_, live, err := s.getOrLoadLiveRoom(ctx, reg.roomID)
 	if err != nil {
@@ -741,6 +749,18 @@ func (s *Service) HandleReadyForConnection(
 	if member.sessionID == "" || member.sessionID != report.SessionID {
 		s.mu.Unlock()
 		return Snapshot{}, ErrConnectionNotAttached
+	}
+
+	if live.room.PlaybackState == RoomPlaybackStateWaiting {
+		command := member.waitingCommand
+		staleCommand := report.CommandID != "" && (command == nil || report.CommandID != command.CommandID)
+		seekPending := command != nil && command.Action == TransportActionSeek &&
+			math.Abs(report.PositionSeconds-command.PositionSeconds) > readySeekToleranceSeconds
+		if staleCommand || seekPending {
+			snapshot := s.buildSnapshotLocked(live, userID, profileID)
+			s.mu.Unlock()
+			return snapshot, nil
+		}
 	}
 
 	member.isReady = true
@@ -1611,6 +1631,9 @@ func (s *Service) targetedCommandDispatchesLocked(
 		}
 		payload := command
 		payload.SessionID = member.sessionID
+		if payload.PlaybackState == RoomPlaybackStateWaiting {
+			member.waitingCommand = &payload
+		}
 		dispatches = append(dispatches, commandDispatch{
 			conn:      member.connection,
 			memberKey: memberKey,
@@ -1643,6 +1666,9 @@ func (s *Service) transportCommandDispatchesLocked(
 			ExecuteAt:         executeAt.UTC().Format(time.RFC3339Nano),
 			IssuedAt:          s.now().UTC().Format(time.RFC3339Nano),
 			PlaybackState:     live.room.PlaybackState,
+		}
+		if command.PlaybackState == RoomPlaybackStateWaiting {
+			member.waitingCommand = &command
 		}
 		dispatches = append(dispatches, commandDispatch{
 			conn:      member.connection,

@@ -145,6 +145,7 @@ type TransportRequest struct {
 }
 
 type StateReport struct {
+	CommandID       string
 	SessionID       string
 	PositionSeconds float64
 	IsPaused        bool

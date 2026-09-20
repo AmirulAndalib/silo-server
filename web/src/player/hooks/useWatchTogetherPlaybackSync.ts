@@ -14,6 +14,7 @@ interface UseWatchTogetherPlaybackSyncOptions {
   sessionId?: string | null;
   videoRef: RefObject<HTMLVideoElement | null>;
   streamOriginRef: MutableRefObject<number>;
+  appliedCommandIdRef: RefObject<string | null>;
 }
 
 interface TransportRequestResult {
@@ -27,18 +28,20 @@ interface UseWatchTogetherPlaybackSyncResult {
     positionSeconds: number,
     isPaused: boolean,
   ) => TransportRequestResult;
-  reportReady: (positionSeconds?: number, isPaused?: boolean) => TransportRequestResult;
+  reportReady: () => TransportRequestResult;
   reportBuffering: (positionSeconds?: number, isPaused?: boolean) => TransportRequestResult;
 }
 
 const stateReportIntervalMs = 1_500;
 const pendingCommandQuietPeriodMs = 250;
+const readySeekToleranceSeconds = 1;
 
 export function useWatchTogetherPlaybackSync({
   roomConnection,
   sessionId,
   videoRef,
   streamOriginRef,
+  appliedCommandIdRef,
 }: UseWatchTogetherPlaybackSyncOptions): UseWatchTogetherPlaybackSyncResult {
   const connectionState = roomConnection.connectionState;
   const room = roomConnection.room;
@@ -52,10 +55,16 @@ export function useWatchTogetherPlaybackSync({
   const waitingStateRef = useRef<"idle" | "buffering" | "ready">("idle");
 
   useEffect(() => {
-    if (!sessionId || attachedSessionId !== sessionId || room?.playback_state !== "waiting") {
-      waitingStateRef.current = "idle";
-    }
-  }, [attachedSessionId, room?.playback_state, room?.selection_revision, sessionId]);
+    waitingStateRef.current = "idle";
+  }, [
+    attachedSessionId,
+    connectionState,
+    room?.room_id,
+    room?.playback_state,
+    room?.selection_revision,
+    sessionId,
+    transportCommand?.command_id,
+  ]);
 
   useEffect(() => {
     if (!sessionId || connectionState !== "connected") {
@@ -127,46 +136,60 @@ export function useWatchTogetherPlaybackSync({
     [attachedSessionId, connectionState, roomConnected, sendRoomMessage, sessionId],
   );
 
-  const reportReady = useCallback(
-    (positionSeconds?: number, isPaused?: boolean) => {
-      const video = videoRef.current;
-      if (
-        connectionState !== "connected" ||
-        !roomConnected ||
-        !sessionId ||
-        attachedSessionId !== sessionId ||
-        roomPlaybackState !== "waiting" ||
-        waitingStateRef.current === "ready" ||
-        !video
-      ) {
-        return { ok: false };
-      }
+  const reportReady = useCallback(() => {
+    const video = videoRef.current;
+    const command = transportCommand;
+    if (
+      connectionState !== "connected" ||
+      !roomConnected ||
+      !sessionId ||
+      attachedSessionId !== sessionId ||
+      roomPlaybackState !== "waiting" ||
+      waitingStateRef.current === "ready" ||
+      !video ||
+      video.seeking ||
+      video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA ||
+      !command ||
+      command.playback_state !== "waiting" ||
+      command.selection_revision !== room?.selection_revision ||
+      (command.session_id && command.session_id !== sessionId) ||
+      appliedCommandIdRef.current !== command.command_id
+    ) {
+      return { ok: false };
+    }
 
-      const result = sendRoomMessage({
-        type: "ready",
-        session_id: sessionId,
-        position_seconds: Math.max(
-          0,
-          positionSeconds ?? toMediaTime(video.currentTime, streamOriginRef.current),
-        ),
-        is_paused: isPaused ?? video.paused,
-      });
-      if (result.ok) {
-        waitingStateRef.current = "ready";
-      }
-      return result;
-    },
-    [
-      attachedSessionId,
-      connectionState,
-      roomConnected,
-      roomPlaybackState,
-      sendRoomMessage,
-      sessionId,
-      streamOriginRef,
-      videoRef,
-    ],
-  );
+    const position = Math.max(0, toMediaTime(video.currentTime, streamOriginRef.current));
+    // A canplay event can still belong to the stream a room seek replaces.
+    if (
+      command.action === "seek" &&
+      Math.abs(position - command.position_seconds) > readySeekToleranceSeconds
+    ) {
+      return { ok: false };
+    }
+    const result = sendRoomMessage({
+      type: "ready",
+      command_id: command.command_id,
+      session_id: sessionId,
+      position_seconds: position,
+      is_paused: video.paused,
+    });
+    if (result.ok) {
+      waitingStateRef.current = "ready";
+    }
+    return result;
+  }, [
+    attachedSessionId,
+    appliedCommandIdRef,
+    connectionState,
+    roomConnected,
+    roomPlaybackState,
+    room?.selection_revision,
+    sendRoomMessage,
+    sessionId,
+    streamOriginRef,
+    transportCommand,
+    videoRef,
+  ]);
 
   const reportBuffering = useCallback(
     (positionSeconds?: number, isPaused?: boolean) => {

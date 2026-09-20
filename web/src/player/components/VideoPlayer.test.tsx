@@ -370,6 +370,140 @@ describe("VideoPlayer room catch-up", () => {
     expect(controls.current!.currentTime).toBe(100);
   });
 
+  it("reports readiness only after the current seek reaches buffered media", async () => {
+    const { connection, video, command, rerenderPlayer } = setup(100);
+    Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+    const waitingConnection = {
+      ...connection,
+      room: { ...connection.room!, playback_state: "waiting" as const },
+      transportCommand: {
+        ...command,
+        action: "seek" as const,
+        playback_state: "waiting" as const,
+        position_seconds: 1500,
+        execute_at: new Date(Date.now() + 500).toISOString(),
+      },
+    };
+    rerenderPlayer({ watchTogetherConnection: waitingConnection });
+    fireEvent.canPlay(video);
+    expect(connection.sendRoomMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "ready" }),
+    );
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    fireEvent.canPlay(video);
+    expect(connection.sendRoomMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "ready" }),
+    );
+
+    video.currentTime = 1500;
+    Object.defineProperty(video, "readyState", { configurable: true, value: 1 });
+    fireEvent.seeked(video);
+    expect(connection.sendRoomMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "ready" }),
+    );
+    Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+    Object.defineProperty(video, "seeking", { configurable: true, value: true });
+    fireEvent.canPlay(video);
+    expect(connection.sendRoomMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "ready" }),
+    );
+    Object.defineProperty(video, "seeking", { configurable: true, value: false });
+    fireEvent.canPlay(video);
+    fireEvent.canPlay(video);
+    expect(
+      vi.mocked(connection.sendRoomMessage).mock.calls.filter(([m]) => m.type === "ready"),
+    ).toEqual([
+      [
+        {
+          type: "ready",
+          session_id: "session-1",
+          command_id: command.command_id,
+          position_seconds: 1500,
+          is_paused: true,
+        },
+      ],
+    ]);
+
+    // Another seek can arrive while the room still waits for other members.
+    rerenderPlayer({
+      watchTogetherConnection: {
+        ...waitingConnection,
+        transportCommand: {
+          ...waitingConnection.transportCommand,
+          command_id: "second-seek",
+          position_seconds: 30,
+        },
+      },
+    });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    fireEvent.canPlay(video);
+    video.currentTime = 30;
+    fireEvent.seeked(video);
+    expect(connection.sendRoomMessage).toHaveBeenCalledWith({
+      type: "ready",
+      session_id: "session-1",
+      command_id: "second-seek",
+      position_seconds: 30,
+      is_paused: true,
+    });
+  });
+
+  it("waits for execution even when a pending seek already matches the media position", async () => {
+    const { connection, video, command, rerenderPlayer } = setup(100);
+    Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+    rerenderPlayer({
+      watchTogetherConnection: {
+        ...connection,
+        room: { ...connection.room!, playback_state: "waiting" },
+        transportCommand: {
+          ...command,
+          action: "seek",
+          playback_state: "waiting",
+          execute_at: new Date(Date.now() + 500).toISOString(),
+        },
+      },
+    });
+    fireEvent.canPlay(video);
+    expect(connection.sendRoomMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "ready" }),
+    );
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    expect(connection.sendRoomMessage).toHaveBeenCalledWith({
+      type: "ready",
+      session_id: "session-1",
+      command_id: command.command_id,
+      position_seconds: 100,
+      is_paused: true,
+    });
+  });
+
+  it("acknowledges a buffering pause at the actual media position and retries a failed send", async () => {
+    const { connection, video, command, rerenderPlayer, onReanchorSeek } = setup(80);
+    Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+    vi.mocked(connection.sendRoomMessage).mockReturnValueOnce({ ok: false });
+    rerenderPlayer({
+      watchTogetherConnection: {
+        ...connection,
+        room: { ...connection.room!, playback_state: "waiting" },
+        transportCommand: { ...command, action: "pause", playback_state: "waiting" },
+      },
+    });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    fireEvent.canPlay(video);
+    expect(onReanchorSeek).not.toHaveBeenCalled();
+    const ready = vi
+      .mocked(connection.sendRoomMessage)
+      .mock.calls.filter(([m]) => m.type === "ready");
+    expect(ready).toHaveLength(2);
+    expect(ready[1]?.[0]).toEqual({
+      type: "ready",
+      session_id: "session-1",
+      command_id: command.command_id,
+      position_seconds: 80,
+      is_paused: true,
+    });
+  });
+
   it("restores the actual position when a seek replan fails", async () => {
     const { connection, video, command, rerenderPlayer } = setup(100);
     const commandedConnection = {

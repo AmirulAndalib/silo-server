@@ -333,14 +333,13 @@ export function VideoPlayer({
   const durationRef = useRef(propDuration ?? 0);
   const compatibilityFallbackKeyRef = useRef<string | null>(null);
   const lastRoomCommandIdRef = useRef<string | null>(null);
+  const appliedRoomCommandIdRef = useRef<string | null>(null);
   const roomCommandTimerRef = useRef<number | null>(null);
   // The advancing room position a playbackRate catch-up is converging toward,
   // when one is active. Non-null means playbackRate is intentionally not 1.
   const roomCatchupTargetRef = useRef<RoomCatchupTarget | null>(null);
   const performPlayerSeekRef = useRef<(seconds: number) => boolean>(() => false);
-  const reportRoomReadyRef = useRef<
-    (positionSeconds?: number, isPaused?: boolean) => { ok: boolean }
-  >(() => ({ ok: false }));
+  const reportRoomReadyRef = useRef<() => { ok: boolean }>(() => ({ ok: false }));
 
   // Playback state
   const [playing, setPlaying] = useState(false);
@@ -592,6 +591,7 @@ export function VideoPlayer({
     sessionId,
     videoRef,
     streamOriginRef: timelineOffsetRef,
+    appliedCommandIdRef: appliedRoomCommandIdRef,
   });
   const roomPlaybackActive = !!watchTogetherRoomId && !watchTogether.closedReason;
   const roomSyncWaiting = watchTogether.room?.playback_state === "waiting";
@@ -2570,14 +2570,17 @@ export function VideoPlayer({
       !sessionId
     ) {
       lastRoomCommandIdRef.current = null;
+      appliedRoomCommandIdRef.current = null;
       return;
     }
     if (command.session_id && command.session_id !== sessionId) {
       lastRoomCommandIdRef.current = null;
+      appliedRoomCommandIdRef.current = null;
       return;
     }
     if (command.selection_revision !== roomSelectionRevision) {
       lastRoomCommandIdRef.current = null;
+      appliedRoomCommandIdRef.current = null;
       return;
     }
     if (command.command_id === lastRoomCommandIdRef.current) {
@@ -2585,6 +2588,7 @@ export function VideoPlayer({
     }
 
     lastRoomCommandIdRef.current = command.command_id;
+    appliedRoomCommandIdRef.current = null;
 
     if (roomCommandTimerRef.current !== null) {
       window.clearTimeout(roomCommandTimerRef.current);
@@ -2597,7 +2601,7 @@ export function VideoPlayer({
       : Date.now();
     const delay = Math.max(0, localExecuteAt - Date.now());
 
-    const applyRoomPosition = (video: HTMLVideoElement): number => {
+    const applyRoomPosition = (video: HTMLVideoElement) => {
       if (command.action === "pause" || command.action === "seek") {
         resetRoomCatchupRate();
       }
@@ -2638,7 +2642,6 @@ export function VideoPlayer({
         // Already at the room position; drop any stale convergence nudge.
         resetRoomCatchupRate();
       }
-      return targetPositionSeconds;
     };
 
     roomCommandTimerRef.current = window.setTimeout(() => {
@@ -2649,6 +2652,7 @@ export function VideoPlayer({
           return;
         }
 
+        appliedRoomCommandIdRef.current = command.command_id;
         applyRoomPosition(video);
 
         if (command.action === "pause" || command.action === "seek") {
@@ -2670,7 +2674,7 @@ export function VideoPlayer({
                   return;
                 const currentVideo = videoRef.current;
                 if (!currentVideo) return;
-                const targetPositionSeconds = applyRoomPosition(currentVideo);
+                applyRoomPosition(currentVideo);
                 void currentVideo
                   .play()
                   .then(() => {
@@ -2679,7 +2683,7 @@ export function VideoPlayer({
                       lastRoomCommandIdRef.current !== command.command_id
                     )
                       return;
-                    reportRoomReadyRef.current(targetPositionSeconds, false);
+                    reportRoomReadyRef.current();
                   })
                   .catch(() => {
                     if (
@@ -2694,12 +2698,8 @@ export function VideoPlayer({
           }
         }
 
-        if (
-          command.playback_state === "waiting" &&
-          command.action === "pause" &&
-          video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA
-        ) {
-          reportRoomReadyRef.current(command.position_seconds, true);
+        if (command.playback_state === "waiting") {
+          reportRoomReadyRef.current();
         }
       })().catch(() => {});
     }, delay);

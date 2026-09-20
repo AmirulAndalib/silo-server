@@ -251,6 +251,34 @@ Connect with `GET /api/v2/watch-together/rooms/{room_id}/ws` (`connectWatchToget
 
 The handler closes the underlying socket at the earlier of five minutes, access expiry, or original room-proof expiry. Every 15 seconds it rechecks current authority and room existence with a two-second validation timeout; errors close the connection rather than extending its deadline. Revocation is therefore bounded by that polling interval and timeout, not instantaneous. Missing Redis prevents runtime socket wiring; Redis errors never use an in-memory fallback.
 
-The post-upgrade loop is shared with frozen v1: Connect, Disconnect(false), initial snapshots, attach-session/transport/state-report/ready/buffering messages and ping/pong retain their existing behavior and frame shapes. There is no new leave message or global membership synchronization. V2 cancellation closes the transport so a blocked read releases and executes the existing disconnect callback. These raw frame shapes are not the typed HTTP room snapshot schema. No playback/provider operation is implied by obtaining a ticket.
+The post-upgrade loop is shared with v1: Connect, Disconnect(false), initial snapshots, attach-session/transport/state-report/ready/buffering messages and ping/pong use the same service. The readiness validation below applies to both versions. There is no new leave message or global membership synchronization. V2 cancellation closes the transport so a blocked read releases and executes the existing disconnect callback. These raw frame shapes are not the typed HTTP room snapshot schema. No playback/provider operation is implied by obtaining a ticket.
 
 The actual web room/player hook obtains a fresh credential for each reconnect. It captures original room proof and profile authority, sends no authentication retry, uses no URL credentials, checks the negotiated protocol, and suppresses old sockets' messages/results after authority or room replacement. It subscribes to the existing AuthProvider so same-profile PIN replacement rebinds even when room props do not change. A fresh reconnect uses an already-rotated access token only while the original logical authority remains current; it does not replay a refused ticket request. Terminal ticket refusals stop reconnecting; transient failures retain the existing bounded reconnect delay. Existing room-proof expiry ends access; it is not automatically renewed or rebound. Native adoption and exact caller inventories remain separate gates. Shared ticket consumption does not provide cross-node live room membership or broadcast coordination.
+
+### Room playback readiness
+
+A `ready` frame acknowledges the waiting `transport_command` that the player has
+applied. Clients send the existing `session_id`, actual media `position_seconds`,
+and `is_paused`, plus the command's `command_id`. A new command requires a new
+acknowledgement even if the room remains `waiting` and the playback session and
+selection have not changed.
+
+The server ignores an acknowledgement naming an older command without changing
+member readiness or the room anchor. For an explicit seek, the reported media
+position must also be within one second of the command's destination. Position
+validation uses the same finite, nonnegative range as other playback reports.
+Buffering pause commands can be acknowledged at the member's actual position:
+they do not require rebuilding an otherwise usable stream to reach an unbuffered
+anchor. Playback correction still runs when the room resumes.
+
+The web player waits until command execution, the native seek has finished, and
+the element has future media data before acknowledging. Old `canplay` or `seeked`
+events cannot acknowledge a seek whose destination has not arrived. It reports the
+actual media clock, including the stream's timeline offset, rather than the
+optimistic timeline displayed during a seek.
+
+`command_id` is optional for older clients on the shared v1/v2 message loop. Their
+seek acknowledgements still need to reach the destination, but a client that
+omits the ID cannot distinguish consecutive seeks to the same position. Older
+servers ignore this additive request field. There is no new endpoint, capability,
+or change to the room's existing waiting deadline.
