@@ -104,11 +104,49 @@ func (s *Service) handleClusterEvent(event cache.Event) {
 	if json.Unmarshal([]byte(event.Payload), &incoming) != nil || incoming.Source == s.instanceID || incoming.RoomID == "" {
 		return
 	}
+	s.queueRoomReconciliation(incoming.RoomID)
+}
+
+// queueRoomReconciliation keeps SQL and row-lock waits off the PubSub reader.
+// Each locally active room has at most one worker and one pending refresh.
+func (s *Service) queueRoomReconciliation(roomID string) {
 	s.mu.Lock()
-	live := s.rooms[incoming.RoomID]
-	s.mu.Unlock()
-	if live == nil {
+	select {
+	case <-s.janitorStop:
+		s.mu.Unlock()
+		return
+	default:
+	}
+	live := s.rooms[roomID]
+	if live == nil || !hasLocalMembers(live) {
+		s.mu.Unlock()
 		return
 	}
-	_ = s.reconcileRoom(context.Background(), incoming.RoomID)
+	if live.reconciling {
+		live.reconcilePending = true
+		s.mu.Unlock()
+		return
+	}
+	live.reconciling = true
+	s.mu.Unlock()
+	go func() {
+		for {
+			_ = s.reconcileRoom(context.Background(), roomID)
+			s.mu.Lock()
+			stopped := false
+			select {
+			case <-s.janitorStop:
+				stopped = true
+			default:
+			}
+			if stopped || s.rooms[roomID] != live || !live.reconcilePending {
+				live.reconciling = false
+				live.reconcilePending = false
+				s.mu.Unlock()
+				return
+			}
+			live.reconcilePending = false
+			s.mu.Unlock()
+		}
+	}()
 }

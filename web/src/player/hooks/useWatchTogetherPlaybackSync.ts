@@ -86,6 +86,7 @@ export function useWatchTogetherPlaybackSync({
     cancelBuffering,
     connectionState,
     attachedSessionId,
+    roomPhase,
     roomPlaybackState,
     room?.room_id,
     room?.selection_revision,
@@ -99,6 +100,7 @@ export function useWatchTogetherPlaybackSync({
   }, [
     attachedSessionId,
     connectionState,
+    roomPhase,
     room?.room_id,
     room?.playback_state,
     room?.selection_revision,
@@ -242,14 +244,14 @@ export function useWatchTogetherPlaybackSync({
         !sessionId ||
         attachedSessionId !== sessionId ||
         roomPhase !== "playing" ||
+        roomPlaybackState !== "playing" ||
         waitingStateRef.current === "buffering" ||
         !video
       ) {
         return { ok: false };
       }
 
-      if (bufferingTimerRef.current !== null || roomPlaybackState === "waiting")
-        return { ok: false };
+      if (bufferingTimerRef.current !== null) return { ok: false };
       bufferingTimerRef.current = setTimeout(() => {
         bufferingTimerRef.current = null;
         // A stalled download can leave plenty of playable media buffered.

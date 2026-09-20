@@ -328,8 +328,9 @@ func TestHandleStartPlaybackV3ExplainsOriginalQuality4KPinWhenAlternateExists(t 
 }
 
 func TestHandleStartPlaybackV3TriesAlternateAfterHDRTerminal(t *testing.T) {
-	for _, fixed := range []bool{false, true} {
-		t.Run(fmt.Sprintf("fixed=%t", fixed), func(t *testing.T) {
+	for _, mode := range []string{"v2-auto", "v2-fixed", "v1-ignores-fixed"} {
+		t.Run(mode, func(t *testing.T) {
+			fixed := mode == "v2-fixed"
 			source := v3HandlerFixtureFile(t)
 			source.CodecVideo = "hevc"
 			source.Resolution = "2160p"
@@ -359,7 +360,7 @@ func TestHandleStartPlaybackV3TriesAlternateAfterHDRTerminal(t *testing.T) {
 			handler.ItemAccess = allowAllPlaybackItemAccess{}
 
 			start := v3HandlerStartRequest()
-			if fixed {
+			if mode != "v2-auto" {
 				start.AllowAlternateVersions = new(false)
 			}
 			start.QualityPreference = "auto"
@@ -368,7 +369,11 @@ func TestHandleStartPlaybackV3TriesAlternateAfterHDRTerminal(t *testing.T) {
 				VideoCodecs: []string{"h264"}, AudioDecodeCodecs: []string{"aac"},
 			}
 			rr := httptest.NewRecorder()
-			handler.HandleStartPlayback(rr, httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, start))).WithContext(newAuthorizedPlaybackContext()))
+			if mode == "v1-ignores-fixed" {
+				handler.HandleStartPlayback(rr, httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, start))).WithContext(newAuthorizedPlaybackContext()))
+			} else {
+				startPlaybackV2IntoRecorder(t, handler, rr, start)
+			}
 
 			var response playback.DecisionResponseV3
 			if fixed {
@@ -513,7 +518,7 @@ func TestHandleReplanPlaybackV3TriesLater4KAlternateAfterNon4KTerminal(t *testin
 				VideoCodecs: []string{"hevc"}, AudioDecodeCodecs: []string{"aac"},
 			}
 			startRR := httptest.NewRecorder()
-			handler.HandleStartPlayback(startRR, httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, startRequest))).WithContext(newAuthorizedPlaybackContext()))
+			startPlaybackV2IntoRecorder(t, handler, startRR, startRequest)
 			var started playback.DecisionResponseV3
 			if startRR.Code != http.StatusCreated || json.Unmarshal(startRR.Body.Bytes(), &started) != nil || started.PlaybackPlan == nil {
 				t.Fatalf("start status=%d body=%s", startRR.Code, startRR.Body.String())
@@ -4942,9 +4947,8 @@ func TestHandleReplanPlaybackV3QualityChangeOperation(t *testing.T) {
 	startRequest := v3HandlerStartRequest()
 	startRequest.QualityPreference = "auto"
 	startRequest.AllowAlternateVersions = new(false)
-	startReq := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, startRequest))).WithContext(newAuthorizedPlaybackContext())
 	startRR := httptest.NewRecorder()
-	handler.HandleStartPlayback(startRR, startReq)
+	startPlaybackV2IntoRecorder(t, handler, startRR, startRequest)
 	if startRR.Code != http.StatusCreated {
 		t.Fatalf("start status = %d, body = %s", startRR.Code, startRR.Body.String())
 	}
@@ -5205,9 +5209,8 @@ func TestHandleStartPlaybackV3FixedFileDoesNotResumeIntoAnotherPart(t *testing.T
 
 	request := v3HandlerStartRequest()
 	request.AllowAlternateVersions = new(false)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, request))).WithContext(newAuthorizedPlaybackContext())
 	rr := httptest.NewRecorder()
-	handler.HandleStartPlayback(rr, req)
+	startPlaybackV2IntoRecorder(t, handler, rr, request)
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
@@ -6485,4 +6488,14 @@ func TestPlaybackRoutingPolicySnapshotContextV3(t *testing.T) {
 	if got := handler.playbackRoutingPolicyForContextV3(context.Background()); got.DirectPlayEgress != config.PlaybackEgressAPIOnly {
 		t.Fatalf("unsnapshotted policy = %#v, want current config", got)
 	}
+}
+
+func startPlaybackV2IntoRecorder(t *testing.T, h *PlaybackHandler, rr *httptest.ResponseRecorder, request playback.StartRequestV3) {
+	t.Helper()
+	h.InstallationID = serviceInstallation
+	response, err := h.StartPlaybackV2(newAuthorizedPlaybackContext(), PlaybackCaller{UserID: 1, ProfileID: "profile-1", InstallationID: serviceInstallation}, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(rr, http.StatusCreated, response)
 }

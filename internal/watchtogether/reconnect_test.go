@@ -17,7 +17,7 @@ func TestReconnectPreservesPlayingSession(t *testing.T) {
 	t.Cleanup(s.Close)
 	old := new(recordingConn)
 	live := s.rooms[repo.room.ID]
-	live.members[buildMemberKey(7, "host")] = &memberState{userID: 7, profileID: "host", sessionID: "host-session", connection: old, isReady: true}
+	live.members[buildMemberKey(7, "host")] = &memberState{userID: 7, profileID: "host", sessionID: "host-session", connection: old, isReady: true, ignoreWait: true}
 	live.members[buildMemberKey(8, "guest")] = &memberState{userID: 8, profileID: "guest", sessionID: "guest-session", connection: new(recordingConn), isReady: true}
 	s.Disconnect(registrationFor(repo.room.ID, 7, "host", old), false)
 	reg, _, err := s.Connect(t.Context(), repo.room.ID, 7, "host", new(recordingConn))
@@ -27,6 +27,9 @@ func TestReconnectPreservesPlayingSession(t *testing.T) {
 	snapshot, err := s.AttachSessionForConnection(t.Context(), reg, 7, "host", "host-session")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if snapshot.SelfIgnoreWait {
+		t.Fatal("reconnected viewer remains excluded from readiness")
 	}
 	if snapshot.PlaybackState != RoomPlaybackStatePlaying || repo.room.Generation != 1 {
 		t.Fatalf("socket renewal interrupted playback: %+v", snapshot)

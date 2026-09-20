@@ -175,6 +175,78 @@ func TestRoomRuntimeDoesNotDispatchRolledBackCommandsPG(t *testing.T) {
 	}
 }
 
+func TestRoomRuntimeRestoresFailedClosePG(t *testing.T) {
+	f := newRoomClusterFixture(t)
+	before := f.host.rooms[f.roomID]
+	frames := len(f.hostConn.payloads)
+	// A deferred constraint trigger fails at COMMIT, after CloseRoom has
+	// updated local state and queued its socket notifications.
+	_, err := f.repo.pool.Exec(t.Context(), `
+CREATE FUNCTION reject_room_close() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.phase = 'ended' THEN RAISE EXCEPTION 'injected close failure'; END IF;
+ RETURN NEW;
+END $$;
+CREATE CONSTRAINT TRIGGER reject_room_close AFTER UPDATE ON watch_together_rooms
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_room_close();`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.host.CloseRoom(t.Context(), f.roomID, 7, "host"); err == nil {
+		t.Fatal("close unexpectedly committed")
+	}
+	if f.host.rooms[f.roomID] != before || len(f.hostConn.payloads) != frames {
+		t.Fatal("failed close lost the live room or sent a close frame")
+	}
+	room, err := f.repo.GetRoomByID(t.Context(), f.roomID)
+	if err != nil || room.Phase == RoomPhaseEnded {
+		t.Fatalf("close was not rolled back: %v", err)
+	}
+	if _, err = f.host.HandleTransportRequestForConnection(t.Context(), f.hostReg, 7, "host", TransportRequest{Action: TransportActionPause}); err != nil {
+		t.Fatalf("original socket lost authority after rollback: %v", err)
+	}
+}
+
+func TestRoomRuntimeRemoteBarrierInvalidatesOldDeadlinePG(t *testing.T) {
+	f := newRoomClusterFixture(t)
+	if _, err := f.host.HandleTransportRequestForConnection(t.Context(), f.hostReg, 7, "host", TransportRequest{Action: TransportActionSeek, PositionSeconds: new(100.0)}); err != nil {
+		t.Fatal(err)
+	}
+	oldEpoch := f.host.rooms[f.roomID].waitingEpoch
+	f.now = f.now.Add(20 * time.Second)
+	f.guest.sessions = &stubSessions{session: &playback.Session{UserID: 7, ProfileID: "host", MediaFileID: 1}}
+	reg, _, err := f.guest.Connect(t.Context(), f.roomID, 7, "host", new(recordingConn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.guest.AttachSessionForConnection(t.Context(), reg, 7, "host", "host-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.guest.HandleTransportRequestForConnection(t.Context(), reg, 7, "host", TransportRequest{Action: TransportActionPlay}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.guest.HandleTransportRequestForConnection(t.Context(), reg, 7, "host", TransportRequest{Action: TransportActionSeek, PositionSeconds: new(900.0)}); err != nil {
+		t.Fatal(err)
+	}
+	f.now = f.now.Add(11 * time.Second)
+	f.host.handleWaitingDeadline(f.roomID, oldEpoch)
+	room, err := f.repo.GetRoomByID(t.Context(), f.roomID)
+	if err != nil || room.PlaybackState != RoomPlaybackStateWaiting || room.AnchorPositionSeconds != 900 {
+		t.Fatalf("stale timer released the new seek: %+v %v", room, err)
+	}
+	if f.host.rooms[f.roomID].waitingTimer != nil {
+		t.Fatal("shared room retained a process-local deadline timer")
+	}
+	f.now = f.now.Add(20 * time.Second)
+	if err = f.host.reconcileRoom(t.Context(), f.roomID); err != nil {
+		t.Fatal(err)
+	}
+	room, _ = f.repo.GetRoomByID(t.Context(), f.roomID)
+	if room.PlaybackState != RoomPlaybackStatePlaying {
+		t.Fatal("current barrier did not expire at its own deadline")
+	}
+}
+
 func TestRoomRuntimeConcurrentReadyResumesOncePG(t *testing.T) {
 	f := newRoomClusterFixture(t)
 	if _, err := f.host.HandleTransportRequestForConnection(t.Context(), f.hostReg, 7, "host", TransportRequest{Action: TransportActionSeek, PositionSeconds: new(1500.0)}); err != nil {

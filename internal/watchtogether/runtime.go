@@ -95,7 +95,14 @@ func withRoomOperation[T any](ctx context.Context, s *Service, roomID string, fn
 	}
 	gate.activeOperations++
 	s.mu.Unlock()
-	defer func() { s.mu.Lock(); gate.activeOperations--; s.mu.Unlock() }()
+	defer func() {
+		s.mu.Lock()
+		gate.activeOperations--
+		if gate.activeOperations == 0 && gate.room.Phase == RoomPhaseEnded && s.rooms[roomID] == gate {
+			delete(s.rooms, roomID)
+		}
+		s.mu.Unlock()
+	}()
 	gate.operationMu.Lock()
 	defer gate.operationMu.Unlock()
 	defer func() {
@@ -174,7 +181,8 @@ func withRoomOperation[T any](ctx context.Context, s *Service, roomID string, fn
 	}
 	if err != nil {
 		s.mu.Lock()
-		if s.rooms[roomID] == live {
+		if s.rooms[roomID] == live || s.rooms[roomID] == nil {
+			s.rooms[roomID] = live
 			live.room, live.command, live.members = previousRoom, previousCommand, previousMembers
 			live.broadcastState = ""
 		}
@@ -206,6 +214,10 @@ func (s *Service) runtimeLocked(live *liveRoom) roomRuntime {
 func (s *Service) adoptRuntimeLocked(ctx context.Context, live *liveRoom, room Room, state roomRuntime) {
 	now := s.now()
 	selectionChanged := state.SelectionRevision != room.SelectionRevision
+	if live.room.PlaybackState != room.PlaybackState || live.room.SelectionRevision != room.SelectionRevision ||
+		(live.command != nil && (state.Command == nil || live.command.CommandID != state.Command.CommandID)) {
+		s.disarmWaitingDeadlineLocked(live)
+	}
 	live.room = room
 	live.command = state.Command
 	if selectionChanged {
@@ -289,7 +301,10 @@ func (s *Service) reconcileRoom(ctx context.Context, roomID string) error {
 		if live.room.Phase == RoomPhaseEnded {
 			dispatches := s.prepareRoomClosedDispatchesLocked(live)
 			s.disarmWaitingDeadlineLocked(live)
-			delete(s.rooms, roomID)
+			// Keep the operation gate until commit; rollback must retain sockets.
+			if operationFrom(ctx) == nil {
+				delete(s.rooms, roomID)
+			}
 			s.mu.Unlock()
 			s.sendDispatches(ctx, dispatches)
 			return struct{}{}, nil

@@ -26,7 +26,9 @@ and `allowed` is `true`; a server without playback wired answers
 `not_configured` with `allowed: false`. `installation_id` is the persisted
 server instance UUID that diagnostics also report. `protocol_versions` is
 `[3]`. `features` is the v3 server feature set plus `sequenced_progress_v1`,
-`fixed_media_file_v1`, and `watch_party_source_fallback_v1`.
+`fixed_media_file_v1`, `watch_party_source_fallback_v1`, and
+`watch_party_coordinator_v1`. The coordinator capability covers shared room
+membership, command-aware readiness, and ready/buffering/syncing member status.
 `deliveries` lists `original_http`, `server_remux_progressive`,
 `server_remux_hls` and, when transcoding is enabled, `server_transcode_hls`.
 `revision` is a digest of the rest.
@@ -57,6 +59,7 @@ the request or backoff. A 4xx refusal ends that start, and a later user Play
 uses the newly selected file and a new attempt ID. The web client does not
 restore pending START requests across page reloads.
 
+The frozen v1 start route ignores `allow_alternate_versions`.
 Servers advertising `fixed_media_file_v1` accept the optional start field
 `allow_alternate_versions`. Setting it to `false` keeps this attempt on the
 requested file through quality, track, output, seek, and recovery replans.

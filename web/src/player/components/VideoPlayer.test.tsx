@@ -414,6 +414,25 @@ describe("VideoPlayer room catch-up", () => {
     );
   });
 
+  it.each(["paused", "lobby"] as const)(
+    "cancels delayed buffering when the room becomes %s",
+    async (state) => {
+      const { connection, video, rerenderPlayer } = setup(100);
+      Object.defineProperty(video, "readyState", { configurable: true, value: 2 });
+      fireEvent.waiting(video);
+      const room = { ...connection.room! };
+      if (state === "paused") room.playback_state = "paused";
+      else room.phase = "lobby";
+      rerenderPlayer({ watchTogetherConnection: { ...connection, room } });
+      fireEvent.waiting(video);
+      await act(() => vi.advanceTimersByTimeAsync(600));
+      expect(connection.sendRoomMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "buffering" }),
+      );
+      expect(screen.queryByLabelText("Syncing playback")).not.toBeInTheDocument();
+    },
+  );
+
   it("names the viewers still syncing", () => {
     const { connection, rerenderPlayer } = setup(100);
     rerenderPlayer({

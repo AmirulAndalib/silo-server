@@ -90,7 +90,7 @@ func TestPlaybackCapabilitiesV2IsAlwaysAvailable(t *testing.T) {
 	if len(view.ProtocolVersions) != 1 || view.ProtocolVersions[0] != playback.ProtocolV3 {
 		t.Fatalf("protocol versions = %v", view.ProtocolVersions)
 	}
-	if !slices.Contains(view.Features, "fixed_media_file_v1") || !slices.Contains(view.Features, "watch_party_source_fallback_v1") {
+	if !slices.Contains(view.Features, "fixed_media_file_v1") || !slices.Contains(view.Features, "watch_party_source_fallback_v1") || !slices.Contains(view.Features, "watch_party_coordinator_v1") {
 		t.Fatal("fixed media file requests are not advertised")
 	}
 	if _, err := f.handler.PlaybackCapabilities(f.ctx, 2, "profile-1"); err == nil {

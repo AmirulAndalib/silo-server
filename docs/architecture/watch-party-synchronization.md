@@ -12,7 +12,9 @@ A transport command has one identity across the room. Seek readiness is tied to
 that identity and destination, including an attachment during the seek. A new
 selection clears previous attachments and readiness. Readiness considers all
 attached, connected members across API servers. The existing 30-second waiting
-deadline excludes stragglers so one client cannot hold everyone indefinitely.
+deadline excludes stragglers so one client cannot hold everyone indefinitely. The
+shared coordinator checks the persisted command time during reconciliation; it
+does not retain process timers that could outlive a remotely replaced barrier.
 
 A connection owns a unique identity. Replacing it fences reports and disconnects
 from the old socket. A transient disconnect retains its session for the host's
@@ -26,8 +28,9 @@ readiness. Host disconnect checks use shared presence and the current disconnect
 time, so an old server cannot end a room whose host reconnected elsewhere. The
 host retains the existing two-minute grace period.
 
-PubSub notifications prompt a refresh of the authoritative row. Every server with
-local viewers also reconciles rooms every two seconds, repairing missed
+PubSub notifications queue a refresh of the authoritative row. Each active room
+coalesces pending notifications so room database waits never block the subscriber.
+Every server with local viewers also reconciles rooms every two seconds, repairing missed
 notifications and expiring lost connections. Unchanged reconciliation does not
 broadcast another snapshot. SQL work has a five-second timeout; a failed mutation
 rolls back and sends no command. This coordinates Watch Party state; it does not
@@ -40,8 +43,9 @@ broadcast builds and sorts the common roster once, then adds each viewer's own
 permissions and identity flags.
 
 The web player keeps stalls shorter than 500 ms local. A sustained lack of media
-reports buffering and enters the room barrier. Viewer status identifies who is
-still buffering or syncing. The timeline remains at the requested seek position
+reports buffering and enters the room barrier while playback is running. Pausing
+cancels pending browser reports, and the server ignores delayed buffering reports
+for a paused room. Viewer status identifies who is still buffering or syncing. The timeline remains at the requested seek position
 while the player waits for the replacement stream.
 
 ## Deployment and clients
@@ -83,12 +87,34 @@ capability `watch_party_source_fallback_v1`. That file constraint survives every
 cannot silently move one viewer to another timeline. Streaming quality and audio
 or subtitle adaptations can still use the same source.
 
-Apply the runtime-column migration before the updated API servers. All API
-instances serving a room must run this coordinator; older instances do not
-participate in its leases or transactions. Update the complete API fleet before
-testing synchronization across nodes. Existing clients may omit readiness command
-IDs, but their seek position must still reach the destination. Updated clients
-send the command ID so the server can also reject superseded acknowledgements.
+The initial coordinator upgrade requires a stop/start rollout. Old API servers
+cannot safely write alongside the new coordinator. Before enabling the new fleet:
+
+1. Block new Watch Party HTTP requests and WebSocket upgrades at ingress, including
+   reconnects. Finish existing parties or notify viewers of the interruption.
+2. Stop every old API instance and wait for its process to exit. Removing it from
+   load-balancer discovery alone is insufficient: existing WebSockets and
+   background timers still have database write access. Keep replacement instances
+   stopped until all old processes and their database connections are gone.
+3. Apply the runtime-column migration and start the updated API fleet. Verify every
+   API instance advertises `watch_party_coordinator_v1` through
+   `GET /api/v2/playback/capabilities` before reopening ingress.
+4. Reconnect viewers through the updated fleet and verify membership, seek, and
+   pause across API instances. Returning to the old coordinator also requires a
+   complete stop/start; never mix coordinator generations during rollback.
+
+A single API instance follows the same stop-before-start order. A rolling update
+from the old coordinator is unsupported. Later deployments between versions of
+this shared coordinator can retain the normal rolling strategy.
+
+Existing clients may omit readiness command IDs, but their seek position must
+still reach the destination. Updated clients send the command ID so the server
+can also reject superseded acknowledgements.
+
+Clients discover shared membership, command-aware readiness, and member status
+through `watch_party_coordinator_v1` in playback capabilities. An absent flag
+means these guarantees and status fields are unsupported; an omitted false status
+on a supported server means false.
 
 The additive member status fields are optional in raw socket frames and HTTP v2
 snapshots. Apple has no active Watch

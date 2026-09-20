@@ -154,6 +154,8 @@ type memberState struct {
 type liveRoom struct {
 	operationMu      sync.Mutex
 	activeOperations int
+	reconciling      bool
+	reconcilePending bool
 	broadcastState   string
 	command          *TransportCommand
 	room             Room
@@ -506,10 +508,10 @@ func (s *Service) attachSessionForConnection(
 		return Snapshot{}, ErrRoomForbidden
 	}
 	reattaching := member.sessionID == sessionID
+	member.ignoreWait = false
 	if !reattaching {
 		member.sessionID = sessionID
 		member.isReady = false
-		member.ignoreWait = false
 		member.isBuffering = live.room.Phase == RoomPhasePlaying
 	}
 
@@ -832,6 +834,14 @@ func (s *Service) handleBufferingForConnection(
 		return Snapshot{}, ErrConnectionNotAttached
 	}
 
+	// A browser can emit waiting/stalled after applying pause. A paused room
+	// needs no buffering barrier; a delayed report must not reopen one.
+	if live.room.PlaybackState == RoomPlaybackStatePaused {
+		snapshot := s.buildSnapshotLocked(live, userID, profileID)
+		s.mu.Unlock()
+		return snapshot, nil
+	}
+
 	member.isBuffering = true
 	member.isReady = false
 	// Members already excluded from the readiness barrier must not drag the
@@ -1109,7 +1119,9 @@ func (s *Service) closeRoom(ctx context.Context, roomID string, userID int, prof
 		if live.waitingTimer != nil {
 			live.waitingTimer.Stop()
 		}
-		delete(s.rooms, roomID)
+		if operationFrom(ctx) == nil {
+			delete(s.rooms, roomID)
+		}
 	}
 	s.mu.Unlock()
 
@@ -1200,10 +1212,12 @@ func (s *Service) persistAnchorLocked(ctx context.Context, live *liveRoom) (bool
 }
 
 func (s *Service) armWaitingDeadlineLocked(live *liveRoom) {
-	if live.waitingTimer != nil {
-		live.waitingTimer.Stop()
+	s.disarmWaitingDeadlineLocked(live)
+	if _, shared := s.repo.(*Repository); shared {
+		// The reconciler checks the persisted command's issue time. Process
+		// timers cannot track a barrier replaced by another API server.
+		return
 	}
-	live.waitingEpoch++
 	epoch := live.waitingEpoch
 	roomID := live.room.ID
 	live.waitingTimer = time.AfterFunc(waitingResumeDeadline, func() {
@@ -1226,6 +1240,10 @@ func (s *Service) waitingDeadline(ctx context.Context, roomID string, epoch int6
 	s.mu.Lock()
 	live := s.rooms[roomID]
 	if live == nil || live.waitingEpoch != epoch || live.room.PlaybackState != RoomPlaybackStateWaiting {
+		s.mu.Unlock()
+		return
+	}
+	if _, shared := s.repo.(*Repository); shared && !waitingDeadlineReached(live, s.now()) {
 		s.mu.Unlock()
 		return
 	}

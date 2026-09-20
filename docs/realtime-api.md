@@ -280,11 +280,20 @@ optimistic timeline displayed during a seek.
 `command_id` is optional for older clients on the shared v1/v2 message loop. Their
 seek acknowledgements still need to reach the destination, but a client that
 omits the ID cannot distinguish consecutive seeks to the same position. Older
-servers ignore this additive request field. There is no new endpoint, capability,
-or change to the room's existing waiting deadline.
+servers ignore this additive request field. Updated servers advertise
+`watch_party_coordinator_v1` in playback capabilities. The existing waiting
+deadline remains 30 seconds.
 
 
 ### Room membership and buffering
+
+Watch Party clients discover the shared coordinator through
+`watch_party_coordinator_v1` in `GET /api/v2/playback/capabilities`. It guarantees
+shared membership and readiness across API servers and support for the optional
+`is_ready`, `is_buffering`, and `is_syncing` member fields. Omitted false fields
+mean false when the capability is present. The initial upgrade requires the
+stop/start procedure in [Watch Party synchronization](architecture/watch-party-synchronization.md);
+old and new coordinators must not serve rooms together.
 
 Room playback uses one selected source file for all viewers. Automatic selection
 uses the catalogue's quality ordering within the selected edition, without a
@@ -323,7 +332,8 @@ readiness barrier. HTTP v2 snapshots and raw socket snapshots expose these field
 The web player lists viewer status and names the viewers it is waiting for.
 
 The web player reports buffering after 500 ms without playable media. Recovery,
-a changed command/session, disconnect, and unmount cancel a pending report. A
+a changed command/session, pause, a phase change, disconnect, and unmount cancel
+a pending report. The server ignores late buffering reports for paused rooms. A
 reconnected socket retains its validated playback-session attachment, and
 reattaching that session does not pause a playing room. A member attaching during
 an explicit seek receives the seek command and must reach its destination before
