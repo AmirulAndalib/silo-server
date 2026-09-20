@@ -526,12 +526,13 @@ func (s *Service) attachSessionForConnection(
 	if !reattaching {
 		member.sessionID = sessionID
 		member.isReady = false
-		member.isBuffering = live.room.Phase == RoomPhasePlaying
+		member.isBuffering = live.room.Phase == RoomPhasePlaying && live.room.PlaybackState == RoomPlaybackStateWaiting
 	}
 
 	var commandDispatches []commandDispatch
 	if live.room.Phase == RoomPhasePlaying {
 		if !reattaching && live.room.PlaybackState == RoomPlaybackStatePlaying && s.activeParticipantCountLocked(live) > 1 {
+			member.isBuffering = true
 			position := s.expectedPositionLocked(live)
 			commandDispatches, _ = s.enterWaitingLocked(live, position, true)
 			conflict, err := s.persistAnchorLocked(ctx, live)

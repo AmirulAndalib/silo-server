@@ -90,8 +90,13 @@ func TestPlaybackCapabilitiesV2IsAlwaysAvailable(t *testing.T) {
 	if len(view.ProtocolVersions) != 1 || view.ProtocolVersions[0] != playback.ProtocolV3 {
 		t.Fatalf("protocol versions = %v", view.ProtocolVersions)
 	}
-	if !slices.Contains(view.Features, "fixed_media_file_v1") || !slices.Contains(view.Features, "watch_party_source_fallback_v1") || !slices.Contains(view.Features, "watch_party_coordinator_v1") {
+	if !slices.Contains(view.Features, "fixed_media_file_v1") {
 		t.Fatal("fixed media file requests are not advertised")
+	}
+	for _, feature := range []string{"watch_party_source_fallback_v1", "watch_party_coordinator_v1"} {
+		if slices.Contains(view.Features, feature) {
+			t.Fatalf("unconfigured Watch Party feature advertised: %s", feature)
+		}
 	}
 	if _, err := f.handler.PlaybackCapabilities(f.ctx, 2, "profile-1"); err == nil {
 		t.Fatal("foreign identity accepted")
@@ -99,6 +104,27 @@ func TestPlaybackCapabilitiesV2IsAlwaysAvailable(t *testing.T) {
 	f.handler.InstallationID = ""
 	if _, err := f.handler.PlaybackCapabilities(f.ctx, 1, "profile-1"); err == nil {
 		t.Fatal("unconfigured installation reported available")
+	}
+}
+
+func TestPlaybackCapabilitiesV2AdvertisesConfiguredWatchTogether(t *testing.T) {
+	f := newPlaybackServiceFixture(t)
+	unconfigured, err := f.handler.PlaybackCapabilities(f.ctx, 1, "profile-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.handler.WatchTogetherAvailable = true
+	configured, err := f.handler.PlaybackCapabilities(f.ctx, 1, "profile-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, feature := range []string{"watch_party_source_fallback_v1", "watch_party_coordinator_v1"} {
+		if !slices.Contains(configured.Features, feature) {
+			t.Fatalf("configured Watch Party feature missing: %s", feature)
+		}
+	}
+	if configured.Revision == unconfigured.Revision {
+		t.Fatal("capability revision did not change with Watch Party availability")
 	}
 }
 

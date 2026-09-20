@@ -32,7 +32,9 @@ type roomClusterFixture struct {
 
 func newRoomClusterFixture(t *testing.T) *roomClusterFixture {
 	t.Helper()
-	f := &roomClusterFixture{repo: NewRepository(selectionPG(t)), now: time.Now().UTC(), hostConn: new(recordingConn), guestConn: new(recordingConn)}
+	// Postgres stores timestamptz at microsecond precision. Keep the service
+	// clock aligned so persisting an anchor does not introduce elapsed time.
+	f := &roomClusterFixture{repo: NewRepository(selectionPG(t)), now: time.Now().UTC().Truncate(time.Microsecond), hostConn: new(recordingConn), guestConn: new(recordingConn)}
 	room := baseRoom(f.now)
 	f.roomID = room.ID
 	if _, err := f.repo.CreateRoom(t.Context(), room); err != nil {

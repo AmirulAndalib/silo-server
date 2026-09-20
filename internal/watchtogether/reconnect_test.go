@@ -36,6 +36,51 @@ func TestReconnectPreservesPlayingSession(t *testing.T) {
 	}
 }
 
+func TestReplacementSessionBufferingRequiresReadinessBarrier(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		paused    bool
+		withGuest bool
+	}{
+		{name: "lone playing viewer"},
+		{name: "lone paused viewer", paused: true},
+		{name: "playing with guest", withGuest: true},
+		{name: "paused with guest", paused: true, withGuest: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			room := baseRoom(now)
+			if test.paused {
+				room.IsPaused, room.PlaybackState = true, RoomPlaybackStatePaused
+			}
+			s := newServiceForTest(now, &stubRepo{room: room}, &stubSessions{session: &playback.Session{UserID: 7, ProfileID: "host", MediaFileID: 1}}, &stubFiles{file: &models.MediaFile{ContentID: "movie-1"}}, nil)
+			t.Cleanup(s.Close)
+			conn := new(recordingConn)
+			live := s.rooms[room.ID]
+			live.members[buildMemberKey(7, "host")] = &memberState{userID: 7, profileID: "host", sessionID: "old-session", connection: conn, isReady: true, isBuffering: true}
+			if test.withGuest {
+				live.members[buildMemberKey(8, "guest")] = &memberState{userID: 8, profileID: "guest", sessionID: "guest-session", connection: new(recordingConn), isReady: true}
+			}
+			snapshot, err := s.AttachSessionForConnection(t.Context(), registrationFor(room.ID, 7, "host", conn), 7, "host", "replacement-session")
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantWaiting := test.withGuest && !test.paused
+			if (snapshot.PlaybackState == RoomPlaybackStateWaiting) != wantWaiting {
+				t.Fatalf("playback state = %s; want waiting %v", snapshot.PlaybackState, wantWaiting)
+			}
+			for _, member := range snapshot.Members {
+				if member.ProfileID == "host" && (member.IsBuffering != wantWaiting || member.IsSyncing != wantWaiting) {
+					t.Fatalf("replacement session status = %+v; want buffering and syncing %v", member, wantWaiting)
+				}
+			}
+			if command := lastTransport(t, conn); command.SessionID != "replacement-session" || command.PlaybackState != snapshot.PlaybackState {
+				t.Fatalf("replacement session command = %+v", command)
+			}
+		})
+	}
+}
+
 func TestAttachDuringSeekRequiresSeekPosition(t *testing.T) {
 	now := time.Now().UTC()
 	repo := &stubRepo{room: baseRoom(now)}

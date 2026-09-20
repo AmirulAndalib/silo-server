@@ -205,6 +205,9 @@ type PlaybackHandler struct {
 	// InstallationID is diagnostics.ServerInstanceID; v2 playback mutations
 	// carry it and are refused when it differs. Empty leaves v2 unconfigured.
 	InstallationID string
+	// WatchTogetherAvailable is set when the room service and authenticated
+	// socket are wired, so capability discovery reflects their dependencies.
+	WatchTogetherAvailable bool
 	// progressSideEffectLocks serializes v2 progress side effects per session
 	// (see persistProgressV2).
 	progressSideEffectLocks sync.Map
