@@ -252,6 +252,7 @@ func NewService(
 	go s.runJanitor()
 	if _, shared := repo.(*Repository); shared {
 		go s.runReconciler()
+		go s.runHostExpirySweeper()
 	}
 	return s
 }
@@ -469,12 +470,16 @@ func (s *Service) disconnect(ctx context.Context, reg *Registration, explicitLea
 		if live.hostCloseTimer != nil {
 			live.hostCloseTimer.Stop()
 		}
-		roomID := reg.roomID
-		hostUserID := live.room.HostUserID
-		hostProfileID := live.room.HostProfileID
-		live.hostCloseTimer = time.AfterFunc(s.hostDisconnectTTL, func() {
-			s.closeIfHostStillDisconnected(roomID, hostUserID, hostProfileID)
-		})
+		// Shared rooms expire from persisted presence. Local timer changes
+		// cannot be rolled back with a failed reconnect or close transaction.
+		if _, shared := s.repo.(*Repository); !shared {
+			roomID := reg.roomID
+			hostUserID := live.room.HostUserID
+			hostProfileID := live.room.HostProfileID
+			live.hostCloseTimer = time.AfterFunc(s.hostDisconnectTTL, func() {
+				s.closeIfHostStillDisconnected(roomID, hostUserID, hostProfileID)
+			})
+		}
 	}
 
 	// A departing member may have been the last participant the room was
@@ -1347,8 +1352,8 @@ func (s *Service) sweepIdleRooms() {
 	s.mu.Lock()
 	for roomID, live := range s.rooms {
 		if live == nil || (live.activeOperations == 0 && !hasLocalRoomWork(live)) {
-			// Room state is fully persisted; it reloads on next access. Any
-			// pending host-close timer keeps working from the database.
+			// Room state is fully persisted; it reloads on next access. The
+			// shared host-expiry sweep does not depend on this local cache.
 			if live != nil && live.waitingTimer != nil {
 				live.waitingTimer.Stop()
 			}

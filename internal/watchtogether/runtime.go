@@ -389,27 +389,33 @@ func (s *Service) runReconciler() {
 				}
 			}
 			s.mu.Unlock()
-			work := make(chan string, len(rooms))
-			for _, id := range rooms {
-				work <- id
-			}
-			close(work)
-			var workers sync.WaitGroup
-			for range min(8, len(rooms)) {
-				workers.Go(func() {
-					for id := range work {
-						select {
-						case <-s.janitorStop:
-							return
-						default:
-						}
-						_ = s.reconcileRoom(context.Background(), id)
-					}
-				})
-			}
-			workers.Wait()
+			s.reconcileRooms(context.Background(), rooms)
 		}
 	}
+}
+
+func (s *Service) reconcileRooms(ctx context.Context, rooms []string) {
+	work := make(chan string, len(rooms))
+	for _, id := range rooms {
+		work <- id
+	}
+	close(work)
+	var workers sync.WaitGroup
+	for range min(8, len(rooms)) {
+		workers.Go(func() {
+			for id := range work {
+				select {
+				case <-s.janitorStop:
+					return
+				case <-ctx.Done():
+					return
+				default:
+				}
+				_ = s.reconcileRoom(ctx, id)
+			}
+		})
+	}
+	workers.Wait()
 }
 
 func (s *Service) Connect(ctx context.Context, roomID string, user int, profile string, conn RoomConnection) (*Registration, Snapshot, error) {

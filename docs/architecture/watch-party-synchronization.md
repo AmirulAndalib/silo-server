@@ -31,7 +31,13 @@ Presence leases last 45 seconds and are refreshed at most every 15 seconds by th
 server holding the socket. An expired lease stops contributing to membership and
 readiness. Host disconnect checks use shared presence and the current disconnect
 time, so an old server cannot end a room whose host reconnected elsewhere. The
-host retains the existing two-minute grace period.
+host retains the existing two-minute grace period. Every API also scans the
+database every 15 seconds for expired host deadlines, including rooms absent
+from its local cache. The scan selects at most 100 rooms and rechecks each under
+its room lock before closing it. Shared rooms use the persisted deadline instead
+of local host-close timers, so failed reconnects or close transactions retain the
+deadline for the next sweep. Losing the last socket-owning API does not require a
+disconnect notification for cleanup.
 
 PubSub notifications queue a refresh of the authoritative row. Each active room
 coalesces pending notifications so room database waits never block the subscriber.
