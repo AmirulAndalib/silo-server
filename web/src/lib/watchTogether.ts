@@ -27,6 +27,9 @@ export interface WatchTogetherRoomMember {
   is_host: boolean;
   is_self: boolean;
   connected: boolean;
+  is_ready?: boolean;
+  is_buffering?: boolean;
+  is_syncing?: boolean;
 }
 
 export interface WatchTogetherRoomSnapshot {

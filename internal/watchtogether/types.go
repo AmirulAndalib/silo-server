@@ -82,6 +82,9 @@ type MemberSummary struct {
 	IsHost      bool   `json:"is_host"`
 	IsSelf      bool   `json:"is_self"`
 	Connected   bool   `json:"connected"`
+	IsReady     bool   `json:"is_ready,omitempty"`
+	IsBuffering bool   `json:"is_buffering,omitempty"`
+	IsSyncing   bool   `json:"is_syncing,omitempty"`
 }
 
 type Snapshot struct {

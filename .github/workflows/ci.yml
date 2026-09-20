@@ -33,6 +33,20 @@ jobs:
   go:
     name: Go
     runs-on: ubuntu-latest
+    services:
+      watch-party-postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: watch_party
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d watch_party"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -185,6 +199,11 @@ jobs:
       # manifest must parse, satisfy its own schema, hold every structural
       # invariant, and agree with the live settings registry on keys and
       # defaults. Without this job those tests exist but never run.
+      - name: Test Watch Party coordination against Postgres
+        env:
+          SILO_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/watch_party?sslmode=disable
+        run: go test -race -count=1 ./internal/watchtogether/
+
       - name: Test
         run: make test-go
 

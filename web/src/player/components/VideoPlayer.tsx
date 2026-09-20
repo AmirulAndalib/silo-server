@@ -3170,7 +3170,12 @@ export function VideoPlayer({
             <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-white/20 border-t-white" />
             <div className="mt-3 text-sm font-medium">Syncing playback</div>
             <div className="mt-1 text-xs text-white/70">
-              Buffering and syncing all users before resuming.
+              {watchTogether.room?.members?.some((member) => member.is_syncing)
+                ? `Waiting for ${watchTogether.room.members
+                    .filter((member) => member.is_syncing)
+                    .map((member) => (member.is_self ? "you" : member.display_name))
+                    .join(", ")}`
+                : "Waiting for everyone to be ready."}
             </div>
           </div>
         </div>

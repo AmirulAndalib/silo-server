@@ -2,12 +2,10 @@ package watchtogether
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/jackc/pgx/v5"
 )
 
 // selectionOnceStore serializes identity comparison and selection replacement.
@@ -30,11 +28,19 @@ func (r *Repository) selectOnce(ctx context.Context, roomID string, user int, pr
 	if r == nil || r.pool == nil {
 		return nil, false, fmt.Errorf("watch together repository unavailable")
 	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return nil, false, err
+	var tx pgx.Tx
+	var err error
+	commit := func(context.Context) error { return nil }
+	if op := operationFrom(ctx); op != nil {
+		tx = op.tx
+	} else {
+		tx, err = r.pool.Begin(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		commit = tx.Commit
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	room, err := scanRoom(tx.QueryRow(ctx, `SELECT `+roomColumns+` FROM watch_together_rooms WHERE id=$1 FOR UPDATE`, roomID))
 	if err != nil {
 		return nil, false, err
@@ -50,7 +56,7 @@ func (r *Repository) selectOnce(ctx context.Context, roomID string, user int, pr
 	}
 	identical := room.SelectedContentID != nil && *room.SelectedContentID == selection.ContentID && (contentOnly || (equalSelectionID(room.SelectedFileID, selection.FileID) && equalSelectionID(room.SelectedLibraryID, selection.LibraryID)))
 	if identical || room.Generation != expected {
-		if err := tx.Commit(ctx); err != nil {
+		if err := commit(ctx); err != nil {
 			return nil, false, err
 		}
 		return room, false, nil
@@ -64,7 +70,7 @@ func (r *Repository) selectOnce(ctx context.Context, roomID string, user int, pr
 	if err != nil {
 		return nil, false, err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := commit(ctx); err != nil {
 		return nil, false, err
 	}
 	return room, true, nil
@@ -83,7 +89,7 @@ func (s *Service) SelectItemOnce(ctx context.Context, roomID string, user int, p
 	return s.selectItemOnce(ctx, roomID, user, profile, input, false, false)
 }
 
-func (s *Service) selectItemOnce(ctx context.Context, roomID string, user int, profile string, input SelectItemInput, viaVote, promotion bool) (Snapshot, error) {
+func (s *Service) selectItemOnceInRoom(ctx context.Context, roomID string, user int, profile string, resolved *ResolvedSelection, viaVote, promotion bool) (Snapshot, error) {
 	if s == nil {
 		return Snapshot{}, fmt.Errorf("watch together unavailable")
 	}
@@ -100,19 +106,6 @@ func (s *Service) selectItemOnce(ctx context.Context, roomID string, user int, p
 			return Snapshot{}, ErrSuggestionPromotionUnavailable
 		}
 		write = promoting.PromoteOnce
-	}
-	if strings.TrimSpace(input.ContentID) == "" {
-		return Snapshot{}, ErrInvalidSelection
-	}
-	resolved, err := s.selectionResolver.ResolveSelection(ctx, user, profile, input)
-	if err != nil {
-		if errors.Is(err, catalog.ErrWatchTargetNotPlayable) {
-			return Snapshot{}, ErrInvalidSelection
-		}
-		return Snapshot{}, err
-	}
-	if resolved == nil || strings.TrimSpace(resolved.ContentID) == "" {
-		return Snapshot{}, ErrInvalidSelection
 	}
 	_, live, err := s.getOrLoadLiveRoom(ctx, roomID)
 	if err != nil {
@@ -133,6 +126,7 @@ func (s *Service) selectItemOnce(ctx context.Context, roomID string, user int, p
 	}
 	if room.Generation >= live.room.Generation {
 		if room.SelectionRevision > live.room.SelectionRevision {
+			live.command = nil
 			for _, member := range live.members {
 				if member == nil {
 					continue
@@ -153,6 +147,7 @@ func (s *Service) selectItemOnce(ctx context.Context, roomID string, user int, p
 	}
 	dispatches := s.prepareSnapshotDispatchesLocked(live)
 	s.mu.Unlock()
-	s.runDispatches(dispatches)
+	s.sendDispatches(ctx, dispatches)
+	s.publishRoomStateAfterCommit(ctx, *room)
 	return snapshot, nil
 }

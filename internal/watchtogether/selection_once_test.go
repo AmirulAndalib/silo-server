@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,6 +56,17 @@ func selectionPG(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatal(err)
 	}
+	migration, err := os.ReadFile("../../migrations/sql/20260920170519_watch_together_runtime.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	up, _, ok := strings.Cut(string(migration), "-- +goose Down")
+	if !ok {
+		t.Fatal("runtime migration has no down boundary")
+	}
+	if _, err = pool.Exec(t.Context(), up); err != nil {
+		t.Fatal(err)
+	}
 	return pool
 }
 
@@ -69,21 +81,29 @@ func TestSelectionOncePreservesAttachedReadinessPG(t *testing.T) {
 	s := newServiceForTest(now, &stubRepo{room: room}, nil, nil, &stubSelectionResolver{resolved: &ResolvedSelection{ContentID: "movie", FileID: new(7), LibraryID: new(8)}})
 	s.repo = repo
 	conn := new(recordingConn)
-	member := &memberState{userID: 7, profileID: "host", connection: conn}
-	s.rooms[room.ID].members["host"] = member
+	if _, _, err := s.Connect(t.Context(), room.ID, 7, "host", conn); err != nil {
+		t.Fatal(err)
+	}
+	memberKey := buildMemberKey(7, "host")
 	first, err := s.SelectItemOnce(t.Context(), room.ID, 7, "host", SelectItemInput{ContentID: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	member.sessionID = "new-session"
-	member.isReady = true
-	member.isBuffering = true
-	member.ignoreWait = true
+	_, err = withRoomOperation(t.Context(), s, room.ID, func(context.Context) (struct{}, error) {
+		member := s.rooms[room.ID].members[memberKey]
+		member.sessionID = "new-session"
+		member.isReady, member.isBuffering, member.ignoreWait = true, true, true
+		return struct{}{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	before := len(conn.payloads)
 	second, err := s.SelectItemOnce(t.Context(), room.ID, 7, "host", SelectItemInput{ContentID: "movie"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	member := s.rooms[room.ID].members[memberKey]
 	if second.Generation != first.Generation || second.SelectionRevision != first.SelectionRevision || second.AnchorUpdatedAt != first.AnchorUpdatedAt || member.sessionID != "new-session" || !member.isReady || !member.isBuffering || !member.ignoreWait || len(conn.payloads) != before {
 		t.Fatal("identical selection reset state or broadcast")
 	}
@@ -97,6 +117,7 @@ func TestSelectionOncePreservesAttachedReadinessPG(t *testing.T) {
 	// A genuinely different resolved selection still resets prior readiness once.
 	s.selectionResolver = &stubSelectionResolver{resolved: &ResolvedSelection{ContentID: "next", FileID: new(9), LibraryID: new(8)}}
 	changed, err := s.SelectItemOnce(t.Context(), room.ID, 7, "host", SelectItemInput{ContentID: "next"})
+	member = s.rooms[room.ID].members[memberKey]
 	if err != nil || changed.SelectionRevision != first.SelectionRevision+1 || changed.Generation != first.Generation+1 || member.sessionID != "" || member.isReady || member.isBuffering || member.ignoreWait || len(conn.payloads) != before+1 {
 		t.Fatalf("new selection reset: %+v %v", changed, err)
 	}

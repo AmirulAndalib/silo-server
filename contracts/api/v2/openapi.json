@@ -39738,10 +39738,19 @@
           "display_name": {
             "type": "string"
           },
+          "is_buffering": {
+            "type": "boolean"
+          },
           "is_host": {
             "type": "boolean"
           },
+          "is_ready": {
+            "type": "boolean"
+          },
           "is_self": {
+            "type": "boolean"
+          },
+          "is_syncing": {
             "type": "boolean"
           },
           "profile_id": {

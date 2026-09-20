@@ -24998,8 +24998,11 @@ export interface components {
     WatchTogetherRoomMember: {
       connected: boolean;
       display_name: string;
+      is_buffering?: boolean;
       is_host: boolean;
+      is_ready?: boolean;
       is_self: boolean;
+      is_syncing?: boolean;
       profile_id: string;
       /**
        * @description Opaque identifier

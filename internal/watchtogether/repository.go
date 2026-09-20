@@ -45,7 +45,7 @@ func (r *Repository) CreateRoom(ctx context.Context, room Room) (*Room, error) {
 		)
 		RETURNING ` + roomColumns
 
-	created, err := scanRoom(r.pool.QueryRow(
+	created, err := scanRoom(r.queryRow(
 		ctx,
 		query,
 		room.ID,
@@ -259,7 +259,7 @@ func (r *Repository) getRoom(ctx context.Context, query string, arg string) (*Ro
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("watch together repository unavailable")
 	}
-	return scanRoom(r.pool.QueryRow(ctx, query, arg))
+	return scanRoom(r.queryRow(ctx, query, arg))
 }
 
 func scanRoom(row pgx.Row) (*Room, error) {
@@ -299,7 +299,7 @@ func (r *Repository) scanConditionalUpdate(ctx context.Context, query string, ar
 		return nil, fmt.Errorf("watch together repository unavailable")
 	}
 
-	room, err := scanRoom(r.pool.QueryRow(ctx, query, args...))
+	room, err := scanRoom(r.queryRow(ctx, query, args...))
 	if !errors.Is(err, ErrRoomNotFound) {
 		return room, err
 	}

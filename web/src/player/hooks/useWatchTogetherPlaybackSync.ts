@@ -35,6 +35,7 @@ interface UseWatchTogetherPlaybackSyncResult {
 const stateReportIntervalMs = 1_500;
 const pendingCommandQuietPeriodMs = 250;
 const readySeekToleranceSeconds = 1;
+const bufferingGraceMs = 500;
 
 export function useWatchTogetherPlaybackSync({
   roomConnection,
@@ -53,6 +54,45 @@ export function useWatchTogetherPlaybackSync({
   const roomPhase = room?.phase ?? null;
   const sendRoomMessage = roomConnection.sendRoomMessage;
   const waitingStateRef = useRef<"idle" | "buffering" | "ready">("idle");
+  const bufferingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelBuffering = useCallback(() => {
+    if (bufferingTimerRef.current !== null) {
+      clearTimeout(bufferingTimerRef.current);
+      bufferingTimerRef.current = null;
+    }
+  }, []);
+  useEffect(() => {
+    const video = videoRef.current;
+    const recovered = () => {
+      if (video && !video.seeking && video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+        cancelBuffering();
+        if (roomPlaybackState !== "waiting" && waitingStateRef.current === "buffering") {
+          waitingStateRef.current = "idle";
+        }
+      }
+    };
+    video?.addEventListener("canplay", recovered);
+    video?.addEventListener("playing", recovered);
+    video?.addEventListener("timeupdate", recovered);
+    video?.addEventListener("seeked", recovered);
+    return () => {
+      cancelBuffering();
+      video?.removeEventListener("canplay", recovered);
+      video?.removeEventListener("playing", recovered);
+      video?.removeEventListener("timeupdate", recovered);
+      video?.removeEventListener("seeked", recovered);
+    };
+  }, [
+    cancelBuffering,
+    connectionState,
+    attachedSessionId,
+    roomPlaybackState,
+    room?.room_id,
+    room?.selection_revision,
+    sessionId,
+    transportCommand?.command_id,
+    videoRef,
+  ]);
 
   useEffect(() => {
     waitingStateRef.current = "idle";
@@ -137,6 +177,7 @@ export function useWatchTogetherPlaybackSync({
   );
 
   const reportReady = useCallback(() => {
+    cancelBuffering();
     const video = videoRef.current;
     const command = transportCommand;
     if (
@@ -180,6 +221,7 @@ export function useWatchTogetherPlaybackSync({
   }, [
     attachedSessionId,
     appliedCommandIdRef,
+    cancelBuffering,
     connectionState,
     roomConnected,
     roomPlaybackState,
@@ -206,25 +248,31 @@ export function useWatchTogetherPlaybackSync({
         return { ok: false };
       }
 
-      const result = sendRoomMessage({
-        type: "buffering",
-        session_id: sessionId,
-        position_seconds: Math.max(
-          0,
-          positionSeconds ?? toMediaTime(video.currentTime, streamOriginRef.current),
-        ),
-        is_paused: isPaused ?? video.paused,
-      });
-      if (result.ok) {
-        waitingStateRef.current = "buffering";
-      }
-      return result;
+      if (bufferingTimerRef.current !== null || roomPlaybackState === "waiting")
+        return { ok: false };
+      bufferingTimerRef.current = setTimeout(() => {
+        bufferingTimerRef.current = null;
+        // A stalled download can leave plenty of playable media buffered.
+        if (!video.seeking && video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) return;
+        const result = sendRoomMessage({
+          type: "buffering",
+          session_id: sessionId,
+          position_seconds: Math.max(
+            0,
+            positionSeconds ?? toMediaTime(video.currentTime, streamOriginRef.current),
+          ),
+          is_paused: isPaused ?? video.paused,
+        });
+        if (result.ok) waitingStateRef.current = "buffering";
+      }, bufferingGraceMs);
+      return { ok: true };
     },
     [
       attachedSessionId,
       connectionState,
       roomConnected,
       roomPhase,
+      roomPlaybackState,
       sendRoomMessage,
       sessionId,
       streamOriginRef,

@@ -370,6 +370,74 @@ describe("VideoPlayer room catch-up", () => {
     expect(controls.current!.currentTime).toBe(100);
   });
 
+  it("keeps brief buffering local and reports a sustained stall once", async () => {
+    const { connection, video } = setup(100);
+    Object.defineProperty(video, "readyState", { configurable: true, value: 2 });
+    fireEvent.waiting(video);
+    await act(() => vi.advanceTimersByTimeAsync(300));
+    expect(connection.sendRoomMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "buffering" }),
+    );
+    Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+    fireEvent.canPlay(video);
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    expect(connection.sendRoomMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "buffering" }),
+    );
+    Object.defineProperty(video, "readyState", { configurable: true, value: 2 });
+    fireEvent.waiting(video);
+    fireEvent.stalled(video);
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    expect(
+      vi
+        .mocked(connection.sendRoomMessage)
+        .mock.calls.filter(([message]) => message.type === "buffering"),
+    ).toHaveLength(1);
+    fireEvent.waiting(video);
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    expect(
+      vi
+        .mocked(connection.sendRoomMessage)
+        .mock.calls.filter(([message]) => message.type === "buffering"),
+    ).toHaveLength(1);
+  });
+
+  it("cancels a pending buffering report when the room disconnects", async () => {
+    const { connection, video, rerenderPlayer } = setup(100);
+    Object.defineProperty(video, "readyState", { configurable: true, value: 2 });
+    fireEvent.waiting(video);
+    rerenderPlayer({ watchTogetherConnection: { ...connection, connectionState: "disconnected" } });
+    await act(() => vi.advanceTimersByTimeAsync(600));
+    expect(connection.sendRoomMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "buffering" }),
+    );
+  });
+
+  it("names the viewers still syncing", () => {
+    const { connection, rerenderPlayer } = setup(100);
+    rerenderPlayer({
+      watchTogetherConnection: {
+        ...connection,
+        room: {
+          ...connection.room!,
+          playback_state: "waiting",
+          members: [
+            {
+              user_id: 8,
+              profile_id: "guest",
+              display_name: "Alex",
+              is_host: false,
+              is_self: false,
+              connected: true,
+              is_syncing: true,
+            },
+          ],
+        },
+      },
+    });
+    expect(screen.getByText("Waiting for Alex")).toBeInTheDocument();
+  });
+
   it("reports readiness only after the current seek reaches buffered media", async () => {
     const { connection, video, command, rerenderPlayer } = setup(100);
     Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
