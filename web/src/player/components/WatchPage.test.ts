@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -25,13 +25,14 @@ vi.mock("./VideoPlayer", () => ({
     return "Mounted video player";
   },
 }));
+const playerConfig = {
+  apiBaseUrl: "/api/v1",
+  getAccessToken: () => "token",
+  getProfileId: () => "profile-1",
+  getDeviceId: () => "test-device",
+};
 vi.mock("../context/PlayerConfigContext", () => ({
-  usePlayerConfig: () => ({
-    apiBaseUrl: "/api/v1",
-    getAccessToken: () => "token",
-    getProfileId: () => "profile-1",
-    getDeviceId: () => "test-device",
-  }),
+  usePlayerConfig: () => playerConfig,
 }));
 vi.mock("@tanstack/react-query", () => ({
   useQueryClient: () => ({ fetchQuery: vi.fn() }),
@@ -109,9 +110,13 @@ function playbackSession(
 
 beforeEach(() => {
   roomConnectionMock.mockReset().mockReturnValue({ room: null });
-  playbackCapabilitiesMock
-    .mockReset()
-    .mockResolvedValue({ features: ["watch_party_source_fallback_v1"] });
+  playbackCapabilitiesMock.mockReset().mockResolvedValue({
+    features: [
+      "watch_party_coordinator_v1",
+      "fixed_media_file_v1",
+      "watch_party_source_fallback_v1",
+    ],
+  });
   startPlaybackMock.mockReset();
   playbackSessionMock.mockReset();
   videoPlayerMock.mockReset();
@@ -129,7 +134,86 @@ describe("derivePersistedSubtitleMode", () => {
 });
 
 describe("WatchPage playback errors", () => {
-  it("pins the room file and disables version changes while keeping quality controls", () => {
+  it("requires the coordinator before opening room playback", async () => {
+    playbackCapabilitiesMock.mockResolvedValue({ features: ["fixed_media_file_v1"] });
+    playbackSessionMock.mockReturnValue(playbackSession());
+    render(
+      createElement(WatchPage, {
+        ...watchPageProps,
+        watchTogetherRoomId: "room-1",
+        watchTogetherRoomToken: "proof",
+      }),
+    );
+    expect(playbackSessionMock).not.toHaveBeenCalled();
+    expect(roomConnectionMock).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText("This server needs an update to support Watch Party."),
+    ).toBeInTheDocument();
+    expect(videoPlayerMock).not.toHaveBeenCalled();
+  });
+  it("waits for capability confirmation before mounting the room player", async () => {
+    let finish!: (value: { features: string[] }) => void;
+    playbackCapabilitiesMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    playbackSessionMock.mockReturnValue(playbackSession());
+    render(
+      createElement(WatchPage, {
+        ...watchPageProps,
+        watchTogetherRoomId: "room-1",
+        watchTogetherRoomToken: "proof",
+      }),
+    );
+    expect(screen.getByText("Checking Watch Party support...")).toBeInTheDocument();
+    expect(playbackSessionMock).not.toHaveBeenCalled();
+    expect(roomConnectionMock).not.toHaveBeenCalled();
+    await act(async () =>
+      finish({ features: ["watch_party_coordinator_v1", "fixed_media_file_v1"] }),
+    );
+    expect(screen.getByText("Mounted video player")).toBeInTheDocument();
+  });
+  it("retries a failed capability check without starting playback early", async () => {
+    playbackCapabilitiesMock.mockRejectedValueOnce(new Error("Network unavailable"));
+    playbackSessionMock.mockReturnValue(playbackSession());
+    render(
+      createElement(WatchPage, {
+        ...watchPageProps,
+        watchTogetherRoomId: "room-1",
+        watchTogetherRoomToken: "proof",
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Try Again" }));
+    expect(playbackSessionMock).not.toHaveBeenCalled();
+    expect(roomConnectionMock).not.toHaveBeenCalled();
+    expect(await screen.findByText("Mounted video player")).toBeInTheDocument();
+    expect(playbackCapabilitiesMock).toHaveBeenCalledTimes(2);
+  });
+  it("ignores capability confirmation after leaving the player", async () => {
+    let finish!: (value: { features: string[] }) => void;
+    playbackCapabilitiesMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const view = render(
+      createElement(WatchPage, {
+        ...watchPageProps,
+        watchTogetherRoomId: "room-1",
+        watchTogetherRoomToken: "proof",
+      }),
+    );
+    view.unmount();
+    await act(async () =>
+      finish({ features: ["watch_party_coordinator_v1", "fixed_media_file_v1"] }),
+    );
+    expect(playbackSessionMock).not.toHaveBeenCalled();
+    expect(roomConnectionMock).not.toHaveBeenCalled();
+  });
+  it("pins the room file and disables version changes while keeping quality controls", async () => {
     playbackSessionMock.mockReturnValue(playbackSession());
     render(
       createElement(WatchPage, {
@@ -140,6 +224,7 @@ describe("WatchPage playback errors", () => {
       }),
     );
 
+    await waitFor(() => expect(videoPlayerMock).toHaveBeenCalled());
     expect(videoPlayerMock.mock.calls.at(-1)?.[0].onSwitchVersion).toBeUndefined();
     expect(videoPlayerMock.mock.calls.at(-1)?.[0].onQualitySelect).toBeTypeOf("function");
     expect(playbackSessionMock.mock.calls.at(-1)?.[12]).toBe(false);
@@ -154,6 +239,7 @@ describe("WatchPage playback errors", () => {
 
     expect(screen.getByText("Mounted video player")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Go Back" })).not.toBeInTheDocument();
+    expect(playbackCapabilitiesMock).not.toHaveBeenCalled();
   });
 
   it("shows the fatal error screen when startup fails without a plan", () => {
@@ -325,7 +411,7 @@ describe("Watch Party source fallback", () => {
     render(createElement(WatchPage, props));
     await waitFor(() => expect(startPlaybackMock).toHaveBeenCalled());
     expect(fallbackSource).not.toHaveBeenCalled();
-    expect(playbackCapabilitiesMock).not.toHaveBeenCalled();
+    expect(playbackCapabilitiesMock).toHaveBeenCalledTimes(1);
   });
 
   it("retries the same refusal once after the room proof is renewed", async () => {

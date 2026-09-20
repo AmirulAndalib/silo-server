@@ -97,9 +97,12 @@ change. Candidate order strictly decreases, preventing clients with different
 capabilities from cycling between previously refused sources. This works in
 host-pick and vote rooms without changing the selected content.
 
-The web player disables version switching while in a room and starts with
-`allow_alternate_versions: false`, requiring the playback capability
-`fixed_media_file_v1`. Clients discover coordinated fallback through the playback
+Before mounting the room player, the web client requires both
+`watch_party_coordinator_v1` and `fixed_media_file_v1`. Missing support shows an
+update message; a failed capability request can be retried without opening the
+playback socket or starting a playback session. The web player disables version
+switching while in a room and starts with `allow_alternate_versions: false`.
+Clients discover coordinated fallback through the playback
 capability `watch_party_source_fallback_v1`. That file constraint survives every replan, so decoder recovery
 cannot silently move one viewer to another timeline. Streaming quality and audio
 or subtitle adaptations can still use the same source.

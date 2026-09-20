@@ -1,5 +1,6 @@
 import { isSourceFallbackReason } from "@/api/v2/watchTogetherSourceFallback";
 import { playbackCapabilitiesV2 } from "../start-v2";
+import { playerV2Origin } from "../player-v2";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { PlayerFileVersion, PlayerPlaybackStateChange, WatchPageProps } from "../types";
@@ -63,7 +64,86 @@ function patchChapterThumbnail(
  * WatchPage is the top-level player component.
  * Starts a playback session, then renders the VideoPlayer once the stream is ready.
  */
-export function WatchPage({
+export function WatchPage(props: WatchPageProps) {
+  const config = usePlayerConfig();
+  return props.watchTogetherRoomId ? (
+    <WatchPartyPlaybackGate
+      key={`${playerV2Origin(config)}:${props.watchTogetherRoomId}`}
+      {...props}
+    />
+  ) : (
+    <WatchPagePlayer {...props} />
+  );
+}
+
+function WatchPartyPlaybackGate(props: WatchPageProps) {
+  const config = usePlayerConfig();
+  const [status, setStatus] = useState<"checking" | "supported" | "unsupported" | "failed">(
+    "checking",
+  );
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    void playbackCapabilitiesV2(config)
+      .then(({ features }) => {
+        if (!cancelled) {
+          setStatus(
+            features.includes("watch_party_coordinator_v1") &&
+              features.includes("fixed_media_file_v1")
+              ? "supported"
+              : "unsupported",
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setStatus("failed");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [config, attempt]);
+
+  if (status === "supported") return <WatchPagePlayer {...props} />;
+  return (
+    <div className="bg-background fixed inset-0 z-50 flex items-center justify-center px-6">
+      <div className="surface-panel-subtle flex max-w-md flex-col items-center gap-4 rounded-[1.8rem] px-8 py-8 text-center">
+        <p className="text-base font-semibold text-white">
+          {status === "checking" ? "Checking Watch Party support..." : "Watch Party unavailable"}
+        </p>
+        {status !== "checking" && (
+          <p className="text-sm text-white/60">
+            {status === "unsupported"
+              ? "This server needs an update to support Watch Party."
+              : "Unable to check Watch Party support. Please try again."}
+          </p>
+        )}
+        {status === "failed" && (
+          <button
+            type="button"
+            className="rounded-[0.95rem] bg-white/10 px-4 py-2 text-sm font-medium text-white"
+            onClick={() => {
+              setStatus("checking");
+              setAttempt((value) => value + 1);
+            }}
+          >
+            Try Again
+          </button>
+        )}
+        <button
+          type="button"
+          className="rounded-[0.95rem] bg-white/10 px-4 py-2 text-sm font-medium text-white"
+          onClick={() => {
+            void props.onExit();
+          }}
+        >
+          Go Back
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function WatchPagePlayer({
   contentId,
   title,
   year,
