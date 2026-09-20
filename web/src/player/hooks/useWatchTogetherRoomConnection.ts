@@ -110,6 +110,23 @@ export function useWatchTogetherRoomConnection({
   const renderedAuthority = captureProfileRequestContext();
   const socketAuthorityRef = useRef<ReturnType<typeof captureProfileRequestContext>>(null);
   const closedReasonRef = useRef<string | null>(null);
+  const socketSnapshotVersion = useRef(0);
+  const applyHTTPRoomSnapshot = useCallback(
+    (incoming: WatchTogetherRoomSnapshot, socketVersionAtRequest: number) => {
+      if (closedReasonRef.current) return;
+      const receivedSocketSnapshot = socketSnapshotVersion.current !== socketVersionAtRequest;
+      // Runtime-only changes do not advance generation. Preserve the socket's
+      // attachment/readiness when an overlapping HTTP request returns that generation.
+      setRoom((current) =>
+        current?.room_id === incoming.room_id &&
+        (current.generation > incoming.generation ||
+          (receivedSocketSnapshot && current.generation === incoming.generation))
+          ? current
+          : incoming,
+      );
+    },
+    [],
+  );
 
   useEffect(() => {
     closedReasonRef.current = closedReason;
@@ -157,17 +174,13 @@ export function useWatchTogetherRoomConnection({
       }
     }, 0);
     const readAuthority = captureProfileRequestContext();
+    const socketVersionAtRequest = socketSnapshotVersion.current;
     void getWatchTogetherRoom(roomId, roomToken, readAuthority)
       .then((response) => {
         if (cancelled || !readAuthority || !isCapturedProfileAuthorityActive(readAuthority)) {
           return;
         }
-        setRoom((current) =>
-          current?.room_id === response.room.room_id &&
-          current.generation > response.room.generation
-            ? current
-            : response.room,
-        );
+        applyHTTPRoomSnapshot(response.room, socketVersionAtRequest);
       })
       .catch((error: unknown) => {
         if (cancelled || !readAuthority || !isCapturedProfileAuthorityActive(readAuthority)) {
@@ -194,6 +207,7 @@ export function useWatchTogetherRoomConnection({
       window.clearTimeout(resetClosedReasonTimer);
     };
   }, [
+    applyHTTPRoomSnapshot,
     markClosed,
     roomId,
     roomToken,
@@ -293,6 +307,7 @@ export function useWatchTogetherRoomConnection({
           case "snapshot": {
             const payload = message.room as WatchTogetherRoomSnapshot | undefined;
             if (payload) {
+              socketSnapshotVersion.current++;
               setRoom((current) =>
                 current?.room_id === payload.room_id && current.generation > payload.generation
                   ? current
@@ -426,6 +441,7 @@ export function useWatchTogetherRoomConnection({
     async (policy: GuestControlPolicy) => {
       if (!roomId) return null;
       const run = ++policyRun.current;
+      const socketVersionAtRequest = socketSnapshotVersion.current;
       const response = await updateWatchTogetherRoomPolicy(roomId, policy, policyAuthority).catch(
         (error: unknown) => {
           if (policyRoom.current !== roomId || policyRun.current !== run) return null;
@@ -435,16 +451,10 @@ export function useWatchTogetherRoomConnection({
       if (!response) return null;
       if (policyRoom.current !== roomId || policyRun.current !== run) return null;
       if (!policyAuthority || !isCapturedProfileAuthorityActive(policyAuthority)) return null;
-      setRoom((current) =>
-        current &&
-        current.room_id === response.room.room_id &&
-        current.generation > response.room.generation
-          ? current
-          : response.room,
-      );
+      applyHTTPRoomSnapshot(response.room, socketVersionAtRequest);
       return response.room;
     },
-    [roomId, policyAuthority],
+    [roomId, policyAuthority, applyHTTPRoomSnapshot],
   );
 
   const selectionAuthority = captureProfileRequestContext();
@@ -462,6 +472,7 @@ export function useWatchTogetherRoomConnection({
     async (input: SelectWatchTogetherRoomItemInput) => {
       if (!roomId) return null;
       const run = ++selectionRun.current;
+      const socketVersionAtRequest = socketSnapshotVersion.current;
       const response = await selectWatchTogetherRoomItem(
         roomId,
         { ...input },
@@ -473,16 +484,10 @@ export function useWatchTogetherRoomConnection({
       if (!response) return null;
       if (selectionRoom.current !== roomId || selectionRun.current !== run) return null;
       if (!selectionAuthority || !isCapturedProfileAuthorityActive(selectionAuthority)) return null;
-      setRoom((current) =>
-        current &&
-        current.room_id === response.room.room_id &&
-        current.generation > response.room.generation
-          ? current
-          : response.room,
-      );
+      applyHTTPRoomSnapshot(response.room, socketVersionAtRequest);
       return response.room;
     },
-    [roomId, selectionAuthority],
+    [roomId, selectionAuthority, applyHTTPRoomSnapshot],
   );
 
   const closeAuthority = captureProfileRequestContext();
@@ -572,6 +577,7 @@ export function useWatchTogetherRoomConnection({
     async (suggestionId: string) => {
       if (!roomId || !roomToken || promotionRoom.current !== roomId) return null;
       const run = ++promotionRun.current;
+      const socketVersionAtRequest = socketSnapshotVersion.current;
       const response = await promoteWatchTogetherSuggestion(
         roomId,
         roomToken,
@@ -583,16 +589,10 @@ export function useWatchTogetherRoomConnection({
       });
       if (!response || run !== promotionRun.current) return null;
       if (!promotionAuthority || !isCapturedProfileAuthorityActive(promotionAuthority)) return null;
-      setRoom((current) =>
-        current &&
-        current.room_id === response.room.room_id &&
-        current.generation > response.room.generation
-          ? current
-          : response.room,
-      );
+      applyHTTPRoomSnapshot(response.room, socketVersionAtRequest);
       return response.room;
     },
-    [roomId, roomToken, promotionAuthority],
+    [roomId, roomToken, promotionAuthority, applyHTTPRoomSnapshot],
   );
 
   const fallbackAuthority = captureProfileRequestContext();
@@ -608,16 +608,13 @@ export function useWatchTogetherRoomConnection({
       const context = fallbackContextRef.current;
       if (!roomId || !roomToken || context.roomId !== roomId || context.roomToken !== roomToken)
         return null;
+      const socketVersionAtRequest = socketSnapshotVersion.current;
       const response = await fallbackRoomSource(roomId, roomToken, input, fallbackAuthority);
       if (fallbackContextRef.current !== context) return null;
-      setRoom((current) =>
-        current?.room_id === roomId && current.generation <= response.room.generation
-          ? response.room
-          : current,
-      );
+      applyHTTPRoomSnapshot(response.room, socketVersionAtRequest);
       return response.room;
     },
-    [roomId, roomToken, fallbackAuthority],
+    [roomId, roomToken, fallbackAuthority, applyHTTPRoomSnapshot],
   );
 
   return {

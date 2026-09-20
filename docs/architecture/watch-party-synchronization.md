@@ -47,6 +47,12 @@ broadcast another snapshot. SQL work has a five-second timeout; a failed mutatio
 rolls back and sends no command. This coordinates Watch Party state; it does not
 restart a media worker or replace the player's transport recovery behavior.
 
+The room generation orders transport changes, not every membership or readiness
+update. The web client preserves a socket snapshot when an overlapping HTTP read
+or mutation receipt returns the same generation. A higher-generation response
+still advances the room. This prevents delayed responses from clearing a session
+attachment that the socket has already confirmed.
+
 Each WebSocket has one writer and a queue of 64 frames. A full queue or failed
 write closes that socket, allowing the client's existing reconnect flow to
 recover. Other viewers' broadcasts do not wait for its write deadline. Each
