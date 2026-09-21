@@ -418,6 +418,34 @@ func TestCorrectionCommandRoundTripsRoomRuntime(t *testing.T) {
 	}
 }
 
+func TestCorrectionCommandPendingAllowsBoundedFutureClockSkew(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 20, 0, time.UTC)
+	command := TransportCommand{
+		SessionID:         "session-1",
+		SelectionRevision: 1,
+		Action:            TransportActionPlay,
+		PlaybackState:     RoomPlaybackStatePlaying,
+	}
+	member := &memberState{correctionCommand: &command}
+
+	for _, test := range []struct {
+		name      string
+		issuedAt  time.Time
+		wantMatch bool
+	}{
+		{name: "small future skew", issuedAt: now.Add(time.Second), wantMatch: true},
+		{name: "retry interval elapsed", issuedAt: now.Add(-guestCorrectionRetryInterval), wantMatch: false},
+		{name: "excessive future skew", issuedAt: now.Add(guestCorrectionRetryInterval + time.Millisecond), wantMatch: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			member.correctionCommand.IssuedAt = test.issuedAt.Format(time.RFC3339Nano)
+			if got := correctionCommandPending(member, command, now); got != test.wantMatch {
+				t.Fatalf("correctionCommandPending() = %t, want %t", got, test.wantMatch)
+			}
+		})
+	}
+}
+
 func TestStateReportsPreservePendingSeek(t *testing.T) {
 	for _, seekPaused := range []bool{false, true} {
 		name := "playing"

@@ -1773,7 +1773,13 @@ func correctionCommandPending(member *memberState, command TransportCommand, now
 		return false
 	}
 	age := now.Sub(issuedAt)
-	return age >= 0 && age < guestCorrectionRetryInterval
+	if age < -guestCorrectionRetryInterval {
+		return false
+	}
+	if age < 0 {
+		age = 0
+	}
+	return age < guestCorrectionRetryInterval
 }
 
 func (s *Service) runCommandDispatches(dispatches []commandDispatch) {
