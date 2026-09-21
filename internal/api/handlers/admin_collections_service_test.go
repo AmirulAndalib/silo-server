@@ -36,7 +36,7 @@ func TestAdminCollectionLookupAPIErrorPreservesFailureClass(t *testing.T) {
 		{name: "backend failure", err: errors.New("database unavailable"), wantStatus: 500, wantCode: "internal_error"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			apiErr, ok := adminCollectionLookupAPIError(tc.err).(*APIError)
+			apiErr, ok := errors.AsType[*APIError](adminCollectionLookupAPIError(tc.err))
 			if !ok || apiErr.Status != tc.wantStatus || apiErr.Code != tc.wantCode {
 				t.Fatalf("error = %#v, want status=%d code=%s", apiErr, tc.wantStatus, tc.wantCode)
 			}
@@ -77,7 +77,7 @@ func TestLegacyTraktAdminCollectionLibraryScopeIsImmutable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateAdminCollectionSourceUpdate(tc.existing, AdminCollectionUpdate{LibraryIDs: &tc.libraryIDs})
 			if tc.wantError {
-				apiErr, ok := err.(*APIError)
+				apiErr, ok := errors.AsType[*APIError](err)
 				if !ok || apiErr.Code != "legacy_source_immutable" {
 					t.Fatalf("error = %#v, want legacy_source_immutable", err)
 				}

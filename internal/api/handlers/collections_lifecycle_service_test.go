@@ -136,7 +136,7 @@ func TestPersonalLegacyTraktSourceCannotBeEdited(t *testing.T) {
 		UserID: 1, ProfileID: "owner", CollectionID: "c",
 		Request: PersonalCollectionUpdateRequest{MaxItems: &maxItems},
 	})
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := errors.AsType[*APIError](err)
 	if !ok || apiErr.Code != "legacy_source_immutable" {
 		t.Fatalf("error = %#v, want legacy_source_immutable", err)
 	}

@@ -18,7 +18,10 @@ import (
 // problem `type` URI lives under. The final path segment of a type URI is the
 // machine-readable problem identifier (docs/architecture/api-contract.md,
 // "Problem Details").
-const ProblemTypeOrigin = "https://siloserver.org/docs/api/v2/problems/"
+const (
+	ProblemTypeOrigin     = "https://siloserver.org/docs/api/v2/problems/"
+	codeUnsupportedSource = "unsupported_source"
+)
 
 // ProblemType is one entry of the shared problem catalog.
 type ProblemType struct {
@@ -40,7 +43,7 @@ var (
 	TypePlaybackSessionEnded        = ProblemType{"playback_session_ended", http.StatusGone, "Playback session ended"}
 	TypePlaybackProgressConflict    = ProblemType{handlers.PlaybackCodeProgressConflict, http.StatusConflict, "Playback progress conflict"}
 	TypeDeviceLoginExpired          = ProblemType{"device_login_expired", http.StatusGone, "Device login expired"}
-	TypeUnsupportedSource           = ProblemType{"unsupported_source", http.StatusGone, "Unsupported source"}
+	TypeUnsupportedSource           = ProblemType{codeUnsupportedSource, http.StatusGone, "Unsupported source"}
 	TypeSyncResetRequired           = ProblemType{"sync_reset_required", http.StatusConflict, "Progress reset required"}
 	TypeSnapshotRequestConflict     = ProblemType{"snapshot_request_conflict", http.StatusConflict, "Snapshot request conflict"}
 	TypeProgressSnapshotTooLarge    = ProblemType{"progress_snapshot_too_large", http.StatusRequestEntityTooLarge, "Progress snapshot too large"}

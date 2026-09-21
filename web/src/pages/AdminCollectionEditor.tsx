@@ -229,7 +229,6 @@ export default function AdminCollectionEditor() {
           onClose={() => navigate(returnPath)}
         />
       ) : null}
-
     </div>
   );
 }

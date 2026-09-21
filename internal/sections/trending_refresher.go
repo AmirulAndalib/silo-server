@@ -15,8 +15,14 @@ import (
 // trendingFetchCap is the over-fetch size for each refresh. Library-only
 // matching drops globally-trending titles the server does not own, so we fetch
 // well beyond any section's display limit and store the matched, ordered list.
-const trendingFetchCap = 200
-const trendingRefreshLease = 5 * time.Minute
+const (
+	trendingFetchCap       = 200
+	trendingRefreshLease   = 5 * time.Minute
+	trendingRefreshOK      = "ok"
+	trendingRefreshEmpty   = "empty"
+	trendingRefreshSkipped = "skipped"
+	trendingRefreshError   = "error"
+)
 
 // trendingSectionConfigLister enumerates enabled trending_discover section
 // configs. Satisfied by *Repository.
@@ -155,11 +161,11 @@ func (r *TrendingRefresher) RunOnce(ctx context.Context) (json.RawMessage, error
 	result := TrendingRefreshResult{Combos: len(combos)}
 	for _, c := range combos {
 		switch r.refreshCombo(ctx, c.source, c.window) {
-		case "ok":
+		case trendingRefreshOK:
 			result.Refreshed++
-		case "empty":
+		case trendingRefreshEmpty:
 			result.Empty++
-		case "skipped":
+		case trendingRefreshSkipped:
 			result.Skipped++
 		default:
 			result.Failed++
@@ -179,11 +185,11 @@ func (r *TrendingRefresher) RunOnce(ctx context.Context) (json.RawMessage, error
 func (r *TrendingRefresher) refreshCombo(ctx context.Context, source, window string) string {
 	claimAt, claimed, err := r.Snapshots.TryClaimRefresh(ctx, source, window, trendingRefreshLease)
 	if err != nil {
-		r.log().ErrorContext(ctx, "trending refresh: lease claim failed", "source", source, "window", window, "error", err)
-		return "error"
+		r.log().ErrorContext(ctx, "trending refresh: lease claim failed", "source", source, "window", window, trendingRefreshError, err)
+		return trendingRefreshError
 	}
 	if !claimed {
-		return "skipped"
+		return trendingRefreshSkipped
 	}
 	return r.refreshComboClaimed(ctx, source, window, claimAt)
 }
@@ -191,30 +197,30 @@ func (r *TrendingRefresher) refreshCombo(ctx context.Context, source, window str
 func (r *TrendingRefresher) refreshComboClaimed(ctx context.Context, source, window string, claimAt time.Time) string {
 	entries, err := r.fetchEntries(ctx, source, window, trendingFetchCap)
 	if err != nil {
-		r.log().ErrorContext(ctx, "trending refresh: fetch failed", "source", source, "window", window, "error", err)
-		return r.finishAttempt(ctx, source, window, "error", err.Error(), claimAt)
+		r.log().ErrorContext(ctx, "trending refresh: fetch failed", "source", source, "window", window, trendingRefreshError, err)
+		return r.finishAttempt(ctx, source, window, trendingRefreshError, err.Error(), claimAt)
 	}
 	if len(entries) == 0 {
 		// Provider unconfigured or returned nothing: keep last-good, mark empty.
-		return r.finishAttempt(ctx, source, window, "empty", "", claimAt)
+		return r.finishAttempt(ctx, source, window, trendingRefreshEmpty, "", claimAt)
 	}
 
 	contentIDs, err := r.resolveIDs(ctx, entries)
 	if err != nil {
-		r.log().ErrorContext(ctx, "trending refresh: resolve failed", "source", source, "window", window, "error", err)
-		return r.finishAttempt(ctx, source, window, "error", err.Error(), claimAt)
+		r.log().ErrorContext(ctx, "trending refresh: resolve failed", "source", source, "window", window, trendingRefreshError, err)
+		return r.finishAttempt(ctx, source, window, trendingRefreshError, err.Error(), claimAt)
 	}
 
-	status := "ok"
+	status := trendingRefreshOK
 	if len(contentIDs) == 0 {
-		status = "empty"
+		status = trendingRefreshEmpty
 	}
 	if err := r.Snapshots.SaveSuccess(ctx, source, window, contentIDs, len(entries), status, claimAt, r.now()); err != nil {
 		if errors.Is(err, ErrTrendingRefreshLeaseLost) {
-			return "skipped"
+			return trendingRefreshSkipped
 		}
-		r.log().ErrorContext(ctx, "trending refresh: save failed", "source", source, "window", window, "error", err)
-		return "error"
+		r.log().ErrorContext(ctx, "trending refresh: save failed", "source", source, "window", window, trendingRefreshError, err)
+		return trendingRefreshError
 	}
 	return status
 }
@@ -222,10 +228,10 @@ func (r *TrendingRefresher) refreshComboClaimed(ctx context.Context, source, win
 func (r *TrendingRefresher) finishAttempt(ctx context.Context, source, window, status, message string, claimAt time.Time) string {
 	if err := r.Snapshots.RecordAttempt(ctx, source, window, status, message, claimAt); err != nil {
 		if errors.Is(err, ErrTrendingRefreshLeaseLost) {
-			return "skipped"
+			return trendingRefreshSkipped
 		}
-		r.log().ErrorContext(ctx, "trending refresh: recording attempt failed", "source", source, "window", window, "status", status, "error", err)
-		return "error"
+		r.log().ErrorContext(ctx, "trending refresh: recording attempt failed", "source", source, "window", window, "status", status, trendingRefreshError, err)
+		return trendingRefreshError
 	}
 	return status
 }

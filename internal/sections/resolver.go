@@ -5,6 +5,8 @@ import (
 	"sort"
 )
 
+const jsonNullLiteral = "null"
+
 // Resolve merges admin sections with profile overrides, producing the final ordered list.
 func Resolve(admin []*PageSection, overrides []ProfileSectionOverride) []ResolvedSection {
 	overrideBySection := make(map[string]*ProfileSectionOverride)
@@ -54,7 +56,7 @@ func Resolve(admin []*PageSection, overrides []ProfileSectionOverride) []Resolve
 			if o.ItemLimit != nil {
 				rs.ItemLimit = *o.ItemLimit
 			}
-			if len(o.Config) > 0 && string(o.Config) != "" && string(o.Config) != "null" {
+			if len(o.Config) > 0 && string(o.Config) != "" && string(o.Config) != jsonNullLiteral {
 				rs.Config = o.Config
 			}
 		}
@@ -123,7 +125,7 @@ func ResolveForSettings(admin []*PageSection, overrides []ProfileSectionOverride
 			if o.ItemLimit != nil {
 				rs.ItemLimit = *o.ItemLimit
 			}
-			if len(o.Config) > 0 && string(o.Config) != "" && string(o.Config) != "null" {
+			if len(o.Config) > 0 && string(o.Config) != "" && string(o.Config) != jsonNullLiteral {
 				rs.Config = o.Config
 			}
 		}

@@ -77,7 +77,7 @@ func (l *TrendingDemandLister) ListTrendingDiscoverConfigs(ctx context.Context) 
 				if base == nil {
 					continue
 				}
-				if override.Config != "" && override.Config != "null" {
+				if override.Config != "" && override.Config != jsonNullLiteral {
 					configs = append(configs, json.RawMessage(override.Config))
 				}
 				continue

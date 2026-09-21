@@ -71,7 +71,7 @@ func TestProfileOverrideSaveStopsOnBaseSectionReadFailure(t *testing.T) {
 	err := h.SaveProfileOverrides(t.Context(), SectionOverridesQuery{UserID: 1, ProfileID: "p1", Scope: "home"}, []SectionOverrideWrite{{
 		ID: "existing", SectionID: "admin-trending",
 	}})
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := errors.AsType[*APIError](err)
 	if !ok || apiErr.Status != 500 || apiErr.Code != "internal_error" {
 		t.Fatalf("error = %#v, want internal_error", err)
 	}
@@ -89,7 +89,7 @@ func TestProfileOverrideResetStopsOnBaseSectionReadFailure(t *testing.T) {
 		sectionReader: sourcePolicySectionReader{err: errors.New("database unavailable")},
 	}
 	err := h.ResetProfileOverrides(t.Context(), SectionOverridesQuery{UserID: 1, ProfileID: "p1", Scope: "home"})
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := errors.AsType[*APIError](err)
 	if !ok || apiErr.Status != 500 || apiErr.Code != "internal_error" {
 		t.Fatalf("error = %#v, want internal_error", err)
 	}
@@ -105,7 +105,7 @@ func TestProfileCannotCreateTraktTrendingSection(t *testing.T) {
 		ID: "new", IsUserAdded: true, UserSectionType: "trending_discover",
 		UserConfig: json.RawMessage(`{"source":"trakt","window":"week"}`),
 	}})
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := errors.AsType[*APIError](err)
 	if !ok || apiErr.Code != "unsupported_source" {
 		t.Fatalf("error = %#v, want unsupported_source", err)
 	}
@@ -116,7 +116,7 @@ func TestAdminCannotCreateTraktTrendingSection(t *testing.T) {
 		Title: "Trakt Trending", SectionType: "trending_discover",
 		Config: json.RawMessage(`{"source":"trakt","window":"week"}`),
 	})
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := errors.AsType[*APIError](err)
 	if !ok || apiErr.Code != "unsupported_source" {
 		t.Fatalf("error = %#v, want unsupported_source", err)
 	}
@@ -127,7 +127,7 @@ func TestAdminBulkCannotCreateTraktTrendingSection(t *testing.T) {
 		Scope: "home", Title: "Trakt Trending", SectionType: "trending_discover",
 		Config: json.RawMessage(`{"source":"trakt","window":"week"}`),
 	})
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := errors.AsType[*APIError](err)
 	if !ok || apiErr.Code != "unsupported_source" {
 		t.Fatalf("error = %#v, want unsupported_source", err)
 	}
@@ -137,7 +137,7 @@ func TestGenericAdminCollectionCannotCreateTraktSource(t *testing.T) {
 	_, err := (&LibraryCollectionHandler{}).CreateAdminCollection(t.Context(), AdminCollectionCreate{
 		Title: "Trakt", CollectionType: "trakt",
 	})
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := errors.AsType[*APIError](err)
 	if !ok || apiErr.Code != "unsupported_source" {
 		t.Fatalf("error = %#v, want unsupported_source", err)
 	}
@@ -285,7 +285,7 @@ func TestLinkedProfileContradictoryUserAddedFlagCannotBypassTraktPolicy(t *testi
 		Config:          json.RawMessage(`{"source":"trakt","window":"week"}`),
 		UserSectionType: "trending_discover", UserConfig: json.RawMessage(`{"source":"tmdb","window":"day"}`),
 	}})
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := errors.AsType[*APIError](err)
 	if !ok || apiErr.Code != "unsupported_source" {
 		t.Fatalf("error = %#v, want unsupported_source", err)
 	}
@@ -307,7 +307,7 @@ func TestLinkedProfileInheritedLegacyTraktCannotBeReactivated(t *testing.T) {
 	err := h.SaveProfileOverrides(t.Context(), SectionOverridesQuery{UserID: 1, ProfileID: "p1", Scope: "home"}, []SectionOverrideWrite{{
 		ID: "legacy-linked", SectionID: "legacy-admin-trending",
 	}})
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := errors.AsType[*APIError](err)
 	if !ok || apiErr.Code != "legacy_source_immutable" {
 		t.Fatalf("error = %#v, want legacy_source_immutable", err)
 	}
@@ -349,7 +349,7 @@ func TestLinkedProfileCannotReactivateLegacyTraktByOmission(t *testing.T) {
 		}},
 	}
 	err := h.SaveProfileOverrides(t.Context(), SectionOverridesQuery{UserID: 1, ProfileID: "p1", Scope: "home"}, nil)
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := errors.AsType[*APIError](err)
 	if !ok || apiErr.Code != "legacy_source_immutable" {
 		t.Fatalf("error = %#v, want legacy_source_immutable", err)
 	}
@@ -375,7 +375,7 @@ func TestLinkedProfileCannotExposeLegacyTraktByReusingOverrideID(t *testing.T) {
 	err := h.SaveProfileOverrides(t.Context(), SectionOverridesQuery{UserID: 1, ProfileID: "p1", Scope: "home"}, []SectionOverrideWrite{{
 		ID: "movable", SectionID: "tmdb-admin-trending",
 	}})
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := errors.AsType[*APIError](err)
 	if !ok || apiErr.Code != "legacy_source_immutable" {
 		t.Fatalf("error = %#v, want legacy_source_immutable", err)
 	}
@@ -395,7 +395,7 @@ func TestResetCannotReactivateInheritedLegacyTrakt(t *testing.T) {
 		}},
 	}
 	err := h.ResetProfileOverrides(t.Context(), SectionOverridesQuery{UserID: 1, ProfileID: "p1", Scope: "home"})
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := errors.AsType[*APIError](err)
 	if !ok || apiErr.Code != "legacy_source_immutable" {
 		t.Fatalf("error = %#v, want legacy_source_immutable", err)
 	}
@@ -424,7 +424,7 @@ func TestProfileLegacyTraktSourceCannotBeChangedOrReactivated(t *testing.T) {
 				ID: "legacy", IsUserAdded: true, UserSectionType: "trending_discover",
 				UserConfig: tc.config, Hidden: tc.hidden,
 			}})
-			apiErr, ok := err.(*APIError)
+			apiErr, ok := errors.AsType[*APIError](err)
 			if !ok || apiErr.Code != "legacy_source_immutable" {
 				t.Fatalf("error = %#v, want legacy_source_immutable", err)
 			}
@@ -438,17 +438,21 @@ func TestProfileOverrideIDsMustBeUnique(t *testing.T) {
 		{ID: "duplicate", IsUserAdded: true, UserSectionType: "trending_discover", UserConfig: json.RawMessage(`{"source":"tmdb"}`)},
 		{ID: "duplicate", IsUserAdded: true, UserSectionType: "trending_discover", UserConfig: json.RawMessage(`{"source":"tmdb"}`)},
 	})
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := errors.AsType[*APIError](err)
 	if !ok || apiErr.Code != "duplicate_override" {
 		t.Fatalf("error = %#v, want duplicate_override", err)
 	}
 }
 
 func TestTraktCollectionImportsAreDisabled(t *testing.T) {
-	if _, err := (&LibraryCollectionHandler{}).ImportAdminTrakt(t.Context(), AdminCollectionImportTrakt{}); err == nil || err.(*APIError).Code != "unsupported_source" {
+	if _, err := (&LibraryCollectionHandler{}).ImportAdminTrakt(t.Context(), AdminCollectionImportTrakt{}); err == nil {
+		t.Fatalf("admin Trakt import error = %#v", err)
+	} else if apiErr, ok := errors.AsType[*APIError](err); !ok || apiErr.Code != "unsupported_source" {
 		t.Fatalf("admin Trakt import error = %#v", err)
 	}
-	if _, err := (&UserCollectionImportHandler{}).ImportTrakt(t.Context(), 1, "p1", UserImportTraktRequest{}); err == nil || err.(*APIError).Code != "unsupported_source" {
+	if _, err := (&UserCollectionImportHandler{}).ImportTrakt(t.Context(), 1, "p1", UserImportTraktRequest{}); err == nil {
+		t.Fatalf("profile Trakt import error = %#v", err)
+	} else if apiErr, ok := errors.AsType[*APIError](err); !ok || apiErr.Code != "unsupported_source" {
 		t.Fatalf("profile Trakt import error = %#v", err)
 	}
 }

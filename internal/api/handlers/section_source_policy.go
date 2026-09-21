@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"reflect"
 	"strings"
+
+	"github.com/Silo-Server/silo-server/internal/sections"
 )
 
 func isTraktBackedSection(sectionType string, config json.RawMessage) bool {
@@ -16,10 +18,10 @@ func isTraktBackedSection(sectionType string, config json.RawMessage) bool {
 		return false
 	}
 	switch sectionType {
-	case "trending_discover":
-		return values.Source == "trakt"
-	case "collection":
-		return values.SourceProvider == "trakt"
+	case string(sections.SectionTrendingDiscover):
+		return values.Source == adminCollectionTrakt
+	case string(sections.SectionCollection):
+		return values.SourceProvider == adminCollectionTrakt
 	default:
 		return false
 	}
@@ -39,11 +41,11 @@ func hasSectionConfig(config json.RawMessage) bool {
 }
 
 func traktSectionKind(config json.RawMessage) string {
-	if isTraktBackedSection("trending_discover", config) {
-		return "trending_discover"
+	if isTraktBackedSection(string(sections.SectionTrendingDiscover), config) {
+		return string(sections.SectionTrendingDiscover)
 	}
-	if isTraktBackedSection("collection", config) {
-		return "collection"
+	if isTraktBackedSection(string(sections.SectionCollection), config) {
+		return string(sections.SectionCollection)
 	}
 	return ""
 }
@@ -56,5 +58,5 @@ func isTraktCollectionSourceConfig(config json.RawMessage) bool {
 	if len(config) == 0 || json.Unmarshal(config, &values) != nil {
 		return false
 	}
-	return values.Provider == "trakt" || strings.HasPrefix(values.Mode, "trakt_")
+	return values.Provider == adminCollectionTrakt || strings.HasPrefix(values.Mode, adminCollectionTrakt+"_")
 }
