@@ -32,7 +32,7 @@ func TestPromotionOncePreservesSelectedVariantPG(t *testing.T) {
 		user    int
 		profile string
 		want    error
-	}{{"winner", 8, "host", ErrRoomForbidden}, {"winner", 7, "guest", ErrRoomForbidden}, {"foreign", 7, "host", ErrSuggestionNotFound}, {"loser", 7, "host", ErrNotVoteWinner}} {
+	}{{"winner", 8, "host", ErrRoomForbidden}, {"winner", 7, "guest", ErrRoomForbidden}, {"foreign", 7, "host", ErrSuggestionNotFound}} {
 		if _, err := s.PromoteSuggestionOnce(t.Context(), room.ID, tc.id, tc.user, tc.profile); !errors.Is(err, tc.want) {
 			t.Fatalf("refusal: %v", err)
 		}
@@ -72,13 +72,17 @@ func TestPromotionOncePreservesSelectedVariantPG(t *testing.T) {
 	if err != nil || *changed.SelectedFileID != 9 || changed.SelectionRevision != first.SelectionRevision+1 || member.sessionID != "" {
 		t.Fatalf("direct selection comparison changed: %+v %v", changed, err)
 	}
-	// No votes and closed rooms still refuse promotion; no-op does not bypass eligibility.
+	// The host may override the tally: promoting the runner-up starts it.
 	live.room.SelectionMode = RoomSelectionModeVote
-	suggestions.ordered[0].VoteCount = 0
-	if _, err = s.PromoteSuggestionOnce(t.Context(), room.ID, "winner", 7, "host"); !errors.Is(err, ErrNoVotesCast) {
-		t.Fatalf("no votes: %v", err)
+	if _, err = pool.Exec(t.Context(), `UPDATE watch_together_rooms SET selection_mode='vote' WHERE id=$1`, room.ID); err != nil {
+		t.Fatal(err)
 	}
-	suggestions.ordered[0].VoteCount = 3
+	resolver.resolved = &ResolvedSelection{ContentID: "loser-content", FileID: new(3), LibraryID: new(8)}
+	overridden, err := s.PromoteSuggestionOnce(t.Context(), room.ID, "loser", 7, "host")
+	if err != nil || overridden.SelectedContentID == nil || *overridden.SelectedContentID != "loser-content" {
+		t.Fatalf("host override: %+v %v", overridden, err)
+	}
+	// Closed rooms still refuse promotion.
 	if _, err = pool.Exec(t.Context(), `UPDATE watch_together_rooms SET phase='ended' WHERE id=$1`, room.ID); err != nil {
 		t.Fatal(err)
 	}

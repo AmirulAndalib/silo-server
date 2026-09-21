@@ -44,6 +44,8 @@ type runtimeMember struct {
 	IgnoreWait     bool              `json:"ignore_wait"`
 	LastPingMS     int64             `json:"last_ping_ms"`
 	WaitingCommand *TransportCommand `json:"waiting_command,omitempty"`
+	SyncingToRoom  bool              `json:"syncing_to_room,omitempty"`
+	LobbyReady     bool              `json:"lobby_ready,omitempty"`
 }
 
 type roomOperationKey struct{}
@@ -206,6 +208,7 @@ func (s *Service) runtimeLocked(live *liveRoom) roomRuntime {
 			Connected: memberConnected(m), LeaseUntil: m.leaseUntil, DisconnectedAt: m.disconnectedAt,
 			SessionID: m.sessionID, IsReady: m.isReady, IsBuffering: m.isBuffering, IgnoreWait: m.ignoreWait,
 			LastPingMS: m.lastPingMS, WaitingCommand: m.waitingCommand,
+			SyncingToRoom: m.syncingToRoom, LobbyReady: m.lobbyReady,
 		}
 	}
 	return runtime
@@ -218,6 +221,7 @@ func (s *Service) adoptRuntimeLocked(ctx context.Context, live *liveRoom, room R
 		(live.command != nil && (state.Command == nil || live.command.CommandID != state.Command.CommandID)) {
 		s.disarmWaitingDeadlineLocked(live)
 	}
+	previousRoom := live.room
 	live.room = room
 	live.command = state.Command
 	if selectionChanged {
@@ -231,7 +235,7 @@ func (s *Service) adoptRuntimeLocked(ctx context.Context, live *liveRoom, room R
 			connectionID: stored.ConnectionID, leaseUntil: stored.LeaseUntil, disconnectedAt: stored.DisconnectedAt,
 			sessionID: stored.SessionID, isReady: stored.IsReady, isBuffering: stored.IsBuffering,
 			ignoreWait: stored.IgnoreWait, lastPingMS: stored.LastPingMS, waitingCommand: stored.WaitingCommand,
-			remoteConnected: stored.Connected,
+			remoteConnected: stored.Connected, syncingToRoom: stored.SyncingToRoom, lobbyReady: stored.LobbyReady,
 		}
 		if old := live.members[key]; old != nil && old.connectionID == stored.ConnectionID && stored.Connected {
 			m.connection, m.lastCommandID = old.connection, old.lastCommandID
@@ -254,6 +258,13 @@ func (s *Service) adoptRuntimeLocked(ctx context.Context, live *liveRoom, room R
 			m.ignoreWait = false
 			m.waitingCommand = nil
 			m.lastCommandID = ""
+			m.syncingToRoom = false
+			m.lobbyReady = false
+		}
+		// Lobby "ready" answers "ready for this?": a different staged item or a
+		// mode switch on another server changes the question.
+		if previousRoom.ID != "" && (room.SelectionMode != previousRoom.SelectionMode || !equalContentID(room.SelectedContentID, previousRoom.SelectedContentID)) {
+			m.lobbyReady = false
 		}
 		// Retain detached sessions through the reconnect grace period only.
 		if !memberConnected(m) && !m.disconnectedAt.IsZero() && now.Sub(m.disconnectedAt) > s.hostDisconnectTTL && (m.userID != room.HostUserID || m.profileID != room.HostProfileID) {
@@ -547,6 +558,38 @@ func (s *Service) closeIfHostStillDisconnected(roomID string, user int, profile 
 
 func (s *Service) UpdatePolicy(ctx context.Context, roomID string, user int, profile string, policy GuestControlPolicy) (Snapshot, error) {
 	return withRoomOperation(ctx, s, roomID, func(ctx context.Context) (Snapshot, error) { return s.updatePolicy(ctx, roomID, user, profile, policy) })
+}
+
+// StageItem puts content on a host-pick lobby without starting it.
+func (s *Service) StageItem(ctx context.Context, roomID string, user int, profile string, input SelectItemInput) (Snapshot, error) {
+	return withRoomOperation(ctx, s, roomID, func(ctx context.Context) (Snapshot, error) { return s.stageItem(ctx, roomID, user, profile, input) })
+}
+
+// UpdateSelectionMode switches a lobby between host picks and voting.
+func (s *Service) UpdateSelectionMode(ctx context.Context, roomID string, user int, profile string, mode RoomSelectionMode) (Snapshot, error) {
+	return withRoomOperation(ctx, s, roomID, func(ctx context.Context) (Snapshot, error) {
+		return s.updateSelectionMode(ctx, roomID, user, profile, mode)
+	})
+}
+
+// HandleLobbyReadyForConnection records a member's lobby "I'm ready".
+func (s *Service) HandleLobbyReadyForConnection(ctx context.Context, reg *Registration, user int, profile string, ready bool) (Snapshot, error) {
+	if reg == nil {
+		return Snapshot{}, ErrRoomForbidden
+	}
+	return withRoomOperation(ctx, s, reg.roomID, func(ctx context.Context) (Snapshot, error) {
+		return s.handleLobbyReadyForConnection(ctx, reg, user, profile, ready)
+	})
+}
+
+// StartStagedOnce starts a lobby's staged item; a playing room is a no-op receipt.
+func (s *Service) StartStagedOnce(ctx context.Context, roomID string, user int, profile string) (Snapshot, error) {
+	return withRoomOperation(ctx, s, roomID, func(ctx context.Context) (Snapshot, error) { return s.startStagedOnce(ctx, roomID, user, profile) })
+}
+
+// StopPlaybackOnce returns a playing room to its lobby with the item still staged.
+func (s *Service) StopPlaybackOnce(ctx context.Context, roomID string, user int, profile string) (Snapshot, error) {
+	return withRoomOperation(ctx, s, roomID, func(ctx context.Context) (Snapshot, error) { return s.stopPlaybackOnce(ctx, roomID, user, profile) })
 }
 func (s *Service) selectItemOnce(ctx context.Context, roomID string, user int, profile string, input SelectItemInput, viaVote, promotion bool) (Snapshot, error) {
 	resolved, err := s.resolveSelection(ctx, user, profile, input)

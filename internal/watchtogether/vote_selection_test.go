@@ -93,22 +93,41 @@ func TestPromotingTheWinnerStartsAVoteRoom(t *testing.T) {
 	}
 }
 
-func TestPromotingSomethingOtherThanTheWinnerIsRefused(t *testing.T) {
+// The tally is advisory: the host can override it and start any suggestion.
+// The override is not silent, because the selection is broadcast to everyone.
+func TestHostMayPromoteSomethingOtherThanTheWinner(t *testing.T) {
 	service, _ := newVoteRoomService(t, RoomSelectionModeVote, voteRoomSuggestions())
+	service.selectionResolver = &stubSelectionResolver{resolved: &ResolvedSelection{ContentID: "movie-other"}}
 
-	_, err := service.PromoteSuggestion(context.Background(), "room-1", "runner-up", 7, "host")
-	if !errors.Is(err, ErrNotVoteWinner) {
-		t.Fatalf("PromoteSuggestion() error = %v, want ErrNotVoteWinner", err)
+	snapshot, err := service.PromoteSuggestion(context.Background(), "room-1", "runner-up", 7, "host")
+	if err != nil {
+		t.Fatalf("PromoteSuggestion() error = %v, want the host override to start", err)
+	}
+	if snapshot.SelectedContentID == nil || *snapshot.SelectedContentID != "movie-other" {
+		t.Fatalf("selected content = %v, want movie-other", snapshot.SelectedContentID)
 	}
 }
 
-func TestPromotingBeforeAnyoneVotesIsRefused(t *testing.T) {
-	unvoted := []Suggestion{{ID: "a", RoomID: "room-1", ContentID: "movie-a", VoteCount: 0}}
+func TestHostMayPromoteBeforeAnyoneVotes(t *testing.T) {
+	unvoted := []Suggestion{{ID: "a", RoomID: "room-1", ContentID: "movie-winner", VoteCount: 0}}
 	service, _ := newVoteRoomService(t, RoomSelectionModeVote, unvoted)
 
-	_, err := service.PromoteSuggestion(context.Background(), "room-1", "a", 7, "host")
-	if !errors.Is(err, ErrNoVotesCast) {
-		t.Fatalf("PromoteSuggestion() error = %v, want ErrNoVotesCast", err)
+	if _, err := service.PromoteSuggestion(context.Background(), "room-1", "a", 7, "host"); err != nil {
+		t.Fatalf("PromoteSuggestion() error = %v, want an unvoted suggestion to be promotable", err)
+	}
+}
+
+// VoteWinner still reports the leader (and refuses to name one with no votes)
+// so clients can show who is ahead; it just no longer gates promotion.
+func TestVoteWinnerStillReportsTheLeader(t *testing.T) {
+	service, _ := newVoteRoomService(t, RoomSelectionModeVote, voteRoomSuggestions())
+	winner, err := service.VoteWinner(context.Background(), "room-1")
+	if err != nil || winner.ID != "winner" {
+		t.Fatalf("VoteWinner() = %+v, %v", winner, err)
+	}
+	service.suggestions = &stubSuggestions{ordered: []Suggestion{{ID: "a", RoomID: "room-1", VoteCount: 0}}}
+	if _, err := service.VoteWinner(context.Background(), "room-1"); !errors.Is(err, ErrNoVotesCast) {
+		t.Fatalf("VoteWinner() with no votes error = %v, want ErrNoVotesCast", err)
 	}
 }
 

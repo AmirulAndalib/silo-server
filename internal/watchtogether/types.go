@@ -85,6 +85,9 @@ type MemberSummary struct {
 	IsReady     bool   `json:"is_ready,omitempty"`
 	IsBuffering bool   `json:"is_buffering,omitempty"`
 	IsSyncing   bool   `json:"is_syncing,omitempty"`
+	// LobbyReady is the member's lobby "I'm ready". It is only meaningful
+	// while the room is in the lobby and is always false once playing.
+	LobbyReady bool `json:"lobby_ready"`
 }
 
 type Snapshot struct {

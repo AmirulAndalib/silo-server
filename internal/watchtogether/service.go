@@ -12,10 +12,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Silo-Server/silo-server/internal/cache"
+	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
-	"github.com/google/uuid"
 )
 
 var (
@@ -27,11 +29,12 @@ var (
 	ErrConnectionNotAttached = errors.New("watch together session is not attached")
 	ErrInvalidSelection      = errors.New("watch together selection is invalid")
 	ErrSuggestionNotFound    = errors.New("watch together suggestion not found")
-	// ErrNotVoteWinner is returned when a vote-mode room is asked to promote
-	// something other than the title the room actually voted for.
+	// ErrNotVoteWinner is retained for callers that compare a suggestion with
+	// VoteWinner; promotion itself no longer refuses non-winners, because the
+	// host may override the tally.
 	ErrNotVoteWinner = errors.New("watch together suggestion is not the vote winner")
-	// ErrNoVotesCast is returned when a vote-mode room is asked to start before
-	// anyone has voted: there is no winner to promote yet.
+	// ErrNoVotesCast is returned by VoteWinner when nobody has voted yet, so
+	// there is no leader to report.
 	ErrNoVotesCast = errors.New("watch together room has no votes yet")
 	// ErrVoteRoomSelection is returned when a vote room's selection is set
 	// directly instead of through the vote.
@@ -39,6 +42,13 @@ var (
 	ErrDuplicateVote     = errors.New("watch together already voted")
 	ErrNotVoted          = errors.New("watch together not voted")
 	ErrInvalidPosition   = errors.New("watch together position is invalid")
+	// ErrRoomNotInLobby is returned when a lobby-only action (staging,
+	// switching the selection mode, marking ready) arrives after playback
+	// has started.
+	ErrRoomNotInLobby = errors.New("watch together room is not in the lobby")
+	// ErrNoStagedSelection is returned when the host starts playback with
+	// nothing staged.
+	ErrNoStagedSelection = errors.New("watch together room has nothing staged")
 )
 
 const (
@@ -109,6 +119,28 @@ type RoomStore interface {
 		generation int64,
 		expectedGeneration int64,
 	) (*Room, error)
+	// UpdateSelectionMode switches a lobby between host_pick and vote and
+	// drops whatever was staged: the staged item belonged to the old way of
+	// deciding.
+	UpdateSelectionMode(
+		ctx context.Context,
+		roomID string,
+		mode RoomSelectionMode,
+		anchorUpdatedAt time.Time,
+		generation int64,
+		expectedGeneration int64,
+	) (*Room, error)
+	// UpdateStagedSelection replaces the lobby's staged item without leaving
+	// the lobby. It never touches phase, playback state or the selection
+	// revision; only a start does.
+	UpdateStagedSelection(
+		ctx context.Context,
+		roomID string,
+		selection SelectItemInput,
+		anchorUpdatedAt time.Time,
+		generation int64,
+		expectedGeneration int64,
+	) (*Room, error)
 }
 
 type RoomSessionLookup interface {
@@ -154,6 +186,17 @@ type memberState struct {
 	// set when the member fails to become ready before waitingResumeDeadline
 	// and cleared once they attach or report ready again.
 	ignoreWait bool
+	// syncingToRoom marks a freshly attached session that has been told the
+	// room's position but has not confirmed it yet. Until then the member's
+	// state reports describe the stream's starting point, not where the room
+	// is, so they are treated as a guest's: corrected, never authoritative.
+	// Cleared by a ready report or by the member's own transport request.
+	syncingToRoom bool
+	// lobbyReady is the member's "I'm ready" in the lobby. It is unrelated to
+	// isReady, which is the buffering barrier bound to an attached playback
+	// session, and it is cleared whenever what the room is about to play
+	// changes: staging a different item, starting, or switching modes.
+	lobbyReady bool
 	lastPingMS int64
 }
 
@@ -527,6 +570,7 @@ func (s *Service) attachSessionForConnection(
 		member.sessionID = sessionID
 		member.isReady = false
 		member.isBuffering = live.room.Phase == RoomPhasePlaying && live.room.PlaybackState == RoomPlaybackStateWaiting
+		member.syncingToRoom = false
 	}
 
 	var commandDispatches []commandDispatch
@@ -546,7 +590,11 @@ func (s *Service) attachSessionForConnection(
 				return snapshot, nil
 			}
 		} else {
+			// The lone (re)joiner is told where the room is. Until they confirm,
+			// their stream position is the file's start, not the room's; the
+			// host in particular must not drag the anchor back there.
 			commandDispatches = s.syncMemberToRoomLocked(live, sessionID)
+			member.syncingToRoom = len(commandDispatches) > 0
 		}
 	}
 
@@ -588,6 +636,9 @@ func (s *Service) handleTransportRequestForConnection(
 		s.mu.Unlock()
 		return Snapshot{}, err
 	}
+	// An explicit transport request is the member's intent, which supersedes
+	// any pending sync to the room's position.
+	member.syncingToRoom = false
 
 	position := live.room.AnchorPositionSeconds
 	if request.PositionSeconds != nil {
@@ -706,6 +757,17 @@ func (s *Service) handleStateReportForConnection(
 	expected := s.expectedPositionLocked(live)
 	pauseMismatch := report.IsPaused != live.room.IsPaused
 	drift := math.Abs(report.PositionSeconds - expected)
+	// A host who has just (re)attached and not yet reached the room's
+	// position is reporting the stream's start, not a decision. Anchoring
+	// there would rewind everyone; correct the host like a guest instead. The
+	// first report that matches the room ends the sync.
+	if isHost && member.syncingToRoom {
+		if !pauseMismatch && drift <= 1.5 {
+			member.syncingToRoom = false
+		} else {
+			isHost = false
+		}
+	}
 
 	snapshot := s.buildSnapshotLocked(live, userID, profileID)
 	if isHost && (pauseMismatch || drift > 1.5) {
@@ -749,6 +811,54 @@ func (s *Service) handleStateReportForConnection(
 		s.sendCommandDispatches(ctx, correctionDispatches)
 	}
 
+	return snapshot, nil
+}
+
+// handleLobbyReadyForConnection records a member's lobby "I'm ready". It is
+// advisory: the host may start regardless, and the flag is dropped the moment
+// what the room is about to play changes. The flag rides in the shared room
+// runtime like the rest of member state, so every API server sees it.
+func (s *Service) handleLobbyReadyForConnection(
+	ctx context.Context,
+	reg *Registration,
+	userID int,
+	profileID string,
+	ready bool,
+) (Snapshot, error) {
+	if reg == nil {
+		return Snapshot{}, ErrRoomForbidden
+	}
+
+	_, live, err := s.getOrLoadLiveRoom(ctx, reg.roomID)
+	if err != nil {
+		return Snapshot{}, err
+	}
+
+	s.mu.Lock()
+	member := live.members[reg.memberKey]
+	if member == nil || member.connection == nil || member.connection != reg.connection {
+		s.mu.Unlock()
+		return Snapshot{}, ErrRoomForbidden
+	}
+	if live.room.Phase == RoomPhaseEnded {
+		s.mu.Unlock()
+		return Snapshot{}, ErrRoomClosed
+	}
+	if live.room.Phase != RoomPhaseLobby {
+		s.mu.Unlock()
+		return Snapshot{}, ErrRoomNotInLobby
+	}
+	if member.lobbyReady == ready {
+		snapshot := s.buildSnapshotLocked(live, userID, profileID)
+		s.mu.Unlock()
+		return snapshot, nil
+	}
+	member.lobbyReady = ready
+	snapshot := s.buildSnapshotLocked(live, userID, profileID)
+	dispatches := s.prepareSnapshotDispatchesLocked(live)
+	s.mu.Unlock()
+
+	s.sendDispatches(ctx, dispatches)
 	return snapshot, nil
 }
 
@@ -972,6 +1082,168 @@ func (s *Service) updatePolicy(
 	return snapshot, nil
 }
 
+// StageItem sets what a host-pick lobby will play without starting it. The
+// room stays in the lobby; StartStagedOnce moves it to playing. Staging bumps
+// the room generation but not the selection revision, because the revision is
+// the playback epoch and nothing has started.
+func (s *Service) stageItem(
+	ctx context.Context,
+	roomID string,
+	userID int,
+	profileID string,
+	input SelectItemInput,
+) (Snapshot, error) {
+	if s == nil || s.selectionResolver == nil {
+		return Snapshot{}, fmt.Errorf("watch together selection unavailable")
+	}
+	if strings.TrimSpace(input.ContentID) == "" {
+		return Snapshot{}, ErrInvalidSelection
+	}
+	resolved, err := s.selectionResolver.ResolveSelection(ctx, userID, profileID, input)
+	if err != nil {
+		if errors.Is(err, catalog.ErrWatchTargetNotPlayable) {
+			return Snapshot{}, ErrInvalidSelection
+		}
+		return Snapshot{}, err
+	}
+	if resolved == nil || strings.TrimSpace(resolved.ContentID) == "" {
+		return Snapshot{}, ErrInvalidSelection
+	}
+
+	_, live, err := s.getOrLoadLiveRoom(ctx, roomID)
+	if err != nil {
+		return Snapshot{}, err
+	}
+
+	s.mu.Lock()
+	if live.room.HostUserID != userID || live.room.HostProfileID != profileID {
+		s.mu.Unlock()
+		return Snapshot{}, ErrRoomForbidden
+	}
+	if live.room.Phase == RoomPhaseEnded {
+		s.mu.Unlock()
+		return Snapshot{}, ErrRoomClosed
+	}
+	if live.room.SelectionMode == RoomSelectionModeVote {
+		s.mu.Unlock()
+		return Snapshot{}, ErrVoteRoomSelection
+	}
+	if live.room.Phase != RoomPhaseLobby {
+		s.mu.Unlock()
+		return Snapshot{}, ErrRoomNotInLobby
+	}
+
+	contentChanged := live.room.SelectedContentID == nil || *live.room.SelectedContentID != resolved.ContentID
+	contentID := resolved.ContentID
+	live.room.SelectedContentID = &contentID
+	live.room.SelectedFileID = resolved.FileID
+	live.room.SelectedLibraryID = resolved.LibraryID
+	// Staging is activity: keep the idle janitor away from a lobby that is
+	// being used.
+	live.room.AnchorUpdatedAt = s.now()
+	if contentChanged {
+		s.clearLobbyReadyLocked(live)
+	}
+	conflict, updateErr := s.persistRoomChangeLocked(ctx, live, func(room Room, expectedGeneration int64) (*Room, error) {
+		return s.repo.UpdateStagedSelection(
+			ctx,
+			roomID,
+			SelectItemInput{ContentID: contentID, FileID: room.SelectedFileID, LibraryID: room.SelectedLibraryID},
+			room.AnchorUpdatedAt,
+			room.Generation,
+			expectedGeneration,
+		)
+	})
+	if updateErr != nil {
+		s.mu.Unlock()
+		return Snapshot{}, updateErr
+	}
+	snapshot := s.buildSnapshotLocked(live, userID, profileID)
+	if conflict {
+		s.mu.Unlock()
+		return snapshot, nil
+	}
+	dispatches := s.prepareSnapshotDispatchesLocked(live)
+	s.mu.Unlock()
+
+	s.sendDispatches(ctx, dispatches)
+	return snapshot, nil
+}
+
+// UpdateSelectionMode switches how the lobby decides what to play. Only the
+// host may switch, only while nothing is playing. A staged item is dropped;
+// suggestions and votes are rows that outlive the switch, so a room that goes
+// vote → host_pick can still promote any of them.
+func (s *Service) updateSelectionMode(
+	ctx context.Context,
+	roomID string,
+	userID int,
+	profileID string,
+	mode RoomSelectionMode,
+) (Snapshot, error) {
+	if mode != RoomSelectionModeHostPick && mode != RoomSelectionModeVote {
+		return Snapshot{}, ErrInvalidSelection
+	}
+
+	_, live, err := s.getOrLoadLiveRoom(ctx, roomID)
+	if err != nil {
+		return Snapshot{}, err
+	}
+
+	s.mu.Lock()
+	if live.room.HostUserID != userID || live.room.HostProfileID != profileID {
+		s.mu.Unlock()
+		return Snapshot{}, ErrRoomForbidden
+	}
+	if live.room.Phase == RoomPhaseEnded {
+		s.mu.Unlock()
+		return Snapshot{}, ErrRoomClosed
+	}
+	if live.room.Phase != RoomPhaseLobby {
+		s.mu.Unlock()
+		return Snapshot{}, ErrRoomNotInLobby
+	}
+	if live.room.SelectionMode == mode {
+		snapshot := s.buildSnapshotLocked(live, userID, profileID)
+		s.mu.Unlock()
+		return snapshot, nil
+	}
+
+	live.room.SelectionMode = mode
+	live.room.SelectedContentID = nil
+	live.room.SelectedFileID = nil
+	live.room.SelectedLibraryID = nil
+	live.room.AnchorUpdatedAt = s.now()
+	s.clearLobbyReadyLocked(live)
+	conflict, updateErr := s.persistRoomChangeLocked(ctx, live, func(room Room, expectedGeneration int64) (*Room, error) {
+		return s.repo.UpdateSelectionMode(ctx, roomID, room.SelectionMode, room.AnchorUpdatedAt, room.Generation, expectedGeneration)
+	})
+	if updateErr != nil {
+		s.mu.Unlock()
+		return Snapshot{}, updateErr
+	}
+	snapshot := s.buildSnapshotLocked(live, userID, profileID)
+	if conflict {
+		s.mu.Unlock()
+		return snapshot, nil
+	}
+	dispatches := s.prepareSnapshotDispatchesLocked(live)
+	s.mu.Unlock()
+
+	s.sendDispatches(ctx, dispatches)
+	return snapshot, nil
+}
+
+// clearLobbyReadyLocked forgets every member's lobby "ready". Must be called
+// with s.mu held.
+func (s *Service) clearLobbyReadyLocked(live *liveRoom) {
+	for _, member := range live.members {
+		if member != nil {
+			member.lobbyReady = false
+		}
+	}
+}
+
 // SelectItem sets what the room plays at the host's direct request. In a vote
 // room that request is refused: the vote decides, and PromoteSuggestion is the
 // only way in.
@@ -1065,6 +1337,8 @@ func (s *Service) applySelectionLocked(ctx context.Context, live *liveRoom, reso
 		member.ignoreWait = false
 		member.waitingCommand = nil
 		member.lastCommandID = ""
+		member.syncingToRoom = false
+		member.lobbyReady = false
 	}
 	s.disarmWaitingDeadlineLocked(live)
 
@@ -1484,7 +1758,8 @@ func (s *Service) buildSnapshotLocked(live *liveRoom, userID int, profileID stri
 			IsSelf:      m.userID == userID && m.profileID == profileID,
 			Connected:   true,
 			IsReady:     m.isReady, IsBuffering: m.isBuffering,
-			IsSyncing: live.room.PlaybackState == RoomPlaybackStateWaiting && m.sessionID != "" && !m.isReady && !m.ignoreWait,
+			IsSyncing:  live.room.PlaybackState == RoomPlaybackStateWaiting && m.sessionID != "" && !m.isReady && !m.ignoreWait,
+			LobbyReady: m.lobbyReady,
 		})
 	}
 	slices.SortFunc(members, func(a, b MemberSummary) int {
@@ -2074,29 +2349,13 @@ func (s *Service) PromoteSuggestion(
 		return Snapshot{}, ErrSuggestionNotFound
 	}
 
-	// In a vote room the host starts the winner; they do not get to overrule it.
-	// Being able to promote any suggestion would make "vote" host_pick with
-	// extra steps, and the tally on everyone else's screen would be a lie.
-	//
-	// The winner is read here and the selection commits a moment later, so a
-	// vote landing in between can start a title that has just stopped being the
-	// head of the tally. That is deliberate: the host pressed start on the
-	// standings they and the room could see, and a vote arriving during the
-	// round trip should not retroactively overrule the press. Closing the window
-	// would mean holding the room lock across a suggestion-store read, which
-	// stalls every other room for a race whose worst case is off by one vote.
+	// The tally is advice, not a lock: the host may start any suggestion in a
+	// vote room. Everyone sees which one was chosen because the selection is
+	// broadcast, so a host override is visible rather than silent. viaVote
+	// stays set so the vote-room gate in selectItem lets the promotion in.
 	s.mu.Lock()
 	isVoteRoom := live.room.SelectionMode == RoomSelectionModeVote
 	s.mu.Unlock()
-	if isVoteRoom {
-		winner, err := s.VoteWinner(ctx, roomID)
-		if err != nil {
-			return Snapshot{}, err
-		}
-		if winner.ID != suggestion.ID {
-			return Snapshot{}, ErrNotVoteWinner
-		}
-	}
 
 	return s.selectItem(ctx, roomID, userID, profileID, SelectItemInput{
 		ContentID: suggestion.ContentID,

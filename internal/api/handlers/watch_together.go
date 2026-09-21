@@ -28,6 +28,10 @@ type WatchTogetherHandler struct {
 	Service       *watchtogether.Service
 	ScopeResolver WatchTogetherScopeResolver
 	TokenService  *watchtogether.RoomTokenService
+	// MemberState and Details serve the v2 member-state and picker reads.
+	// Both may be nil, in which case those operations fail closed.
+	MemberState *watchtogether.MemberStateReader
+	Details     watchtogether.ItemDetailLookup
 }
 
 type createWatchTogetherRoomRequest struct {
@@ -107,6 +111,11 @@ type watchTogetherBufferingMessage struct {
 	SessionID       string  `json:"session_id"`
 	PositionSeconds float64 `json:"position_seconds"`
 	IsPaused        bool    `json:"is_paused"`
+}
+
+type watchTogetherLobbyReadyMessage struct {
+	Type  string `json:"type"`
+	Ready bool   `json:"ready"`
 }
 
 type watchTogetherPingMessage struct {
@@ -897,6 +906,13 @@ func (h *WatchTogetherHandler) handleRoomClientMessage(
 			PositionSeconds: msg.PositionSeconds,
 			IsPaused:        msg.IsPaused,
 		})
+		return err
+	case "lobby_ready":
+		var msg watchTogetherLobbyReadyMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return err
+		}
+		_, err := h.Service.HandleLobbyReadyForConnection(ctx, reg, userID, profileID, msg.Ready)
 		return err
 	case "ping":
 		var msg watchTogetherPingMessage
