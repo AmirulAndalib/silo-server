@@ -2,6 +2,7 @@ package watchtogether
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"testing"
@@ -306,6 +307,114 @@ func TestGuestDriftTriggersCorrection(t *testing.T) {
 
 	if len(conn.payloads) == 0 {
 		t.Fatal("expected correction commands to be dispatched")
+	}
+}
+
+func TestGuestDriftCorrectionIsCoalescedAndRearmed(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 20, 0, time.UTC)
+	current := now
+	repo := &stubRepo{room: baseRoom(now)}
+	conn := &recordingConn{}
+	service := newServiceForTest(
+		now,
+		repo,
+		&stubSessions{session: &playback.Session{
+			ID:          "session-1",
+			UserID:      8,
+			ProfileID:   "guest",
+			MediaFileID: 42,
+		}},
+		&stubFiles{file: &models.MediaFile{ID: 42, ContentID: "movie-1"}},
+		nil,
+	)
+	service.now = func() time.Time { return current }
+	service.rooms[repo.room.ID].members[buildMemberKey(8, "guest")] = &memberState{
+		userID:     8,
+		profileID:  "guest",
+		sessionID:  "session-1",
+		connection: conn,
+	}
+
+	reg := registrationFor(repo.room.ID, 8, "guest", conn)
+	report := StateReport{SessionID: "session-1", PositionSeconds: 2}
+	if _, err := service.HandleStateReportForConnection(t.Context(), reg, 8, "guest", report); err != nil {
+		t.Fatal(err)
+	}
+	first := lastTransport(t, conn)
+	if _, err := service.HandleStateReportForConnection(t.Context(), reg, 8, "guest", report); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(conn.payloads); got != 1 {
+		t.Fatalf("repeated drift report dispatched %d corrections, want 1", got)
+	}
+
+	current = current.Add(guestCorrectionRetryInterval)
+	if _, err := service.HandleStateReportForConnection(t.Context(), reg, 8, "guest", report); err != nil {
+		t.Fatal(err)
+	}
+	second := lastTransport(t, conn)
+	if got := len(conn.payloads); got != 2 {
+		t.Fatalf("expired correction dispatched %d corrections, want 2", got)
+	}
+	if second.CommandID == first.CommandID {
+		t.Fatalf("retry reused command ID %q", second.CommandID)
+	}
+
+	expected := expectedPosition(repo.room, current)
+	if _, err := service.HandleStateReportForConnection(t.Context(), reg, 8, "guest", StateReport{
+		SessionID:       "session-1",
+		PositionSeconds: expected,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.HandleStateReportForConnection(t.Context(), reg, 8, "guest", report); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(conn.payloads); got != 3 {
+		t.Fatalf("in-sync report did not re-arm correction, got %d corrections, want 3", got)
+	}
+}
+
+func TestCorrectionCommandRoundTripsRoomRuntime(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 20, 0, time.UTC)
+	repo := &stubRepo{room: baseRoom(now)}
+	service := newServiceForTest(now, repo, &stubSessions{}, &stubFiles{}, nil)
+	command := &TransportCommand{
+		CommandID:         "correction-1",
+		SessionID:         "session-1",
+		SelectionRevision: repo.room.SelectionRevision,
+		Action:            TransportActionPlay,
+		PositionSeconds:   20,
+		ExecuteAt:         now.Add(time.Second).Format(time.RFC3339Nano),
+		IssuedAt:          now.Format(time.RFC3339Nano),
+		PlaybackState:     RoomPlaybackStatePlaying,
+	}
+	key := buildMemberKey(8, "guest")
+	live := service.rooms[repo.room.ID]
+	live.members[key] = &memberState{
+		userID:            8,
+		profileID:         "guest",
+		sessionID:         command.SessionID,
+		correctionCommand: command,
+	}
+
+	encoded, err := json.Marshal(service.runtimeLocked(live))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state roomRuntime
+	if err := json.Unmarshal(encoded, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Members[key].CorrectionCommand == nil {
+		t.Fatal("correction command was omitted from room runtime")
+	}
+
+	adopted := &liveRoom{members: make(map[string]*memberState)}
+	service.adoptRuntimeLocked(t.Context(), adopted, repo.room, state)
+	got := adopted.members[key].correctionCommand
+	if got == nil || got.CommandID != command.CommandID || got.SessionID != command.SessionID {
+		t.Fatalf("adopted correction command = %+v, want %+v", got, command)
 	}
 }
 

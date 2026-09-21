@@ -135,6 +135,7 @@ func (s *Service) selectItemOnceInRoom(ctx context.Context, roomID string, user 
 				member.isReady = false
 				member.isBuffering = false
 				member.ignoreWait = false
+				member.correctionCommand = nil
 			}
 			s.disarmWaitingDeadlineLocked(live)
 		}

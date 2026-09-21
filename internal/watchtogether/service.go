@@ -52,6 +52,11 @@ const (
 	// scheduled, so a single member with a huge (or bogus) measured latency
 	// cannot stall the whole room.
 	maxTransportLead = 5 * time.Second
+	// guestCorrectionRetryInterval prevents repeated state reports from
+	// rebuilding a guest's stream while the previous correction is still being
+	// applied. A later report retries the correction if the guest remains out of
+	// sync after this bounded interval.
+	guestCorrectionRetryInterval = 5 * time.Second
 	// maxBufferingAnchorDriftSeconds bounds how far a buffering member's
 	// reported position may move the shared room anchor.
 	maxBufferingAnchorDriftSeconds = 5.0
@@ -148,6 +153,10 @@ type memberState struct {
 	connection      RoomConnection
 	isReady         bool
 	isBuffering     bool
+	// correctionCommand is the most recent normal-playing correction sent to
+	// this member. It is persisted with the room runtime so another API server
+	// does not immediately resend the same correction.
+	correctionCommand *TransportCommand
 	// waitingCommand is the command this member must finish before resuming.
 	waitingCommand *TransportCommand
 	// ignoreWait excludes a member from room-wide readiness barriers. It is
@@ -412,6 +421,7 @@ func (s *Service) connect(
 	current.leaseUntil = s.now().Add(connectionLease)
 	current.disconnectedAt = time.Time{}
 	current.lastCommandID = ""
+	current.correctionCommand = nil
 	if live.room.PlaybackState == RoomPlaybackStateWaiting {
 		current.isReady = false
 	}
@@ -521,6 +531,7 @@ func (s *Service) attachSessionForConnection(
 		s.mu.Unlock()
 		return Snapshot{}, ErrRoomForbidden
 	}
+	member.correctionCommand = nil
 	reattaching := member.sessionID == sessionID
 	member.ignoreWait = false
 	if !reattaching {
@@ -703,7 +714,8 @@ func (s *Service) handleStateReportForConnection(
 	}
 
 	isHost := userID == live.room.HostUserID && profileID == live.room.HostProfileID
-	expected := s.expectedPositionLocked(live)
+	now := s.now()
+	expected := expectedPosition(live.room, now)
 	pauseMismatch := report.IsPaused != live.room.IsPaused
 	drift := math.Abs(report.PositionSeconds - expected)
 
@@ -722,10 +734,12 @@ func (s *Service) handleStateReportForConnection(
 			s.mu.Unlock()
 			return snapshot, nil
 		}
+		s.clearCorrectionCommandsLocked(live)
 		dispatches = s.prepareSnapshotDispatchesLocked(live)
 	} else if !isHost && (pauseMismatch || drift > 1.0) {
-		correctionDispatches = s.targetedCommandDispatchesLocked(live, report.SessionID, TransportCommand{
+		command := TransportCommand{
 			CommandID:         uuid.NewString(),
+			SessionID:         report.SessionID,
 			SelectionRevision: live.room.SelectionRevision,
 			Action: func() TransportAction {
 				if live.room.PlaybackState == RoomPlaybackStatePlaying {
@@ -733,11 +747,17 @@ func (s *Service) handleStateReportForConnection(
 				}
 				return TransportActionPause
 			}(),
-			PositionSeconds: math.Max(0, expectedPosition(live.room, s.now())),
-			ExecuteAt:       s.now().Add(s.highestPingLocked(live)).UTC().Format(time.RFC3339Nano),
-			IssuedAt:        s.now().UTC().Format(time.RFC3339Nano),
+			PositionSeconds: math.Max(0, expected),
+			ExecuteAt:       now.Add(s.highestPingLocked(live)).UTC().Format(time.RFC3339Nano),
+			IssuedAt:        now.UTC().Format(time.RFC3339Nano),
 			PlaybackState:   live.room.PlaybackState,
-		})
+		}
+		if !correctionCommandPending(member, command, now) {
+			member.correctionCommand = &command
+			correctionDispatches = s.targetedCommandDispatchesLocked(live, report.SessionID, command)
+		}
+	} else if !isHost {
+		member.correctionCommand = nil
 	}
 	s.mu.Unlock()
 	if isHost && (pauseMismatch || drift > 1.5) {
@@ -1609,6 +1629,7 @@ func (s *Service) resetMemberReadinessLocked(live *liveRoom, markBuffering bool)
 			continue
 		}
 		member.isReady = false
+		member.correctionCommand = nil
 		if markBuffering {
 			member.isBuffering = true
 		}
@@ -1700,6 +1721,7 @@ func (s *Service) transportCommandDispatchesLocked(
 	positionSeconds float64,
 	executeAt time.Time,
 ) []commandDispatch {
+	s.clearCorrectionCommandsLocked(live)
 	command := TransportCommand{
 		CommandID: uuid.NewString(), SelectionRevision: live.room.SelectionRevision,
 		Action: action, PositionSeconds: math.Max(0, positionSeconds),
@@ -1724,6 +1746,33 @@ func (s *Service) transportCommandDispatchesLocked(
 		}
 	}
 	return dispatches
+}
+
+func (s *Service) clearCorrectionCommandsLocked(live *liveRoom) {
+	for _, member := range live.members {
+		if member != nil {
+			member.correctionCommand = nil
+		}
+	}
+}
+
+func correctionCommandPending(member *memberState, command TransportCommand, now time.Time) bool {
+	if member == nil || member.correctionCommand == nil {
+		return false
+	}
+	pending := member.correctionCommand
+	if pending.SessionID != command.SessionID ||
+		pending.SelectionRevision != command.SelectionRevision ||
+		pending.Action != command.Action ||
+		pending.PlaybackState != command.PlaybackState {
+		return false
+	}
+	issuedAt, err := time.Parse(time.RFC3339Nano, pending.IssuedAt)
+	if err != nil {
+		return false
+	}
+	age := now.Sub(issuedAt)
+	return age >= 0 && age < guestCorrectionRetryInterval
 }
 
 func (s *Service) runCommandDispatches(dispatches []commandDispatch) {
