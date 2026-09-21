@@ -62,7 +62,8 @@ func (h *PlaybackHandler) maybeQueueLazyPlaybackMarkers(
 		return
 	}
 	mode := markers.NormalizeMode(rawMode)
-	if !strings.EqualFold(strings.TrimSpace(lazy), "true") {
+	lazyEnabled := strings.EqualFold(strings.TrimSpace(lazy), "true")
+	if !lazyEnabled {
 		storage, err := h.SettingsRepo.Get(ctx, markers.SettingOnlineStorage)
 		if err != nil || storage != "on_demand" || (mode != markers.ModeOnline && mode != markers.ModeBoth) {
 			return
@@ -77,7 +78,7 @@ func (h *PlaybackHandler) maybeQueueLazyPlaybackMarkers(
 	}
 
 	hasOnline := h.hasOnlineMarkerProviders()
-	shouldRunLocal := markers.ShouldRunLocal(mode)
+	shouldRunLocal := lazyEnabled && markers.ShouldRunLocal(mode)
 	shouldRunOnline := (mode == markers.ModeOnline || mode == markers.ModeBoth) && hasOnline
 
 	if shouldRunOnline {

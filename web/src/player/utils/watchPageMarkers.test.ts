@@ -166,6 +166,42 @@ describe("markerOccurrenceAtTime", () => {
       end: 50,
     });
   });
+
+  it.each([30, 50])(
+    "keeps the last ending occurrence after skipping an inner marker ending at %s",
+    (innerEnd) => {
+      const nested = resolveMarkerRegions(
+        makeVersion({ marker_segments: segments(["intro", 10, 50], ["intro", 20, innerEnd]) }),
+      );
+      expect(markerOccurrenceAtTime(nested, "intro", 50)).toEqual({
+        kind: "intro",
+        start: 10,
+        end: 50,
+      });
+    },
+  );
+
+  it("prefers the earliest start when active occurrences have the same end", () => {
+    const nested = resolveMarkerRegions(
+      makeVersion({ marker_segments: segments(["intro", 10, 50], ["intro", 20, 50]) }),
+    );
+    expect(markerOccurrenceAtTime(nested, "intro", 25)).toEqual({
+      kind: "intro",
+      start: 10,
+      end: 50,
+    });
+  });
+
+  it("keeps selecting the latest start when active occurrences have different ends", () => {
+    const nested = resolveMarkerRegions(
+      makeVersion({ marker_segments: segments(["intro", 10, 50], ["intro", 20, 30]) }),
+    );
+    expect(markerOccurrenceAtTime(nested, "intro", 25)).toEqual({
+      kind: "intro",
+      start: 20,
+      end: 30,
+    });
+  });
 });
 
 describe("resolveAutoplayMarker", () => {

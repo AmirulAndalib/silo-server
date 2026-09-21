@@ -133,10 +133,16 @@ export function markerOccurrenceAtTime(
   let active: MarkerRegionView | null = null;
   for (const region of occurrences) {
     if (region.start > currentTime) break;
-    occurrence = region;
+    if (!occurrence || region.end > occurrence.end) occurrence = region;
     if (currentTime < region.end) active = region;
   }
-  return active ?? occurrence;
+  if (active) {
+    // Equal-end occurrences use the same earliest-start identity before and
+    // after a skip so the intro's undo prompt survives the position change.
+    const end = active.end;
+    return occurrences.find((region) => region.end === end) ?? active;
+  }
+  return occurrence;
 }
 
 /** Only leave the episode once all unmarked scenes have played. */
