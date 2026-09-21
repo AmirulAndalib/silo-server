@@ -52,7 +52,9 @@ export default function SeasonContent({ item }: { item: ItemDetail & { type: "se
   const seriesTitle = item.series_title ?? "Series";
   const seriesId = item.series_id;
   const firstEpisode = episodes[0];
-  const firstUnwatched = episodes.find((e) => !e.user_data?.played) ?? firstEpisode;
+  const playableEpisodes = episodes.filter((episode) => (episode.files?.length ?? 0) > 0);
+  const firstUnwatched =
+    playableEpisodes.find((episode) => !episode.user_data?.played) ?? playableEpisodes[0];
   const watchTogether = useDetailWatchTogether({
     item,
     target: firstUnwatched

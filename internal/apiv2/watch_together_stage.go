@@ -21,7 +21,7 @@ type WatchTogetherStageInput struct {
 }
 
 func registerWatchTogetherStage(reg *Registry) {
-	op := Operation{Operation: humaOp(http.MethodPut, Prefix+"/watch-together/rooms/{room_id}/staged-selection", "stageWatchTogetherRoomItem", "realtime", "Stage playable content in a host-pick lobby without starting it. The room stays in the lobby until the host starts playback; staging the same content again is a no-op. Refused once the room is playing."), Class: ClassProfileScoped, DemoRestricted: true, ServiceBacked: true, RetrySafety: RetrySafetyNaturalIdempotent}
+	op := Operation{Operation: humaOp(http.MethodPut, Prefix+"/watch-together/rooms/{room_id}/staged-selection", "stageWatchTogetherRoomItem", "realtime", "Stage playable content in a host-pick lobby without starting it. The room stays in the lobby until the host starts playback; staging the same resolved content, file, and library again is a no-op. Refused once the room is playing."), Class: ClassProfileScoped, DemoRestricted: true, ServiceBacked: true, RetrySafety: RetrySafetyNaturalIdempotent}
 	op.MaxBodyBytes = 4096
 	op.Errors = []int{409}
 	Register(reg, op, func(ctx context.Context, in *WatchTogetherStageInput) (*WatchTogetherRoomReadOutput, error) {

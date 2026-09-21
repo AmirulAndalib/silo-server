@@ -9920,7 +9920,7 @@ export interface paths {
       cookie?: never;
     };
     get?: never;
-    /** Stage playable content in a host-pick lobby without starting it. The room stays in the lobby until the host starts playback; staging the same content again is a no-op. Refused once the room is playing. */
+    /** Stage playable content in a host-pick lobby without starting it. The room stays in the lobby until the host starts playback; staging the same resolved content, file, and library again is a no-op. Refused once the room is playing. */
     put: operations["stageWatchTogetherRoomItem"];
     post?: never;
     delete?: never;

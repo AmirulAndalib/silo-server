@@ -266,6 +266,58 @@ func TestPickerWatchlistUnionOrdersByOverlapThenRecency(t *testing.T) {
 	}
 }
 
+func TestPickerNamesUnwatchedModalNextUp(t *testing.T) {
+	members := append(pickerMembers(), MemberSummary{UserID: 4, ProfileID: "guest", DisplayName: "Guest", Connected: true})
+	provider := &memberProvider{stores: map[int]*memberStore{
+		1: {inOrder: []userstore.WatchProgress{inProgress("sev-s2e4", 300, 3300, "2026-04-05T00:00:00Z")}},
+		2: {inOrder: []userstore.WatchProgress{inProgress("sev-s2e4", 100, 3300, "2026-04-04T00:00:00Z")}},
+		3: {},
+		4: {},
+	}}
+	episodes := episodeIndex{"sev-s2e4": severanceE4, "sev-s2e3": severanceE3}
+	result := catalog.NextUpResult{ContentID: "sev-s2e3", SeriesID: "severance", SeasonNumber: 2, EpisodeNumber: 3}
+	nextUp := nextUpIndex{buildMemberKey(3, "theo") + ":severance": result, buildMemberKey(4, "guest") + ":severance": result}
+	rows, err := NewMemberStateReader(provider, episodes, nextUp).Picker(t.Context(), members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows.ContinueTogether) != 1 {
+		t.Fatalf("continue together = %+v", rows.ContinueTogether)
+	}
+	next := rows.ContinueTogether[0].NextUp
+	if next == nil || next.ContentID != "sev-s2e3" || next.Title != severanceE3.Title || next.MemberCount != 2 {
+		t.Fatalf("unwatched next up = %+v, want the earlier tied episode with its title", next)
+	}
+}
+
+func TestPickerWatchlistCollapsesEpisodesAndCountsEachMemberOnce(t *testing.T) {
+	provider := &memberProvider{stores: map[int]*memberStore{
+		1: {watchlist: []userstore.WatchlistEntry{
+			{MediaItemID: "sev-s2e3", AddedAt: "2026-04-05T00:00:00Z"},
+			{MediaItemID: "sev-s2e4", AddedAt: "2026-04-04T00:00:00Z"},
+			{MediaItemID: "severance", AddedAt: "2026-04-03T00:00:00Z"},
+		}},
+		2: {watchlist: []userstore.WatchlistEntry{{MediaItemID: "sev-s2e4", AddedAt: "2026-04-04T00:00:00Z"}}},
+		3: {watchlist: []userstore.WatchlistEntry{{MediaItemID: "arrival", AddedAt: "2026-04-06T00:00:00Z"}}},
+	}}
+	reader := NewMemberStateReader(provider, episodeIndex{"sev-s2e3": severanceE3, "sev-s2e4": severanceE4}, nil)
+	rows, err := reader.Picker(t.Context(), pickerMembers())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows.WatchlistUnion) != 2 || rows.WatchlistUnion[0].ContentID != "severance" || len(rows.WatchlistUnion[0].Members) != 2 {
+		t.Fatalf("watchlist union = %+v, want the series with two distinct members then arrival", rows.WatchlistUnion)
+	}
+	details := detailIndex{"severance": {ContentID: "severance", Title: "Severance"}, "arrival": {ContentID: "arrival", Title: "Arrival"}}
+	view, err := ResolvePicker(t.Context(), details, catalog.AccessFilter{}, pickerMembers(), rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.WatchlistUnion) != 2 || view.WatchlistUnion[0].Item.ContentID != "severance" {
+		t.Fatalf("watchlisted episodes disappeared during card lookup: %+v", view.WatchlistUnion)
+	}
+}
+
 type detailIndex map[string]*catalog.ItemDetail
 
 func (d detailIndex) GetItemCardsByIDs(_ context.Context, ids []string, _ catalog.AccessFilter) (map[string]*catalog.ItemDetail, error) {

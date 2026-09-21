@@ -281,16 +281,25 @@ func (r *MemberStateReader) loadMemberProgress(ctx context.Context, store userst
 	for _, row := range rows {
 		ids = append(ids, row.MediaItemID)
 	}
+	page.seriesOf, err = r.episodesByID(ctx, ids)
+	return page, err
+}
+
+func (r *MemberStateReader) episodesByID(ctx context.Context, ids []string) (map[string]*models.Episode, error) {
+	byID := map[string]*models.Episode{}
+	if r.episodes == nil || len(ids) == 0 {
+		return byID, nil
+	}
 	episodes, err := r.episodes.GetByIDs(ctx, ids)
 	if err != nil {
-		return page, err
+		return nil, err
 	}
 	for _, ep := range episodes {
 		if ep != nil && ep.SeriesID != "" {
-			page.seriesOf[ep.ContentID] = ep
+			byID[ep.ContentID] = ep
 		}
 	}
-	return page, nil
+	return byID, nil
 }
 
 // Picker computes the rows the room's picker opens with: what two or more
@@ -382,13 +391,29 @@ func (r *MemberStateReader) Picker(ctx context.Context, members []MemberSummary)
 		if err != nil {
 			return rows, err
 		}
+		ids := make([]string, 0, len(entries))
 		for _, entry := range entries {
-			state := lists[entry.MediaItemID]
-			if state == nil {
-				state = &listState{entry: PickerEntry{ContentID: entry.MediaItemID}}
-				lists[entry.MediaItemID] = state
+			ids = append(ids, entry.MediaItemID)
+		}
+		episodes, err := r.episodesByID(ctx, ids)
+		if err != nil {
+			return rows, err
+		}
+		seen := map[string]bool{}
+		for _, entry := range entries {
+			unitID := entry.MediaItemID
+			if ep := episodes[unitID]; ep != nil {
+				unitID = ep.SeriesID
 			}
-			state.entry.Members = append(state.entry.Members, PickerMember{UserID: member.UserID, ProfileID: member.ProfileID, DisplayName: member.DisplayName})
+			state := lists[unitID]
+			if state == nil {
+				state = &listState{entry: PickerEntry{ContentID: unitID}}
+				lists[unitID] = state
+			}
+			if !seen[unitID] {
+				state.entry.Members = append(state.entry.Members, PickerMember{UserID: member.UserID, ProfileID: member.ProfileID, DisplayName: member.DisplayName})
+				seen[unitID] = true
+			}
 			if entry.AddedAt > state.newest {
 				state.newest = entry.AddedAt
 			}
@@ -486,11 +511,15 @@ func (r *MemberStateReader) modalNextUp(ctx context.Context, members []MemberSum
 	}
 	title := best.ep.Title
 	if title == "" {
-		// A next-up row carries no title; borrow it from a loaded episode.
-		for _, ep := range byID {
-			if ep.ContentID == best.ep.ContentID {
-				title = ep.Title
+		// An unwatched next-up episode may not appear in any progress page.
+		ep := byID[best.ep.ContentID]
+		if ep == nil {
+			if loaded, err := r.episodesByID(ctx, []string{best.ep.ContentID}); err == nil {
+				ep = loaded[best.ep.ContentID]
 			}
+		}
+		if ep != nil && ep.SeriesID == unitID {
+			title = ep.Title
 		}
 	}
 	return &PickerNextUp{ContentID: best.ep.ContentID, SeasonNumber: best.ep.SeasonNumber, EpisodeNumber: best.ep.EpisodeNumber, Title: title, MemberCount: best.count}

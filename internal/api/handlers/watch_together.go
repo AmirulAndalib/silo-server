@@ -7,7 +7,6 @@ import (
 	"io"
 	"maps"
 	"net/http"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,6 +60,30 @@ type selectWatchTogetherRoomItemRequest struct {
 type watchTogetherRoomResponse struct {
 	Room            watchtogether.Snapshot `json:"room"`
 	RoomAccessToken string                 `json:"room_access_token,omitempty"`
+}
+
+// The response builder also supplies snapshots to v2 adapters. Apply the v1
+// projection only when writing this legacy HTTP envelope to the wire.
+func (response watchTogetherRoomResponse) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Room            watchTogetherRoomSnapshotV1 `json:"room"`
+		RoomAccessToken string                      `json:"room_access_token,omitempty"`
+	}{Room: watchTogetherSnapshotV1(response.Room), RoomAccessToken: response.RoomAccessToken})
+}
+
+type watchTogetherRoomSnapshotV1 struct {
+	watchtogether.Snapshot
+	Members []watchTogetherMemberV1 `json:"members,omitempty"`
+}
+
+// Keep the frozen v1 roster independent of new coordinator and v2 member fields.
+type watchTogetherMemberV1 struct {
+	UserID      int    `json:"user_id"`
+	ProfileID   string `json:"profile_id"`
+	DisplayName string `json:"display_name"`
+	IsHost      bool   `json:"is_host"`
+	IsSelf      bool   `json:"is_self"`
+	Connected   bool   `json:"connected"`
 }
 
 type createWatchTogetherSuggestionRequest struct {
@@ -686,7 +709,7 @@ func (h *WatchTogetherHandler) buildRoomResponse(
 	userID int,
 	profileID string,
 ) (watchTogetherRoomResponse, error) {
-	response := watchTogetherRoomResponse{Room: watchTogetherSnapshotV1(snapshot)}
+	response := watchTogetherRoomResponse{Room: snapshot}
 	if h == nil || h.TokenService == nil {
 		return response, nil
 	}
@@ -705,14 +728,15 @@ func (h *WatchTogetherHandler) buildRoomResponse(
 
 // watchTogetherSnapshotV1 preserves the frozen member payload without mutating
 // the roster shared with v2 viewers and the coordinator.
-func watchTogetherSnapshotV1(snapshot watchtogether.Snapshot) watchtogether.Snapshot {
-	snapshot.Members = slices.Clone(snapshot.Members)
-	for i := range snapshot.Members {
-		snapshot.Members[i].IsReady = false
-		snapshot.Members[i].IsBuffering = false
-		snapshot.Members[i].IsSyncing = false
+func watchTogetherSnapshotV1(snapshot watchtogether.Snapshot) watchTogetherRoomSnapshotV1 {
+	members := make([]watchTogetherMemberV1, 0, len(snapshot.Members))
+	for _, member := range snapshot.Members {
+		members = append(members, watchTogetherMemberV1{
+			UserID: member.UserID, ProfileID: member.ProfileID, DisplayName: member.DisplayName,
+			IsHost: member.IsHost, IsSelf: member.IsSelf, Connected: member.Connected,
+		})
 	}
-	return snapshot
+	return watchTogetherRoomSnapshotV1{Snapshot: snapshot, Members: members}
 }
 
 func (h *WatchTogetherHandler) validateRoomAccessToken(
@@ -919,6 +943,9 @@ func (h *WatchTogetherHandler) handleRoomClientMessage(
 		})
 		return err
 	case "lobby_ready":
+		if !rc.includeMemberStatus {
+			return errors.New("unsupported room websocket message")
+		}
 		var msg watchTogetherLobbyReadyMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
 			return err

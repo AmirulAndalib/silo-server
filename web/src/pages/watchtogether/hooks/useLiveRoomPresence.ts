@@ -39,7 +39,7 @@ export function useLiveRoomPresence(): LiveRoomPresence | null {
       try {
         const response = await getWatchTogetherRoom(candidate.room_id, candidate.token);
         if (response.room.phase === "ended") {
-          markRecentRoomEnded(candidate.room_id);
+          markRecentRoomEnded(candidate);
           return null;
         }
         return {
@@ -57,7 +57,7 @@ export function useLiveRoomPresence(): LiveRoomPresence | null {
             error instanceof V2TransportError) &&
           [404, 409, 410].includes(error.status)
         ) {
-          markRecentRoomEnded(candidate.room_id);
+          markRecentRoomEnded(candidate);
           return null;
         }
         throw error;

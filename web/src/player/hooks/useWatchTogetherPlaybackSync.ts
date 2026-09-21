@@ -33,8 +33,8 @@ interface UseWatchTogetherPlaybackSyncResult {
 }
 
 const stateReportIntervalMs = 1_500;
-// While the room waits on a barrier, the tick doubles as a readiness report so
-// a lost or rejected acknowledgement heals quickly.
+// Retry readiness until the server acknowledges this member, so a lost or
+// rejected acknowledgement heals quickly while another member may still load.
 const waitingReportIntervalMs = 500;
 const pendingCommandQuietPeriodMs = 250;
 const readySeekToleranceSeconds = 1;
@@ -64,6 +64,9 @@ export function useWatchTogetherPlaybackSync({
   const roomPhase = room?.phase ?? null;
   const roomSelectionRevision = room?.selection_revision;
   const isHost = room?.self_role === "host";
+  // The server clears readiness in its snapshot before each waiting command.
+  const readinessAcknowledged =
+    room?.members?.some((member) => member.is_self && member.is_ready) === true;
   const lastReadyRejectReasonRef = useRef<string | null>(null);
   const sendRoomMessage = roomConnection.sendRoomMessage;
   const waitingStateRef = useRef<"idle" | "buffering" | "ready">("idle");
@@ -118,6 +121,7 @@ export function useWatchTogetherPlaybackSync({
     attachedSessionId,
     connectionState,
     roomPhase,
+    readinessAcknowledged,
     room?.room_id,
     room?.playback_state,
     room?.selection_revision,
@@ -216,7 +220,7 @@ export function useWatchTogetherPlaybackSync({
       return;
     }
 
-    const waiting = roomPlaybackState === "waiting";
+    const retryReadiness = roomPlaybackState === "waiting" && !readinessAcknowledged;
     const intervalId = window.setInterval(
       () => {
         const video = videoRef.current;
@@ -233,7 +237,7 @@ export function useWatchTogetherPlaybackSync({
           }
         }
 
-        if (waiting) {
+        if (retryReadiness) {
           const check = checkReady();
           if (check.ok) {
             sendRoomMessage({
@@ -256,7 +260,7 @@ export function useWatchTogetherPlaybackSync({
           is_paused: video.paused,
         });
       },
-      waiting ? waitingReportIntervalMs : stateReportIntervalMs,
+      retryReadiness ? waitingReportIntervalMs : stateReportIntervalMs,
     );
 
     return () => {
@@ -267,6 +271,7 @@ export function useWatchTogetherPlaybackSync({
     checkReady,
     connectionState,
     noteReadyReject,
+    readinessAcknowledged,
     roomPlaybackState,
     sendRoomMessage,
     serverTimeOffsetMs,
@@ -298,7 +303,7 @@ export function useWatchTogetherPlaybackSync({
 
   const reportReady = useCallback(() => {
     cancelBuffering();
-    if (waitingStateRef.current === "ready") {
+    if (readinessAcknowledged || waitingStateRef.current === "ready") {
       return { ok: false };
     }
     const check = checkReady();
@@ -317,7 +322,14 @@ export function useWatchTogetherPlaybackSync({
       waitingStateRef.current = "ready";
     }
     return result;
-  }, [cancelBuffering, checkReady, noteReadyReject, sendRoomMessage, sessionId]);
+  }, [
+    cancelBuffering,
+    checkReady,
+    noteReadyReject,
+    readinessAcknowledged,
+    sendRoomMessage,
+    sessionId,
+  ]);
 
   const reportBuffering = useCallback(
     (positionSeconds?: number, isPaused?: boolean) => {

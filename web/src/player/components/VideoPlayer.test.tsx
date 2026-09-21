@@ -636,6 +636,101 @@ describe("VideoPlayer room catch-up", () => {
     });
   });
 
+  it.each(["readiness reset", "new command"])(
+    "stops readiness retries after the server acknowledges this member and resumes on %s",
+    async (reset) => {
+      const { connection, video, command, rerenderPlayer } = setup(100);
+      Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+      const members = [
+        {
+          user_id: 1,
+          profile_id: "guest",
+          display_name: "Guest",
+          is_host: false,
+          is_self: true,
+          connected: true,
+          is_ready: false,
+        },
+        {
+          user_id: 2,
+          profile_id: "host",
+          display_name: "Host",
+          is_host: true,
+          is_self: false,
+          connected: true,
+          is_ready: false,
+        },
+      ];
+      const waitingConnection = {
+        ...connection,
+        room: { ...connection.room!, playback_state: "waiting" as const, members },
+        transportCommand: {
+          ...command,
+          action: "pause" as const,
+          playback_state: "waiting" as const,
+        },
+      };
+      rerenderPlayer({ watchTogetherConnection: waitingConnection });
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      const messages = vi.mocked(connection.sendRoomMessage);
+      messages.mockClear();
+      await act(() => vi.advanceTimersByTimeAsync(1_000));
+      expect(messages).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "state_report", is_ready: true }),
+      );
+
+      // The peer is still loading, but our own readiness has reached the server.
+      rerenderPlayer({
+        watchTogetherConnection: {
+          ...waitingConnection,
+          room: {
+            ...waitingConnection.room,
+            members: members.map((member) => ({ ...member, is_ready: member.is_self })),
+          },
+        },
+      });
+      messages.mockClear();
+      fireEvent.canPlay(video);
+      await act(() => vi.advanceTimersByTimeAsync(1_500));
+      expect(messages).not.toHaveBeenCalledWith(expect.objectContaining({ is_ready: true }));
+      expect(messages).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ready" }));
+      expect(messages).toHaveBeenCalledWith({
+        type: "state_report",
+        session_id: "session-1",
+        position_seconds: 100,
+        is_paused: true,
+      });
+
+      // The server clears readiness in its snapshot before dispatching a new command.
+      rerenderPlayer({ watchTogetherConnection: waitingConnection });
+      const nextCommand =
+        reset === "new command"
+          ? {
+              ...waitingConnection.transportCommand,
+              command_id: "room-command-2",
+              execute_at: new Date().toISOString(),
+            }
+          : waitingConnection.transportCommand;
+      rerenderPlayer({
+        watchTogetherConnection: { ...waitingConnection, transportCommand: nextCommand },
+      });
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      fireEvent.canPlay(video);
+      expect(messages).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "ready", command_id: nextCommand.command_id }),
+      );
+      messages.mockClear();
+      await act(() => vi.advanceTimersByTimeAsync(500));
+      expect(messages).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "state_report",
+          is_ready: true,
+          command_id: nextCommand.command_id,
+        }),
+      );
+    },
+  );
+
   it("waits for execution even when a pending seek already matches the media position", async () => {
     const { connection, video, command, rerenderPlayer } = setup(100);
     Object.defineProperty(video, "readyState", { configurable: true, value: 3 });

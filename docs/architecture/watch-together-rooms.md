@@ -28,7 +28,8 @@ SQL), and the web auto-start effects, which check `phase === "playing"`.
 Transitions:
 
 - **Stage** (`Service.StageItem`, `PUT .../staged-selection`): lobby → lobby.
-  Host only, host-pick only. Sets the selection columns.
+  Host only, host-pick only. Sets the selection columns. An identical resolved
+  content, file, and library selection is a no-op.
 - **Start** (`Service.StartStagedOnce`, `POST .../playback/start`): lobby
   (staged) → playing. Host only. Performs exactly the transition a direct
   selection performs.
@@ -85,7 +86,8 @@ switch mode) without any client thinking playback restarted.
 | `memberState.ignoreWait` | shared room runtime | the waiting deadline (`waitingResumeDeadline`) skipping a straggler | attach, ready |
 
 Lobby ready is advisory. The server never gates start on it; the web shows
-the count on the start button and offers the same call as "start anyway".
+the connected guest count on the start button and offers the same call as
+"start anyway". Vote rooms start through promotion without this ready check.
 The buffering barrier (`isReady`, `ignoreWait`) is the one that actually holds
 playback until members have buffered. Guests must reach a seek destination
 within one second; the host is accepted within fifteen and re-anchors the room

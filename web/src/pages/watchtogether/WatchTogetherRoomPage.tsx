@@ -92,6 +92,8 @@ export default function WatchTogetherRoomPage() {
   const [searchParams] = useSearchParams();
   const roomToken = searchParams.get("room_token");
   const auth = useOptionalAuth();
+  const userId = auth?.user?.id;
+  const profileId = auth?.profile?.id;
   const playbackController = useWatchPlaybackController();
   const activePlaybackRequest = playbackController.state.request;
   // While the player is in the foreground for this same room it owns the
@@ -140,8 +142,14 @@ export default function WatchTogetherRoomPage() {
     });
   }, [room, roomToken, auth?.user, auth?.profile, stagedDetail.data]);
   useEffect(() => {
-    if (roomId && connection.closedReason) markRecentRoomEnded(roomId);
-  }, [roomId, connection.closedReason]);
+    if (roomId && connection.closedReason && userId != null && profileId) {
+      markRecentRoomEnded({
+        room_id: roomId,
+        user_id: userId,
+        profile_id: profileId,
+      });
+    }
+  }, [roomId, connection.closedReason, userId, profileId]);
 
   // Auto-start: when the room starts playing a new selection, enter the
   // player. Keyed on the selection revision so a lobby restage never fires.
@@ -158,14 +166,10 @@ export default function WatchTogetherRoomPage() {
     const suppressed = suppressAutoStartSelectionRef.current;
     if (suppressed) {
       suppressAutoStartSelectionRef.current = null;
-      const same =
-        room.selected_content_id === suppressed.contentId &&
-        (room.selected_file_id ?? null) === (suppressed.fileId ?? null) &&
-        (room.selected_library_id ?? null) === (suppressed.libraryId ?? null);
-      if (same) {
-        lastAutoStartRevisionRef.current = room.selection_revision;
-        return;
-      }
+      // Exit must reach the room even if the host started another selection
+      // before this first snapshot arrived. Follow subsequent starts normally.
+      lastAutoStartRevisionRef.current = room.selection_revision;
+      return;
     }
     if (room.phase !== "playing" || !room.selected_content_id) return;
     if (lastAutoStartRevisionRef.current === room.selection_revision) return;
@@ -231,13 +235,12 @@ export default function WatchTogetherRoomPage() {
   }, [phaseKey]);
   const stageRef = useRef<HTMLDivElement | null>(null);
   // A staged lobby and a playing room fold the shelf to one line so the ready
-  // check or the now-playing card owns the screen; "Change" reopens it. The
-  // key remounts the shelf when that default flips so it takes effect.
+  // check or the now-playing card owns the screen; "Change" reopens it.
+  // The shelf stays mounted so folding preserves the viewer's search and filters.
   // Guests keep browsing in a staged lobby: suggesting is what they do while
   // the host decides.
   const shelfCollapsible = (staged && !isVote && isHost) || isPlaying;
   const [shelfOpen, setShelfOpen] = useState(false);
-  const shelfKey = `${shelfCollapsible}:${shelfOpen}`;
   useEffect(() => {
     if (!shelfCollapsible) setShelfOpen(false);
   }, [shelfCollapsible]);
@@ -461,7 +464,6 @@ export default function WatchTogetherRoomPage() {
                   )}
                 </div>
                 <BrowseShelf
-                  key={shelfKey}
                   roomId={roomId}
                   roomToken={roomToken}
                   members={room.members ?? []}
@@ -473,7 +475,8 @@ export default function WatchTogetherRoomPage() {
                   collapsedLabel={
                     isPlaying ? "Suggest something for after" : "Change what's up next"
                   }
-                  defaultOpen={!shelfCollapsible || shelfOpen}
+                  open={shelfOpen}
+                  onOpenChange={setShelfOpen}
                   onSelect={selectCandidate}
                 />
               </>

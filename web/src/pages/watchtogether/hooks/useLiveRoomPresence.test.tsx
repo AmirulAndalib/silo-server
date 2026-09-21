@@ -9,6 +9,8 @@ import { useLiveRoomPresence } from "./useLiveRoomPresence";
 
 const recent = vi.hoisted(() => [
   {
+    user_id: 1,
+    profile_id: "profile",
     room_id: "room",
     code: "CODE",
     token: "proof",
@@ -49,5 +51,5 @@ it("marks a room ended after a definitive not-found response", async () => {
     new ApiClientError(404, "not_found", "Room not found"),
   );
   renderHook(() => useLiveRoomPresence(), { wrapper });
-  await waitFor(() => expect(markRecentRoomEnded).toHaveBeenCalledWith("room"));
+  await waitFor(() => expect(markRecentRoomEnded).toHaveBeenCalledWith(recent[0]));
 });

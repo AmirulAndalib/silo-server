@@ -1191,6 +1191,11 @@ func (s *Service) stageItem(
 	}
 
 	contentChanged := live.room.SelectedContentID == nil || *live.room.SelectedContentID != resolved.ContentID
+	if !contentChanged && equalSelectionID(live.room.SelectedFileID, resolved.FileID) && equalSelectionID(live.room.SelectedLibraryID, resolved.LibraryID) {
+		snapshot := s.buildSnapshotLocked(live, userID, profileID)
+		s.mu.Unlock()
+		return snapshot, nil
+	}
 	contentID := resolved.ContentID
 	live.room.SelectedContentID = &contentID
 	live.room.SelectedFileID = resolved.FileID

@@ -89,6 +89,64 @@ func TestStageClearsLobbyReadyOnlyWhenContentChanges(t *testing.T) {
 	}
 }
 
+func TestStageIdenticalResolvedSelectionIsNoOp(t *testing.T) {
+	now := time.Date(2026, 4, 10, 12, 0, 20, 0, time.UTC)
+	room := lobbyRoom(now.Add(-time.Minute))
+	room.SelectedContentID = new("movie-2")
+	room.SelectedFileID = new(7)
+	room.SelectedLibraryID = new(8)
+	service, repo, host, guest := stagedServiceForTest(t, now, room, "movie-2")
+
+	// Different request inputs may resolve to the same canonical selection.
+	snapshot, err := service.StageItem(t.Context(), room.ID, 7, "host", SelectItemInput{ContentID: "alias"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Generation != room.Generation || snapshot.SelectionRevision != room.SelectionRevision || snapshot.AnchorUpdatedAt != room.AnchorUpdatedAt.Format(time.RFC3339) {
+		t.Fatalf("identical stage changed the room: %+v", snapshot)
+	}
+	if repo.room.Generation != room.Generation || !repo.room.AnchorUpdatedAt.Equal(room.AnchorUpdatedAt) {
+		t.Fatalf("identical stage persisted a change: %+v", repo.room)
+	}
+	if !service.rooms[room.ID].members[buildMemberKey(8, "guest")].lobbyReady {
+		t.Fatal("identical stage cleared lobby readiness")
+	}
+	if len(host.payloads) != 0 || len(guest.payloads) != 0 {
+		t.Fatal("identical stage broadcast another snapshot")
+	}
+}
+
+func TestStageUpdatesChangedResolvedFileOrLibrary(t *testing.T) {
+	for _, field := range []string{"file", "library"} {
+		t.Run(field, func(t *testing.T) {
+			now := time.Date(2026, 4, 10, 12, 0, 20, 0, time.UTC)
+			room := lobbyRoom(now.Add(-time.Minute))
+			room.SelectedContentID = new("movie-2")
+			room.SelectedFileID = new(7)
+			room.SelectedLibraryID = new(8)
+			if field == "file" {
+				room.SelectedFileID = new(9)
+			} else {
+				room.SelectedLibraryID = nil
+			}
+			service, repo, host, guest := stagedServiceForTest(t, now, room, "movie-2")
+			snapshot, err := service.StageItem(t.Context(), room.ID, 7, "host", SelectItemInput{ContentID: "movie-2"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Generation != room.Generation+1 || snapshot.SelectionRevision != room.SelectionRevision || snapshot.AnchorUpdatedAt != now.Format(time.RFC3339) {
+				t.Fatalf("changed variant was not staged: %+v", snapshot)
+			}
+			if repo.room.SelectedFileID == nil || *repo.room.SelectedFileID != 7 || repo.room.SelectedLibraryID == nil || *repo.room.SelectedLibraryID != 8 {
+				t.Fatalf("resolved variant was not persisted: %+v", repo.room)
+			}
+			if len(host.payloads) != 1 || len(guest.payloads) != 1 {
+				t.Fatal("changed variant was not broadcast")
+			}
+		})
+	}
+}
+
 func TestStageRefusals(t *testing.T) {
 	now := time.Date(2026, 4, 10, 12, 0, 20, 0, time.UTC)
 	for _, tc := range []struct {

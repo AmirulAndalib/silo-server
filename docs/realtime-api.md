@@ -202,7 +202,7 @@ The actual web action captures input and authority, sends once without authentic
 
 `PUT /api/v2/watch-together/rooms/{room_id}/staged-selection` (`stageWatchTogetherRoomItem`) requires authenticated profile authority, the demo guard and both the host account and profile. The body requires `content_id`; optional `file_id` and `library_id` are positive string IDs, resolved by the same playable-content and access checks as a direct selection. Vote rooms refuse staging with `409` (suggest instead); a room that is already playing refuses with `409`; non-host authority returns `403`, missing room `404`, invalid selection `422`, closed room `409`, and unavailable service/token configuration `503`.
 
-A staged item is a lobby room whose `selected_content_id` is set. Staging keeps the room in the lobby, advances the room generation, refreshes the idle timestamp so the janitor leaves an active lobby alone, and broadcasts the local snapshot. It never advances the selection revision, because that revision is the playback epoch and nothing has started. Staging different content clears every member's lobby ready state; re-staging the same content keeps it. The row update is guarded in SQL on generation, lobby phase and host-pick mode, so a stale node cannot stage into a room another node has started or switched. The operation is naturally idempotent: repeating it with the same content is a no-op.
+A staged item is a lobby room whose `selected_content_id` is set. A changed selection keeps the room in the lobby, advances the room generation, refreshes the idle timestamp so the janitor leaves an active lobby alone, and broadcasts the snapshot across API servers. It never advances the selection revision, because that revision is the playback epoch and nothing has started. Staging different content clears every member's lobby ready state; re-staging the same content keeps it. The row update is guarded in SQL on generation, lobby phase and host-pick mode, so a stale node cannot stage into a room another node has started or switched. The operation is naturally idempotent: repeating the same resolved content, file, and library preserves the generation, idle timestamp, readiness, and broadcasts.
 
 The web sends once under captured authority and uses the returned snapshot. A member cannot attach a playback session to a staged lobby; attach, transport and buffering readiness remain playing-only. No v1 route stages: v1 selection always starts playback.
 
@@ -212,7 +212,7 @@ The web sends once under captured authority and uses the returned snapshot. A me
 
 Start locks the authoritative row and performs the selection transition a direct selection performs: playing phase, waiting playback state, resume-on-ready, anchor reset to zero and paused, selection revision and generation advanced. Every member's attached session, buffering readiness, ignore-wait and lobby ready state is dropped as belonging to the previous epoch, and the waiting deadline is disarmed. A room that is already playing answers with its current snapshot unchanged, so a duplicate press cannot restart playback; a generation mismatch answers the same way. The operation is non-retryable: an uncertain result is read back, not replayed.
 
-The lobby ready check is advisory. The server never gates start on it; the web labels the button with the ready count and offers the same call as "start anyway".
+The lobby ready check is advisory. The server never gates start on it; the web counts connected guests and offers the same call as "start anyway" when some guests are not ready. Vote rooms start through suggestion promotion and do not show a lobby ready check.
 
 ### Stop playback without ending the room
 
@@ -230,7 +230,7 @@ Switching drops the staged item and every member's lobby ready state, advances t
 
 ### Lobby ready over the room socket
 
-A connected member sends `{"type":"lobby_ready","ready":true|false}` on the room socket (v1 or v2 transport; the loop is shared). The server records the flag on the member's in-memory entry, rebroadcasts the snapshot, and answers `error bad_request` when the room is not in the lobby. Every member listed in `members[]` carries `lobby_ready`; it is always `false` once the room is playing. The flag is distinct from the buffering `ready` message, which still requires an attached playback session.
+A connected member sends `{"type":"lobby_ready","ready":true|false}` on the v2 room socket. The server commits the flag in the shared runtime, broadcasts the snapshot, and answers `error bad_request` when the room is not in the lobby. V1 sockets reject this message, and v1 HTTP and socket snapshots retain the frozen six-field member representation. Every member listed in v2 `members[]` carries `lobby_ready`; it is always `false` once the room is playing. The flag is distinct from the buffering `ready` message, which still requires an attached playback session.
 
 Lobby ready is persisted in the shared room runtime and included in snapshots across API servers. Staging different content, starting or stopping playback, and switching modes clear it in the same transaction as the room update. A stale node adopting that transaction preserves any ready flag subsequently saved for the current selection.
 
@@ -342,9 +342,11 @@ at debug level once per distinct reason.
 While the room is `waiting`, `state_report` frames may carry `command_id` and
 `is_ready: true`. The server treats such a report exactly like a `ready` frame
 for that command, so a lost or rejected acknowledgement heals on the next tick
-without a new media event. The web player sends state reports every 500 ms while
-waiting and every 1.5 s otherwise. Reports without `is_ready` are still ignored
-while waiting.
+without a new media event. The web player retries readiness every 500 ms until
+the room snapshot marks its own member `is_ready`. It then stops readiness
+acknowledgements and returns to ordinary state reports every 1.5 s, even while
+other members are still waiting. A readiness reset for a new command enables
+retries again. Reports without `is_ready` are still ignored while waiting.
 
 `command_id` is optional for older clients on the shared v1/v2 message loop. Their
 seek acknowledgements still need to reach the destination, but a client that

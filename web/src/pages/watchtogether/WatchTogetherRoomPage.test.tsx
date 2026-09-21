@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router";
+import { useState } from "react";
 import type { WatchTogetherRoomSnapshot, WatchTogetherSuggestion } from "@/lib/watchTogether";
 import type { WatchTogetherRoomConnectionResult } from "@/player/hooks/useWatchTogetherRoomConnection";
 import { WatchPlaybackControllerContext } from "@/playback/watchPlaybackContext";
@@ -38,31 +39,37 @@ vi.mock("./room/browse/BrowseShelf", () => ({
   BrowseShelf: ({
     verb,
     collapsible,
-    defaultOpen,
+    open,
     onSelect,
   }: {
     verb: string;
     collapsible?: boolean;
-    defaultOpen?: boolean;
+    open: boolean;
     onSelect: (s: {
       card: { content_id: string; type: string; title: string; year?: number };
     }) => void;
-  }) => (
-    <div
-      data-testid="shelf"
-      data-verb={verb}
-      data-collapsed={String(!!collapsible && !defaultOpen)}
-    >
-      <button
-        type="button"
-        onClick={() =>
-          onSelect({ card: { content_id: "arrival", type: "movie", title: "Arrival", year: 2016 } })
-        }
-      >
-        pick Arrival
-      </button>
-    </div>
-  ),
+  }) => {
+    const [query, setQuery] = useState("");
+    return (
+      <div data-testid="shelf" data-verb={verb} data-collapsed={String(!!collapsible && !open)}>
+        <input
+          aria-label="Shelf search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <button
+          type="button"
+          onClick={() =>
+            onSelect({
+              card: { content_id: "arrival", type: "movie", title: "Arrival", year: 2016 },
+            })
+          }
+        >
+          pick Arrival
+        </button>
+      </div>
+    );
+  },
 }));
 vi.mock("./room/browse/CandidateStage", () => ({
   CandidateStage: ({
@@ -189,8 +196,9 @@ function renderPage(
     state: { request: null, mode: "foreground", pictureInPictureActive: false },
     startPlayback: state.startPlayback,
   } as never;
-  return render(
-    <QueryClientProvider client={new QueryClient()}>
+  const queryClient = new QueryClient();
+  const page = () => (
+    <QueryClientProvider client={queryClient}>
       <WatchPlaybackControllerContext.Provider value={controller}>
         <MemoryRouter initialEntries={[path]}>
           <Routes>
@@ -199,8 +207,16 @@ function renderPage(
           </Routes>
         </MemoryRouter>
       </WatchPlaybackControllerContext.Provider>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const view = render(page());
+  return {
+    ...view,
+    rerenderConnection(next: WatchTogetherRoomConnectionResult) {
+      state.connection = next;
+      view.rerender(page());
+    },
+  };
 }
 
 beforeEach(() => {
@@ -251,7 +267,9 @@ describe("WatchTogetherRoomPage", () => {
     });
     renderPage(conn);
     expect(screen.getByRole("heading", { name: /Title dune/ })).toBeInTheDocument();
-    const start = screen.getByRole("button", { name: /Start for everyone · 1\/2 ready/ });
+    const start = screen.getByRole("button", { name: /Start for everyone · 1\/1 ready/ });
+    expect(screen.getByText("Guest ready check")).toBeInTheDocument();
+    expect(screen.queryByLabelText("not ready")).toBeNull();
     fireEvent.click(start);
     expect(conn.startPlayback).toHaveBeenCalledTimes(1);
   });
@@ -350,6 +368,7 @@ describe("WatchTogetherRoomPage", () => {
     ];
     const conn = connection({ room: room({ selection_mode: "vote" }), suggestions });
     renderPage(conn);
+    expect(screen.queryByText(/ready check/i)).toBeNull();
     expect(screen.getByRole("heading", { name: /Title arrival/ })).toBeInTheDocument();
     expect(screen.getByText("Leading")).toBeInTheDocument();
     expect(screen.getByText(/big screen/)).toBeInTheDocument();
@@ -465,6 +484,49 @@ describe("WatchTogetherRoomPage", () => {
   it("does not auto-start on a staged lobby (revision unchanged)", () => {
     renderPage(connection({ room: room({ selected_content_id: "dune" }) }));
     expect(state.startPlayback).not.toHaveBeenCalled();
+  });
+
+  it("stays in the room after exit when another selection already started, then follows later starts", () => {
+    const playing = room({
+      phase: "playing",
+      playback_state: "playing",
+      selection_revision: 3,
+      selected_content_id: "arrival",
+      selected_file_id: 8,
+    });
+    const view = renderPage(connection({ room: playing }), {
+      pathname: "/rooms/room",
+      search: "?room_token=proof",
+      state: { suppressAutoStartSelection: { contentId: "dune", fileId: 7 } },
+    });
+    expect(state.startPlayback).not.toHaveBeenCalled();
+    view.rerenderConnection(connection({ room: { ...playing, generation: 2 } }));
+    expect(state.startPlayback).not.toHaveBeenCalled();
+    view.rerenderConnection(
+      connection({ room: { ...playing, phase: "lobby", selection_revision: 4 } }),
+    );
+    view.rerenderConnection(connection({ room: { ...playing, selection_revision: 5 } }));
+    expect(state.startPlayback).toHaveBeenCalledTimes(1);
+    expect(state.startPlayback).toHaveBeenCalledWith(
+      expect.objectContaining({ contentId: "arrival", fileId: 8 }),
+    );
+  });
+
+  it("keeps a guest's shelf search when the room starts playing", () => {
+    const staged = room({
+      selected_content_id: "dune",
+      self_can_manage_room: false,
+      self_role: "guest",
+    });
+    const view = renderPage(connection({ room: staged }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Shelf search" }), {
+      target: { value: "arrival" },
+    });
+    view.rerenderConnection(
+      connection({ room: { ...staged, phase: "playing", selection_revision: 1 } }),
+    );
+    expect(screen.getByRole("textbox", { name: "Shelf search" })).toHaveValue("arrival");
+    expect(screen.getByTestId("shelf")).toHaveAttribute("data-collapsed", "true");
   });
 
   it("hides the mode switch for guests and while playing", () => {
