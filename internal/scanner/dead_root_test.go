@@ -1289,7 +1289,7 @@ func TestCollectLogicalFilePathsReportsUnreadableEntries(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
 
-	files, walkFailures, err := collectLogicalFilePaths(context.Background(), []string{root}, "movies")
+	files, walkFailures, err := collectLogicalFilePaths(t.Context(), []string{root}, "movies", nil)
 	if err != nil {
 		t.Fatalf("collectLogicalFilePaths: %v", err)
 	}

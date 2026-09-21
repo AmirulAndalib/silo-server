@@ -1,11 +1,53 @@
 package scanner
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// scanRootIgnoreRules loads the rules above a scoped folder walk, stopping at
+// its configured library root. Rules outside that root cannot affect a library.
+// A failed ancestor read makes the scope incomplete, so callers must protect it
+// from missing-file reconciliation.
+func scanRootIgnoreRules(path string, libraryRoots []string) ([]ignoreRules, bool, error) {
+	path = filepath.Clean(path)
+	root := ""
+	for _, candidate := range libraryRoots {
+		candidate = filepath.Clean(candidate)
+		if pathWithinAnyRoot(path, []string{candidate}) && len(candidate) > len(root) {
+			root = candidate
+		}
+	}
+	if root == "" || root == path {
+		return nil, false, nil
+	}
+	var parents []string
+	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+		parents = append(parents, dir)
+		if dir == root {
+			break
+		}
+	}
+	var rules []ignoreRules
+	for i := len(parents) - 1; i >= 0; i-- {
+		dir := parents[i]
+		if ignoreRulesMatch(rules, dir) {
+			return rules, true, nil
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil, false, fmt.Errorf("read ignore ancestor %s: %w", dir, err)
+		}
+		if dirHasIgnoreMarker(entries) {
+			return rules, true, nil
+		}
+		rules = childIgnoreRules(rules, dir, dir, entries)
+	}
+	return rules, ignoreRulesMatch(rules, path), nil
+}
 
 // Filesystem ignore conventions honored during scans:
 //
