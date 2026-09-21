@@ -192,6 +192,7 @@ func TestStartStagedEntersWaitingAndBumpsRevision(t *testing.T) {
 	hostMember.sessionID = "stale"
 	hostMember.isReady = true
 	hostMember.lobbyReady = true
+	hostMember.correctionCommand = &TransportCommand{CommandID: "stale-correction"}
 
 	snapshot, err := service.StartStagedOnce(context.Background(), repo.room.ID, 7, "host")
 	if err != nil {
@@ -206,7 +207,7 @@ func TestStartStagedEntersWaitingAndBumpsRevision(t *testing.T) {
 	if snapshot.SelectedContentID == nil || *snapshot.SelectedContentID != "movie-2" {
 		t.Fatalf("start changed the staged item: %+v", snapshot.SelectedContentID)
 	}
-	if hostMember.sessionID != "" || hostMember.isReady || hostMember.lobbyReady {
+	if hostMember.sessionID != "" || hostMember.isReady || hostMember.lobbyReady || hostMember.correctionCommand != nil {
 		t.Fatalf("start did not reset member epoch state: %+v", hostMember)
 	}
 	if live.members[buildMemberKey(8, "guest")].lobbyReady {
@@ -441,6 +442,7 @@ func TestStopPlaybackReturnsToLobbyAndKeepsSelection(t *testing.T) {
 	hostMember := live.members[buildMemberKey(7, "host")]
 	hostMember.sessionID = "session-1"
 	hostMember.isReady = true
+	hostMember.correctionCommand = &TransportCommand{CommandID: "stale-correction"}
 
 	snapshot, err := service.StopPlaybackOnce(context.Background(), repo.room.ID, 7, "host")
 	if err != nil {
@@ -455,7 +457,7 @@ func TestStopPlaybackReturnsToLobbyAndKeepsSelection(t *testing.T) {
 	if snapshot.SelectedContentID == nil || *snapshot.SelectedContentID != "movie-1" {
 		t.Fatalf("stop dropped the staged item: %+v", snapshot.SelectedContentID)
 	}
-	if hostMember.sessionID != "" || hostMember.isReady {
+	if hostMember.sessionID != "" || hostMember.isReady || hostMember.correctionCommand != nil {
 		t.Fatalf("stop left the previous epoch's session attached: %+v", hostMember)
 	}
 	if live.members[buildMemberKey(8, "guest")].lobbyReady {

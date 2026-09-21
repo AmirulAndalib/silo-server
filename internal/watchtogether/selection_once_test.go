@@ -96,6 +96,7 @@ func TestSelectionOncePreservesAttachedReadinessPG(t *testing.T) {
 		member := s.rooms[room.ID].members[memberKey]
 		member.sessionID = "new-session"
 		member.isReady, member.isBuffering, member.ignoreWait = true, true, true
+		member.correctionCommand = &TransportCommand{CommandID: "pending-correction", SessionID: member.sessionID, SelectionRevision: first.SelectionRevision}
 		return struct{}{}, nil
 	})
 	if err != nil {
@@ -110,6 +111,9 @@ func TestSelectionOncePreservesAttachedReadinessPG(t *testing.T) {
 	if second.Generation != first.Generation || second.SelectionRevision != first.SelectionRevision || second.AnchorUpdatedAt != first.AnchorUpdatedAt || member.sessionID != "new-session" || !member.isReady || !member.isBuffering || !member.ignoreWait || len(conn.payloads) != before {
 		t.Fatal("identical selection reset state or broadcast")
 	}
+	if member.correctionCommand == nil || member.correctionCommand.CommandID != "pending-correction" {
+		t.Fatal("identical selection lost the pending correction")
+	}
 	// A separate service has stale local state but must still resolve the same DB identity as a no-op.
 	other := newServiceForTest(now, &stubRepo{room: room}, nil, nil, s.selectionResolver)
 	other.repo = repo
@@ -117,12 +121,18 @@ func TestSelectionOncePreservesAttachedReadinessPG(t *testing.T) {
 	if err != nil || third.Generation != first.Generation {
 		t.Fatalf("stale node: %+v %v", third, err)
 	}
+	if correction := other.rooms[room.ID].members[memberKey].correctionCommand; correction == nil || correction.CommandID != "pending-correction" {
+		t.Fatal("a different node lost the pending correction during an identical selection")
+	}
 	// A genuinely different resolved selection still resets prior readiness once.
 	s.selectionResolver = &stubSelectionResolver{resolved: &ResolvedSelection{ContentID: "next", FileID: new(9), LibraryID: new(8)}}
 	changed, err := s.SelectItemOnce(t.Context(), room.ID, 7, "host", SelectItemInput{ContentID: "next"})
 	member = s.rooms[room.ID].members[memberKey]
 	if err != nil || changed.SelectionRevision != first.SelectionRevision+1 || changed.Generation != first.Generation+1 || member.sessionID != "" || member.isReady || member.isBuffering || member.ignoreWait || len(conn.payloads) != before+1 {
 		t.Fatalf("new selection reset: %+v %v", changed, err)
+	}
+	if member.correctionCommand != nil {
+		t.Fatal("new selection retained the previous correction")
 	}
 
 	for _, authority := range []struct {

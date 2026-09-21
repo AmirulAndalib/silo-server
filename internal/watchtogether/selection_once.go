@@ -160,6 +160,7 @@ func (s *Service) adoptSelectionWriteLocked(live *liveRoom, room *Room) {
 			member.isBuffering = false
 			member.ignoreWait = false
 			member.waitingCommand = nil
+			member.correctionCommand = nil
 			member.lastCommandID = ""
 			member.syncingToRoom = false
 			member.lobbyReady = false

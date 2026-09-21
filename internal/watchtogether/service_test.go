@@ -2,6 +2,7 @@ package watchtogether
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"testing"
@@ -402,6 +403,157 @@ func TestGuestDriftTriggersCorrection(t *testing.T) {
 
 	if len(conn.payloads) == 0 {
 		t.Fatal("expected correction commands to be dispatched")
+	}
+}
+
+func TestGuestDriftCorrectionIsCoalescedAndRearmed(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 20, 0, time.UTC)
+	current := now
+	repo := &stubRepo{room: baseRoom(now)}
+	conn := &recordingConn{}
+	service := newServiceForTest(
+		now,
+		repo,
+		&stubSessions{session: &playback.Session{
+			ID:          "session-1",
+			UserID:      8,
+			ProfileID:   "guest",
+			MediaFileID: 42,
+		}},
+		&stubFiles{file: &models.MediaFile{ID: 42, ContentID: "movie-1"}},
+		nil,
+	)
+	service.now = func() time.Time { return current }
+	service.rooms[repo.room.ID].members[buildMemberKey(8, "guest")] = &memberState{
+		userID:     8,
+		profileID:  "guest",
+		sessionID:  "session-1",
+		connection: conn,
+	}
+
+	reg := registrationFor(repo.room.ID, 8, "guest", conn)
+	report := StateReport{SessionID: "session-1", PositionSeconds: 2}
+	if _, err := service.HandleStateReportForConnection(t.Context(), reg, 8, "guest", report); err != nil {
+		t.Fatal(err)
+	}
+	first := lastTransport(t, conn)
+	if _, err := service.HandleStateReportForConnection(t.Context(), reg, 8, "guest", report); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(conn.payloads); got != 1 {
+		t.Fatalf("repeated drift report dispatched %d corrections, want 1", got)
+	}
+
+	current = current.Add(guestCorrectionRetryInterval)
+	if _, err := service.HandleStateReportForConnection(t.Context(), reg, 8, "guest", report); err != nil {
+		t.Fatal(err)
+	}
+	second := lastTransport(t, conn)
+	if got := len(conn.payloads); got != 2 {
+		t.Fatalf("expired correction dispatched %d corrections, want 2", got)
+	}
+	if second.CommandID == first.CommandID {
+		t.Fatalf("retry reused command ID %q", second.CommandID)
+	}
+
+	expected := expectedPosition(repo.room, current)
+	if _, err := service.HandleStateReportForConnection(t.Context(), reg, 8, "guest", StateReport{
+		SessionID:       "session-1",
+		PositionSeconds: expected,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.HandleStateReportForConnection(t.Context(), reg, 8, "guest", report); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(conn.payloads); got != 3 {
+		t.Fatalf("in-sync report did not re-arm correction, got %d corrections, want 3", got)
+	}
+}
+
+func TestCorrectionCommandRoundTripsRoomRuntime(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 20, 0, time.UTC)
+	repo := &stubRepo{room: baseRoom(now)}
+	service := newServiceForTest(now, repo, &stubSessions{}, &stubFiles{}, nil)
+	command := &TransportCommand{
+		CommandID:         "correction-1",
+		SessionID:         "session-1",
+		SelectionRevision: repo.room.SelectionRevision,
+		Action:            TransportActionPlay,
+		PositionSeconds:   20,
+		ExecuteAt:         now.Add(time.Second).Format(time.RFC3339Nano),
+		IssuedAt:          now.Format(time.RFC3339Nano),
+		PlaybackState:     RoomPlaybackStatePlaying,
+	}
+	key := buildMemberKey(8, "guest")
+	live := service.rooms[repo.room.ID]
+	live.members[key] = &memberState{
+		userID:            8,
+		profileID:         "guest",
+		sessionID:         command.SessionID,
+		correctionCommand: command,
+		syncingToRoom:     true,
+		lobbyReady:        true,
+	}
+
+	encoded, err := json.Marshal(service.runtimeLocked(live))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state roomRuntime
+	if err := json.Unmarshal(encoded, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Members[key].CorrectionCommand == nil {
+		t.Fatal("correction command was omitted from room runtime")
+	}
+	if !state.Members[key].SyncingToRoom || !state.Members[key].LobbyReady {
+		t.Fatal("correction persistence dropped the other member runtime fields")
+	}
+
+	adopted := &liveRoom{members: make(map[string]*memberState)}
+	service.adoptRuntimeLocked(t.Context(), adopted, repo.room, state)
+	got := adopted.members[key].correctionCommand
+	if got == nil || got.CommandID != command.CommandID || got.SessionID != command.SessionID {
+		t.Fatalf("adopted correction command = %+v, want %+v", got, command)
+	}
+	if !adopted.members[key].syncingToRoom || !adopted.members[key].lobbyReady {
+		t.Fatal("runtime adoption dropped syncing or lobby readiness")
+	}
+
+	nextRoom := repo.room
+	nextRoom.SelectionRevision++
+	service.adoptRuntimeLocked(t.Context(), adopted, nextRoom, state)
+	if member := adopted.members[key]; member.correctionCommand != nil || member.syncingToRoom || member.lobbyReady {
+		t.Fatalf("previous epoch state survived runtime adoption: %+v", member)
+	}
+}
+
+func TestCorrectionCommandPendingAllowsBoundedFutureClockSkew(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 20, 0, time.UTC)
+	command := TransportCommand{
+		SessionID:         "session-1",
+		SelectionRevision: 1,
+		Action:            TransportActionPlay,
+		PlaybackState:     RoomPlaybackStatePlaying,
+	}
+	member := &memberState{correctionCommand: &command}
+
+	for _, test := range []struct {
+		name      string
+		issuedAt  time.Time
+		wantMatch bool
+	}{
+		{name: "small future skew", issuedAt: now.Add(time.Second), wantMatch: true},
+		{name: "retry interval elapsed", issuedAt: now.Add(-guestCorrectionRetryInterval), wantMatch: false},
+		{name: "excessive future skew", issuedAt: now.Add(guestCorrectionRetryInterval + time.Millisecond), wantMatch: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			member.correctionCommand.IssuedAt = test.issuedAt.Format(time.RFC3339Nano)
+			if got := correctionCommandPending(member, command, now); got != test.wantMatch {
+				t.Fatalf("correctionCommandPending() = %t, want %t", got, test.wantMatch)
+			}
+		})
 	}
 }
 
@@ -973,6 +1125,58 @@ func TestStaleLiveConflictAdoptsDatabaseRow(t *testing.T) {
 	}
 }
 
+func TestStateReportConflictClearsStaleCorrectionCommands(t *testing.T) {
+	now := time.Date(2026, 4, 10, 12, 0, 20, 0, time.UTC)
+	repo := &stubRepo{room: baseRoom(now)}
+	service := newServiceForTest(now, repo, &stubSessions{}, &stubFiles{}, nil)
+
+	guestCorrection := &TransportCommand{
+		CommandID:         "stale-correction",
+		SessionID:         "guest-session",
+		SelectionRevision: repo.room.SelectionRevision,
+		Action:            TransportActionPlay,
+		PositionSeconds:   20,
+		IssuedAt:          now.Add(-time.Second).Format(time.RFC3339Nano),
+		PlaybackState:     RoomPlaybackStatePlaying,
+	}
+	service.rooms[repo.room.ID].members[buildMemberKey(8, "guest")] = &memberState{
+		userID:            8,
+		profileID:         "guest",
+		sessionID:         "guest-session",
+		correctionCommand: guestCorrection,
+	}
+	hostConn := &recordingConn{}
+	service.rooms[repo.room.ID].members[buildMemberKey(7, "host")] = &memberState{
+		userID:     7,
+		profileID:  "host",
+		sessionID:  "host-session",
+		connection: hostConn,
+	}
+
+	// The database row advances independently and wins the host's stale write.
+	repo.room.Generation = 5
+	repo.room.AnchorPositionSeconds = 40
+	repo.room.AnchorUpdatedAt = now
+
+	snapshot, err := service.HandleStateReportForConnection(
+		context.Background(),
+		registrationFor(repo.room.ID, 7, "host", hostConn),
+		7,
+		"host",
+		StateReport{SessionID: "host-session", PositionSeconds: 30},
+	)
+	if err != nil {
+		t.Fatalf("HandleStateReportForConnection() error = %v", err)
+	}
+	if snapshot.Generation != repo.room.Generation || snapshot.AnchorPositionSeconds != repo.room.AnchorPositionSeconds {
+		t.Fatalf("snapshot = generation %d, anchor %v; want winning row generation %d, anchor %v",
+			snapshot.Generation, snapshot.AnchorPositionSeconds, repo.room.Generation, repo.room.AnchorPositionSeconds)
+	}
+	if service.rooms[repo.room.ID].members[buildMemberKey(8, "guest")].correctionCommand != nil {
+		t.Fatal("stale guest correction survived a conflicting host anchor update")
+	}
+}
+
 func intPtr(value int) *int {
 	return &value
 }
@@ -1086,6 +1290,13 @@ func TestHostRejoinReportsDoNotRewindTheRoomUntilSynced(t *testing.T) {
 	}
 	if len(conn.payloads) == before {
 		t.Fatal("expected the unsynced host to be corrected toward the room like a guest")
+	}
+	corrected := len(conn.payloads)
+	if _, err := service.HandleStateReportForConnection(t.Context(), reg, 7, "host", StateReport{SessionID: "session-1", PositionSeconds: 0, IsPaused: false}); err != nil {
+		t.Fatalf("repeated unsynced report: %v", err)
+	}
+	if len(conn.payloads) != corrected || repo.room.AnchorPositionSeconds != 600 || !service.rooms[repo.room.ID].members[buildMemberKey(7, "host")].syncingToRoom {
+		t.Fatal("repeated host sync report resent correction or restored authority before convergence")
 	}
 
 	// The seek landed: the host now reports the room's position and becomes authoritative again.
