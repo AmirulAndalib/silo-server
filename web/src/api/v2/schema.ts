@@ -23446,14 +23446,21 @@ export interface components {
        */
       updated_at: string;
     };
-    ServerAccessPath: {
+    ServerAccessPathDefault: {
       /**
-       * @description default for the public URL, LAN or a reverse proxy; provider for an overlay origin
+       * @description The public URL, LAN or a reverse proxy
        * @enum {string}
        */
-      kind: "default" | "provider";
-      /** @description Provider slug when kind is provider */
-      provider?: string;
+      kind: "default";
+    };
+    ServerAccessPathProvider: {
+      /**
+       * @description An overlay origin
+       * @enum {string}
+       */
+      kind: "provider";
+      /** @description Provider slug the request came through */
+      provider: string;
     };
     ServerCollectionLibrary: {
       collections: components["schemas"]["LibraryCollectionCard"][];
@@ -23473,9 +23480,14 @@ export interface components {
       /** @description Whether the current principal may use the capability */
       allowed: boolean;
       /** @description How this request reached the server */
-      current: components["schemas"]["ServerAccessPath"];
+      current:
+        | components["schemas"]["ServerAccessPathDefault"]
+        | components["schemas"]["ServerAccessPathProvider"];
       /** @description Addresses the deployment offers, public first then providers in slug order; empty when no public URL is configured and no provider is installed. Reachability is the client's to test. */
-      endpoints: components["schemas"]["ServerEndpoint"][];
+      endpoints: (
+        | components["schemas"]["ServerEndpointPublic"]
+        | components["schemas"]["ServerEndpointProvider"]
+      )[];
       /** @description Opaque revision of this document */
       revision: string;
       /** @description The same identity getServerIdentity reports */
@@ -23486,29 +23498,38 @@ export interface components {
        */
       state: "available" | "disabled" | "not_configured" | "unsupported";
     };
-    ServerEndpoint: {
+    ServerEndpointProvider: {
       /** @description Provider display name from its manifest, for setup help on the receiving device */
-      display_name?: string;
+      display_name: string;
       /**
-       * @description public is server.public_url; provider is a network access provider's overlay origin on the API host
+       * @description A network access provider's overlay origin on the API host
        * @enum {string}
        */
-      kind: "public" | "provider";
-      /** @description Provider slug (e.g. tailscale) for kind provider */
-      provider?: string;
+      kind: "provider";
+      /** @description Provider slug (e.g. tailscale) */
+      provider: string;
       /**
-       * @description Provider state on the API host for kind provider; only connected carries a url
+       * @description Provider state on the API host; only connected carries a url
        * @enum {string}
        */
-      state?:
+      state:
         | "disconnected"
         | "awaiting_authorization"
         | "connecting"
         | "connected"
         | "error"
         | "unavailable";
-      /** @description scheme://host[:port] clients reach the API at; absent for a provider that is not connected on the API host */
+      /** @description scheme://host[:port] clients reach the API at over the overlay; present only while connected */
       url?: string;
+    };
+    ServerEndpointPublic: {
+      /**
+       * @description server.public_url as configured
+       * @enum {string}
+       */
+      kind: "public";
+      /** @description scheme://host[:port] clients reach the API at */
+      url: string;
     };
     ServerIdentity: {
       /**

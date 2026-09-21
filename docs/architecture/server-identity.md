@@ -23,9 +23,16 @@ it. The ID is:
   with insert-if-absent; concurrent API processes converge on the winner.
   Each process caches it for its lifetime because it never changes.
 - **Stable across restarts, hostname and URL changes, and database restores.**
-  All of those keep the deployment the same server. A cloned database carries
-  the ID to the clone; that is accepted because the ID authorizes nothing
-  (below), and no regenerate operation exists yet.
+  All of those keep the deployment the same server.
+- **Copied by a database clone.** A clone carries the row, so until it is
+  changed the clone *is* the same server to every client: clients group it
+  with the original and may offer its addresses as candidates. That is the
+  intended reading for a restore or a migrated host. An operator who wants a
+  clone to be a separate deployment deletes the `server.identity_id` row on
+  the clone before serving clients; the next read mints a fresh ID. There is
+  no API to regenerate it. The ID authorizes nothing (below), so a collision
+  costs a failed pairing attempt at an address that turns out to be the
+  wrong server, not a credential.
 - **Plaintext.** It is public discovery data, and an encrypted row would
   become unreadable after a `SECRET_KEY` rotation, which must not change who
   a server is.

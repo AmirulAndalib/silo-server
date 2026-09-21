@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
+
+	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/Silo-Server/silo-server/internal/netaccess"
 	"github.com/Silo-Server/silo-server/internal/serveridentity"
@@ -60,7 +63,11 @@ const (
 	publicDiscoveryCache = "no-cache"
 )
 
-// ServerEndpoint is one address the deployment offers to clients.
+// ServerEndpoint is one address the deployment offers to clients: a tagged
+// union of the public and provider variants below, discriminated by kind.
+// The wire struct carries the superset; the schema is the union so a
+// validator rejects a public endpoint without a url or a provider endpoint
+// without its slug and state.
 type ServerEndpoint struct {
 	Kind        string `json:"kind" enum:"public,provider" doc:"public is server.public_url; provider is a network access provider's overlay origin on the API host"`
 	URL         string `json:"url,omitempty" doc:"scheme://host[:port] clients reach the API at; absent for a provider that is not connected on the API host"`
@@ -69,10 +76,54 @@ type ServerEndpoint struct {
 	State       string `json:"state,omitempty" enum:"disconnected,awaiting_authorization,connecting,connected,error,unavailable" doc:"Provider state on the API host for kind provider; only connected carries a url"`
 }
 
-// ServerAccessPath is the access path the current request arrived on.
+// ServerEndpointPublic is the configured public URL.
+type ServerEndpointPublic struct {
+	Kind string `json:"kind" enum:"public" doc:"server.public_url as configured"`
+	URL  string `json:"url" doc:"scheme://host[:port] clients reach the API at"`
+}
+
+// ServerEndpointProvider is one installed network access provider on the API
+// host. A url is present only while the provider is connected there; a
+// connected provider whose origin is not an http(s) origin has none.
+type ServerEndpointProvider struct {
+	Kind        string `json:"kind" enum:"provider" doc:"A network access provider's overlay origin on the API host"`
+	Provider    string `json:"provider" doc:"Provider slug (e.g. tailscale)"`
+	DisplayName string `json:"display_name" doc:"Provider display name from its manifest, for setup help on the receiving device"`
+	State       string `json:"state" enum:"disconnected,awaiting_authorization,connecting,connected,error,unavailable" doc:"Provider state on the API host; only connected carries a url"`
+	URL         string `json:"url,omitempty" doc:"scheme://host[:port] clients reach the API at over the overlay; present only while connected"`
+}
+
+func (ServerEndpoint) Schema(r huma.Registry) *huma.Schema {
+	return &huma.Schema{OneOf: []*huma.Schema{
+		r.Schema(reflect.TypeFor[ServerEndpointPublic](), true, ""),
+		r.Schema(reflect.TypeFor[ServerEndpointProvider](), true, ""),
+	}}
+}
+
+// ServerAccessPath is the access path the current request arrived on: a
+// tagged union of the default and provider variants, discriminated by kind.
 type ServerAccessPath struct {
 	Kind     string `json:"kind" enum:"default,provider" doc:"default for the public URL, LAN or a reverse proxy; provider for an overlay origin"`
 	Provider string `json:"provider,omitempty" doc:"Provider slug when kind is provider"`
+}
+
+// ServerAccessPathDefault is a request that did not arrive through a provider.
+type ServerAccessPathDefault struct {
+	Kind string `json:"kind" enum:"default" doc:"The public URL, LAN or a reverse proxy"`
+}
+
+// ServerAccessPathProvider is a request that arrived through a provider's
+// overlay listener.
+type ServerAccessPathProvider struct {
+	Kind     string `json:"kind" enum:"provider" doc:"An overlay origin"`
+	Provider string `json:"provider" doc:"Provider slug the request came through"`
+}
+
+func (ServerAccessPath) Schema(r huma.Registry) *huma.Schema {
+	return &huma.Schema{OneOf: []*huma.Schema{
+		r.Schema(reflect.TypeFor[ServerAccessPathDefault](), true, ""),
+		r.Schema(reflect.TypeFor[ServerAccessPathProvider](), true, ""),
+	}}
 }
 
 // ServerConnectionsDocument is the connections capability document.
