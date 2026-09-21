@@ -38,6 +38,8 @@ type audiobookPosterPathReader interface {
 	GetPosterPath(ctx context.Context, contentID string) (string, error)
 }
 
+const audiobookMultipartKind = "multipart"
+
 const audiobookDuplicateCandidateSQL = `
 	SELECT mi.content_id, mi.title
 	FROM media_items mi
@@ -169,10 +171,10 @@ func (s *Scanner) audiobookFolderShouldSkip(ctx context.Context, folder *models.
 	// incomplete multipart book safe to skip.
 	for _, file := range existing {
 		if len(existing) == 1 {
-			if file.PresentationKind == "multipart" {
+			if file.PresentationKind == audiobookMultipartKind {
 				return "", false, nil
 			}
-		} else if file.PresentationKind != "multipart" || file.PresentationPartTotal != len(existing) {
+		} else if file.PresentationKind != audiobookMultipartKind || file.PresentationPartTotal != len(existing) {
 			return "", false, nil
 		}
 	}
@@ -231,12 +233,10 @@ func (r *audiobookRootScan) failed() bool {
 // walkAudiobookDirectories keeps catalog paths under the configured root while
 // following directory symlinks. Only ancestors are tracked: aliases must retain
 // their own seen paths so missing-file reconciliation does not retire them.
+// Callers filter inherited patterns before resolving or entering a directory.
 func walkAudiobookDirectories(ctx context.Context, path string, scan *audiobookRootScan, ancestors map[string]bool, ignoreRulesStack []ignoreRules, honorIgnores bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
-	}
-	if ignoreRulesMatch(ignoreRulesStack, path) {
-		return nil
 	}
 	recordFailure := func(err error) {
 		recordWalkFailure(&scan.walkFailures, path)
@@ -1255,7 +1255,7 @@ func (s *Scanner) upsertAudiobookPresentationTx(
 			AudioChannels:      af.AudioChannels,
 		}
 		if partTotal > 1 {
-			mf.PresentationKind = "multipart"
+			mf.PresentationKind = audiobookMultipartKind
 			mf.PresentationGroupKey = contentID
 			mf.PresentationPartIndex = idx + 1
 			mf.PresentationPartTotal = partTotal

@@ -396,15 +396,6 @@ func cleanScopedAudiobookScanRoot(path string) (string, error) {
 	return clean, nil
 }
 
-func scopedFolderPaths(folder *models.MediaFolder, paths []string) *models.MediaFolder {
-	if folder == nil {
-		return nil
-	}
-	clone := *folder
-	clone.Paths = paths
-	return &clone
-}
-
 // walkMode tells walkLogicalTree which file extensions to surface and
 // which library-specific filename heuristics (sample/extra skipping)
 // to apply.
@@ -493,6 +484,7 @@ func recordWalkFailure(failures *[]string, path string) {
 	}
 }
 
+// Callers filter inherited patterns before resolving or entering a path.
 func walkLogicalTree(
 	ctx context.Context,
 	logicalPath string,
@@ -563,9 +555,6 @@ func walkLogicalTree(
 	visitedPhysicalDirs[canonicalDir] = struct{}{}
 
 	if isIgnoredDirectoryPath(logicalPath) {
-		return nil
-	}
-	if ignoreRulesMatch(ignoreRulesStack, logicalPath) {
 		return nil
 	}
 	if mode == walkModeMovie && shouldSkipMovieSupplementalDir(logicalPath) {

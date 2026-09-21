@@ -1027,8 +1027,8 @@ func TestSweepMissingAndReconcileProtectsDeadRootsFromScopedScans(t *testing.T) 
 	}
 
 	scanner := NewScanner(NewFileRepository(pool), "", nil, 2, true, 0)
-	// A scoped clone the way ScanSubtree/ScanFile build one: Paths is just the
-	// scanned subtree, not the configured roots.
+	// Cleanup must load the configured roots even when its caller supplies a
+	// folder value containing only the scanned subtree.
 	scoped := scopedFolderPaths(&models.MediaFolder{
 		ID:      folderID,
 		Paths:   []string{parent, child},

@@ -18,6 +18,15 @@ type recordingQueueSyncer struct {
 	scope    string
 }
 
+func scopedFolderPaths(folder *models.MediaFolder, paths []string) *models.MediaFolder {
+	if folder == nil {
+		return nil
+	}
+	clone := *folder
+	clone.Paths = paths
+	return &clone
+}
+
 func (s *recordingQueueSyncer) SyncForFolder(context.Context, int) error {
 	return nil
 }
