@@ -238,6 +238,11 @@ function roomConnection(
     vote: vi.fn(async () => {}),
     unvote: vi.fn(async () => {}),
     promoteSuggestion: vi.fn(async () => null),
+    stageItem: vi.fn(async () => null),
+    startPlayback: vi.fn(async () => null),
+    stopPlayback: vi.fn(async () => null),
+    updateSelectionMode: vi.fn(async () => null),
+    setLobbyReady: vi.fn(() => ({ ok: true })),
     ...overrides,
   };
 }

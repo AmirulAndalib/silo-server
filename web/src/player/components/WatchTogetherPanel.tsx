@@ -14,6 +14,7 @@ interface WatchTogetherPanelProps {
   onCopyInvite: () => void;
   onToggleGuestControl: (policy: GuestControlPolicy) => void;
   onEndRoom: () => void;
+  onStopPlayback: () => void;
 }
 
 export function WatchTogetherPanel({
@@ -23,6 +24,7 @@ export function WatchTogetherPanel({
   onCopyInvite,
   onToggleGuestControl,
   onEndRoom,
+  onStopPlayback,
 }: WatchTogetherPanelProps) {
   const [endConfirmOpen, setEndConfirmOpen] = useState(false);
   const isHost = room?.self_can_manage_room === true;
@@ -119,8 +121,16 @@ export function WatchTogetherPanel({
           </button>
           <button
             type="button"
+            onClick={onStopPlayback}
+            title="Stop for everyone and go back to the room to pick something else"
+            className="ml-auto rounded-md bg-white/12 px-2.5 py-1 text-[11px] font-medium text-white/90 transition-colors hover:bg-white/20"
+          >
+            Stop
+          </button>
+          <button
+            type="button"
             onClick={() => setEndConfirmOpen(true)}
-            className="ml-auto rounded-md bg-red-500/25 px-2.5 py-1 text-[11px] font-medium text-red-100 transition-colors hover:bg-red-500/35"
+            className="rounded-md bg-red-500/25 px-2.5 py-1 text-[11px] font-medium text-red-100 transition-colors hover:bg-red-500/35"
           >
             End
           </button>

@@ -76,6 +76,7 @@ import { pendingServerSubtitleSelection } from "../utils/playableSubtitles";
 import {
   copyWatchTogetherInvite,
   endWatchTogetherRoom,
+  stopWatchTogetherPlayback,
   setWatchTogetherGuestControl,
 } from "@/lib/watchTogetherActions";
 import { toast } from "sonner";
@@ -583,6 +584,11 @@ export function VideoPlayer({
       updatePolicy: async () => null,
       selectItem: async () => null,
       fallbackSource: async () => null,
+      stageItem: async () => null,
+      startPlayback: async () => null,
+      stopPlayback: async () => null,
+      updateSelectionMode: async () => null,
+      setLobbyReady: () => ({ ok: false }),
       closeRoom: async () => {},
       createSuggestion: async () => {},
       deleteSuggestion: async () => {},
@@ -953,9 +959,10 @@ export function VideoPlayer({
       }
 
       try {
+        // The room is gone; the hub is where a new one starts.
         await onExit({
           ...exitState,
-          destinationHref: "/rooms/join",
+          destinationHref: "/rooms",
         });
       } finally {
         if (!cancelled) {
@@ -975,6 +982,46 @@ export function VideoPlayer({
     onExit,
     resetLeaveState,
     watchTogether.closedReason,
+    watchTogetherRoomId,
+  ]);
+
+  // The host stopped playback: the room is still open, in the lobby, so
+  // everyone goes back to the room page rather than the hub. A room that was
+  // never playing (a stale lobby snapshot on first connect) is not a stop.
+  const wasRoomPlayingRef = useRef(false);
+  useEffect(() => {
+    const phase = watchTogether.room?.phase;
+    if (!watchTogetherRoomId || watchTogether.closedReason || !phase) return;
+    if (phase === "playing") {
+      wasRoomPlayingRef.current = true;
+      return;
+    }
+    if (!wasRoomPlayingRef.current || leaveInProgressRef.current) return;
+    wasRoomPlayingRef.current = false;
+    leaveInProgressRef.current = true;
+    setIsLeaving(true);
+    showWatchTogetherNotice("The host stopped playback.", "info");
+    const exitState = buildExitState();
+    void (async () => {
+      try {
+        await Promise.race([
+          flushWatchProgress(),
+          new Promise<void>((resolve) => {
+            window.setTimeout(resolve, EXIT_PROGRESS_FLUSH_TIMEOUT_MS);
+          }),
+        ]);
+      } catch {
+        // Best effort, as on any other exit.
+      }
+      await onExit(exitState);
+    })();
+  }, [
+    buildExitState,
+    flushWatchProgress,
+    onExit,
+    showWatchTogetherNotice,
+    watchTogether.closedReason,
+    watchTogether.room?.phase,
     watchTogetherRoomId,
   ]);
 
@@ -999,20 +1046,10 @@ export function VideoPlayer({
       }
 
       try {
-        if (
-          action === "exit" &&
-          watchTogetherRoomId &&
-          !watchTogether.closedReason &&
-          watchTogether.room?.self_can_manage_room
-        ) {
-          await watchTogether.closeRoom();
-          await onExit({
-            ...exitState,
-            destinationHref: "/rooms/join",
-          });
-          return;
-        }
-
+        // Leaving the player in a room returns everyone, host included, to the
+        // room page (WatchPlaybackChrome navigates there when no destination
+        // is given). Ending the party is the room page's decision, not a side
+        // effect of closing the player.
         if (action === "minimize" && onMinimize) {
           await onMinimize(exitState);
           return;
@@ -3017,6 +3054,10 @@ export function VideoPlayer({
     await endWatchTogetherRoom(watchTogether.closeRoom);
   }, [watchTogether]);
 
+  const handleStopRoomPlayback = useCallback(async () => {
+    await stopWatchTogetherPlayback(watchTogether.stopPlayback);
+  }, [watchTogether]);
+
   // -- Render --
 
   const isPostrollVisible = displayMode === "postroll" && !hasEnded;
@@ -3148,6 +3189,7 @@ export function VideoPlayer({
           onCopyInvite={() => void handleCopyWatchTogetherInvite()}
           onToggleGuestControl={(policy) => void handleToggleGuestControl(policy)}
           onEndRoom={() => void handleEndRoom()}
+          onStopPlayback={() => void handleStopRoomPlayback()}
         />
       ) : null}
 
