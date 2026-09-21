@@ -7,7 +7,6 @@ import (
 	"io"
 	"maps"
 	"net/http"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,6 +14,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/access"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/auth"
+	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/watchtogether"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -28,6 +29,13 @@ type WatchTogetherHandler struct {
 	Service       *watchtogether.Service
 	ScopeResolver WatchTogetherScopeResolver
 	TokenService  *watchtogether.RoomTokenService
+	// MemberState and Details serve the v2 member-state and picker reads.
+	// Both may be nil, in which case those operations fail closed.
+	MemberState        *watchtogether.MemberStateReader
+	Details            watchtogether.ItemDetailLookup
+	MemberStateCatalog interface {
+		GetSearchItemsByIDsWithAccess(context.Context, []string, catalog.AccessFilter) ([]*models.MediaItem, error)
+	}
 }
 
 type createWatchTogetherRoomRequest struct {
@@ -52,6 +60,30 @@ type selectWatchTogetherRoomItemRequest struct {
 type watchTogetherRoomResponse struct {
 	Room            watchtogether.Snapshot `json:"room"`
 	RoomAccessToken string                 `json:"room_access_token,omitempty"`
+}
+
+// The response builder also supplies snapshots to v2 adapters. Apply the v1
+// projection only when writing this legacy HTTP envelope to the wire.
+func (response watchTogetherRoomResponse) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Room            watchTogetherRoomSnapshotV1 `json:"room"`
+		RoomAccessToken string                      `json:"room_access_token,omitempty"`
+	}{Room: watchTogetherSnapshotV1(response.Room), RoomAccessToken: response.RoomAccessToken})
+}
+
+type watchTogetherRoomSnapshotV1 struct {
+	watchtogether.Snapshot
+	Members []watchTogetherMemberV1 `json:"members,omitempty"`
+}
+
+// Keep the frozen v1 roster independent of new coordinator and v2 member fields.
+type watchTogetherMemberV1 struct {
+	UserID      int    `json:"user_id"`
+	ProfileID   string `json:"profile_id"`
+	DisplayName string `json:"display_name"`
+	IsHost      bool   `json:"is_host"`
+	IsSelf      bool   `json:"is_self"`
+	Connected   bool   `json:"connected"`
 }
 
 type createWatchTogetherSuggestionRequest struct {
@@ -92,6 +124,10 @@ type watchTogetherStateReportMessage struct {
 	SessionID       string  `json:"session_id"`
 	PositionSeconds float64 `json:"position_seconds"`
 	IsPaused        bool    `json:"is_paused"`
+	// Optional: the report doubles as a ready acknowledgement of command_id
+	// while the room is waiting, so a lost ready frame heals on the next tick.
+	CommandID string `json:"command_id,omitempty"`
+	IsReady   bool   `json:"is_ready,omitempty"`
 }
 
 type watchTogetherReadyMessage struct {
@@ -107,6 +143,11 @@ type watchTogetherBufferingMessage struct {
 	SessionID       string  `json:"session_id"`
 	PositionSeconds float64 `json:"position_seconds"`
 	IsPaused        bool    `json:"is_paused"`
+}
+
+type watchTogetherLobbyReadyMessage struct {
+	Type  string `json:"type"`
+	Ready bool   `json:"ready"`
 }
 
 type watchTogetherPingMessage struct {
@@ -668,7 +709,7 @@ func (h *WatchTogetherHandler) buildRoomResponse(
 	userID int,
 	profileID string,
 ) (watchTogetherRoomResponse, error) {
-	response := watchTogetherRoomResponse{Room: watchTogetherSnapshotV1(snapshot)}
+	response := watchTogetherRoomResponse{Room: snapshot}
 	if h == nil || h.TokenService == nil {
 		return response, nil
 	}
@@ -687,14 +728,15 @@ func (h *WatchTogetherHandler) buildRoomResponse(
 
 // watchTogetherSnapshotV1 preserves the frozen member payload without mutating
 // the roster shared with v2 viewers and the coordinator.
-func watchTogetherSnapshotV1(snapshot watchtogether.Snapshot) watchtogether.Snapshot {
-	snapshot.Members = slices.Clone(snapshot.Members)
-	for i := range snapshot.Members {
-		snapshot.Members[i].IsReady = false
-		snapshot.Members[i].IsBuffering = false
-		snapshot.Members[i].IsSyncing = false
+func watchTogetherSnapshotV1(snapshot watchtogether.Snapshot) watchTogetherRoomSnapshotV1 {
+	members := make([]watchTogetherMemberV1, 0, len(snapshot.Members))
+	for _, member := range snapshot.Members {
+		members = append(members, watchTogetherMemberV1{
+			UserID: member.UserID, ProfileID: member.ProfileID, DisplayName: member.DisplayName,
+			IsHost: member.IsHost, IsSelf: member.IsSelf, Connected: member.Connected,
+		})
 	}
-	return snapshot
+	return watchTogetherRoomSnapshotV1{Snapshot: snapshot, Members: members}
 }
 
 func (h *WatchTogetherHandler) validateRoomAccessToken(
@@ -864,9 +906,11 @@ func (h *WatchTogetherHandler) handleRoomClientMessage(
 			return errors.New("session_id is required")
 		}
 		_, err := h.Service.HandleStateReportForConnection(ctx, reg, userID, profileID, watchtogether.StateReport{
+			CommandID:       msg.CommandID,
 			SessionID:       msg.SessionID,
 			PositionSeconds: msg.PositionSeconds,
 			IsPaused:        msg.IsPaused,
+			IsReady:         msg.IsReady,
 		})
 		return err
 	case "ready":
@@ -897,6 +941,16 @@ func (h *WatchTogetherHandler) handleRoomClientMessage(
 			PositionSeconds: msg.PositionSeconds,
 			IsPaused:        msg.IsPaused,
 		})
+		return err
+	case "lobby_ready":
+		if !rc.includeMemberStatus {
+			return errors.New("unsupported room websocket message")
+		}
+		var msg watchTogetherLobbyReadyMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return err
+		}
+		_, err := h.Service.HandleLobbyReadyForConnection(ctx, reg, userID, profileID, msg.Ready)
 		return err
 	case "ping":
 		var msg watchTogetherPingMessage

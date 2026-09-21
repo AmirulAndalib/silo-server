@@ -76,6 +76,7 @@ import { pendingServerSubtitleSelection } from "../utils/playableSubtitles";
 import {
   copyWatchTogetherInvite,
   endWatchTogetherRoom,
+  stopWatchTogetherPlayback,
   setWatchTogetherGuestControl,
 } from "@/lib/watchTogetherActions";
 import { toast } from "sonner";
@@ -221,6 +222,14 @@ interface PlaybackNoticeState {
   tone: "info" | "warning";
   actionLabel?: string;
   onAction?: () => void;
+}
+
+function isAutoplayPolicyRejection(error: unknown): boolean {
+  return error instanceof DOMException
+    ? error.name === "NotAllowedError"
+    : typeof error === "object" &&
+        error !== null &&
+        (error as { name?: unknown }).name === "NotAllowedError";
 }
 
 function readNumericPayload(
@@ -583,6 +592,11 @@ export function VideoPlayer({
       updatePolicy: async () => null,
       selectItem: async () => null,
       fallbackSource: async () => null,
+      stageItem: async () => null,
+      startPlayback: async () => null,
+      stopPlayback: async () => null,
+      updateSelectionMode: async () => null,
+      setLobbyReady: () => ({ ok: false }),
       closeRoom: async () => {},
       createSuggestion: async () => {},
       deleteSuggestion: async () => {},
@@ -953,9 +967,10 @@ export function VideoPlayer({
       }
 
       try {
+        // The room is gone; the hub is where a new one starts.
         await onExit({
           ...exitState,
-          destinationHref: "/rooms/join",
+          destinationHref: "/rooms",
         });
       } finally {
         if (!cancelled) {
@@ -975,6 +990,46 @@ export function VideoPlayer({
     onExit,
     resetLeaveState,
     watchTogether.closedReason,
+    watchTogetherRoomId,
+  ]);
+
+  // The host stopped playback: the room is still open, in the lobby, so
+  // everyone goes back to the room page rather than the hub. A room that was
+  // never playing (a stale lobby snapshot on first connect) is not a stop.
+  const wasRoomPlayingRef = useRef(false);
+  useEffect(() => {
+    const phase = watchTogether.room?.phase;
+    if (!watchTogetherRoomId || watchTogether.closedReason || !phase) return;
+    if (phase === "playing") {
+      wasRoomPlayingRef.current = true;
+      return;
+    }
+    if (!wasRoomPlayingRef.current || leaveInProgressRef.current) return;
+    wasRoomPlayingRef.current = false;
+    leaveInProgressRef.current = true;
+    setIsLeaving(true);
+    showWatchTogetherNotice("The host stopped playback.", "info");
+    const exitState = buildExitState();
+    void (async () => {
+      try {
+        await Promise.race([
+          flushWatchProgress(),
+          new Promise<void>((resolve) => {
+            window.setTimeout(resolve, EXIT_PROGRESS_FLUSH_TIMEOUT_MS);
+          }),
+        ]);
+      } catch {
+        // Best effort, as on any other exit.
+      }
+      await onExit(exitState);
+    })();
+  }, [
+    buildExitState,
+    flushWatchProgress,
+    onExit,
+    showWatchTogetherNotice,
+    watchTogether.closedReason,
+    watchTogether.room?.phase,
     watchTogetherRoomId,
   ]);
 
@@ -999,20 +1054,10 @@ export function VideoPlayer({
       }
 
       try {
-        if (
-          action === "exit" &&
-          watchTogetherRoomId &&
-          !watchTogether.closedReason &&
-          watchTogether.room?.self_can_manage_room
-        ) {
-          await watchTogether.closeRoom();
-          await onExit({
-            ...exitState,
-            destinationHref: "/rooms/join",
-          });
-          return;
-        }
-
+        // Leaving the player in a room returns everyone, host included, to the
+        // room page (WatchPlaybackChrome navigates there when no destination
+        // is given). Ending the party is the room page's decision, not a side
+        // effect of closing the player.
         if (action === "minimize" && onMinimize) {
           await onMinimize(exitState);
           return;
@@ -1839,6 +1884,9 @@ export function VideoPlayer({
       // where `waiting` fired but `canplay`/`playing` never followed.
       markPlaybackStarted();
       clearBuffering();
+      if (roomSyncWaiting && watchTogetherSync.attachedSessionId === sessionId) {
+        watchTogetherSync.reportReady();
+      }
     };
     const onSeeked = () => {
       const resolved = resolvePendingSeekTime(
@@ -1848,13 +1896,15 @@ export function VideoPlayer({
       setCurrentTime(resolved.currentTime);
       setPendingSeekTime(resolved.pendingSeekTime);
       // Reloading a stream can finish an older native seek. It does not settle
-      // the requested seek or make this member ready at the room's new position.
-      if (resolved.pendingSeekTime !== null) return;
-      markPlaybackStarted();
-      clearBuffering();
+      // the requested seek. Readiness is still evaluated: the sync hook checks
+      // the actual media position against the room's seek target, and the
+      // host may be accepted short of it.
       if (roomSyncWaiting && watchTogetherSync.attachedSessionId === sessionId) {
         watchTogetherSync.reportReady();
       }
+      if (resolved.pendingSeekTime !== null) return;
+      markPlaybackStarted();
+      clearBuffering();
     };
     const onDurationChange = () => {
       if (video.duration && isFinite(video.duration)) {
@@ -1893,6 +1943,14 @@ export function VideoPlayer({
     const onPlaying = () => {
       clearBuffering();
       markPlaybackStarted();
+      if (roomSyncWaiting && watchTogetherSync.attachedSessionId === sessionId) {
+        watchTogetherSync.reportReady();
+      }
+    };
+    const onLoadedData = () => {
+      if (roomSyncWaiting && watchTogetherSync.attachedSessionId === sessionId) {
+        watchTogetherSync.reportReady();
+      }
     };
     const onStalled = () => {
       if (watchTogetherRoomActive && watchTogetherSync.attachedSessionId === sessionId) {
@@ -1930,6 +1988,8 @@ export function VideoPlayer({
     video.addEventListener("waiting", onWaiting);
     video.addEventListener("stalled", onStalled);
     video.addEventListener("canplay", onCanPlay);
+    video.addEventListener("canplaythrough", onCanPlay);
+    video.addEventListener("loadeddata", onLoadedData);
     video.addEventListener("playing", onPlaying);
     video.addEventListener("error", onError);
     video.addEventListener("ended", onVideoEnded);
@@ -1945,6 +2005,8 @@ export function VideoPlayer({
       video.removeEventListener("waiting", onWaiting);
       video.removeEventListener("stalled", onStalled);
       video.removeEventListener("canplay", onCanPlay);
+      video.removeEventListener("canplaythrough", onCanPlay);
+      video.removeEventListener("loadeddata", onLoadedData);
       video.removeEventListener("playing", onPlaying);
       video.removeEventListener("error", onError);
       video.removeEventListener("ended", onVideoEnded);
@@ -2666,9 +2728,23 @@ export function VideoPlayer({
         if (command.action === "play") {
           try {
             await video.play();
-          } catch {
+          } catch (error) {
             if (!isMountedRef.current || lastRoomCommandIdRef.current !== command.command_id)
               return;
+            // Only an autoplay policy refusal needs a click. A transport swap
+            // (subtitle or quality change) tears the source down with load(),
+            // which aborts a pending play() for a reason that is gone a moment
+            // later; the replacement transport's own startup resumes playback.
+            if (!isAutoplayPolicyRejection(error)) {
+              window.setTimeout(() => {
+                if (!isMountedRef.current || lastRoomCommandIdRef.current !== command.command_id)
+                  return;
+                const currentVideo = videoRef.current;
+                if (!currentVideo || !currentVideo.paused) return;
+                void currentVideo.play().catch(() => {});
+              }, AUTOPLAY_RETRY_DELAY_MS);
+              return;
+            }
             resetRoomCatchupRate();
             showWatchTogetherNotice(
               "Your browser blocked automatic playback. Click to join playback.",
@@ -3017,6 +3093,10 @@ export function VideoPlayer({
     await endWatchTogetherRoom(watchTogether.closeRoom);
   }, [watchTogether]);
 
+  const handleStopRoomPlayback = useCallback(async () => {
+    await stopWatchTogetherPlayback(watchTogether.stopPlayback);
+  }, [watchTogether]);
+
   // -- Render --
 
   const isPostrollVisible = displayMode === "postroll" && !hasEnded;
@@ -3148,6 +3228,7 @@ export function VideoPlayer({
           onCopyInvite={() => void handleCopyWatchTogetherInvite()}
           onToggleGuestControl={(policy) => void handleToggleGuestControl(policy)}
           onEndRoom={() => void handleEndRoom()}
+          onStopPlayback={() => void handleStopRoomPlayback()}
         />
       ) : null}
 

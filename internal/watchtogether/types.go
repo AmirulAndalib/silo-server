@@ -85,6 +85,9 @@ type MemberSummary struct {
 	IsReady     bool   `json:"is_ready,omitempty"`
 	IsBuffering bool   `json:"is_buffering,omitempty"`
 	IsSyncing   bool   `json:"is_syncing,omitempty"`
+	// LobbyReady is the member's lobby "I'm ready". It is only meaningful
+	// while the room is in the lobby and is always false once playing.
+	LobbyReady bool `json:"lobby_ready"`
 }
 
 type Snapshot struct {
@@ -152,6 +155,9 @@ type StateReport struct {
 	SessionID       string
 	PositionSeconds float64
 	IsPaused        bool
+	// IsReady marks a periodic state report as a readiness acknowledgement
+	// for CommandID while the room is waiting.
+	IsReady bool
 }
 
 type TransportCommand struct {

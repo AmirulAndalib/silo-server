@@ -194,9 +194,61 @@ The actual web code-entry and invite auto-join/retry actions copy input and capt
 
 `PUT /api/v2/watch-together/rooms/{room_id}/selection` (`selectWatchTogetherRoomItem`) requires authenticated profile authority, the demo guard and both the host account and profile. The body requires `content_id`; optional `file_id` and `library_id` are positive string IDs. Host selection does not require guest room proof. The existing resolver retains playable-content and access checks. Vote rooms reject direct selection with `409`; non-host authority returns `403`, missing room `404`, invalid selection `422`, closed room `409`, and unavailable service/token configuration `503`.
 
-A changed selection retains the existing service behavior: reset playback anchor to zero and paused, enter waiting with resume-on-ready, advance selection revision and generation, clear prior member playback-session/readiness/buffering/ignore-wait state, and broadcast the room snapshot across connected API servers. The v2 writer locks the authoritative database row and compares resolved content, file and library identity before any reset. An identical current selection preserves anchor, revision, generation, member readiness, waiting timer and broadcasts. This is a current-state no-op, not a historical replay receipt: after a different intervening selection, the old request can select its content again. The operation remains non-retryable. A competing generation writer can cause the service to return its refreshed winning snapshot without replaying the failed selection. Clients must use the returned snapshot.
+A changed selection retains the existing service behavior: reset playback anchor to zero and paused, enter waiting with resume-on-ready, advance selection revision and generation, clear prior member playback-session/readiness/buffering/ignore-wait state, and broadcast the room snapshot across connected API servers. The v2 writer locks the authoritative database row and compares resolved content, file and library identity before any reset. An identical current selection preserves anchor, revision, generation, member readiness, waiting timer and broadcasts. That no-op applies only while the room is playing: selecting the item a lobby has merely staged starts it, because staging is not playback. This is a current-state no-op, not a historical replay receipt: after a different intervening selection, the old request can select its content again. The operation remains non-retryable. A competing generation writer can cause the service to return its refreshed winning snapshot without replaying the failed selection. Clients must use the returned snapshot.
 
 The actual web action captures input and authority, sends once without authentication replay, and fences replaced authority, room and request run before publication. A newer held generation is retained only for the same room. Stale receipts do not clear the candidate or display completion feedback. There is no automatic read, rebase or retry after an uncertain result. Success returns the existing room snapshot and renewed room/account/profile proof; that proof is not a session-bound socket credential. The v1 selection writer retains its frozen reset behavior; all nodes serving this v2 operation must use the guarded writer. A no-op refresh from another node adopts a newer selection revision locally and discards readiness belonging to the prior selection. Room coordination across API servers is described in [Watch Party synchronization](architecture/watch-party-synchronization.md). Native Watch Party UI remains inactive.
+
+### Stage room content without starting it
+
+`PUT /api/v2/watch-together/rooms/{room_id}/staged-selection` (`stageWatchTogetherRoomItem`) requires authenticated profile authority, the demo guard and both the host account and profile. The body requires `content_id`; optional `file_id` and `library_id` are positive string IDs, resolved by the same playable-content and access checks as a direct selection. Vote rooms refuse staging with `409` (suggest instead); a room that is already playing refuses with `409`; non-host authority returns `403`, missing room `404`, invalid selection `422`, closed room `409`, and unavailable service/token configuration `503`.
+
+A staged item is a lobby room whose `selected_content_id` is set. A changed selection keeps the room in the lobby, advances the room generation, refreshes the idle timestamp so the janitor leaves an active lobby alone, and broadcasts the snapshot across API servers. It never advances the selection revision, because that revision is the playback epoch and nothing has started. Staging different content clears every member's lobby ready state; re-staging the same content keeps it. The row update is guarded in SQL on generation, lobby phase and host-pick mode, so a stale node cannot stage into a room another node has started or switched. The operation is naturally idempotent: repeating the same resolved content, file, and library preserves the generation, idle timestamp, readiness, and broadcasts.
+
+The web sends once under captured authority and uses the returned snapshot. A member cannot attach a playback session to a staged lobby; attach, transport and buffering readiness remain playing-only. No v1 route stages: v1 selection always starts playback.
+
+### Start the staged content
+
+`POST /api/v2/watch-together/rooms/{room_id}/playback/start` (`startWatchTogetherRoomPlayback`) requires authenticated profile authority, the demo guard and both the host account and profile. It has no body: it starts whatever is staged. Nothing staged returns `409`; non-host authority `403`, missing room `404`, closed room `409`, and unavailable service `503`.
+
+Start locks the authoritative row and performs the selection transition a direct selection performs: playing phase, waiting playback state, resume-on-ready, anchor reset to zero and paused, selection revision and generation advanced. Every member's attached session, buffering readiness, ignore-wait and lobby ready state is dropped as belonging to the previous epoch, and the waiting deadline is disarmed. A room that is already playing answers with its current snapshot unchanged, so a duplicate press cannot restart playback; a generation mismatch answers the same way. The operation is non-retryable: an uncertain result is read back, not replayed.
+
+The lobby ready check is advisory. The server never gates start on it; the web counts connected guests and offers the same call as "start anyway" when some guests are not ready. Vote rooms start through suggestion promotion and do not show a lobby ready check.
+
+### Stop playback without ending the room
+
+`POST /api/v2/watch-together/rooms/{room_id}/playback/stop` (`stopWatchTogetherRoomPlayback`) requires authenticated profile authority, the demo guard and both the host account and profile. It has no body. Non-host authority returns `403`, missing room `404`, closed room `409`, and unavailable service `503`.
+
+Stop locks the authoritative row and returns a playing room to the lobby: lobby phase, idle playback state, resume-on-ready cleared, anchor reset to zero and paused, selection revision and generation advanced. The selection columns are left alone, so the item that was playing is the lobby's staged item and the host can start it again or stage something else. Advancing the revision is what ends the playback epoch: every member's attached session, buffering readiness, ignore-wait and lobby ready state is dropped and the waiting deadline is disarmed, exactly as a start does. Members in the player see the room leave the playing phase and return to the room page. A room that is not playing answers with its current snapshot unchanged, so the call is naturally idempotent and a duplicate press cannot disturb the lobby it produced.
+
+Ending the room (`DELETE .../rooms/{room_id}`) remains the way to dismiss everyone. Frozen v1 has no stop: v1 rooms either play or end.
+
+### Switch a lobby's selection mode
+
+`PATCH /api/v2/watch-together/rooms/{room_id}/selection-mode` (`updateWatchTogetherRoomSelectionMode`) requires authenticated profile authority, the demo guard and both the host account and profile. The body contains `selection_mode`: `host_pick` or `vote`. A playing room refuses with `409`; non-host authority returns `403`, missing room `404`, an invalid mode `422`, closed room `409`, and unavailable service `503`.
+
+Switching drops the staged item and every member's lobby ready state, advances the generation, refreshes the idle timestamp and broadcasts the local snapshot. Suggestions and votes are rows that outlive the switch: a room switched from voting to host picks can still promote any of them, and a room switched to voting starts with whatever was already suggested. Repeating the current mode is a no-op with no persistence or broadcast. Frozen v1 fixes the mode at creation and has no switch.
+
+### Lobby ready over the room socket
+
+A connected member sends `{"type":"lobby_ready","ready":true|false}` on the v2 room socket. The server commits the flag in the shared runtime, broadcasts the snapshot, and answers `error bad_request` when the room is not in the lobby. V1 sockets reject this message, and v1 HTTP and socket snapshots retain the frozen six-field member representation. Every member listed in v2 `members[]` carries `lobby_ready`; it is always `false` once the room is playing. The flag is distinct from the buffering `ready` message, which still requires an attached playback session.
+
+Lobby ready is persisted in the shared room runtime and included in snapshots across API servers. Staging different content, starting or stopping playback, and switching modes clear it in the same transaction as the room update. A stale node adopting that transaction preserves any ready flag subsequently saved for the current selection.
+
+### Read member watch state for named content
+
+`POST /api/v2/watch-together/rooms/{room_id}/member-state` (`queryWatchTogetherMemberState`) requires authenticated profile authority and room proof in `X-Room-Token` for the exact room, account and profile. The body carries `content_ids` (1 to 200). It is a POST-shaped read: the id set exceeds what a query string carries and the operation changes nothing, so it is classified naturally idempotent. Invalid proof returns `403`, missing room `404`, closed room `409`, an empty, blank or oversized id list `422`, and unavailable service `503`. The response is `no-store`.
+
+The response lists `members` (connected across API servers, host first) and one `items` entry per distinct accessible requested id, in request order, with each member's `state` (`unseen`, `in_progress` with `position_seconds` and `duration_seconds`, or `watched`) and `on_watchlist`. Completed watch history is folded into `watched`. A series id is `in_progress` for a member when one of their in-progress episodes belongs to it. The caller's catalog access filter applies to movie, series, and episode IDs before any member state is read; inaccessible and missing IDs are omitted.
+
+### Read the room picker rows
+
+`GET /api/v2/watch-together/rooms/{room_id}/picker` (`getWatchTogetherRoomPicker`) requires the same authority and room proof. It returns `members`, `continue_together` (items two or more connected members are mid-way through, most shared first, then most recent) and `watchlist_union` (items on any connected member's watchlist, most shared first). Episodes collapse to their series, and a series row carries `next_up`: the episode most members would play next (their own in-progress episode, else their next unwatched one) with the count of members it applies to. Each row names the members it applies to and, for continue rows, their positions.
+
+Rows are resolved to catalog cards through the caller's access filter; a row whose item the caller cannot see is dropped, so another member's viewing never names an item the caller cannot browse to. Resolution uses the batch card path: one base-row query, one access check, one localization lookup and one artwork signing for the whole page. It never takes the item-page build, whose per-item file, extra, folder-path and credit reads and separate image resolves made the picker cost seconds per row. Per-member reads are bounded pages (fifty in-progress rows, fifty watchlist rows); the rows are capped at twenty and thirty. The response is `no-store`. Invalid proof returns `403`, missing room `404`, closed room `409`, and unavailable service or catalog access `503`.
+
+### Watch-together capabilities
+
+`GET /api/v2/watch-together/capabilities` (`getWatchTogetherCapabilities`) requires an authenticated account and follows the shared capability document conventions (opaque `revision`, `state`, `allowed`, private revalidation with `ETag`). When rooms are served, each feature flag reflects its wired operation dependencies. `max_member_state_ids` is 200 when member-state is available and zero otherwise. `lobby_ready` and `socket_protocol` (`silo.room.v2`) require the v2 socket; the protocol is an empty string when the socket is unavailable. When the room service is not wired the state is `not_configured` and every flag is `false`. Clients decide whether to show the staged lobby, the ready check, the mode switch and the shared picker from this document, not from the server version.
 
 ### Suggestion creation receipt storage
 
@@ -214,11 +266,11 @@ The actual web candidate holds an immutable ID, metadata, room proof and authori
 
 ### Promote a room suggestion
 
-`POST /api/v2/watch-together/rooms/{room_id}/suggestions/promote` (`promoteWatchTogetherSuggestion`) requires profile/demo authority, original `X-Room-Token`, both host account and profile, and a suggestion belonging to the room. The body contains `suggestion_id`. A vote room requires a nonzero tally and its current winner. The existing tally read precedes selection admission; a vote arriving between them does not retroactively invalidate the host action. This is not a serializable vote freeze.
+`POST /api/v2/watch-together/rooms/{room_id}/suggestions/promote` (`promoteWatchTogetherSuggestion`) requires profile/demo authority, original `X-Room-Token`, both host account and profile, and a suggestion belonging to the room. The body contains `suggestion_id`. The host may promote any suggestion in either mode: in a vote room the tally is advisory and the host's choice is broadcast as the selection, so an override is visible rather than silent. Clients read the leader from the suggestion list ordering rather than from a server-side gate.
 
 The v2 path retains playable/access resolution, then uses the guarded selection transaction. Promotion chooses content rather than an explicit file variant: already-selected content preserves its selected file/library, playback anchor, revision/generation, attached readiness and local broadcast count even if the resolver now prefers another variant. A different eligible content selection resets playback/readiness once. Direct selection continues to compare all resolved identities. Host/closed/mode checks still precede the no-op. No historical replay receipt is promised after intervening different content, so promotion remains non-retryable. Frozen v1 promotion remains unchanged.
 
-Success returns the authoritative room snapshot and renewed existing room proof. A competing writer may determine that snapshot; the web reports selection updated without asserting playback started. Missing room/suggestion returns `404`, non-host or invalid proof `403`, closed/no-votes/nonwinner `409`, unplayable selection `422`, and unavailable service `503`. The actual panel sends once without auth replay, suppresses stale room/run/authority success and error feedback, and compares generations only within one room before publication. No new session-bound socket proof, cross-node broadcast, native activation or real playback dispatch is established by this port.
+Success returns the authoritative room snapshot and renewed existing room proof. A competing writer may determine that snapshot; the web reports selection updated without asserting playback started. Missing room/suggestion returns `404`, non-host or invalid proof `403`, closed room `409`, unplayable selection `422`, and unavailable service `503`. V2 permits a host override of the tally. The frozen v1 route retains its `409` for a non-leader or a room with no votes. The actual panel sends once without auth replay, suppresses stale room/run/authority success and error feedback, and compares generations only within one room before publication. No new session-bound socket proof, cross-node broadcast, native activation or real playback dispatch is established by this port.
 
 ### Room creation identity storage
 
@@ -264,25 +316,45 @@ acknowledgement even if the room remains `waiting` and the playback session and
 selection have not changed.
 
 The server ignores an acknowledgement naming an older command without changing
-member readiness or the room anchor. For an explicit seek, the reported media
-position must also be within one second of the command's destination. Position
-validation uses the same finite, nonnegative range as other playback reports.
-Buffering pause commands can be acknowledged at the member's actual position:
-they do not require rebuilding an otherwise usable stream to reach an unbuffered
-anchor. Playback correction still runs when the room resumes.
+member readiness or the room anchor. For an explicit seek, a guest's reported
+media position must be within one second of the command's destination. The host
+is the authority on position: a host acknowledgement within fifteen seconds of
+the destination is accepted, and when it is more than one second away the
+host's reported position becomes the room anchor before the room resumes. A
+rebuilt stream that lands on a keyframe or segment boundary short of the
+target therefore resumes from where the host really is instead of holding the
+room until the waiting deadline. Position validation uses the same finite,
+nonnegative range as other playback reports. Buffering pause commands can be
+acknowledged at the member's actual position: they do not require rebuilding an
+otherwise usable stream to reach an unbuffered anchor. Playback correction
+still runs when the room resumes.
 
-The web player waits until command execution, the native seek has finished, and
-the element has future media data before acknowledging. Old `canplay` or `seeked`
-events cannot acknowledge a seek whose destination has not arrived. It reports the
-actual media clock, including the stream's timeline offset, rather than the
-optimistic timeline displayed during a seek.
+Readiness is level-triggered on the web player. It evaluates the same guards on
+every media event that can indicate playable media (`canplay`,
+`canplaythrough`, `loadeddata`, `seeked`, `playing`, `timeupdate`) after
+command execution, the native seek has finished, and the element has future
+media data. Old events on the stream being replaced cannot acknowledge a seek
+whose destination has not arrived. It reports the actual media clock, including
+the stream's timeline offset, rather than the optimistic timeline displayed
+during a seek. When an acknowledgement is withheld, the player logs the reason
+at debug level once per distinct reason.
+
+While the room is `waiting`, `state_report` frames may carry `command_id` and
+`is_ready: true`. The server treats such a report exactly like a `ready` frame
+for that command, so a lost or rejected acknowledgement heals on the next tick
+without a new media event. The web player retries readiness every 500 ms until
+the room snapshot marks its own member `is_ready`. It then stops readiness
+acknowledgements and returns to ordinary state reports every 1.5 s, even while
+other members are still waiting. A readiness reset for a new command enables
+retries again. Reports without `is_ready` are still ignored while waiting.
 
 `command_id` is optional for older clients on the shared v1/v2 message loop. Their
 seek acknowledgements still need to reach the destination, but a client that
 omits the ID cannot distinguish consecutive seeks to the same position. Older
-servers ignore this additive request field. Updated servers advertise
-`watch_party_coordinator_v1` in playback capabilities. The existing waiting
-deadline remains 30 seconds.
+servers ignore these additive request fields. Updated servers advertise
+`watch_party_coordinator_v1` in playback capabilities. The waiting deadline,
+after which members that never became ready stop blocking the room, is 10
+seconds; it is a safety net rather than the expected path.
 
 
 ### Room membership and buffering

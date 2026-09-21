@@ -22,7 +22,12 @@ import {
   listWatchTogetherSuggestions,
   promoteWatchTogetherSuggestion,
   selectWatchTogetherRoomItem,
+  stageWatchTogetherRoomItem,
+  startWatchTogetherRoomPlayback,
+  stopWatchTogetherRoomPlayback,
+  updateWatchTogetherRoomSelectionMode,
   type SelectWatchTogetherRoomItemInput,
+  type WatchTogetherSelectionMode,
   unvoteWatchTogetherSuggestion,
   updateWatchTogetherRoomPolicy,
   voteWatchTogetherSuggestion,
@@ -55,6 +60,18 @@ export interface WatchTogetherRoomConnectionResult {
     input: SelectWatchTogetherRoomItemInput,
   ) => Promise<WatchTogetherRoomSnapshot | null>;
   fallbackSource: (input: SourceFallbackRequest) => Promise<WatchTogetherRoomSnapshot | null>;
+  /** Stages content in a host-pick lobby; nothing plays until startPlayback. */
+  stageItem: (input: SelectWatchTogetherRoomItemInput) => Promise<WatchTogetherRoomSnapshot | null>;
+  /** Starts the staged content for everyone. */
+  startPlayback: () => Promise<WatchTogetherRoomSnapshot | null>;
+  /** Stops playback for everyone; the room returns to the lobby, still staged. */
+  stopPlayback: () => Promise<WatchTogetherRoomSnapshot | null>;
+  /** Switches a lobby between host picks and voting. */
+  updateSelectionMode: (
+    mode: WatchTogetherSelectionMode,
+  ) => Promise<WatchTogetherRoomSnapshot | null>;
+  /** Marks this member ready (or not) in the lobby. Sent over the socket and shared across API servers. */
+  setLobbyReady: (ready: boolean) => SendRoomMessageResult;
   closeRoom: () => Promise<void>;
   createSuggestion: (draft: SuggestionCreationDraft) => Promise<void>;
   deleteSuggestion: (suggestionId: string) => Promise<void>;
@@ -490,6 +507,93 @@ export function useWatchTogetherRoomConnection({
     [roomId, selectionAuthority, applyHTTPRoomSnapshot],
   );
 
+  // Stage, start and mode switch share the selection fencing: one run counter
+  // per action, invalidated when the room changes, and a receipt is published
+  // only under the authority it was captured with.
+  const lobbyAuthority = captureProfileRequestContext();
+  const lobbyRun = useRef(0);
+  const lobbyRoom = useRef(roomId);
+  const invalidateLobby = useCallback(() => {
+    lobbyRun.current++;
+  }, []);
+  useLayoutEffect(() => {
+    lobbyRoom.current = roomId;
+    invalidateLobby();
+    return invalidateLobby;
+  }, [roomId, invalidateLobby]);
+  const publishLobbyReceipt = useCallback(
+    (run: number, response: { room: WatchTogetherRoomSnapshot } | null) => {
+      if (!response) return null;
+      if (lobbyRoom.current !== roomId || lobbyRun.current !== run) return null;
+      if (!lobbyAuthority || !isCapturedProfileAuthorityActive(lobbyAuthority)) return null;
+      setRoom((current) =>
+        current &&
+        current.room_id === response.room.room_id &&
+        current.generation > response.room.generation
+          ? current
+          : response.room,
+      );
+      return response.room;
+    },
+    [roomId, lobbyAuthority],
+  );
+  const stageItem = useCallback(
+    async (input: SelectWatchTogetherRoomItemInput) => {
+      if (!roomId) return null;
+      const run = ++lobbyRun.current;
+      const response = await stageWatchTogetherRoomItem(roomId, { ...input }, lobbyAuthority).catch(
+        (error: unknown) => {
+          if (lobbyRoom.current !== roomId || lobbyRun.current !== run) return null;
+          throw error;
+        },
+      );
+      return publishLobbyReceipt(run, response);
+    },
+    [roomId, lobbyAuthority, publishLobbyReceipt],
+  );
+  const startPlayback = useCallback(async () => {
+    if (!roomId) return null;
+    const run = ++lobbyRun.current;
+    const response = await startWatchTogetherRoomPlayback(roomId, lobbyAuthority).catch(
+      (error: unknown) => {
+        if (lobbyRoom.current !== roomId || lobbyRun.current !== run) return null;
+        throw error;
+      },
+    );
+    return publishLobbyReceipt(run, response);
+  }, [roomId, lobbyAuthority, publishLobbyReceipt]);
+  const stopPlayback = useCallback(async () => {
+    if (!roomId) return null;
+    const run = ++lobbyRun.current;
+    const response = await stopWatchTogetherRoomPlayback(roomId, lobbyAuthority).catch(
+      (error: unknown) => {
+        if (lobbyRoom.current !== roomId || lobbyRun.current !== run) return null;
+        throw error;
+      },
+    );
+    return publishLobbyReceipt(run, response);
+  }, [roomId, lobbyAuthority, publishLobbyReceipt]);
+  const updateSelectionMode = useCallback(
+    async (mode: WatchTogetherSelectionMode) => {
+      if (!roomId) return null;
+      const run = ++lobbyRun.current;
+      const response = await updateWatchTogetherRoomSelectionMode(
+        roomId,
+        mode,
+        lobbyAuthority,
+      ).catch((error: unknown) => {
+        if (lobbyRoom.current !== roomId || lobbyRun.current !== run) return null;
+        throw error;
+      });
+      return publishLobbyReceipt(run, response);
+    },
+    [roomId, lobbyAuthority, publishLobbyReceipt],
+  );
+  const setLobbyReady = useCallback(
+    (ready: boolean) => sendRoomMessage({ type: "lobby_ready", ready }),
+    [sendRoomMessage],
+  );
+
   const closeAuthority = captureProfileRequestContext();
   const closeRoom = useCallback(async () => {
     if (!roomId) {
@@ -628,6 +732,11 @@ export function useWatchTogetherRoomConnection({
     updatePolicy,
     selectItem,
     fallbackSource,
+    stageItem,
+    startPlayback,
+    stopPlayback,
+    updateSelectionMode,
+    setLobbyReady,
     closeRoom,
     createSuggestion,
     deleteSuggestion,

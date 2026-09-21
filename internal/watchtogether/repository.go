@@ -246,6 +246,70 @@ func (r *Repository) UpdateSelection(
 	)
 }
 
+// UpdateSelectionMode switches a lobby's selection mode and clears the staged
+// item. The lobby guard runs in SQL so a stale node cannot switch a room that
+// another node has already started.
+func (r *Repository) UpdateSelectionMode(
+	ctx context.Context,
+	roomID string,
+	mode RoomSelectionMode,
+	anchorUpdatedAt time.Time,
+	generation int64,
+	expectedGeneration int64,
+) (*Room, error) {
+	const query = `
+		UPDATE watch_together_rooms
+		SET selection_mode = $2,
+		    selected_content_id = NULL,
+		    selected_file_id = NULL,
+		    selected_library_id = NULL,
+		    anchor_updated_at = $3,
+		    generation = $4
+		WHERE id = $1
+		  AND generation = $5
+		  AND phase = 'lobby'
+		RETURNING ` + roomColumns
+
+	return r.scanConditionalUpdate(ctx, query, roomID, mode, anchorUpdatedAt.UTC(), generation, expectedGeneration)
+}
+
+// UpdateStagedSelection replaces the staged item of a host-pick lobby. The
+// phase and mode guards run in SQL as well as in the service so a stale node
+// cannot stage into a room another node has already started or switched.
+func (r *Repository) UpdateStagedSelection(
+	ctx context.Context,
+	roomID string,
+	selection SelectItemInput,
+	anchorUpdatedAt time.Time,
+	generation int64,
+	expectedGeneration int64,
+) (*Room, error) {
+	const query = `
+		UPDATE watch_together_rooms
+		SET selected_content_id = $2,
+		    selected_file_id = $3,
+		    selected_library_id = $4,
+		    anchor_updated_at = $5,
+		    generation = $6
+		WHERE id = $1
+		  AND generation = $7
+		  AND phase = 'lobby'
+		  AND selection_mode = 'host_pick'
+		RETURNING ` + roomColumns
+
+	return r.scanConditionalUpdate(
+		ctx,
+		query,
+		roomID,
+		selection.ContentID,
+		selection.FileID,
+		selection.LibraryID,
+		anchorUpdatedAt.UTC(),
+		generation,
+		expectedGeneration,
+	)
+}
+
 const roomColumns = `
 	id, code, join_token, host_user_id, host_profile_id,
 	phase, playback_state, resume_on_ready, selection_mode, selection_revision,
