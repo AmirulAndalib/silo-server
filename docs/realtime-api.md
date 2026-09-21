@@ -316,25 +316,43 @@ acknowledgement even if the room remains `waiting` and the playback session and
 selection have not changed.
 
 The server ignores an acknowledgement naming an older command without changing
-member readiness or the room anchor. For an explicit seek, the reported media
-position must also be within one second of the command's destination. Position
-validation uses the same finite, nonnegative range as other playback reports.
-Buffering pause commands can be acknowledged at the member's actual position:
-they do not require rebuilding an otherwise usable stream to reach an unbuffered
-anchor. Playback correction still runs when the room resumes.
+member readiness or the room anchor. For an explicit seek, a guest's reported
+media position must be within one second of the command's destination. The host
+is the authority on position: a host acknowledgement within fifteen seconds of
+the destination is accepted, and when it is more than one second away the
+host's reported position becomes the room anchor before the room resumes. A
+rebuilt stream that lands on a keyframe or segment boundary short of the
+target therefore resumes from where the host really is instead of holding the
+room until the waiting deadline. Position validation uses the same finite,
+nonnegative range as other playback reports. Buffering pause commands can be
+acknowledged at the member's actual position: they do not require rebuilding an
+otherwise usable stream to reach an unbuffered anchor. Playback correction
+still runs when the room resumes.
 
-The web player waits until command execution, the native seek has finished, and
-the element has future media data before acknowledging. Old `canplay` or `seeked`
-events cannot acknowledge a seek whose destination has not arrived. It reports the
-actual media clock, including the stream's timeline offset, rather than the
-optimistic timeline displayed during a seek.
+Readiness is level-triggered on the web player. It evaluates the same guards on
+every media event that can indicate playable media (`canplay`,
+`canplaythrough`, `loadeddata`, `seeked`, `playing`, `timeupdate`) after
+command execution, the native seek has finished, and the element has future
+media data. Old events on the stream being replaced cannot acknowledge a seek
+whose destination has not arrived. It reports the actual media clock, including
+the stream's timeline offset, rather than the optimistic timeline displayed
+during a seek. When an acknowledgement is withheld, the player logs the reason
+at debug level once per distinct reason.
+
+While the room is `waiting`, `state_report` frames may carry `command_id` and
+`is_ready: true`. The server treats such a report exactly like a `ready` frame
+for that command, so a lost or rejected acknowledgement heals on the next tick
+without a new media event. The web player sends state reports every 500 ms while
+waiting and every 1.5 s otherwise. Reports without `is_ready` are still ignored
+while waiting.
 
 `command_id` is optional for older clients on the shared v1/v2 message loop. Their
 seek acknowledgements still need to reach the destination, but a client that
 omits the ID cannot distinguish consecutive seeks to the same position. Older
-servers ignore this additive request field. Updated servers advertise
-`watch_party_coordinator_v1` in playback capabilities. The existing waiting
-deadline remains 30 seconds.
+servers ignore these additive request fields. Updated servers advertise
+`watch_party_coordinator_v1` in playback capabilities. The waiting deadline,
+after which members that never became ready stop blocking the room, is 10
+seconds; it is a safety net rather than the expected path.
 
 
 ### Room membership and buffering

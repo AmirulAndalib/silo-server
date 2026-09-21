@@ -101,6 +101,10 @@ type watchTogetherStateReportMessage struct {
 	SessionID       string  `json:"session_id"`
 	PositionSeconds float64 `json:"position_seconds"`
 	IsPaused        bool    `json:"is_paused"`
+	// Optional: the report doubles as a ready acknowledgement of command_id
+	// while the room is waiting, so a lost ready frame heals on the next tick.
+	CommandID string `json:"command_id,omitempty"`
+	IsReady   bool   `json:"is_ready,omitempty"`
 }
 
 type watchTogetherReadyMessage struct {
@@ -878,9 +882,11 @@ func (h *WatchTogetherHandler) handleRoomClientMessage(
 			return errors.New("session_id is required")
 		}
 		_, err := h.Service.HandleStateReportForConnection(ctx, reg, userID, profileID, watchtogether.StateReport{
+			CommandID:       msg.CommandID,
 			SessionID:       msg.SessionID,
 			PositionSeconds: msg.PositionSeconds,
 			IsPaused:        msg.IsPaused,
+			IsReady:         msg.IsReady,
 		})
 		return err
 	case "ready":

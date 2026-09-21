@@ -1131,3 +1131,119 @@ func TestHostTransportRequestEndsRejoinSync(t *testing.T) {
 		t.Fatal("explicit transport should end the rejoin sync")
 	}
 }
+
+// A rebuilt stream lands the host on a keyframe or segment boundary short of
+// the seek target. The host's real position becomes the anchor and the room
+// resumes instead of waiting out the deadline; a guest at the same offset is
+// still held to the destination.
+func TestHostReadyNearSeekTargetReanchorsTheRoom(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &stubRepo{room: baseRoom(now)}
+	service := newServiceForTest(now, repo, &stubSessions{}, &stubFiles{}, nil)
+	live := service.rooms[repo.room.ID]
+	t.Cleanup(func() {
+		service.mu.Lock()
+		service.disarmWaitingDeadlineLocked(live)
+		service.mu.Unlock()
+		service.Close()
+	})
+	hostConn := &recordingConn{}
+	guestConn := &recordingConn{}
+	live.members[buildMemberKey(7, "host")] = &memberState{userID: 7, profileID: "host", sessionID: "host-session", connection: hostConn}
+	live.members[buildMemberKey(8, "guest")] = &memberState{userID: 8, profileID: "guest", sessionID: "guest-session", connection: guestConn}
+	hostReg := registrationFor(repo.room.ID, 7, "host", hostConn)
+	guestReg := registrationFor(repo.room.ID, 8, "guest", guestConn)
+	if _, err := service.HandleTransportRequestForConnection(t.Context(), hostReg, 7, "host", TransportRequest{
+		Action: TransportActionSeek, PositionSeconds: new(1500.0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	command := hostConn.payloads[len(hostConn.payloads)-1]["command"].(TransportCommand)
+
+	snapshot, err := service.HandleReadyForConnection(t.Context(), guestReg, 8, "guest", StateReport{
+		SessionID: "guest-session", CommandID: command.CommandID, PositionSeconds: 1494, IsPaused: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.PlaybackState != RoomPlaybackStateWaiting || live.members[buildMemberKey(8, "guest")].isReady {
+		t.Fatalf("guest short of the seek target was accepted: %+v", snapshot)
+	}
+
+	snapshot, err = service.HandleReadyForConnection(t.Context(), hostReg, 7, "host", StateReport{
+		SessionID: "host-session", CommandID: command.CommandID, PositionSeconds: 1494, IsPaused: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !live.members[buildMemberKey(7, "host")].isReady || snapshot.AnchorPositionSeconds != 1494 {
+		t.Fatalf("host ready near the target did not re-anchor: %+v", snapshot)
+	}
+	if snapshot.PlaybackState != RoomPlaybackStateWaiting {
+		t.Fatalf("room resumed before the guest was ready: %+v", snapshot)
+	}
+
+	snapshot, err = service.HandleReadyForConnection(t.Context(), hostReg, 7, "host", StateReport{
+		SessionID: "host-session", CommandID: command.CommandID, PositionSeconds: 1400, IsPaused: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.AnchorPositionSeconds != 1494 {
+		t.Fatalf("host far from the target moved the anchor: %+v", snapshot)
+	}
+}
+
+// A state report carrying is_ready is the periodic form of the ready message:
+// a lost or rejected acknowledgement heals on the next tick without a new
+// media event.
+func TestStateReportWithIsReadyAcknowledgesTheWaitingCommand(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &stubRepo{room: baseRoom(now)}
+	service := newServiceForTest(now, repo, &stubSessions{}, &stubFiles{}, nil)
+	live := service.rooms[repo.room.ID]
+	t.Cleanup(func() {
+		service.mu.Lock()
+		service.disarmWaitingDeadlineLocked(live)
+		service.mu.Unlock()
+		service.Close()
+	})
+	conn := &recordingConn{}
+	member := &memberState{userID: 7, profileID: "host", sessionID: "session", connection: conn}
+	live.members[buildMemberKey(7, "host")] = member
+	reg := registrationFor(repo.room.ID, 7, "host", conn)
+	if _, err := service.HandleTransportRequestForConnection(t.Context(), reg, 7, "host", TransportRequest{
+		Action: TransportActionSeek, PositionSeconds: new(1500.0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	command := conn.payloads[len(conn.payloads)-1]["command"].(TransportCommand)
+
+	snapshot, err := service.HandleStateReportForConnection(t.Context(), reg, 7, "host", StateReport{
+		SessionID: "session", PositionSeconds: 1500, IsPaused: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.PlaybackState != RoomPlaybackStateWaiting || member.isReady {
+		t.Fatalf("plain state report satisfied the barrier: %+v", snapshot)
+	}
+	snapshot, err = service.HandleStateReportForConnection(t.Context(), reg, 7, "host", StateReport{
+		SessionID: "session", CommandID: "stale", PositionSeconds: 1500, IsPaused: true, IsReady: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.PlaybackState != RoomPlaybackStateWaiting || member.isReady {
+		t.Fatalf("stale ready report satisfied the barrier: %+v", snapshot)
+	}
+	snapshot, err = service.HandleStateReportForConnection(t.Context(), reg, 7, "host", StateReport{
+		SessionID: "session", CommandID: command.CommandID, PositionSeconds: 1500, IsPaused: true, IsReady: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.PlaybackState != RoomPlaybackStatePlaying || snapshot.AnchorPositionSeconds != 1500 {
+		t.Fatalf("ready report did not resume the room: %+v", snapshot)
+	}
+}

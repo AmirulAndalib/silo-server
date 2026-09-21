@@ -81,13 +81,17 @@ switch mode) without any client thinking playback restarted.
 | Name | Where | Set by | Cleared by |
 |---|---|---|---|
 | `memberState.lobbyReady` (`members[].lobby_ready`) | shared room runtime | socket `lobby_ready` message, lobby only | stage with different content, start, stop, mode switch |
-| `memberState.isReady` | shared room runtime | socket `ready` message with an attached session, playing only | any selection change, buffering, disconnect |
+| `memberState.isReady` | shared room runtime | socket `ready` message, or a `state_report` with `is_ready`, with an attached session, playing only | any selection change, buffering, disconnect |
 | `memberState.ignoreWait` | shared room runtime | the waiting deadline (`waitingResumeDeadline`) skipping a straggler | attach, ready |
 
 Lobby ready is advisory. The server never gates start on it; the web shows
 the count on the start button and offers the same call as "start anyway".
 The buffering barrier (`isReady`, `ignoreWait`) is the one that actually holds
-playback until members have buffered, and it is unchanged.
+playback until members have buffered. Guests must reach a seek destination
+within one second; the host is accepted within fifteen and re-anchors the room
+to their real position, since a rebuilt stream lands on a keyframe or segment
+boundary. The waiting deadline (`waitingResumeDeadline`, 10 s) is a safety net
+for a member that never reports, not the normal way out of the barrier.
 
 ## What crosses nodes
 

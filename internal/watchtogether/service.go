@@ -66,12 +66,19 @@ const (
 	// readySeekToleranceSeconds allows media clock rounding after a seek,
 	// while rejecting readiness from the stream that is being replaced.
 	readySeekToleranceSeconds = 1.0
+	// hostReadySeekToleranceSeconds is the seek tolerance for the host. A
+	// rebuilt stream lands on a keyframe or segment boundary short of the
+	// requested position; the host's real position becomes the room anchor
+	// rather than holding everyone until the exact target is reached.
+	hostReadySeekToleranceSeconds = 15.0
 	// maxPositionSeconds rejects corrupt client reports before they can poison
 	// the shared anchor or produce unusable transport commands.
 	maxPositionSeconds = 7 * 24 * 60 * 60
 	// waitingResumeDeadline is how long a room stays in the waiting state
 	// before stragglers are skipped and playback resumes for everyone ready.
-	waitingResumeDeadline = 30 * time.Second
+	// It is a safety net past any legitimate seek plus stream reload, not the
+	// expected path: readiness is reported on every media event and state tick.
+	waitingResumeDeadline = 10 * time.Second
 	// roomIdleTTL is how long a room may go without any playback-anchor
 	// activity before the janitor closes it.
 	roomIdleTTL = 24 * time.Hour
@@ -744,11 +751,16 @@ func (s *Service) handleStateReportForConnection(
 	// While a seek or buffering barrier is pending, element positions may
 	// still describe the old stream. Keep the waiting anchor authoritative:
 	// host reports must not undo the seek, and guest corrections must not
-	// supersede the transport command that is still loading.
+	// supersede the transport command that is still loading. A report that
+	// carries is_ready is the periodic form of the ready message, so a lost
+	// or rejected acknowledgement heals on the next tick.
 	if live.room.PlaybackState == RoomPlaybackStateWaiting {
-		snapshot := s.buildSnapshotLocked(live, userID, profileID)
-		s.mu.Unlock()
-		return snapshot, nil
+		if !report.IsReady || !s.acceptReadyLocked(ctx, live, member, userID, profileID, report) {
+			snapshot := s.buildSnapshotLocked(live, userID, profileID)
+			s.mu.Unlock()
+			return snapshot, nil
+		}
+		return s.finishReadyLocked(ctx, live, member, userID, profileID)
 	}
 
 	isHost := userID == live.room.HostUserID && profileID == live.room.HostProfileID
@@ -879,9 +891,6 @@ func (s *Service) handleReadyForConnection(
 		return Snapshot{}, err
 	}
 
-	var dispatches []snapshotDispatch
-	var commandDispatches []commandDispatch
-
 	s.mu.Lock()
 	member := live.members[reg.memberKey]
 	if member == nil || member.connection == nil || member.connection != reg.connection {
@@ -893,23 +902,73 @@ func (s *Service) handleReadyForConnection(
 		return Snapshot{}, ErrConnectionNotAttached
 	}
 
-	if live.room.PlaybackState == RoomPlaybackStateWaiting {
-		command := member.waitingCommand
-		staleCommand := report.CommandID != "" && (command == nil || report.CommandID != command.CommandID)
-		seekPending := command != nil && command.Action == TransportActionSeek &&
-			math.Abs(report.PositionSeconds-command.PositionSeconds) > readySeekToleranceSeconds
-		if staleCommand || seekPending {
-			snapshot := s.buildSnapshotLocked(live, userID, profileID)
-			s.mu.Unlock()
-			return snapshot, nil
-		}
+	if live.room.PlaybackState == RoomPlaybackStateWaiting &&
+		!s.acceptReadyLocked(ctx, live, member, userID, profileID, report) {
+		snapshot := s.buildSnapshotLocked(live, userID, profileID)
+		s.mu.Unlock()
+		return snapshot, nil
 	}
+	return s.finishReadyLocked(ctx, live, member, userID, profileID)
+}
 
+// acceptReadyLocked validates a readiness report against the member's waiting
+// command. Guests must reach a seek destination within readySeekToleranceSeconds
+// so the stream being replaced cannot satisfy the seek. The host is the
+// authority on position: within hostReadySeekToleranceSeconds the host's actual
+// position becomes the room anchor, so a rebuilt stream that lands short of the
+// target resumes from where the host really is instead of waiting out the
+// deadline. It returns false, with no state change, when the report is stale
+// or the destination has not arrived. Must be called with s.mu held.
+func (s *Service) acceptReadyLocked(
+	ctx context.Context,
+	live *liveRoom,
+	member *memberState,
+	userID int,
+	profileID string,
+	report StateReport,
+) bool {
+	command := member.waitingCommand
+	if report.CommandID != "" && (command == nil || report.CommandID != command.CommandID) {
+		return false
+	}
+	if command == nil || command.Action != TransportActionSeek {
+		return true
+	}
+	delta := math.Abs(report.PositionSeconds - command.PositionSeconds)
+	isHost := userID == live.room.HostUserID && profileID == live.room.HostProfileID
+	if !isHost {
+		return delta <= readySeekToleranceSeconds
+	}
+	if delta > hostReadySeekToleranceSeconds {
+		return false
+	}
+	if delta > readySeekToleranceSeconds {
+		live.room.AnchorPositionSeconds = math.Max(0, report.PositionSeconds)
+		live.room.AnchorUpdatedAt = s.now()
+		if _, err := s.persistAnchorLocked(ctx, live); err != nil {
+			return false
+		}
+		// A lost race reloaded live.room from the winning row; readiness is
+		// still recorded against whatever that row says.
+	}
+	return true
+}
+
+// finishReadyLocked records the member as ready, resumes the room when every
+// participant is, and sends the resulting snapshots and commands. It must be
+// called with s.mu held and releases it.
+func (s *Service) finishReadyLocked(
+	ctx context.Context,
+	live *liveRoom,
+	member *memberState,
+	userID int,
+	profileID string,
+) (Snapshot, error) {
 	member.isReady = true
 	member.isBuffering = false
 	member.ignoreWait = false
 
-	dispatches, commandDispatches = s.maybeResumeFromWaitingLocked(ctx, live, false)
+	dispatches, commandDispatches := s.maybeResumeFromWaitingLocked(ctx, live, false)
 	if len(commandDispatches) == 0 && live.room.Phase == RoomPhasePlaying && live.room.PlaybackState == RoomPlaybackStatePlaying {
 		commandDispatches = s.syncMemberToRoomLocked(live, member.sessionID)
 	}

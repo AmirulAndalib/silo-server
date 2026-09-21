@@ -155,6 +155,9 @@ type StateReport struct {
 	SessionID       string
 	PositionSeconds float64
 	IsPaused        bool
+	// IsReady marks a periodic state report as a readiness acknowledgement
+	// for CommandID while the room is waiting.
+	IsReady bool
 }
 
 type TransportCommand struct {
