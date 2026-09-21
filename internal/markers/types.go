@@ -454,6 +454,8 @@ func (r *Registry) logProviderError(providerID string, req Request, err error) {
 
 func NormalizeMode(raw string) Mode {
 	switch Mode(strings.ToLower(strings.TrimSpace(raw))) {
+	case "":
+		return ModeBoth
 	case ModeOff:
 		return ModeOff
 	case ModeOnline:

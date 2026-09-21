@@ -14,9 +14,9 @@ func NewSyncMarkersTask(service *markers.PopulationService) *SyncMarkersTask {
 	return &SyncMarkersTask{service: service}
 }
 func (t *SyncMarkersTask) Key() string  { return "sync_markers" }
-func (t *SyncMarkersTask) Name() string { return "Sync Online Markers" }
+func (t *SyncMarkersTask) Name() string { return "Sync online markers" }
 func (t *SyncMarkersTask) Description() string {
-	return "Fetches missing online markers and refreshes stored markers"
+	return "Fetches missing markers from enabled online providers and refreshes saved markers. Requires Save to library."
 }
 func (t *SyncMarkersTask) Category() taskmanager.TaskCategory { return taskmanager.TaskCategoryLibrary }
 func (t *SyncMarkersTask) IsHidden() bool                     { return false }

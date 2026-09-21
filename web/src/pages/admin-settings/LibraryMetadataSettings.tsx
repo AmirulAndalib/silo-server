@@ -101,7 +101,7 @@ export default function LibraryMetadataSettings() {
     }
   }
 
-  const markerMode = form.getValue("markers.mode") || "online";
+  const markerMode = form.getValue("markers.mode") || "both";
   const onlineMarkersEnabled = markerMode === "online" || markerMode === "both";
   const onlineMarkerStorage = form.getValue("markers.online_storage") || "stored";
 
@@ -218,6 +218,7 @@ export default function LibraryMetadataSettings() {
         */}
         <FieldGroup
           label="Skip markers"
+          description="Markers identify intros, credits, recaps, and previews so players can offer skip controls."
           restartAll={allRestart(MARKER_KEYS)}
           actions={
             <Link
@@ -230,14 +231,15 @@ export default function LibraryMetadataSettings() {
           }
         >
           <SettingField
-            label="Find skip markers"
+            label="Marker source"
             type="select"
-            description="Detecting on this server uses CPU. Looking online uses the marker providers set up on the Subtitles & Metadata page."
+            description="Online markers take priority. Silo skips local intro detection when an online intro is saved in your library. Local detection uses CPU."
+            className="[&_[data-slot=select-trigger]]:h-auto [&_[data-slot=select-trigger]]:min-h-9 [&_[data-slot=select-value]]:line-clamp-none [&_[data-slot=select-value]]:text-left [&_[data-slot=select-value]]:whitespace-normal"
             options={[
               { value: "off", label: "Off" },
               { value: "local", label: "Detect on this server" },
-              { value: "both", label: "Detect on this server and look online" },
-              { value: "online", label: "Look online only" },
+              { value: "both", label: "Online preferred + server detection" },
+              { value: "online", label: "Online providers only" },
             ]}
             value={markerMode}
             onChange={(value) => form.setValue("markers.mode", value)}
@@ -246,12 +248,16 @@ export default function LibraryMetadataSettings() {
 
           {onlineMarkersEnabled && (
             <SettingField
-              label="Online marker storage"
+              label="Save online markers"
               type="select"
-              description="Store markers locally to keep your library up to date in the background. On-demand only looks up markers when you play a file, without saving them to your library."
+              description={
+                onlineMarkerStorage === "stored"
+                  ? "Silo saves markers from enabled providers such as TheIntroDB. The Sync online markers task fetches missing markers and refreshes saved markers daily at 03:00 (server time) by default."
+                  : "Fetch markers when needed without saving them to your library. Scheduled online sync is disabled."
+              }
               options={[
-                { value: "stored", label: "Store markers locally" },
-                { value: "on_demand", label: "On-demand only" },
+                { value: "stored", label: "Save to library" },
+                { value: "on_demand", label: "Fetch when needed" },
               ]}
               value={onlineMarkerStorage}
               onChange={(value) => {
@@ -268,7 +274,9 @@ export default function LibraryMetadataSettings() {
               type="toggle"
               description={
                 onlineMarkersEnabled
-                  ? "Look up missing or outdated markers when playback starts."
+                  ? markerMode === "both"
+                    ? "Check online first when playback starts. If intro or credits markers are available, skip local detection. Otherwise, detect locally using this server's CPU."
+                    : "Check online for missing or outdated markers when playback starts."
                   : "Detect missing markers when playback starts. Local analysis uses CPU."
               }
               value={form.getValue("markers.lazy_playback") || "true"}

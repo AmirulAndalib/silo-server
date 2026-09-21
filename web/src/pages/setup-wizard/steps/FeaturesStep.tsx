@@ -54,6 +54,8 @@ export function FeaturesStep() {
   const recsEnabled = form.getValue("recommendations.enabled") === "true";
   const markerMode = form.getValue("markers.mode");
   const onlineMarkersEnabled = markerMode === "online" || markerMode === "both";
+  const localMarkersEnabled = markerMode === "local" || markerMode === "both";
+  const onlineMarkerStorage = form.getValue("markers.online_storage") || "stored";
 
   const baseUrl = form.getValue("recommendations.embedding_base_url");
   const model = form.getValue("recommendations.embedding_model");
@@ -67,7 +69,7 @@ export function FeaturesStep() {
     (form.getValue("recommendations.embedding_auth_token") !== "" || tokenConfigured);
 
   const enabledFeatures = [
-    onlineMarkersEnabled ? "Skip markers" : null,
+    onlineMarkersEnabled || localMarkersEnabled ? "Skip markers" : null,
     pushEnabled ? "Push" : null,
     downloadsEnabled ? "Downloads" : null,
     recsEnabled ? "Recommendations" : null,
@@ -80,11 +82,17 @@ export function FeaturesStep() {
   }
 
   function setOnlineMarkers(enabled: boolean) {
-    const localDetection = markerMode === "local" || markerMode === "both";
     let nextMode = enabled ? "online" : "off";
-    if (localDetection) nextMode = enabled ? "both" : "local";
+    if (localMarkersEnabled) nextMode = enabled ? "both" : "local";
     form.setValue("markers.mode", nextMode);
-    if (enabled || !localDetection) form.setValue("markers.lazy_playback", String(enabled));
+    if (enabled || !localMarkersEnabled) form.setValue("markers.lazy_playback", String(enabled));
+  }
+
+  function setLocalMarkers(enabled: boolean) {
+    let nextMode = enabled ? "local" : "off";
+    if (onlineMarkersEnabled) nextMode = enabled ? "both" : "online";
+    form.setValue("markers.mode", nextMode);
+    if (enabled || !onlineMarkersEnabled) form.setValue("markers.lazy_playback", String(enabled));
   }
 
   function applyPreset(preset: RecommendationProviderPreset) {
@@ -108,8 +116,8 @@ export function FeaturesStep() {
       >
         <StepSection>
           <p className="text-muted-foreground py-3 text-sm">
-            Skip markers and mobile push are on by default. Reload to review these settings before
-            continuing.
+            Online markers, local marker detection, and mobile push are on by default. Reload to
+            review these settings before continuing.
           </p>
         </StepSection>
       </StepFrame>
@@ -128,26 +136,37 @@ export function FeaturesStep() {
         <SettingField
           label="Skip markers from TheIntroDB"
           type="toggle"
-          description="TheIntroDB is installed by default to find intros, credits, recaps, and other segments you can skip. Turn this off to disable online marker lookup."
+          description="TheIntroDB is installed by default to find intros, credits, recaps, and other segments you can skip. Online markers are preferred over local detection."
           value={onlineMarkersEnabled ? "true" : "false"}
           onChange={(value) => setOnlineMarkers(value === "true")}
         />
         {onlineMarkersEnabled ? (
           <SettingField
-            label="Online marker storage"
+            label="Save online markers"
             type="select"
-            description="Store markers locally to keep your library up to date in the background. On-demand only looks up markers when you play a file, without saving them to your library."
+            description={
+              onlineMarkerStorage === "stored"
+                ? "Silo saves markers from enabled providers such as TheIntroDB. The Sync online markers task fetches missing markers and refreshes saved markers daily at 03:00 (server time) by default."
+                : "Fetch markers when needed without saving them to your library. Scheduled online sync is disabled."
+            }
             options={[
-              { value: "stored", label: "Store markers locally" },
-              { value: "on_demand", label: "On-demand only" },
+              { value: "stored", label: "Save to library" },
+              { value: "on_demand", label: "Fetch when needed" },
             ]}
-            value={form.getValue("markers.online_storage") || "stored"}
+            value={onlineMarkerStorage}
             onChange={(value) => {
               form.setValue("markers.online_storage", value);
               if (value === "on_demand") form.setValue("markers.lazy_playback", "true");
             }}
           />
         ) : null}
+        <SettingField
+          label="Detect markers on this server"
+          type="toggle"
+          description="Detect missing intros using this server's CPU. Saved online intros take priority. Applies to libraries with marker detection enabled."
+          value={localMarkersEnabled ? "true" : "false"}
+          onChange={(value) => setLocalMarkers(value === "true")}
+        />
         <SettingField
           label="Mobile push notifications"
           type="toggle"

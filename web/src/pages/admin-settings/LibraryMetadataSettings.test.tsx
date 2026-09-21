@@ -103,14 +103,15 @@ describe("LibraryMetadataSettings", () => {
 
     expect(rendered).toContain("Library & Metadata");
     expect(rendered).toContain("Keep provider artwork");
-    expect(rendered).toContain("Find skip markers");
+    expect(rendered).toContain("Marker source");
     expect(rendered).toContain("Search engine");
   });
 
   it("states the CPU cost of local detection and the search fallback guarantee", () => {
     const rendered = text(render({ "catalog.search.provider": "meilisearch" }));
 
-    expect(rendered).toContain("Detecting on this server uses CPU.");
+    expect(rendered).toContain("Online markers take priority.");
+    expect(rendered).toContain("Local detection uses CPU.");
     expect(rendered).toContain(
       "Meilisearch tolerates typos but runs as its own service. If it goes down, search falls back to the built-in engine automatically.",
     );
@@ -128,6 +129,18 @@ describe("LibraryMetadataSettings", () => {
     // Filled rather than the transparent outline variant, so the control does
     // not read as flat text inside the group panel.
     expect(button?.getAttribute("data-variant")).toBe("secondary");
+  });
+
+  it.each(["stored", "on_demand"])("explains scheduled sync for %s storage", (storage) => {
+    const rendered = text(render({ "markers.mode": "online", "markers.online_storage": storage }));
+
+    if (storage === "stored") {
+      expect(rendered).toContain("daily at 03:00 (server time) by default");
+      expect(rendered).not.toContain("Scheduled online sync is disabled.");
+    } else {
+      expect(rendered).toContain("Scheduled online sync is disabled.");
+      expect(rendered).not.toContain("daily at 03:00");
+    }
   });
 
   it("manages the merged key set of the three tabs it replaces", () => {
@@ -161,10 +174,10 @@ describe("LibraryMetadataSettings", () => {
   it("keeps marker behavior and points provider setup at the providers page", () => {
     const rendered = render({ "catalog.search.provider": "postgres" });
 
-    expect(text(rendered)).toContain("Find skip markers");
+    expect(text(rendered)).toContain("Marker source");
     // Per-provider configuration moved to Subtitles & Metadata; only the link
     // to it is left here.
-    expect(text(rendered)).not.toContain("Use for online marker lookup");
+    expect(text(rendered)).not.toContain("Get markers from this provider");
     expect(text(rendered)).not.toContain("Minimum confidence");
     expect(text(rendered)).toContain("Marker providers");
     expect(rendered).toContain("/admin/settings/providers");

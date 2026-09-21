@@ -9,14 +9,18 @@ optional; supplying a profile applies its access restrictions.
 ## Provider modes and storage
 
 New installations include TheIntroDB and default to online markers with local
-storage. The setup wizard offers an opt-out before any automatic online lookup;
-existing installations retain their configured marker mode. `markers.mode`
-continues to accept `off`, `local`, `online`, and `both`. Local detection requires
-the library's existing opt-in.
+detection as a fallback (`markers.mode=both`). Online markers are saved to the
+library by default. The setup wizard offers separate controls for online lookup
+and local detection before automatic lookup begins. New TV and mixed libraries
+created in the web UI enable local detection by default; existing library choices
+are preserved. Local detection only runs in libraries where it is enabled.
+Existing installations retain their configured marker mode, which accepts `off`,
+`local`, `online`, and `both`.
 
 `markers.online_storage` chooses how online results are used:
 
-- `stored` persists markers and enables the daily **Sync Online Markers** task.
+- `stored` persists markers and enables the **Sync online markers** task,
+  scheduled daily at 03:00 in server-local time by default.
   Sync checks unqueried files before refreshing previous results. Successful
   responses are fresh for seven days; empty results are retried after one day.
   `markers.lazy_playback` also allows reads and playback to fill missing markers.
@@ -33,7 +37,7 @@ or withdraw that provider's existing ranges.
 
 `POST /api/v2/admin/items/{id}/refresh-markers` explicitly refreshes an episode
 from its configured sources. In `both` mode, eligible local detection fills
-missing intro or credits markers. The existing v1 refresh endpoint retains its
+missing intro markers. The existing v1 refresh endpoint retains its
 local-only behavior.
 
 ## Operations
