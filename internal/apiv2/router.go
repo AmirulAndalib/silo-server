@@ -103,6 +103,13 @@ type Dependencies struct {
 	WatchTogetherJoin               WatchTogetherJoinService
 	WatchTogetherSelection          WatchTogetherSelectionService
 	WatchTogetherSourceFallback     WatchTogetherSourceFallbackService
+	WatchTogetherStage              WatchTogetherStageService
+	WatchTogetherStart              WatchTogetherStartService
+	WatchTogetherStop               WatchTogetherStopService
+	WatchTogetherSelectionMode      WatchTogetherSelectionModeService
+	WatchTogetherMemberState        WatchTogetherMemberStateService
+	WatchTogetherPicker             WatchTogetherPickerService
+	WatchTogetherCapability         WatchTogetherCapabilityService
 	WatchTogetherSuggestions        WatchTogetherSuggestionService
 	AdminSectionSettingsWrite       AdminSectionSettingsWriteService
 	AdminDashboardStats             AdminDashboardStatsService

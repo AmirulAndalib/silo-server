@@ -238,6 +238,11 @@ function roomConnection(
     vote: vi.fn(async () => {}),
     unvote: vi.fn(async () => {}),
     promoteSuggestion: vi.fn(async () => null),
+    stageItem: vi.fn(async () => null),
+    startPlayback: vi.fn(async () => null),
+    stopPlayback: vi.fn(async () => null),
+    updateSelectionMode: vi.fn(async () => null),
+    setLobbyReady: vi.fn(() => ({ ok: true })),
     ...overrides,
   };
 }
@@ -536,6 +541,196 @@ describe("VideoPlayer room catch-up", () => {
     });
   });
 
+  it("acknowledges a seek from timeupdate when no canplay follows the rebuilt stream", async () => {
+    const { connection, video, command, rerenderPlayer } = setup(100);
+    Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+    rerenderPlayer({
+      watchTogetherConnection: {
+        ...connection,
+        room: { ...connection.room!, playback_state: "waiting" as const },
+        transportCommand: {
+          ...command,
+          action: "seek" as const,
+          playback_state: "waiting" as const,
+          position_seconds: 1500,
+        },
+      },
+    });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    // The first canplay still belongs to the old stream.
+    fireEvent.canPlay(video);
+    expect(connection.sendRoomMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "ready" }),
+    );
+    video.currentTime = 1500.3;
+    fireEvent.timeUpdate(video);
+    expect(connection.sendRoomMessage).toHaveBeenCalledWith({
+      type: "ready",
+      session_id: "session-1",
+      command_id: command.command_id,
+      position_seconds: 1500.3,
+      is_paused: true,
+    });
+  });
+
+  it("lets the host acknowledge a seek that landed short of the target", async () => {
+    const { connection, video, command, rerenderPlayer } = setup(100);
+    Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+    rerenderPlayer({
+      watchTogetherConnection: {
+        ...connection,
+        room: {
+          ...connection.room!,
+          playback_state: "waiting" as const,
+          self_role: "host" as const,
+          self_can_manage_room: true,
+        },
+        transportCommand: {
+          ...command,
+          action: "seek" as const,
+          playback_state: "waiting" as const,
+          position_seconds: 1500,
+        },
+      },
+    });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    video.currentTime = 1494;
+    fireEvent.seeked(video);
+    expect(connection.sendRoomMessage).toHaveBeenCalledWith({
+      type: "ready",
+      session_id: "session-1",
+      command_id: command.command_id,
+      position_seconds: 1494,
+      is_paused: true,
+    });
+  });
+
+  it("repeats readiness on the state tick while the room waits", async () => {
+    const { connection, video, command, rerenderPlayer } = setup(100);
+    Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+    rerenderPlayer({
+      watchTogetherConnection: {
+        ...connection,
+        room: { ...connection.room!, playback_state: "waiting" as const },
+        transportCommand: {
+          ...command,
+          action: "pause" as const,
+          playback_state: "waiting" as const,
+        },
+      },
+    });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    vi.mocked(connection.sendRoomMessage).mockClear();
+    await act(() => vi.advanceTimersByTimeAsync(1_000));
+    const reports = vi
+      .mocked(connection.sendRoomMessage)
+      .mock.calls.filter(([m]) => m.type === "state_report");
+    expect(reports.length).toBeGreaterThanOrEqual(1);
+    expect(reports[0]?.[0]).toEqual({
+      type: "state_report",
+      session_id: "session-1",
+      command_id: command.command_id,
+      position_seconds: 100,
+      is_paused: true,
+      is_ready: true,
+    });
+  });
+
+  it.each(["readiness reset", "new command"])(
+    "stops readiness retries after the server acknowledges this member and resumes on %s",
+    async (reset) => {
+      const { connection, video, command, rerenderPlayer } = setup(100);
+      Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+      const members = [
+        {
+          user_id: 1,
+          profile_id: "guest",
+          display_name: "Guest",
+          is_host: false,
+          is_self: true,
+          connected: true,
+          is_ready: false,
+        },
+        {
+          user_id: 2,
+          profile_id: "host",
+          display_name: "Host",
+          is_host: true,
+          is_self: false,
+          connected: true,
+          is_ready: false,
+        },
+      ];
+      const waitingConnection = {
+        ...connection,
+        room: { ...connection.room!, playback_state: "waiting" as const, members },
+        transportCommand: {
+          ...command,
+          action: "pause" as const,
+          playback_state: "waiting" as const,
+        },
+      };
+      rerenderPlayer({ watchTogetherConnection: waitingConnection });
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      const messages = vi.mocked(connection.sendRoomMessage);
+      messages.mockClear();
+      await act(() => vi.advanceTimersByTimeAsync(1_000));
+      expect(messages).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "state_report", is_ready: true }),
+      );
+
+      // The peer is still loading, but our own readiness has reached the server.
+      rerenderPlayer({
+        watchTogetherConnection: {
+          ...waitingConnection,
+          room: {
+            ...waitingConnection.room,
+            members: members.map((member) => ({ ...member, is_ready: member.is_self })),
+          },
+        },
+      });
+      messages.mockClear();
+      fireEvent.canPlay(video);
+      await act(() => vi.advanceTimersByTimeAsync(1_500));
+      expect(messages).not.toHaveBeenCalledWith(expect.objectContaining({ is_ready: true }));
+      expect(messages).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ready" }));
+      expect(messages).toHaveBeenCalledWith({
+        type: "state_report",
+        session_id: "session-1",
+        position_seconds: 100,
+        is_paused: true,
+      });
+
+      // The server clears readiness in its snapshot before dispatching a new command.
+      rerenderPlayer({ watchTogetherConnection: waitingConnection });
+      const nextCommand =
+        reset === "new command"
+          ? {
+              ...waitingConnection.transportCommand,
+              command_id: "room-command-2",
+              execute_at: new Date().toISOString(),
+            }
+          : waitingConnection.transportCommand;
+      rerenderPlayer({
+        watchTogetherConnection: { ...waitingConnection, transportCommand: nextCommand },
+      });
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      fireEvent.canPlay(video);
+      expect(messages).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "ready", command_id: nextCommand.command_id }),
+      );
+      messages.mockClear();
+      await act(() => vi.advanceTimersByTimeAsync(500));
+      expect(messages).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "state_report",
+          is_ready: true,
+          command_id: nextCommand.command_id,
+        }),
+      );
+    },
+  );
+
   it("waits for execution even when a pending seek already matches the media position", async () => {
     const { connection, video, command, rerenderPlayer } = setup(100);
     Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
@@ -650,7 +845,9 @@ describe("VideoPlayer room catch-up", () => {
     "recalculates catch-up after autoplay is blocked for %sms",
     async (delayMs) => {
       const { connection, video, command, rerenderPlayer, onReanchorSeek } = setup(101);
-      vi.mocked(video.play).mockRejectedValueOnce(new Error("Autoplay blocked"));
+      vi.mocked(video.play).mockRejectedValueOnce(
+        new DOMException("Autoplay blocked", "NotAllowedError"),
+      );
       rerenderPlayer({ watchTogetherConnection: { ...connection, transportCommand: command } });
       await act(() => vi.advanceTimersByTimeAsync(0));
 
@@ -668,9 +865,25 @@ describe("VideoPlayer room catch-up", () => {
     },
   );
 
+  it("retries a play aborted by a transport swap instead of asking for a click", async () => {
+    const { connection, video, command, rerenderPlayer } = setup(101);
+    vi.mocked(video.play).mockRejectedValueOnce(
+      new DOMException("The play() request was interrupted", "AbortError"),
+    );
+    Object.defineProperty(video, "paused", { configurable: true, value: true });
+    rerenderPlayer({ watchTogetherConnection: { ...connection, transportCommand: command } });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(screen.queryByRole("button", { name: "Join playback" })).not.toBeInTheDocument();
+    await act(() => vi.advanceTimersByTimeAsync(400));
+    expect(video.play).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("button", { name: "Join playback" })).not.toBeInTheDocument();
+  });
+
   it("resets catch-up when the manual autoplay retry also fails", async () => {
     const { connection, video, command, rerenderPlayer } = setup(101);
-    vi.mocked(video.play).mockRejectedValue(new Error("Autoplay blocked"));
+    vi.mocked(video.play).mockRejectedValue(
+      new DOMException("Autoplay blocked", "NotAllowedError"),
+    );
     rerenderPlayer({ watchTogetherConnection: { ...connection, transportCommand: command } });
     await act(() => vi.advanceTimersByTimeAsync(0));
     vi.setSystemTime(Date.now() + 2000);
@@ -680,7 +893,9 @@ describe("VideoPlayer room catch-up", () => {
 
   it("keeps the autoplay retry usable after a clock offset update", async () => {
     const { connection, video, command, rerenderPlayer } = setup(101);
-    vi.mocked(video.play).mockRejectedValueOnce(new Error("Autoplay blocked"));
+    vi.mocked(video.play).mockRejectedValueOnce(
+      new DOMException("Autoplay blocked", "NotAllowedError"),
+    );
     const commandedConnection = { ...connection, transportCommand: command };
     rerenderPlayer({ watchTogetherConnection: commandedConnection });
     await act(() => vi.advanceTimersByTimeAsync(0));

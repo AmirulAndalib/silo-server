@@ -13285,6 +13285,26 @@
       "response_media_type": "application/json",
       "schema": "#/components/schemas/CollectionWatchProviderSummary",
       "body_file": "watch_providers_ok.json"
+    },
+    {
+      "name": "watch_together_capabilities",
+      "operation_id": "getWatchTogetherCapabilities",
+      "scenario": "An authenticated account reads which watch-together room behaviors the server supports.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/watch-together/capabilities",
+        "headers": {
+          "Authorization": "Bearer tok-member"
+        }
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "private, no-cache",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/WatchTogetherCapabilities",
+      "body_file": "watch_together_capabilities.json"
     }
   ]
 }

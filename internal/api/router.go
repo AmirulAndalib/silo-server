@@ -1293,6 +1293,15 @@ func newChiRouter(deps Dependencies) chi.Router {
 				viewerResolver,
 				roomTokenService,
 			)
+			if deps.UserStoreProvider != nil {
+				watchTogetherHandler.MemberState = watchtogether.NewMemberStateReader(
+					deps.UserStoreProvider,
+					episodeRepo,
+					catalog.NewNextUpRepository(deps.DB, deps.UserStoreProvider),
+				)
+				watchTogetherHandler.Details = detailSvc
+				watchTogetherHandler.MemberStateCatalog = itemRepo
+			}
 		}
 	}
 
@@ -2246,6 +2255,17 @@ func newChiRouter(deps Dependencies) chi.Router {
 		v2deps.WatchTogetherJoin = watchTogetherHandler
 		v2deps.WatchTogetherSelection = watchTogetherHandler
 		v2deps.WatchTogetherSourceFallback = watchTogetherHandler
+		v2deps.WatchTogetherStage = watchTogetherHandler
+		v2deps.WatchTogetherStart = watchTogetherHandler
+		v2deps.WatchTogetherStop = watchTogetherHandler
+		v2deps.WatchTogetherSelectionMode = watchTogetherHandler
+		if watchTogetherHandler.MemberState != nil && watchTogetherHandler.MemberStateCatalog != nil {
+			v2deps.WatchTogetherMemberState = watchTogetherHandler
+		}
+		if watchTogetherHandler.MemberState != nil && watchTogetherHandler.Details != nil {
+			v2deps.WatchTogetherPicker = watchTogetherHandler
+		}
+		v2deps.WatchTogetherCapability = watchTogetherHandler
 		v2deps.WatchTogetherCreate = watchTogetherHandler
 		if deps.RedisClient != nil && sessionRepo != nil && userRepo != nil {
 			socket := handlers.NewWatchTogetherSocketV2(watchTogetherHandler, watchtogether.NewRoomSocketCredentialStore(deps.RedisClient), sessionRepo, userRepo, viewerResolver, checkPrimaryProfile, deps.PublicURL)

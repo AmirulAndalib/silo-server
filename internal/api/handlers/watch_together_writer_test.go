@@ -88,7 +88,10 @@ func TestWatchTogetherSlowWriterDoesNotBlockOtherViewers(t *testing.T) {
 func TestWatchTogetherMemberStatusIsV2Only(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	snapshot := watchtogether.Snapshot{RoomID: "room", Members: []watchtogether.MemberSummary{{UserID: 7, ProfileID: "host", Connected: true, IsReady: true, IsBuffering: true, IsSyncing: true}}}
+	snapshot := watchtogether.Snapshot{RoomID: "room", Members: []watchtogether.MemberSummary{
+		{UserID: 7, ProfileID: "host", Connected: true, IsReady: true, IsBuffering: true, IsSyncing: true, LobbyReady: true},
+		{UserID: 8, ProfileID: "guest", Connected: true},
+	}}
 	frame := map[string]any{"type": "snapshot", "room": snapshot}
 	assertStatus := func(t *testing.T, data []byte, wantStatus bool) {
 		t.Helper()
@@ -101,13 +104,22 @@ func TestWatchTogetherMemberStatusIsV2Only(t *testing.T) {
 		if err := json.Unmarshal(data, &payload); err != nil {
 			t.Fatal(err)
 		}
-		if payload.Room.RoomID != "room" || len(payload.Room.Members) != 1 || payload.Room.Members[0]["connected"] != true {
+		if payload.Room.RoomID != "room" || len(payload.Room.Members) != 2 || payload.Room.Members[0]["connected"] != true {
 			t.Fatalf("existing snapshot fields changed: %s", data)
 		}
 		for _, key := range []string{"is_ready", "is_buffering", "is_syncing"} {
 			value, present := payload.Room.Members[0][key]
 			if present != wantStatus || (present && value != true) {
 				t.Fatalf("%s = %v, present %v; want status %v", key, value, present, wantStatus)
+			}
+		}
+		for i, member := range payload.Room.Members {
+			value, present := member["lobby_ready"]
+			if present != wantStatus || (present && value != snapshot.Members[i].LobbyReady) {
+				t.Fatalf("member %d lobby_ready = %v, present %v; want status %v", i, value, present, wantStatus)
+			}
+			if !wantStatus && len(member) != 6 {
+				t.Fatalf("v1 member fields changed: %s", data)
 			}
 		}
 	}
@@ -121,6 +133,17 @@ func TestWatchTogetherMemberStatusIsV2Only(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertStatus(t, data, false)
+	})
+	t.Run("v2 adapter snapshot", func(t *testing.T) {
+		response, err := new(WatchTogetherHandler).buildRoomResponse(ctx, snapshot, 7, "host")
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(map[string]any{"room": response.Room})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertStatus(t, data, true)
 	})
 	for _, version := range []string{"v1", "v2"} {
 		t.Run(version+" socket", func(t *testing.T) {
@@ -139,7 +162,17 @@ func TestWatchTogetherMemberStatusIsV2Only(t *testing.T) {
 			}
 		})
 	}
-	if member := frame["room"].(watchtogether.Snapshot).Members[0]; !member.IsReady || !member.IsBuffering || !member.IsSyncing {
+	if member := frame["room"].(watchtogether.Snapshot).Members[0]; !member.IsReady || !member.IsBuffering || !member.IsSyncing || !member.LobbyReady {
 		t.Fatal("v1 projection mutated the snapshot shared with v2 viewers")
+	}
+}
+
+func TestWatchTogetherV1RejectsLobbyReady(t *testing.T) {
+	h := new(WatchTogetherHandler)
+	for _, payload := range []string{`{"type":"lobby_ready","ready":true}`, `{"type":"lobby_ready","ready":false}`} {
+		err := h.handleRoomClientMessage(t.Context(), new(watchTogetherRoomConn), nil, 7, "profile", []byte(payload))
+		if err == nil || err.Error() != "unsupported room websocket message" {
+			t.Fatalf("v1 lobby_ready error = %v", err)
+		}
 	}
 }

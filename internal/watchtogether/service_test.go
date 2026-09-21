@@ -136,6 +136,102 @@ func (s *stubRepo) UpdateSelection(
 	return &room, nil
 }
 
+func (s *stubRepo) UpdateSelectionMode(
+	_ context.Context,
+	_ string,
+	mode RoomSelectionMode,
+	anchorUpdatedAt time.Time,
+	generation int64,
+	expectedGeneration int64,
+) (*Room, error) {
+	if s.room.Generation != expectedGeneration || s.room.Phase != RoomPhaseLobby {
+		return nil, ErrRoomStateConflict
+	}
+	s.room.SelectionMode = mode
+	s.room.SelectedContentID = nil
+	s.room.SelectedFileID = nil
+	s.room.SelectedLibraryID = nil
+	s.room.AnchorUpdatedAt = anchorUpdatedAt
+	s.room.Generation = generation
+	room := s.room
+	return &room, nil
+}
+
+func (s *stubRepo) UpdateStagedSelection(
+	_ context.Context,
+	_ string,
+	selection SelectItemInput,
+	anchorUpdatedAt time.Time,
+	generation int64,
+	expectedGeneration int64,
+) (*Room, error) {
+	if s.room.Generation != expectedGeneration {
+		return nil, ErrRoomStateConflict
+	}
+	if s.room.Phase != RoomPhaseLobby || s.room.SelectionMode != RoomSelectionModeHostPick {
+		return nil, ErrRoomStateConflict
+	}
+	contentID := selection.ContentID
+	s.room.SelectedContentID = &contentID
+	s.room.SelectedFileID = selection.FileID
+	s.room.SelectedLibraryID = selection.LibraryID
+	s.room.AnchorUpdatedAt = anchorUpdatedAt
+	s.room.Generation = generation
+	room := s.room
+	return &room, nil
+}
+
+// StartStagedOnce mirrors Repository.StartStagedOnce over the in-memory row.
+func (s *stubRepo) StartStagedOnce(_ context.Context, _ string, user int, profile string, expected int64, now time.Time) (*Room, bool, error) {
+	if s.room.HostUserID != user || s.room.HostProfileID != profile {
+		return nil, false, ErrRoomForbidden
+	}
+	if s.room.Phase == RoomPhaseEnded {
+		return nil, false, ErrRoomClosed
+	}
+	if s.room.Phase == RoomPhasePlaying || s.room.Generation != expected {
+		room := s.room
+		return &room, false, nil
+	}
+	if s.room.SelectedContentID == nil || *s.room.SelectedContentID == "" {
+		return nil, false, ErrNoStagedSelection
+	}
+	s.room.Phase = RoomPhasePlaying
+	s.room.PlaybackState = RoomPlaybackStateWaiting
+	s.room.ResumeOnReady = true
+	s.room.AnchorPositionSeconds = 0
+	s.room.IsPaused = true
+	s.room.AnchorUpdatedAt = now
+	s.room.SelectionRevision++
+	s.room.Generation++
+	room := s.room
+	return &room, true, nil
+}
+
+// StopPlaybackOnce mirrors Repository.StopPlaybackOnce over the in-memory row.
+func (s *stubRepo) StopPlaybackOnce(_ context.Context, _ string, user int, profile string, expected int64, now time.Time) (*Room, bool, error) {
+	if s.room.HostUserID != user || s.room.HostProfileID != profile {
+		return nil, false, ErrRoomForbidden
+	}
+	if s.room.Phase == RoomPhaseEnded {
+		return nil, false, ErrRoomClosed
+	}
+	if s.room.Phase != RoomPhasePlaying || s.room.Generation != expected {
+		room := s.room
+		return &room, false, nil
+	}
+	s.room.Phase = RoomPhaseLobby
+	s.room.PlaybackState = RoomPlaybackStateIdle
+	s.room.ResumeOnReady = false
+	s.room.AnchorPositionSeconds = 0
+	s.room.IsPaused = true
+	s.room.AnchorUpdatedAt = now
+	s.room.SelectionRevision++
+	s.room.Generation++
+	room := s.room
+	return &room, true, nil
+}
+
 type stubSessions struct {
 	session *playback.Session
 }
@@ -396,6 +492,8 @@ func TestCorrectionCommandRoundTripsRoomRuntime(t *testing.T) {
 		profileID:         "guest",
 		sessionID:         command.SessionID,
 		correctionCommand: command,
+		syncingToRoom:     true,
+		lobbyReady:        true,
 	}
 
 	encoded, err := json.Marshal(service.runtimeLocked(live))
@@ -409,12 +507,25 @@ func TestCorrectionCommandRoundTripsRoomRuntime(t *testing.T) {
 	if state.Members[key].CorrectionCommand == nil {
 		t.Fatal("correction command was omitted from room runtime")
 	}
+	if !state.Members[key].SyncingToRoom || !state.Members[key].LobbyReady {
+		t.Fatal("correction persistence dropped the other member runtime fields")
+	}
 
 	adopted := &liveRoom{members: make(map[string]*memberState)}
 	service.adoptRuntimeLocked(t.Context(), adopted, repo.room, state)
 	got := adopted.members[key].correctionCommand
 	if got == nil || got.CommandID != command.CommandID || got.SessionID != command.SessionID {
 		t.Fatalf("adopted correction command = %+v, want %+v", got, command)
+	}
+	if !adopted.members[key].syncingToRoom || !adopted.members[key].lobbyReady {
+		t.Fatal("runtime adoption dropped syncing or lobby readiness")
+	}
+
+	nextRoom := repo.room
+	nextRoom.SelectionRevision++
+	service.adoptRuntimeLocked(t.Context(), adopted, nextRoom, state)
+	if member := adopted.members[key]; member.correctionCommand != nil || member.syncingToRoom || member.lobbyReady {
+		t.Fatalf("previous epoch state survived runtime adoption: %+v", member)
 	}
 }
 
@@ -1140,5 +1251,210 @@ func TestReadyAcknowledgesCurrentSeek(t *testing.T) {
 				t.Fatalf("current ready did not resume at the seek target: %+v", snapshot)
 			}
 		})
+	}
+}
+
+// A host who rejoins a playing room alone is told the room's position. Their
+// stream starts at zero, and the first state report can arrive before that
+// seek lands; it must not become the new anchor.
+func TestHostRejoinReportsDoNotRewindTheRoomUntilSynced(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 20, 0, time.UTC)
+	repo := &stubRepo{room: baseRoom(now)}
+	repo.room.AnchorPositionSeconds = 600
+	repo.room.IsPaused = false
+	repo.room.AnchorUpdatedAt = now
+	conn := &recordingConn{}
+	service := newServiceForTest(
+		now,
+		repo,
+		&stubSessions{session: &playback.Session{ID: "session-1", UserID: 7, ProfileID: "host", MediaFileID: 42}},
+		&stubFiles{file: &models.MediaFile{ID: 42, ContentID: "movie-1"}},
+		nil,
+	)
+	service.rooms[repo.room.ID].members[buildMemberKey(7, "host")] = &memberState{userID: 7, profileID: "host", connection: conn}
+	reg := registrationFor(repo.room.ID, 7, "host", conn)
+	if _, err := service.AttachSessionForConnection(context.Background(), reg, 7, "host", "session-1"); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if len(conn.payloads) == 0 {
+		t.Fatal("expected a sync command for the rejoining host")
+	}
+	before := len(conn.payloads)
+
+	// Stream just started: position 0 while the room is at ~600.
+	if _, err := service.HandleStateReportForConnection(context.Background(), reg, 7, "host", StateReport{SessionID: "session-1", PositionSeconds: 0, IsPaused: false}); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	if repo.room.AnchorPositionSeconds != 600 {
+		t.Fatalf("host's pre-seek report rewound the room to %v", repo.room.AnchorPositionSeconds)
+	}
+	if len(conn.payloads) == before {
+		t.Fatal("expected the unsynced host to be corrected toward the room like a guest")
+	}
+	corrected := len(conn.payloads)
+	if _, err := service.HandleStateReportForConnection(t.Context(), reg, 7, "host", StateReport{SessionID: "session-1", PositionSeconds: 0, IsPaused: false}); err != nil {
+		t.Fatalf("repeated unsynced report: %v", err)
+	}
+	if len(conn.payloads) != corrected || repo.room.AnchorPositionSeconds != 600 || !service.rooms[repo.room.ID].members[buildMemberKey(7, "host")].syncingToRoom {
+		t.Fatal("repeated host sync report resent correction or restored authority before convergence")
+	}
+
+	// The seek landed: the host now reports the room's position and becomes authoritative again.
+	if _, err := service.HandleStateReportForConnection(context.Background(), reg, 7, "host", StateReport{SessionID: "session-1", PositionSeconds: 600.4, IsPaused: false}); err != nil {
+		t.Fatalf("synced report: %v", err)
+	}
+	if _, err := service.HandleStateReportForConnection(context.Background(), reg, 7, "host", StateReport{SessionID: "session-1", PositionSeconds: 650, IsPaused: false}); err != nil {
+		t.Fatalf("authoritative report: %v", err)
+	}
+	if repo.room.AnchorPositionSeconds != 650 {
+		t.Fatalf("host authority not restored after sync: anchor=%v", repo.room.AnchorPositionSeconds)
+	}
+}
+
+// An explicit host action while still syncing is intent, not a stale report.
+func TestHostTransportRequestEndsRejoinSync(t *testing.T) {
+	now := time.Date(2026, 4, 9, 12, 0, 20, 0, time.UTC)
+	repo := &stubRepo{room: baseRoom(now)}
+	repo.room.AnchorPositionSeconds = 600
+	repo.room.IsPaused = false
+	repo.room.AnchorUpdatedAt = now
+	conn := &recordingConn{}
+	service := newServiceForTest(
+		now,
+		repo,
+		&stubSessions{session: &playback.Session{ID: "session-1", UserID: 7, ProfileID: "host", MediaFileID: 42}},
+		&stubFiles{file: &models.MediaFile{ID: 42, ContentID: "movie-1"}},
+		nil,
+	)
+	service.rooms[repo.room.ID].members[buildMemberKey(7, "host")] = &memberState{userID: 7, profileID: "host", connection: conn}
+	reg := registrationFor(repo.room.ID, 7, "host", conn)
+	if _, err := service.AttachSessionForConnection(context.Background(), reg, 7, "host", "session-1"); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	position := 30.0
+	if _, err := service.HandleTransportRequestForConnection(context.Background(), reg, 7, "host", TransportRequest{Action: TransportActionSeek, PositionSeconds: &position, IsPaused: false}); err != nil {
+		t.Fatalf("seek: %v", err)
+	}
+	if repo.room.AnchorPositionSeconds != 30 {
+		t.Fatalf("host seek ignored: anchor=%v", repo.room.AnchorPositionSeconds)
+	}
+	if service.rooms[repo.room.ID].members[buildMemberKey(7, "host")].syncingToRoom {
+		t.Fatal("explicit transport should end the rejoin sync")
+	}
+}
+
+// A rebuilt stream lands the host on a keyframe or segment boundary short of
+// the seek target. The host's real position becomes the anchor and the room
+// resumes instead of waiting out the deadline; a guest at the same offset is
+// still held to the destination.
+func TestHostReadyNearSeekTargetReanchorsTheRoom(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &stubRepo{room: baseRoom(now)}
+	service := newServiceForTest(now, repo, &stubSessions{}, &stubFiles{}, nil)
+	live := service.rooms[repo.room.ID]
+	t.Cleanup(func() {
+		service.mu.Lock()
+		service.disarmWaitingDeadlineLocked(live)
+		service.mu.Unlock()
+		service.Close()
+	})
+	hostConn := &recordingConn{}
+	guestConn := &recordingConn{}
+	live.members[buildMemberKey(7, "host")] = &memberState{userID: 7, profileID: "host", sessionID: "host-session", connection: hostConn}
+	live.members[buildMemberKey(8, "guest")] = &memberState{userID: 8, profileID: "guest", sessionID: "guest-session", connection: guestConn}
+	hostReg := registrationFor(repo.room.ID, 7, "host", hostConn)
+	guestReg := registrationFor(repo.room.ID, 8, "guest", guestConn)
+	if _, err := service.HandleTransportRequestForConnection(t.Context(), hostReg, 7, "host", TransportRequest{
+		Action: TransportActionSeek, PositionSeconds: new(1500.0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	command := hostConn.payloads[len(hostConn.payloads)-1]["command"].(TransportCommand)
+
+	snapshot, err := service.HandleReadyForConnection(t.Context(), guestReg, 8, "guest", StateReport{
+		SessionID: "guest-session", CommandID: command.CommandID, PositionSeconds: 1494, IsPaused: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.PlaybackState != RoomPlaybackStateWaiting || live.members[buildMemberKey(8, "guest")].isReady {
+		t.Fatalf("guest short of the seek target was accepted: %+v", snapshot)
+	}
+
+	snapshot, err = service.HandleReadyForConnection(t.Context(), hostReg, 7, "host", StateReport{
+		SessionID: "host-session", CommandID: command.CommandID, PositionSeconds: 1494, IsPaused: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !live.members[buildMemberKey(7, "host")].isReady || snapshot.AnchorPositionSeconds != 1494 {
+		t.Fatalf("host ready near the target did not re-anchor: %+v", snapshot)
+	}
+	if snapshot.PlaybackState != RoomPlaybackStateWaiting {
+		t.Fatalf("room resumed before the guest was ready: %+v", snapshot)
+	}
+
+	snapshot, err = service.HandleReadyForConnection(t.Context(), hostReg, 7, "host", StateReport{
+		SessionID: "host-session", CommandID: command.CommandID, PositionSeconds: 1400, IsPaused: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.AnchorPositionSeconds != 1494 {
+		t.Fatalf("host far from the target moved the anchor: %+v", snapshot)
+	}
+}
+
+// A state report carrying is_ready is the periodic form of the ready message:
+// a lost or rejected acknowledgement heals on the next tick without a new
+// media event.
+func TestStateReportWithIsReadyAcknowledgesTheWaitingCommand(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &stubRepo{room: baseRoom(now)}
+	service := newServiceForTest(now, repo, &stubSessions{}, &stubFiles{}, nil)
+	live := service.rooms[repo.room.ID]
+	t.Cleanup(func() {
+		service.mu.Lock()
+		service.disarmWaitingDeadlineLocked(live)
+		service.mu.Unlock()
+		service.Close()
+	})
+	conn := &recordingConn{}
+	member := &memberState{userID: 7, profileID: "host", sessionID: "session", connection: conn}
+	live.members[buildMemberKey(7, "host")] = member
+	reg := registrationFor(repo.room.ID, 7, "host", conn)
+	if _, err := service.HandleTransportRequestForConnection(t.Context(), reg, 7, "host", TransportRequest{
+		Action: TransportActionSeek, PositionSeconds: new(1500.0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	command := conn.payloads[len(conn.payloads)-1]["command"].(TransportCommand)
+
+	snapshot, err := service.HandleStateReportForConnection(t.Context(), reg, 7, "host", StateReport{
+		SessionID: "session", PositionSeconds: 1500, IsPaused: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.PlaybackState != RoomPlaybackStateWaiting || member.isReady {
+		t.Fatalf("plain state report satisfied the barrier: %+v", snapshot)
+	}
+	snapshot, err = service.HandleStateReportForConnection(t.Context(), reg, 7, "host", StateReport{
+		SessionID: "session", CommandID: "stale", PositionSeconds: 1500, IsPaused: true, IsReady: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.PlaybackState != RoomPlaybackStateWaiting || member.isReady {
+		t.Fatalf("stale ready report satisfied the barrier: %+v", snapshot)
+	}
+	snapshot, err = service.HandleStateReportForConnection(t.Context(), reg, 7, "host", StateReport{
+		SessionID: "session", CommandID: command.CommandID, PositionSeconds: 1500, IsPaused: true, IsReady: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.PlaybackState != RoomPlaybackStatePlaying || snapshot.AnchorPositionSeconds != 1500 {
+		t.Fatalf("ready report did not resume the room: %+v", snapshot)
 	}
 }

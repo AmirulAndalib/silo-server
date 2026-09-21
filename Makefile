@@ -62,7 +62,6 @@ lint:
 # its reason in the source, where whoever reads the test finds it.
 WEBTEST_KNOWN_FAILURES := \
 	--exclude src/pages/Catalog.test.tsx \
-	--exclude src/pages/ItemDetail/SeasonContent.test.tsx \
 	--exclude src/pages/LibraryRecommended.test.tsx
 
 # The Go binary embeds the built frontend, so every Go build and test needs
