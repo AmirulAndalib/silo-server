@@ -155,6 +155,17 @@ describe("markerOccurrenceAtTime", () => {
   it("ignores other kinds", () => {
     expect(markerOccurrenceAtTime(regions, "preview", 310)).toBeNull();
   });
+
+  it("uses an active occurrence when a nested occurrence has ended", () => {
+    const nested = resolveMarkerRegions(
+      makeVersion({ marker_segments: segments(["intro", 10, 50], ["intro", 20, 30]) }),
+    );
+    expect(markerOccurrenceAtTime(nested, "intro", 35)).toEqual({
+      kind: "intro",
+      start: 10,
+      end: 50,
+    });
+  });
 });
 
 describe("resolveAutoplayMarker", () => {

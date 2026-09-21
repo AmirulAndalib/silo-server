@@ -240,6 +240,34 @@ func TestPopulationStoredPlaybackToggleDoesNotBlockExplicitRefresh(t *testing.T)
 	}
 }
 
+func TestPopulationOnDemandRefreshBypassesMemoryCache(t *testing.T) {
+	result := Result{Markers: []Marker{{Kind: MarkerKindIntro, Start: 10 * time.Second, End: 30 * time.Second}}}
+	provider := &populationProvider{id: "provider", fetch: func() (Result, error) { return result, nil }}
+	service, store := populationFixture(t, OnlineStorageOnDemand, provider)
+	file := &models.MediaFile{ID: 1, Duration: 1000}
+	if _, _, err := service.Populate(t.Context(), file); err != nil {
+		t.Fatal(err)
+	}
+	result = Result{Markers: []Marker{{Kind: MarkerKindIntro, Start: 10 * time.Second, End: 40 * time.Second}}}
+	effective, _, err := service.Refresh(t.Context(), file)
+	if err != nil || provider.calls != 2 || effective.IntroEnd == nil || *effective.IntroEnd != 40 {
+		t.Fatalf("refresh did not fetch corrected markers: calls=%d markers=%+v err=%v", provider.calls, effective.MarkerSegments, err)
+	}
+	result = Result{}
+	effective, _, err = service.Refresh(t.Context(), file)
+	if err != nil || provider.calls != 3 || len(effective.MarkerSegments) != 0 {
+		t.Fatalf("refresh did not fetch withdrawn markers: calls=%d markers=%+v err=%v", provider.calls, effective.MarkerSegments, err)
+	}
+	if _, _, err := service.Populate(t.Context(), file); err != nil || provider.calls != 3 {
+		t.Fatalf("ordinary lookup did not reuse refreshed cache: calls=%d err=%v", provider.calls, err)
+	}
+	for _, completion := range store.completions {
+		if completion.Result != nil {
+			t.Fatal("on-demand refresh persisted a provider response")
+		}
+	}
+}
+
 func TestPopulationRejectsChangedSettingsAndCredentials(t *testing.T) {
 	for _, change := range []string{"mode", "storage", "credentials"} {
 		t.Run(change, func(t *testing.T) {

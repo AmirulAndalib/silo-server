@@ -901,11 +901,7 @@ export interface FileVersion {
   credits?: TimeRange | null;
   recap?: TimeRange | null;
   preview?: TimeRange | null;
-  marker_segments?: {
-    kind: "intro" | "credits" | "recap" | "preview";
-    start_seconds: number;
-    end_seconds: number;
-  }[];
+  marker_segments?: MarkerOccurrence[];
 }
 
 export interface PlaybackVariantPart {
@@ -1018,6 +1014,12 @@ export interface TimeRange {
 /** The four editable marker kinds. "credits" is exposed as Jellyfin's "Outro". */
 export type MarkerKind = "intro" | "credits" | "recap" | "preview";
 
+export interface MarkerOccurrence {
+  kind: MarkerKind;
+  start_seconds: number;
+  end_seconds: number;
+}
+
 /** A marker segment with provenance, as returned by the markers API. */
 export interface MarkerSegment {
   start: number | null;
@@ -1036,6 +1038,7 @@ export interface FileMarkersResponse {
   credits: MarkerSegment;
   recap: MarkerSegment;
   preview: MarkerSegment;
+  marker_segments?: MarkerOccurrence[];
 }
 
 export interface MarkerEditAuditEntry {

@@ -118,7 +118,7 @@ export function resolveMarkerRegions(
     .sort((a, b) => a.start - b.start || a.end - b.end);
 }
 
-/** Keep the previous occurrence after its end so an intro skip can still be undone. */
+/** Prefer an active occurrence, retaining the previous one after a skip for undo. */
 export function markerOccurrenceAtTime(
   regions: MarkerRegionView[],
   kind: MarkerKind,
@@ -130,11 +130,13 @@ export function markerOccurrenceAtTime(
   // the returned region without re-checking the playhead would otherwise be
   // handed a range that has not started.
   let occurrence: MarkerRegionView | null = null;
+  let active: MarkerRegionView | null = null;
   for (const region of occurrences) {
     if (region.start > currentTime) break;
     occurrence = region;
+    if (currentTime < region.end) active = region;
   }
-  return occurrence;
+  return active ?? occurrence;
 }
 
 /** Only leave the episode once all unmarked scenes have played. */

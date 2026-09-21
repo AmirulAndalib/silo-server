@@ -121,7 +121,7 @@ func (s *PopulationService) Populate(ctx context.Context, file *models.MediaFile
 	return s.populate(ctx, file, false, true)
 }
 
-// Refresh bypasses successful stored-cache freshness for an explicit refresh.
+// Refresh bypasses successful cached results for an explicit refresh.
 // Active leases, provider cooldowns and failed-request backoff still apply.
 func (s *PopulationService) Refresh(ctx context.Context, file *models.MediaFile) (*models.MediaFile, bool, error) {
 	return s.populate(ctx, file, true, true)
@@ -210,7 +210,7 @@ func (s *PopulationService) populate(ctx context.Context, file *models.MediaFile
 		}
 		providerID := entry.provider.ID()
 		key := identity + ":" + providerID
-		if storage == OnlineStorageOnDemand {
+		if storage == OnlineStorageOnDemand && !refresh {
 			if result, ok := s.cachedMemory(key); ok {
 				results = append(results, providerResult{entry: entry, result: result, refreshed: true})
 				continue
