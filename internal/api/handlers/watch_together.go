@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -94,6 +96,7 @@ type watchTogetherStateReportMessage struct {
 
 type watchTogetherReadyMessage struct {
 	Type            string  `json:"type"`
+	CommandID       string  `json:"command_id,omitempty"`
 	SessionID       string  `json:"session_id"`
 	PositionSeconds float64 `json:"position_seconds"`
 	IsPaused        bool    `json:"is_paused"`
@@ -111,35 +114,98 @@ type watchTogetherPingMessage struct {
 	ClientSentAt string `json:"client_sent_at"`
 }
 
-// watchTogetherRoomConn serializes every write to the underlying gorilla
-// connection. gorilla/websocket does not support concurrent writers, and room
-// broadcasts arrive from other members' goroutines, so all writes — including
-// pong/error replies from the read loop — must go through this wrapper.
+// Each viewer has one writer and a bounded queue. A slow socket is closed
+// without delaying commands to the rest of the room.
+const watchTogetherQueueSize = 64
+const watchTogetherNotFound = "not_found"
+const watchTogetherReasonKey = "reason"
+const watchTogetherTypeKey = "type"
+const watchTogetherRoomClosed = "room_closed"
+
+type watchTogetherSocket interface {
+	SetWriteDeadline(time.Time) error
+	WriteMessage(int, []byte) error
+	WriteControl(int, []byte, time.Time) error
+	Close() error
+}
+type watchTogetherFrame struct {
+	data []byte
+	ping bool
+}
 type watchTogetherRoomConn struct {
-	conn    *websocket.Conn
-	writeMu sync.Mutex
-	// pingSentAtNano is the send time of the most recent protocol-level ping,
-	// used to measure round-trip latency when the pong arrives.
-	pingSentAtNano atomic.Int64
+	conn                watchTogetherSocket
+	outgoing            chan watchTogetherFrame
+	done                chan struct{}
+	closeOnce           sync.Once
+	pingSentAtNano      atomic.Int64
+	includeMemberStatus bool
 }
 
+func newWatchTogetherRoomConn(conn watchTogetherSocket) *watchTogetherRoomConn {
+	c := &watchTogetherRoomConn{conn: conn, outgoing: make(chan watchTogetherFrame, watchTogetherQueueSize), done: make(chan struct{})}
+	go c.writeLoop()
+	return c
+}
 func (c *watchTogetherRoomConn) WriteJSON(v any) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	return writeWebSocketJSON(c.conn, v)
+	if !c.includeMemberStatus {
+		if payload, ok := v.(map[string]any); ok {
+			if snapshot, ok := payload["room"].(watchtogether.Snapshot); ok {
+				payload = maps.Clone(payload)
+				payload["room"] = watchTogetherSnapshotV1(snapshot)
+				v = payload
+			}
+		}
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return c.enqueue(watchTogetherFrame{data: data})
 }
-
+func (c *watchTogetherRoomConn) enqueue(frame watchTogetherFrame) error {
+	select {
+	case <-c.done:
+		return websocket.ErrCloseSent
+	default:
+	}
+	select {
+	case <-c.done:
+		return websocket.ErrCloseSent
+	case c.outgoing <- frame:
+		return nil
+	default:
+		_ = c.Close()
+		return websocket.ErrCloseSent
+	}
+}
 func (c *watchTogetherRoomConn) Close() error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	return c.conn.Close()
+	var err error
+	c.closeOnce.Do(func() { close(c.done); err = c.conn.Close() })
+	return err
 }
-
-func (c *watchTogetherRoomConn) WritePing() error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	c.pingSentAtNano.Store(time.Now().UnixNano())
-	return writeWebSocketControl(c.conn, websocket.PingMessage, nil)
+func (c *watchTogetherRoomConn) WritePing() error { return c.enqueue(watchTogetherFrame{ping: true}) }
+func (c *watchTogetherRoomConn) writeLoop() {
+	defer func() { _ = c.Close() }()
+	for {
+		select {
+		case <-c.done:
+			return
+		case frame := <-c.outgoing:
+			var err error
+			if frame.ping {
+				c.pingSentAtNano.Store(time.Now().UnixNano())
+				err = c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteTimeout))
+			} else {
+				err = c.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+				if err == nil {
+					err = c.conn.WriteMessage(websocket.TextMessage, frame.data)
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
 }
 
 // TakePingSentAt returns and clears the send time of the last unanswered
@@ -157,13 +223,6 @@ func (c *watchTogetherRoomConn) WriteError(code, message string) {
 		"type":    "error",
 		"code":    code,
 		"message": message,
-	})
-}
-
-func (c *watchTogetherRoomConn) writeRoomClosed(reason string) {
-	_ = c.WriteJSON(map[string]string{
-		"type":   "room_closed",
-		"reason": reason,
 	})
 }
 
@@ -609,7 +668,7 @@ func (h *WatchTogetherHandler) buildRoomResponse(
 	userID int,
 	profileID string,
 ) (watchTogetherRoomResponse, error) {
-	response := watchTogetherRoomResponse{Room: snapshot}
+	response := watchTogetherRoomResponse{Room: watchTogetherSnapshotV1(snapshot)}
 	if h == nil || h.TokenService == nil {
 		return response, nil
 	}
@@ -624,6 +683,18 @@ func (h *WatchTogetherHandler) buildRoomResponse(
 	}
 	response.RoomAccessToken = token
 	return response, nil
+}
+
+// watchTogetherSnapshotV1 preserves the frozen member payload without mutating
+// the roster shared with v2 viewers and the coordinator.
+func watchTogetherSnapshotV1(snapshot watchtogether.Snapshot) watchtogether.Snapshot {
+	snapshot.Members = slices.Clone(snapshot.Members)
+	for i := range snapshot.Members {
+		snapshot.Members[i].IsReady = false
+		snapshot.Members[i].IsBuffering = false
+		snapshot.Members[i].IsSyncing = false
+	}
+	return snapshot
 }
 
 func (h *WatchTogetherHandler) validateRoomAccessToken(
@@ -701,20 +772,22 @@ func (h *WatchTogetherHandler) HandleRoomWebSocket(w http.ResponseWriter, r *htt
 
 // serveRoomConnection preserves the existing room message and disconnect loop.
 func (h *WatchTogetherHandler) serveRoomConnection(parent context.Context, conn *websocket.Conn, roomID string, userID int, profileID string) {
-	realtimeConn := &watchTogetherRoomConn{conn: conn}
+	realtimeConn := newWatchTogetherRoomConn(conn)
+	realtimeConn.includeMemberStatus = conn.Subprotocol() == watchtogether.RoomSocketProtocol
+	defer func() { _ = realtimeConn.Close() }()
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
-	reg, snapshot, err := h.Service.Connect(ctx, roomID, userID, profileID, realtimeConn)
+	reg, _, err := h.Service.Connect(ctx, roomID, userID, profileID, realtimeConn)
 	if err != nil {
 		// Terminal failures use room_closed so clients stop reconnecting
 		// instead of retrying a room that will never come back.
 		if errors.Is(err, watchtogether.ErrRoomNotFound) {
-			realtimeConn.writeRoomClosed("not_found")
+			_ = writeWebSocketJSON(conn, map[string]string{watchTogetherTypeKey: watchTogetherRoomClosed, watchTogetherReasonKey: watchTogetherNotFound})
 		} else if errors.Is(err, watchtogether.ErrRoomClosed) {
-			realtimeConn.writeRoomClosed("ended")
+			_ = writeWebSocketJSON(conn, map[string]string{watchTogetherTypeKey: watchTogetherRoomClosed, watchTogetherReasonKey: "ended"})
 		} else {
-			realtimeConn.WriteError("internal_error", "Failed to connect room socket")
+			writeWebSocketError(conn, "internal_error", "Failed to connect room socket")
 		}
 		return
 	}
@@ -734,13 +807,6 @@ func (h *WatchTogetherHandler) serveRoomConnection(parent context.Context, conn 
 	startWebSocketPingLoop(ctx, realtimeConn.WritePing)
 	// Prime an RTT sample right away instead of waiting for the first tick.
 	_ = realtimeConn.WritePing()
-
-	if err := realtimeConn.WriteJSON(map[string]any{
-		"type": "snapshot",
-		"room": snapshot,
-	}); err != nil {
-		return
-	}
 
 	for {
 		_, data, err := conn.ReadMessage()
@@ -812,6 +878,7 @@ func (h *WatchTogetherHandler) handleRoomClientMessage(
 			return errors.New("session_id is required")
 		}
 		_, err := h.Service.HandleReadyForConnection(ctx, reg, userID, profileID, watchtogether.StateReport{
+			CommandID:       msg.CommandID,
 			SessionID:       msg.SessionID,
 			PositionSeconds: msg.PositionSeconds,
 			IsPaused:        msg.IsPaused,

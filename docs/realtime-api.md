@@ -194,9 +194,9 @@ The actual web code-entry and invite auto-join/retry actions copy input and capt
 
 `PUT /api/v2/watch-together/rooms/{room_id}/selection` (`selectWatchTogetherRoomItem`) requires authenticated profile authority, the demo guard and both the host account and profile. The body requires `content_id`; optional `file_id` and `library_id` are positive string IDs. Host selection does not require guest room proof. The existing resolver retains playable-content and access checks. Vote rooms reject direct selection with `409`; non-host authority returns `403`, missing room `404`, invalid selection `422`, closed room `409`, and unavailable service/token configuration `503`.
 
-A changed selection retains the existing service behavior: reset playback anchor to zero and paused, enter waiting with resume-on-ready, advance selection revision and generation, clear prior member playback-session/readiness/buffering/ignore-wait state, and broadcast the local snapshot. The v2 writer locks the authoritative database row and compares resolved content, file and library identity before any reset. An identical current selection preserves anchor, revision, generation, member readiness, waiting timer and broadcasts. This is a current-state no-op, not a historical replay receipt: after a different intervening selection, the old request can select its content again. The operation remains non-retryable. A competing generation writer can cause the service to return its refreshed winning snapshot without replaying the failed selection. Clients must use the returned snapshot.
+A changed selection retains the existing service behavior: reset playback anchor to zero and paused, enter waiting with resume-on-ready, advance selection revision and generation, clear prior member playback-session/readiness/buffering/ignore-wait state, and broadcast the room snapshot across connected API servers. The v2 writer locks the authoritative database row and compares resolved content, file and library identity before any reset. An identical current selection preserves anchor, revision, generation, member readiness, waiting timer and broadcasts. This is a current-state no-op, not a historical replay receipt: after a different intervening selection, the old request can select its content again. The operation remains non-retryable. A competing generation writer can cause the service to return its refreshed winning snapshot without replaying the failed selection. Clients must use the returned snapshot.
 
-The actual web action captures input and authority, sends once without authentication replay, and fences replaced authority, room and request run before publication. A newer held generation is retained only for the same room. Stale receipts do not clear the candidate or display completion feedback. There is no automatic read, rebase or retry after an uncertain result. Success returns the existing room snapshot and renewed room/account/profile proof; that proof is not a session-bound socket credential. The v1 selection writer retains its frozen reset behavior; all nodes serving this v2 operation must use the guarded writer. A no-op refresh from another node adopts a newer selection revision locally and discards readiness belonging to the prior selection. This port does not migrate the room socket, establish cross-node broadcast or activate dormant native UI.
+The actual web action captures input and authority, sends once without authentication replay, and fences replaced authority, room and request run before publication. A newer held generation is retained only for the same room. Stale receipts do not clear the candidate or display completion feedback. There is no automatic read, rebase or retry after an uncertain result. Success returns the existing room snapshot and renewed room/account/profile proof; that proof is not a session-bound socket credential. The v1 selection writer retains its frozen reset behavior; all nodes serving this v2 operation must use the guarded writer. A no-op refresh from another node adopts a newer selection revision locally and discards readiness belonging to the prior selection. Room coordination across API servers is described in [Watch Party synchronization](architecture/watch-party-synchronization.md). Native Watch Party UI remains inactive.
 
 ### Suggestion creation receipt storage
 
@@ -251,6 +251,94 @@ Connect with `GET /api/v2/watch-together/rooms/{room_id}/ws` (`connectWatchToget
 
 The handler closes the underlying socket at the earlier of five minutes, access expiry, or original room-proof expiry. Every 15 seconds it rechecks current authority and room existence with a two-second validation timeout; errors close the connection rather than extending its deadline. Revocation is therefore bounded by that polling interval and timeout, not instantaneous. Missing Redis prevents runtime socket wiring; Redis errors never use an in-memory fallback.
 
-The post-upgrade loop is shared with frozen v1: Connect, Disconnect(false), initial snapshots, attach-session/transport/state-report/ready/buffering messages and ping/pong retain their existing behavior and frame shapes. There is no new leave message or global membership synchronization. V2 cancellation closes the transport so a blocked read releases and executes the existing disconnect callback. These raw frame shapes are not the typed HTTP room snapshot schema. No playback/provider operation is implied by obtaining a ticket.
+The post-upgrade loop is shared with v1: Connect, Disconnect(false), initial snapshots, attach-session/transport/state-report/ready/buffering messages and ping/pong use the same service. The readiness validation below applies to both versions. There is no new leave message. Membership and readiness are shared through the room coordinator. V2 cancellation closes the transport so a blocked read releases and executes the existing disconnect callback. These raw frame shapes are not the typed HTTP room snapshot schema. No playback/provider operation is implied by obtaining a ticket.
 
-The actual web room/player hook obtains a fresh credential for each reconnect. It captures original room proof and profile authority, sends no authentication retry, uses no URL credentials, checks the negotiated protocol, and suppresses old sockets' messages/results after authority or room replacement. It subscribes to the existing AuthProvider so same-profile PIN replacement rebinds even when room props do not change. A fresh reconnect uses an already-rotated access token only while the original logical authority remains current; it does not replay a refused ticket request. Terminal ticket refusals stop reconnecting; transient failures retain the existing bounded reconnect delay. Existing room-proof expiry ends access; it is not automatically renewed or rebound. Native adoption and exact caller inventories remain separate gates. Shared ticket consumption does not provide cross-node live room membership or broadcast coordination.
+The actual web room/player hook obtains a fresh credential for each reconnect. It captures original room proof and profile authority, sends no authentication retry, uses no URL credentials, checks the negotiated protocol, and suppresses old sockets' messages/results after authority or room replacement. It subscribes to the existing AuthProvider so same-profile PIN replacement rebinds even when room props do not change. A fresh reconnect uses an already-rotated access token only while the original logical authority remains current; it does not replay a refused ticket request. Terminal ticket refusals stop reconnecting; transient failures retain the existing bounded reconnect delay. Existing room-proof expiry ends access; it is not automatically renewed or rebound. Native adoption and exact caller inventories remain separate gates. Ticket consumption handles socket admission; the room coordinator handles membership and playback synchronization.
+
+### Room playback readiness
+
+A `ready` frame acknowledges the waiting `transport_command` that the player has
+applied. Clients send the existing `session_id`, actual media `position_seconds`,
+and `is_paused`, plus the command's `command_id`. A new command requires a new
+acknowledgement even if the room remains `waiting` and the playback session and
+selection have not changed.
+
+The server ignores an acknowledgement naming an older command without changing
+member readiness or the room anchor. For an explicit seek, the reported media
+position must also be within one second of the command's destination. Position
+validation uses the same finite, nonnegative range as other playback reports.
+Buffering pause commands can be acknowledged at the member's actual position:
+they do not require rebuilding an otherwise usable stream to reach an unbuffered
+anchor. Playback correction still runs when the room resumes.
+
+The web player waits until command execution, the native seek has finished, and
+the element has future media data before acknowledging. Old `canplay` or `seeked`
+events cannot acknowledge a seek whose destination has not arrived. It reports the
+actual media clock, including the stream's timeline offset, rather than the
+optimistic timeline displayed during a seek.
+
+`command_id` is optional for older clients on the shared v1/v2 message loop. Their
+seek acknowledgements still need to reach the destination, but a client that
+omits the ID cannot distinguish consecutive seeks to the same position. Older
+servers ignore this additive request field. Updated servers advertise
+`watch_party_coordinator_v1` in playback capabilities. The existing waiting
+deadline remains 30 seconds.
+
+
+### Room membership and buffering
+
+Watch Party clients discover the shared coordinator through
+`watch_party_coordinator_v1` in `GET /api/v2/playback/capabilities`. It guarantees
+shared membership and readiness across API servers and support for the optional
+`is_ready`, `is_buffering`, and `is_syncing` member fields. Omitted false fields
+mean false when the capability is present. The initial upgrade requires the
+stop/start procedure in [Watch Party synchronization](architecture/watch-party-synchronization.md);
+old and new coordinators must not serve rooms together.
+
+Room playback uses one selected source file for all viewers. Automatic selection
+uses the catalogue's quality ordering within the selected edition, without a
+room-specific resolution or dynamic range limit. Each viewer's playback plan can
+direct play, remux, transcode, or tone map that file according to their device
+capabilities and server settings. When that source cannot be adapted, a connected
+viewer can request coordinated source fallback as described below. The web player
+disables version switching and requires
+`fixed_media_file_v1` from playback capabilities, starting with
+`allow_alternate_versions: false` to prevent automatic file fallback during
+recovery. Streaming quality remains adjustable on the same file.
+
+`POST /api/v2/watch-together/rooms/{room_id}/source-fallback`
+(`fallbackWatchTogetherSource`) requires authenticated profile authority, room
+proof in `X-Room-Token`, and connected room membership. Discover support through
+`watch_party_source_fallback_v1` in playback capabilities. The body contains
+`selection_revision`, `failed_file_id` (a positive string ID), and `reason`:
+`no_alternate_version`, `hdr_transcode_unsupported`,
+`subtitle_conversion_unsupported`, or `transcoding_disabled`.
+
+The server chooses a lower-ranked source in the same edition and presentation
+part. `no_alternate_version` requires lower resolution; an HDR refusal requires
+SDR. It preserves the shared position and resume intent, advances the selection
+revision, clears attachments/readiness, and returns/broadcasts the new snapshot.
+All clients must follow that selection and attach again, including the host.
+This changes the file for the existing content in both host-pick and vote rooms.
+A stale file or revision returns the current snapshot without a write, so replay
+cannot cause a second fallback. No candidate returns `409`; disconnected or
+unauthorized viewers receive `403`. Clients retain the playback refusal if the
+fallback fails and must not independently substitute another file.
+
+V2 room snapshots include members connected through all API servers. Each member can
+include additive `is_ready`, `is_buffering`, and `is_syncing` booleans; absent fields
+mean false. `is_syncing` identifies an attached member still blocking the current
+readiness barrier. HTTP v2 snapshots and raw socket snapshots expose these fields.
+The frozen v1 HTTP responses and room socket omit these status fields. The web
+player lists viewer status and names the viewers it is waiting for.
+
+The web player reports buffering after 500 ms without playable media. Recovery,
+a changed command/session, pause, a phase change, disconnect, and unmount cancel
+a pending report. The server ignores late buffering reports for paused rooms. A
+reconnected socket retains its validated playback-session attachment, and
+reattaching that session does not pause a playing room. A member attaching during
+an explicit seek receives the seek command and must reach its destination before
+acknowledging readiness.
+
+See [Watch Party synchronization](architecture/watch-party-synchronization.md)
+for transaction, lease, delivery, and deployment behavior.

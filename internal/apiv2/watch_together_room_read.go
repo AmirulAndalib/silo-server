@@ -23,6 +23,9 @@ type WatchTogetherRoomMember struct {
 	IsHost      bool   `json:"is_host"`
 	IsSelf      bool   `json:"is_self"`
 	Connected   bool   `json:"connected"`
+	IsReady     bool   `json:"is_ready,omitempty"`
+	IsBuffering bool   `json:"is_buffering,omitempty"`
+	IsSyncing   bool   `json:"is_syncing,omitempty"`
 }
 type WatchTogetherRoomSnapshot struct {
 	RoomID                  ID                               `json:"room_id"`
@@ -102,7 +105,7 @@ func watchTogetherRoomSnapshotOf(row watchtogether.Snapshot) (WatchTogetherRoomS
 	}
 	out.Members = make([]WatchTogetherRoomMember, 0, len(row.Members))
 	for _, m := range row.Members {
-		out.Members = append(out.Members, WatchTogetherRoomMember{UserID: ID(strconv.Itoa(m.UserID)), ProfileID: m.ProfileID, DisplayName: m.DisplayName, IsHost: m.IsHost, IsSelf: m.IsSelf, Connected: m.Connected})
+		out.Members = append(out.Members, WatchTogetherRoomMember{UserID: ID(strconv.Itoa(m.UserID)), ProfileID: m.ProfileID, DisplayName: m.DisplayName, IsHost: m.IsHost, IsSelf: m.IsSelf, Connected: m.Connected, IsReady: m.IsReady, IsBuffering: m.IsBuffering, IsSyncing: m.IsSyncing})
 	}
 	return out, nil
 }

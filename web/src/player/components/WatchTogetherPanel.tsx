@@ -72,6 +72,31 @@ export function WatchTogetherPanel({
         <div className="mt-1.5 text-[11px] leading-snug text-white/50">Syncing room state</div>
       )}
 
+      {room?.members?.length ? (
+        <ul aria-label="Viewers" className="mt-3 max-h-40 space-y-1.5 overflow-y-auto text-xs">
+          {room.members.map((member) => (
+            <li
+              key={`${member.user_id}:${member.profile_id}`}
+              className="flex items-center justify-between gap-2"
+            >
+              <span className="truncate">
+                {member.display_name}
+                {member.is_self ? " (you)" : ""}
+              </span>
+              <span className="shrink-0 text-white/60">
+                {member.is_buffering
+                  ? "Buffering"
+                  : member.is_syncing
+                    ? "Syncing"
+                    : member.is_ready
+                      ? "Ready"
+                      : "Connected"}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
       {/* Actions */}
       {isHost ? (
         <div className="mt-3 flex items-center gap-1 border-t border-white/8 pt-2.5">

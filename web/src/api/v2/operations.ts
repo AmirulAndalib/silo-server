@@ -673,6 +673,7 @@ export const v2Operations = {
   "POST /api/v2/watch-providers/{provider}/sync": "triggerWatchProviderSync",
   "POST /api/v2/watch-together/join": "joinWatchTogetherRoom",
   "POST /api/v2/watch-together/rooms": "createWatchTogetherRoom",
+  "POST /api/v2/watch-together/rooms/{room_id}/source-fallback": "fallbackWatchTogetherSource",
   "POST /api/v2/watch-together/rooms/{room_id}/suggestions": "createWatchTogetherSuggestion",
   "POST /api/v2/watch-together/rooms/{room_id}/suggestions/promote":
     "promoteWatchTogetherSuggestion",

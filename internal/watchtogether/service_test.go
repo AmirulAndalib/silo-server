@@ -29,6 +29,9 @@ func TestInvalidPlaybackPositionsAreRejected(t *testing.T) {
 		if _, err := service.HandleBufferingForConnection(t.Context(), reg, 7, "host", StateReport{SessionID: "session", PositionSeconds: position}); !errors.Is(err, ErrInvalidPosition) {
 			t.Fatalf("buffering position %v error = %v", position, err)
 		}
+		if _, err := service.HandleReadyForConnection(t.Context(), reg, 7, "host", StateReport{SessionID: "session", PositionSeconds: position}); !errors.Is(err, ErrInvalidPosition) {
+			t.Fatalf("ready position %v error = %v", position, err)
+		}
 	}
 }
 
@@ -876,4 +879,77 @@ func TestStaleLiveConflictAdoptsDatabaseRow(t *testing.T) {
 
 func intPtr(value int) *int {
 	return &value
+}
+
+func TestReadyAcknowledgesCurrentSeek(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		staleCommand bool
+		legacy       bool
+		position     float64
+	}{
+		{"old command at current position", true, false, 1500},
+		{"current command at old position", false, false, 20},
+		{"legacy report at old position", false, true, 20},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			repo := &stubRepo{room: baseRoom(now)}
+			service := newServiceForTest(now, repo, &stubSessions{}, &stubFiles{}, nil)
+			live := service.rooms[repo.room.ID]
+			t.Cleanup(func() {
+				service.mu.Lock()
+				service.disarmWaitingDeadlineLocked(live)
+				service.mu.Unlock()
+				service.Close()
+			})
+			conn := &recordingConn{}
+			member := &memberState{userID: 7, profileID: "host", sessionID: "session", connection: conn}
+			live.members[buildMemberKey(7, "host")] = member
+			reg := registrationFor(repo.room.ID, 7, "host", conn)
+			seek := func() TransportCommand {
+				t.Helper()
+				_, err := service.HandleTransportRequestForConnection(t.Context(), reg, 7, "host", TransportRequest{
+					Action: TransportActionSeek, PositionSeconds: new(1500.0),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return conn.payloads[len(conn.payloads)-1]["command"].(TransportCommand)
+			}
+			previous := seek()
+			current := seek()
+			commandID := current.CommandID
+			if test.staleCommand {
+				commandID = previous.CommandID
+			}
+			if test.legacy {
+				commandID = ""
+			}
+			conn.payloads = nil
+			generation := repo.room.Generation
+			snapshot, err := service.HandleReadyForConnection(t.Context(), reg, 7, "host", StateReport{
+				SessionID: "session", CommandID: commandID, PositionSeconds: test.position, IsPaused: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.PlaybackState != RoomPlaybackStateWaiting || member.isReady || repo.room.Generation != generation || len(conn.payloads) != 0 {
+				t.Fatalf("stale ready changed the waiting room: state=%s ready=%v generation=%d frames=%d", snapshot.PlaybackState, member.isReady, repo.room.Generation, len(conn.payloads))
+			}
+			commandID = current.CommandID
+			if test.legacy {
+				commandID = ""
+			}
+			snapshot, err = service.HandleReadyForConnection(t.Context(), reg, 7, "host", StateReport{
+				SessionID: "session", CommandID: commandID, PositionSeconds: 1500.5, IsPaused: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.PlaybackState != RoomPlaybackStatePlaying || snapshot.AnchorPositionSeconds != 1500 {
+				t.Fatalf("current ready did not resume at the seek target: %+v", snapshot)
+			}
+		})
+	}
 }

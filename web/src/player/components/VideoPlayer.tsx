@@ -336,14 +336,13 @@ export function VideoPlayer({
   const durationRef = useRef(propDuration ?? 0);
   const compatibilityFallbackKeyRef = useRef<string | null>(null);
   const lastRoomCommandIdRef = useRef<string | null>(null);
+  const appliedRoomCommandIdRef = useRef<string | null>(null);
   const roomCommandTimerRef = useRef<number | null>(null);
   // The advancing room position a playbackRate catch-up is converging toward,
   // when one is active. Non-null means playbackRate is intentionally not 1.
   const roomCatchupTargetRef = useRef<RoomCatchupTarget | null>(null);
   const performPlayerSeekRef = useRef<(seconds: number) => boolean | Promise<boolean>>(() => false);
-  const reportRoomReadyRef = useRef<
-    (positionSeconds?: number, isPaused?: boolean) => { ok: boolean }
-  >(() => ({ ok: false }));
+  const reportRoomReadyRef = useRef<() => { ok: boolean }>(() => ({ ok: false }));
 
   // Playback state
   const [playing, setPlaying] = useState(false);
@@ -583,6 +582,7 @@ export function VideoPlayer({
       sendRoomMessage: () => ({ ok: false }),
       updatePolicy: async () => null,
       selectItem: async () => null,
+      fallbackSource: async () => null,
       closeRoom: async () => {},
       createSuggestion: async () => {},
       deleteSuggestion: async () => {},
@@ -595,6 +595,7 @@ export function VideoPlayer({
     sessionId,
     videoRef,
     streamOriginRef: timelineOffsetRef,
+    appliedCommandIdRef: appliedRoomCommandIdRef,
   });
   const roomPlaybackActive = !!watchTogetherRoomId && !watchTogether.closedReason;
   const roomSyncWaiting = watchTogether.room?.playback_state === "waiting";
@@ -2573,14 +2574,17 @@ export function VideoPlayer({
       !sessionId
     ) {
       lastRoomCommandIdRef.current = null;
+      appliedRoomCommandIdRef.current = null;
       return;
     }
     if (command.session_id && command.session_id !== sessionId) {
       lastRoomCommandIdRef.current = null;
+      appliedRoomCommandIdRef.current = null;
       return;
     }
     if (command.selection_revision !== roomSelectionRevision) {
       lastRoomCommandIdRef.current = null;
+      appliedRoomCommandIdRef.current = null;
       return;
     }
     if (command.command_id === lastRoomCommandIdRef.current) {
@@ -2588,6 +2592,7 @@ export function VideoPlayer({
     }
 
     lastRoomCommandIdRef.current = command.command_id;
+    appliedRoomCommandIdRef.current = null;
 
     if (roomCommandTimerRef.current !== null) {
       window.clearTimeout(roomCommandTimerRef.current);
@@ -2600,7 +2605,7 @@ export function VideoPlayer({
       : Date.now();
     const delay = Math.max(0, localExecuteAt - Date.now());
 
-    const applyRoomPosition = (video: HTMLVideoElement): number => {
+    const applyRoomPosition = (video: HTMLVideoElement) => {
       if (command.action === "pause" || command.action === "seek") {
         resetRoomCatchupRate();
       }
@@ -2641,7 +2646,6 @@ export function VideoPlayer({
         // Already at the room position; drop any stale convergence nudge.
         resetRoomCatchupRate();
       }
-      return targetPositionSeconds;
     };
 
     roomCommandTimerRef.current = window.setTimeout(() => {
@@ -2652,6 +2656,7 @@ export function VideoPlayer({
           return;
         }
 
+        appliedRoomCommandIdRef.current = command.command_id;
         applyRoomPosition(video);
 
         if (command.action === "pause" || command.action === "seek") {
@@ -2673,7 +2678,7 @@ export function VideoPlayer({
                   return;
                 const currentVideo = videoRef.current;
                 if (!currentVideo) return;
-                const targetPositionSeconds = applyRoomPosition(currentVideo);
+                applyRoomPosition(currentVideo);
                 void currentVideo
                   .play()
                   .then(() => {
@@ -2682,7 +2687,7 @@ export function VideoPlayer({
                       lastRoomCommandIdRef.current !== command.command_id
                     )
                       return;
-                    reportRoomReadyRef.current(targetPositionSeconds, false);
+                    reportRoomReadyRef.current();
                   })
                   .catch(() => {
                     if (
@@ -2697,12 +2702,8 @@ export function VideoPlayer({
           }
         }
 
-        if (
-          command.playback_state === "waiting" &&
-          command.action === "pause" &&
-          video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA
-        ) {
-          reportRoomReadyRef.current(command.position_seconds, true);
+        if (command.playback_state === "waiting") {
+          reportRoomReadyRef.current();
         }
       })().catch(() => {});
     }, delay);
@@ -3173,7 +3174,12 @@ export function VideoPlayer({
             <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-white/20 border-t-white" />
             <div className="mt-3 text-sm font-medium">Syncing playback</div>
             <div className="mt-1 text-xs text-white/70">
-              Buffering and syncing all users before resuming.
+              {watchTogether.room?.members?.some((member) => member.is_syncing)
+                ? `Waiting for ${watchTogether.room.members
+                    .filter((member) => member.is_syncing)
+                    .map((member) => (member.is_self ? "you" : member.display_name))
+                    .join(", ")}`
+                : "Waiting for everyone to be ready."}
             </div>
           </div>
         </div>
@@ -3356,6 +3362,7 @@ export function VideoPlayer({
           isTranscoding={replanning}
           qualityError={replanError}
           onQualitySelect={handleQualitySelect}
+          versionLocked={!!watchTogetherRoomId}
           versions={
             versions.length > 1
               ? versions.map((v) => ({
@@ -3369,7 +3376,9 @@ export function VideoPlayer({
               : undefined
           }
           onSwitchVersion={
-            onSwitchVersion ? (fileId) => onSwitchVersion(fileId, currentTime) : undefined
+            onSwitchVersion && !watchTogetherRoomId
+              ? (fileId) => onSwitchVersion(fileId, currentTime)
+              : undefined
           }
           onTogglePiP={handleTogglePiP}
           onPlayPause={handlePlayPause}

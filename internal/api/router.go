@@ -1284,6 +1284,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 				watchtogether.NewSuggestionRepository(deps.DB),
 				watchtogether.NewProfileNameResolver(deps.UserStoreProvider),
 			)
+			watchTogetherService.SetPlaybackAttemptStore(playbackHandler.PlanStoreV3)
 			if err := watchTogetherService.SetClusterEventBus(deps.EventBus); err != nil {
 				slog.Warn("watch together cluster synchronization unavailable", "error", err)
 			}
@@ -2244,10 +2245,12 @@ func newChiRouter(deps Dependencies) chi.Router {
 		v2deps.WatchTogetherPolicy = watchTogetherHandler
 		v2deps.WatchTogetherJoin = watchTogetherHandler
 		v2deps.WatchTogetherSelection = watchTogetherHandler
+		v2deps.WatchTogetherSourceFallback = watchTogetherHandler
 		v2deps.WatchTogetherCreate = watchTogetherHandler
 		if deps.RedisClient != nil && sessionRepo != nil && userRepo != nil {
 			socket := handlers.NewWatchTogetherSocketV2(watchTogetherHandler, watchtogether.NewRoomSocketCredentialStore(deps.RedisClient), sessionRepo, userRepo, viewerResolver, checkPrimaryProfile, deps.PublicURL)
 			v2deps.WatchTogetherSocket = socket
+			playbackHandler.WatchTogetherAvailable = true
 			if deps.OnConfigChange != nil {
 				deps.OnConfigChange(func(_, updated *config.Config) { socket.SetPublicOrigin(updated.Server.PublicURL) })
 			}

@@ -206,6 +206,9 @@ type PlaybackHandler struct {
 	// InstallationID is diagnostics.ServerInstanceID; v2 playback mutations
 	// carry it and are refused when it differs. Empty leaves v2 unconfigured.
 	InstallationID string
+	// WatchTogetherAvailable is set when the room service and authenticated
+	// socket are wired, so capability discovery reflects their dependencies.
+	WatchTogetherAvailable bool
 	// progressSideEffectLocks serializes v2 progress side effects per session
 	// (see persistProgressV2).
 	progressSideEffectLocks sync.Map
@@ -1389,8 +1392,9 @@ func (h *PlaybackHandler) HandleStartPlayback(w http.ResponseWriter, r *http.Req
 		return
 	}
 	var envelope struct {
-		ProtocolVersion *int `json:"protocol_version"`
-		Capabilities    *struct {
+		ProtocolVersion        *int            `json:"protocol_version"`
+		AllowAlternateVersions json.RawMessage `json:"allow_alternate_versions"`
+		Capabilities           *struct {
 			VideoEvidence *string `json:"video_evidence"`
 			AudioEvidence *string `json:"audio_evidence"`
 		} `json:"client_capabilities"`
@@ -1404,6 +1408,14 @@ func (h *PlaybackHandler) HandleStartPlayback(w http.ResponseWriter, r *http.Req
 		upgrade := playback.LegacyUpgradeErrorV3()
 		writeError(w, http.StatusUpgradeRequired, upgrade.Error, upgrade.Message)
 		return
+	}
+	// V1 remains frozen: ignore the v2-only fixed-source control just as the
+	// legacy decoder ignored this unknown field before it was introduced.
+	if len(envelope.AllowAlternateVersions) > 0 {
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal(body, &fields) // The envelope was validated above.
+		delete(fields, "allow_alternate_versions")
+		body, _ = json.Marshal(fields)
 	}
 	h.handleStartPlaybackV3(w, r, body)
 }
