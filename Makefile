@@ -77,8 +77,11 @@ test: test-go test-web
 test-go: embed-stub
 	go test ./...
 
+# WEBTEST_ARGS passes extra vitest flags through; CI uses it to shard the
+# suite across runners (--shard=N/M).
+WEBTEST_ARGS ?=
 test-web:
-	cd web && pnpm exec vitest run $(WEBTEST_KNOWN_FAILURES)
+	cd web && pnpm exec vitest run $(WEBTEST_KNOWN_FAILURES) $(WEBTEST_ARGS)
 
 # Regenerate the settings-contract bindings for every language.
 #
