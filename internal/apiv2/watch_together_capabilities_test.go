@@ -15,6 +15,7 @@ func (f *fakeWatchTogetherCapability) WatchTogetherAvailable() bool { return f.a
 func TestWatchTogetherCapabilities(t *testing.T) {
 	deps := pilotDeps(nil, nil)
 	deps.WatchTogetherCapability = &fakeWatchTogetherCapability{available: true}
+	wireWatchTogetherCapabilityFakes(&deps)
 	h := NewHandler(deps)
 	path := Prefix + "/watch-together/capabilities"
 	if rec := do(t, h, http.MethodGet, path, "", nil); rec.Code != 401 {
@@ -48,6 +49,31 @@ func TestWatchTogetherCapabilities(t *testing.T) {
 	}
 }
 
+func wireWatchTogetherCapabilityFakes(deps *Dependencies) {
+	deps.WatchTogetherStage = new(fakeRoomStage)
+	deps.WatchTogetherStart = new(fakeRoomStart)
+	deps.WatchTogetherStop = new(fakeRoomStop)
+	deps.WatchTogetherSelectionMode = new(fakeRoomSelectionMode)
+	deps.WatchTogetherMemberState = new(fakeMemberState)
+	deps.WatchTogetherPicker = new(fakePicker)
+	deps.WatchTogetherSuggestionPromote = new(fakePromotion)
+	deps.WatchTogetherSocket = new(fakeRoomSocket)
+	deps.CatalogAccess = new(fakeCatalog)
+}
+
 func watchTogetherCapabilityFixtureCases() []fixtureCase {
 	return []fixtureCase{{name: "watch_together_capabilities", operationID: "getWatchTogetherCapabilities", method: "GET", path: Prefix + "/watch-together/capabilities", headers: bearer(memberToken), status: 200, schema: "#/components/schemas/WatchTogetherCapabilities", assertHeaders: []string{"Content-Type", "Cache-Control"}, scenario: "An authenticated account reads which watch-together room behaviors the server supports."}}
+}
+
+func TestWatchTogetherCapabilitiesWithoutOptionalDependencies(t *testing.T) {
+	deps := pilotDeps(nil, nil)
+	deps.WatchTogetherCapability = &fakeWatchTogetherCapability{available: true}
+	rec := do(t, NewHandler(deps), http.MethodGet, Prefix+"/watch-together/capabilities", "", bearer(memberToken))
+	var out WatchTogetherCapabilities
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 200 || out.MemberState || out.Picker || out.LobbyReady || out.SocketProtocol != "" || out.MaxMemberStateIDs != 0 {
+		t.Fatalf("advertised unwired operations: %d %+v", rec.Code, out)
+	}
 }

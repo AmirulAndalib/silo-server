@@ -221,7 +221,6 @@ func (s *Service) adoptRuntimeLocked(ctx context.Context, live *liveRoom, room R
 		(live.command != nil && (state.Command == nil || live.command.CommandID != state.Command.CommandID)) {
 		s.disarmWaitingDeadlineLocked(live)
 	}
-	previousRoom := live.room
 	live.room = room
 	live.command = state.Command
 	if selectionChanged {
@@ -261,11 +260,8 @@ func (s *Service) adoptRuntimeLocked(ctx context.Context, live *liveRoom, room R
 			m.syncingToRoom = false
 			m.lobbyReady = false
 		}
-		// Lobby "ready" answers "ready for this?": a different staged item or a
-		// mode switch on another server changes the question.
-		if previousRoom.ID != "" && (room.SelectionMode != previousRoom.SelectionMode || !equalContentID(room.SelectedContentID, previousRoom.SelectedContentID)) {
-			m.lobbyReady = false
-		}
+		// Stage and mode changes clear lobby readiness in the same transaction
+		// as the room update. A stale local room must not erase a later ready.
 		// Retain detached sessions through the reconnect grace period only.
 		if !memberConnected(m) && !m.disconnectedAt.IsZero() && now.Sub(m.disconnectedAt) > s.hostDisconnectTTL && (m.userID != room.HostUserID || m.profileID != room.HostProfileID) {
 			continue

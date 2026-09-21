@@ -9785,7 +9785,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Read what each connected room member has watched of the named content: unseen, in progress (with position) or watched, and whether it is on their watchlist. A POST-shaped read: the id set exceeds what a query string carries. Only members connected to the serving node are read; nothing beyond the named items is exposed. */
+    /** Read what each connected room member has watched of the named content: unseen, in progress (with position) or watched, and whether it is on their watchlist. A POST-shaped read: the id set exceeds what a query string carries. Members across API servers are read; inaccessible content ids are omitted. */
     post: operations["queryWatchTogetherMemberState"];
     delete?: never;
     options?: never;
@@ -9800,7 +9800,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Read the rows the room picker leads with: what connected members are watching together and the union of their watchlists, resolved to cards the caller may see. Members connected to other nodes are not read. */
+    /** Read the rows the room picker leads with: what connected members are watching together and the union of their watchlists, resolved to cards the caller may see. Connected members across API servers are included. */
     get: operations["getWatchTogetherRoomPicker"];
     put?: never;
     post?: never;
@@ -25483,9 +25483,9 @@ export interface components {
       join_token?: string;
     };
     WatchTogetherMemberState: {
-      /** @description One entry per distinct requested content id, in request order */
+      /** @description One entry per distinct accessible requested content id, in request order */
       items: components["schemas"]["WatchTogetherItemMemberState"][];
-      /** @description Room members connected to the serving node, host first */
+      /** @description Connected room members across API servers, host first */
       members: components["schemas"]["WatchTogetherRoomMember"][];
     };
     WatchTogetherMemberStateInputBody: {

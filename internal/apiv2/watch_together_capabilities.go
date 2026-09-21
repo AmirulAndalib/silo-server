@@ -36,19 +36,28 @@ func registerWatchTogetherCapabilities(reg *Registry) {
 	Register(reg, op, func(ctx context.Context, _ *CapabilityInput) (*WatchTogetherCapabilitiesOutput, error) {
 		svc := reg.deps.WatchTogetherCapability
 		if svc == nil || !svc.WatchTogetherAvailable() {
-			return &WatchTogetherCapabilitiesOutput{Body: WatchTogetherCapabilities{Capability: Capability{State: StateNotConfigured}, SocketProtocol: watchtogether.RoomSocketProtocol}}, nil
+			return &WatchTogetherCapabilitiesOutput{Body: WatchTogetherCapabilities{Capability: Capability{State: StateNotConfigured}}}, nil
+		}
+		socketProtocol := ""
+		if reg.deps.WatchTogetherSocket != nil {
+			socketProtocol = watchtogether.RoomSocketProtocol
+		}
+		memberState := reg.deps.WatchTogetherMemberState != nil && reg.deps.CatalogAccess != nil
+		maxIDs := 0
+		if memberState {
+			maxIDs = watchtogether.MaxMemberStateIDs
 		}
 		return &WatchTogetherCapabilitiesOutput{Body: WatchTogetherCapabilities{
 			Capability:          Capability{Allowed: new(capabilityLoginAllowed(ctx))},
-			StagedSelection:     true,
-			LobbyReady:          true,
-			SelectionModeSwitch: true,
-			MemberState:         true,
-			Picker:              true,
-			VoteHostOverride:    true,
-			StopPlayback:        true,
-			MaxMemberStateIDs:   watchtogether.MaxMemberStateIDs,
-			SocketProtocol:      watchtogether.RoomSocketProtocol,
+			StagedSelection:     reg.deps.WatchTogetherStage != nil && reg.deps.WatchTogetherStart != nil,
+			LobbyReady:          reg.deps.WatchTogetherSocket != nil,
+			SelectionModeSwitch: reg.deps.WatchTogetherSelectionMode != nil,
+			MemberState:         memberState,
+			Picker:              reg.deps.WatchTogetherPicker != nil && reg.deps.CatalogAccess != nil,
+			VoteHostOverride:    reg.deps.WatchTogetherSuggestionPromote != nil,
+			StopPlayback:        reg.deps.WatchTogetherStop != nil,
+			MaxMemberStateIDs:   maxIDs,
+			SocketProtocol:      socketProtocol,
 		}}, nil
 	})
 }

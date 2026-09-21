@@ -70,7 +70,7 @@ export interface WatchTogetherRoomConnectionResult {
   updateSelectionMode: (
     mode: WatchTogetherSelectionMode,
   ) => Promise<WatchTogetherRoomSnapshot | null>;
-  /** Marks this member ready (or not) in the lobby. Socket-only; per node. */
+  /** Marks this member ready (or not) in the lobby. Sent over the socket and shared across API servers. */
   setLobbyReady: (ready: boolean) => SendRoomMessageResult;
   closeRoom: () => Promise<void>;
   createSuggestion: (draft: SuggestionCreationDraft) => Promise<void>;

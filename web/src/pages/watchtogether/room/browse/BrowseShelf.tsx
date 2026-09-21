@@ -84,8 +84,7 @@ export function BrowseShelf({
   const [chip, setChip] = useState<Chip>("all");
   const expanded = !collapsible || open;
 
-  const memberCount = members.length;
-  const rows = usePickerRows(roomId, roomToken, memberCount);
+  const rows = usePickerRows(roomId, roomToken, members);
   const search = usePickerSearch(query);
   const browsing = expanded && search.q === "";
   const home = useHomeShelfSections(

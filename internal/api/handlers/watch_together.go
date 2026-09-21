@@ -15,6 +15,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/access"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/auth"
+	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/watchtogether"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -30,8 +32,11 @@ type WatchTogetherHandler struct {
 	TokenService  *watchtogether.RoomTokenService
 	// MemberState and Details serve the v2 member-state and picker reads.
 	// Both may be nil, in which case those operations fail closed.
-	MemberState *watchtogether.MemberStateReader
-	Details     watchtogether.ItemDetailLookup
+	MemberState        *watchtogether.MemberStateReader
+	Details            watchtogether.ItemDetailLookup
+	MemberStateCatalog interface {
+		GetSearchItemsByIDsWithAccess(context.Context, []string, catalog.AccessFilter) ([]*models.MediaItem, error)
+	}
 }
 
 type createWatchTogetherRoomRequest struct {

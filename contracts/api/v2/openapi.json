@@ -40282,14 +40282,14 @@
         "additionalProperties": false,
         "properties": {
           "items": {
-            "description": "One entry per distinct requested content id, in request order",
+            "description": "One entry per distinct accessible requested content id, in request order",
             "items": {
               "$ref": "#/components/schemas/WatchTogetherItemMemberState"
             },
             "type": "array"
           },
           "members": {
-            "description": "Room members connected to the serving node, host first",
+            "description": "Connected room members across API servers, host first",
             "items": {
               "$ref": "#/components/schemas/WatchTogetherRoomMember"
             },
@@ -172991,7 +172991,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "Read what each connected room member has watched of the named content: unseen, in progress (with position) or watched, and whether it is on their watchlist. A POST-shaped read: the id set exceeds what a query string carries. Only members connected to the serving node are read; nothing beyond the named items is exposed.",
+        "summary": "Read what each connected room member has watched of the named content: unseen, in progress (with position) or watched, and whether it is on their watchlist. A POST-shaped read: the id set exceeds what a query string carries. Members across API servers are read; inaccessible content ids are omitted.",
         "tags": [
           "realtime"
         ],
@@ -173168,7 +173168,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "Read the rows the room picker leads with: what connected members are watching together and the union of their watchlists, resolved to cards the caller may see. Members connected to other nodes are not read.",
+        "summary": "Read the rows the room picker leads with: what connected members are watching together and the union of their watchlists, resolved to cards the caller may see. Connected members across API servers are included.",
         "tags": [
           "realtime"
         ],

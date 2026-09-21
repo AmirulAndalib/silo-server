@@ -13,17 +13,34 @@ func (h *WatchTogetherHandler) WatchTogetherAvailable() bool {
 	return h != nil && h.Service != nil && h.TokenService != nil
 }
 
-// RoomMemberState classifies the named content for every member connected to
-// this node. The caller must already hold room proof.
-func (h *WatchTogetherHandler) RoomMemberState(ctx context.Context, room string, user int, profile string, contentIDs []string) ([]watchtogether.MemberSummary, []watchtogether.ItemMemberState, error) {
-	if h == nil || h.Service == nil || h.MemberState == nil {
+// RoomMemberState classifies accessible content for the room's connected
+// members. The caller must already hold room proof.
+func (h *WatchTogetherHandler) RoomMemberState(ctx context.Context, room string, user int, profile string, contentIDs []string, filter catalog.AccessFilter) ([]watchtogether.MemberSummary, []watchtogether.ItemMemberState, error) {
+	if h == nil || h.Service == nil || h.MemberState == nil || h.MemberStateCatalog == nil {
 		return nil, nil, apiError(503, "unavailable", "Watch together member state is unavailable")
 	}
 	members, err := h.Service.ConnectedMembers(ctx, room, user, profile)
 	if err != nil {
 		return nil, nil, err
 	}
-	items, err := h.MemberState.MemberState(ctx, members, contentIDs)
+	// Reuse the catalog's mixed item/episode access query. Checking only
+	// media_items would drop episodes; checking only their parent would miss
+	// episode library restrictions.
+	visible, err := h.MemberStateCatalog.GetSearchItemsByIDsWithAccess(ctx, contentIDs, filter)
+	if err != nil {
+		return nil, nil, err
+	}
+	allowed := make(map[string]bool, len(visible))
+	for _, item := range visible {
+		allowed[item.ContentID] = true
+	}
+	ids := make([]string, 0, len(contentIDs))
+	for _, id := range contentIDs {
+		if allowed[id] {
+			ids = append(ids, id)
+		}
+	}
+	items, err := h.MemberState.MemberState(ctx, members, ids)
 	if err != nil {
 		return nil, nil, err
 	}

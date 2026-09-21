@@ -210,7 +210,7 @@ func TestAttachSessionRefusedWhileStaged(t *testing.T) {
 	}
 }
 
-func TestClusterAdoptionClearsLobbyReadyWhenStagedItemChanges(t *testing.T) {
+func TestClusterAdoptionPreservesCommittedLobbyReady(t *testing.T) {
 	now := time.Date(2026, 4, 10, 12, 0, 20, 0, time.UTC)
 	room := lobbyRoom(now)
 	room.SelectedContentID = stringPtr("movie-1")
@@ -239,8 +239,8 @@ func TestClusterAdoptionClearsLobbyReadyWhenStagedItemChanges(t *testing.T) {
 	next.Generation = 3
 	next.SelectedContentID = stringPtr("movie-2")
 	adopt(next)
-	if live.members[key].lobbyReady {
-		t.Fatal("another node staging different content kept lobby ready")
+	if !live.members[key].lobbyReady {
+		t.Fatal("adoption erased readiness committed for the current staged item")
 	}
 }
 

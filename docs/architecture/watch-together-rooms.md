@@ -54,22 +54,20 @@ is not: host reports move the anchor, and a report of "position 0" arriving
 before the seek would rewind everyone.
 
 `memberState.syncingToRoom` covers that window. It is set on attach when the
-sync command is issued and cleared by the member's first ready report, by a
-state report that already matches the room, or by any transport request from
+sync command is issued and cleared by a state report that already matches the room, or by any transport request from
 that member (an explicit action is intent, not a stale position). While it is
 set, a host's reports are treated like a guest's: corrected, never
-authoritative. The flag is per node and never persisted, like the other
-member flags.
+authoritative. The flag is persisted with the shared room runtime.
 
 ## Two counters
 
 `generation` is the optimistic-concurrency counter. Every persisted change
-advances it (policy, stage, mode switch, start, anchor writes). Cross-node
-adoption in `cluster.go` ignores rows whose generation is not newer than the
-local copy.
+advances it (policy, stage, mode switch, start, anchor writes). Room operations
+load the authoritative row and runtime under the same database lock; cluster
+events prompt other servers to reconcile.
 
 `selection_revision` is the playback epoch. It advances only when playback
-starts or restarts with different content (start, select, promote). It never
+starts, restarts with different content, or stops (start, select, promote, stop). It never
 advances on stage or mode switch. Transport commands carry it, the web
 auto-start effects fire on it, and cross-node adoption uses it to decide
 whether members' attached sessions belong to a previous epoch and must be
@@ -82,9 +80,9 @@ switch mode) without any client thinking playback restarted.
 
 | Name | Where | Set by | Cleared by |
 |---|---|---|---|
-| `memberState.lobbyReady` (`members[].lobby_ready`) | in-memory per node | socket `lobby_ready` message, lobby only | stage with different content, start, mode switch, cross-node adoption with a different revision/item/mode, disconnect |
-| `memberState.isReady` | in-memory per node | socket `ready` message with an attached session, playing only | any selection change, buffering, disconnect |
-| `memberState.ignoreWait` | in-memory per node | the waiting deadline (`waitingResumeDeadline`) skipping a straggler | attach, ready |
+| `memberState.lobbyReady` (`members[].lobby_ready`) | shared room runtime | socket `lobby_ready` message, lobby only | stage with different content, start, stop, mode switch |
+| `memberState.isReady` | shared room runtime | socket `ready` message with an attached session, playing only | any selection change, buffering, disconnect |
+| `memberState.ignoreWait` | shared room runtime | the waiting deadline (`waitingResumeDeadline`) skipping a straggler | attach, ready |
 
 Lobby ready is advisory. The server never gates start on it; the web shows
 the count on the start button and offers the same call as "start anyway".
@@ -93,21 +91,16 @@ playback until members have buffered, and it is unchanged.
 
 ## What crosses nodes
 
-Only the room row crosses nodes, through `publishRoomState` on every persisted
-change and `handleClusterEvent` on the others. Member state (connections,
-sessions, all three readiness flags) lives on the node that holds the socket.
+The room row and runtime commit together under a PostgreSQL row lock. The
+runtime includes membership, connection leases, attached playback sessions,
+and readiness. Local socket objects remain on the server that owns them.
+Cluster events prompt reconciliation; reads and mutations also load the shared
+runtime, so correctness does not depend on delivery of an event.
 
-Consequences, accepted rather than solved:
-
-- `members[]` in a snapshot lists the members connected to the serving node.
-- Lobby ready counts are per node. In a multi-node deployment where a room's
-  members are spread across nodes, the host sees the ready state of the
-  members on their node.
-- The member-state and picker reads (`POST .../member-state`,
-  `GET .../picker`) compute over the members connected to the serving node.
-
-Sticky routing of a room's sockets to one node, or publishing member state
-through the event bus, would close this. Neither is done today.
+Snapshots, member-state reads, and picker reads use connected members across
+API servers. Expired remote leases are excluded. Staging and mode changes clear
+lobby readiness in their transaction; adoption preserves readiness already
+committed for the current selection.
 
 ## Member watch state
 
@@ -121,14 +114,18 @@ any item the caller cannot see. Clients never receive a member's lists; they
 receive the rows that made the cut plus who each row applies to.
 
 The `member-state` read classifies named content (up to 200 ids) per member
-as `unseen`, `in_progress` (with position) or `watched`, with completed
-history folded in and series ids classified by their in-progress episodes.
+after omitting IDs outside the caller's catalog access. The states are `unseen`,
+`in_progress` (with position), and `watched`, with completed history folded in
+and series ids classified by their in-progress episodes.
 That is all a room may learn about a member's viewing.
 
 ## Vote rooms
 
-The tally is advisory. The host may promote any suggestion; the promotion is
-broadcast as the selection, so an override is visible to everyone. Clients
+On v2 the tally is advisory. The host may promote any suggestion; the promotion
+is broadcast as the selection, so an override is visible to everyone. Clients
 show the leader from the list ordering (`vote_count DESC, created_at ASC`),
 which `VoteWinner` still exposes for that purpose. Direct selection remains
 refused in vote rooms; the host switches to host picks first.
+
+The frozen v1 promotion route retains its winner-only gate and rejects
+promotion before any votes are cast.

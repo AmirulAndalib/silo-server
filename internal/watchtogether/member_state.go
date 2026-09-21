@@ -12,7 +12,7 @@ import (
 
 // Member watch state is what a room may know about its members' viewing so
 // the picker can say "you are all mid-way through this" or "Theo has not seen
-// episode 3". It is deliberately narrow: only members connected to this node
+// episode 3". It is deliberately narrow: only connected room members
 // are read, only the content the caller asks about (or the small "together"
 // rows the server itself computes) is answered, and nothing about a member's
 // history beyond the classified state of those items ever leaves the server.
@@ -171,20 +171,21 @@ func NewMemberStateReader(provider userstore.UserStoreProvider, episodes Episode
 	return &MemberStateReader{provider: provider, episodes: episodes, nextUp: nextUp}
 }
 
-// ConnectedMembers lists the members connected to this node, host first, with
-// the caller marked. It is the member set every member-state read is scoped
-// to: a member on another node is not visible here and is not read.
+// ConnectedMembers reads the shared runtime, including connection leases, so
+// picker reads see the same roster regardless of which API server serves them.
 func (s *Service) ConnectedMembers(ctx context.Context, roomID string, userID int, profileID string) ([]MemberSummary, error) {
-	_, live, err := s.getOrLoadLiveRoom(ctx, roomID)
-	if err != nil {
-		return nil, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if live.room.Phase == RoomPhaseEnded {
-		return nil, ErrRoomClosed
-	}
-	return s.buildSnapshotLocked(live, userID, profileID).Members, nil
+	return withRoomOperation(ctx, s, roomID, func(ctx context.Context) ([]MemberSummary, error) {
+		_, live, err := s.getOrLoadLiveRoom(ctx, roomID)
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if live.room.Phase == RoomPhaseEnded {
+			return nil, ErrRoomClosed
+		}
+		return s.buildSnapshotLocked(live, userID, profileID).Members, nil
+	})
 }
 
 // memberProgress is one member's bounded in-progress page, resolved to

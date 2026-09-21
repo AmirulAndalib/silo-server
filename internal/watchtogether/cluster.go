@@ -150,10 +150,3 @@ func (s *Service) queueRoomReconciliation(roomID string) {
 		}
 	}()
 }
-
-func equalContentID(a, b *string) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return *a == *b
-}

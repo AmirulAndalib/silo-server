@@ -29,9 +29,7 @@ var (
 	ErrConnectionNotAttached = errors.New("watch together session is not attached")
 	ErrInvalidSelection      = errors.New("watch together selection is invalid")
 	ErrSuggestionNotFound    = errors.New("watch together suggestion not found")
-	// ErrNotVoteWinner is retained for callers that compare a suggestion with
-	// VoteWinner; promotion itself no longer refuses non-winners, because the
-	// host may override the tally.
+	// ErrNotVoteWinner preserves the v1 winner-only promotion contract.
 	ErrNotVoteWinner = errors.New("watch together suggestion is not the vote winner")
 	// ErrNoVotesCast is returned by VoteWinner when nobody has voted yet, so
 	// there is no leader to report.
@@ -190,7 +188,7 @@ type memberState struct {
 	// room's position but has not confirmed it yet. Until then the member's
 	// state reports describe the stream's starting point, not where the room
 	// is, so they are treated as a guest's: corrected, never authoritative.
-	// Cleared by a ready report or by the member's own transport request.
+	// Cleared by a matching state report or the member's transport request.
 	syncingToRoom bool
 	// lobbyReady is the member's "I'm ready" in the lobby. It is unrelated to
 	// isReady, which is the buffering barrier bound to an attached playback
@@ -2349,13 +2347,20 @@ func (s *Service) PromoteSuggestion(
 		return Snapshot{}, ErrSuggestionNotFound
 	}
 
-	// The tally is advice, not a lock: the host may start any suggestion in a
-	// vote room. Everyone sees which one was chosen because the selection is
-	// broadcast, so a host override is visible rather than silent. viaVote
-	// stays set so the vote-room gate in selectItem lets the promotion in.
+	// V1 keeps its frozen winner-only behavior. V2 permits the host override
+	// through PromoteSuggestionOnce.
 	s.mu.Lock()
 	isVoteRoom := live.room.SelectionMode == RoomSelectionModeVote
 	s.mu.Unlock()
+	if isVoteRoom {
+		winner, err := s.VoteWinner(ctx, roomID)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		if winner.ID != suggestion.ID {
+			return Snapshot{}, ErrNotVoteWinner
+		}
+	}
 
 	return s.selectItem(ctx, roomID, userID, profileID, SelectItemInput{
 		ContentID: suggestion.ContentID,

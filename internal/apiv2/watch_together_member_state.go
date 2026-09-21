@@ -5,15 +5,16 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/Silo-Server/silo-server/internal/api/handlers"
+	catalogpkg "github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/watchtogether"
 )
 
 // WatchTogetherMemberStateService answers per-member watch state for content
-// the caller names. The member set is the room's members connected to the
-// serving node.
+// the caller may access. The member set comes from the shared room runtime.
 type WatchTogetherMemberStateService interface {
 	CheckSuggestionRoomProof(string, int, string, string) error
-	RoomMemberState(context.Context, string, int, string, []string) ([]watchtogether.MemberSummary, []watchtogether.ItemMemberState, error)
+	RoomMemberState(context.Context, string, int, string, []string, catalogpkg.AccessFilter) ([]watchtogether.MemberSummary, []watchtogether.ItemMemberState, error)
 }
 type WatchTogetherMemberStateInput struct {
 	RoomID    string `path:"room_id"`
@@ -35,8 +36,8 @@ type WatchTogetherItemMemberState struct {
 	Members   []WatchTogetherMemberWatchState `json:"members"`
 }
 type WatchTogetherMemberState struct {
-	Members []WatchTogetherRoomMember      `json:"members" doc:"Room members connected to the serving node, host first"`
-	Items   []WatchTogetherItemMemberState `json:"items" doc:"One entry per distinct requested content id, in request order"`
+	Members []WatchTogetherRoomMember      `json:"members" doc:"Connected room members across API servers, host first"`
+	Items   []WatchTogetherItemMemberState `json:"items" doc:"One entry per distinct accessible requested content id, in request order"`
 }
 type WatchTogetherMemberStateOutput struct {
 	CacheControl string `header:"Cache-Control"`
@@ -44,7 +45,7 @@ type WatchTogetherMemberStateOutput struct {
 }
 
 func registerWatchTogetherMemberState(reg *Registry) {
-	op := Operation{Operation: humaOp(http.MethodPost, Prefix+"/watch-together/rooms/{room_id}/member-state", "queryWatchTogetherMemberState", "realtime", "Read what each connected room member has watched of the named content: unseen, in progress (with position) or watched, and whether it is on their watchlist. A POST-shaped read: the id set exceeds what a query string carries. Only members connected to the serving node are read; nothing beyond the named items is exposed."), Class: ClassProfileScoped, ServiceBacked: true, RetrySafety: RetrySafetyNaturalIdempotent}
+	op := Operation{Operation: humaOp(http.MethodPost, Prefix+"/watch-together/rooms/{room_id}/member-state", "queryWatchTogetherMemberState", "realtime", "Read what each connected room member has watched of the named content: unseen, in progress (with position) or watched, and whether it is on their watchlist. A POST-shaped read: the id set exceeds what a query string carries. Members across API servers are read; inaccessible content ids are omitted."), Class: ClassProfileScoped, ServiceBacked: true, RetrySafety: RetrySafetyNaturalIdempotent}
 	op.MaxBodyBytes = 16384
 	op.Errors = []int{409}
 	Register(reg, op, func(ctx context.Context, in *WatchTogetherMemberStateInput) (*WatchTogetherMemberStateOutput, error) {
@@ -59,6 +60,13 @@ func registerWatchTogetherMemberState(reg *Registry) {
 		if err := svc.CheckSuggestionRoomProof(in.RoomID, user, profile, in.RoomToken); err != nil {
 			return nil, serviceProblem(err)
 		}
+		if reg.deps.CatalogAccess == nil {
+			return nil, unavailable("catalog access")
+		}
+		filter, err := reg.deps.CatalogAccess.ContextAccessFilter(ctx, handlers.AccessFilterOptions{})
+		if err != nil {
+			return nil, collectionProblem(err)
+		}
 		ids := make([]string, 0, len(in.Body.ContentIDs))
 		for i, id := range in.Body.ContentIDs {
 			if id == "" {
@@ -66,7 +74,7 @@ func registerWatchTogetherMemberState(reg *Registry) {
 			}
 			ids = append(ids, string(id))
 		}
-		members, items, err := svc.RoomMemberState(ctx, in.RoomID, user, profile, ids)
+		members, items, err := svc.RoomMemberState(ctx, in.RoomID, user, profile, ids, filter)
 		if err != nil {
 			return nil, suggestionProblem(err)
 		}

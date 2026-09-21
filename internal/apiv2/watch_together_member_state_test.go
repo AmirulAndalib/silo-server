@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Silo-Server/silo-server/internal/api/handlers"
+	catalogpkg "github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/watchtogether"
 )
 
@@ -14,6 +15,7 @@ type fakeMemberState struct {
 	calls, user   int
 	room, profile string
 	ids           []string
+	filter        catalogpkg.AccessFilter
 	proofErr, err error
 }
 
@@ -27,9 +29,10 @@ func (f *fakeMemberState) CheckSuggestionRoomProof(room string, user int, profil
 	return nil
 }
 
-func (f *fakeMemberState) RoomMemberState(_ context.Context, room string, user int, profile string, ids []string) ([]watchtogether.MemberSummary, []watchtogether.ItemMemberState, error) {
+func (f *fakeMemberState) RoomMemberState(_ context.Context, room string, user int, profile string, ids []string, filter catalogpkg.AccessFilter) ([]watchtogether.MemberSummary, []watchtogether.ItemMemberState, error) {
 	f.calls++
 	f.room, f.user, f.profile, f.ids = room, user, profile, ids
+	f.filter = filter
 	if f.err != nil {
 		return nil, nil, f.err
 	}
@@ -45,6 +48,7 @@ func TestWatchTogetherMemberState(t *testing.T) {
 	f := new(fakeMemberState)
 	deps := pilotDeps(nil, nil)
 	deps.WatchTogetherMemberState = f
+	deps.CatalogAccess = &fakeCatalog{}
 	h := NewHandler(deps)
 	path := Prefix + "/watch-together/rooms/room/member-state"
 	body := `{"content_ids":["movie","series"]}`
@@ -59,7 +63,7 @@ func TestWatchTogetherMemberState(t *testing.T) {
 	}
 	rec := do(t, h, http.MethodPost, path, body, proof)
 	out := rec.Body.String()
-	if rec.Code != 200 || rec.Header().Get("Cache-Control") != "no-store" || f.room != "room" || f.user != 1 || f.profile != "p-owner" || len(f.ids) != 2 {
+	if rec.Code != 200 || rec.Header().Get("Cache-Control") != "no-store" || f.room != "room" || f.user != 1 || f.profile != "p-owner" || len(f.ids) != 2 || f.filter.UserID != 1 || f.filter.ProfileID != "p-owner" || len(f.filter.AllowedLibraryIDs) != 2 {
 		t.Fatalf("%d %s %+v", rec.Code, out, f)
 	}
 	for _, want := range []string{`"content_id":"movie"`, `"state":"in_progress"`, `"position_seconds":120`, `"on_watchlist":true`, `"state":"unseen"`, `"lobby_ready":true`, `"user_id":"2"`} {
@@ -83,4 +87,12 @@ func TestWatchTogetherMemberState(t *testing.T) {
 	}
 	deps.WatchTogetherMemberState = nil
 	requireProblem(t, do(t, NewHandler(deps), http.MethodPost, path, body, proof), TypeDependencyUnavailable)
+	deps.WatchTogetherMemberState = f
+	f.proofErr = nil
+	deps.CatalogAccess = nil
+	before := f.calls
+	requireProblem(t, do(t, NewHandler(deps), http.MethodPost, path, body, proof), TypeDependencyUnavailable)
+	if f.calls != before {
+		t.Fatal("member state dispatched without catalog access")
+	}
 }
