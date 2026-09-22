@@ -17,14 +17,15 @@ import (
 // fakeCatalogActions backs the stage B operations: trailer refresh, on-view
 // translation, people, and works.
 type fakeCatalogActions struct {
-	enabled     bool
-	err         error
-	trailerView handlers.TrailerRefreshView
-	lastUser    int
-	lastContent string
-	lastLang    string
-	lastFilter  catalogpkg.AccessFilter
-	refreshed   []int64
+	enabled        bool
+	err            error
+	trailerView    handlers.TrailerRefreshView
+	lastUser       int
+	lastContent    string
+	lastLang       string
+	lastFilter     catalogpkg.AccessFilter
+	lastMediaScope string
+	refreshed      []int64
 }
 
 func (f *fakeCatalogActions) TrailerRefreshCapability() handlers.TrailerRefreshCapabilityView {
@@ -80,12 +81,13 @@ func fakePerson(id int64) handlers.PersonView {
 	return handlers.PersonView{ID: id, Name: "Al Pacino", Bio: "Actor", BirthDate: &birth, Birthplace: "New York", PhotoURL: "https://cdn.example/people/7.jpg", TmdbID: "1158"}
 }
 
-func (f *fakeCatalogActions) SearchPeople(_ context.Context, query string, limit int) ([]handlers.PersonView, error) {
+func (f *fakeCatalogActions) SearchPeopleScoped(_ context.Context, query string, limit int, mediaScope string) ([]handlers.PersonView, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
 	f.lastLang = query
 	f.lastUser = limit
+	f.lastMediaScope = mediaScope
 	if strings.HasPrefix("al pacino", strings.ToLower(query)) {
 		return []handlers.PersonView{fakePerson(7)}, nil
 	}
@@ -247,6 +249,13 @@ func TestPeople(t *testing.T) {
 		t.Fatalf("empty: %d %s", rec.Code, rec.Body.String())
 	}
 	requireProblem(t, do(t, h, http.MethodGet, "/api/v2/catalog/people?limit=0", "", viewerHeaders()), TypeValidationFailed)
+	for _, scope := range []string{"video", "movie", "series", "episode", "audiobook", "ebook", "manga"} {
+		rec = do(t, h, http.MethodGet, "/api/v2/catalog/people?q=al&media_scope="+scope, "", viewerHeaders())
+		if rec.Code != 200 || fake.lastMediaScope != scope {
+			t.Fatalf("scope %q: %d %s, forwarded %q", scope, rec.Code, rec.Body.String(), fake.lastMediaScope)
+		}
+	}
+	requireProblem(t, do(t, h, http.MethodGet, "/api/v2/catalog/people?media_scope=invalid", "", viewerHeaders()), TypeValidationFailed)
 	rec = do(t, h, http.MethodGet, "/api/v2/catalog/people/7", "", viewerHeaders())
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"photo_url":"https://cdn.example/people/7.jpg"`) {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())

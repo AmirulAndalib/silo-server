@@ -4,6 +4,24 @@
 > 1.0. The frozen alpha `/api/v1` surface answers the same features through the pre-1.0 bridge
 > window and is then retired. See [the native API contract](architecture/api-contract.md).
 
+## People search
+
+`GET /api/v2/catalog/people` (`listPeople`) accepts a name fragment in `q` and
+`limit` from 1 to 100 (default 20). Case-insensitive exact name matches come first;
+other matches sort by name, with person ID breaking ties. Ranking happens before
+applying the limit.
+
+The optional `media_scope` parameter limits results to people credited on items
+in that scope. It accepts `video` (movies and series), `movie`, `series`, `episode`,
+`audiobook`, `ebook`, or `manga`. Omit it to search all people. The filter applies
+before the limit and includes every credit role, so directors match video searches
+and authors and narrators match audiobook searches. A person with several matching
+credits appears once.
+
+Web search applies its selected media scope to both titles and people. People
+responses remain an `{items}` collection with string IDs. The v1 bridge retains
+its existing alphabetical, unscoped search.
+
 ## Saved browse sort
 
 `PUT /api/v2/collections/sort-preference` (`setCollectionSortPreference`) saves the

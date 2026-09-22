@@ -110546,6 +110546,25 @@
               "minimum": 1,
               "type": "integer"
             }
+          },
+          {
+            "description": "Restrict people to credits in this media scope; omitted searches all people",
+            "explode": false,
+            "in": "query",
+            "name": "media_scope",
+            "schema": {
+              "description": "Restrict people to credits in this media scope; omitted searches all people",
+              "enum": [
+                "video",
+                "movie",
+                "series",
+                "episode",
+                "audiobook",
+                "ebook",
+                "manga"
+              ],
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -110655,7 +110674,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "Search people by name.",
+        "summary": "Search people by name, with exact matches first and optional media scope.",
         "tags": [
           "catalog"
         ],

@@ -1067,7 +1067,7 @@ type MetadataAIService interface {
 // PeopleService is the slice of *handlers.PeopleHandler the people
 // operations use.
 type PeopleService interface {
-	SearchPeople(ctx context.Context, query string, limit int) ([]handlers.PersonView, error)
+	SearchPeopleScoped(ctx context.Context, query string, limit int, mediaScope string) ([]handlers.PersonView, error)
 	Person(ctx context.Context, id int64) (handlers.PersonView, error)
 	RefreshPerson(ctx context.Context, userID int, id int64) error
 }

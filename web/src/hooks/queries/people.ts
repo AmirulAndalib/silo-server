@@ -3,16 +3,26 @@ import { toast } from "sonner";
 
 import { adminRefreshPerson, adminUpdatePerson } from "@/api/v2/people";
 import type { Person, UpdatePersonRequest } from "@/api/types";
-import { refreshPerson, searchPeople, type PersonRefreshResult } from "@/api/v2/people";
+import {
+  refreshPerson,
+  searchPeople,
+  type PersonRefreshResult,
+  type PersonSearchMediaScope,
+} from "@/api/v2/people";
 
 import { personKeys } from "./keys";
 
-export function usePersonSearch(query: string, limit = 20, enabled = true) {
+export function usePersonSearch(
+  query: string,
+  limit = 20,
+  enabled = true,
+  mediaScope?: PersonSearchMediaScope,
+) {
   const normalizedQuery = query.trim();
 
   return useQuery({
-    queryKey: personKeys.search(normalizedQuery, limit),
-    queryFn: ({ signal }) => searchPeople(normalizedQuery, limit, { signal }),
+    queryKey: personKeys.search(normalizedQuery, limit, mediaScope),
+    queryFn: ({ signal }) => searchPeople(normalizedQuery, limit, { signal, mediaScope }),
     enabled: enabled && normalizedQuery.length > 0,
     staleTime: 5 * 60 * 1000,
   });

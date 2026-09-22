@@ -24,6 +24,9 @@ func (r *adminPeopleRepo) Get(context.Context, int64) (*models.Person, error) { 
 func (r *adminPeopleRepo) Search(context.Context, string, int) ([]models.Person, error) {
 	return nil, nil
 }
+func (r *adminPeopleRepo) SearchScoped(context.Context, string, int, string) ([]models.Person, error) {
+	return nil, nil
+}
 func (r *adminPeopleRepo) Update(_ context.Context, p models.Person) error {
 	r.writes++
 	r.person = p

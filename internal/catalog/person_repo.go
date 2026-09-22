@@ -551,15 +551,41 @@ func (r *PersonRepository) GetByName(ctx context.Context, name string) (*models.
 // LOWER(name) comparison (including its existing treatment of % and _ in the
 // term as LIKE wildcards).
 func (r *PersonRepository) Search(ctx context.Context, query string, limit int) ([]models.Person, error) {
+	return r.search(ctx, query, limit, "", false)
+}
+
+// SearchScoped ranks exact names first and restricts people to credits in the
+// selected media scope before applying the limit. Empty scope includes all people.
+func (r *PersonRepository) SearchScoped(ctx context.Context, query string, limit int, mediaScope string) ([]models.Person, error) {
+	return r.search(ctx, strings.TrimSpace(query), limit, mediaScope, true)
+}
+
+func (r *PersonRepository) search(ctx context.Context, query string, limit int, mediaScope string, rankExact bool) ([]models.Person, error) {
 	if limit <= 0 {
 		limit = 20
+	}
+	args := []any{query, limit}
+	where := "name ILIKE '%' || $1 || '%'"
+	if types := MediaScopeItemTypes(mediaScope); len(types) > 0 {
+		where += ` AND EXISTS (
+			SELECT 1 FROM item_people ip
+			JOIN media_items mi ON mi.content_id = ip.content_id
+			WHERE ip.person_id = people.id AND mi.type = ANY($3::text[])
+		)`
+		args = append(args, types)
+	}
+	order := "name ASC"
+	if rankExact {
+		order = "name ASC, id ASC"
+		if query != "" {
+			order = "(LOWER(name) = LOWER($1)) DESC, " + order
+		}
 	}
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, name, sort_name, bio, birth_date, death_date, birthplace, homepage,
 			photo_path, photo_source_path, photo_thumbhash, tmdb_id, imdb_id, tvdb_id, plex_guid, created_at, updated_at,
 			metadata_refresh_attempted_at
-		FROM people WHERE name ILIKE '%' || $1 || '%'
-		ORDER BY name LIMIT $2`, query, limit,
+		FROM people WHERE `+where+` ORDER BY `+order+` LIMIT $2`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("search people: %w", err)

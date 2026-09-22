@@ -5137,7 +5137,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Search people by name. */
+    /** Search people by name, with exact matches first and optional media scope. */
     get: operations["listPeople"];
     put?: never;
     post?: never;
@@ -72642,6 +72642,8 @@ export interface operations {
       query?: {
         /** @description Most people to answer */
         limit?: number;
+        /** @description Restrict people to credits in this media scope; omitted searches all people */
+        media_scope?: "video" | "movie" | "series" | "episode" | "audiobook" | "ebook" | "manga";
         /** @description Name prefix or fragment; empty lists the first people */
         q?: string;
       };

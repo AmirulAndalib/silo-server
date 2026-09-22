@@ -26,8 +26,8 @@ export default function PersonDetail() {
   const { id } = useParams<{ id: string }>();
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
   const [editOpen, setEditOpen] = useState(false);
-  const autoRefreshWindowRef = useRef<{ personId: number; until: number } | null>(null);
-  const autoRefreshRequestedPersonIdRef = useRef<number | null>(null);
+  const autoRefreshWindowRef = useRef<{ personId: string; until: number } | null>(null);
+  const autoRefreshRequestedPersonIdRef = useRef<string | null>(null);
   const { user } = useAuth();
   const isAdmin = useIsActingAdmin();
   const refreshMutation = useRefreshPerson(id, isAdmin);
