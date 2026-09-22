@@ -4,6 +4,7 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import type { IntroSkipMode } from "../types";
+import { markerOccurrenceAtTime, resolveMarkerRegions } from "../utils/watchPageMarkers";
 import {
   INTRO_PROMPT_SECONDS,
   PLAYBACK_PAUSE_GRACE_MS,
@@ -108,6 +109,44 @@ describe("useIntroSkipPrompt", () => {
     expect(onSeek).toHaveBeenCalledTimes(2);
     expect(result.current.prompt).toBeNull();
   });
+
+  it.each([
+    { innerEnd: 30, initialTime: 12 },
+    { innerEnd: 50, initialTime: 12 },
+    { innerEnd: 50, initialTime: 25 },
+  ])(
+    "retains undo after skipping an intro containing another occurrence (%j)",
+    ({ innerEnd, initialTime }) => {
+      const regions = resolveMarkerRegions({
+        marker_segments: [
+          { kind: "intro", start_seconds: 10, end_seconds: 50 },
+          { kind: "intro", start_seconds: 20, end_seconds: innerEnd },
+        ],
+      });
+      const { result, rerender } = renderHook(
+        (currentTime: number) => {
+          const intro = markerOccurrenceAtTime(regions, "intro", currentTime);
+          return useIntroSkipPrompt({
+            intro,
+            introKey: intro ? `session:file:${intro.start}:${intro.end}` : null,
+            currentTime,
+            mode: "always",
+            playing: true,
+            enabled: true,
+            onSeek,
+          });
+        },
+        { initialProps: initialTime },
+      );
+
+      expect(onSeek).toHaveBeenCalledWith(50);
+      rerender(50);
+
+      expect(result.current.prompt?.label).toBe("Watch Intro");
+      act(() => expect(result.current.select()).toBe(true));
+      expect(onSeek).toHaveBeenLastCalledWith(10);
+    },
+  );
 
   it("resolves an automatic skip when its undo times out", () => {
     const { result, rerender } = renderPrompt({ mode: "always" });

@@ -189,7 +189,6 @@ function WatchPagePlayer({
   const playbackController = useWatchPlaybackController();
   const chapterRefreshAttemptsRef = useRef<Set<number>>(new Set());
   const handledSelectionRevisionRef = useRef<number | null>(null);
-  const markerRealtimeReconcileKeyRef = useRef<string | null>(null);
   const [playbackVersions, setPlaybackVersions] = useState(versions);
   const [realtimeConnectionState, setRealtimeConnectionState] = useState<
     "disconnected" | "connecting" | "connected"
@@ -363,7 +362,6 @@ function WatchPagePlayer({
 
   useEffect(() => {
     chapterRefreshAttemptsRef.current.clear();
-    markerRealtimeReconcileKeyRef.current = null;
   }, [contentId, playbackRequestKey]);
 
   useEffect(() => {
@@ -453,12 +451,6 @@ function WatchPagePlayer({
     }
 
     const activeFileId = session.mediaFileId;
-    const reconcileKey = `${session.sessionId}:${activeFileId}`;
-    if (markerRealtimeReconcileKeyRef.current === reconcileKey) {
-      return;
-    }
-    markerRealtimeReconcileKeyRef.current = reconcileKey;
-
     let cancelled = false;
     void queryClient
       .fetchQuery({
@@ -470,6 +462,9 @@ function WatchPagePlayer({
         if (!cancelled) {
           setPlaybackVersions(detail.versions);
         }
+      })
+      .catch(() => {
+        // Reconcile again on the next connection; keep the current markers meanwhile.
       });
 
     return () => {
@@ -516,13 +511,22 @@ function WatchPagePlayer({
         credits: nextCredits,
         recap: nextRecap,
         preview: nextPreview,
+        marker_segments: nextSegments,
       } = event.payload;
       if (file_id !== session.mediaFileId) {
         return;
       }
 
       setPlaybackVersions((current) =>
-        patchVersionMarkers(current, file_id, nextIntro, nextCredits, nextRecap, nextPreview),
+        patchVersionMarkers(
+          current,
+          file_id,
+          nextIntro,
+          nextCredits,
+          nextRecap,
+          nextPreview,
+          nextSegments,
+        ),
       );
     },
     [session.mediaFileId],
@@ -618,6 +622,7 @@ function WatchPagePlayer({
       recap={activeMarkers.recap}
       autoSkipRecap={autoSkipRecap}
       preview={activeMarkers.preview}
+      markerSegments={selectedVersion?.marker_segments}
       autoPlayNextPreview={autoPlayNextPreview}
       canEditMarkers={canEditMarkers}
       onMarkersEdited={(fileId, markers) =>

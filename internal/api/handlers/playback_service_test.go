@@ -93,6 +93,9 @@ func TestPlaybackCapabilitiesV2IsAlwaysAvailable(t *testing.T) {
 	if !slices.Contains(view.Features, "fixed_media_file_v1") {
 		t.Fatal("fixed media file requests are not advertised")
 	}
+	if !slices.Contains(view.Features, "marker_segments_v1") {
+		t.Fatal("marker collections are not advertised")
+	}
 	for _, feature := range []string{"watch_party_source_fallback_v1", "watch_party_coordinator_v1"} {
 		if slices.Contains(view.Features, feature) {
 			t.Fatalf("unconfigured Watch Party feature advertised: %s", feature)
@@ -122,6 +125,9 @@ func TestPlaybackCapabilitiesV2AdvertisesConfiguredWatchTogether(t *testing.T) {
 		if !slices.Contains(configured.Features, feature) {
 			t.Fatalf("configured Watch Party feature missing: %s", feature)
 		}
+	}
+	if !slices.Contains(configured.Features, "marker_segments_v1") {
+		t.Fatal("marker collections are not advertised with Watch Party configured")
 	}
 	if configured.Revision == unconfigured.Revision {
 		t.Fatal("capability revision did not change with Watch Party availability")

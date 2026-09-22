@@ -40,6 +40,11 @@ import { HlsStartupGuard } from "../utils/hlsStartupGuard";
 import { isSafariBrowserV3, resolveHLSEngineV3 } from "../utils/hlsEngine";
 import { isFirefoxUserAgent } from "../utils/browser";
 import { normalizeSubtitleMode } from "../utils/subtitleMode";
+import {
+  markerOccurrenceAtTime,
+  resolveAutoplayMarker,
+  resolveMarkerRegions,
+} from "../utils/watchPageMarkers";
 import type {
   PlaybackExitState,
   IntroSkipMode,
@@ -53,7 +58,9 @@ import type {
   PlayerSubtitleInfo,
   PlayerSubtitleTrackSignature,
   PlayerTimeRange,
+  PlayerMarkerSegment,
   MarkerDraft,
+  MarkerKind,
   MarkerRegionView,
   SeriesContext,
   SubtitleMode,
@@ -106,6 +113,12 @@ const LIVE_SUBTITLE_INDEX = 1_000_000;
 // Resume playback once translated cues cover at least this far ahead of the
 // playhead; a hard cap also resumes so we never wait forever.
 const TRANSLATION_RESUME_TIMEOUT_MS = 30_000;
+const MARKER_SKIP_LABELS: Record<MarkerKind, string> = {
+  intro: "Skip Intro",
+  recap: "Skip Recap",
+  credits: "Skip Credits",
+  preview: "Skip Preview",
+};
 
 interface VideoPlayerProps {
   title: string;
@@ -168,6 +181,7 @@ interface VideoPlayerProps {
   recap?: PlayerTimeRange | null;
   autoSkipRecap?: boolean;
   preview?: PlayerTimeRange | null;
+  markerSegments?: PlayerMarkerSegment[];
   autoPlayNextPreview?: boolean;
   canEditMarkers?: boolean;
   /** Notified after a successful in-player marker edit so the host can patch local state. */
@@ -292,6 +306,7 @@ export function VideoPlayer({
   recap = null,
   autoSkipRecap = false,
   preview = null,
+  markerSegments,
   autoPlayNextPreview = false,
   canEditMarkers = true,
   onMarkersEdited,
@@ -1425,8 +1440,22 @@ export function VideoPlayer({
     [onNavigateEpisode],
   );
 
+  const savedMarkerRegions = useMemo(
+    () => resolveMarkerRegions({ intro, credits, recap, preview, marker_segments: markerSegments }),
+    [intro, credits, recap, preview, markerSegments],
+  );
+  const activeIntro = markerOccurrenceAtTime(savedMarkerRegions, "intro", currentTime);
+  const activeRecap = markerOccurrenceAtTime(savedMarkerRegions, "recap", currentTime);
+  const activeCredits = markerOccurrenceAtTime(savedMarkerRegions, "credits", currentTime);
+  const activePreview = markerOccurrenceAtTime(savedMarkerRegions, "preview", currentTime);
+  const autoplayMarker = useMemo(() => {
+    if (markerSegments !== undefined) {
+      return resolveAutoplayMarker(savedMarkerRegions, duration, autoPlayNextPreview);
+    }
+    return autoPlayNextPreview && preview ? preview : credits;
+  }, [markerSegments, savedMarkerRegions, duration, autoPlayNextPreview, preview, credits]);
   const nextEpisode = useNextEpisode(
-    roomPlaybackActive ? null : autoPlayNextPreview && preview ? preview : credits,
+    roomPlaybackActive ? null : autoplayMarker,
     roomPlaybackActive ? undefined : seriesContext,
     currentTime,
     handleNavigate,
@@ -1477,18 +1506,19 @@ export function VideoPlayer({
   }, [cancelNextEpisodeAutoPlay, displayMode]);
 
   // -- Intro/recap skip --
-  const showRecapSkip = recap != null && currentTime >= recap.start && currentTime < recap.end;
-
-  const skipRecap = useCallback(() => {
-    if (recap) handlePlayerSeek(recap.end);
-  }, [recap, handlePlayerSeek]);
+  const activeSkipMarker = [activeRecap, activeCredits, activePreview].find(
+    (region) => region !== null && currentTime >= region.start && currentTime < region.end,
+  );
+  const skipMarker = useCallback(() => {
+    if (activeSkipMarker) handlePlayerSeek(activeSkipMarker.end);
+  }, [activeSkipMarker, handlePlayerSeek]);
 
   const introPromptCanSeek =
     !roomPlaybackActive ||
     (watchTogether.room?.self_can_manage_room === true &&
       watchTogetherSync.attachedSessionId === sessionId);
-  const introKey = intro
-    ? `${sessionId}:${activeFileId ?? selectedVersion?.file_id ?? "unknown"}:${intro.start}:${intro.end}`
+  const introKey = activeIntro
+    ? `${sessionId}:${activeFileId ?? selectedVersion?.file_id ?? "unknown"}:${activeIntro.start}:${activeIntro.end}`
     : null;
   const {
     prompt: activeIntroPrompt,
@@ -1496,7 +1526,7 @@ export function VideoPlayer({
     dismiss: dismissActiveIntroPrompt,
   } = useIntroSkipPrompt({
     mode: introSkipMode ?? "ask",
-    intro,
+    intro: activeIntro,
     introKey,
     currentTime,
     playing,
@@ -1512,10 +1542,10 @@ export function VideoPlayer({
   });
 
   useEffect(() => {
-    if (!autoSkipRecap || !recap || !isPlayerReady || awaitingFirstFrame) {
+    if (!autoSkipRecap || !activeRecap || !isPlayerReady || awaitingFirstFrame) {
       return;
     }
-    if (currentTime < recap.start || currentTime >= recap.end) {
+    if (currentTime < activeRecap.start || currentTime >= activeRecap.end) {
       return;
     }
     if (
@@ -1526,12 +1556,12 @@ export function VideoPlayer({
       return;
     }
 
-    const recapKey = `${sessionId}:${activeFileId ?? "unknown"}:${recap.start}:${recap.end}`;
+    const recapKey = `${sessionId}:${activeFileId ?? "unknown"}:${activeRecap.start}:${activeRecap.end}`;
     if (autoSkippedRecapKeyRef.current === recapKey) {
       return;
     }
     autoSkippedRecapKeyRef.current = recapKey;
-    handlePlayerSeek(recap.end);
+    handlePlayerSeek(activeRecap.end);
   }, [
     activeFileId,
     autoSkipRecap,
@@ -1539,7 +1569,7 @@ export function VideoPlayer({
     currentTime,
     handlePlayerSeek,
     isPlayerReady,
-    recap,
+    activeRecap,
     roomPlaybackActive,
     sessionId,
     watchTogether.room?.self_can_manage_room,
@@ -2192,7 +2222,8 @@ export function VideoPlayer({
   // While editing, the seek bar reflects the live draft; otherwise the saved
   // props. All four kinds are shown so recap/preview are visible too.
   const markerRegions = useMemo<MarkerRegionView[]>(() => {
-    const source = markerEditor.editing ? markerEditor.draft : currentMarkers;
+    if (!markerEditor.editing) return savedMarkerRegions;
+    const source = markerEditor.draft;
     const out: MarkerRegionView[] = [];
     for (const kind of MARKER_KINDS) {
       const range = source[kind];
@@ -2201,7 +2232,7 @@ export function VideoPlayer({
       }
     }
     return out;
-  }, [markerEditor.editing, markerEditor.draft, currentMarkers]);
+  }, [markerEditor.editing, markerEditor.draft, savedMarkerRegions]);
 
   // -- Playback info overlay --
   const [showPlaybackInfo, setShowPlaybackInfo] = useState(false);
@@ -3375,7 +3406,13 @@ export function VideoPlayer({
           focusOnMount={focusIntroPromptOnMount}
         />
       )}
-      {!isDetached && showRecapSkip && <IntroSkipButton onSkip={skipRecap} label="Skip Recap" />}
+      {!isDetached && !activeIntroPrompt && !nextEpisode.showCountdown && activeSkipMarker && (
+        <IntroSkipButton
+          onSkip={skipMarker}
+          label={MARKER_SKIP_LABELS[activeSkipMarker.kind]}
+          controlsVisible={controlsVisible}
+        />
+      )}
 
       {/* Marker editor */}
       {!isDetached && markerEditor.editing && (

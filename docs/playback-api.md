@@ -25,10 +25,11 @@ features, deliveries}` with `Cache-Control: private, no-cache` and an `ETag`; cl
 and `allowed` is `true`; a server without playback wired answers
 `not_configured` with `allowed: false`. `installation_id` is the persisted
 server instance UUID that diagnostics also report. `protocol_versions` is
-`[3]`. `features` is the v3 server feature set plus `sequenced_progress_v1` and
-`fixed_media_file_v1`. When the room service and authenticated room socket are
-configured, it also includes `watch_party_source_fallback_v1` and
-`watch_party_coordinator_v1`. The coordinator capability covers shared room
+`[3]`. `features` is the v3 server feature set plus `sequenced_progress_v1`,
+`fixed_media_file_v1`, and `marker_segments_v1`. When the room service and
+authenticated room socket are configured, it also includes
+`watch_party_source_fallback_v1` and `watch_party_coordinator_v1`.
+The coordinator capability covers shared room
 membership, command-aware readiness, and ready/buffering/syncing member status.
 `deliveries` lists `original_http`, `server_remux_progressive`,
 `server_remux_hls` and, when transcoding is enabled, `server_transcode_hls`.
@@ -38,6 +39,20 @@ Every mutation body carries the `installation_id` the client read from
 capabilities. A different value is `409 installation_changed`: refresh
 capabilities and start a new attempt. There is no admission step and no
 per-account enrollment.
+
+## Marker ranges
+
+V2 watch detail includes `marker_segments` on each file version, including
+versions nested in playback variants. Each entry is
+`{kind, start_seconds, end_seconds}`, with kind `intro`, `credits`, `recap`, or
+`preview`. The collection is ordered by source time and is empty when the file
+has no markers. A kind may occur more than once: skip only the active range,
+without spanning intervening content. Existing singular `intro`, `credits`,
+`recap`, and `preview` fields remain for older clients.
+
+Marker reads and watch detail can populate the selected file's markers after
+authorization. A provider error leaves the available markers readable.
+See [Marker API](markers-api.md) for reads, manual edits, and provenance.
 
 ## Start
 
