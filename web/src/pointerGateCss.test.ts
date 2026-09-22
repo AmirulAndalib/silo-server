@@ -53,6 +53,13 @@ describe("pointer-capability gating", () => {
     }
   });
 
+  it("gates the row reveals on the attribute", () => {
+    expect(css).toMatch(/:where\(:root\[data-fine-pointer="true"\]\) \.pointer-reveal \{/);
+    expect(css).toMatch(
+      /:where\(:root\[data-fine-pointer="true"\]\) \.group\\\/row:hover \.pointer-reveal/,
+    );
+  });
+
   it("leaves no hover or pointer media query gating a reveal", () => {
     expect(css).not.toMatch(/@media[^{]*\bany-hover\b/);
     expect(css).not.toMatch(/@media[^{]*\bany-pointer\b/);

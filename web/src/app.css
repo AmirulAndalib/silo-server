@@ -1611,10 +1611,9 @@ html[data-navigation-direction]::view-transition-new(main-content) {
     pointer-events: auto;
   }
   /* Hover reveal is for precise pointers only, so a tap-emulated :hover on a
-     phone cannot uncover the controls. This deliberately uses a direct :hover
-     selector: Tailwind's group-hover variant is limited to the primary
-     pointer's (hover: hover) result, which can exclude Windows hybrid devices
-     even while an attached mouse is actively hovering the card.
+     phone cannot uncover the controls. These are bespoke rules rather than
+     group-hover utilities because they span two named groups (card and media)
+     and share one reveal across every card surface.
 
      Card actions sit at z-20 in the card wrapper's stacking context while the
      overlay-badge layer sits at z-10 inside the artwork box, so a visible
@@ -1653,18 +1652,17 @@ html[data-navigation-direction]::view-transition-new(main-content) {
 
   /* Row actions that appear on hover. On a touch screen there is no hover, so
      the action stays visible; a fine pointer hides it until the row is hovered
-     or the control is focused. Usage: a `group/row` wrapper and
-     `.pointer-reveal` on the control. */
-  @media (any-hover: hover) and (any-pointer: fine) {
-    .pointer-reveal {
-      opacity: 0;
-      transition: opacity var(--duration-fast) var(--ease-default);
-    }
-    .group\/row:hover .pointer-reveal,
-    .group\/row:focus-within .pointer-reveal,
-    .pointer-reveal:focus-visible {
-      opacity: 1;
-    }
+     or the control is focused. Gated on the observed pointer like the card
+     reveals above. Usage: a `group/row` wrapper and `.pointer-reveal` on the
+     control. */
+  :where(:root[data-fine-pointer="true"]) .pointer-reveal {
+    opacity: 0;
+    transition: opacity var(--duration-fast) var(--ease-default);
+  }
+  :where(:root[data-fine-pointer="true"]) .group\/row:hover .pointer-reveal,
+  :where(:root[data-fine-pointer="true"]) .group\/row:focus-within .pointer-reveal,
+  :where(:root[data-fine-pointer="true"]) .pointer-reveal:focus-visible {
+    opacity: 1;
   }
 
   /* A long press on a card opens the action sheet, so the browser's own image
