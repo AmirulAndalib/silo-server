@@ -223,6 +223,24 @@ func TestParseFilename(t *testing.T) {
 			wantEp:     3,
 		},
 		{
+			name:        "dotted separator preserves the full episode number",
+			path:        "/mixed/Show Name/Show.Name.s23.e11620.mkv",
+			libraryType: "mixed",
+			wantTitle:   "Show Name",
+			wantType:    "series",
+			wantSeason:  23,
+			wantEp:      11620,
+		},
+		{
+			name:        "dotted separator keeps oversized episode tokens as series",
+			path:        "/mixed/Show Name/Show.Name.s01.e1234567.mkv",
+			libraryType: "mixed",
+			wantTitle:   "Show Name",
+			wantType:    "series",
+			wantSeason:  1,
+			wantEp:      0,
+		},
+		{
 			name:        "series daily date episode",
 			path:        "/tv/Jeopardy! (1984)/Season 2026/Jeopardy! (1984) - 2026-04-24 - Jamie Ding Zach Pollock Nicco Martinez.mkv",
 			libraryType: "series",
@@ -709,6 +727,8 @@ func TestEpisodePatternAgreesAcrossClassifiers(t *testing.T) {
 		"/mixed/Show Name/Show Name S23E1162.mkv",
 		"/mixed/Show Name/Show Name S23E11620.mkv",
 		"/mixed/Show Name/Show Name S01E1234567.mkv",
+		"/mixed/Show Name/Show Name S23.E11620.mkv",
+		"/mixed/Show Name/Show Name S01.E1234567.mkv",
 		"/mixed/Some Movie (2019)/Some Movie (2019).mkv",
 	}
 

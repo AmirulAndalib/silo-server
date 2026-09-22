@@ -51,21 +51,30 @@ func TestParseVariantHints_ComposesUnratedDirectorCutFromReleaseStem(t *testing.
 }
 
 func TestParseVariantHints_MultiEpisodeRangeDottedSeparator(t *testing.T) {
-	hints := ParseVariantHints(
-		"/tv/Show Name/Season 01/Show.Name.s01.e01-e02.mkv",
-		"series",
-	)
-	if hints == nil {
-		t.Fatal("expected hints")
-	}
-	if got, want := hints.PresentationKind, "multi_episode"; got != want {
-		t.Fatalf("PresentationKind = %q, want %q", got, want)
-	}
-	if got, want := hints.MultiEpisodeStart, 1; got != want {
-		t.Fatalf("MultiEpisodeStart = %d, want %d", got, want)
-	}
-	if got, want := hints.MultiEpisodeEnd, 2; got != want {
-		t.Fatalf("MultiEpisodeEnd = %d, want %d", got, want)
+	for _, tt := range []struct {
+		name  string
+		path  string
+		start int
+		end   int
+	}{
+		{"two digits", "/tv/Show Name/Season 01/Show.Name.s01.e01-e02.mkv", 1, 2},
+		{"four digits", "/tv/Show Name/Season 23/Show.Name.s23.e1162-e1163.mkv", 1162, 1163},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			hints := ParseVariantHints(tt.path, "series")
+			if hints == nil {
+				t.Fatal("expected hints")
+			}
+			if got, want := hints.PresentationKind, "multi_episode"; got != want {
+				t.Fatalf("PresentationKind = %q, want %q", got, want)
+			}
+			if got, want := hints.MultiEpisodeStart, tt.start; got != want {
+				t.Fatalf("MultiEpisodeStart = %d, want %d", got, want)
+			}
+			if got, want := hints.MultiEpisodeEnd, tt.end; got != want {
+				t.Fatalf("MultiEpisodeEnd = %d, want %d", got, want)
+			}
+		})
 	}
 }
 
