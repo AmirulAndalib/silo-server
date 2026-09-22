@@ -346,6 +346,29 @@ describe("Watch Party source fallback", () => {
     watchTogetherRoomToken: "proof",
   };
 
+  it("ignores a changed selection from a late room read while this connection is replaced", async () => {
+    const room = refusedRoom();
+    playbackSessionMock.mockReturnValue(playbackSession());
+    const fallbackSource = vi.fn();
+    roomConnectionMock.mockReturnValue({ room, connectionState: "connected", fallbackSource });
+    const view = render(createElement(WatchPage, props));
+    await waitFor(() => expect(videoPlayerMock).toHaveBeenCalled());
+    roomConnectionMock.mockReturnValue({
+      room: {
+        ...room,
+        selected_content_id: "another-title",
+        selected_file_id: 8,
+        selection_revision: 2,
+      },
+      connectionState: "disconnected",
+      replacementReason: "This profile joined the Watch Party on another device.",
+      fallbackSource,
+    });
+    view.rerender(createElement(WatchPage, props));
+    expect(startPlaybackMock).not.toHaveBeenCalled();
+    expect(fallbackSource).not.toHaveBeenCalled();
+  });
+
   it.each(["host", "guest"])(
     "automatically requests one shared fallback for a %s",
     async (role) => {

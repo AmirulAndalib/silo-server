@@ -158,6 +158,7 @@ type watchTogetherPingMessage struct {
 // Each viewer has one writer and a bounded queue. A slow socket is closed
 // without delaying commands to the rest of the room.
 const watchTogetherQueueSize = 64
+const watchTogetherReplacementTimeout = time.Second
 const watchTogetherNotFound = "not_found"
 const watchTogetherReasonKey = "reason"
 const watchTogetherTypeKey = "type"
@@ -177,13 +178,15 @@ type watchTogetherRoomConn struct {
 	conn                watchTogetherSocket
 	outgoing            chan watchTogetherFrame
 	done                chan struct{}
+	replaced            chan struct{}
 	closeOnce           sync.Once
+	replaceOnce         sync.Once
 	pingSentAtNano      atomic.Int64
 	includeMemberStatus bool
 }
 
 func newWatchTogetherRoomConn(conn watchTogetherSocket) *watchTogetherRoomConn {
-	c := &watchTogetherRoomConn{conn: conn, outgoing: make(chan watchTogetherFrame, watchTogetherQueueSize), done: make(chan struct{})}
+	c := &watchTogetherRoomConn{conn: conn, outgoing: make(chan watchTogetherFrame, watchTogetherQueueSize), done: make(chan struct{}), replaced: make(chan struct{})}
 	go c.writeLoop()
 	return c
 }
@@ -205,6 +208,8 @@ func (c *watchTogetherRoomConn) WriteJSON(v any) error {
 }
 func (c *watchTogetherRoomConn) enqueue(frame watchTogetherFrame) error {
 	select {
+	case <-c.replaced:
+		return websocket.ErrCloseSent
 	case <-c.done:
 		return websocket.ErrCloseSent
 	default:
@@ -224,27 +229,58 @@ func (c *watchTogetherRoomConn) Close() error {
 	c.closeOnce.Do(func() { close(c.done); err = c.conn.Close() })
 	return err
 }
+
+// CloseReplaced uses the socket's single writer and waits for the terminal
+// frame to be written before closing. A blocked peer can delay takeover by at
+// most one second. V1 keeps its frozen, unexplained close behavior.
+func (c *watchTogetherRoomConn) CloseReplaced() error {
+	if !c.includeMemberStatus {
+		return c.Close()
+	}
+	c.replaceOnce.Do(func() { close(c.replaced) })
+	timer := time.NewTimer(watchTogetherReplacementTimeout)
+	defer timer.Stop()
+	select {
+	case <-c.done:
+		return c.Close()
+	case <-timer.C:
+		return c.Close()
+	}
+}
+
 func (c *watchTogetherRoomConn) WritePing() error { return c.enqueue(watchTogetherFrame{ping: true}) }
 func (c *watchTogetherRoomConn) writeLoop() {
 	defer func() { _ = c.Close() }()
 	for {
+		var frame watchTogetherFrame
 		select {
 		case <-c.done:
 			return
-		case frame := <-c.outgoing:
-			var err error
-			if frame.ping {
-				c.pingSentAtNano.Store(time.Now().UnixNano())
-				err = c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteTimeout))
-			} else {
-				err = c.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-				if err == nil {
-					err = c.conn.WriteMessage(websocket.TextMessage, frame.data)
-				}
+		case <-c.replaced:
+		case frame = <-c.outgoing:
+		}
+		// Give replacement priority over queued snapshots and pings.
+		terminal := false
+		writeTimeout := wsWriteTimeout
+		select {
+		case <-c.replaced:
+			terminal = true
+			writeTimeout = watchTogetherReplacementTimeout
+			frame = watchTogetherFrame{data: []byte(`{"type":"connection_replaced","reason":"This profile joined the Watch Party on another device."}`)}
+		default:
+		}
+		var err error
+		if frame.ping {
+			c.pingSentAtNano.Store(time.Now().UnixNano())
+			err = c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeTimeout))
+		} else {
+			err = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if err == nil {
+				err = c.conn.WriteMessage(websocket.TextMessage, frame.data)
 			}
-			if err != nil {
-				return
-			}
+		}
+		if err != nil || terminal {
+			return
 		}
 	}
 }

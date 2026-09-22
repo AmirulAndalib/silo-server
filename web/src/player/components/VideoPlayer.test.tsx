@@ -226,6 +226,8 @@ function roomConnection(
     },
     suggestions: [],
     closedReason: null,
+    replacementReason: null,
+    rejoinRoom: vi.fn(),
     transportCommand: null,
     serverTimeOffsetMs: 0,
     sendRoomMessage: vi.fn(() => ({ ok: true })),
@@ -296,6 +298,103 @@ describe("VideoPlayer room catch-up", () => {
     };
     return { ...rendered, connection, video, command, onReanchorSeek };
   }
+
+  it("pauses displaced playback and offers an explicit room rejoin", () => {
+    const { connection, video, rerenderPlayer } = setup(100);
+    vi.mocked(video.pause).mockClear();
+    rerenderPlayer({
+      watchTogetherConnection: {
+        ...connection,
+        connectionState: "disconnected",
+        replacementReason: "This profile joined the Watch Party on another device.",
+      },
+    });
+    expect(video.pause).toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "This profile joined the Watch Party on another device.",
+    );
+    expect(
+      screen.queryByText("Reconnecting to room. Controls are temporarily unavailable."),
+    ).toBeNull();
+    expect(connection.closeRoom).not.toHaveBeenCalled();
+    expect(connection.rejoinRoom).not.toHaveBeenCalled();
+    // Native media controls and delayed translation resumes also obey the stop.
+    vi.mocked(video.pause).mockClear();
+    fireEvent.play(video);
+    expect(video.pause).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Rejoin Watch Party" }));
+    expect(connection.rejoinRoom).toHaveBeenCalledOnce();
+  });
+
+  it("keeps displaced playback stopped on a late lobby read and leaves through the hub", async () => {
+    const { connection, rerenderPlayer } = setup(100);
+    const onExit = vi.fn();
+    rerenderPlayer({
+      onExit,
+      watchTogetherConnection: {
+        ...connection,
+        room: { ...connection.room!, phase: "lobby" },
+        connectionState: "disconnected",
+        replacementReason: "This profile joined the Watch Party on another device.",
+      },
+    });
+    expect(onExit).not.toHaveBeenCalled();
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Leave Watch Party" })),
+    );
+    expect(onExit).toHaveBeenCalledWith(expect.objectContaining({ destinationHref: "/rooms" }));
+    expect(connection.closeRoom).not.toHaveBeenCalled();
+    expect(connection.rejoinRoom).not.toHaveBeenCalled();
+  });
+
+  it.each(["canplay", "retry", "pending play"])(
+    "prevents late autoplay after replacement during %s without reloading the stream",
+    async (stage) => {
+      const connection = roomConnection();
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      let finishPlay!: () => void;
+      if (stage === "pending play")
+        play.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              finishPlay = resolve;
+            }),
+        );
+      if (stage === "retry") play.mockRejectedValueOnce(new Error("play interrupted"));
+      const { container, rerenderPlayer } = renderPlayer({
+        shouldAutoPlay: true,
+        watchTogetherRoomId: "room-1",
+        watchTogetherConnection: connection,
+      });
+      const video = container.querySelector("video")!;
+      if (stage !== "canplay") {
+        Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+        await act(async () => fireEvent.canPlay(video));
+        expect(play).toHaveBeenCalledOnce();
+      }
+      const callsBeforeReplacement = play.mock.calls.length;
+      vi.mocked(video.load).mockClear();
+      rerenderPlayer({
+        shouldAutoPlay: true,
+        watchTogetherConnection: {
+          ...connection,
+          connectionState: "disconnected",
+          replacementReason: "This profile joined the Watch Party on another device.",
+        },
+      });
+      vi.mocked(video.pause).mockClear();
+      Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+      if (stage === "pending play") {
+        await act(async () => finishPlay());
+        expect(video.pause).toHaveBeenCalledOnce();
+      }
+      fireEvent.canPlay(video);
+      fireEvent.loadedData(video);
+      await act(() => vi.advanceTimersByTimeAsync(1_000));
+      expect(play).toHaveBeenCalledTimes(callsBeforeReplacement);
+      expect(video.load).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([1500, 30])("shows a requested room seek to %ss before the command arrives", (target) => {
     const { connection, video, rerenderPlayer, onReanchorSeek } = setup(100);

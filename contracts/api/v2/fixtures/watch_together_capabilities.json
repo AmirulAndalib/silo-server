@@ -1,9 +1,10 @@
 {
-  "revision": "342db71ff47b67e0293c350f38e4a8ede821e352ae79f98dcad0ced7146f1f8e",
+  "revision": "efa2c8c12c9ace1fbcf4c6e3e159a3f97ee59741f73d3ca9e303b0b1e0179cf2",
   "state": "available",
   "allowed": false,
   "staged_selection": true,
   "lobby_ready": true,
+  "connection_replaced": true,
   "selection_mode_switch": true,
   "member_state": true,
   "picker": true,

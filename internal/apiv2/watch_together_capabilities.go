@@ -16,6 +16,7 @@ type WatchTogetherCapabilities struct {
 	Capability
 	StagedSelection     bool   `json:"staged_selection" doc:"Lobbies stage an item and the host starts it explicitly"`
 	LobbyReady          bool   `json:"lobby_ready" doc:"Members mark themselves ready in the lobby over the room socket"`
+	ConnectionReplaced  bool   `json:"connection_replaced" doc:"Displaced v2 room sockets receive a terminal connection_replaced message before closing"`
 	SelectionModeSwitch bool   `json:"selection_mode_switch" doc:"The host may switch a lobby between host picks and voting"`
 	MemberState         bool   `json:"member_state" doc:"Member watch state and picker rows are computed server-side"`
 	Picker              bool   `json:"picker"`
@@ -51,6 +52,7 @@ func registerWatchTogetherCapabilities(reg *Registry) {
 			Capability:          Capability{Allowed: new(capabilityLoginAllowed(ctx))},
 			StagedSelection:     reg.deps.WatchTogetherStage != nil && reg.deps.WatchTogetherStart != nil,
 			LobbyReady:          reg.deps.WatchTogetherSocket != nil,
+			ConnectionReplaced:  reg.deps.WatchTogetherSocket != nil,
 			SelectionModeSwitch: reg.deps.WatchTogetherSelectionMode != nil,
 			MemberState:         memberState,
 			Picker:              reg.deps.WatchTogetherPicker != nil && reg.deps.CatalogAccess != nil,

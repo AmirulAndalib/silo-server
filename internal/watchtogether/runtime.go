@@ -278,7 +278,11 @@ func (s *Service) adoptRuntimeLocked(ctx context.Context, live *liveRoom, room R
 		current := members[key]
 		if current == nil || current.connection != old.connection {
 			conn := old.connection
-			afterRoomCommit(ctx, func() { _ = conn.Close() })
+			if room.Phase != RoomPhaseEnded && memberConnected(current) && current.connectionID != old.connectionID {
+				afterRoomCommit(ctx, func() { closeReplacedConnection(conn) })
+			} else {
+				afterRoomCommit(ctx, func() { _ = conn.Close() })
+			}
 		}
 	}
 	live.members = members

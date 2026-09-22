@@ -248,7 +248,7 @@ Rows are resolved to catalog cards through the caller's access filter; a row who
 
 ### Watch-together capabilities
 
-`GET /api/v2/watch-together/capabilities` (`getWatchTogetherCapabilities`) requires an authenticated account and follows the shared capability document conventions (opaque `revision`, `state`, `allowed`, private revalidation with `ETag`). When rooms are served, each feature flag reflects its wired operation dependencies. `max_member_state_ids` is 200 when member-state is available and zero otherwise. `lobby_ready` and `socket_protocol` (`silo.room.v2`) require the v2 socket; the protocol is an empty string when the socket is unavailable. When the room service is not wired the state is `not_configured` and every flag is `false`. Clients decide whether to show the staged lobby, the ready check, the mode switch and the shared picker from this document, not from the server version.
+`GET /api/v2/watch-together/capabilities` (`getWatchTogetherCapabilities`) requires an authenticated account and follows the shared capability document conventions (opaque `revision`, `state`, `allowed`, private revalidation with `ETag`). When rooms are served, each feature flag reflects its wired operation dependencies. `max_member_state_ids` is 200 when member-state is available and zero otherwise. `lobby_ready`, `connection_replaced` and `socket_protocol` (`silo.room.v2`) require the v2 socket; the protocol is an empty string when the socket is unavailable. When the room service is not wired the state is `not_configured` and every flag is `false`. Clients decide whether to show the staged lobby, the ready check, the mode switch and the shared picker from this document, not from the server version.
 
 ### Suggestion creation receipt storage
 
@@ -306,6 +306,43 @@ The handler closes the underlying socket at the earlier of five minutes, access 
 The post-upgrade loop is shared with v1: Connect, Disconnect(false), initial snapshots, attach-session/transport/state-report/ready/buffering messages and ping/pong use the same service. The readiness validation below applies to both versions. There is no new leave message. Membership and readiness are shared through the room coordinator. V2 cancellation closes the transport so a blocked read releases and executes the existing disconnect callback. These raw frame shapes are not the typed HTTP room snapshot schema. No playback/provider operation is implied by obtaining a ticket.
 
 The actual web room/player hook obtains a fresh credential for each reconnect. It captures original room proof and profile authority, sends no authentication retry, uses no URL credentials, checks the negotiated protocol, and suppresses old sockets' messages/results after authority or room replacement. It subscribes to the existing AuthProvider so same-profile PIN replacement rebinds even when room props do not change. A fresh reconnect uses an already-rotated access token only while the original logical authority remains current; it does not replay a refused ticket request. Terminal ticket refusals stop reconnecting; transient failures retain the existing bounded reconnect delay. Existing room-proof expiry ends access; it is not automatically renewed or rebound. Native adoption and exact caller inventories remain separate gates. Ticket consumption handles socket admission; the room coordinator handles membership and playback synchronization.
+
+### Replaced room connections
+
+A new socket for the same account and profile replaces that member's previous
+socket. On v2, the displaced socket receives this terminal frame before closure:
+
+```json
+{"type":"connection_replaced","reason":"This profile joined the Watch Party on another device."}
+```
+
+Clients identify the terminal condition by `type`, stop automatic reconnect and
+pending credential renewal, and explain that this profile joined on another
+device. The room and the replacement connection remain active. Clients must not
+interpret this frame as `room_closed`. An explicit user rejoin can claim the
+membership again. The web room and player display a rejoin action; displaced
+playback pauses until the user chooses to rejoin.
+
+Local takeover and cross-node reconciliation use the same signal after the
+membership transaction commits. The socket's single writer prioritizes the
+terminal frame over queued updates and waits for the write before closing, with
+a one-second bound for a blocked peer. Delivery cannot be guaranteed over a
+broken connection. Delayed callbacks retain their original connection identity
+and cannot disconnect the winner. Expired membership, ordinary network loss,
+five-minute renewal and credential rotation do not send this replacement frame.
+
+The `connection_replaced` capability advertises support. Deploy the correction
+to every API node before relying on it across the cluster. V1 retains its frozen
+close behavior. Older v2 clients that ignore the frame can still reconnect and
+displace the winner; upgrading those clients is a release prerequisite.
+
+Native adoption is tracked in
+[Apple #344](https://github.com/Silo-Server/silo-apple/issues/344) and
+[Android #355](https://github.com/Silo-Server/silo-android/issues/355). Before either
+native surface ships, it must handle this terminal frame, preserve HTTP vote
+membership when common suggestion rows arrive, and verify takeover with the web
+client, explicit rejoin, credential renewal and transient network recovery.
+Jellyfin compatibility does not use these room sockets.
 
 ### Room playback readiness
 

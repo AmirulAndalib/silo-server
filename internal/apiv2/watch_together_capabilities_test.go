@@ -32,6 +32,9 @@ func TestWatchTogetherCapabilities(t *testing.T) {
 	if rec.Code != 200 || out.State != StateAvailable || out.Allowed == nil || !out.StagedSelection || !out.LobbyReady || !out.SelectionModeSwitch || !out.MemberState || !out.Picker || !out.VoteHostOverride || out.MaxMemberStateIDs != watchtogether.MaxMemberStateIDs || out.SocketProtocol != watchtogether.RoomSocketProtocol || out.Revision == "" {
 		t.Fatalf("capabilities: %d %+v", rec.Code, out)
 	}
+	if !out.ConnectionReplaced {
+		t.Fatal("wired v2 socket omitted connection replacement capability")
+	}
 	tag := rec.Header().Get("ETag")
 	if cached := do(t, h, http.MethodGet, path, "", with(bearer(memberToken), "If-None-Match", tag)); cached.Code != http.StatusNotModified {
 		t.Fatalf("revalidation: %d", cached.Code)
@@ -43,7 +46,7 @@ func TestWatchTogetherCapabilities(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 			t.Fatal(err)
 		}
-		if rec.Code != 200 || out.State != StateNotConfigured || out.Allowed == nil || *out.Allowed || out.StagedSelection {
+		if rec.Code != 200 || out.State != StateNotConfigured || out.Allowed == nil || *out.Allowed || out.StagedSelection || out.ConnectionReplaced {
 			t.Fatalf("unconfigured: %d %+v", rec.Code, out)
 		}
 	}
@@ -73,7 +76,7 @@ func TestWatchTogetherCapabilitiesWithoutOptionalDependencies(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Code != 200 || out.MemberState || out.Picker || out.LobbyReady || out.SocketProtocol != "" || out.MaxMemberStateIDs != 0 {
+	if rec.Code != 200 || out.MemberState || out.Picker || out.LobbyReady || out.ConnectionReplaced || out.SocketProtocol != "" || out.MaxMemberStateIDs != 0 {
 		t.Fatalf("advertised unwired operations: %d %+v", rec.Code, out)
 	}
 }

@@ -40208,6 +40208,10 @@
             "description": "Whether the current principal may use the capability",
             "type": "boolean"
           },
+          "connection_replaced": {
+            "description": "Displaced v2 room sockets receive a terminal connection_replaced message before closing",
+            "type": "boolean"
+          },
           "lobby_ready": {
             "description": "Members mark themselves ready in the lobby over the room socket",
             "type": "boolean"
@@ -40260,6 +40264,7 @@
         "required": [
           "staged_selection",
           "lobby_ready",
+          "connection_replaced",
           "selection_mode_switch",
           "member_state",
           "picker",

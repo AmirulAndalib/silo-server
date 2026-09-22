@@ -25454,6 +25454,8 @@ export interface components {
     WatchTogetherCapabilities: {
       /** @description Whether the current principal may use the capability */
       allowed: boolean;
+      /** @description Displaced v2 room sockets receive a terminal connection_replaced message before closing */
+      connection_replaced: boolean;
       /** @description Members mark themselves ready in the lobby over the room socket */
       lobby_ready: boolean;
       /** Format: int64 */
