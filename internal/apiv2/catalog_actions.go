@@ -42,7 +42,7 @@ type TranslateDescription struct {
 type PeopleSearchInput struct {
 	Q          string `query:"q" maxLength:"200" doc:"Name prefix or fragment; empty lists the first people"`
 	Limit      int    `query:"limit" minimum:"1" maximum:"100" default:"20" doc:"Most people to answer"`
-	MediaScope string `query:"media_scope" enum:"video,movie,series,episode,audiobook,ebook,manga" doc:"Restrict people to credits in this media scope; omitted searches all people"`
+	MediaScope string `query:"media_scope" enum:"video,movie,series,episode,audiobook,ebook,manga" doc:"Restrict people to accessible credits in this media scope; omitted searches all media scopes"`
 }
 
 // PersonInput names one person.
@@ -396,7 +396,14 @@ func (reg *Registry) listPeople(ctx context.Context, in *PeopleSearchInput) (*Pe
 	if _, _, p := viewerIdentity(ctx); p != nil {
 		return nil, p
 	}
-	people, err := svc.SearchPeopleScoped(ctx, in.Q, in.Limit, in.MediaScope)
+	if reg.deps.CatalogAccess == nil {
+		return nil, unavailable("catalog access")
+	}
+	filter, err := reg.deps.CatalogAccess.ContextAccessFilter(ctx, handlers.AccessFilterOptions{})
+	if err != nil {
+		return nil, NewProblem(TypeInternalError, "An unexpected error occurred.")
+	}
+	people, err := svc.SearchPeopleScoped(ctx, in.Q, in.Limit, in.MediaScope, filter)
 	if err != nil {
 		return nil, serviceProblem(err)
 	}

@@ -551,31 +551,39 @@ func (r *PersonRepository) GetByName(ctx context.Context, name string) (*models.
 // LOWER(name) comparison (including its existing treatment of % and _ in the
 // term as LIKE wildcards).
 func (r *PersonRepository) Search(ctx context.Context, query string, limit int) ([]models.Person, error) {
-	return r.search(ctx, query, limit, "", false)
+	return r.search(ctx, query, limit, "", nil)
 }
 
 // SearchScoped ranks exact names first and restricts people to credits in the
-// selected media scope before applying the limit. Empty scope includes all people.
-func (r *PersonRepository) SearchScoped(ctx context.Context, query string, limit int, mediaScope string) ([]models.Person, error) {
-	return r.search(ctx, strings.TrimSpace(query), limit, mediaScope, true)
+// selected media scope and viewer access before applying the limit. Empty scope
+// includes accessible credits across all media types.
+func (r *PersonRepository) SearchScoped(ctx context.Context, query string, limit int, mediaScope string, filter AccessFilter) ([]models.Person, error) {
+	return r.search(ctx, strings.TrimSpace(query), limit, mediaScope, &filter)
 }
 
-func (r *PersonRepository) search(ctx context.Context, query string, limit int, mediaScope string, rankExact bool) ([]models.Person, error) {
+func (r *PersonRepository) search(ctx context.Context, query string, limit int, mediaScope string, filter *AccessFilter) ([]models.Person, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	args := []any{query, limit}
 	where := "name ILIKE '%' || $1 || '%'"
-	if types := MediaScopeItemTypes(mediaScope); len(types) > 0 {
+	if filter != nil {
+		conditions := []string{"ip.person_id = people.id"}
+		argIdx := 3
+		if types := MediaScopeItemTypes(mediaScope); len(types) > 0 {
+			conditions = append(conditions, "mi.type = ANY($3::text[])")
+			args = append(args, types)
+			argIdx++
+		}
+		appendLibraryAccessConditions("mi.content_id", *filter, &conditions, &args, &argIdx)
+		applyAccessFilter("mi", *filter, &conditions, &args, &argIdx)
 		where += ` AND EXISTS (
 			SELECT 1 FROM item_people ip
 			JOIN media_items mi ON mi.content_id = ip.content_id
-			WHERE ip.person_id = people.id AND mi.type = ANY($3::text[])
-		)`
-		args = append(args, types)
+			WHERE ` + strings.Join(conditions, " AND ") + ")"
 	}
 	order := "name ASC"
-	if rankExact {
+	if filter != nil {
 		order = "name ASC, id ASC"
 		if query != "" {
 			order = "(LOWER(name) = LOWER($1)) DESC, " + order

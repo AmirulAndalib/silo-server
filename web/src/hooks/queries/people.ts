@@ -5,6 +5,7 @@ import { adminRefreshPerson, adminUpdatePerson } from "@/api/v2/people";
 import type { Person, UpdatePersonRequest } from "@/api/types";
 import {
   refreshPerson,
+  getPeopleSearchCapabilities,
   searchPeople,
   type PersonRefreshResult,
   type PersonSearchMediaScope,
@@ -19,10 +20,21 @@ export function usePersonSearch(
   mediaScope?: PersonSearchMediaScope,
 ) {
   const normalizedQuery = query.trim();
+  const queryClient = useQueryClient();
 
   return useQuery({
     queryKey: personKeys.search(normalizedQuery, limit, mediaScope),
-    queryFn: ({ signal }) => searchPeople(normalizedQuery, limit, { signal, mediaScope }),
+    queryFn: async ({ signal }) => {
+      if (mediaScope) {
+        const capabilities = await queryClient.fetchQuery({
+          queryKey: personKeys.searchCapabilities(),
+          queryFn: ({ signal }) => getPeopleSearchCapabilities({ signal }),
+          staleTime: 5 * 60 * 1000,
+        });
+        if (!capabilities.people_media_scope) return [];
+      }
+      return searchPeople(normalizedQuery, limit, { signal, mediaScope });
+    },
     enabled: enabled && normalizedQuery.length > 0,
     staleTime: 5 * 60 * 1000,
   });

@@ -165,6 +165,7 @@ export const compatKeys = {
 
 export const personKeys = {
   all: ["people"] as const,
+  searchCapabilities: () => ["people", "search-capabilities"] as const,
   search: (query: string, limit = 20, mediaScope?: string) =>
     ["people", "search", query, limit, mediaScope ?? "all"] as const,
   detail: (id: string) => ["people", "detail", id] as const,

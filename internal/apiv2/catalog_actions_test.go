@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -81,13 +82,14 @@ func fakePerson(id int64) handlers.PersonView {
 	return handlers.PersonView{ID: id, Name: "Al Pacino", Bio: "Actor", BirthDate: &birth, Birthplace: "New York", PhotoURL: "https://cdn.example/people/7.jpg", TmdbID: "1158"}
 }
 
-func (f *fakeCatalogActions) SearchPeopleScoped(_ context.Context, query string, limit int, mediaScope string) ([]handlers.PersonView, error) {
+func (f *fakeCatalogActions) SearchPeopleScoped(_ context.Context, query string, limit int, mediaScope string, filter catalogpkg.AccessFilter) ([]handlers.PersonView, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
 	f.lastLang = query
 	f.lastUser = limit
 	f.lastMediaScope = mediaScope
+	f.lastFilter = filter
 	if strings.HasPrefix("al pacino", strings.ToLower(query)) {
 		return []handlers.PersonView{fakePerson(7)}, nil
 	}
@@ -243,6 +245,9 @@ func TestPeople(t *testing.T) {
 	decodeJSON(t, rec.Body, &list)
 	if rec.Code != 200 || len(list.Items) != 1 || list.Items[0].ID != "7" || *list.Items[0].BirthDate != "1940-04-25" || list.Page != nil || fake.lastUser != 20 {
 		t.Fatalf("%d %s limit=%d", rec.Code, rec.Body.String(), fake.lastUser)
+	}
+	if !slices.Equal(fake.lastFilter.AllowedLibraryIDs, []int{1, 2}) {
+		t.Fatalf("viewer access was not forwarded: %+v", fake.lastFilter)
 	}
 	rec = do(t, h, http.MethodGet, "/api/v2/catalog/people?q=zzz&limit=5", "", viewerHeaders())
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"items":[]`) || fake.lastUser != 5 {

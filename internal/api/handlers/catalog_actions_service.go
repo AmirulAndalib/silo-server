@@ -212,8 +212,8 @@ func (h *PeopleHandler) SearchPeople(ctx context.Context, query string, limit in
 }
 
 // SearchPeopleScoped serves v2 people search with media scope and exact-name ranking.
-func (h *PeopleHandler) SearchPeopleScoped(ctx context.Context, query string, limit int, mediaScope string) ([]PersonView, error) {
-	people, err := h.personRepo.SearchScoped(ctx, query, limit, mediaScope)
+func (h *PeopleHandler) SearchPeopleScoped(ctx context.Context, query string, limit int, mediaScope string, filter catalog.AccessFilter) ([]PersonView, error) {
+	people, err := h.personRepo.SearchScoped(ctx, query, limit, mediaScope, filter)
 	if err != nil {
 		return nil, apiError(http.StatusInternalServerError, "search_failed", err.Error())
 	}

@@ -13,10 +13,17 @@ applying the limit.
 
 The optional `media_scope` parameter limits results to people credited on items
 in that scope. It accepts `video` (movies and series), `movie`, `series`, `episode`,
-`audiobook`, `ebook`, or `manga`. Omit it to search all people. The filter applies
-before the limit and includes every credit role, so directors match video searches
+`audiobook`, `ebook`, or `manga`. Omit it to search credits across all media scopes.
+Results require at least one credit visible to the viewer. Library restrictions, disabled libraries, rating
+limits, and excluded media types apply before the limit, including when the media
+scope is omitted. Every credit role participates, so directors match video searches
 and authors and narrators match audiobook searches. A person with several matching
 credits appears once.
+
+`GET /api/v2/catalog/search/capabilities` advertises `people_media_scope: true`
+when scoped people search is available. Clients must check this signal before
+sending `media_scope`. Web omits scoped people results on older servers that do
+not advertise support; unscoped people search remains available.
 
 Web search applies its selected media scope to both titles and people. People
 responses remain an `{items}` collection with string IDs. The v1 bridge retains

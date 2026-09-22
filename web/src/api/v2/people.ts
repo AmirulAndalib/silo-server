@@ -11,6 +11,10 @@ export type PersonSearchMediaScope = NonNullable<
   V2Query<"GET /api/v2/catalog/people">["media_scope"]
 >;
 
+export function getPeopleSearchCapabilities(options?: Pick<RequestInit, "signal">) {
+  return v2("GET /api/v2/catalog/search/capabilities", { signal: options?.signal ?? undefined });
+}
+
 export async function searchPeople(
   query: string,
   limit = 20,
