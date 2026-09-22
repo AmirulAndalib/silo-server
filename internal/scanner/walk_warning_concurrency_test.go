@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -190,5 +191,51 @@ func TestRecoveredAudiobookWarningSuffixPreservesConcurrentUpdate(t *testing.T) 
 		actual.ScanWarningMessage == nil || *actual.ScanWarningMessage != original ||
 		actual.ScanWarningAt == nil || !actual.ScanWarningAt.Equal(warnedAt) || !actual.AllowEmptyCleanupOnce {
 		t.Fatalf("recovered scan should strip only the stale suffix: %+v", actual)
+	}
+}
+
+func TestPartialWalkWarningPreservesConcurrentCleanupWarning(t *testing.T) {
+	for _, preserve := range []bool{false, true} {
+		for _, initialCode := range []string{"", "dead_root"} {
+			t.Run(fmt.Sprintf("preserve=%t/initial=%s", preserve, initialCode), func(t *testing.T) {
+				ctx := t.Context()
+				pool := newDeadRootTestPool(t)
+				folderID := seedDeadRootTestFolder(t, pool, "ebooks", "Concurrent cleanup warning")
+				newer := NewScanner(NewFileRepository(pool), "", nil, 1, true, 0)
+				if initialCode != "" {
+					if err := newer.folderRepo.SetScanWarning(ctx, folderID, initialCode, "Previous outage", time.Now()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				const message = "Scan found 0 media files; cleanup requires confirmation."
+				warnedAt := time.Now().UTC().Truncate(time.Microsecond)
+				tracer := &warningInterleaveTracer{
+					match: func(sql string) bool {
+						return strings.Contains(sql, "UPDATE media_folders") && strings.Contains(sql, "scan_warning_code")
+					},
+					run: func() {
+						if err := newer.folderRepo.SetScanWarning(ctx, folderID, "empty_root", message, warnedAt); err != nil {
+							t.Fatal(err)
+						}
+						if err := newer.folderRepo.AllowEmptyCleanupOnce(ctx, folderID); err != nil {
+							t.Fatal(err)
+						}
+					},
+				}
+				older := NewScanner(NewFileRepository(warningInterleavePool(t, pool, tracer)), "", nil, 1, true, 0)
+				if err := older.setPartialWalkWarning(ctx, folderID, 1, preserve); err != nil {
+					t.Fatal(err)
+				}
+				actual, err := newer.folderRepo.GetByID(ctx, folderID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !tracer.fired.Load() || actual.ScanWarningCode == nil || *actual.ScanWarningCode != "empty_root" ||
+					actual.ScanWarningMessage == nil || *actual.ScanWarningMessage != message ||
+					actual.ScanWarningAt == nil || !actual.ScanWarningAt.Equal(warnedAt) || !actual.AllowEmptyCleanupOnce {
+					t.Fatalf("partial scan overwrote concurrent cleanup warning or allowance: %+v", actual)
+				}
+			})
+		}
 	}
 }

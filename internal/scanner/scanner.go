@@ -2095,28 +2095,28 @@ func (s *Scanner) setPartialWalkWarning(ctx context.Context, folderID, failures 
 	if s.folderRepo == nil || failures == 0 {
 		return nil
 	}
+	warning, err := s.folderRepo.GetScanWarning(ctx, folderID)
+	if err != nil {
+		return fmt.Errorf("reading scan warning for folder %d: %w", folderID, err)
+	}
 	pathLabel := "paths"
 	if failures == 1 {
 		pathLabel = "path"
 	}
 	code := partialWalkWarningCode
 	message := fmt.Sprintf("Scan could not read or resolve %d %s; some files were not scanned. Unreadable paths were protected from missing-file cleanup.", failures, pathLabel)
-	if preserveWarning {
-		folder, err := s.folderRepo.GetByID(ctx, folderID)
-		if err != nil {
-			return fmt.Errorf("reading scan warning for folder %d: %w", folderID, err)
-		}
-		if folder.ScanWarningCode != nil && *folder.ScanWarningCode != partialWalkWarningCode {
-			// Preserve stronger warnings raised by this scan's cleanup, or a
-			// prior folder warning when only a subtree was scanned.
-			code = *folder.ScanWarningCode
-			if folder.ScanWarningMessage != nil {
-				previous, _, _ := strings.Cut(*folder.ScanWarningMessage, "\nPartial scan: ")
-				message = previous + "\nPartial scan: " + message
-			}
+	if preserveWarning && warning.Code != nil && *warning.Code != partialWalkWarningCode {
+		// Preserve stronger warnings raised by this scan's cleanup, or a
+		// prior folder warning when only a subtree was scanned.
+		code = *warning.Code
+		if warning.Message != nil {
+			previous, _, _ := strings.Cut(*warning.Message, "\nPartial scan: ")
+			message = previous + "\nPartial scan: " + message
 		}
 	}
-	if err := s.folderRepo.SetScanWarning(ctx, folderID, code, message, time.Now().UTC()); err != nil {
+	// A warning published after the read takes precedence over this update.
+	replacement := catalog.ScanWarning{Code: &code, Message: &message, At: new(time.Now().UTC())}
+	if err := s.folderRepo.UpdateScanWarningIfUnchanged(ctx, folderID, warning, replacement); err != nil {
 		return fmt.Errorf("recording partial-walk warning for folder %d: %w", folderID, err)
 	}
 	return nil
