@@ -31,6 +31,9 @@ root, where the key prefixes each caller already uses keep the namespaces apart:
 |---|---|
 | `<provider>/<kind>/<id>/<imageType>/…` | artwork (`internal/artworkkey`) |
 | `branding/…` | branding assets |
+| `collection-images/…` | collection artwork |
+| `library-posters/…` | library posters |
+| `chapter-images/…` | chapter thumbnails |
 | `markers/…` | intro and credit markers |
 | `subtitles/…` | downloaded subtitles |
 | `diagnostics/…` | diagnostic bundles |
