@@ -218,7 +218,9 @@ export default function Layout({ children }: LayoutProps) {
     // `main-content`. app.css holds the root view-transition group still while
     // it is set, so the frozen sidebar snapshot cannot cross-fade over the live
     // collapse — and the routes rendered outside this shell keep the default
-    // root transition, which is the only thing they have to animate.
+    // root transition, which is the only thing they have to animate. It also
+    // gates `--app-sidebar-offset`: the sidebar only exists while this shell is
+    // mounted, so out-of-tree chrome must not reserve room for it elsewhere.
     root.dataset.appShell = "true";
     if (isHomePath) {
       root.dataset.homeRoute = "true";
