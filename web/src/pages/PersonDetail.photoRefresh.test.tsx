@@ -81,9 +81,17 @@ it.each([
   { queueDelay: 123_000, rotateSignature: false },
   { queueDelay: 660_000, rotateSignature: false },
   { queueDelay: 33_000, rotateSignature: true },
+  { queueDelay: 33_000, rotateSignature: false, coldNavigation: "prefetch" },
+  { queueDelay: 33_000, rotateSignature: false, coldNavigation: "mount" },
+  {
+    queueDelay: 0,
+    rotateSignature: false,
+    coldNavigation: "prefetch",
+    completeBeforeItemLoads: true,
+  },
 ])(
-  "observes a queued refresh after $queueDelay ms with signature rotation=$rotateSignature",
-  async ({ queueDelay, rotateSignature }) => {
+  "observes a queued refresh after $queueDelay ms with signature rotation=$rotateSignature, cold navigation=$coldNavigation, and early completion=$completeBeforeItemLoads",
+  async ({ queueDelay, rotateSignature, coldNavigation, completeBeforeItemLoads }) => {
     vi.useFakeTimers();
     vi.mocked(useAuth).mockReturnValue({ user: { id: 1 } } as ReturnType<typeof useAuth>);
     const id = "9007199254740993";
@@ -105,7 +113,7 @@ it.each([
       crew: [],
     };
     client.setQueryData(personKeys.detail(id), person);
-    client.setQueryData(itemKey, item);
+    if (!coldNavigation) client.setQueryData(itemKey, item);
     vi.mocked(getPerson).mockResolvedValue(person);
     vi.mocked(refreshPerson).mockResolvedValue(
       v2Fixture<"POST /api/v2/catalog/people/{id}/refresh">({ status: "queued", person_id: id }),
@@ -124,18 +132,40 @@ it.each([
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(refreshPerson).toHaveBeenCalledWith(id);
-    view.unmount();
 
     let serverItem = item;
-    const returned = renderHook(
-      () => useQuery({ queryKey: itemKey, queryFn: async () => serverItem }),
-      {
-        wrapper: ({ children }: { children: ReactNode }) => (
-          <QueryClientProvider client={client}>{children}</QueryClientProvider>
-        ),
-      },
-    );
-    await act(() => vi.advanceTimersByTimeAsync(0));
+    const photoUrl = "https://images.example.test/new.jpg";
+    const readItem = vi.fn(async () => serverItem);
+    let finishItem: (() => void) | undefined;
+    if (coldNavigation) {
+      const firstRead = new Promise<typeof item>((resolve) => {
+        finishItem = () => resolve(item);
+      });
+      readItem.mockImplementationOnce(() => firstRead);
+      if (coldNavigation === "prefetch") {
+        void client.prefetchQuery({ queryKey: itemKey, queryFn: readItem });
+      }
+    }
+    if (completeBeforeItemLoads) {
+      serverItem = { ...item, cast: [{ person_id: id, photo_url: photoUrl }] };
+      vi.mocked(getPerson).mockResolvedValue({ ...person, photo_url: photoUrl });
+      await act(() => client.refetchQueries({ queryKey: personKeys.detail(id) }));
+    }
+    view.unmount();
+
+    const returned = renderHook(() => useQuery({ queryKey: itemKey, queryFn: readItem }), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    });
+    await act(async () => {
+      finishItem?.();
+      await vi.advanceTimersByTimeAsync(2);
+    });
+    if (completeBeforeItemLoads) {
+      expect(returned.result.current.data?.cast[0]?.photo_url).toBe(photoUrl);
+      return;
+    }
     expect(returned.result.current.data?.cast[0]?.photo_url).toBe(person.photo_url);
 
     if (rotateSignature) {
@@ -148,7 +178,6 @@ it.each([
     await act(() => vi.advanceTimersByTimeAsync(queueDelay));
     expect(returned.result.current.data?.cast[0]?.photo_url).toBe(person.photo_url);
 
-    const photoUrl = "https://images.example.test/new.jpg";
     serverItem = { ...item, cast: [{ person_id: id, photo_url: photoUrl }] };
     vi.mocked(getPerson).mockResolvedValue({ ...person, photo_url: photoUrl });
     await act(() => vi.advanceTimersByTimeAsync(queueDelay === 0 ? 3_001 : 30_001));

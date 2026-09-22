@@ -41,6 +41,7 @@ function observeQueuedPersonRefresh(queryClient: QueryClient, id: string) {
   const queryKey = personKeys.detail(id);
   const startedAt = Date.now();
   let photoUrl = queryClient.getQueryData<Person>(queryKey)?.photo_url;
+  let refreshOnResume = false;
   const observer = new QueryObserver(queryClient, {
     queryKey,
     queryFn: ({ signal }) => getPerson(id, { signal }),
@@ -49,42 +50,54 @@ function observeQueuedPersonRefresh(queryClient: QueryClient, id: string) {
     // Queue wait and photo caching can outlast the worker's per-person timeout.
     refetchInterval: () => (Date.now() - startedAt < 30_000 ? 3_000 : 30_000),
   });
-  const unsubscribe = observer.subscribe((result) => {
-    // Presigned URLs can rotate before the job finishes, so a URL change is not completion.
-    if (result.isSuccess && result.data.photo_url !== photoUrl) {
-      photoUrl = result.data.photo_url;
-      void invalidatePersonItemDetails(queryClient, id);
-    }
-  });
   const query = observer.getCurrentQuery();
   const unsubscribeCache = queryClient.getQueryCache().subscribe((event) => {
     if (event.type === "removed" && event.query === query) stop();
     else if (
       event.type === "removed" ||
-      (event.type === "observerRemoved" && event.query === query)
+      (event.query === query &&
+        (event.type === "observerAdded" || event.type === "observerRemoved")) ||
+      (event.type === "updated" && event.query !== query)
     ) {
-      stopIfUnused();
+      updateObservation();
     }
   });
   function stop() {
     unsubscribeCache();
-    unsubscribe();
+    observer.destroy();
     refreshes.delete(id);
   }
-  function stopIfUnused() {
-    // The refresh observer must not keep polling after its consumers are gone.
-    if (
-      query.getObserversCount() === 1 &&
-      !queryClient
+  function updateObservation() {
+    const observing = observer.hasListeners();
+    const needed =
+      query.getObserversCount() > (observing ? 1 : 0) ||
+      queryClient
         .getQueryCache()
         .getAll()
-        .some((item) => isPersonItemDetail(item, id))
-    ) {
-      stop();
+        .some((item) => isPersonItemDetail(item, id));
+    if (needed && !observing) {
+      observer.subscribe((result) => {
+        // Presigned URLs can rotate before the job finishes; this is not completion.
+        if (
+          result.isSuccess &&
+          !result.isFetching &&
+          (refreshOnResume || result.data.photo_url !== photoUrl)
+        ) {
+          refreshOnResume = false;
+          photoUrl = result.data.photo_url;
+          void invalidatePersonItemDetails(queryClient, id);
+        }
+      });
+    } else if (!needed && observing) {
+      // Pause during navigation. Resume when an uncached related detail arrives;
+      // the cache listener is disposed when this inactive person query expires.
+      // That detail may have fetched its old photo before the person was updated.
+      refreshOnResume = true;
+      observer.destroy();
     }
   }
   refreshes.set(id, stop);
-  stopIfUnused();
+  updateObservation();
 }
 
 export function usePersonSearch(query: string, limit = 20, enabled = true) {

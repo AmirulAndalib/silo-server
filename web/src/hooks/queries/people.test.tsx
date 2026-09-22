@@ -189,6 +189,31 @@ describe("person refresh and cached item credits", () => {
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith(personId))).toHaveLength(3);
   });
 
+  it.each(["cleared", "expired"] as const)(
+    "disposes the paused listener when the person cache is %s",
+    async (reason) => {
+      vi.useFakeTimers();
+      const { client, detail, relatedKeys, crewKey, fetchMock, wrapper } = setup();
+      const { result, unmount } = renderHook(() => useRefreshPerson(personId, false), { wrapper });
+      await act(async () => {
+        await result.current.mutateAsync();
+      });
+      unmount();
+      for (const queryKey of [...relatedKeys, crewKey]) {
+        client.removeQueries({ queryKey, exact: true });
+      }
+      if (reason === "cleared") client.clear();
+      else await act(() => vi.advanceTimersByTimeAsync(5 * 60_000));
+      expect(client.getQueryState(personKeys.detail(personId))).toBeUndefined();
+
+      const requests = fetchMock.mock.calls.length;
+      client.setQueryData(relatedKeys[0]!, detail);
+      await act(() => vi.advanceTimersByTimeAsync(30_000));
+      expect(fetchMock).toHaveBeenCalledTimes(requests);
+      expect(client.getQueryState(personKeys.detail(personId))).toBeUndefined();
+    },
+  );
+
   it("does not start observation when the cache was cleared while queueing", async () => {
     const { client, fetchMock, wrapper } = setup();
     let finishQueue!: () => void;
