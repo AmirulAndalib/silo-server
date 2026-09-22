@@ -12,7 +12,11 @@ import PageBack from "@/components/PageBack";
 import { Button } from "@/components/ui/button";
 import { useCatalogWindow } from "@/hooks/queries/catalog";
 import { personKeys } from "@/hooks/queries/keys";
-import { invalidatePersonItemDetails, useRefreshPerson } from "@/hooks/queries/people";
+import {
+  invalidatePersonItemDetails,
+  observePersonRefresh,
+  useRefreshPerson,
+} from "@/hooks/queries/people";
 import { useAuth } from "@/hooks/useAuth";
 import { useIsActingAdmin } from "@/hooks/useIsActingAdmin";
 import { useDocumentTitle } from "@/hooks/useDocumentTitle";
@@ -27,7 +31,6 @@ export default function PersonDetail() {
   const queryClient = useQueryClient();
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
   const [editOpen, setEditOpen] = useState(false);
-  const autoRefreshWindowRef = useRef<{ personId: string; until: number } | null>(null);
   const autoRefreshRequestedPersonIdRef = useRef<string | null>(null);
   const { user } = useAuth();
   const isAdmin = useIsActingAdmin();
@@ -37,32 +40,18 @@ export default function PersonDetail() {
     queryKey: personKeys.detail(id!),
     queryFn: ({ signal }) => getPerson(id!, { signal }),
     enabled: !!id,
-    refetchInterval: (query) => {
-      const data = query.state.data;
-      if (!data || !isPersonMetadataIncomplete(data)) {
-        autoRefreshWindowRef.current = null;
-        return false;
-      }
-
-      const current = autoRefreshWindowRef.current;
-      if (!current || current.personId !== data.id) {
-        autoRefreshWindowRef.current = { personId: data.id, until: Date.now() + 30_000 };
-        return 3_000;
-      }
-
-      return Date.now() < current.until ? 3_000 : false;
-    },
   });
 
   useDocumentTitle(person?.name ?? "Person");
 
-  const photoUrl = person?.photo_url;
+  const hasPerson = !!person;
   useEffect(() => {
-    // A queued refresh can finish during polling, after the mutation has returned.
-    if (id && photoUrl) {
+    // A person read can queue a refresh even when all metadata is already present.
+    if (id && hasPerson) {
       void invalidatePersonItemDetails(queryClient, id);
+      observePersonRefresh(queryClient, id);
     }
-  }, [id, photoUrl, queryClient]);
+  }, [id, hasPerson, queryClient]);
 
   useEffect(() => {
     if (!person || !user || !isPersonMetadataIncomplete(person)) {

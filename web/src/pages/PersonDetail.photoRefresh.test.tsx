@@ -58,6 +58,7 @@ it("refreshes cached cast after a person read observes a background photo update
     crew: [],
   };
   client.setQueryData(personKeys.detail(id), person);
+  vi.mocked(getPerson).mockResolvedValue(person);
   render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[`/person/${id}`]}>
@@ -91,6 +92,8 @@ it.each([
   { queueDelay: 33_000, rotateSignature: false, coldNavigation: "mount" },
   { queueDelay: 33_000, rotateSignature: false, isAdmin: true },
   { queueDelay: 33_000, rotateSignature: false, coldNavigation: "mount", isAdmin: true },
+  { queueDelay: 33_000, rotateSignature: false, automatic: true },
+  { queueDelay: 33_000, rotateSignature: false, coldNavigation: "mount", automatic: true },
   {
     queueDelay: 0,
     rotateSignature: false,
@@ -98,8 +101,15 @@ it.each([
     completeBeforeItemLoads: true,
   },
 ])(
-  "observes a photo refresh after $queueDelay ms with signature rotation=$rotateSignature, cold navigation=$coldNavigation, early completion=$completeBeforeItemLoads, and admin=$isAdmin",
-  async ({ queueDelay, rotateSignature, coldNavigation, completeBeforeItemLoads, isAdmin }) => {
+  "observes a photo refresh after $queueDelay ms with signature rotation=$rotateSignature, cold navigation=$coldNavigation, early completion=$completeBeforeItemLoads, admin=$isAdmin, and automatic=$automatic",
+  async ({
+    queueDelay,
+    rotateSignature,
+    coldNavigation,
+    completeBeforeItemLoads,
+    isAdmin,
+    automatic,
+  }) => {
     vi.useFakeTimers();
     vi.mocked(useAuth).mockReturnValue({ user: { id: 1 } } as ReturnType<typeof useAuth>);
     vi.mocked(useIsActingAdmin).mockReturnValue(isAdmin ?? false);
@@ -138,12 +148,17 @@ it.each([
       </QueryClientProvider>,
     );
     await act(async () => {
-      fireEvent.click(
-        screen.getByRole("button", { name: isAdmin ? "Refresh now" : "Refresh metadata" }),
-      );
+      if (!automatic) {
+        fireEvent.click(
+          screen.getByRole("button", { name: isAdmin ? "Refresh now" : "Refresh metadata" }),
+        );
+      }
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(isAdmin ? adminRefreshPerson : refreshPerson).toHaveBeenCalledWith(id);
+    if (automatic) {
+      expect(refreshPerson).not.toHaveBeenCalled();
+      expect(adminRefreshPerson).not.toHaveBeenCalled();
+    } else expect(isAdmin ? adminRefreshPerson : refreshPerson).toHaveBeenCalledWith(id);
 
     let serverItem = item;
     const photoUrl = "https://images.example.test/new.jpg";

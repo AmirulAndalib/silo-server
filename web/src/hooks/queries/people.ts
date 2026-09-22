@@ -40,12 +40,14 @@ export function invalidatePersonItemDetails(queryClient: QueryClient, personId: 
 
 const personRefreshObservers = new WeakMap<QueryClient, Map<string, () => void>>();
 
-function observePersonRefresh(queryClient: QueryClient, id: string) {
+export function observePersonRefresh(queryClient: QueryClient, id: string) {
+  const queryKey = personKeys.detail(id);
+  if (!queryClient.getQueryCache().find({ queryKey, exact: true })) return;
+
   const refreshes = personRefreshObservers.get(queryClient) ?? new Map<string, () => void>();
   personRefreshObservers.set(queryClient, refreshes);
   refreshes.get(id)?.();
 
-  const queryKey = personKeys.detail(id);
   const startedAt = Date.now();
   let photoUrl = queryClient.getQueryData<Person>(queryKey)?.photo_url;
   let refreshOnResume = false;
