@@ -75,66 +75,71 @@ it("refreshes cached cast after a person read observes a background photo update
   });
 });
 
-it("observes a queued refresh of complete metadata after returning to the item", async () => {
-  vi.useFakeTimers();
-  vi.mocked(useAuth).mockReturnValue({ user: { id: 1 } } as ReturnType<typeof useAuth>);
-  const id = "9007199254740993";
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false, staleTime: 120_000 } },
-  });
-  clients.push(client);
-  const person = {
-    id: Number(id),
-    name: "Actor",
-    bio: "Biography",
-    birth_date: "1979-08-01",
-    photo_url: "https://images.example.test/old.jpg",
-  };
-  const itemKey = catalogKeys.itemDetail("movie", 12);
-  const item = {
-    content_id: "movie",
-    cast: [{ person_id: id, photo_url: person.photo_url }],
-    crew: [],
-  };
-  client.setQueryData(personKeys.detail(id), person);
-  client.setQueryData(itemKey, item);
-  vi.mocked(getPerson).mockResolvedValue(person);
-  vi.mocked(refreshPerson).mockResolvedValue(
-    v2Fixture<"POST /api/v2/catalog/people/{id}/refresh">({ status: "queued", person_id: id }),
-  );
-  const view = render(
-    <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[`/person/${id}`]}>
-        <Routes>
-          <Route path="/person/:id" element={<PersonDetail />} />
-        </Routes>
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
-  await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: "Refresh metadata" }));
-    await vi.advanceTimersByTimeAsync(0);
-  });
-  expect(refreshPerson).toHaveBeenCalledWith(id);
-  view.unmount();
+it.each([0, 33_000, 123_000, 660_000])(
+  "observes a queued refresh after returning to the item and waiting %i ms",
+  async (queueDelay) => {
+    vi.useFakeTimers();
+    vi.mocked(useAuth).mockReturnValue({ user: { id: 1 } } as ReturnType<typeof useAuth>);
+    const id = "9007199254740993";
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 120_000 } },
+    });
+    clients.push(client);
+    const person = {
+      id: Number(id),
+      name: "Actor",
+      bio: "Biography",
+      birth_date: "1979-08-01",
+      photo_url: "https://images.example.test/old.jpg",
+    };
+    const itemKey = catalogKeys.itemDetail("movie", 12);
+    const item = {
+      content_id: "movie",
+      cast: [{ person_id: id, photo_url: person.photo_url }],
+      crew: [],
+    };
+    client.setQueryData(personKeys.detail(id), person);
+    client.setQueryData(itemKey, item);
+    vi.mocked(getPerson).mockResolvedValue(person);
+    vi.mocked(refreshPerson).mockResolvedValue(
+      v2Fixture<"POST /api/v2/catalog/people/{id}/refresh">({ status: "queued", person_id: id }),
+    );
+    const view = render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={[`/person/${id}`]}>
+          <Routes>
+            <Route path="/person/:id" element={<PersonDetail />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Refresh metadata" }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(refreshPerson).toHaveBeenCalledWith(id);
+    view.unmount();
 
-  let serverItem = item;
-  const returned = renderHook(
-    () => useQuery({ queryKey: itemKey, queryFn: async () => serverItem }),
-    {
-      wrapper: ({ children }: { children: ReactNode }) => (
-        <QueryClientProvider client={client}>{children}</QueryClientProvider>
-      ),
-    },
-  );
-  await act(() => vi.advanceTimersByTimeAsync(0));
-  expect(returned.result.current.data?.cast[0]?.photo_url).toBe(person.photo_url);
+    let serverItem = item;
+    const returned = renderHook(
+      () => useQuery({ queryKey: itemKey, queryFn: async () => serverItem }),
+      {
+        wrapper: ({ children }: { children: ReactNode }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      },
+    );
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(returned.result.current.data?.cast[0]?.photo_url).toBe(person.photo_url);
 
-  const photoUrl = "https://images.example.test/new.jpg";
-  serverItem = { ...item, cast: [{ person_id: id, photo_url: photoUrl }] };
-  vi.mocked(getPerson).mockResolvedValue({ ...person, photo_url: photoUrl });
-  await act(() => vi.advanceTimersByTimeAsync(3_001));
+    await act(() => vi.advanceTimersByTimeAsync(queueDelay));
+    expect(returned.result.current.data?.cast[0]?.photo_url).toBe(person.photo_url);
 
-  expect(getPerson).toHaveBeenCalledTimes(2);
-  expect(returned.result.current.data?.cast[0]?.photo_url).toBe(photoUrl);
-});
+    const photoUrl = "https://images.example.test/new.jpg";
+    serverItem = { ...item, cast: [{ person_id: id, photo_url: photoUrl }] };
+    vi.mocked(getPerson).mockResolvedValue({ ...person, photo_url: photoUrl });
+    await act(() => vi.advanceTimersByTimeAsync(queueDelay === 0 ? 3_001 : 30_001));
+
+    expect(returned.result.current.data?.cast[0]?.photo_url).toBe(photoUrl);
+  },
+);

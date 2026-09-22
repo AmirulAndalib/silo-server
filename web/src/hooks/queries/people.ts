@@ -1,4 +1,5 @@
 import {
+  type Query,
   type QueryClient,
   QueryObserver,
   useMutation,
@@ -14,17 +15,19 @@ import { getPerson, refreshPerson, searchPeople, type PersonRefreshResult } from
 import { personKeys } from "./keys";
 import { isItemDetailQueryKey } from "./mediaSurfaceRefresh";
 
+function isPersonItemDetail(query: Query, personId: string) {
+  const item = query.state.data as ItemDetail | undefined;
+  return (
+    !!item &&
+    isItemDetailQueryKey(query.queryKey, item.content_id) &&
+    (item.cast?.some((credit) => credit.person_id === personId) ||
+      item.crew?.some((credit) => credit.person_id === personId))
+  );
+}
+
 export function invalidatePersonItemDetails(queryClient: QueryClient, personId: string) {
   return queryClient.invalidateQueries({
-    predicate: (query) => {
-      const item = query.state.data as ItemDetail | undefined;
-      return (
-        !!item &&
-        isItemDetailQueryKey(query.queryKey, item.content_id) &&
-        (item.cast?.some((credit) => credit.person_id === personId) ||
-          item.crew?.some((credit) => credit.person_id === personId))
-      );
-    },
+    predicate: (query) => isPersonItemDetail(query, personId),
   });
 }
 
@@ -36,13 +39,15 @@ function observeQueuedPersonRefresh(queryClient: QueryClient, id: string) {
   refreshes.get(id)?.();
 
   const queryKey = personKeys.detail(id);
+  const startedAt = Date.now();
   let photoUrl = queryClient.getQueryData<Person>(queryKey)?.photo_url;
   const observer = new QueryObserver(queryClient, {
     queryKey,
     queryFn: ({ signal }) => getPerson(id, { signal }),
     staleTime: 0,
     retry: false,
-    refetchInterval: 3_000,
+    // Queue wait and photo caching can outlast the worker's per-person timeout.
+    refetchInterval: () => (Date.now() - startedAt < 30_000 ? 3_000 : 30_000),
   });
   const unsubscribe = observer.subscribe((result) => {
     if (result.isSuccess && result.data.photo_url !== photoUrl) {
@@ -53,16 +58,32 @@ function observeQueuedPersonRefresh(queryClient: QueryClient, id: string) {
   const query = observer.getCurrentQuery();
   const unsubscribeCache = queryClient.getQueryCache().subscribe((event) => {
     if (event.type === "removed" && event.query === query) stop();
+    else if (
+      event.type === "removed" ||
+      (event.type === "observerRemoved" && event.query === query)
+    ) {
+      stopIfUnused();
+    }
   });
-  // Keep observing after navigation, but stop on timeout or a profile/cache reset.
-  const timer = setTimeout(stop, 30_000);
   function stop() {
-    clearTimeout(timer);
-    unsubscribe();
     unsubscribeCache();
+    unsubscribe();
     refreshes.delete(id);
   }
+  function stopIfUnused() {
+    // The refresh observer must not keep polling after its consumers are gone.
+    if (
+      query.getObserversCount() === 1 &&
+      !queryClient
+        .getQueryCache()
+        .getAll()
+        .some((item) => isPersonItemDetail(item, id))
+    ) {
+      stop();
+    }
+  }
   refreshes.set(id, stop);
+  stopIfUnused();
 }
 
 export function usePersonSearch(query: string, limit = 20, enabled = true) {

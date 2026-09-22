@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -121,11 +121,11 @@ describe("person refresh and cached item credits", () => {
     },
   );
 
-  it.each(["timeout", "cache reset"] as const)(
+  it.each(["cache reset", "related items removed", "related items expire"] as const)(
     "stops queued refresh observation after %s",
     async (stopReason) => {
       vi.useFakeTimers();
-      const { client, fetchMock, wrapper } = setup();
+      const { client, relatedKeys, crewKey, fetchMock, wrapper } = setup();
       const { result, unmount } = renderHook(() => useRefreshPerson(personId, false), { wrapper });
       await act(async () => {
         await result.current.mutateAsync();
@@ -137,13 +137,45 @@ describe("person refresh and cached item credits", () => {
       );
 
       if (stopReason === "cache reset") client.clear();
-      else await act(() => vi.advanceTimersByTimeAsync(30_000));
+      else if (stopReason === "related items removed") {
+        for (const queryKey of [...relatedKeys, crewKey]) {
+          client.removeQueries({ queryKey, exact: true });
+        }
+      } else await act(() => vi.advanceTimersByTimeAsync(5 * 60_000));
       const requests = fetchMock.mock.calls.length;
       await act(() => vi.advanceTimersByTimeAsync(30_000));
       expect(fetchMock).toHaveBeenCalledTimes(requests);
       if (stopReason === "cache reset") expect(client.getQueryCache().getAll()).toHaveLength(0);
     },
   );
+
+  it("keeps observing an open person page until it unmounts even without cached items", async () => {
+    vi.useFakeTimers();
+    const { client, relatedKeys, crewKey, fetchMock, wrapper } = setup();
+    const { result, unmount } = renderHook(
+      () => {
+        useQuery({
+          queryKey: personKeys.detail(personId),
+          queryFn: async () => ({ id: Number(personId), name: "Actor", photo_url: oldPhoto }),
+        });
+        return useRefreshPerson(personId, false);
+      },
+      { wrapper },
+    );
+    await act(async () => {
+      await result.current.mutateAsync();
+    });
+    for (const queryKey of [...relatedKeys, crewKey]) {
+      client.removeQueries({ queryKey, exact: true });
+    }
+    const requests = fetchMock.mock.calls.length;
+    await act(() => vi.advanceTimersByTimeAsync(33_000));
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(requests);
+    unmount();
+    const finalRequests = fetchMock.mock.calls.length;
+    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    expect(fetchMock).toHaveBeenCalledTimes(finalRequests);
+  });
 
   it("replaces an existing observer when the same person is queued again", async () => {
     vi.useFakeTimers();
