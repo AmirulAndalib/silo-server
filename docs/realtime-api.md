@@ -128,6 +128,14 @@ page size. Vote changes do not move suggestions across the cursor. Concurrent
 creation/deletion is not a snapshot; clients refresh to reconcile live changes.
 Room lifecycle and the room websocket still use the bridge contract.
 
+HTTP suggestion reads return the requesting profile's authoritative
+`voted_by_me`. Both v1 and v2 socket `suggestions_update` frames carry common room
+rows and tallies, with every `voted_by_me` set to `false`. That socket field is
+non-authoritative: clients retain their own vote membership or refresh it through
+the authenticated HTTP read. Local and cross-node broadcasts use the same shape;
+each receiving API node with viewers reads the common list once, outside the
+room mutex, and sends it to its current connections.
+
 `POST` and `DELETE` on
 `/api/v2/watch-together/rooms/{room_id}/suggestions/{suggestion_id}/vote` use the same
 authority and return bodyless `204` for the requested vote membership, including
