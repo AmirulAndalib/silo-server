@@ -540,7 +540,7 @@ export interface AdminHistoryImportBulkRunResult {
 
 // Person
 export interface Person {
-  id: number;
+  id: string;
   name: string;
   bio?: string;
   birth_date?: string;
