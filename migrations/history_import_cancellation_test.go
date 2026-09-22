@@ -1,8 +1,17 @@
 package migrations
 
 import (
+	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
+	"testing/fstest"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 )
 
 func TestHistoryImportCancellationStatusPostgres(t *testing.T) {
@@ -64,4 +73,58 @@ UPDATE history_import_runs SET cancel_requested_at=now() WHERE id='running';`)
 	}
 	migrationExec(t, tx, `INSERT INTO history_import_runs(id,user_id,profile_id,source_type,connection_mode,status) VALUES('after-rollback',1,'profile','emby','custom','cancelled')`)
 	migrationExec(t, tx, adminMigrationSQL(t, repair, schema, false))
+}
+
+func TestHistoryImportCancellationRetryPostgres(t *testing.T) {
+	tx, schema := adminMigrationFixture(t)
+	// An existing invalid row forces validation to fail after replacement.
+	migrationExec(t, tx, `CREATE TABLE history_import_runs(status text);
+INSERT INTO history_import_runs VALUES('invalid');
+ALTER TABLE history_import_runs ADD CONSTRAINT history_import_runs_status_check
+CHECK (status IN ('queued','running','completed','failed')) NOT VALID;`)
+	config, err := pgx.ParseConfig(os.Getenv("SILO_TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.RuntimeParams["search_path"] = schema
+	db := stdlib.OpenDB(*config)
+	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { _, _ = db.ExecContext(context.Background(), "DROP SCHEMA "+schema+" CASCADE") })
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	const file = "20260922124201_allow_cancelled_history_import_runs.sql"
+	data, err := FS.ReadFile("sql/" + file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, fstest.MapFS{
+		file: &fstest.MapFile{Data: data},
+	}, goose.WithTableName(schema+".goose_db_version"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.Up(t.Context()); err == nil {
+		t.Fatal("validation accepted an invalid existing status")
+	} else if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "23514" {
+		t.Fatalf("expected validation failure, got %v", err)
+	}
+	// The widened constraint must have committed despite validation failing.
+	if _, err := db.ExecContext(t.Context(), `INSERT INTO history_import_runs VALUES('cancelled')`); err != nil {
+		t.Fatalf("replacement was rolled back with validation: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(), `INSERT INTO history_import_runs VALUES('invalid')`); err == nil {
+		t.Fatal("unvalidated constraint allowed a new invalid status")
+	}
+	if _, err := db.ExecContext(t.Context(), `UPDATE history_import_runs SET status='failed' WHERE status='invalid'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.Up(t.Context()); err != nil {
+		t.Fatalf("retry partially applied migration: %v", err)
+	}
+	var validated bool
+	if err := db.QueryRowContext(t.Context(), `SELECT convalidated FROM pg_constraint
+WHERE conrelid='history_import_runs'::regclass AND conname='history_import_runs_status_check'`).Scan(&validated); err != nil || !validated {
+		t.Fatalf("constraint validated=%t err=%v", validated, err)
+	}
 }

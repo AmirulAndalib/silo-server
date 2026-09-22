@@ -238,7 +238,7 @@ jobs:
       - name: Test history import cancellation against Postgres
         env:
           SILO_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/watch_party?sslmode=disable
-        run: go test -race -count=1 -run '^(TestHistoryImportCancellationStatusPostgres|TestQueue.*)$' ./migrations/ ./internal/historyimport/
+        run: go test -race -count=1 -run '^(TestHistoryImportCancellation.*|TestQueue.*)$' ./migrations/ ./internal/historyimport/
 
       # Compiles every package on the way, so there is no separate build step.
       - name: Test
