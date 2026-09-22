@@ -169,9 +169,16 @@ export function usePrefetchPeople(personIds: readonly string[], enabled = true) 
       for (let id = pending.shift(); id !== undefined && !stopped; id = pending.shift()) {
         const personId = id;
         inFlight.add(personId);
+        const queryKey = personKeys.detail(personId);
         await queryClient.prefetchQuery({
-          queryKey: personKeys.detail(personId),
-          queryFn: ({ signal }) => getPerson(personId, { signal, prefetch: true }),
+          queryKey,
+          queryFn: async ({ signal }) => {
+            const person = await getPerson(personId, { signal, prefetch: true });
+            // A person page that opened during this read shares its result, so
+            // read again as a view the server can queue a due refresh for.
+            const query = queryClient.getQueryCache().find({ queryKey, exact: true });
+            return query?.getObserversCount() ? getPerson(personId, { signal }) : person;
+          },
           staleTime: PEOPLE_PREFETCH_STALE_TIME_MS,
           retry: false,
         });

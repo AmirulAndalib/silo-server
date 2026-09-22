@@ -1,10 +1,12 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import { setProfileId } from "@/api/client";
 import { installPolicyStorageMocks, jsonResponse } from "@/pages/admin-policy/policyTestUtils";
+
+import { getPerson } from "@/api/v2/people";
 
 import { personKeys } from "./keys";
 import { usePrefetchPeople } from "./people";
@@ -109,6 +111,34 @@ it("does not prefetch from a server that would reject the prefetch marker", asyn
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(reads).toHaveLength(0);
+  unmount();
+  client.clear();
+});
+
+it("reads as a view when the person is opened while their prefetch runs", async () => {
+  const reads = stubPeopleFetch();
+  const client = new QueryClient();
+  seedCapabilities(client);
+  const { unmount } = renderPrefetch(client, ["1"]);
+  await waitFor(() => expect(reads).toHaveLength(1));
+
+  // The person page subscribes while the prefetch is still in flight.
+  const page = new QueryObserver(client, {
+    queryKey: personKeys.detail("1"),
+    queryFn: ({ signal }) => getPerson("1", { signal }),
+    refetchOnMount: "always",
+  });
+  const stop = page.subscribe(() => {});
+  reads[0]!.resolve();
+
+  await waitFor(() => expect(reads).toHaveLength(2));
+  expect(reads[0]!.url.searchParams.get("prefetch")).toBe("true");
+  expect(reads[1]!.url.searchParams.has("prefetch")).toBe(false);
+  reads[1]!.resolve();
+  await waitFor(() => expect(page.getCurrentResult().data?.id).toBe("1"));
+  expect(reads).toHaveLength(2);
+
+  stop();
   unmount();
   client.clear();
 });
