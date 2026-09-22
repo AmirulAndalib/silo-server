@@ -91,12 +91,152 @@ export function decideRoomCatchup(input: RoomCatchupInput): RoomCatchupDecision 
   };
 }
 
-/** Whether `nativeSeconds` falls inside one of the element's seekable ranges. */
-export function isNativePositionSeekable(seekable: TimeRanges, nativeSeconds: number): boolean {
-  for (let i = 0; i < seekable.length; i++) {
-    if (nativeSeconds >= seekable.start(i) && nativeSeconds <= seekable.end(i)) {
+/** Whether `nativeSeconds` falls inside one of `ranges`, such as the element's seekable or buffered ranges. */
+export function isNativePositionInRanges(ranges: TimeRanges, nativeSeconds: number): boolean {
+  for (let i = 0; i < ranges.length; i++) {
+    if (nativeSeconds >= ranges.start(i) && nativeSeconds <= ranges.end(i)) {
       return true;
     }
   }
   return false;
+}
+
+/**
+ * Correction-driven media reloads. A room correction whose target is not
+ * already buffered has to load new media: a range request on a seekable
+ * stream, or a whole stream rebuild outside the seekable window. Either way
+ * the viewer lands late by the load time. Without a budget a viewer on a slow
+ * connection or storage chases the advancing room forever, reloading on every
+ * correction. Only one reload runs at a time, later ones back off, and each
+ * aims ahead by the load time the previous reload took.
+ */
+export const roomReloadMinIntervalMs = 10_000;
+export const roomReloadMaxIntervalMs = 60_000;
+/** An unlanded reload stops blocking the next one after this long. */
+export const roomReloadStaleMs = 30_000;
+/** Upper bound on the load-time lead added to a reload's target. */
+export const roomReloadMaxLeadSeconds = 10;
+
+export interface RoomReloadBudget {
+  /** Media position the in-flight reload aims at, or null when none runs. */
+  targetSeconds: number | null;
+  startedAtMs: number;
+  /** Earliest time the next correction may reload media. */
+  nextAllowedAtMs: number;
+  /** Reloads since this viewer last converged on the room. */
+  attempts: number;
+  /** Load time the last reload took, added to the next target. */
+  leadSeconds: number;
+}
+
+export function createRoomReloadBudget(): RoomReloadBudget {
+  return { targetSeconds: null, startedAtMs: 0, nextAllowedAtMs: 0, attempts: 0, leadSeconds: 0 };
+}
+
+function roomReloadBackoffMs(attempts: number): number {
+  return Math.min(
+    roomReloadMaxIntervalMs,
+    roomReloadMinIntervalMs * 2 ** Math.max(0, attempts - 1),
+  );
+}
+
+export function roomReloadAllowed(budget: RoomReloadBudget, nowMs: number): boolean {
+  if (budget.targetSeconds !== null) {
+    return nowMs - budget.startedAtMs >= roomReloadStaleMs;
+  }
+  return nowMs >= budget.nextAllowedAtMs;
+}
+
+/** Records a reload toward `roomPositionSeconds` and returns where to aim it. */
+export function beginRoomReload(
+  budget: RoomReloadBudget,
+  roomPositionSeconds: number,
+  nowMs: number,
+): number {
+  const targetSeconds = roomPositionSeconds + budget.leadSeconds;
+  budget.targetSeconds = targetSeconds;
+  budget.startedAtMs = nowMs;
+  budget.attempts += 1;
+  budget.nextAllowedAtMs = nowMs + roomReloadStaleMs;
+  return targetSeconds;
+}
+
+/** Whether media at `localPositionSeconds` is the in-flight reload playing. */
+export function roomReloadLanded(budget: RoomReloadBudget, localPositionSeconds: number): boolean {
+  return (
+    budget.targetSeconds !== null &&
+    localPositionSeconds >= budget.targetSeconds - roomCatchupDeadbandSeconds
+  );
+}
+
+/** The reload is playing: remember its load time and space the next one. */
+export function landRoomReload(budget: RoomReloadBudget, nowMs: number): void {
+  if (budget.targetSeconds === null) return;
+  budget.leadSeconds = Math.min(
+    roomReloadMaxLeadSeconds,
+    Math.max(0, (nowMs - budget.startedAtMs) / 1000),
+  );
+  budget.targetSeconds = null;
+  budget.nextAllowedAtMs = nowMs + roomReloadBackoffMs(budget.attempts);
+}
+
+/** The reload was refused or superseded; space the next one. */
+export function abandonRoomReload(budget: RoomReloadBudget, nowMs: number): void {
+  budget.targetSeconds = null;
+  budget.nextAllowedAtMs = nowMs + roomReloadBackoffMs(budget.attempts);
+}
+
+/** The viewer reached the room; the next drift starts a fresh backoff. */
+export function settleRoomReloads(budget: RoomReloadBudget): void {
+  budget.attempts = 0;
+  budget.nextAllowedAtMs = 0;
+}
+
+interface RoomMemberStatus {
+  user_id: number;
+  profile_id: string;
+  display_name: string;
+  is_self: boolean;
+  is_ready?: boolean;
+  is_syncing?: boolean;
+}
+
+interface RoomStatusSnapshot {
+  phase: string;
+  playback_state: string;
+  selection_revision: number;
+  members?: RoomMemberStatus[];
+}
+
+/**
+ * Other viewers the room stopped waiting for: they were still syncing when the
+ * room waited, and it is playing now without them being ready.
+ */
+export function roomMembersLeftBehind(
+  previous: RoomStatusSnapshot | null,
+  next: RoomStatusSnapshot | null,
+): string[] {
+  if (
+    !previous ||
+    !next ||
+    previous.playback_state !== "waiting" ||
+    next.phase !== "playing" ||
+    next.playback_state !== "playing" ||
+    next.selection_revision !== previous.selection_revision
+  ) {
+    return [];
+  }
+  return (next.members ?? [])
+    .filter(
+      (member) =>
+        !member.is_self &&
+        !member.is_ready &&
+        previous.members?.some(
+          (before) =>
+            before.is_syncing &&
+            before.user_id === member.user_id &&
+            before.profile_id === member.profile_id,
+        ),
+    )
+    .map((member) => member.display_name);
 }

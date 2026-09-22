@@ -28,6 +28,7 @@ type roomRuntime struct {
 	SelectionRevision int64                    `json:"selection_revision"`
 	Command           *TransportCommand        `json:"command,omitempty"`
 	Members           map[string]runtimeMember `json:"members"`
+	BufferingWaitAt   time.Time                `json:"buffering_wait_at,omitzero"`
 }
 
 type runtimeMember struct {
@@ -47,6 +48,7 @@ type runtimeMember struct {
 	WaitingCommand    *TransportCommand `json:"waiting_command,omitempty"`
 	SyncingToRoom     bool              `json:"syncing_to_room,omitempty"`
 	LobbyReady        bool              `json:"lobby_ready,omitempty"`
+	LastStallAt       time.Time         `json:"last_stall_at,omitzero"`
 }
 
 type roomOperationKey struct{}
@@ -202,14 +204,17 @@ func withRoomOperation[T any](ctx context.Context, s *Service, roomID string, fn
 }
 
 func (s *Service) runtimeLocked(live *liveRoom) roomRuntime {
-	runtime := roomRuntime{SelectionRevision: live.room.SelectionRevision, Command: live.command, Members: make(map[string]runtimeMember, len(live.members))}
+	runtime := roomRuntime{
+		SelectionRevision: live.room.SelectionRevision, Command: live.command, BufferingWaitAt: live.bufferingWaitAt,
+		Members: make(map[string]runtimeMember, len(live.members)),
+	}
 	for key, m := range live.members {
 		runtime.Members[key] = runtimeMember{
 			UserID: m.userID, ProfileID: m.profileID, DisplayName: m.displayName, ConnectionID: m.connectionID,
 			Connected: memberConnected(m), LeaseUntil: m.leaseUntil, DisconnectedAt: m.disconnectedAt,
 			SessionID: m.sessionID, IsReady: m.isReady, IsBuffering: m.isBuffering, IgnoreWait: m.ignoreWait,
 			LastPingMS: m.lastPingMS, CorrectionCommand: m.correctionCommand, WaitingCommand: m.waitingCommand,
-			SyncingToRoom: m.syncingToRoom, LobbyReady: m.lobbyReady,
+			SyncingToRoom: m.syncingToRoom, LobbyReady: m.lobbyReady, LastStallAt: m.lastStallAt,
 		}
 	}
 	return runtime
@@ -224,8 +229,10 @@ func (s *Service) adoptRuntimeLocked(ctx context.Context, live *liveRoom, room R
 	}
 	live.room = room
 	live.command = state.Command
+	live.bufferingWaitAt = state.BufferingWaitAt
 	if selectionChanged {
 		live.command = nil
+		live.bufferingWaitAt = time.Time{}
 		s.disarmWaitingDeadlineLocked(live)
 	}
 	members := make(map[string]*memberState, len(state.Members))
@@ -237,6 +244,7 @@ func (s *Service) adoptRuntimeLocked(ctx context.Context, live *liveRoom, room R
 			ignoreWait: stored.IgnoreWait, lastPingMS: stored.LastPingMS, waitingCommand: stored.WaitingCommand,
 			correctionCommand: stored.CorrectionCommand,
 			remoteConnected:   stored.Connected, syncingToRoom: stored.SyncingToRoom, lobbyReady: stored.LobbyReady,
+			lastStallAt: stored.LastStallAt,
 		}
 		if old := live.members[key]; old != nil && old.connectionID == stored.ConnectionID && stored.Connected {
 			m.connection, m.lastCommandID = old.connection, old.lastCommandID
@@ -253,15 +261,7 @@ func (s *Service) adoptRuntimeLocked(ctx context.Context, live *liveRoom, room R
 			m.disconnectedAt = m.leaseUntil
 		}
 		if selectionChanged {
-			m.sessionID = ""
-			m.isReady = false
-			m.isBuffering = false
-			m.ignoreWait = false
-			m.waitingCommand = nil
-			m.correctionCommand = nil
-			m.lastCommandID = ""
-			m.syncingToRoom = false
-			m.lobbyReady = false
+			m.resetForSelection()
 		}
 		// Stage and mode changes clear lobby readiness in the same transaction
 		// as the room update. A stale local room must not erase a later ready.
@@ -349,11 +349,7 @@ func (s *Service) reconcileRoom(ctx context.Context, roomID string) error {
 		}
 		force := waitingDeadlineReached(live, s.now())
 		if force {
-			for _, member := range live.members {
-				if memberConnected(member) && !member.isReady {
-					member.ignoreWait = true
-				}
-			}
+			s.skipUnreadyMembersLocked(live, s.now())
 		}
 		snapshots, commands := s.maybeResumeFromWaitingLocked(ctx, live, force)
 		state := s.runtimeLocked(live)
