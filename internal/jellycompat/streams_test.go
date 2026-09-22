@@ -20,6 +20,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/mediaprobe"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/netaccess"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -560,6 +561,7 @@ func TestBuildProxyRedirectURLRequestsSourceAlignedCompatManifest(t *testing.T) 
 		"http://transcode-1",
 		0,
 		&nodepool.Node{URL: "http://proxy-1"},
+		netaccess.Path{},
 	)
 	if err != nil {
 		t.Fatalf("buildProxyRedirectURL: %v", err)
@@ -575,7 +577,7 @@ func TestBuildProxyRedirectURLMarksCopyFMP4ForOldReaderRejection(t *testing.T) {
 	redirectURL, err := h.buildProxyRedirectURL(
 		"play-1", "upstream-1", string(playback.PlayTranscode),
 		&models.MediaFile{FilePath: "/media/movie.mkv"}, source, nil, time.Time{},
-		"http://transcode-1", 0, &nodepool.Node{URL: "http://proxy-1"},
+		"http://transcode-1", 0, &nodepool.Node{URL: "http://proxy-1"}, netaccess.Path{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -599,7 +601,7 @@ func TestBuildProxyRedirectURLCarriesMPEGTSForRemoteCopyRecipe(t *testing.T) {
 	redirectURL, err := h.buildProxyRedirectURL(
 		"play-1", "upstream-1", string(playback.PlayTranscode),
 		&models.MediaFile{FilePath: "/media/movie.mkv"}, source, nil, time.Time{},
-		"http://transcode-1", 0, &nodepool.Node{URL: "http://proxy-1"},
+		"http://transcode-1", 0, &nodepool.Node{URL: "http://proxy-1"}, netaccess.Path{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -616,7 +618,7 @@ func TestBuildProxyRedirectURLCarriesMPEGTSForRemoteCopyRecipe(t *testing.T) {
 func TestBuildProxyRedirectURLMarksToneMapForOldReaderRejection(t *testing.T) {
 	h := &PlaybackHandler{JWTSecret: "test-secret"}
 	source := PlaybackMediaSource{Version: catalog.FileVersion{HDR: true, VideoTracks: []models.VideoTrack{{VideoRangeType: "HDR10", ColorTransfer: "smpte2084"}}}}
-	redirectURL, err := h.buildProxyRedirectURL("play-1", "upstream-1", string(playback.PlayTranscode), &models.MediaFile{FilePath: "/media/hdr.mkv"}, source, nil, time.Time{}, "http://transcode-1", 0, &nodepool.Node{URL: "http://proxy-1"})
+	redirectURL, err := h.buildProxyRedirectURL("play-1", "upstream-1", string(playback.PlayTranscode), &models.MediaFile{FilePath: "/media/hdr.mkv"}, source, nil, time.Time{}, "http://transcode-1", 0, &nodepool.Node{URL: "http://proxy-1"}, netaccess.Path{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -653,6 +655,7 @@ func TestBuildProxyRedirectURLCarriesAudioOnlyRemuxClaim(t *testing.T) {
 		"",
 		0,
 		&nodepool.Node{URL: "http://proxy-1"},
+		netaccess.Path{},
 	)
 	if err != nil {
 		t.Fatalf("buildProxyRedirectURL: %v", err)
@@ -894,11 +897,11 @@ func TestProxyRedirectURLClaimGrowthBudget(t *testing.T) {
 
 	for _, method := range []string{string(playback.PlayDirect), string(playback.PlayRemux), string(playback.PlayTranscode)} {
 		t.Run(method, func(t *testing.T) {
-			withClaims, err := h.buildProxyRedirectURL("play", "upstream", method, file, source, session, createdAt, transcodeNodeURL, 12.5, proxyNode)
+			withClaims, err := h.buildProxyRedirectURL("play", "upstream", method, file, source, session, createdAt, transcodeNodeURL, 12.5, proxyNode, netaccess.Path{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			withoutClaims, err := h.buildProxyRedirectURL("play", "upstream", method, file, source, nil, time.Time{}, transcodeNodeURL, 12.5, proxyNode)
+			withoutClaims, err := h.buildProxyRedirectURL("play", "upstream", method, file, source, nil, time.Time{}, transcodeNodeURL, 12.5, proxyNode, netaccess.Path{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1504,13 +1507,75 @@ type recordingSessionSyncer struct {
 	calls           int
 	lastCtxErr      error
 	lastHadDeadline bool
+	onSync          func()
 }
 
 func (s *recordingSessionSyncer) SyncNow(ctx context.Context) error {
 	s.calls++
 	s.lastCtxErr = ctx.Err()
 	_, s.lastHadDeadline = ctx.Deadline()
+	if s.onSync != nil {
+		s.onSync()
+	}
 	return nil
+}
+
+type outputFormatTestSessionManager struct {
+	*testCompatSessionManager
+}
+
+func (m *outputFormatTestSessionManager) SetOutputFormat(id, container, protocol string) error {
+	session, err := m.GetSession(id)
+	if err != nil {
+		return err
+	}
+	session.OutputContainer, session.OutputProtocol = container, protocol
+	return nil
+}
+
+func TestHandleVideoStreamSyncsChangedRemuxOutputFormat(t *testing.T) {
+	for _, direct := range []bool{false, true} {
+		t.Run(fmt.Sprintf("direct_%t", direct), func(t *testing.T) {
+			handler, routeID, directBody := newStaticDirectPlayHandler(t)
+			source := testCompatSource(handler.codec, testCompatVersion())
+			source.SupportsDirectPlay, source.SupportsDirectStream = direct, true
+			method := "remux"
+			wantBody := "remuxed"
+			if direct {
+				method, wantBody = "direct", directBody
+			} else {
+				handler.FFmpegPath, _, _ = writeCompatAudioRecipeFFmpeg(t, false, wantBody)
+			}
+			mgr := &outputFormatTestSessionManager{&testCompatSessionManager{sessions: map[string]*playback.Session{
+				"upstream-1": {ID: "upstream-1", PlayMethod: playback.PlayMethod(method), BasePlayMethod: playback.PlayMethod(method)},
+			}}}
+			handler.sessionMgr = mgr
+			handler.playbackStore.Put(PlaybackSession{
+				ID: "play-1", CompatToken: "token-1", RouteItemID: routeID,
+				UpstreamSessionID: "upstream-1", UpstreamPlayMethod: method, MediaSources: []PlaybackMediaSource{source},
+			})
+			syncer := &recordingSessionSyncer{onSync: func() {
+				session, _ := mgr.GetSession("upstream-1")
+				if session.OutputContainer != playback.OutputContainerFMP4 || session.OutputProtocol != playback.OutputProtocolHTTP {
+					t.Fatal("immediate admin sync ran before the remux output format was recorded")
+				}
+			}}
+			handler.SessionSyncer = syncer
+			for range 2 {
+				rec := serveCompatVideoStream(handler, routeID, "PlaySessionId=play-1&MediaSourceId="+url.QueryEscape(source.ID), false)
+				if rec.Code != http.StatusOK || rec.Body.String() != wantBody {
+					t.Fatalf("stream = %d %q, want 200 %q", rec.Code, rec.Body.String(), wantBody)
+				}
+				wantCalls := 1
+				if direct {
+					wantCalls = 0
+				}
+				if syncer.calls != wantCalls {
+					t.Fatalf("admin sync calls = %d, want %d; unchanged requests must not flush again", syncer.calls, wantCalls)
+				}
+			}
+		})
+	}
 }
 
 // TestHandleSessionPlayingStopped_TearsDownAndSyncsImmediately verifies the

@@ -77,6 +77,28 @@ func TestSessionManager_StartStop(t *testing.T) {
 	}
 }
 
+func TestSessionManagerOutputFormatFollowsReplacement(t *testing.T) {
+	sm := playback.NewSessionManager(5, 2)
+	session, err := sm.StartSession(1, "profile", 100, playback.PlayRemux, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sm.SetOutputFormat(session.ID, "fmp4", "hls"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := sm.GetSession(session.ID)
+	if err != nil || got.OutputContainer != "fmp4" || got.OutputProtocol != "hls" {
+		t.Fatal("transport output format was not recorded")
+	}
+	if err := sm.UpdateStreamState(session.ID, playback.SessionStreamState{PlayMethod: playback.PlayDirect, TranscodeRouteSet: true}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = sm.GetSession(session.ID)
+	if got.OutputContainer != "" || got.OutputProtocol != "" {
+		t.Fatal("a replacement retained the previous container")
+	}
+}
+
 func TestSessionManager_StopNonExistent(t *testing.T) {
 	sm := playback.NewSessionManager(5, 2)
 
@@ -766,17 +788,18 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := manager.UpdateStreamState(session.ID, playback.SessionStreamState{
-		PlayMethod:           playback.PlayDirect,
-		BasePlayMethod:       playback.PlayDirect,
-		AudioTrackIndex:      0,
-		TranscodeRouteSet:    true,
-		SubtitleTrackIndex:   -1,
-		StreamBitrateKbps:    8_000,
-		SourceAudioChannels:  6,
-		TranscodeHWAccel:     "qsv",
-		ToneMapMode:          tonemap.ModeHardware,
-		TranscodeNodeURL:     "http://old-node",
-		TranscodeTransportID: "old-transport",
+		PlayMethod:             playback.PlayDirect,
+		BasePlayMethod:         playback.PlayDirect,
+		AudioTrackIndex:        0,
+		TranscodeRouteSet:      true,
+		SubtitleTrackIndex:     -1,
+		StreamBitrateKbps:      8_000,
+		SourceAudioChannels:    6,
+		TranscodeHWAccel:       "qsv",
+		ToneMapMode:            tonemap.ModeHardware,
+		TranscodeNodeURL:       "http://old-node",
+		TranscodeTransportID:   "old-transport",
+		RoutingNetworkProvider: new("tailscale"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -784,18 +807,19 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 	rollback, err := manager.ApplyReplacement(session.ID, playback.SessionReplacement{
 		EffectiveMediaFileID: 84,
 		StreamState: playback.SessionStreamState{
-			PlayMethod:           playback.PlayTranscode,
-			BasePlayMethod:       playback.PlayTranscode,
-			AudioTrackIndex:      2,
-			TranscodeAudio:       true,
-			TranscodeRouteSet:    true,
-			SubtitleTrackIndex:   1,
-			StreamBitrateKbps:    3_500,
-			SourceAudioChannels:  8,
-			TranscodeHWAccel:     "none",
-			ToneMapMode:          tonemap.ModeSoftware,
-			TranscodeNodeURL:     "http://new-node",
-			TranscodeTransportID: "new-transport",
+			PlayMethod:             playback.PlayTranscode,
+			BasePlayMethod:         playback.PlayTranscode,
+			AudioTrackIndex:        2,
+			TranscodeAudio:         true,
+			TranscodeRouteSet:      true,
+			SubtitleTrackIndex:     1,
+			StreamBitrateKbps:      3_500,
+			SourceAudioChannels:    8,
+			TranscodeHWAccel:       "none",
+			ToneMapMode:            tonemap.ModeSoftware,
+			TranscodeNodeURL:       "http://new-node",
+			TranscodeTransportID:   "new-transport",
+			RoutingNetworkProvider: new(""),
 		},
 		PositionSeconds: &position,
 		IsPaused:        true,
@@ -808,7 +832,7 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	if replaced.MediaFileID != 84 || replaced.PlayMethod != playback.PlayTranscode || replaced.AudioTrackIndex != 2 ||
-		replaced.SourceAudioChannels != 8 ||
+		replaced.SourceAudioChannels != 8 || replaced.RoutingNetworkProvider == nil || *replaced.RoutingNetworkProvider != "" ||
 		replaced.TranscodeNodeURL != "http://new-node" || replaced.TranscodeHWAccel != "none" || replaced.ToneMapMode != "software" || replaced.Position != position || !replaced.IsPaused {
 		t.Fatalf("replacement session = %#v", replaced)
 	}
@@ -820,7 +844,7 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	if restored.MediaFileID != 42 || restored.PlayMethod != playback.PlayDirect || restored.AudioTrackIndex != 0 ||
-		restored.SourceAudioChannels != 6 ||
+		restored.SourceAudioChannels != 6 || restored.RoutingNetworkProvider == nil || *restored.RoutingNetworkProvider != "tailscale" ||
 		restored.TranscodeNodeURL != "http://old-node" || restored.TranscodeTransportID != "old-transport" ||
 		restored.TranscodeHWAccel != "qsv" || restored.ToneMapMode != "hardware" ||
 		restored.Position != 0 || restored.IsPaused {
