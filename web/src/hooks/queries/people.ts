@@ -1,9 +1,15 @@
-import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  QueryObserver,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { adminRefreshPerson, adminUpdatePerson } from "@/api/v2/people";
 import type { ItemDetail, Person, UpdatePersonRequest } from "@/api/types";
-import { refreshPerson, searchPeople, type PersonRefreshResult } from "@/api/v2/people";
+import { getPerson, refreshPerson, searchPeople, type PersonRefreshResult } from "@/api/v2/people";
 
 import { personKeys } from "./keys";
 import { isItemDetailQueryKey } from "./mediaSurfaceRefresh";
@@ -20,6 +26,43 @@ export function invalidatePersonItemDetails(queryClient: QueryClient, personId: 
       );
     },
   });
+}
+
+const queuedRefreshObservers = new WeakMap<QueryClient, Map<string, () => void>>();
+
+function observeQueuedPersonRefresh(queryClient: QueryClient, id: string) {
+  const refreshes = queuedRefreshObservers.get(queryClient) ?? new Map<string, () => void>();
+  queuedRefreshObservers.set(queryClient, refreshes);
+  refreshes.get(id)?.();
+
+  const queryKey = personKeys.detail(id);
+  let photoUrl = queryClient.getQueryData<Person>(queryKey)?.photo_url;
+  const observer = new QueryObserver(queryClient, {
+    queryKey,
+    queryFn: ({ signal }) => getPerson(id, { signal }),
+    staleTime: 0,
+    retry: false,
+    refetchInterval: 3_000,
+  });
+  const unsubscribe = observer.subscribe((result) => {
+    if (result.isSuccess && result.data.photo_url !== photoUrl) {
+      photoUrl = result.data.photo_url;
+      void invalidatePersonItemDetails(queryClient, id);
+    }
+  });
+  const query = observer.getCurrentQuery();
+  const unsubscribeCache = queryClient.getQueryCache().subscribe((event) => {
+    if (event.type === "removed" && event.query === query) stop();
+  });
+  // Keep observing after navigation, but stop on timeout or a profile/cache reset.
+  const timer = setTimeout(stop, 30_000);
+  function stop() {
+    clearTimeout(timer);
+    unsubscribe();
+    unsubscribeCache();
+    refreshes.delete(id);
+  }
+  refreshes.set(id, stop);
 }
 
 export function usePersonSearch(query: string, limit = 20, enabled = true) {
@@ -48,6 +91,8 @@ export function useRefreshPerson(id: string | undefined, isAdmin: boolean) {
 
   return useMutation({
     retry: false,
+    onMutate: () =>
+      queryClient.getQueryCache().find({ queryKey: personKeys.detail(id!), exact: true }),
     mutationFn: async (): Promise<RefreshPersonResult> => {
       if (!id) {
         throw new Error("Person ID is required");
@@ -65,7 +110,7 @@ export function useRefreshPerson(id: string | undefined, isAdmin: boolean) {
         response: await refreshPerson(id),
       };
     },
-    onSuccess: async (result) => {
+    onSuccess: async (result, _variables, personQuery) => {
       if (result.mode === "admin" && id) {
         queryClient.setQueryData(personKeys.detail(id), result.person);
         await Promise.all([
@@ -76,6 +121,14 @@ export function useRefreshPerson(id: string | undefined, isAdmin: boolean) {
         return;
       }
 
+      if (result.mode === "queued" && personQuery) {
+        const refreshedId = result.response.person_id;
+        const current = queryClient.getQueryCache().find({
+          queryKey: personKeys.detail(refreshedId),
+          exact: true,
+        });
+        if (current === personQuery) observeQueuedPersonRefresh(queryClient, refreshedId);
+      }
       toast.success("Person refresh queued");
     },
     onError: (err) => {

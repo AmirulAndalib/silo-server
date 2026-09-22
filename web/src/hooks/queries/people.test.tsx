@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -7,7 +7,7 @@ import itemFixture from "../../../../contracts/api/v2/fixtures/get_catalog_item_
 import { catalogItemDetailFromV2 } from "@/api/v2/catalog";
 import { installPolicyStorageMocks, jsonResponse } from "@/pages/admin-policy/policyTestUtils";
 import { useCatalogItemDetail } from "./catalogRead";
-import { catalogKeys, itemKeys } from "./keys";
+import { catalogKeys, itemKeys, personKeys } from "./keys";
 import { useRefreshPerson, useUpdatePersonMetadata } from "./people";
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -25,12 +25,24 @@ const credit = {
 };
 
 describe("person refresh and cached item credits", () => {
+  const clients: QueryClient[] = [];
   beforeEach(installPolicyStorageMocks);
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    cleanup();
+    for (const client of clients.splice(0)) client.clear();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
   function setup({ fail = false } = {}) {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false, staleTime: 120_000 } },
+    });
+    clients.push(client);
+    client.setQueryData(personKeys.detail(personId), {
+      id: Number(personId),
+      name: "Actor",
+      photo_url: oldPhoto,
     });
     const detail = catalogItemDetailFromV2({ ...itemFixture, cast: [credit] });
     const relatedKeys = [
@@ -57,13 +69,16 @@ describe("person refresh and cached item credits", () => {
       if (path.startsWith("/api/v2/admin/people/")) {
         return jsonResponse({ id: personId, name: "Actor", photo_url: newPhoto });
       }
-      return jsonResponse({ status: "queued" });
+      if (path === `/api/v2/catalog/people/${personId}`) {
+        return jsonResponse({ id: personId, name: "Actor", photo_url: oldPhoto });
+      }
+      return jsonResponse({ status: "queued", person_id: personId });
     });
     vi.stubGlobal("fetch", fetchMock);
     const wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
-    return { client, detail, relatedKeys, unrelatedKey, crewKey, wrapper };
+    return { client, detail, relatedKeys, unrelatedKey, crewKey, fetchMock, wrapper };
   }
 
   it.each(["refresh", "edit"] as const)(
@@ -105,4 +120,66 @@ describe("person refresh and cached item credits", () => {
       for (const key of relatedKeys) expect(client.getQueryState(key)?.isInvalidated).toBe(false);
     },
   );
+
+  it.each(["timeout", "cache reset"] as const)(
+    "stops queued refresh observation after %s",
+    async (stopReason) => {
+      vi.useFakeTimers();
+      const { client, fetchMock, wrapper } = setup();
+      const { result, unmount } = renderHook(() => useRefreshPerson(personId, false), { wrapper });
+      await act(async () => {
+        await result.current.mutateAsync();
+      });
+      unmount();
+      await act(() => vi.advanceTimersByTimeAsync(3_000));
+      expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith(personId))).toHaveLength(
+        2,
+      );
+
+      if (stopReason === "cache reset") client.clear();
+      else await act(() => vi.advanceTimersByTimeAsync(30_000));
+      const requests = fetchMock.mock.calls.length;
+      await act(() => vi.advanceTimersByTimeAsync(30_000));
+      expect(fetchMock).toHaveBeenCalledTimes(requests);
+      if (stopReason === "cache reset") expect(client.getQueryCache().getAll()).toHaveLength(0);
+    },
+  );
+
+  it("replaces an existing observer when the same person is queued again", async () => {
+    vi.useFakeTimers();
+    const { fetchMock, wrapper } = setup();
+    const { result } = renderHook(() => useRefreshPerson(personId, false), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync();
+      await result.current.mutateAsync();
+    });
+    await act(() => vi.advanceTimersByTimeAsync(3_000));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith(personId))).toHaveLength(3);
+  });
+
+  it("does not start observation when the cache was cleared while queueing", async () => {
+    const { client, fetchMock, wrapper } = setup();
+    let finishQueue!: () => void;
+    const queued = new Promise<Response>((resolve) => {
+      finishQueue = () => resolve(jsonResponse({ status: "queued", person_id: personId }));
+    });
+    fetchMock.mockImplementation(async (input) =>
+      String(input).endsWith("/refresh")
+        ? queued
+        : jsonResponse({ id: personId, name: "Actor", photo_url: oldPhoto }),
+    );
+    const { result } = renderHook(() => useRefreshPerson(personId, false), { wrapper });
+    let request!: Promise<unknown>;
+    act(() => {
+      request = result.current.mutateAsync();
+    });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    client.clear();
+    await act(async () => {
+      finishQueue();
+      await request;
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(client.getQueryCache().getAll()).toHaveLength(0);
+  });
 });
