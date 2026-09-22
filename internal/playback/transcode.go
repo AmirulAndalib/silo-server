@@ -21,6 +21,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/mediaprobe"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/processmetrics"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/google/uuid"
 )
@@ -113,9 +114,13 @@ type TranscodeOpts struct {
 	TargetBitrateKbps      int     // max video bitrate in kbps; 0 = CRF-only (no cap)
 	TotalDuration          float64 // total media duration in seconds (for VOD manifest)
 	FastStart              bool    // use superfast preset for faster first-segment production
-	NodeType               string
-	ExecutionMode          string
-	FFmpegLogSink          FFmpegLogSink
+	// ThrottleSeconds is the resolved forward-buffer policy for this session.
+	// Zero disables throttling. It is durable so a remote executor can preserve
+	// the API server's policy across node reconstruction without reading settings.
+	ThrottleSeconds int
+	NodeType        string
+	ExecutionMode   string
+	FFmpegLogSink   FFmpegLogSink
 }
 
 // DV7ToHDR10BitstreamFilter strips Dolby Vision RPU metadata during a
@@ -189,6 +194,8 @@ type TranscodeSession struct {
 	pruneBeforeStart     bool
 	copyDurationMu       sync.Mutex
 	copyDurationIndex    copyManifestDurationIndex
+	copyTimelineMu       sync.Mutex
+	copyTimeline         observedCopyTimeline
 	segmentGeneration    uint64
 	segmentIncarnation   string
 	throttler            *TranscodeThrottler
@@ -392,6 +399,7 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	// this ffmpeg produces is strictly newer than the stamp.
 	startedAt := time.Now()
 	if err := cmd.Start(); err != nil {
+		processmetrics.Record(processmetrics.Transcode, nil, err, ctx.Err())
 		cancel()
 		releaseHWDevice()
 		s.logFFmpegEvent(ctx, "ffmpeg process exit error", err.Error())
@@ -415,6 +423,7 @@ func (s *TranscodeSession) monitorFFmpeg(ctx context.Context, cmd *exec.Cmd, don
 	// flushing/logging so slow diagnostics cannot make the allocator count a
 	// process that has already exited.
 	releaseHWDevice()
+	processmetrics.Record(processmetrics.Transcode, cmd.ProcessState, waitErr, ctx.Err())
 	s.flushStderr(ctx)
 	s.mu.Lock()
 	s.running = false
@@ -776,7 +785,7 @@ func buildFFmpegArgs(opts TranscodeOpts) []string {
 	// race with fMP4 (hls.js #6337).
 	var segmentPattern string
 	segmentType := "mpegts"
-	copyVideoUsesFMP4 := isVideoCopy && !opts.CopyVideoMPEGTS && !IsMPEG2VideoCodec(opts.SourceVideoCodec)
+	copyVideoUsesFMP4 := copyVideoUsesFMP4(opts)
 	if copyVideoUsesFMP4 {
 		segmentType = "fmp4"
 		segmentPattern = filepath.Join(opts.OutputDir, "seg_%05d.m4s")
@@ -896,16 +905,40 @@ func appendStreamSelectionArgs(args []string, opts TranscodeOpts) []string {
 	return args
 }
 
+// copyVideoUsesFMP4 reports whether copied video is packaged as fragmented MP4
+// rather than MPEG-TS. Shared by segment-type selection and timestamp policy
+// so the two cannot disagree.
+func copyVideoUsesFMP4(opts TranscodeOpts) bool {
+	return strings.EqualFold(opts.TargetCodecVideo, "copy") &&
+		!opts.CopyVideoMPEGTS &&
+		!IsMPEG2VideoCodec(opts.SourceVideoCodec)
+}
+
 // appendTimestampNormalizationArgs selects timestamp handling based on the
 // playback mode. Jellyfin-compatible copy-video fMP4 preserves source timing
 // while start_at_zero makes the output presentation timeline begin at zero.
 // This keeps initial fragments decodable without losing the source-relative
 // timing required by segment-driven resume restarts.
+//
+// Negative timestamps must still be lifted. When the audio is re-encoded to
+// AAC the encoder's 1024-sample priming delay places the first audio packet
+// before zero, and with "disabled" the mov muxer writes that value straight
+// into the first fragment's tfdt (baseMediaDecodeTime -1024). ExoPlayer/Media3
+// rejects any tfdt with the sign bit set ("Top bit not zero"), so every
+// full-file copy-video start with audio adaptation failed on Android before
+// the first frame. make_non_negative shifts all streams by the same minimal
+// offset only when a timestamp is negative; resumes and audio-copy starts
+// carry no negative timestamps and are therefore unaffected. MPEG-TS copy
+// output has no tfdt and keeps the source timestamps untouched.
 func appendTimestampNormalizationArgs(args []string, opts TranscodeOpts) []string {
 	if strings.EqualFold(opts.TargetCodecVideo, "copy") {
+		negativeTS := "disabled"
+		if copyVideoUsesFMP4(opts) {
+			negativeTS = "make_non_negative"
+		}
 		return append(args,
 			"-copyts",
-			"-avoid_negative_ts", "disabled",
+			"-avoid_negative_ts", negativeTS,
 			"-start_at_zero",
 		)
 	}
@@ -918,19 +951,15 @@ func appendTimestampNormalizationArgs(args []string, opts TranscodeOpts) []strin
 // appendSegmentBoundaryArgs forces keyframes on segment boundaries so each HLS
 // fragment starts cleanly and can be appended independently by the player.
 //
-// With -copyts, the output timestamp t starts at the seek position rather than
-// 0. Subtracting SeekSeconds prevents a "catch-up storm" where n_forced races
-// from 0 to seek_position/segment_duration, making every frame an I-frame and
-// grinding encoding to a halt for large seeks.
+// FFmpeg's force_key_frames expression clock starts at the first encoded
+// frame, even with -copyts. Subtracting the source seek would suppress forced
+// keyframes until that much output had elapsed. Segments would then follow the
+// encoder's GOP instead of the synthetic manifest's fixed-duration timeline,
+// giving the same segment number different source times after a seek restart.
 func appendSegmentBoundaryArgs(args []string, opts TranscodeOpts) []string {
 	args = append(args, "-sc_threshold", "0")
-	if opts.SeekSeconds > 0 {
-		args = append(args, "-force_key_frames",
-			fmt.Sprintf("expr:gte(t-%.3f,n_forced*%d)", opts.SeekSeconds, opts.SegmentDuration))
-	} else {
-		args = append(args, "-force_key_frames",
-			fmt.Sprintf("expr:gte(t,n_forced*%d)", opts.SegmentDuration))
-	}
+	args = append(args, "-force_key_frames",
+		fmt.Sprintf("expr:gte(t,n_forced*%d)", opts.SegmentDuration))
 
 	// Hardware encoders (QSV, VAAPI, NVENC, VideoToolbox) may not reliably
 	// honor force_key_frames expressions. Set explicit GOP size so segment
@@ -1461,7 +1490,7 @@ func appendAudioArgs(args []string, opts TranscodeOpts) []string {
 		// Legacy Dolby Digital; universal AVR support.
 		args = append(args, "-c:a", "ac3", "-b:a", "448k")
 	default:
-		channels, bitrateKbps := resolvedAACOutputV3(opts.TargetAudioChannels, opts.TargetAudioBitrateKbps)
+		channels, bitrateKbps := ResolveAACOutputV3(opts.TargetAudioChannels, opts.TargetAudioBitrateKbps)
 		args = append(args, "-c:a", "aac", "-b:a", strconv.Itoa(bitrateKbps)+"k", "-ac", strconv.Itoa(channels))
 		args = appendAACEncodeFilterArgs(args, opts.SourceAudioChannels, opts.TargetCodecAudio, opts.TargetAudioChannels, channels)
 	}
@@ -1469,7 +1498,10 @@ func appendAudioArgs(args []string, opts TranscodeOpts) []string {
 	return args
 }
 
-func resolvedAACOutputV3(targetChannels, targetBitrateKbps int) (int, int) {
+// ResolveAACOutputV3 returns the encoded channel count and bitrate in kbps,
+// applying the encoder defaults when no bitrate is specified. Negotiation and
+// FFmpeg argument construction must use the same output facts.
+func ResolveAACOutputV3(targetChannels, targetBitrateKbps int) (int, int) {
 	channels := 2
 	if targetChannels == 1 {
 		channels = 1
@@ -1982,20 +2014,41 @@ const SourceTimelineQueryParam = "source_timeline"
 // first produced segment retains its source-time position. Synthetic manifests
 // already cover the full source timeline and need no adjustment.
 func (s *TranscodeSession) BuildSourceAlignedPlaybackManifest(segPrefix, rawQuery string) ([]byte, error) {
+	s.mu.Lock()
+	opts, generation, restarting := s.opts, s.segmentGeneration, s.restarting != nil
+	s.mu.Unlock()
+	if restarting {
+		return nil, ErrManifestNotReady
+	}
 	manifest, err := s.BuildPlaybackManifest(segPrefix, rawQuery)
 	if err != nil {
 		return nil, err
 	}
-	opts := s.Opts()
 	usesRealManifest := strings.EqualFold(opts.TargetCodecVideo, "copy") ||
 		!CanGenerateSyntheticManifest(opts.TotalDuration, opts.SegmentDuration)
-	if opts.SeekSeconds <= 0 || !usesRealManifest {
+	if !usesRealManifest {
 		return manifest, nil
 	}
 
 	gapURI := segPrefix + "source_timeline_gap" + hlsSegmentExtension(opts)
 	if rawQuery != "" {
 		gapURI += "?" + rawQuery
+	}
+	if strings.EqualFold(opts.TargetCodecVideo, "copy") && opts.CopySeekAnchorResolved {
+		timeline, err := parseManifestTimeline(manifest)
+		if err != nil {
+			return nil, err
+		}
+		origin, err := s.copyManifestOrigin(opts, generation, timeline)
+		if err != nil {
+			return nil, err
+		}
+		opts.StreamOriginSeconds = origin
+		opts.StartSegmentNumber = timeline.entries[0].number
+		opts.SeekSeconds = max(opts.SeekSeconds, origin)
+	}
+	if opts.SeekSeconds <= 0 {
+		return manifest, nil
 	}
 	return AlignRealManifestToSourceTimeline(manifest, opts, gapURI)
 }
@@ -2022,14 +2075,37 @@ func AlignRealManifestToSourceTimeline(manifest []byte, opts TranscodeOpts, gapU
 	firstSegment := timeline.entries[0].number
 	advancedSegments := max(0, firstSegment-opts.StartSegmentNumber)
 	gapDuration := opts.SeekSeconds + float64(advancedSegments*segmentDuration)
+	if strings.EqualFold(opts.TargetCodecVideo, "copy") && opts.CopySeekAnchorResolved {
+		// A copied stream begins at the demuxer-selected keyframe, which can
+		// precede the requested seek. Its fragment timestamps must use that origin.
+		if advancedSegments > 0 {
+			return nil, fmt.Errorf("cannot align an evicted copy manifest without its original fragment timeline")
+		}
+		gapDuration = opts.StreamOriginSeconds
+	}
+	// BuildPlaybackManifest's generation-relative start (0.001) must not point
+	// into the unavailable prefix after source-time alignment. Keep this hint
+	// at the requested source position on every reload/remount, including a
+	// seek whose copied keyframe is at source zero and needs no gap.
+	lines := bytes.Split(manifest, []byte("\n"))
+	startTag := []byte(fmt.Sprintf("#EXT-X-START:TIME-OFFSET=%.6f,PRECISE=YES", opts.SeekSeconds))
+	foundStart := false
+	for i, line := range lines {
+		if bytes.HasPrefix(bytes.TrimSpace(line), []byte("#EXT-X-START:")) {
+			lines[i] = startTag
+			foundStart = true
+		}
+	}
+	if !foundStart {
+		lines = append(lines[:1], append([][]byte{startTag}, lines[1:]...)...)
+	}
 	if gapDuration <= 0 {
-		return manifest, nil
+		return bytes.Join(lines, []byte("\n")), nil
 	}
 	if gapURI == "" {
 		gapURI = "source_timeline_gap" + hlsSegmentExtension(opts)
 	}
 
-	lines := bytes.Split(manifest, []byte("\n"))
 	targetDuration := segmentDuration
 	for _, line := range lines {
 		trimmed := bytes.TrimSpace(line)
@@ -2974,6 +3050,7 @@ func (s *TranscodeSession) restart(
 	// As in StartTranscode, stamp the generation before the process can write.
 	startedAt := time.Now()
 	if err := cmd.Start(); err != nil {
+		processmetrics.Record(processmetrics.Transcode, nil, err, ctx.Err())
 		cancel()
 		releaseHWDevice()
 		s.mu.Lock()
@@ -3301,10 +3378,15 @@ func (s *TranscodeSession) manifestTimelineSnapshot() (float64, manifestTimeline
 	s.mu.Lock()
 	manifestPath := filepath.Join(s.outputDir, "stream.m3u8")
 	baseSeekSeconds := s.opts.SeekSeconds
+	opts := s.opts
+	generation, restarting := s.segmentGeneration, s.restarting != nil
 	if strings.EqualFold(s.opts.TargetCodecVideo, "copy") && s.opts.CopySeekAnchorResolved {
 		baseSeekSeconds = s.opts.StreamOriginSeconds
 	}
 	s.mu.Unlock()
+	if restarting {
+		return 0, manifestTimeline{}, ErrManifestNotReady
+	}
 
 	manifest, err := os.ReadFile(manifestPath)
 	if err != nil {
@@ -3321,6 +3403,12 @@ func (s *TranscodeSession) manifestTimelineSnapshot() (float64, manifestTimeline
 
 	if len(timeline.entries) == 0 {
 		return 0, manifestTimeline{}, ErrManifestNotReady
+	}
+	if strings.EqualFold(opts.TargetCodecVideo, "copy") && opts.CopySeekAnchorResolved {
+		baseSeekSeconds, err = s.copyManifestOrigin(opts, generation, timeline)
+		if err != nil {
+			return 0, manifestTimeline{}, err
+		}
 	}
 	return baseSeekSeconds, timeline, nil
 }

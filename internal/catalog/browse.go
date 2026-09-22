@@ -11,16 +11,32 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Silo-Server/silo-server/internal/lang"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
-const browseSortRecentlyAdded = "recently_added"
+const (
+	browseSortRecentlyAdded = "recently_added"
+	browseTypeEpisode       = "episode"
+	BrowseSortTitle         = "sort_title"
+	BrowseSortReleaseDate   = "release_date"
+	BrowseSortCreatedAt     = "created_at"
+	BrowseOrderDescending   = "desc"
+)
 
 // BrowseFilters represents all supported filter, sort, and pagination parameters
 // for the /items browse endpoint.
 type BrowseFilters struct {
-	Type               string   // single type ("movie") or comma-separated ("movie,series")
-	Genre              string   // single genre filter (GIN index)
+	Type               string // single type ("movie") or comma-separated ("movie,series")
+	Genre              string // single genre filter (GIN index)
+	UserID             int
+	ProfileID          string
+	IsFavorite         bool
+	IsPlayed           *bool
+	IsResumable        bool
+	Genres             []string // any matching genre
+	Years              []int    // exact release years
+	SearchTerm         string   // case-insensitive literal title substring
 	NamePrefix         string   // case-insensitive prefix filter on sort_title/title
 	ContentIDs         []string // optional allowlist of exact content IDs
 	LibraryID          int      // filter by specific library
@@ -39,6 +55,9 @@ type BrowseFilters struct {
 	Offset             int
 	SnapshotAt         *time.Time // pagination fence: exclude items created after this timestamp
 	RequireBackdrop    bool       // only return items with a non-empty backdrop_path (Jellyfin ImageTypes=Backdrop filter)
+	// Internal source scope stays in SQL instead of materializing an ID allowlist.
+	contentSourceSQL  string
+	contentSourceArgs []any
 }
 
 // BrowseResult contains the paginated result of a browse query.
@@ -405,6 +424,9 @@ func (r *BrowseRepository) buildBrowsePlan(filters BrowseFilters) (browseQueryPl
 		argIdx++
 	}
 
+	appendBrowseContentSource(filters, &conditions, &args, &argIdx)
+	appendCompatBrowsePredicates(filters, &conditions, &args, &argIdx)
+
 	// Genre filter (GIN array containment).
 	if filters.Genre != "" {
 		conditions = append(conditions, fmt.Sprintf("mi.genres @> ARRAY[$%d]::text[]", argIdx))
@@ -587,6 +609,15 @@ func (r *BrowseRepository) buildBrowsePlan(filters BrowseFilters) (browseQueryPl
 // ListXxx distinct-value methods.  If the returned earlyEmpty flag is true the
 // caller should return an empty result immediately (e.g. when LibraryIDs is an
 // empty slice).
+func appendBrowseContentSource(filters BrowseFilters, conditions *[]string, args *[]any, argIdx *int) {
+	if filters.contentSourceSQL == "" {
+		return
+	}
+	*conditions = append(*conditions, "mi.content_id IN ("+rebindSQLPlaceholders(filters.contentSourceSQL, *argIdx-1)+")")
+	*args = append(*args, filters.contentSourceArgs...)
+	*argIdx += len(filters.contentSourceArgs)
+}
+
 func filterWhereClause(filters BrowseFilters) (fromClause, whereClause string, args []any, earlyEmpty bool) {
 	return filterWhereClauseForSource(filters, "media_items mi", "")
 }
@@ -643,6 +674,9 @@ func filterWhereClauseForSource(filters BrowseFilters, baseRelation string, medi
 		args = append(args, filters.ContentIDs)
 		argIdx++
 	}
+	appendBrowseContentSource(filters, &conditions, &args, &argIdx)
+	appendCompatBrowsePredicates(filters, &conditions, &args, &argIdx)
+
 	if filters.LibraryIDs != nil {
 		if len(filters.LibraryIDs) == 0 {
 			return "", "", nil, true
@@ -938,7 +972,37 @@ func listSubtitleLanguagesWithSource(
 		ORDER BY value ASC
 		LIMIT %d
 	`, fromClause, mediaFileJoin, browseFilterPrefix(whereClause), fromClause, mediaFileJoin, browseFilterPrefix(whereClause), catalogFacetMaxValues)
-	return queryDistinctStrings(ctx, pool, query, args)
+	values, err := queryDistinctStrings(ctx, pool, query, args)
+	if err != nil {
+		return nil, err
+	}
+	return canonicalSubtitleFacetValues(values), nil
+}
+
+// canonicalSubtitleFacetValues restores canonical BCP 47 casing to facet
+// values. Both arms of the facet query lowercase (the generated column through
+// canonical_language_code, the external arm explicitly) so that filter
+// comparisons are case-insensitive; the API still returns the same spelling
+// the items themselves carry, "zh-Hant" rather than "zh-hant". Values the
+// canonicalizer cannot parse are returned as stored so a legacy tag never
+// vanishes from the facet. Two stored spellings can share one canonical form
+// (a not-yet-repaired "eng" beside "en"), so the result is deduplicated and
+// re-sorted.
+func canonicalSubtitleFacetValues(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if canonical := lang.CanonicalTag(value); canonical != "" {
+			value = canonical
+		}
+		if _, dup := seen[value]; dup {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	slices.Sort(out)
+	return out
 }
 
 func (r *BrowseRepository) listDistinctJSONBLanguageWithFilters(ctx context.Context, column string, filters BrowseFilters) ([]string, error) {
@@ -1339,14 +1403,14 @@ func browseItemColumns(alias string) string {
 // mangaCountColumns returns two index-backed correlated subqueries feeding the
 // "X Volumes · X Chapters" poster chip: distinct volume tokens (many chapter
 // rows can share one volume) and loose chapter rows without a volume token.
-// They return 0 for non-manga rows (no matching manga_chapters), which the
-// scan path nils out so only manga cards carry the counts. The subqueries are
-// functionally dependent on alias.content_id (the media_items PK, which leads
+// Only manga rows need these lookups. The scan path already nils the counts
+// for other types; the CASE avoids doing that discarded work in mixed scopes.
+// The subqueries depend on alias.content_id (the media_items PK, which leads
 // browseGroupByColumns), so they remain valid under the dedup GROUP BY without
 // being listed there.
 func mangaCountColumns(alias string) string {
-	return "(SELECT count(*) FROM manga_chapters mc WHERE mc.series_content_id = " + alias + ".content_id AND (mc.volume IS NULL OR mc.volume = '')) AS manga_chapter_count, " +
-		"(SELECT count(DISTINCT mc.volume) FROM manga_chapters mc WHERE mc.series_content_id = " + alias + ".content_id AND mc.volume IS NOT NULL AND mc.volume <> '') AS manga_volume_count"
+	return "CASE WHEN " + alias + ".type = 'manga' THEN (SELECT count(*) FROM manga_chapters mc WHERE mc.series_content_id = " + alias + ".content_id AND (mc.volume IS NULL OR mc.volume = '')) END AS manga_chapter_count, " +
+		"CASE WHEN " + alias + ".type = 'manga' THEN (SELECT count(DISTINCT mc.volume) FROM manga_chapters mc WHERE mc.series_content_id = " + alias + ".content_id AND mc.volume IS NOT NULL AND mc.volume <> '') END AS manga_volume_count"
 }
 
 // nullMangaCountColumns substitutes NULL placeholders for the manga count
@@ -1621,4 +1685,78 @@ func splitTypes(s string) []string {
 		}
 	}
 	return result
+}
+
+func appendCompatBrowsePredicates(filters BrowseFilters, conditions *[]string, args *[]any, argIdx *int) {
+	add := func(sql string, value any) {
+		*conditions = append(*conditions, fmt.Sprintf(sql, *argIdx))
+		*args = append(*args, value)
+		*argIdx++
+	}
+	if len(filters.Genres) > 0 {
+		add("mi.genres && $%d::text[]", filters.Genres)
+	}
+	if len(filters.Years) > 0 {
+		add("mi.year = ANY($%d::int[])", filters.Years)
+	}
+	if filters.SearchTerm != "" {
+		add("mi.title ILIKE $%d ESCAPE '\\'", "%"+strings.TrimSuffix(likePrefixPattern(filters.SearchTerm), "%")+"%")
+	}
+	if !filters.IsFavorite && filters.IsPlayed == nil && !filters.IsResumable {
+		return
+	}
+	if filters.UserID <= 0 || filters.ProfileID == "" {
+		*conditions = append(*conditions, "FALSE")
+		return
+	}
+	userArg, profileArg := *argIdx, *argIdx+1
+	if filters.IsFavorite || filters.IsResumable {
+		*args = append(*args, filters.UserID, filters.ProfileID)
+		*argIdx += 2
+	}
+	if filters.IsFavorite {
+		*conditions = append(*conditions, fmt.Sprintf("EXISTS (SELECT 1 FROM user_favorites uf WHERE uf.user_id = $%d AND uf.profile_id = $%d AND uf.media_item_id = mi.content_id)", userArg, profileArg))
+	}
+	if filters.IsPlayed != nil {
+		builder := NewQueryBuilder("mi").WithUserScope(filters.UserID, filters.ProfileID)
+		builder.argIdx = *argIdx
+		builder.mediaScope = filters.Type
+		predicate := builder.userStateCompletionClause()
+		*args = append(*args, builder.args...)
+		*argIdx = builder.argIdx
+		if !*filters.IsPlayed {
+			predicate = "NOT (" + predicate + ")"
+		}
+		*conditions = append(*conditions, predicate)
+	}
+	if filters.IsResumable {
+		*conditions = append(*conditions, fmt.Sprintf(`EXISTS (SELECT 1 FROM user_watch_progress uwp WHERE uwp.user_id = $%d AND uwp.profile_id = $%d AND uwp.media_item_id = mi.content_id AND uwp.position_seconds > 0 AND NOT uwp.completed AND NOT EXISTS (SELECT 1 FROM user_history_hidden_items hhi WHERE hhi.user_id = uwp.user_id AND hhi.profile_id = uwp.profile_id AND hhi.media_item_id = uwp.media_item_id AND uwp.updated_at <= hhi.hidden_before))`, userArg, profileArg))
+	}
+}
+
+// ListYears returns release years from the same viewer-scoped facet relation.
+func (r *BrowseRepository) ListYears(ctx context.Context, filters BrowseFilters) ([]int, error) {
+	from, where, args, empty := filterWhereClauseForSource(filters, "media_items mi", "")
+	if empty {
+		return []int{}, nil
+	}
+	if where == "" {
+		where = "WHERE mi.year > 0"
+	} else {
+		where += " AND mi.year > 0"
+	}
+	rows, err := r.pool.Query(ctx, "SELECT DISTINCT mi.year FROM "+from+" "+where+fmt.Sprintf(" ORDER BY mi.year DESC LIMIT %d", catalogFacetMaxValues), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	years := []int{}
+	for rows.Next() {
+		var year int
+		if err := rows.Scan(&year); err != nil {
+			return nil, err
+		}
+		years = append(years, year)
+	}
+	return years, rows.Err()
 }

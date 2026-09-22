@@ -1,17 +1,20 @@
 import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Outlet } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 let appInitialEntries = ["/catalog?source=query&q=heat"];
 let latestNavigateTo: string | null = null;
+let appProfile: { id: string } | null = { id: "profile-1" };
 
 const mockUseCatalogWindow = vi.fn();
 const mockUseCatalogFilters = vi.fn();
 const mockItemGrid = vi.fn();
 const mockUseCanRequest = vi.fn();
 const mockUseRequestSearch = vi.fn();
+const mockUsePersonSearch = vi.fn();
 
 vi.mock("react-router", async () => {
   const actual = await vi.importActual<typeof import("react-router")>("react-router");
@@ -41,6 +44,10 @@ vi.mock("@/hooks/queries/catalog", () => ({
   useCatalogWindow: (...args: unknown[]) => mockUseCatalogWindow(...args),
   useCatalogFilters: (...args: unknown[]) => mockUseCatalogFilters(...args),
   useCatalogMetadataFilters: (...args: unknown[]) => mockUseCatalogFilters(...args),
+}));
+
+vi.mock("@/hooks/queries/people", () => ({
+  usePersonSearch: (...args: unknown[]) => mockUsePersonSearch(...args),
 }));
 
 vi.mock("@/hooks/useCanRequest", () => ({
@@ -73,7 +80,7 @@ vi.mock("@/hooks/useAuth", () => ({
   AuthProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
   useAuth: () => ({
     user: { id: 1, username: "alex", role: "admin" },
-    profile: { id: "profile-1" },
+    profile: appProfile,
     loading: false,
     setupLoading: false,
     setupRequired: false,
@@ -84,7 +91,7 @@ vi.mock("@/hooks/useAuth", () => ({
   }),
   useOptionalAuth: () => ({
     user: { id: 1, username: "alex", role: "admin" },
-    profile: { id: "profile-1" },
+    profile: appProfile,
     loading: false,
     setupLoading: false,
     setupRequired: false,
@@ -176,6 +183,7 @@ vi.mock("@/pages/SettingsLayout", () => ({
   ),
 }));
 vi.mock("@/pages/settings/PlaybackSettings", () => stubPage("Playback settings"));
+vi.mock("@/pages/settings/AccountSettings", () => stubPage("Account settings"));
 vi.mock("@/pages/settings/LibrarySettings", () => stubPage("Library settings"));
 vi.mock("@/pages/settings/HistoryImportSettings", () => stubPage("History import settings"));
 vi.mock("@/pages/settings/WebhookSyncSettings", () => stubPage("Webhook sync settings"));
@@ -190,11 +198,14 @@ describe("Catalog page", () => {
   beforeEach(() => {
     appInitialEntries = ["/catalog?source=query&q=heat"];
     latestNavigateTo = null;
+    appProfile = { id: "profile-1" };
     mockUseCatalogWindow.mockReset();
     mockUseCatalogFilters.mockReset();
     mockItemGrid.mockReset();
     mockUseCanRequest.mockReset();
     mockUseRequestSearch.mockReset();
+    mockUsePersonSearch.mockReset();
+    mockUsePersonSearch.mockReturnValue({ data: [], isLoading: false, isError: false });
     mockUseCanRequest.mockReturnValue({
       discoveryEnabled: false,
       isResolving: false,
@@ -216,6 +227,68 @@ describe("Catalog page", () => {
       data: { genres: ["Drama"], content_ratings: ["R"] },
       isLoading: false,
     });
+  });
+
+  it("offers actor and director results with exact person links when no titles match", () => {
+    mockUseCatalogWindow.mockReturnValue({
+      data: { totalItems: 0, pages: new Map() },
+      isLoading: false,
+      isError: false,
+    });
+    mockUsePersonSearch.mockReturnValue({
+      data: [
+        { id: "137101642343383042", name: "Tom Hanks", photo_url: "/actor.jpg" },
+        { id: "137101697843200002", name: "Christopher Nolan" },
+      ],
+      isLoading: false,
+      isError: false,
+    });
+
+    const markup = renderToStaticMarkup(
+      <QueryClientProvider client={new QueryClient()}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(markup).toContain("People");
+    expect(markup).toContain('href="/person/137101642343383042"');
+    expect(markup).toContain('href="/person/137101697843200002"');
+    expect(markup).toContain("Tom Hanks");
+    expect(markup).toContain("Christopher Nolan");
+    expect(markup).toContain('src="/actor.jpg"');
+    expect(markup).toContain(">CN<");
+    expect(mockItemGrid).not.toHaveBeenCalled();
+  });
+
+  it("keeps title results visible when people search fails and offers a retry", async () => {
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const refetch = vi.fn();
+    mockUsePersonSearch.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      refetch,
+    });
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("Could not load people results.")).toBeDefined();
+    expect(mockItemGrid).toHaveBeenCalledWith(expect.objectContaining({ totalItems: 1 }));
+    await userEvent.click(screen.getByRole("button", { name: "Retry people search" }));
+    expect(refetch).toHaveBeenCalledOnce();
+  });
+
+  it("does not search people when browsing a personal list", () => {
+    appInitialEntries = ["/catalog?source=favorites"];
+    const markup = renderToStaticMarkup(
+      <QueryClientProvider client={new QueryClient()}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(mockUsePersonSearch).toHaveBeenCalledWith("", 20, false, undefined);
+    expect(markup).not.toContain('aria-label="People"');
   });
 
   it("renders catalog results from the new API route", () => {
@@ -280,6 +353,21 @@ describe("Catalog page", () => {
     );
   });
 
+  it("browses an explicit library without requiring search text", () => {
+    appInitialEntries = ["/catalog?library_id=17&sort=title&order=asc"];
+    const markup = renderToStaticMarkup(
+      <QueryClientProvider client={new QueryClient()}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(mockUseCatalogWindow).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "query", library_id: 17, q: undefined }),
+      expect.objectContaining({ includeTotal: true }),
+    );
+    expect(mockItemGrid).toHaveBeenCalled();
+    expect(markup).not.toContain("Find films, series, performances");
+  });
+
   it("renders the search-first landing for empty query catalog routes", () => {
     appInitialEntries = ["/catalog?source=query"];
 
@@ -334,17 +422,47 @@ describe("Catalog page", () => {
     expect(latestNavigateTo).toBeNull();
   });
 
-  it("renders user settings inside the main app layout", () => {
+  it("renders user settings inside the main app layout", async () => {
     appInitialEntries = ["/settings/playback"];
 
-    const markup = renderToStaticMarkup(
+    render(
       <QueryClientProvider client={new QueryClient()}>
         <App />
       </QueryClientProvider>,
     );
 
-    expect(markup).toContain('data-kind="app-layout"');
-    expect(markup).toContain("Settings");
+    const settings = await screen.findByText("Playback settings");
+    expect(settings.closest('[data-kind="app-layout"]')).not.toBeNull();
+    expect(screen.getByText("Settings")).toBeInTheDocument();
+  });
+
+  it("lets an administrator without an active profile open account settings", async () => {
+    appInitialEntries = ["/settings/account"];
+    appProfile = null;
+
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("Account settings")).toBeInTheDocument();
+    expect(latestNavigateTo).toBeNull();
+    expect(screen.getByText("Settings")).toBeInTheDocument();
+    expect(screen.getByText("Account settings").closest('[data-kind="app-layout"]')).not.toBeNull();
+  });
+
+  it("keeps other personal settings behind profile selection", () => {
+    appInitialEntries = ["/settings/playback"];
+    appProfile = null;
+
+    renderToStaticMarkup(
+      <QueryClientProvider client={new QueryClient()}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(latestNavigateTo).toBe("/profiles?redirect=%2Fsettings%2Fplayback");
   });
 
   it("redirects the retired user plugins settings route back to playback settings", () => {
@@ -635,7 +753,7 @@ describe("Catalog page", () => {
       </QueryClientProvider>,
     );
 
-    expect(markup).toContain("Search stopped before it could finish.");
+    expect(markup).toContain("Could not load search results.");
     expect(markup).toContain("Retry search");
     expect(markup).not.toContain('data-kind="item-grid"');
     expect(markup).not.toContain("Stale Result");
@@ -656,7 +774,7 @@ describe("Catalog page", () => {
       </QueryClientProvider>,
     );
 
-    expect(markup).toContain("Catalog stopped before it could finish.");
+    expect(markup).toContain("Could not load catalog results.");
     expect(markup).toContain("Retry catalog");
     expect(markup).not.toContain("Try a more specific title");
   });
@@ -676,6 +794,7 @@ describe("Catalog page", () => {
       }),
       expect.anything(),
     );
+    expect(mockUsePersonSearch).toHaveBeenCalledWith("heat", 20, true, "video");
   });
 
   it("uses approximate totals for interactive query searches", () => {
@@ -711,6 +830,17 @@ describe("Catalog page", () => {
       }),
       expect.anything(),
     );
+    expect(mockUsePersonSearch).toHaveBeenCalledWith("heat", 20, true, undefined);
+  });
+
+  it.each(["movie", "series", "audiobook"])("scopes people to the explicit %s search", (scope) => {
+    appInitialEntries = [`/catalog?source=query&q=heat&type=${scope}`];
+    renderToStaticMarkup(
+      <QueryClientProvider client={new QueryClient()}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(mockUsePersonSearch).toHaveBeenCalledWith("heat", 20, true, scope);
   });
 
   it("renders the search scope chips on query results", () => {

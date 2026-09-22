@@ -2,6 +2,7 @@ package userstore
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -36,6 +37,9 @@ func AddVisibleHistory(ctx context.Context, store UserStore, entry WatchHistoryE
 type MarkWatchedTarget struct {
 	MediaItemID     string
 	DurationSeconds float64
+	// EventAt preserves an explicitly supplied progress date while the write
+	// timestamp advances independently. Nil retains normal manual-mark timing.
+	EventAt *time.Time
 }
 
 // WatchedBatchWriter is an optional store capability: mark every target
@@ -45,8 +49,9 @@ type MarkWatchedTarget struct {
 // episode independently, so losing the request mid-loop strands the series
 // half-watched.
 //
-// Semantics must match the fallback: per-target duration lands on the progress
-// row, each entry gets exactly one history row, and both respect the
+// Implementations preserve per-target duration on the progress
+// row; already-completed visible targets produce no history or returned entry.
+// The completed-state check and writes are atomic. Both respect the
 // hidden-history watermark the single-row MarkWatched/AddVisibleHistory paths
 // apply. The returned entries carry the resolved (possibly watermark-adjusted)
 // WatchedAt, in the order given.
@@ -63,6 +68,11 @@ func MarkWatchedBatch(ctx context.Context, store UserStore, profileID string, ta
 	}
 	if writer, ok := store.(WatchedBatchWriter); ok {
 		return writer.MarkWatchedBatch(ctx, profileID, targets, entries)
+	}
+	for _, target := range targets {
+		if target.EventAt != nil {
+			return nil, fmt.Errorf("explicit dated marks require transactional batch support")
+		}
 	}
 	written := make([]WatchHistoryEntry, 0, len(entries))
 	for i, target := range targets {
@@ -132,6 +142,17 @@ type SeriesWatchCounts struct {
 // progress row has position_seconds > 0.
 type SeriesEpisodeRollupStore interface {
 	SeriesEpisodeWatchCounts(ctx context.Context, profileID string, seriesIDs []string) (map[string]SeriesWatchCounts, error)
+}
+
+// EpisodeParentCompletionStore determines whether every available episode of a
+// series or season is completed. Empty parents are not completed. Implementations
+// must use the same progress and completed-history visibility rules as
+// ListProgressWithCompletedHistory, and count episode-library membership as
+// availability, including missing files. Callers needing only a played flag can
+// stop at the first incomplete episode instead of materializing all child IDs.
+type EpisodeParentCompletionStore interface {
+	SeriesCompletion(ctx context.Context, profileID string, seriesIDs []string) (map[string]bool, error)
+	SeasonCompletion(ctx context.Context, profileID string, seasonIDs []string) (map[string]bool, error)
 }
 
 // CompletedHistoryItemMap returns the latest completed-history item row for a

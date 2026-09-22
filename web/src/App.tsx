@@ -51,7 +51,6 @@ import { isTasteSeedDismissed } from "@/lib/tasteSeed";
 import { OnboardingGate } from "@/components/onboarding/OnboardingGate";
 import { useOnboardingState } from "@/hooks/queries/onboarding";
 import SettingsLayout from "@/pages/SettingsLayout";
-import PlaybackSettings from "@/pages/settings/PlaybackSettings";
 import {
   WatchPlaybackBar,
   WatchPlaybackHost,
@@ -91,6 +90,7 @@ const Collections = lazy(importCollections);
 const CollectionEditor = lazy(() => import("@/pages/CollectionEditor"));
 const Notifications = lazy(() => import("@/pages/Notifications"));
 const DeviceSettings = lazy(() => import("@/pages/settings/DeviceSettings"));
+const PlaybackSettings = lazy(() => import("@/pages/settings/PlaybackSettings"));
 const NotificationsSettings = lazy(() => import("@/pages/settings/NotificationsSettings"));
 const Requests = lazy(() => import("@/pages/Requests"));
 const RequestBrowse = lazy(() => import("@/pages/RequestBrowse"));
@@ -144,8 +144,9 @@ const CardOverlaySettings = lazy(() => import("@/pages/settings/CardOverlaySetti
 const PersonalizeSettings = lazy(() => import("@/pages/settings/PersonalizeSettings"));
 const ConnectAppsSettings = lazy(() => import("@/pages/settings/ConnectAppsSettings"));
 const InterfaceSettings = lazy(() => import("@/pages/settings/InterfaceSettings"));
-const WatchTogetherJoin = lazy(() => import("@/pages/WatchTogetherJoin"));
-const WatchTogetherRoomPage = lazy(() => import("@/pages/WatchTogetherRoomPage"));
+const AccountSettings = lazy(() => import("@/pages/settings/AccountSettings"));
+const WatchPartyHub = lazy(() => import("@/pages/watchtogether/WatchPartyHub"));
+const WatchTogetherRoomPage = lazy(() => import("@/pages/watchtogether/WatchTogetherRoomPage"));
 const WatchRoute = lazy(() => import("@/pages/WatchRoute"));
 const ProfileCustomizeHome = lazy(() => import("@/pages/ProfileCustomizeHome"));
 
@@ -547,7 +548,20 @@ function AppRoutes() {
                   <Route path="stats" element={<Navigate to="/admin" replace />} />
                   <Route path="*" element={<Navigate to="/admin" replace />} />
                 </Route>
-                {/* Settings area — own layout, requires profile */}
+                {/* Account credentials are reachable by admins before profile selection. */}
+                <Route
+                  path="/settings/account"
+                  element={
+                    <RequirePrimaryOrAdmin>
+                      <UICustomizedLayout>
+                        <SettingsLayout />
+                      </UICustomizedLayout>
+                    </RequirePrimaryOrAdmin>
+                  }
+                >
+                  <Route index element={<AccountSettings />} />
+                </Route>
+                {/* Remaining settings use profile-scoped values and require a profile. */}
                 <Route
                   path="/settings/*"
                   element={
@@ -608,8 +622,10 @@ function AppRoutes() {
                           <Route path="/browse" element={<LegacyBrowseRedirect />} />
                           <Route path="/item/:id" element={<ItemDetail />} />
                           <Route path="/person/:id" element={<PersonDetail />} />
+                          <Route path="/rooms" element={<WatchPartyHub />} />
+                          {/* Invite links still carry /rooms/join?token=; keep it as the same hub. */}
+                          <Route path="/rooms/join" element={<WatchPartyHub />} />
                           <Route path="/rooms/:roomId" element={<WatchTogetherRoomPage />} />
-                          <Route path="/rooms/join" element={<WatchTogetherJoin />} />
                           <Route
                             path="/favorites"
                             element={<LegacyPersonalCatalogRedirect source="favorites" />}
