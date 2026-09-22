@@ -5137,7 +5137,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Search people by name. */
+    /** Search people by name, with exact matches first and optional media scope. */
     get: operations["listPeople"];
     put?: never;
     post?: never;
@@ -16280,6 +16280,8 @@ export interface components {
        * @description Oldest ranking sessions expire when this retention bound is exceeded
        */
       max_sessions_per_account?: number;
+      /** @description People search accepts media_scope and filters credits by viewer access */
+      people_media_scope?: boolean;
       /** @enum {string} */
       provider?: "postgres" | "meilisearch";
       /**
@@ -72642,6 +72644,8 @@ export interface operations {
       query?: {
         /** @description Most people to answer */
         limit?: number;
+        /** @description Restrict people to accessible credits in this media scope; omitted searches all media scopes */
+        media_scope?: "video" | "movie" | "series" | "episode" | "audiobook" | "ebook" | "manga";
         /** @description Name prefix or fragment; empty lists the first people */
         q?: string;
       };

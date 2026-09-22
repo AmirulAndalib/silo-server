@@ -10,7 +10,14 @@ import { toast } from "sonner";
 
 import { adminRefreshPerson, adminUpdatePerson } from "@/api/v2/people";
 import type { ItemDetail, Person, UpdatePersonRequest } from "@/api/types";
-import { getPerson, refreshPerson, searchPeople, type PersonRefreshResult } from "@/api/v2/people";
+import {
+  getPerson,
+  refreshPerson,
+  getPeopleSearchCapabilities,
+  searchPeople,
+  type PersonRefreshResult,
+  type PersonSearchMediaScope,
+} from "@/api/v2/people";
 
 import { personKeys } from "./keys";
 import { isItemDetailQueryKey } from "./mediaSurfaceRefresh";
@@ -100,12 +107,27 @@ function observePersonRefresh(queryClient: QueryClient, id: string) {
   updateObservation();
 }
 
-export function usePersonSearch(query: string, limit = 20, enabled = true) {
+export function usePersonSearch(
+  query: string,
+  limit = 20,
+  enabled = true,
+  mediaScope?: PersonSearchMediaScope,
+) {
   const normalizedQuery = query.trim();
+  const queryClient = useQueryClient();
 
   return useQuery({
-    queryKey: personKeys.search(normalizedQuery, limit),
-    queryFn: ({ signal }) => searchPeople(normalizedQuery, limit, { signal }),
+    queryKey: personKeys.search(normalizedQuery, limit, mediaScope),
+    queryFn: async ({ signal }) => {
+      const capabilities = await queryClient.fetchQuery({
+        queryKey: personKeys.searchCapabilities(),
+        queryFn: ({ signal }) => getPeopleSearchCapabilities({ signal }),
+        staleTime: 5 * 60 * 1000,
+      });
+      // This capability also guarantees viewer access filtering for All.
+      if (!capabilities.people_media_scope) return [];
+      return searchPeople(normalizedQuery, limit, { signal, mediaScope });
+    },
     enabled: enabled && normalizedQuery.length > 0,
     staleTime: 5 * 60 * 1000,
   });

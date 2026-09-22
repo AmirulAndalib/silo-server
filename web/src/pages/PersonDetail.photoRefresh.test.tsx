@@ -45,7 +45,7 @@ it("refreshes cached cast after a person read observes a background photo update
   });
   clients.push(client);
   const person = {
-    id: Number(id),
+    id: id,
     name: "Actor",
     bio: "Biography",
     birth_date: "1979-08-01",
@@ -109,7 +109,7 @@ it.each([
     });
     clients.push(client);
     const person = {
-      id: Number(id),
+      id: id,
       name: "Actor",
       bio: "Biography",
       birth_date: "1979-08-01",

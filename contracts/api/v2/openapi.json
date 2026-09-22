@@ -17268,6 +17268,10 @@
             "format": "int64",
             "type": "integer"
           },
+          "people_media_scope": {
+            "description": "People search accepts media_scope and filters credits by viewer access",
+            "type": "boolean"
+          },
           "provider": {
             "enum": [
               "postgres",
@@ -110546,6 +110550,25 @@
               "minimum": 1,
               "type": "integer"
             }
+          },
+          {
+            "description": "Restrict people to accessible credits in this media scope; omitted searches all media scopes",
+            "explode": false,
+            "in": "query",
+            "name": "media_scope",
+            "schema": {
+              "description": "Restrict people to accessible credits in this media scope; omitted searches all media scopes",
+              "enum": [
+                "video",
+                "movie",
+                "series",
+                "episode",
+                "audiobook",
+                "ebook",
+                "manga"
+              ],
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -110655,7 +110678,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "Search people by name.",
+        "summary": "Search people by name, with exact matches first and optional media scope.",
         "tags": [
           "catalog"
         ],
