@@ -2170,12 +2170,11 @@ export function VideoPlayer({
 
   // -- Subtitle appearance --
   const { settings: subtitleSettings, containerStyle, cueStyle } = useSubtitleAppearance();
-  const { positionStyle: subtitlePositionStyle, fontScale: subtitleFontScale } = useSubtitleLayout(
-    containerRef,
-    videoRef,
-    subtitleSettings.position,
-    videoFit,
-  );
+  const {
+    positionStyle: subtitlePositionStyle,
+    fontScale: subtitleFontScale,
+    coverCrop,
+  } = useSubtitleLayout(containerRef, videoRef, subtitleSettings.position, videoFit);
   // Scale cue text with the rendered video so subtitles stay proportionally
   // the same size as the window grows or shrinks.
   const scaledCueStyle = useMemo(
@@ -2255,6 +2254,8 @@ export function VideoPlayer({
     timelineOffsetSeconds,
     subtitleDelayMs,
     setASSSubtitleState,
+    videoFit,
+    coverCrop,
   );
   const subtitleLoadState = isASSActive ? assSubtitleState : textSubtitleState;
 

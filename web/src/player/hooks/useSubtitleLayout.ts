@@ -2,11 +2,14 @@ import { useEffect, useMemo, useState, type CSSProperties, type RefObject } from
 import { computeSubtitleFontScale, computeSubtitlePositionStyle } from "@/lib/subtitleAppearance";
 import type { SubtitleAppearance } from "@/lib/subtitleAppearance";
 import type { VideoFitMode } from "../types";
+import { computeCoverCrop, NO_COVER_CROP, type CoverCrop } from "../utils/assFillMargins";
 
 export interface SubtitleLayout {
   positionStyle: CSSProperties;
   /** Multiplier for cue font size so text scales with the rendered video. */
   fontScale: number;
+  /** Portion of the video hidden past each edge by Fill; zero in Fit. */
+  coverCrop: CoverCrop;
 }
 
 /**
@@ -64,6 +67,10 @@ export function useSubtitleLayout(
         videoFit,
       ),
       fontScale: computeSubtitleFontScale(playerSize.w, playerSize.h, videoAspect, videoFit),
+      coverCrop:
+        videoFit === "cover"
+          ? computeCoverCrop(playerSize.w, playerSize.h, videoAspect)
+          : NO_COVER_CROP,
     }),
     [position, playerSize.w, playerSize.h, videoAspect, videoFit],
   );

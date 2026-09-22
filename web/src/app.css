@@ -1418,6 +1418,18 @@ html[data-navigation-direction]::view-transition-new(main-content) {
     contain: layout;
   }
 
+  /* JASSUB writes contain-mode geometry directly onto its canvas. Override
+     that geometry when the video uses Fill so styled subtitles follow the
+     same crop instead of remaining letterboxed over the zoomed picture.
+     useASSSubtitles keeps regular dialogue inside the visible area. */
+  .player-ass-fill {
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: cover;
+  }
+
   /* Bottom HUD rail — title/time on the left, utilities on the right. */
   .player-hud {
     background: linear-gradient(
