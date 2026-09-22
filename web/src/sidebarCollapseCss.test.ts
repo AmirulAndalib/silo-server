@@ -163,21 +163,24 @@ describe("sidebar collapse CSS", () => {
     );
   });
 
-  it("only reserves sidebar room for out-of-tree chrome while the shell is mounted", () => {
-    // The banner renders above every route, including /profiles, /login and
-    // /watch, which live outside Layout and have no sidebar. Layout publishes
-    // `data-app-shell` for exactly the sidebar's lifetime, so the desktop offset
-    // must hang off it; an unconditional 260px left a blank strip on the profile
-    // picker while impersonating (#1290).
+  it("only reserves sidebar room for out-of-tree chrome while a shell is mounted", () => {
+    // The banner and the audiobook MiniBar render above every route, including
+    // /profiles, /login and /watch, which live outside Layout and have no
+    // sidebar. Layout publishes `data-app-shell` for exactly the sidebar's
+    // lifetime and AdminLayout publishes `data-admin-shell` for its own fixed
+    // 240px sidebar, so every desktop offset must hang off one of them; an
+    // unconditional 260px left a blank strip on the profile picker while
+    // impersonating (#1290).
     expect(ruleBody(":root[data-app-shell] {")).toContain("--app-sidebar-offset: 260px");
     expect(ruleBody(':root[data-app-shell][data-sidebar-collapsed="true"] {')).toContain(
       "--app-sidebar-offset: 64px",
     );
-    // Nothing else may reintroduce the offset without the shell gate.
+    expect(ruleBody(":root[data-admin-shell] {")).toContain("--app-sidebar-offset: 240px");
+    // Nothing else may reintroduce a non-zero offset without a shell gate.
     const desktopOffsets =
-      css.match(/^\s*([^{\n]+)\{\s*--app-sidebar-offset: (?:260|64)px;/gm) ?? [];
-    expect(desktopOffsets.length).toBe(2);
-    for (const rule of desktopOffsets) expect(rule).toContain("[data-app-shell]");
+      css.match(/^\s*([^{\n]+)\{\s*--app-sidebar-offset: (?:260|240|64)px;/gm) ?? [];
+    expect(desktopOffsets.length).toBe(3);
+    for (const rule of desktopOffsets) expect(rule).toMatch(/\[data-(?:app|admin)-shell\]/);
     // Off-shell the variable stays at its 0px default.
     expect(css).toMatch(/:root \{\s*--app-sidebar-offset: 0px;/);
   });
