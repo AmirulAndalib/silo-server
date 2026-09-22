@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Silo-Server/silo-server/internal/api/handlers"
+	"github.com/Silo-Server/silo-server/internal/httpstream"
 )
 
 // dispositionFilenameParam is the Content-Disposition parameter naming the file
@@ -131,15 +132,20 @@ func registerAdminJobArtifactDownload(reg *Registry) {
 			return
 		}
 		defer func() { _ = download.Body.Close() }()
-		w.Header().Set("Content-Type", mediaTypeCatalogGzip)
-		w.Header().Set(directDisposition, mime.FormatMediaType("attachment", map[string]string{dispositionFilenameParam: download.Filename}))
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Accept-Ranges", "none")
+		// A large export can outlast the API server's absolute WriteTimeout, and
+		// Accept-Ranges: none means a cut-off download cannot resume. Roll the
+		// write deadline forward while bytes keep flowing, as the other download
+		// routes do; a stalled client is still reaped.
+		sw := httpstream.NewRollingDeadlineWriter(w)
+		sw.Header().Set("Content-Type", mediaTypeCatalogGzip)
+		sw.Header().Set(directDisposition, mime.FormatMediaType("attachment", map[string]string{dispositionFilenameParam: download.Filename}))
+		sw.Header().Set("Cache-Control", "no-store")
+		sw.Header().Set("Accept-Ranges", "none")
 		if download.Size != nil && *download.Size >= 0 {
-			w.Header().Set(adminSubtitleLengthHeader, strconv.FormatInt(*download.Size, 10))
+			sw.Header().Set(adminSubtitleLengthHeader, strconv.FormatInt(*download.Size, 10))
 		}
-		w.WriteHeader(http.StatusOK)
-		if _, err := io.Copy(w, download.Body); err != nil {
+		sw.WriteHeader(http.StatusOK)
+		if _, err := io.Copy(sw, download.Body); err != nil {
 			slog.WarnContext(r.Context(), "job artifact stream interrupted", "component", "adminjob", "job_id", id)
 		}
 	}))

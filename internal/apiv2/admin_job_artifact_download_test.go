@@ -3,7 +3,9 @@ package apiv2
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -163,4 +165,46 @@ func TestAdminJobCapabilitiesReportBackendSupport(t *testing.T) {
 	deps, _ := libraryDeps(t)
 	deps.AdminTaskJobs = f
 	requireProblem(t, do(t, newTestHandler(t, deps), "GET", Prefix+"/admin/jobs/capabilities", "", bearer(memberToken)), TypePermissionDenied)
+}
+
+// slowArtifactReader yields one chunk per read after a delay, standing in for
+// a large export on a slow link: the whole body takes longer than the server's
+// WriteTimeout even though it never stalls.
+type slowArtifactReader struct {
+	chunks []string
+	delay  time.Duration
+}
+
+func (r *slowArtifactReader) Read(p []byte) (int, error) {
+	if len(r.chunks) == 0 {
+		return 0, io.EOF
+	}
+	time.Sleep(r.delay)
+	n := copy(p, r.chunks[0])
+	r.chunks = r.chunks[1:]
+	return n, nil
+}
+
+// The API server sets an absolute WriteTimeout, and the route answers
+// Accept-Ranges: none, so a download cut off there cannot resume. The stream
+// must roll its write deadline forward while it makes progress.
+func TestAdminJobArtifactDownloadOutlastsServerWriteTimeout(t *testing.T) {
+	body := &slowArtifactReader{chunks: []string{"ab", "cd", "ef"}, delay: 150 * time.Millisecond}
+	stub := &jobArtifactStub{body: &diagnosticTestBody{Reader: body}}
+	h, signer := jobArtifactHandler(t, stub)
+	srv := httptest.NewUnstartedServer(h)
+	srv.Config.WriteTimeout = 100 * time.Millisecond
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	path, _ := signer.SignFor("job-abc", time.Now(), 15*time.Minute)
+	resp, err := srv.Client().Get(srv.URL + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	got, err := io.ReadAll(resp.Body)
+	if err != nil || string(got) != "abcdef" {
+		t.Fatalf("body = %q, err = %v", got, err)
+	}
 }

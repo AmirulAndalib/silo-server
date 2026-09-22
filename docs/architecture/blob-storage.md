@@ -46,6 +46,9 @@ bucket.
 Nothing walks a store root unbounded. The artwork sweep names its prefixes
 explicitly and refuses an empty one, because `parseArtworkObjectKey` accepts any
 `a.b.c` filename and would read a bundle name as a revisioned variant.
+Diagnostics orphan cleanup deletes only keys shaped exactly like a bundle,
+`diagnostics/<user id>/<report id>.tar.gz`, so artwork from a provider slugged
+`diagnostics` is never swept.
 
 Only the Assets store is wrapped to record the storage identity. When Operational
 shares it, a first write through any caller records it. A private S3 bucket is
