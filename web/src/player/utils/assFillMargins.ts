@@ -143,11 +143,13 @@ export function applyASSMarginInset(content: string, inset: ASSMarginInset): str
         : line.match(/^(\s*Dialogue\s*:\s*)(.*)$/i);
       if (!entry || fields.length === 0) return line;
 
-      // Only the final field (Text) may contain commas.
+      // Only an event's final field (Text) may contain commas; style rows
+      // have no free-text field, so every declared column is editable.
       const values = entry[2]!.split(",");
       if (values.length < fields.length) return line;
-      const head = values.slice(0, fields.length - 1);
-      const tail = values.slice(fields.length - 1).join(",");
+      const editable = isStyles ? fields.length : fields.length - 1;
+      const head = values.slice(0, editable);
+      const rest = values.slice(editable);
 
       for (const [name, amount] of Object.entries(growth)) {
         const index = fields.indexOf(name);
@@ -157,7 +159,8 @@ export function applyASSMarginInset(content: string, inset: ASSMarginInset): str
         if (!isStyles && current === 0) continue;
         head[index] = String(current + amount);
       }
-      return `${entry[1]}${[...head, tail].join(",")}`;
+      const joined = isStyles ? [...head, ...rest] : [...head, rest.join(",")];
+      return `${entry[1]}${joined.join(",")}`;
     })
     .join("");
 }

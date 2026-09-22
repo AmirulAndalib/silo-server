@@ -131,6 +131,15 @@ describe("applyASSMarginInset", () => {
     );
   });
 
+  it("grows a margin declared as the last style column", () => {
+    const content = ["[V4+ Styles]", "Format: Name, Alignment, MarginV", "Style: Low,2,40"].join(
+      "\n",
+    );
+    expect(applyASSMarginInset(content, { horizontal: 0, vertical: 10 })).toBe(
+      ["[V4+ Styles]", "Format: Name, Alignment, MarginV", "Style: Low,2,50"].join("\n"),
+    );
+  });
+
   it("uses libass default formats when a section omits Format", () => {
     const content = ["[V4+ Styles]", DEFAULT_STYLE].join("\n");
     expect(applyASSMarginInset(content, { horizontal: 0, vertical: 5 })).toContain(",40,30,25,1");
