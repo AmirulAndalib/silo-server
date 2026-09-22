@@ -6,7 +6,7 @@ import type { PlayerConfig } from "../context/PlayerConfigContext";
 import { SubtitleSearchModal } from "./SubtitleSearchModal";
 import { SubtitleTranslateModal } from "./SubtitleTranslateModal";
 import { SubtitleAppearancePanel } from "./SubtitleAppearancePanel";
-import { playerFetch } from "../player-fetch";
+import { playerV2 } from "../player-v2";
 import { getLanguageName } from "../utils/languageNames";
 import { sortSubtitlesBySource } from "../utils/subtitleSort";
 import { getSubtitleFormatLabel, isSubtitleFormatLabel } from "../utils/subtitleCodecs";
@@ -19,9 +19,11 @@ interface SubtitleMenuProps {
   onSelect: (index: number | null) => void;
   delayMs: number;
   onDelayChange: (ms: number) => void;
+  preferredSubtitleLanguage?: string | null;
   mediaFileId?: number;
   playerConfig?: PlayerConfig;
   onRefreshSubtitles?: () => void;
+  onSubtitleJobAccepted?: (jobId: string) => void;
   sessionId?: string;
   getSubtitleStartPosition?: () => number;
   audioTracks?: PlayerAudioTrack[];
@@ -48,9 +50,11 @@ export function SubtitleMenu({
   onSelect,
   delayMs,
   onDelayChange,
+  preferredSubtitleLanguage,
   mediaFileId,
   playerConfig,
   onRefreshSubtitles,
+  onSubtitleJobAccepted,
   sessionId,
   getSubtitleStartPosition,
   audioTracks,
@@ -72,10 +76,7 @@ export function SubtitleMenu({
   useEffect(() => {
     if (!playerConfig) return;
     let cancelled = false;
-    playerFetch<{ enabled: boolean; transcribe_enabled?: boolean }>(
-      playerConfig,
-      "/subtitles/ai/status",
-    )
+    playerV2(playerConfig, "GET /api/v2/subtitles/ai/status", {})
       .then((res) => {
         if (cancelled) return;
         setAiEnabled(Boolean(res?.enabled));
@@ -379,12 +380,14 @@ export function SubtitleMenu({
           mediaFileId={mediaFileId}
           playerConfig={playerConfig}
           tracks={tracks}
+          preferredSubtitleLanguage={preferredSubtitleLanguage}
           audioTracks={audioTracks}
           translateEnabled={aiEnabled}
           transcribeEnabled={aiTranscribeEnabled}
           isOpen={translateOpen}
           sessionId={sessionId}
           getStartPosition={getSubtitleStartPosition}
+          onSubtitleJobAccepted={onSubtitleJobAccepted}
           onClose={() => setTranslateOpen(false)}
         />
       )}

@@ -77,9 +77,11 @@ const mediaSearchTitleVector = `(
 
 const mediaSearchOverviewVector = `to_tsvector('english', COALESCE(mi.overview, ''))`
 
-const mixedSearchOrder = `exact_title_match DESC, contiguous_title_match DESC, year_match DESC,
-	phrase_rank DESC, title_prefix_rank DESC, overview_rank DESC,
-	LOWER(title) ASC, content_id ASC`
+func mixedSearchOrder(prefix string) string {
+	return fmt.Sprintf(`%[1]sexact_title_match DESC, %[1]scontiguous_title_match DESC, %[1]syear_match DESC,
+	%[1]sphrase_rank DESC, %[1]stitle_prefix_rank DESC, %[1]soverview_rank DESC,
+	LOWER(%[1]stitle) ASC, %[1]scontent_id ASC`, prefix)
+}
 
 // buildMixedSearchSQLFromParsed builds one ranked candidate set from the two
 // physical catalog sources. The scored CTE deliberately carries only ranking
@@ -92,6 +94,9 @@ func (r *ItemRepository) buildMixedSearchSQLFromParsed(
 	filter AccessFilter,
 	includeTotal bool,
 ) (dataSQL, countSQL string, args []any) {
+	return r.buildMixedSearchCursorSQL(parsed, itemTypes, limit, offset, filter, includeTotal, nil)
+}
+func (r *ItemRepository) buildMixedSearchCursorSQL(parsed parsedSearchQuery, itemTypes []string, limit, offset int, filter AccessFilter, includeTotal bool, cursor *searchCursorSQL) (dataSQL, countSQL string, args []any) {
 	searchText := searchTextFromParsed(parsed)
 	if searchText == "" {
 		return "", "", nil
@@ -152,6 +157,15 @@ func (r *ItemRepository) buildMixedSearchSQLFromParsed(
 		}
 	}
 
+	if includeMediaItems {
+		r.appendSearchCursorDefinition(cursor, false, filter, &mediaConditions, &args, &argIdx)
+	}
+	if includeEpisodes {
+		r.appendSearchCursorDefinition(cursor, true, filter, &episodeConditions, &args, &argIdx)
+	}
+	if cursor != nil && cursor.err != nil {
+		return "", "", nil
+	}
 	exactIdx := argIdx
 	args = append(args, parsed.ExactTitleHint)
 	argIdx++
@@ -281,6 +295,14 @@ func (r *ItemRepository) buildMixedSearchSQLFromParsed(
 		scoredBody = "WITH " + strings.Join(innerCTEs, ",\n") + "\n" + scoredBody
 	}
 	scoredCTE := "WITH scored AS (\n" + scoredBody + "\n)"
+	if cursor != nil && cursor.request.GroupByWork {
+		if cap := cursor.request.Definition.Limit; cap != nil {
+			scoredBody = "SELECT * FROM (" + scoredBody + ") source_scored" + fmt.Sprintf(" ORDER BY %s LIMIT $%d", mixedSearchOrder(""), argIdx)
+			args = append(args, *cap)
+			argIdx++
+		}
+		scoredCTE = "WITH raw_scored AS (" + scoredBody + "), work_scored AS (SELECT raw_scored.*, ROW_NUMBER() OVER (PARTITION BY CASE WHEN raw_scored.type IN ('ebook','audiobook') AND work_link.work_id IS NOT NULL THEN 'work:' || work_link.work_id ELSE 'item:' || raw_scored.content_id END ORDER BY " + mixedSearchOrder("raw_scored.") + ") AS work_rank FROM raw_scored LEFT JOIN literary_work_items work_link ON work_link.content_id=raw_scored.content_id), scored AS (SELECT * FROM work_scored WHERE work_rank=1)"
+	}
 	postFilter := `FROM scored`
 	if narrowTitleLookup {
 		// Narrow title searches intentionally skip the overview branch. That
@@ -293,6 +315,28 @@ func (r *ItemRepository) buildMixedSearchSQLFromParsed(
 		postFilter += ` WHERE $1::text IS NOT NULL`
 	}
 
+	if cursor != nil {
+		cursor.relation = scoredCTE + " SELECT content_id " + postFilter
+		cursor.relationArgs = append([]any(nil), args...)
+	}
+	countPostFilter := postFilter
+	if cursor != nil {
+		cursor.countArgs = append([]any(nil), args...)
+		if cursor.after != nil && len(cursor.after.Keys) > 0 {
+			seek, seekArgs, err := cursorSeekSQL(searchFTSTerms(), &QueryCursor{Keys: cursor.after.Keys}, argIdx)
+			if err != nil {
+				cursor.err = err
+				return "", "", nil
+			}
+			if strings.Contains(postFilter, " WHERE ") {
+				postFilter += " AND " + seek
+			} else {
+				postFilter += " WHERE " + seek
+			}
+			args = append(args, seekArgs...)
+			argIdx += len(seekArgs)
+		}
+	}
 	pageTotalColumn := ""
 	finalTotalColumn := ""
 	if includeTotal {
@@ -300,14 +344,19 @@ func (r *ItemRepository) buildMixedSearchSQLFromParsed(
 		finalTotalColumn = ", page.total_count"
 	}
 	limitIdx, offsetIdx := argIdx, argIdx+1
-	args = append(args, limit, offset)
+	args = append(args, limit)
+	offsetClause := ""
+	if cursor == nil || cursor.jump {
+		args = append(args, offset)
+		offsetClause = fmt.Sprintf(" OFFSET $%d", offsetIdx)
+	}
 
 	pageCTE := fmt.Sprintf(`, page AS (
-		SELECT scored.*, ROW_NUMBER() OVER (ORDER BY %s) AS ordinal%s
+		SELECT scored.*%s
 		%s
 		ORDER BY %s
-		LIMIT $%d OFFSET $%d
-	)`, mixedSearchOrder, pageTotalColumn, postFilter, mixedSearchOrder, limitIdx, offsetIdx)
+		LIMIT $%d%s
+	)`, pageTotalColumn, postFilter, mixedSearchOrder(""), limitIdx, offsetClause)
 
 	hydratedRelation := fmt.Sprintf(`LATERAL (
 		SELECT %s
@@ -321,12 +370,23 @@ func (r *ItemRepository) buildMixedSearchSQLFromParsed(
 		  AND mi.content_id = page.content_id
 	) hydrated`, qualifiedItemColumns("hydrated_mi"), qualifiedItemColumns("mi"), episodeCatalogBaseRelation)
 
+	if cursor != nil {
+		for _, term := range searchFTSTerms() {
+			expression := term.expression
+			if expression == searchLowerTitleExpression {
+				expression = "LOWER(page.title)"
+			} else {
+				expression = "page." + expression
+			}
+			finalTotalColumn += ", (" + expression + ")::text"
+		}
+	}
 	dataSQL = scoredCTE + pageCTE + fmt.Sprintf(`
 		SELECT %s%s
 		FROM page
 		JOIN %s ON true
-		ORDER BY page.ordinal`, qualifiedItemColumns("hydrated"), finalTotalColumn, hydratedRelation)
-	countSQL = scoredCTE + fmt.Sprintf("\nSELECT COUNT(*)\n%s", postFilter)
+		ORDER BY %s`, qualifiedItemColumns("hydrated"), finalTotalColumn, hydratedRelation, mixedSearchOrder("page."))
+	countSQL = scoredCTE + fmt.Sprintf("\nSELECT COUNT(*)\n%s", countPostFilter)
 	return dataSQL, countSQL, args
 }
 

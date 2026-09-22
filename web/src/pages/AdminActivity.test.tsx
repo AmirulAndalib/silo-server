@@ -1,12 +1,17 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdminSession } from "@/api/types";
 import { activityMethodMeta } from "./adminActivityPresentation";
 
-const mocks = vi.hoisted(() => ({ sessions: [] as AdminSession[], refresh: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  sessions: [] as AdminSession[],
+  refresh: vi.fn(),
+  error: false,
+  rows: true,
+  next: vi.fn(),
+  restart: vi.fn(),
+}));
 
 vi.mock("@/hooks/queries/admin/stats", () => ({
   useAdminSessions: () => ({ data: mocks.sessions, isLoading: false, refetch: mocks.refresh }),
@@ -19,7 +24,25 @@ vi.mock("@/hooks/usePageActivity", () => ({
   usePageActivity: () => ({ canApplyRealtimeUpdates: true }),
 }));
 vi.mock("@/hooks/queries/admin/ips", () => ({
-  useIPUsers: () => ({ data: [], isLoading: false }),
+  useIPUsers: () => ({
+    data: mocks.rows
+      ? [
+          {
+            user_id: 7,
+            username: "Target",
+            first_seen: "2026-01-01T00:00:00Z",
+            last_seen: "2026-01-02T00:00:00Z",
+            request_count: 3,
+          },
+        ]
+      : [],
+    isLoading: false,
+    isError: mocks.error,
+    hasNextPage: true,
+    isFetchingNextPage: false,
+    fetchNextPage: mocks.next,
+    restart: mocks.restart,
+  }),
 }));
 vi.mock("@/hooks/queries/admin/logs", () => ({
   useOperationalLogs: () => ({ data: { entries: [] }, isLoading: false, isFetching: false }),
@@ -28,6 +51,14 @@ vi.mock("@/components/AdminSessionActions", () => ({ AdminSessionActions: () => 
 
 import AdminActivity from "./AdminActivity";
 import AdminStats from "./AdminStats";
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.sessions = [];
+  mocks.error = false;
+  mocks.rows = true;
+});
+afterEach(cleanup);
 
 function makeSession(overrides: Partial<AdminSession> = {}): AdminSession {
   return {
@@ -79,45 +110,6 @@ describe("activity playback scopes", () => {
   beforeEach(() => {
     mocks.sessions = [makeSession()];
   });
-  afterEach(cleanup);
-
-  it.skipIf(!process.env.SILO_ACTIVITY_EVIDENCE_DIR)(
-    "exports synthetic activity screenshot fixtures",
-    async () => {
-      const directory = process.env.SILO_ACTIVITY_EVIDENCE_DIR!;
-      const baseline = process.env.SILO_ACTIVITY_EVIDENCE_BASELINE === "1";
-      const methods = ["direct_stream", "direct", "remux", "transcode"];
-      mocks.sessions = methods.map((method, index) =>
-        makeSession({
-          session_id: `example-session-${index}`,
-          username: `Example viewer ${index + 1}`,
-          media_title: `Example video ${index + 1}`,
-          effective_play_method: baseline && method === "direct_stream" ? "audio" : method,
-          play_method: method === "direct_stream" ? "remux" : method,
-          video_decision: method === "direct" || method === "transcode" ? method : "remux",
-          audio_decision:
-            method === "direct_stream" || method === "transcode" ? "transcode" : method,
-          transcode_audio: method === "direct_stream" || method === "transcode",
-          output_container: baseline
-            ? undefined
-            : method === "direct"
-              ? "mkv"
-              : method === "transcode"
-                ? "mpegts"
-                : "fmp4",
-          output_protocol: baseline ? undefined : method === "direct" ? "http" : "hls",
-          target_video_codec: method === "transcode" ? "h264" : undefined,
-          started_at: new Date(Date.now() - 300_000).toISOString(),
-          updated_at: new Date().toISOString(),
-        }),
-      );
-      renderActivity();
-      await mkdir(directory, { recursive: true });
-      await writeFile(join(directory, "collapsed.html"), document.body.innerHTML);
-      fireEvent.click(screen.getAllByRole("button", { name: "Details" })[0]!);
-      await writeFile(join(directory, "expanded.html"), document.body.innerHTML);
-    },
-  );
 
   it("shows Direct Stream on desktop and mobile without a second audio-transcode badge", () => {
     renderActivity();
@@ -225,5 +217,39 @@ describe("activity playback scopes", () => {
 
     expect(screen.getByRole("cell", { name: "Direct Stream" })).toBeInTheDocument();
     expect(screen.queryByText("direct_stream")).not.toBeInTheDocument();
+  });
+});
+
+describe("IP lookup", () => {
+  function lookup() {
+    render(
+      <MemoryRouter>
+        <AdminActivity />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("IP Lookup"));
+    fireEvent.change(screen.getByPlaceholderText(/IP lookup/), {
+      target: { value: "198.51.100.1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Lookup" }));
+  }
+
+  it("offers explicit continuation and preserves existing rows on partial errors", () => {
+    mocks.error = true;
+    lookup();
+    expect(screen.getByText("Target")).toBeInTheDocument();
+    expect(screen.getByText(/Could not load more history/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(mocks.next).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Reload history" }));
+    expect(mocks.restart).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not present a failed initial page as an empty result", () => {
+    mocks.error = true;
+    mocks.rows = false;
+    lookup();
+    expect(screen.getByText(/Could not load IP history/)).toBeInTheDocument();
+    expect(screen.queryByText(/No users found/)).not.toBeInTheDocument();
   });
 });

@@ -1,23 +1,44 @@
+import type { AdminUser } from "@/api/types";
+import { V2ProblemError } from "@/api/v2/request";
+import { setAccessToken, setProfileId, setProfileToken } from "@/api/client";
 // @vitest-environment jsdom
 
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import AdminUsers from "./AdminUsers";
 
-// The page is exercised for its tab wiring only; the user table's data and the
-// two invite tabs each own their own queries and tests.
+vi.mock("@/hooks/useAuth", () => ({
+  useAuth: () => ({ beginImpersonation: mocks.beginImpersonation }),
+}));
 vi.mock("@/hooks/queries/admin/users", () => ({
-  useAdminUsers: () => ({ data: [], isLoading: false }),
+  useAdminUserCapabilities: () => ({ data: { available: mocks.available, default_profile: true } }),
+  useImpersonateUser: () => ({ mutateAsync: mocks.impersonate, reset: vi.fn(), isPending: false }),
+  useAdminUsers: () => ({ data: mocks.users, isLoading: false }),
   useCreateUser: () => ({ mutate: vi.fn(), isPending: false }),
-  useUpdateUser: () => ({ mutate: vi.fn(), isPending: false }),
+  useUpdateUser: () => ({ mutateAsync: mocks.update, isPending: false }),
   useDeleteUser: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
 const mocks = vi.hoisted(() => ({
   useAdminServerSettings: vi.fn(),
+  users: [] as AdminUser[],
+  update: vi.fn(),
+  reads: 0,
+  available: true,
+  impersonate: vi.fn(),
+  beginImpersonation: vi.fn(),
+}));
+
+vi.mock("@/api/v2/adminUsers", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/api/v2/adminUsers")>()),
+  getAdminUser: async () => ({
+    user: { ...mocks.users[0], username: "Canonical" },
+    etag: `"read-${++mocks.reads}"`,
+    profileContext: (await import("@/api/client")).captureProfileRequestContext()!,
+  }),
 }));
 
 vi.mock("@/hooks/queries/admin/settings", () => ({
@@ -58,6 +79,7 @@ function renderPage(entry = "/admin/users") {
             </>
           }
         />
+        <Route path="/profiles" element={<LocationProbe />} />
       </Routes>
     </MemoryRouter>,
   );
@@ -69,6 +91,12 @@ function tab(name: string) {
 
 describe("AdminUsers tabs", () => {
   beforeEach(() => {
+    setAccessToken("account");
+    setProfileId("owner");
+    setProfileToken(null);
+    mocks.users = [];
+    mocks.reads = 0;
+    mocks.update.mockReset();
     mocks.useAdminServerSettings.mockReset();
     mocks.useAdminServerSettings.mockReturnValue({
       data: { "signup.enabled": "false" },
@@ -110,6 +138,12 @@ describe("AdminUsers tabs", () => {
 
 describe("AdminUsers public-signup status badge", () => {
   beforeEach(() => {
+    setAccessToken("account");
+    setProfileId("owner");
+    setProfileToken(null);
+    mocks.users = [];
+    mocks.reads = 0;
+    mocks.update.mockReset();
     mocks.useAdminServerSettings.mockReset();
   });
 
@@ -161,5 +195,185 @@ describe("AdminUsers public-signup status badge", () => {
 
     await userEvent.click(tab("Invitations"));
     expect(screen.getByText("Public signups on")).toBeInTheDocument();
+  });
+});
+
+const adminUser: AdminUser = {
+  id: 7,
+  username: "taylor",
+  email: "taylor@example.test",
+  role: "user",
+  permissions: [],
+  enabled: true,
+  library_ids: null,
+  access_group_id: null,
+  max_playback_quality: null,
+  max_streams: null,
+  max_transcodes: null,
+  transcode_allowed: null,
+  audio_transcode_allowed: null,
+  max_profiles: 4,
+  download_allowed: null,
+  download_transcode_allowed: null,
+  requests_allowed: null,
+  effective_policy: {
+    library_ids: null,
+    max_playback_quality: "",
+    max_streams: 0,
+    max_transcodes: 0,
+    transcode_allowed: true,
+    audio_transcode_allowed: true,
+    download_allowed: true,
+    download_transcode_allowed: true,
+    requests_allowed: true,
+    permissions: [],
+  },
+  created_at: "2026-07-01T12:00:00Z",
+  updated_at: "2026-07-01T12:00:00Z",
+};
+
+it("seeds list edits from canonical GET and preserves drafts through explicit conflict reload", async () => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  setAccessToken("account");
+  setProfileId("owner");
+  setProfileToken(null);
+  mocks.users = [adminUser];
+  mocks.reads = 0;
+  mocks.update
+    .mockRejectedValueOnce(
+      new V2ProblemError("updateAdminUser", {
+        type: "https://silo.example/problems/precondition_failed",
+        title: "Changed",
+        status: 412,
+        detail: "Reload",
+        instance: "/api/v2/admin/users/7",
+      }),
+    )
+    .mockResolvedValue(undefined);
+  const user = userEvent.setup();
+  renderPage();
+  await user.click(screen.getByRole("button", { name: "Edit taylor" }));
+  const dialog = await screen.findByRole("dialog");
+  const name = within(dialog).getByLabelText("Username");
+  expect(name).toHaveValue("Canonical");
+  await user.clear(name);
+  await user.type(name, "My draft");
+  const save = within(dialog).getByRole("button", { name: /save/i });
+  await user.click(save);
+  await screen.findByText(/Your draft is preserved/);
+  expect(name).toHaveValue("My draft");
+  expect(save).toBeDisabled();
+  expect(mocks.reads).toBe(1);
+  await user.click(within(dialog).getByRole("button", { name: "Reload current user" }));
+  await waitFor(() => expect(save).toBeEnabled());
+  expect(name).toHaveValue("My draft");
+  await user.click(save);
+  await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(2));
+  expect(mocks.update.mock.calls.map((call) => call[0].editor.etag)).toEqual([
+    '"read-1"',
+    '"read-2"',
+  ]);
+});
+
+describe("AdminUsers row actions", () => {
+  afterEach(() => vi.useRealTimers());
+  beforeEach(() => {
+    setAccessToken("account");
+    setProfileId("owner");
+    setProfileToken(null);
+    mocks.users = [adminUser];
+    mocks.available = true;
+    mocks.impersonate.mockReset();
+    mocks.beginImpersonation.mockReset();
+  });
+
+  it("offers View as user only for enabled non-admin accounts", () => {
+    mocks.users = [
+      adminUser,
+      { ...adminUser, id: 8, username: "admin", role: "admin" },
+      { ...adminUser, id: 9, username: "disabled", enabled: false },
+    ];
+    renderPage();
+    expect(screen.getByRole("button", { name: "View as user: taylor" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "View as user: admin" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "View as user: disabled" })).toBeNull();
+  });
+
+  it("does not offer View as user when administration is unavailable", () => {
+    mocks.available = false;
+    renderPage();
+    expect(screen.queryByRole("button", { name: /View as user/ })).toBeNull();
+  });
+
+  it.each([
+    ["link", "View taylor playback history", "View playback history"],
+    ["button", "View as user: taylor", "View as user"],
+    ["button", "Edit taylor", "Edit user"],
+    ["button", "Delete taylor", "Delete user"],
+  ])("shows an immediate hover and focus tooltip for %s %s", (role, name, label) => {
+    vi.useFakeTimers();
+    renderPage();
+    const action = screen.getByRole(role, { name });
+    fireEvent.pointerMove(action, { pointerType: "mouse" });
+    act(() => vi.advanceTimersByTime(0));
+    expect(screen.getByRole("tooltip")).toHaveTextContent(label);
+    fireEvent.pointerLeave(action);
+    act(() => action.focus());
+    expect(action).toHaveFocus();
+    expect(screen.getByRole("tooltip")).toHaveTextContent(label);
+    expect(mocks.impersonate).not.toHaveBeenCalled();
+  });
+
+  it("explains that actions run as the user and lets the admin cancel", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("button", { name: "View as user: taylor" }));
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog).toHaveTextContent('Continue as "taylor"?');
+    expect(dialog).toHaveTextContent("Actions you take will run as this user.");
+    expect(dialog).toHaveTextContent(
+      "Admin access will be unavailable until you end this session.",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(mocks.impersonate).not.toHaveBeenCalled();
+  });
+
+  it("starts the selected user's session only after confirmation and returns to the list", async () => {
+    const user = userEvent.setup();
+    mocks.impersonate.mockImplementation(async ({ profileContext }) => ({
+      session: {},
+      profileContext,
+    }));
+    renderPage();
+    await user.click(screen.getByRole("button", { name: "View as user: taylor" }));
+    expect(mocks.impersonate).not.toHaveBeenCalled();
+    await user.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", { name: "View as user" }),
+    );
+    await waitFor(() => expect(mocks.beginImpersonation).toHaveBeenCalledWith({}, "/admin/users"));
+    expect(mocks.impersonate).toHaveBeenCalledTimes(1);
+    expect(mocks.impersonate.mock.calls[0]![0].id).toBe(7);
+    expect(screen.getByTestId("location")).toHaveTextContent("/profiles");
+  });
+
+  it("preserves the current session when starting View as user fails", async () => {
+    const user = userEvent.setup();
+    mocks.impersonate.mockRejectedValue(new Error("This user is disabled."));
+    renderPage();
+    await user.click(screen.getByRole("button", { name: "View as user: taylor" }));
+    await user.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", { name: "View as user" }),
+    );
+    expect(await screen.findByText("This user is disabled.")).toBeInTheDocument();
+    expect(mocks.beginImpersonation).not.toHaveBeenCalled();
+    expect(screen.getByTestId("location")).toHaveTextContent("/admin/users");
   });
 });

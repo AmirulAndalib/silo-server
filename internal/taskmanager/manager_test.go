@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -23,22 +24,35 @@ type fakeTriggerRepository struct {
 func (r *fakeTriggerRepository) GetTriggers(_ context.Context, taskKey string) ([]taskmanager.TriggerConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]taskmanager.TriggerConfig(nil), r.triggers[taskKey]...), nil
+	return slices.Clone(r.triggers[taskKey]), nil
+}
+
+func (r *fakeTriggerRepository) GetOrCreateTriggers(_ context.Context, taskKey string, defaults []taskmanager.TriggerConfig) ([]taskmanager.TriggerConfig, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.triggers[taskKey]; !exists {
+		r.setTriggers(taskKey, defaults)
+	}
+	return slices.Clone(r.triggers[taskKey]), nil
 }
 
 func (r *fakeTriggerRepository) SetTriggers(_ context.Context, taskKey string, triggers []taskmanager.TriggerConfig) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.setTriggers(taskKey, triggers)
+	return nil
+}
+
+func (r *fakeTriggerRepository) setTriggers(taskKey string, triggers []taskmanager.TriggerConfig) {
 	if r.triggers == nil {
 		r.triggers = map[string][]taskmanager.TriggerConfig{}
 	}
 	if r.setCalls == nil {
 		r.setCalls = map[string][]taskmanager.TriggerConfig{}
 	}
-	copied := append([]taskmanager.TriggerConfig(nil), triggers...)
+	copied := append([]taskmanager.TriggerConfig{}, triggers...)
 	r.triggers[taskKey] = copied
 	r.setCalls[taskKey] = copied
-	return nil
 }
 
 type fakeExecutionRepository struct{}
@@ -482,5 +496,39 @@ func TestTaskManagerTriggerSkipsConditionalTaskOnPreflightError(t *testing.T) {
 	if !triggers[0].next.After(beforeTrigger) {
 		t.Fatalf("next run = %s, want rearmed after skipped preflight error",
 			triggers[0].next.Format(time.RFC3339Nano))
+	}
+}
+
+type reservedTask struct {
+	stubTask
+	entered chan struct{}
+	done    chan struct{}
+}
+
+func (t reservedTask) Execute(ctx context.Context, _ taskmanager.ProgressReporter) error {
+	close(t.entered)
+	<-ctx.Done()
+	close(t.done)
+	return ctx.Err()
+}
+func TestStartTaskReservesBeforeAcknowledgment(t *testing.T) {
+	task := reservedTask{stubTask: stubTask{key: "reserved"}, entered: make(chan struct{}), done: make(chan struct{})}
+	manager := taskmanager.New(&fakeTriggerRepository{}, fakeExecutionRepository{}, nil, nil)
+	manager.Register(task)
+	info, err := manager.StartTask(task.Key())
+	if err != nil || info.State != taskmanager.TaskStateRunning {
+		t.Fatalf("start: %+v, %v", info, err)
+	}
+	t.Cleanup(manager.Stop)
+	if _, err := manager.StartTask(task.Key()); !errors.Is(err, taskmanager.ErrTaskAlreadyRunning) {
+		t.Fatalf("second start: %v", err)
+	}
+	if err := manager.CancelTask(task.Key()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-task.done:
+	case <-time.After(time.Second):
+		t.Fatal("reserved work did not receive cancellation")
 	}
 }

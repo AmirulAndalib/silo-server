@@ -51,8 +51,17 @@ func TestSessionComponentDecisionLabelsCopiedAudioDuringHLSAsRemux(t *testing.T)
 func TestActivityOutputFormatIsIndependentOfSessionScope(t *testing.T) {
 	row := playbackSessionRow{PlayMethod: "remux", TranscodeAudio: true, SourceContainer: "mkv", OutputContainer: "fmp4", OutputProtocol: "hls"}
 	enrichPlaybackSessionRow(&row, nil)
-	if row.EffectivePlayMethod != "direct_stream" || row.OutputContainer != "fmp4" || row.OutputProtocol != "hls" {
+	if row.EffectivePlayMethod != "audio" || row.OutputContainer != "fmp4" || row.OutputProtocol != "hls" {
 		t.Fatal("output format changed the session classification")
+	}
+	// The frozen bridge payload keeps its alpha shape; only the native API
+	// exposes the output format.
+	body, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "output_container") || strings.Contains(string(body), "output_protocol") {
+		t.Fatalf("bridge payload gained output fields: %s", body)
 	}
 	row.PlayMethod = "direct"
 	enrichPlaybackSessionRow(&row, nil)
@@ -73,11 +82,11 @@ func TestEffectivePlayMethodBuckets(t *testing.T) {
 	}{
 		{"direct play", "direct", false, "", "direct"},
 		{"plain remux", "remux", false, "", "remux"},
-		{"audio-only re-encode via remux", "remux", true, "", "direct_stream"},
+		{"audio-only re-encode via remux", "remux", true, "", "audio"},
 		{"full video transcode", "transcode", true, "h264", "transcode"},
 		{"video transcode with copied audio", "transcode", false, "h264", "transcode"},
 		{"video-copy HLS repackage", "transcode", false, "copy", "remux"},
-		{"video-copy HLS with audio re-encode", "transcode", true, "copy", "direct_stream"},
+		{"video-copy HLS with audio re-encode", "transcode", true, "copy", "audio"},
 		// Unknown play_method (stale row from an older node): the bucket must
 		// stay empty rather than inventing a method from transcode_audio.
 		{"unknown method with transcode_audio set", "hls", true, "", ""},
@@ -109,10 +118,10 @@ func TestSessionsCapabilitiesAdvertisesActivityFields(t *testing.T) {
 		t.Fatalf("decode capabilities: %v", err)
 	}
 	if !resp.EffectivePlayMethod || !resp.IsJellyfinClient || !resp.TranscodeHWAccel || !resp.ToneMapMode ||
-		!resp.ClientBuild || !resp.ClientChannel || !resp.TargetAudioChannels || !resp.NodeRouting || !resp.OutputFormat {
+		!resp.ClientBuild || !resp.ClientChannel || !resp.TargetAudioChannels || !resp.NodeRouting {
 		t.Fatalf("capabilities must advertise every additive field: %+v", resp)
 	}
-	want := []string{"direct", "remux", "direct_stream", "transcode"}
+	want := []string{"direct", "remux", "transcode", "audio"}
 	if len(resp.EffectivePlayMethodValues) != len(want) {
 		t.Fatalf("bucket vocabulary = %v, want %v", resp.EffectivePlayMethodValues, want)
 	}

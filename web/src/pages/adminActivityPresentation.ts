@@ -326,7 +326,7 @@ function reportingServerRouteNode(session: AdminSession): ActivityRouteNode {
 
 /**
  * Return registered playback nodes in work-to-viewer order. Routes without a
- * registered node retain the reporting API server's identity, while rows from
+ * registered node identify the API server, while rows from
  * older servers fall back to their legacy node fields.
  */
 export function getSessionRouteNodes(session: AdminSession): ActivityRouteNode[] {
@@ -361,6 +361,9 @@ export function getSessionRouteNodes(session: AdminSession): ActivityRouteNode[]
     }
   }
 
+  if (egress === "api" || (execution === "api" && nodes.length === 0)) {
+    nodes.push(reportingServerRouteNode(session));
+  }
   return nodes.length > 0 ? nodes : [reportingServerRouteNode(session)];
 }
 

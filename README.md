@@ -32,6 +32,16 @@
 > Silo is pre-release. APIs, configuration, and database migrations may change
 > before the first stable release. Back up your deployment before updating.
 
+## 1.0 release scope
+
+The [1.0 milestone](https://siloserver.org/milestone/1.0/) covers movies and
+series. Audiobooks, ebooks, and Audiobookshelf compatibility keep working as
+they do today and are labeled **beta**: they are outside the 1.0 support
+promise and will be replaced by a consolidated Books effort with no assigned
+release date. The broader capabilities below include those beta
+implementations, not a promise that every media type is supported in 1.0.
+Existing library data is preserved when upgrading.
+
 ## What Silo does
 
 <table>
@@ -112,7 +122,7 @@ defines each tag and the SemVer contract.
 
 - [Documentation index](docs/wiki/index.md) — user and operator guides
 - [Development guide](DEVELOPMENT.md) — source setup, builds, tests, migrations
-- [Settings API](docs/settings-api.md) and [Downloads API](docs/downloads-api.md) — client contracts
+- [Settings API](docs/settings-api.md), [Downloads API](docs/downloads-api.md), and [Apple Push Display Token](docs/notifications-push-api.md) — client contracts
 
 ## Community and contributions
 

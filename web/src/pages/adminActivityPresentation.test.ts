@@ -582,6 +582,7 @@ describe("adminActivityPresentation", () => {
         label: "Transcode",
         name: "silo-transcode-recovered",
       },
+      { key: "server:local", kind: "server", label: "Server", name: "Local server" },
     ]);
   });
 

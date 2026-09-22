@@ -78,7 +78,7 @@ make embed-stub
 go build ./...
 gofmt -l .                      # must print nothing
 go vet ./...
-golangci-lint run --new-from-merge-base="origin/main" ./...
+make lint-changed                   # BASE_REF=origin/<pr-base> when not main
 make test-go
 
 # Web
@@ -93,28 +93,40 @@ make test-web
 # Generated contracts, fixtures, and docs hygiene
 make verify-settings-bindings-all
 make verify-playback-fixtures
+make verify-route-inventory
+make verify-migration-ledger
+make verify-scenario-catalogs
+make verify-offline-routes
+make verify-apiv2-openapi
+make verify-apiv2-contract          # BASE_REF=origin/<pr-base> when not main
+make verify-apiv2-fixtures
+go test -count=1 -run '^TestCommittedArtifactMatchesRouter$' ./internal/apiv2/
 make verify-local-paths
 ```
 
+Touching `internal/apiv2` registrations? Run `make apiv2-openapi` and
+`make apiv2-fixtures` and commit what they write; the gates above fail on a
+stale artifact or fixture tree.
+
 `make lint` runs `golangci-lint` over the whole tree and reports inherited
 findings the repository does not pass yet; CI only gates the lines your branch
-changed, which is what the `--new-from-merge-base` form checks. Do not add to
-the inherited findings.
+changed. `make lint-changed` checks exactly those lines, and it analyzes only
+the packages your branch touched, so it takes seconds where a cold run over
+`./...` takes minutes of every core. Do not add to the inherited findings.
+Never pass `--allow-parallel-runners`: concurrent runs queue behind one
+another on purpose.
 
-Paste the actual results into the pull request. Do not report a check as passing
-if it was skipped, failed, or ran somewhere other than where you say it did.
+Summarize the relevant commands and results in the pull request. Name required
+checks that were skipped or failed, and include short output excerpts only when
+they help explain a failure. Describe the test environment without identifying
+private infrastructure. Never claim a check passed or ran on a target it did not.
 
 ## AI-assisted contributions
 
-> [!WARNING]
-> Disclose AI use in every issue and pull request. Fabricated APIs,
-> observations, vulnerabilities, reproduction steps, logs, or test results get
-> the contributor blocked. Bug reports must come from a real reproduction with
-> raw logs.
-
-The [AI-assisted contribution policy](docs/ai-contributions.md) defines the
-disclosure block, the evidence standard, and enforcement. "No AI" is a valid
-disclosure; leaving it out is not.
+Disclose AI use in every issue and pull request, or state "No AI used" when true.
+The [AI-assisted contribution policy](docs/ai-contributions.md) covers contributor
+responsibility, evidence, and enforcement. Use the disclosure fields in the PR
+template or issue form.
 
 ## Open the pull request
 
@@ -122,7 +134,10 @@ Use a [Conventional Commit](https://www.conventionalcommits.org/) title and fill
 in the pull request template. Link the issue or scope item for non-trivial
 work; write `Related issue: N/A — narrow fix` only when no prior coordination
 was needed. Keep the commit history intentional and the diff limited to the
-stated problem.
+stated problem. Keep the description proportional to the change; omit session
+history, full logs, and private report links. Follow the
+[public-content and media rules](AGENTS.md#pull-requests). Screenshots and recordings
+are not routine PR requirements; attach them only when explicitly requested.
 
 ## Review expectations
 
@@ -136,4 +151,6 @@ building.
 Coding agents must read [AGENTS.md](AGENTS.md) before changing the repository
 (`CLAUDE.md` points to the same file). This guide and the
 [AI-assisted contribution policy](docs/ai-contributions.md) apply to agent and
-human authors equally.
+human authors equally. Before creating or updating an issue or pull request,
+agents must apply the checked-in [unslop skill](.agents/skills/unslop/SKILL.md) to
+the title and body, as required by the [Writing policy](AGENTS.md#writing).

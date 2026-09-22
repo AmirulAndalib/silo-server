@@ -3,6 +3,7 @@ package historyimport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +26,11 @@ const (
 	// rejects the PMS page size with 400 "Invalid value provided for
 	// x-plex-container-size!".
 	plexWatchlistPageSize = 100
+	// plexMetadataBatchSize caps how many rating keys one /library/metadata/{a,b,c}
+	// request carries. The PMS accepts comma-separated keys; batching keeps a
+	// history sweep of thousands of id-less items to a handful of requests under
+	// the shared upstream rate limit.
+	plexMetadataBatchSize = 50
 )
 
 type PlexClient struct {
@@ -289,7 +295,7 @@ func (c *PlexClient) fetchSectionItems(ctx context.Context, baseURL, token, sect
 // The discover listing does not honor includeGuids, so items usually arrive
 // without external ids. Each id-less item gets a follow-up per-item metadata
 // fetch to resolve its Guid array; failures there degrade to warnings so the
-// rest of the watchlist still imports (matching falls back to title/year).
+// remaining watchlist items can still import.
 func (c *PlexClient) FetchWatchlist(ctx context.Context, accountToken string) ([]PlexItem, []string, error) {
 	base := c.discoverBaseURL
 	if base == "" {
@@ -321,25 +327,30 @@ func (c *PlexClient) FetchWatchlist(ctx context.Context, accountToken string) ([
 	}
 
 	var warnings []string
+	var firstErr error
 	unresolved := 0
+	attempted := 0
 	for i := range allItems {
-		if len(allItems[i].Guid) > 0 {
+		if hasMatchablePlexGuid(allItems[i].Guid) {
 			continue
 		}
+		attempted++
 		detail, err := c.fetchWatchlistItemMetadata(ctx, base, accountToken, allItems[i].RatingKey)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
 		if err != nil || detail == nil {
 			unresolved++
 			continue
 		}
-		allItems[i].Guid = detail.Guid
-		if allItems[i].Year == 0 {
-			allItems[i].Year = detail.Year
+		allItems[i].Guid, allItems[i].Year = applyPlexMetadataFallback(
+			allItems[i].Guid, allItems[i].Year, detail)
+		if !hasMatchablePlexGuid(allItems[i].Guid) {
+			unresolved++
 		}
 	}
 	if unresolved > 0 {
-		warnings = append(warnings, fmt.Sprintf(
-			"watchlist: could not resolve external ids for %d of %d items; those fall back to exact title/year matching",
-			unresolved, len(allItems)))
+		warnings = append(warnings, plexUnresolvedIDsWarning("watchlist", "items", unresolved, attempted, firstErr))
 	}
 	return allItems, warnings, nil
 }
@@ -378,7 +389,28 @@ func (c *PlexClient) FetchOnDeck(ctx context.Context, baseURL, token string) ([]
 }
 
 func (c *PlexClient) FetchMetadata(ctx context.Context, baseURL, token, ratingKey string) (*PlexItem, error) {
-	reqURL := fmt.Sprintf("%s/library/metadata/%s?includeGuids=1", baseURL, url.PathEscape(ratingKey))
+	items, err := c.FetchMetadataBatch(ctx, baseURL, token, []string{ratingKey})
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, nil
+	}
+	return &items[0], nil
+}
+
+// FetchMetadataBatch fetches full metadata for several rating keys in one request
+// (GET /library/metadata/{k1,k2,...}). Keys the server no longer knows are simply
+// absent from the result; callers match returned items on RatingKey.
+func (c *PlexClient) FetchMetadataBatch(ctx context.Context, baseURL, token string, ratingKeys []string) ([]PlexItem, error) {
+	if len(ratingKeys) == 0 {
+		return nil, nil
+	}
+	escaped := make([]string, len(ratingKeys))
+	for i, key := range ratingKeys {
+		escaped[i] = url.PathEscape(key)
+	}
+	reqURL := fmt.Sprintf("%s/library/metadata/%s?includeGuids=1", baseURL, strings.Join(escaped, ","))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, err
@@ -386,12 +418,9 @@ func (c *PlexClient) FetchMetadata(ctx context.Context, baseURL, token, ratingKe
 	c.setPlexHeaders(req, token)
 	var container plexMediaContainer
 	if err := c.doJSON(req, &container); err != nil {
-		return nil, fmt.Errorf("fetching Plex metadata for %s: %w", ratingKey, err)
+		return nil, fmt.Errorf("fetching Plex metadata for %s: %w", strings.Join(ratingKeys, ","), err)
 	}
-	if len(container.MediaContainer.Metadata) == 0 {
-		return nil, nil
-	}
-	return &container.MediaContainer.Metadata[0], nil
+	return container.items(), nil
 }
 
 // Authenticate exchanges Plex account credentials for an auth token via plex.tv.
@@ -449,6 +478,11 @@ func (c *PlexClient) doJSON(req *http.Request, out any) error {
 type plexHTTPError struct {
 	StatusCode int
 	Body       string
+}
+
+func isPlexHTTPStatus(err error, statusCode int) bool {
+	var httpErr *plexHTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == statusCode
 }
 
 func (e *plexHTTPError) Error() string {
