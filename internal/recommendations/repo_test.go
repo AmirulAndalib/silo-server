@@ -284,3 +284,38 @@ func assertQueryTermsInOrder(t *testing.T, query string, terms ...string) {
 		searchFrom += idx + len(term)
 	}
 }
+
+func TestRecommendationCacheQueriesStoreGlobalRowsAsNull(t *testing.T) {
+	// GlobalCacheUserID is the sentinel the worker/reader pass for global
+	// (non-personalized) rows. It must reach the row as NULL so the users(id)
+	// foreign key added in 20260912231023_user_fk_integrity does not reject it
+	// (issue #1261): no users row has id 0, so a literal 0 fails with 23503.
+	if GlobalCacheUserID != 0 {
+		t.Fatalf("GlobalCacheUserID = %d, expected 0", GlobalCacheUserID)
+	}
+
+	upsert := strings.Join(strings.Fields(upsertRecommendationCacheQuery), " ")
+	// The sentinel is mapped to NULL, and the conflict target is the identity
+	// index (NULLS NOT DISTINCT) so a NULL-owned row still upserts in place.
+	for _, want := range []string{
+		"VALUES (NULLIF($1, 0), $2, $3, $4, $5, $6::timestamptz, NOW())",
+		"ON CONFLICT (user_id, profile_id, rec_type, source_item_id) DO UPDATE",
+	} {
+		if !strings.Contains(upsert, want) {
+			t.Fatalf("upsert query missing %q: %s", want, upsert)
+		}
+	}
+	if strings.Contains(upsert, "VALUES ($1,") {
+		t.Fatalf("upsert must not insert the raw sentinel into user_id: %s", upsert)
+	}
+
+	get := strings.Join(strings.Fields(getRecommendationCacheQuery), " ")
+	// IS NOT DISTINCT FROM NULLIF($1, 0) matches a stored NULL for the global
+	// sentinel and stays an equality match for real account ids.
+	if !strings.Contains(get, "user_id IS NOT DISTINCT FROM NULLIF($1, 0)") {
+		t.Fatalf("get query must match NULL-owned rows: %s", get)
+	}
+	if strings.Contains(get, "user_id = $1") {
+		t.Fatalf("get query must not equality-match the sentinel: %s", get)
+	}
+}

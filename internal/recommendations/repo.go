@@ -793,21 +793,41 @@ func compatiblePeerContentRatings(maxContentRating string) []string {
 
 // UpsertRecommendationCache stores or refreshes a precomputed recommendation
 // list for a user.
+// Global cache rows are owned by no account and are stored with user_id NULL so
+// the users(id) foreign key does not reject them (see migration
+// 20260922130000_recommendation_cache_global_ownership). GlobalCacheUserID (0)
+// is the API-level sentinel; NULLIF maps it to NULL at the row, and the identity
+// index is NULLS NOT DISTINCT so a NULL-owned row still collides on upsert.
+const upsertRecommendationCacheQuery = `
+		INSERT INTO recommendation_cache
+			(user_id, profile_id, rec_type, source_item_id, items, expires_at, created_at)
+		VALUES (NULLIF($1, 0), $2, $3, $4, $5, $6::timestamptz, NOW())
+		ON CONFLICT (user_id, profile_id, rec_type, source_item_id) DO UPDATE
+			SET items      = EXCLUDED.items,
+			    expires_at = EXCLUDED.expires_at,
+			    created_at = NOW()
+`
+
+// getRecommendationCacheQuery matches the NULL-owned global rows written by
+// upsertRecommendationCacheQuery: IS NOT DISTINCT FROM treats NULLIF(0) (NULL)
+// as equal to a stored NULL, and stays an equality match for real account ids.
+const getRecommendationCacheQuery = `
+		SELECT items
+		FROM   recommendation_cache
+		WHERE  user_id        IS NOT DISTINCT FROM NULLIF($1, 0)
+		  AND  profile_id     = $2
+		  AND  rec_type       = $3
+		  AND  source_item_id = $4
+		  AND  expires_at     > NOW()
+`
+
 func (r *Repo) UpsertRecommendationCache(ctx context.Context, userID int, profileID, recType, sourceItemID string, items []ScoredItem, expiresAt string) error {
 	itemsJSON, err := json.Marshal(items)
 	if err != nil {
 		return fmt.Errorf("marshaling cached items: %w", err)
 	}
 
-	_, err = r.pool.Exec(ctx, `
-		INSERT INTO recommendation_cache
-			(user_id, profile_id, rec_type, source_item_id, items, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6::timestamptz, NOW())
-		ON CONFLICT (user_id, profile_id, rec_type, source_item_id) DO UPDATE
-			SET items      = EXCLUDED.items,
-			    expires_at = EXCLUDED.expires_at,
-			    created_at = NOW()
-	`, userID, profileID, recType, sourceItemID, itemsJSON, expiresAt)
+	_, err = r.pool.Exec(ctx, upsertRecommendationCacheQuery, userID, profileID, recType, sourceItemID, itemsJSON, expiresAt)
 	if err != nil {
 		return fmt.Errorf("upsert recommendation cache: %w", err)
 	}
@@ -818,15 +838,7 @@ func (r *Repo) UpsertRecommendationCache(ctx context.Context, userID int, profil
 // yet expired. Returns nil, nil on cache miss or expiry.
 func (r *Repo) GetRecommendationCache(ctx context.Context, userID int, profileID, recType, sourceItemID string) ([]ScoredItem, error) {
 	var itemsJSON []byte
-	err := r.pool.QueryRow(ctx, `
-		SELECT items
-		FROM   recommendation_cache
-		WHERE  user_id        = $1
-		  AND  profile_id     = $2
-		  AND  rec_type       = $3
-		  AND  source_item_id = $4
-		  AND  expires_at     > NOW()
-	`, userID, profileID, recType, sourceItemID).Scan(&itemsJSON)
+	err := r.pool.QueryRow(ctx, getRecommendationCacheQuery, userID, profileID, recType, sourceItemID).Scan(&itemsJSON)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
