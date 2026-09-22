@@ -60,6 +60,10 @@ catalog's assets location and refuse the real assets store on the next start.
 `artwork.storage_backend` accepts `auto`, `local`, or `s3`. `auto` selects S3
 when the public bucket is configured and local storage otherwise. The local
 root defaults to `/var/lib/silo/artwork`; containers must persist that directory.
+Local objects are written `0644` and directories `0755`, including diagnostic
+bundles and job artifacts when they share the root, so the data directory's
+ownership and mount options are what keep them private. Owner-only modes and a
+separate operational root are deferred to follow-up storage work.
 S3 is recommended when multiple hosts serve the same catalog.
 
 The setting keys keep their original artwork-era names. They select the backend
