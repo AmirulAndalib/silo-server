@@ -35,12 +35,13 @@ type Options struct {
 // no private bucket puts both in one root and the key prefixes each caller
 // already uses keep the namespaces apart.
 type Stores struct {
-	// Assets backs artwork, branding, markers, chapter thumbnails, and
-	// downloaded subtitles. It carries the recorded storage identity.
+	// Assets backs artwork, branding, markers, chapter thumbnails, and (once
+	// migrated) downloaded subtitles. It carries the recorded storage identity.
 	Assets Store
-	// Operational backs diagnostic bundles, job artifacts, and profile avatars.
-	// Nil only when there is nowhere to put them: an S3 backend with no private
-	// bucket configured.
+	// Operational is for diagnostic bundles, job artifacts, and profile
+	// avatars; those callers still take their storage directly until they
+	// migrate. Nil only when there is nowhere to put them: an S3 backend with no
+	// private bucket configured.
 	Operational Store
 }
 
