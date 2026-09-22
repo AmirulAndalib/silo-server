@@ -22,9 +22,9 @@ import (
 	"github.com/Silo-Server/silo-server/internal/adminjob"
 	"github.com/Silo-Server/silo-server/internal/api/handlers"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
-	"github.com/Silo-Server/silo-server/internal/artworkstore"
 	"github.com/Silo-Server/silo-server/internal/artworkurl"
 	"github.com/Silo-Server/silo-server/internal/auth"
+	"github.com/Silo-Server/silo-server/internal/blobstore"
 	mediacatalog "github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/literaryworks"
 	"github.com/Silo-Server/silo-server/internal/metadata/translation"
@@ -176,6 +176,8 @@ type Dependencies struct {
 	AdminMetadataTranslation        AdminMetadataTranslationService
 	AdminPeople                     AdminPeopleService
 	AdminDiagnosticDownloads        AdminDiagnosticDownloadService
+	AdminJobArtifacts               AdminJobArtifactService
+	AdminJobArtifactSigner          *artworkurl.Signer
 	AdminDiagnosticReads            AdminDiagnosticReadsService
 	AdminDashboardInsights          AdminDashboardInsightsService
 	AdminNodesRead                  AdminNodesReadService
@@ -366,7 +368,7 @@ type Dependencies struct {
 	PersonalAPIKeys                    PersonalAPIKeyService
 	PolicyCapability                   PolicyCapabilityService
 	Branding                           BrandingService
-	ArtworkStore                       artworkstore.Store
+	ArtworkStore                       blobstore.Store
 	ArtworkBackend                     string
 	ArtworkSigner                      *artworkurl.Signer
 	ArtworkRepair                      ArtworkRepairService
