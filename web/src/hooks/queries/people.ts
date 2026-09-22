@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import {
   type Query,
   type QueryClient,
@@ -18,9 +19,21 @@ import {
   type PersonRefreshResult,
   type PersonSearchMediaScope,
 } from "@/api/v2/people";
+import { scheduleWhenIdle } from "@/lib/routeChunkPrefetch";
 
 import { personKeys } from "./keys";
 import { isItemDetailQueryKey } from "./mediaSurfaceRefresh";
+
+const PEOPLE_PREFETCH_CONCURRENCY = 3;
+const PEOPLE_PREFETCH_STALE_TIME_MS = 5 * 60_000;
+
+function fetchPeopleSearchCapabilities(queryClient: QueryClient) {
+  return queryClient.fetchQuery({
+    queryKey: personKeys.searchCapabilities(),
+    queryFn: ({ signal }) => getPeopleSearchCapabilities({ signal }),
+    staleTime: 5 * 60 * 1000,
+  });
+}
 
 function isPersonItemDetail(query: Query, personId: string) {
   const item = query.state.data as ItemDetail | undefined;
@@ -134,6 +147,58 @@ export function observePersonRefresh(queryClient: QueryClient, id: string) {
   updateObservation();
 }
 
+/**
+ * Warms person detail for the people a cast row shows, so opening one renders
+ * from cache. Reads start once the page is idle, run a few at a time, skip
+ * people already cached, and are marked as prefetches so they do not queue
+ * provider refreshes. A server that does not advertise `person_prefetch`
+ * would reject the marker, so nothing is prefetched from it. Unmounting drops
+ * the remaining queue and cancels reads nobody else is waiting on.
+ */
+export function usePrefetchPeople(personIds: readonly string[], enabled = true) {
+  const queryClient = useQueryClient();
+  const idsKey = [...new Set(personIds)].join(",");
+
+  useEffect(() => {
+    if (!enabled || !idsKey) return;
+    const pending = idsKey.split(",");
+    const inFlight = new Set<string>();
+    let stopped = false;
+
+    const drain = async () => {
+      for (let id = pending.shift(); id !== undefined && !stopped; id = pending.shift()) {
+        const personId = id;
+        inFlight.add(personId);
+        await queryClient.prefetchQuery({
+          queryKey: personKeys.detail(personId),
+          queryFn: ({ signal }) => getPerson(personId, { signal, prefetch: true }),
+          staleTime: PEOPLE_PREFETCH_STALE_TIME_MS,
+          retry: false,
+        });
+        inFlight.delete(personId);
+      }
+    };
+    const start = async () => {
+      const capabilities = await fetchPeopleSearchCapabilities(queryClient).catch(() => null);
+      if (stopped || !capabilities?.person_prefetch) return;
+      for (let i = 0; i < PEOPLE_PREFETCH_CONCURRENCY; i++) void drain();
+    };
+    const cancelIdle = scheduleWhenIdle(() => void start());
+
+    return () => {
+      stopped = true;
+      cancelIdle();
+      for (const personId of inFlight) {
+        void queryClient.cancelQueries({
+          queryKey: personKeys.detail(personId),
+          exact: true,
+          predicate: (query) => query.getObserversCount() === 0,
+        });
+      }
+    };
+  }, [enabled, idsKey, queryClient]);
+}
+
 export function usePersonSearch(
   query: string,
   limit = 20,
@@ -146,11 +211,7 @@ export function usePersonSearch(
   return useQuery({
     queryKey: personKeys.search(normalizedQuery, limit, mediaScope),
     queryFn: async ({ signal }) => {
-      const capabilities = await queryClient.fetchQuery({
-        queryKey: personKeys.searchCapabilities(),
-        queryFn: ({ signal }) => getPeopleSearchCapabilities({ signal }),
-        staleTime: 5 * 60 * 1000,
-      });
+      const capabilities = await fetchPeopleSearchCapabilities(queryClient);
       // This capability also guarantees viewer access filtering for All.
       if (!capabilities.people_media_scope) return [];
       return searchPeople(normalizedQuery, limit, { signal, mediaScope });
