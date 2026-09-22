@@ -35,6 +35,9 @@ Patterns follow gitignore syntax:
   file's directory.
 - A trailing `/` matches directories only. `**` matches any number of
   directories, as in `**/sample.mkv` or `Extras/**`.
+- Bracket expressions follow gitignore: `[!a]` and `[^a]` both negate, POSIX
+  classes such as `[[:digit:]]` work, and a leading `]` or a leading or
+  trailing `-` is literal.
 - `!` re-includes a path an earlier pattern excluded. Nested `.ignore` files
   stack, and the last matching pattern wins, so a deeper file can re-include
   what a parent excluded. Nothing re-includes content inside an excluded

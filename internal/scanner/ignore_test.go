@@ -132,11 +132,33 @@ func TestIgnoreFileGitignoreSemantics(t *testing.T) {
 		{"!keep.mkv\n*.mkv", "keep.mkv", false, true},
 		{"\\#hash.mkv", "#hash.mkv", false, true},
 		{"[\n*.nfo", "a.nfo", false, true},
+		{"[!a]*.mkv", "b.mkv", false, true},
+		{"[!a]*.mkv", "a.mkv", false, false},
+		{"[^a]*.mkv", "a.mkv", false, false},
+		{"Season [[:digit:]]", "Season 1", true, true},
+		{"Season [[:digit:]]", "Season X", true, false},
+		{"[[:upper:][:digit:]]*.nfo", "7.nfo", false, true},
+		{"[[:upper:][:digit:]]*.nfo", "a.nfo", false, false},
+		{"[[:punct:]]*.mkv", "#tmp.mkv", false, true},
+		{"[]x].nfo", "].nfo", false, true},
+		{"[a-].nfo", "-.nfo", false, true},
+		{"[-a].nfo", "-.nfo", false, true},
+		{"[[:bogus:]].nfo\n*.txt", "x.nfo", false, false},
 	}
 	for _, tc := range cases {
 		rules := []ignoreRules{{basePath: "/lib", gitPatterns: parseGitIgnorePatterns(tc.content)}}
 		if got := ignoreRulesMatch(rules, filepath.Join("/lib", tc.path), tc.isDir); got != tc.want {
 			t.Errorf("pattern %q, path %q (dir=%v): ignored = %v, want %v", tc.content, tc.path, tc.isDir, got, tc.want)
+		}
+	}
+}
+
+func TestParseGitIgnorePatternsDropsMalformedBrackets(t *testing.T) {
+	t.Parallel()
+
+	for _, content := range []string{"[[:bogus:]].nfo", "[abc", "[[:digit:].nfo", "foo\\"} {
+		if patterns := parseGitIgnorePatterns(content); len(patterns) != 0 {
+			t.Errorf("parseGitIgnorePatterns(%q) = %+v, want no valid pattern", content, patterns)
 		}
 	}
 }

@@ -191,17 +191,105 @@ func parseGitIgnorePatterns(content string) []gitIgnorePattern {
 		}
 		pattern.segments = strings.Split(line, "/")
 		valid := true
-		for _, segment := range pattern.segments {
-			if _, err := path.Match(segment, ""); err != nil || segment == "" {
+		for i, segment := range pattern.segments {
+			if segment == "**" {
+				continue
+			}
+			translated, ok := gitGlobSegment(segment)
+			if _, err := path.Match(translated, ""); !ok || err != nil || segment == "" {
 				valid = false
 				break
 			}
+			pattern.segments[i] = translated
 		}
 		if valid {
 			patterns = append(patterns, pattern)
 		}
 	}
 	return patterns
+}
+
+// posixClasses maps the POSIX character classes gitignore accepts inside a
+// bracket expression to path.Match ranges.
+var posixClasses = map[string]string{
+	"alnum":  "0-9A-Za-z",
+	"alpha":  "A-Za-z",
+	"blank":  " \t",
+	"cntrl":  "\x00-\x1f\x7f",
+	"digit":  "0-9",
+	"graph":  `\!-\~`,
+	"lower":  "a-z",
+	"print":  ` -\~`,
+	"punct":  "\\!-\\/\\:-\\@\\[-\\`\\{-\\~",
+	"space":  " \t\n\v\f\r",
+	"upper":  "A-Z",
+	"xdigit": "0-9A-Fa-f",
+}
+
+// gitGlobSegment rewrites one gitignore glob segment into path.Match syntax.
+// Only bracket expressions differ: gitignore also negates with "!", accepts
+// POSIX classes such as [:digit:], and reads a leading "]" and a leading or
+// trailing "-" literally. ok is false for a malformed bracket expression.
+func gitGlobSegment(segment string) (string, bool) {
+	var b strings.Builder
+	for i := 0; i < len(segment); i++ {
+		switch segment[i] {
+		case '\\':
+			b.WriteString(segment[i:min(i+2, len(segment))])
+			i++
+		case '[':
+			class, n, ok := gitBracketExpression(segment[i:])
+			if !ok {
+				return "", false
+			}
+			b.WriteString(class)
+			i += n - 1
+		default:
+			b.WriteByte(segment[i])
+		}
+	}
+	return b.String(), true
+}
+
+// gitBracketExpression translates the bracket expression at the start of s and
+// returns it with the number of bytes of s it consumed.
+func gitBracketExpression(s string) (string, int, bool) {
+	var b strings.Builder
+	b.WriteByte('[')
+	i := 1
+	if i < len(s) && (s[i] == '!' || s[i] == '^') {
+		b.WriteByte('^')
+		i++
+	}
+	for first := true; i < len(s); first = false {
+		switch c := s[i]; {
+		case c == ']' && !first:
+			b.WriteByte(']')
+			return b.String(), i + 1, true
+		case c == ']' || (c == '-' && (first || (i+1 < len(s) && s[i+1] == ']'))):
+			b.WriteByte('\\')
+			b.WriteByte(c)
+			i++
+		case c == '\\' && i+1 < len(s):
+			b.WriteString(s[i : i+2])
+			i += 2
+		case strings.HasPrefix(s[i:], "[:"):
+			end := strings.Index(s[i+2:], ":]")
+			if end < 0 {
+				return "", 0, false
+			}
+			ranges, ok := posixClasses[s[i+2:i+2+end]]
+			if !ok {
+				return "", 0, false
+			}
+			b.WriteString(ranges)
+			i += end + 4
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	return "", 0, false
 }
 
 // match reports whether the pattern matches rel, a slash-separated path
