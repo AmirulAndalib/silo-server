@@ -791,8 +791,6 @@ func compatiblePeerContentRatings(maxContentRating string) []string {
 	return allowed
 }
 
-// UpsertRecommendationCache stores or refreshes a precomputed recommendation
-// list for a user.
 // Global cache rows are owned by no account and are stored with user_id NULL so
 // the users(id) foreign key does not reject them (see migration
 // 20260922130000_recommendation_cache_global_ownership). GlobalCacheUserID (0)
@@ -808,19 +806,27 @@ const upsertRecommendationCacheQuery = `
 			    created_at = NOW()
 `
 
-// getRecommendationCacheQuery matches the NULL-owned global rows written by
-// upsertRecommendationCacheQuery: IS NOT DISTINCT FROM treats NULLIF(0) (NULL)
-// as equal to a stored NULL, and stays an equality match for real account ids.
 const getRecommendationCacheQuery = `
 		SELECT items
 		FROM   recommendation_cache
-		WHERE  user_id        IS NOT DISTINCT FROM NULLIF($1, 0)
-		  AND  profile_id     = $2
-		  AND  rec_type       = $3
-		  AND  source_item_id = $4
+		WHERE  profile_id     = $1
+		  AND  rec_type       = $2
+		  AND  source_item_id = $3
 		  AND  expires_at     > NOW()
-`
+		  AND  `
 
+// recommendationCacheLookup builds the read for one cache row. Global rows are
+// matched with user_id IS NULL and account rows with user_id = $4; both keep
+// the identity index usable, which IS NOT DISTINCT FROM would not.
+func recommendationCacheLookup(userID int, profileID, recType, sourceItemID string) (string, []any) {
+	if userID == GlobalCacheUserID {
+		return getRecommendationCacheQuery + "user_id IS NULL", []any{profileID, recType, sourceItemID}
+	}
+	return getRecommendationCacheQuery + "user_id = $4", []any{profileID, recType, sourceItemID, userID}
+}
+
+// UpsertRecommendationCache stores or refreshes a precomputed recommendation
+// list for a user, or a global list when userID is GlobalCacheUserID.
 func (r *Repo) UpsertRecommendationCache(ctx context.Context, userID int, profileID, recType, sourceItemID string, items []ScoredItem, expiresAt string) error {
 	itemsJSON, err := json.Marshal(items)
 	if err != nil {
@@ -838,7 +844,8 @@ func (r *Repo) UpsertRecommendationCache(ctx context.Context, userID int, profil
 // yet expired. Returns nil, nil on cache miss or expiry.
 func (r *Repo) GetRecommendationCache(ctx context.Context, userID int, profileID, recType, sourceItemID string) ([]ScoredItem, error) {
 	var itemsJSON []byte
-	err := r.pool.QueryRow(ctx, getRecommendationCacheQuery, userID, profileID, recType, sourceItemID).Scan(&itemsJSON)
+	query, args := recommendationCacheLookup(userID, profileID, recType, sourceItemID)
+	err := r.pool.QueryRow(ctx, query, args...).Scan(&itemsJSON)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -853,17 +860,20 @@ func (r *Repo) GetRecommendationCache(ctx context.Context, userID int, profileID
 	return items, nil
 }
 
+// listCachedGenreSamplersQuery reads the global (user_id NULL) genre samplers.
+const listCachedGenreSamplersQuery = `
+		SELECT rec_type, items
+		FROM   recommendation_cache
+		WHERE  user_id IS NULL
+		  AND  profile_id = $1
+		  AND  rec_type LIKE $2
+		  AND  expires_at > NOW()`
+
 // ListCachedGenreSamplers returns all non-expired global genre sampler cache entries
 // as a map of genre name → scored items.
 func (r *Repo) ListCachedGenreSamplers(ctx context.Context) (map[string][]ScoredItem, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT rec_type, items
-		FROM   recommendation_cache
-		WHERE  user_id    = $1
-		  AND  profile_id = $2
-		  AND  rec_type LIKE $3
-		  AND  expires_at > NOW()`,
-		GlobalCacheUserID, GlobalCacheProfileID, RecTypeGenreSamplerPrefix+"%")
+	rows, err := r.pool.Query(ctx, listCachedGenreSamplersQuery,
+		GlobalCacheProfileID, RecTypeGenreSamplerPrefix+"%")
 	if err != nil {
 		return nil, fmt.Errorf("list cached genre samplers: %w", err)
 	}

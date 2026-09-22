@@ -2,6 +2,7 @@ package recommendations
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -309,13 +310,29 @@ func TestRecommendationCacheQueriesStoreGlobalRowsAsNull(t *testing.T) {
 		t.Fatalf("upsert must not insert the raw sentinel into user_id: %s", upsert)
 	}
 
-	get := strings.Join(strings.Fields(getRecommendationCacheQuery), " ")
-	// IS NOT DISTINCT FROM NULLIF($1, 0) matches a stored NULL for the global
-	// sentinel and stays an equality match for real account ids.
-	if !strings.Contains(get, "user_id IS NOT DISTINCT FROM NULLIF($1, 0)") {
-		t.Fatalf("get query must match NULL-owned rows: %s", get)
+	// Reads must match the stored NULL for global rows and keep an indexable
+	// predicate: IS NOT DISTINCT FROM forces a sequential scan.
+	for _, tc := range []struct {
+		name      string
+		userID    int
+		predicate string
+		args      []any
+	}{
+		{"global", GlobalCacheUserID, "AND user_id IS NULL", []any{"", RecTypePopular, ""}},
+		{"account", 7, "AND user_id = $4", []any{"", RecTypePopular, "", 7}},
+	} {
+		query, args := recommendationCacheLookup(tc.userID, "", RecTypePopular, "")
+		get := strings.Join(strings.Fields(query), " ")
+		if !strings.HasSuffix(get, tc.predicate) || strings.Contains(get, "DISTINCT") {
+			t.Fatalf("%s lookup has wrong owner predicate: %s", tc.name, get)
+		}
+		if fmt.Sprint(args) != fmt.Sprint(tc.args) {
+			t.Fatalf("%s lookup args = %v, want %v", tc.name, args, tc.args)
+		}
 	}
-	if strings.Contains(get, "user_id = $1") {
-		t.Fatalf("get query must not equality-match the sentinel: %s", get)
+
+	samplers := strings.Join(strings.Fields(listCachedGenreSamplersQuery), " ")
+	if !strings.Contains(samplers, "WHERE user_id IS NULL AND profile_id = $1") {
+		t.Fatalf("genre sampler query must read NULL-owned global rows: %s", samplers)
 	}
 }

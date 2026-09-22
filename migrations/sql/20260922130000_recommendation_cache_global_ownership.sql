@@ -21,10 +21,11 @@ CREATE UNIQUE INDEX recommendation_cache_identity_key
     ON public.recommendation_cache (user_id, profile_id, rec_type, source_item_id) NULLS NOT DISTINCT;
 
 -- +goose Down
--- Restore the sentinel and the NOT NULL primary key. Any global rows written as
--- NULL become user_id = 0 again, which the surviving foreign key will reject on
--- the next write (the pre-fix behavior).
-UPDATE public.recommendation_cache SET user_id = 0 WHERE user_id IS NULL;
+-- Restore the NOT NULL primary key. Global rows cannot return to the sentinel
+-- user_id = 0 while the account foreign key exists, so drop them; they are a
+-- cache the worker rebuilds (after rollback its global writes fail again, the
+-- pre-fix behavior).
+DELETE FROM public.recommendation_cache WHERE user_id IS NULL;
 DROP INDEX IF EXISTS recommendation_cache_identity_key;
 ALTER TABLE public.recommendation_cache ALTER COLUMN user_id SET NOT NULL;
 ALTER TABLE public.recommendation_cache
