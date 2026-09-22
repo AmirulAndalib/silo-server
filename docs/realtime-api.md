@@ -402,8 +402,9 @@ The server then clears the viewer's buffering status and, while the room plays,
 sends it a transport command at the room's current position. When nobody else is
 watching, the room's position moves to the viewer's reported position first, so
 the viewer does not skip ahead. A `state_report` within one second of the room's
-position, with a matching pause state, clears the same status for clients that
-never send `ready`. Seek-destination checks apply only while the room is
+position, with a matching pause state, also marks the member ready and clears
+the same status; this covers late joiners and clients that never send
+`ready`. Seek-destination checks apply only while the room is
 `waiting`.
 
 `command_id` is optional for older clients on the shared v1/v2 message loop. Their

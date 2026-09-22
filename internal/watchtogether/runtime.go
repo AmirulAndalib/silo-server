@@ -152,7 +152,7 @@ func withRoomOperation[T any](ctx context.Context, s *Service, roomID string, fn
 		live = &liveRoom{members: make(map[string]*memberState)}
 		s.rooms[roomID] = live
 	}
-	previousRoom, previousCommand := live.room, live.command
+	previousRoom, previousCommand, previousBufferingWaitAt := live.room, live.command, live.bufferingWaitAt
 	previousMembers := make(map[string]*memberState, len(live.members))
 	for key, member := range live.members {
 		copy := *member
@@ -189,6 +189,7 @@ func withRoomOperation[T any](ctx context.Context, s *Service, roomID string, fn
 		if s.rooms[roomID] == live || s.rooms[roomID] == nil {
 			s.rooms[roomID] = live
 			live.room, live.command, live.members = previousRoom, previousCommand, previousMembers
+			live.bufferingWaitAt = previousBufferingWaitAt
 			live.broadcastState = ""
 		}
 		s.mu.Unlock()

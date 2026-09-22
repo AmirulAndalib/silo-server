@@ -120,6 +120,8 @@ export const roomReloadMaxLeadSeconds = 10;
 export interface RoomReloadBudget {
   /** Media position the in-flight reload aims at, or null when none runs. */
   targetSeconds: number | null;
+  /** Whether the element has started loading since the reload began. */
+  loadStarted: boolean;
   startedAtMs: number;
   /** Earliest time the next correction may reload media. */
   nextAllowedAtMs: number;
@@ -130,7 +132,14 @@ export interface RoomReloadBudget {
 }
 
 export function createRoomReloadBudget(): RoomReloadBudget {
-  return { targetSeconds: null, startedAtMs: 0, nextAllowedAtMs: 0, attempts: 0, leadSeconds: 0 };
+  return {
+    targetSeconds: null,
+    loadStarted: false,
+    startedAtMs: 0,
+    nextAllowedAtMs: 0,
+    attempts: 0,
+    leadSeconds: 0,
+  };
 }
 
 function roomReloadBackoffMs(attempts: number): number {
@@ -155,18 +164,28 @@ export function beginRoomReload(
 ): number {
   const targetSeconds = roomPositionSeconds + budget.leadSeconds;
   budget.targetSeconds = targetSeconds;
+  budget.loadStarted = false;
   budget.startedAtMs = nowMs;
   budget.attempts += 1;
   budget.nextAllowedAtMs = nowMs + roomReloadStaleMs;
   return targetSeconds;
 }
 
-/** Whether media at `localPositionSeconds` is the in-flight reload playing. */
+/** The element started seeking or loading a new source for the in-flight reload. */
+export function noteRoomReloadLoading(budget: RoomReloadBudget): void {
+  if (budget.targetSeconds !== null) budget.loadStarted = true;
+}
+
+/**
+ * Whether media at `localPositionSeconds` is the in-flight reload playing: a
+ * load has started since the reload began, and playback sits at its target.
+ * The stream being replaced keeps playing until then and can be on either
+ * side of the target, so position alone cannot settle the reload.
+ */
 export function roomReloadLanded(budget: RoomReloadBudget, localPositionSeconds: number): boolean {
-  return (
-    budget.targetSeconds !== null &&
-    localPositionSeconds >= budget.targetSeconds - roomCatchupDeadbandSeconds
-  );
+  if (budget.targetSeconds === null || !budget.loadStarted) return false;
+  const offset = localPositionSeconds - budget.targetSeconds;
+  return offset >= -roomCatchupDeadbandSeconds && offset <= roomCatchupBandSeconds;
 }
 
 /** The reload is playing: remember its load time and space the next one. */

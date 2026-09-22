@@ -1,6 +1,8 @@
 package watchtogether
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -473,5 +475,46 @@ func TestInSyncReportClearsAStaleBufferingStatus(t *testing.T) {
 	}
 	if !f.member("guest").lastStallAt.Equal(stallAt) {
 		t.Fatal("recovery by report forgot the stall cooldown")
+	}
+}
+
+// A late joiner is never asked to acknowledge anything while the room plays;
+// reaching the room's position is what makes it ready.
+func TestLateJoinerBecomesReadyOnceInSync(t *testing.T) {
+	f := newBufferingRoom(t, "guest")
+	f.member("guest").isReady = false
+	f.now = f.now.Add(3 * time.Second)
+	f.report("guest", f.expected()-4)
+	if f.member("guest").isReady {
+		t.Fatal("out-of-sync joiner became ready")
+	}
+	hostFrames := len(f.conns["host"].payloads)
+	snapshot := f.report("guest", f.expected()-0.2)
+	if guest := memberSummary(t, snapshot, "guest"); !guest.IsReady || guest.IsBuffering {
+		t.Fatalf("in-sync joiner status = %+v", guest)
+	}
+	if len(f.conns["host"].payloads) == hostFrames {
+		t.Fatal("other viewers did not receive the joiner's ready status")
+	}
+}
+
+func TestRolledBackBufferingPauseLeavesNoSpacingPG(t *testing.T) {
+	f := newRoomClusterFixture(t)
+	failure := errors.New("abort room operation")
+	_, err := withRoomOperation(t.Context(), f.host, f.roomID, func(ctx context.Context) (Snapshot, error) {
+		snapshot, err := f.host.handleBufferingForConnection(ctx, f.hostReg, 7, "host", StateReport{SessionID: "host-session", PositionSeconds: 20})
+		if err != nil {
+			return Snapshot{}, err
+		}
+		if snapshot.PlaybackState != RoomPlaybackStateWaiting {
+			t.Fatalf("stall did not pause the room: %+v", snapshot)
+		}
+		return Snapshot{}, failure
+	})
+	if !errors.Is(err, failure) {
+		t.Fatal(err)
+	}
+	if at := f.host.rooms[f.roomID].bufferingWaitAt; !at.IsZero() {
+		t.Fatalf("rolled back pause left buffering spacing at %v", at)
 	}
 }

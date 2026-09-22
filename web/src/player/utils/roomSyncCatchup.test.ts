@@ -6,6 +6,7 @@ import {
   decideRoomCatchup,
   isNativePositionInRanges,
   landRoomReload,
+  noteRoomReloadLoading,
   roomMembersLeftBehind,
   roomReloadAllowed,
   roomReloadLanded,
@@ -181,7 +182,10 @@ describe("room rebuild budget", () => {
     expect(beginRoomReload(budget, 100, 0)).toBe(100);
     expect(roomReloadAllowed(budget, 5_000)).toBe(false);
 
-    // The old stream still plays behind the target; the rebuild has not landed.
+    // Until the element starts loading, even the target position belongs to
+    // the stream being replaced.
+    expect(roomReloadLanded(budget, 100)).toBe(false);
+    noteRoomReloadLoading(budget);
     expect(roomReloadLanded(budget, 95)).toBe(false);
     expect(roomReloadLanded(budget, 100)).toBe(true);
     landRoomReload(budget, 6_000);
@@ -189,6 +193,15 @@ describe("room rebuild budget", () => {
     expect(roomReloadAllowed(budget, 6_000 + roomReloadMinIntervalMs - 1)).toBe(false);
     expect(roomReloadAllowed(budget, 6_000 + roomReloadMinIntervalMs)).toBe(true);
     expect(beginRoomReload(budget, 200, 20_000)).toBe(206);
+  });
+
+  it("does not settle a backward reload on the stream it replaces", () => {
+    const budget = createRoomReloadBudget();
+    beginRoomReload(budget, 100, 0);
+    noteRoomReloadLoading(budget);
+    // Playback ahead of an earlier target is the old stream, not the reload.
+    expect(roomReloadLanded(budget, 105)).toBe(false);
+    expect(roomReloadLanded(budget, 100.4)).toBe(true);
   });
 
   it("backs off between rebuilds until the viewer converges", () => {

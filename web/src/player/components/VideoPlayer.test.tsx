@@ -840,6 +840,7 @@ describe("VideoPlayer room catch-up", () => {
     vi.setSystemTime(Date.now() + 2_000);
     Object.defineProperty(video, "paused", { configurable: true, value: false });
     Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+    fireEvent.loadStart(video);
     video.currentTime = 100;
     fireEvent.timeUpdate(video);
 
@@ -887,6 +888,37 @@ describe("VideoPlayer room catch-up", () => {
     await correct("correction-3", 120);
     expect(playerSeek).toHaveBeenCalledTimes(2);
     expect(playerSeek).toHaveBeenLastCalledWith(120);
+  });
+
+  it("starts reload pacing over when the viewer picks another quality", async () => {
+    const { connection, command, rerenderPlayer, onReanchorSeek } = setup(90);
+    const onQualitySelect = vi.fn();
+    const correct = async (commandId: string) => {
+      rerenderPlayer({
+        onQualitySelect,
+        watchTogetherConnection: {
+          ...connection,
+          transportCommand: {
+            ...command,
+            command_id: commandId,
+            position_seconds: 100,
+            execute_at: new Date().toISOString(),
+          },
+        },
+      });
+      await act(() => vi.advanceTimersByTimeAsync(0));
+    };
+    await correct("correction-1");
+    vi.setSystemTime(Date.now() + 2_000);
+    await correct("correction-2");
+    expect(onReanchorSeek).toHaveBeenCalledTimes(1);
+
+    const selectQuality = (controls.current as unknown as { onQualitySelect: (id: string) => void })
+      .onQualitySelect;
+    act(() => selectQuality("720p"));
+    expect(onQualitySelect).toHaveBeenCalledWith("720p", expect.any(Number));
+    await correct("correction-3");
+    expect(onReanchorSeek).toHaveBeenCalledTimes(2);
   });
 
   it("offers a lower quality after repeated stalls", async () => {

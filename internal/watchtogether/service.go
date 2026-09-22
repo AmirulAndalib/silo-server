@@ -822,11 +822,12 @@ func (s *Service) handleStateReportForConnection(
 	expected := expectedPosition(live.room, now)
 	pauseMismatch := report.IsPaused != live.room.IsPaused
 	drift := math.Abs(report.PositionSeconds - expected)
-	// A member still marked buffering or catching up whose report matches the
-	// room has recovered. Clients acknowledge recovery with ready; this keeps
-	// one that never does from staying flagged. Its stall history is kept.
-	statusRecovered := (member.isBuffering || member.ignoreWait) && !pauseMismatch && drift <= readySeekToleranceSeconds
-	if statusRecovered {
+	// A member whose report matches the room is ready, whether it just joined,
+	// is catching up, or is still marked buffering. Clients acknowledge
+	// recovery with ready; this keeps one that never does, and a late joiner
+	// that was never asked to, from staying unready. Stall history is kept.
+	caughtUp := (!member.isReady || member.isBuffering || member.ignoreWait) && !pauseMismatch && drift <= readySeekToleranceSeconds
+	if caughtUp {
 		member.isBuffering = false
 		member.ignoreWait = false
 		member.isReady = true
@@ -895,7 +896,7 @@ func (s *Service) handleStateReportForConnection(
 	} else {
 		member.correctionCommand = nil
 	}
-	if statusRecovered && dispatches == nil {
+	if caughtUp && dispatches == nil {
 		dispatches = s.prepareSnapshotDispatchesLocked(live)
 	}
 	s.mu.Unlock()

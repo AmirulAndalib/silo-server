@@ -88,9 +88,9 @@ miss the scene.
   command has executed and its media is playable again. The server clears its
   buffering status, keeps its stall history, and sends it the room's current
   position. A member reported as buffering receives no position corrections for
-  up to 30 seconds; the acknowledgement ends that hold. For a client that never
-  sends `ready`, a position report that matches the room clears the same
-  status.
+  up to 30 seconds; the acknowledgement ends that hold. A position report that
+  matches the room also marks the member ready, which covers late joiners and
+  clients that never send `ready`.
 - The host follows the same rules. While the host is buffering or catching up,
   and whenever the host has drifted by 2 seconds or less, the host is corrected
   like any viewer instead of moving the room anchor. A larger jump or a pause

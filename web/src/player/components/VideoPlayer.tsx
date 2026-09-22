@@ -80,6 +80,7 @@ import {
   decideRoomCatchup,
   isNativePositionInRanges,
   landRoomReload,
+  noteRoomReloadLoading,
   roomCatchupConverged,
   roomCatchupExpectedPosition,
   roomReloadAllowed,
@@ -1993,6 +1994,9 @@ export function VideoPlayer({
         watchTogetherSync.reportReady();
       }
     };
+    // A correction's reload has started once the element seeks or loads a
+    // new source; only then can its position settle the reload.
+    const onReloadLoading = () => noteRoomReloadLoading(roomReloadBudgetRef.current);
     const onSeeked = () => {
       const resolved = resolvePendingSeekTime(
         toMediaTime(video.currentTime, timelineOffsetRef.current),
@@ -2087,6 +2091,8 @@ export function VideoPlayer({
     video.addEventListener("pause", onPause);
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("seeked", onSeeked);
+    video.addEventListener("seeking", onReloadLoading);
+    video.addEventListener("loadstart", onReloadLoading);
     video.addEventListener("durationchange", onDurationChange);
     video.addEventListener("progress", onProgress);
     video.addEventListener("volumechange", onVolumeChange);
@@ -2104,6 +2110,8 @@ export function VideoPlayer({
       video.removeEventListener("pause", onPause);
       video.removeEventListener("timeupdate", onTimeUpdate);
       video.removeEventListener("seeked", onSeeked);
+      video.removeEventListener("seeking", onReloadLoading);
+      video.removeEventListener("loadstart", onReloadLoading);
       video.removeEventListener("durationchange", onDurationChange);
       video.removeEventListener("progress", onProgress);
       video.removeEventListener("volumechange", onVolumeChange);
@@ -2987,6 +2995,9 @@ export function VideoPlayer({
   // The id is the plan's own quality label, handed back to the server verbatim.
   const handleQualitySelect = useCallback(
     (id: string) => {
+      // A new quality replaces the stream; reload pacing from the old one
+      // does not apply to it.
+      roomReloadBudgetRef.current = createRoomReloadBudget();
       onQualitySelect?.(id, currentTime);
     },
     [currentTime, onQualitySelect],
