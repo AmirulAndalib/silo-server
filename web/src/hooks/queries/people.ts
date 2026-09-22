@@ -170,19 +170,25 @@ export function usePrefetchPeople(personIds: readonly string[], enabled = true) 
         const personId = id;
         inFlight.add(personId);
         const queryKey = personKeys.detail(personId);
+        let openedDuringRead = false;
         await queryClient.prefetchQuery({
           queryKey,
           queryFn: async ({ signal }) => {
             const person = await getPerson(personId, { signal, prefetch: true });
-            // A person page that opened during this read shares its result, so
-            // read again as a view the server can queue a due refresh for.
             const query = queryClient.getQueryCache().find({ queryKey, exact: true });
-            return query?.getObserversCount() ? getPerson(personId, { signal }) : person;
+            openedDuringRead = !!query?.getObserversCount();
+            return person;
           },
           staleTime: PEOPLE_PREFETCH_STALE_TIME_MS,
           retry: false,
         });
         inFlight.delete(personId);
+        // A person page that opened during the read shared the prefetch. It
+        // renders that result while its own query reads again as a view the
+        // server can queue a due refresh for; a failed view read keeps the data.
+        if (openedDuringRead) {
+          void queryClient.refetchQueries({ queryKey, exact: true, type: "active" });
+        }
       }
     };
     const start = async () => {

@@ -18,7 +18,7 @@ vi.mock("@/lib/routeChunkPrefetch", () => ({
   },
 }));
 
-type PendingRead = { url: URL; signal: AbortSignal; resolve: () => void };
+type PendingRead = { url: URL; signal: AbortSignal; resolve: () => void; fail: () => void };
 
 function stubPeopleFetch() {
   const reads: PendingRead[] = [];
@@ -31,6 +31,7 @@ function stubPeopleFetch() {
         url,
         signal,
         resolve: () => resolve(jsonResponse({ id: url.pathname.split("/").pop(), name: "Person" })),
+        fail: () => resolve(jsonResponse({ title: "Service Unavailable", status: 503 }, 503)),
       });
     });
   });
@@ -115,6 +116,16 @@ it("does not prefetch from a server that would reject the prefetch marker", asyn
   client.clear();
 });
 
+function openPersonPage(client: QueryClient, id: string) {
+  const page = new QueryObserver(client, {
+    queryKey: personKeys.detail(id),
+    queryFn: ({ signal }) => getPerson(id, { signal }),
+    refetchOnMount: "always",
+    retry: false,
+  });
+  return { page, stop: page.subscribe(() => {}) };
+}
+
 it("reads as a view when the person is opened while their prefetch runs", async () => {
   const reads = stubPeopleFetch();
   const client = new QueryClient();
@@ -123,20 +134,37 @@ it("reads as a view when the person is opened while their prefetch runs", async 
   await waitFor(() => expect(reads).toHaveLength(1));
 
   // The person page subscribes while the prefetch is still in flight.
-  const page = new QueryObserver(client, {
-    queryKey: personKeys.detail("1"),
-    queryFn: ({ signal }) => getPerson("1", { signal }),
-    refetchOnMount: "always",
-  });
-  const stop = page.subscribe(() => {});
+  const { page, stop } = openPersonPage(client, "1");
   reads[0]!.resolve();
 
+  // The page renders the prefetched person while it reads again as a view.
   await waitFor(() => expect(reads).toHaveLength(2));
+  expect(page.getCurrentResult().data?.id).toBe("1");
   expect(reads[0]!.url.searchParams.get("prefetch")).toBe("true");
   expect(reads[1]!.url.searchParams.has("prefetch")).toBe(false);
   reads[1]!.resolve();
-  await waitFor(() => expect(page.getCurrentResult().data?.id).toBe("1"));
+  await waitFor(() => expect(page.getCurrentResult().isFetching).toBe(false));
   expect(reads).toHaveLength(2);
+
+  stop();
+  unmount();
+  client.clear();
+});
+
+it("keeps the prefetched person when the mid-prefetch view read fails", async () => {
+  const reads = stubPeopleFetch();
+  const client = new QueryClient();
+  seedCapabilities(client);
+  const { unmount } = renderPrefetch(client, ["1"]);
+  await waitFor(() => expect(reads).toHaveLength(1));
+
+  const { page, stop } = openPersonPage(client, "1");
+  reads[0]!.resolve();
+  await waitFor(() => expect(reads).toHaveLength(2));
+  reads[1]!.fail();
+
+  await waitFor(() => expect(page.getCurrentResult().isError).toBe(true));
+  expect(page.getCurrentResult().data?.id).toBe("1");
 
   stop();
   unmount();
