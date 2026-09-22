@@ -25,14 +25,13 @@ export function usePersonSearch(
   return useQuery({
     queryKey: personKeys.search(normalizedQuery, limit, mediaScope),
     queryFn: async ({ signal }) => {
-      if (mediaScope) {
-        const capabilities = await queryClient.fetchQuery({
-          queryKey: personKeys.searchCapabilities(),
-          queryFn: ({ signal }) => getPeopleSearchCapabilities({ signal }),
-          staleTime: 5 * 60 * 1000,
-        });
-        if (!capabilities.people_media_scope) return [];
-      }
+      const capabilities = await queryClient.fetchQuery({
+        queryKey: personKeys.searchCapabilities(),
+        queryFn: ({ signal }) => getPeopleSearchCapabilities({ signal }),
+        staleTime: 5 * 60 * 1000,
+      });
+      // This capability also guarantees viewer access filtering for All.
+      if (!capabilities.people_media_scope) return [];
       return searchPeople(normalizedQuery, limit, { signal, mediaScope });
     },
     enabled: enabled && normalizedQuery.length > 0,

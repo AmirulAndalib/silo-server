@@ -575,11 +575,17 @@ func (r *PersonRepository) search(ctx context.Context, query string, limit int, 
 			args = append(args, types)
 			argIdx++
 		}
-		appendLibraryAccessConditions("mi.content_id", *filter, &conditions, &args, &argIdx)
-		applyAccessFilter("mi", *filter, &conditions, &args, &argIdx)
+		// Episode access follows the parent series, while scope and excluded
+		// media types describe the credited item itself.
+		appendLibraryAccessConditions("access_item.content_id", *filter, &conditions, &args, &argIdx)
+		applyAccessFilter("access_item", AccessFilter{MaxContentRating: filter.MaxContentRating}, &conditions, &args, &argIdx)
+		applyAccessFilter("mi", AccessFilter{ExcludedMediaTypes: filter.ExcludedMediaTypes}, &conditions, &args, &argIdx)
 		where += ` AND EXISTS (
 			SELECT 1 FROM item_people ip
 			JOIN media_items mi ON mi.content_id = ip.content_id
+			JOIN media_items access_item ON access_item.content_id = CASE
+				WHEN mi.type = 'episode' THEN ` + episodeParentSeriesIDExpr("mi.content_id") + `
+				ELSE mi.content_id END
 			WHERE ` + strings.Join(conditions, " AND ") + ")"
 	}
 	order := "name ASC"

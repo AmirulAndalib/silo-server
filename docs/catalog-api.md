@@ -20,10 +20,13 @@ scope is omitted. Every credit role participates, so directors match video searc
 and authors and narrators match audiobook searches. A person with several matching
 credits appears once.
 
+Episode credits inherit library visibility and rating limits from their parent
+series. Media scope and excluded media types still apply to the credited episode.
+
 `GET /api/v2/catalog/search/capabilities` advertises `people_media_scope: true`
-when scoped people search is available. Clients must check this signal before
-sending `media_scope`. Web omits scoped people results on older servers that do
-not advertise support; unscoped people search remains available.
+when people search supports media scopes and viewer access filtering. Clients
+must check this signal before offering people results, including unscoped
+searches. Web omits the People row on older servers that do not advertise support.
 
 Web search applies its selected media scope to both titles and people. People
 responses remain an `{items}` collection with string IDs. The v1 bridge retains

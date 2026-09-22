@@ -46,7 +46,7 @@ it("keeps cached people results separate for Media, Audiobooks, and All", async 
 });
 
 it.each([undefined, false])(
-  "does not send a scoped search when capability is %s",
+  "does not send any people search when capability is %s",
   async (supported) => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       if (String(input).includes("/capabilities")) {
@@ -67,28 +67,32 @@ it.each([undefined, false])(
     expect(result.current.data).toEqual([]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     rerender({ scope: undefined });
-    await waitFor(() => expect(result.current.data?.[0]?.name).toBe("Unscoped result"));
-    expect(String(fetchMock.mock.calls[1]?.[0])).not.toContain("media_scope");
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     unmount();
     client.clear();
   },
 );
 
-it("surfaces a capability request failure without sending the scoped search", async () => {
-  const fetchMock = vi.fn<typeof fetch>(async () => {
-    throw new Error("offline");
-  });
-  vi.stubGlobal("fetch", fetchMock);
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const wrapper = ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={client}>{children}</QueryClientProvider>
-  );
-  const { result, unmount } = renderHook(() => usePersonSearch("Actor", 20, true, "video"), {
-    wrapper,
-  });
-  await waitFor(() => expect(result.current.isError).toBe(true));
-  expect(fetchMock).toHaveBeenCalledTimes(1);
-  expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/catalog/search/capabilities");
-  unmount();
-  client.clear();
-});
+it.each([undefined, "video"] as const)(
+  "surfaces a capability failure without searching scope %s",
+  async (scope) => {
+    const fetchMock = vi.fn<typeof fetch>(async () => {
+      throw new Error("offline");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    const { result, unmount } = renderHook(() => usePersonSearch("Actor", 20, true, scope), {
+      wrapper,
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/catalog/search/capabilities");
+    unmount();
+    client.clear();
+  },
+);

@@ -173,3 +173,95 @@ func TestPersonSearchViewerAccessPostgres(t *testing.T) {
 		})
 	}
 }
+
+func TestPersonSearchEpisodeParentAccessPostgres(t *testing.T) {
+	pool := collectionSortTestPool(t)
+	ctx := t.Context()
+	prefix := "person-episode-" + uuid.NewString()
+	baseID := time.Now().UnixNano()
+	ids := make([]int64, 6)
+	libraries := make([]int, 2)
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = pool.Exec(cleanup, `DELETE FROM item_people WHERE person_id = ANY($1)`, ids)
+		_, _ = pool.Exec(cleanup, `DELETE FROM people WHERE id = ANY($1)`, ids)
+		_, _ = pool.Exec(cleanup, `DELETE FROM media_items WHERE content_id LIKE $1`, prefix+"%")
+		_, _ = pool.Exec(cleanup, `DELETE FROM media_folders WHERE id = ANY($1)`, libraries)
+	})
+	for i := range libraries {
+		if err := pool.QueryRow(ctx, `INSERT INTO media_folders(type,name,enabled) VALUES('tv',$1,true) RETURNING id`, prefix).Scan(&libraries[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range ids {
+		ids[i] = baseID + int64(i)
+		name := prefix
+		if i > 0 {
+			name = fmt.Sprintf("%c %s", 'A'+i-1, prefix)
+		}
+		exec(`INSERT INTO people(id,name) VALUES($1,$2)`, ids[i], name)
+		episodeID := fmt.Sprintf("%s-episode-%d", prefix, i)
+		exec(`INSERT INTO media_items(content_id,type,title,content_rating) VALUES($1,'episode','Synthetic episode','G')`, episodeID)
+		exec(`INSERT INTO item_people(id,content_id,person_id,kind) VALUES($1,$2,$1,1)`, ids[i], episodeID)
+		if i != 1 { // Accessible episode has no independent library membership.
+			exec(`INSERT INTO media_item_libraries(content_id,media_folder_id) VALUES($1,$2)`, episodeID, libraries[0])
+		}
+		if i == 5 { // An episode without a parent cannot establish visibility.
+			continue
+		}
+		seriesID := fmt.Sprintf("%s-series-%d", prefix, i)
+		rating := "G"
+		if i == 3 {
+			rating = "R"
+		}
+		exec(`INSERT INTO media_items(content_id,type,title,content_rating) VALUES($1,'series','Synthetic series',$2)`, seriesID, rating)
+		exec(`INSERT INTO episodes(content_id,series_id,season_number,episode_number,title) VALUES($1,$2,1,1,'Synthetic episode')`, episodeID, seriesID)
+		if i != 4 { // Orphan parent, despite the child's permissive membership.
+			library := libraries[0]
+			if i == 0 {
+				library = libraries[1]
+			}
+			exec(`INSERT INTO media_item_libraries(content_id,media_folder_id) VALUES($1,$2)`, seriesID, library)
+		}
+		if i == 2 { // A disabled membership hides a series in both libraries.
+			exec(`INSERT INTO media_item_libraries(content_id,media_folder_id) VALUES($1,$2)`, seriesID, libraries[1])
+		}
+	}
+	repo := NewPersonRepository(pool)
+	for _, scope := range []string{"", "episode"} {
+		for _, tc := range []struct {
+			name   string
+			filter AccessFilter
+			limit  int
+			want   []int64
+		}{
+			{"allowed library", AccessFilter{AllowedLibraryIDs: libraries[:1]}, 20, []int64{ids[1], ids[2], ids[3]}},
+			{"disabled library", AccessFilter{DisabledLibraryIDs: libraries[1:]}, 20, []int64{ids[1], ids[3]}},
+			{"parent rating", AccessFilter{AllowedLibraryIDs: libraries[:1], MaxContentRating: "PG-13"}, 20, []int64{ids[1], ids[2]}},
+			{"access before limit", AccessFilter{AllowedLibraryIDs: libraries[:1], DisabledLibraryIDs: libraries[1:], MaxContentRating: "PG-13"}, 1, []int64{ids[1]}},
+			{"excluded credit type", AccessFilter{ExcludedMediaTypes: []string{"episode"}}, 20, nil},
+			{"missing parent", AccessFilter{}, 20, ids[:5]},
+		} {
+			t.Run(scope+"/"+tc.name, func(t *testing.T) {
+				people, err := repo.SearchScoped(t.Context(), prefix, tc.limit, scope, tc.filter)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := make([]int64, len(people))
+				for i, person := range people {
+					got[i] = person.ID
+				}
+				if !slices.Equal(got, tc.want) {
+					t.Fatalf("got %v, want %v", got, tc.want)
+				}
+			})
+		}
+	}
+}
