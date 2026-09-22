@@ -19,9 +19,8 @@ type scheduleStore struct {
 	saveCalls int
 }
 
-func (s *scheduleStore) GetTriggers(_ context.Context, key string) ([]taskmanager.TriggerConfig, bool, error) {
-	configs, exists := s.saved[key]
-	return slices.Clone(configs), exists, s.loadErr
+func (s *scheduleStore) GetTriggers(_ context.Context, key string) ([]taskmanager.TriggerConfig, error) {
+	return slices.Clone(s.saved[key]), s.loadErr
 }
 
 func (s *scheduleStore) GetOrCreateTriggers(ctx context.Context, key string, defaults []taskmanager.TriggerConfig) ([]taskmanager.TriggerConfig, error) {
@@ -44,7 +43,7 @@ func (s *scheduleStore) SetTriggers(_ context.Context, key string, configs []tas
 	if s.saved == nil {
 		s.saved = make(map[string][]taskmanager.TriggerConfig)
 	}
-	s.saved[key] = slices.Clone(configs)
+	s.saved[key] = append([]taskmanager.TriggerConfig{}, configs...)
 	return nil
 }
 

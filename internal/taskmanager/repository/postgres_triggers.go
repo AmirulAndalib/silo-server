@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -19,92 +20,72 @@ func NewPgTriggerRepository(pool *pgxpool.Pool) *PgTriggerRepository {
 	return &PgTriggerRepository{pool: pool}
 }
 
-func (r *PgTriggerRepository) GetTriggers(ctx context.Context, taskKey string) ([]taskmanager.TriggerConfig, bool, error) {
-	return getTriggers(ctx, r.pool, taskKey)
+func (r *PgTriggerRepository) GetTriggers(ctx context.Context, taskKey string) ([]taskmanager.TriggerConfig, error) {
+	snapshot, err := r.GetSchedule(ctx, taskKey)
+	if err != nil {
+		return nil, err
+	}
+	if snapshot.Revision == 0 {
+		return nil, nil
+	}
+	return snapshot.Triggers, nil
+}
+
+func (r *PgTriggerRepository) GetSchedule(ctx context.Context, taskKey string) (taskmanager.Schedule, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return taskmanager.Schedule{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	snapshot, err := readSchedule(ctx, tx, taskKey)
+	if err != nil {
+		return taskmanager.Schedule{}, err
+	}
+	return snapshot, tx.Commit(ctx)
 }
 
 func (r *PgTriggerRepository) GetOrCreateTriggers(ctx context.Context, taskKey string, defaults []taskmanager.TriggerConfig) ([]taskmanager.TriggerConfig, error) {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
+	// Revision zero requires an absent schedule. Use the same lock and revision
+	// guard as administrator edits so startup cannot overwrite a saved schedule.
+	saved, err := r.ReplaceSchedule(ctx, taskKey, 0, defaults)
+	if _, conflict := errors.AsType[*taskmanager.ScheduleConflict](err); conflict {
+		return r.GetTriggers(ctx, taskKey)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	created, err := lockTriggerSet(ctx, tx, taskKey)
-	if err != nil {
-		return nil, err
-	}
-	configs, _, err := getTriggers(ctx, tx, taskKey)
 	if err != nil {
 		return nil, err
 	}
-	// Preserve legacy trigger rows too, including tasks first registered by an
-	// older server after the migration's backfill ran.
-	if created && len(configs) == 0 {
-		if err := insertTriggers(ctx, tx, taskKey, defaults); err != nil {
-			return nil, err
-		}
-		configs = defaults
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit triggers: %w", err)
-	}
-	return configs, nil
+	return saved.Triggers, nil
 }
 
-// The parent row survives clearing the triggers and serializes initialization
-// and replacement across server instances, even for an empty schedule.
-func lockTriggerSet(ctx context.Context, tx pgx.Tx, taskKey string) (bool, error) {
-	result, err := tx.Exec(ctx, `INSERT INTO task_trigger_sets (task_key)
-		VALUES ($1) ON CONFLICT (task_key) DO NOTHING`, taskKey)
+func readSchedule(ctx context.Context, tx pgx.Tx, taskKey string) (taskmanager.Schedule, error) {
+	var snapshot taskmanager.Schedule
+	snapshot.Triggers = []taskmanager.TriggerConfig{}
+	err := tx.QueryRow(ctx, `SELECT revision FROM task_schedules WHERE task_key=$1`, taskKey).Scan(&snapshot.Revision)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return snapshot, nil
+	}
 	if err != nil {
-		return false, fmt.Errorf("creating trigger set: %w", err)
+		return snapshot, err
 	}
-	if _, err := tx.Exec(ctx, `SELECT task_key FROM task_trigger_sets WHERE task_key = $1 FOR UPDATE`, taskKey); err != nil {
-		return false, fmt.Errorf("locking trigger set: %w", err)
-	}
-	return result.RowsAffected() == 1, nil
-}
-
-type triggerQuerier interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-}
-
-func getTriggers(ctx context.Context, db triggerQuerier, taskKey string) ([]taskmanager.TriggerConfig, bool, error) {
-	// Read existence and trigger rows in one snapshot. Legacy trigger rows also
-	// count as saved, even if an older server wrote them after the backfill.
-	rows, err := db.Query(ctx, `
-		SELECT t.type, t.interval, t.time_of_day, t.day_of_week, t.max_runtime
-		FROM (SELECT $1::text AS task_key) requested
-		LEFT JOIN task_trigger_sets s USING (task_key)
-		LEFT JOIN task_triggers t USING (task_key)
-		WHERE s.task_key IS NOT NULL OR t.id IS NOT NULL
-		ORDER BY t.id`, taskKey,
-	)
+	rows, err := tx.Query(ctx, `SELECT type, interval, time_of_day, day_of_week, max_runtime FROM task_triggers WHERE task_key=$1 ORDER BY id`, taskKey)
 	if err != nil {
-		return nil, false, fmt.Errorf("getting task triggers: %w", err)
+		return snapshot, fmt.Errorf("getting task triggers: %w", err)
 	}
 	defer rows.Close()
 
-	var configs []taskmanager.TriggerConfig
-	exists := false
 	for rows.Next() {
-		exists = true
 		var (
 			cfg       taskmanager.TriggerConfig
-			trigType  *string
+			trigType  string
 			interval  *int64
 			timeOfDay *string
 			dayOfWeek *int
 			maxRT     *int64
 		)
 		if err := rows.Scan(&trigType, &interval, &timeOfDay, &dayOfWeek, &maxRT); err != nil {
-			return nil, false, fmt.Errorf("scanning task trigger: %w", err)
+			return snapshot, fmt.Errorf("scanning task trigger: %w", err)
 		}
-		if trigType == nil {
-			continue // The schedule exists but its trigger list is empty.
-		}
-		cfg.Type = taskmanager.TriggerType(*trigType)
+		cfg.Type = taskmanager.TriggerType(trigType)
 		if interval != nil {
 			cfg.IntervalMs = *interval
 		}
@@ -117,31 +98,45 @@ func getTriggers(ctx context.Context, db triggerQuerier, taskKey string) ([]task
 		if maxRT != nil {
 			cfg.MaxRuntimeMs = *maxRT
 		}
-		configs = append(configs, cfg)
+		snapshot.Triggers = append(snapshot.Triggers, cfg)
 	}
-	return configs, exists, rows.Err()
+	return snapshot, rows.Err()
 }
 
 func (r *PgTriggerRepository) SetTriggers(ctx context.Context, taskKey string, triggers []taskmanager.TriggerConfig) error {
+	_, err := r.ReplaceSchedule(ctx, taskKey, -1, triggers)
+	return err
+}
+
+// ReplaceSchedule compares the original persisted revision while holding the
+// parent row lock. Legacy SetTriggers uses the same transaction with a wildcard.
+func (r *PgTriggerRepository) ReplaceSchedule(ctx context.Context, taskKey string, expected int64, triggers []taskmanager.TriggerConfig) (taskmanager.Schedule, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return taskmanager.Schedule{}, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := lockTriggerSet(ctx, tx, taskKey); err != nil {
-		return err
+	inserted, err := tx.Exec(ctx, `INSERT INTO task_schedules (task_key) VALUES ($1) ON CONFLICT DO NOTHING`, taskKey)
+	if err != nil {
+		return taskmanager.Schedule{}, err
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM task_triggers WHERE task_key = $1`, taskKey); err != nil {
-		return fmt.Errorf("deleting old triggers: %w", err)
+	var revision int64
+	if err := tx.QueryRow(ctx, `SELECT revision FROM task_schedules WHERE task_key=$1 FOR UPDATE`, taskKey).Scan(&revision); err != nil {
+		return taskmanager.Schedule{}, err
 	}
-	if err := insertTriggers(ctx, tx, taskKey, triggers); err != nil {
-		return err
+	observed := revision
+	if inserted.RowsAffected() == 1 {
+		observed = 0
 	}
-	return tx.Commit(ctx)
-}
+	if expected != -1 && expected != observed {
+		return taskmanager.Schedule{}, &taskmanager.ScheduleConflict{Actual: observed}
+	}
 
-func insertTriggers(ctx context.Context, tx pgx.Tx, taskKey string, triggers []taskmanager.TriggerConfig) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM task_triggers WHERE task_key = $1`, taskKey); err != nil {
+		return taskmanager.Schedule{}, fmt.Errorf("deleting old triggers: %w", err)
+	}
+
 	for _, cfg := range triggers {
 		var interval *int64
 		if cfg.IntervalMs > 0 {
@@ -165,9 +160,15 @@ func insertTriggers(ctx context.Context, tx pgx.Tx, taskKey string, triggers []t
 			VALUES ($1, $2, $3, $4, $5, $6)`,
 			taskKey, string(cfg.Type), interval, timeOfDay, dayOfWeek, maxRT,
 		); err != nil {
-			return fmt.Errorf("inserting trigger: %w", err)
+			return taskmanager.Schedule{}, fmt.Errorf("inserting trigger: %w", err)
 		}
 	}
 
-	return nil
+	if err := tx.QueryRow(ctx, `UPDATE task_schedules SET revision=revision+1 WHERE task_key=$1 RETURNING revision`, taskKey).Scan(&revision); err != nil {
+		return taskmanager.Schedule{}, err
+	}
+	if triggers == nil {
+		triggers = []taskmanager.TriggerConfig{}
+	}
+	return taskmanager.Schedule{Revision: revision, Triggers: triggers}, tx.Commit(ctx)
 }

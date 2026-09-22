@@ -1,4 +1,12 @@
-import { useId, useMemo, useState } from "react";
+import { AdminUserDeleteDialog } from "@/components/AdminUserDeleteDialog";
+import {
+  adminUserScope,
+  captureAdminUserAuthority,
+  getAdminUser,
+  type AdminUserEditor,
+} from "@/api/v2/adminUsers";
+import { V2ProblemError } from "@/api/v2/request";
+import { useId, useMemo, useState, useRef } from "react";
 import type { FormEvent } from "react";
 import { useParams, Link } from "react-router";
 import {
@@ -7,8 +15,7 @@ import {
   type AdminUserSettingEntry,
   useAdminUser,
   useUpdateUser,
-  useDeleteUser,
-  useImpersonateUser,
+  useAdminUserCapabilities,
   useAdminUserDeviceSettings,
   useAdminUserSettings,
   useDeleteAdminUserDeviceSetting,
@@ -45,13 +52,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -61,9 +62,11 @@ import {
 } from "@/components/ui/select";
 import { ArrowUpRight, ChevronRight, Pencil, RotateCcw, Settings2, UserCircle } from "lucide-react";
 import { useNavigate } from "react-router";
+import { AdminUserImpersonationDialog } from "@/components/AdminUserImpersonationDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useAuth } from "@/hooks/useAuth";
 import { formatPlaybackQualityPreset } from "@/lib/playback-quality";
+import { INVALID_EMAIL_MESSAGE, isValidEmail } from "@/lib/email";
 import {
   PERMISSION_MARKER_EDIT,
   PERMISSION_METADATA_CURATION,
@@ -86,23 +89,31 @@ import {
   shortenId,
   type DeviceProfileTabEntry,
 } from "@/components/admin/deviceOverrides";
-import { toast } from "sonner";
 import {
   formatDate as formatPreferredDate,
   formatDateTime as formatDateTimePreferred,
 } from "@/lib/datetime";
 
 export default function AdminUserDetail() {
+  useAuth();
+  const { id } = useParams<{ id: string }>();
+  return <AdminUserDetailPage key={`${adminUserScope()}:${id}`} />;
+}
+function AdminUserDetailPage() {
   const { id } = useParams<{ id: string }>();
   const userId = Number(id);
   const navigate = useNavigate();
-  const { beginImpersonation } = useAuth();
   const { data: user, isLoading, error } = useAdminUser(userId);
   const [editOpen, setEditOpen] = useState(false);
-  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [deleteEditor, setDeleteEditor] = useState<AdminUserEditor | null>(null);
+  const [editEditor, setEditEditor] = useState<AdminUserEditor | null>(null);
+  const [authority] = useState(captureAdminUserAuthority);
+  const busy = useRef(false);
+  const formBusy = useRef(false);
+  const [actionError, setActionError] = useState("");
+  const capabilities = useAdminUserCapabilities();
+  const available = capabilities.data?.available === true;
   const [confirmImpersonateOpen, setConfirmImpersonateOpen] = useState(false);
-  const deleteMutation = useDeleteUser();
-  const impersonateMutation = useImpersonateUser();
 
   if (isLoading) return <div className="page-shell py-8">Loading user...</div>;
   if (error || !user)
@@ -110,12 +121,31 @@ export default function AdminUserDetail() {
 
   const impersonationDisabled = user.role === "admin" || !user.enabled;
 
+  async function loadEditor(deleting = false) {
+    if (busy.current || !available) return;
+    busy.current = true;
+    setActionError("");
+    try {
+      const editor = await getAdminUser(userId, authority);
+      if (deleting) setDeleteEditor(editor);
+      else {
+        setEditEditor(editor);
+        setEditOpen(true);
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not load user.");
+    } finally {
+      busy.current = false;
+    }
+  }
   function handleDelete() {
-    setConfirmDeleteOpen(true);
+    void loadEditor(true);
   }
 
   return (
     <div className="page-shell space-y-6 py-4 sm:py-6">
+      {actionError && <p role="alert">{actionError}</p>}
+      {!available && <p role="status">User administration is unavailable.</p>}
       <nav
         aria-label="Breadcrumb"
         className="text-muted-foreground flex items-center gap-1.5 text-sm"
@@ -148,21 +178,38 @@ export default function AdminUserDetail() {
             size="sm"
             className="flex-1 sm:flex-none"
             onClick={() => setConfirmImpersonateOpen(true)}
-            disabled={impersonationDisabled || impersonateMutation.isPending}
+            disabled={!available || impersonationDisabled}
           >
-            Impersonate
+            View as user
           </Button>
-          <Dialog open={editOpen} onOpenChange={setEditOpen}>
-            <DialogTrigger asChild>
-              <Button variant="outline" size="sm" className="flex-1 sm:flex-none">
-                <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
-              </Button>
-            </DialogTrigger>
+          <Dialog
+            open={editOpen}
+            onOpenChange={(open) => {
+              if (!formBusy.current && !open) setEditOpen(false);
+            }}
+          >
+            <Button
+              disabled={!available}
+              onClick={() => void loadEditor()}
+              variant="outline"
+              size="sm"
+              className="flex-1 sm:flex-none"
+            >
+              <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
+            </Button>
             <DialogContent className="sm:max-w-2xl">
               <DialogHeader>
                 <DialogTitle>Edit User</DialogTitle>
               </DialogHeader>
-              <EditUserForm user={user} onClose={() => setEditOpen(false)} />
+              {editEditor && (
+                <EditUserForm
+                  initialEditor={editEditor}
+                  onBusy={(value) => {
+                    formBusy.current = value;
+                  }}
+                  onClose={() => setEditOpen(false)}
+                />
+              )}
             </DialogContent>
           </Dialog>
           <Button
@@ -170,7 +217,7 @@ export default function AdminUserDetail() {
             size="sm"
             className="flex-1 sm:flex-none"
             onClick={handleDelete}
-            disabled={deleteMutation.isPending}
+            disabled={!available}
           >
             Delete
           </Button>
@@ -209,43 +256,21 @@ export default function AdminUserDetail() {
           <IPHistoryTab userId={userId} />
         </TabsContent>
       </Tabs>
-      <ConfirmDialog
-        open={confirmImpersonateOpen}
-        onOpenChange={(open) => {
-          if (!open) setConfirmImpersonateOpen(false);
-        }}
-        title="Impersonate user"
-        description={`Continue as "${user.username}"? Admin access will be removed until you end impersonation.`}
-        confirmLabel="Impersonate"
-        onConfirm={() => {
-          setConfirmImpersonateOpen(false);
-          void impersonateMutation
-            .mutateAsync(user.id)
-            .then((result) => {
-              beginImpersonation(result, `/admin/users/${user.id}`);
-              navigate("/profiles");
-            })
-            .catch((error: unknown) => {
-              toast.error(error instanceof Error ? error.message : "Failed to start impersonation");
-            });
-        }}
-      />
-      <ConfirmDialog
-        open={confirmDeleteOpen}
-        onOpenChange={(open) => {
-          if (!open) setConfirmDeleteOpen(false);
-        }}
-        title="Delete user"
-        description={`Delete user "${user.username}"? This cannot be undone.`}
-        confirmLabel="Delete"
-        variant="destructive"
-        onConfirm={() => {
-          setConfirmDeleteOpen(false);
-          deleteMutation.mutate(user.id, {
-            onSuccess: () => navigate("/admin/users"),
-          });
-        }}
-      />
+      {confirmImpersonateOpen && (
+        <AdminUserImpersonationDialog
+          user={user}
+          returnPath={`/admin/users/${user.id}`}
+          onClose={() => setConfirmImpersonateOpen(false)}
+          onError={setActionError}
+        />
+      )}
+      {deleteEditor && (
+        <AdminUserDeleteDialog
+          initialEditor={deleteEditor}
+          onClose={() => setDeleteEditor(null)}
+          onDeleted={() => navigate("/admin/users")}
+        />
+      )}
     </div>
   );
 }
@@ -379,11 +404,20 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 }
 
 function ProfilesTab({ userId }: { userId: number }) {
-  const { data: profiles, isLoading } = useAdminUserProfiles(userId);
+  const query = useAdminUserProfiles(userId);
+  const { data: profiles, isLoading } = query;
 
   if (isLoading)
     return (
       <div className="text-muted-foreground py-8 text-center text-sm">Loading profiles...</div>
+    );
+
+  if (query.isError)
+    return (
+      <div role="alert">
+        Could not load profiles.{" "}
+        <Button onClick={() => void query.refetch()}>Reload profiles</Button>
+      </div>
     );
 
   if (!profiles || profiles.length === 0)
@@ -510,14 +544,15 @@ function WatchHistoryTab({ userId }: { userId: number }) {
 }
 
 function IPHistoryTab({ userId }: { userId: number }) {
-  const { data: ips = [], isLoading } = useUserIPs(userId);
+  const history = useUserIPs(userId);
+  const { data: ips = [], isLoading } = history;
 
   if (isLoading)
     return (
       <div className="text-muted-foreground py-8 text-center text-sm">Loading IP history...</div>
     );
 
-  if (ips.length === 0)
+  if (ips.length === 0 && !history.isError)
     return (
       <div className="surface-panel text-muted-foreground rounded-2xl py-10 text-center text-sm">
         No IP history found for this user.
@@ -526,6 +561,17 @@ function IPHistoryTab({ userId }: { userId: number }) {
 
   return (
     <div className="surface-panel overflow-x-auto rounded-2xl border-0">
+      {history.isError && (
+        <div role="alert">
+          Could not load IP history.{" "}
+          <Button onClick={() => void history.restart()}>Reload history</Button>
+        </div>
+      )}
+      {history.hasNextPage && (
+        <Button disabled={history.isFetchingNextPage} onClick={() => void history.fetchNextPage()}>
+          Load more
+        </Button>
+      )}
       <Table>
         <TableHeader>
           <TableRow>
@@ -1044,7 +1090,41 @@ function DeviceOverridesTab({ userId }: { userId: number }) {
   );
 }
 
-function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void }) {
+function EditUserForm({
+  initialEditor,
+  onClose,
+  onBusy,
+}: {
+  initialEditor: AdminUserEditor;
+  onClose: () => void;
+  onBusy: (value: boolean) => void;
+}) {
+  const [editor, setEditor] = useState(initialEditor);
+  const user = editor.user;
+  const busy = useRef(false);
+  const [conflict, setConflict] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
+  const [reloading, setReloading] = useState(false);
+  async function reload() {
+    if (busy.current) return;
+    busy.current = true;
+    setReloading(true);
+    onBusy(true);
+    try {
+      setEditor(await getAdminUser(user.id, editor.profileContext));
+      setConflict(false);
+      setError("");
+      if (saved) onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not reload user.");
+    } finally {
+      busy.current = false;
+      setReloading(false);
+      onBusy(false);
+    }
+  }
+
   const { data: libraries = [] } = useAdminLibraries();
   const { data: accessGroups = [] } = useAccessGroups();
   const [username, setUsername] = useState(user.username);
@@ -1075,8 +1155,16 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
   const selectedGroupMissing =
     accessGroupID !== null && !accessGroups.some((group) => group.id === accessGroupID);
 
-  function handleSubmit(e: FormEvent) {
+  async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (busy.current || conflict || saved) return;
+    if (!isValidEmail(email)) {
+      setError(INVALID_EMAIL_MESSAGE);
+      return;
+    }
+    busy.current = true;
+    onBusy(true);
+    setError("");
     const body: UpdateUserRequest = {
       username,
       email,
@@ -1090,11 +1178,33 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
       ...policyUpdateFields(policy),
     };
     if (password) body.password = password;
-    updateMutation.mutate({ id: user.id, body }, { onSuccess: onClose });
+    try {
+      await updateMutation.mutateAsync({ editor, body });
+      setSaved(true);
+      await getAdminUser(user.id, editor.profileContext);
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save user.");
+      if (err instanceof V2ProblemError && err.status === 412) setConflict(true);
+    } finally {
+      busy.current = false;
+      onBusy(false);
+    }
   }
 
   return (
     <form onSubmit={handleSubmit} className="flex max-h-[70vh] flex-col">
+      {error && <p role="alert">{error}</p>}
+      {(conflict || saved) && (
+        <div>
+          {saved
+            ? "Saved. Reload to confirm the current state."
+            : "Your draft is preserved. Reload before submitting again."}
+          <Button type="button" disabled={reloading} onClick={() => void reload()}>
+            Reload current user
+          </Button>
+        </div>
+      )}
       <Tabs defaultValue="account" className="min-h-0 flex-1">
         <TabsList variant="line" className="border-border mb-4 w-full justify-start border-b pb-1">
           <TabsTrigger value="account" className="flex-none px-1">
@@ -1243,7 +1353,11 @@ function EditUserForm({ user, onClose }: { user: AdminUser; onClose: () => void 
       </Tabs>
 
       <div className="border-border mt-4 border-t pt-4">
-        <Button type="submit" className="w-full" disabled={updateMutation.isPending}>
+        <Button
+          type="submit"
+          className="w-full"
+          disabled={updateMutation.isPending || conflict || saved || reloading}
+        >
           {updateMutation.isPending ? "Saving..." : "Save"}
         </Button>
       </div>
