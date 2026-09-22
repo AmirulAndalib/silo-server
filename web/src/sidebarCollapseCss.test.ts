@@ -163,6 +163,25 @@ describe("sidebar collapse CSS", () => {
     );
   });
 
+  it("only reserves sidebar room for out-of-tree chrome while the shell is mounted", () => {
+    // The banner renders above every route, including /profiles, /login and
+    // /watch, which live outside Layout and have no sidebar. Layout publishes
+    // `data-app-shell` for exactly the sidebar's lifetime, so the desktop offset
+    // must hang off it; an unconditional 260px left a blank strip on the profile
+    // picker while impersonating (#1290).
+    expect(ruleBody(":root[data-app-shell] {")).toContain("--app-sidebar-offset: 260px");
+    expect(ruleBody(':root[data-app-shell][data-sidebar-collapsed="true"] {')).toContain(
+      "--app-sidebar-offset: 64px",
+    );
+    // Nothing else may reintroduce the offset without the shell gate.
+    const desktopOffsets =
+      css.match(/^\s*([^{\n]+)\{\s*--app-sidebar-offset: (?:260|64)px;/gm) ?? [];
+    expect(desktopOffsets.length).toBe(2);
+    for (const rule of desktopOffsets) expect(rule).toContain("[data-app-shell]");
+    // Off-shell the variable stays at its 0px default.
+    expect(css).toMatch(/:root \{\s*--app-sidebar-offset: 0px;/);
+  });
+
   it("compensates the banner on the same breakpoint that moves its margin", () => {
     // `html[data-text-scale]` re-bases rem, so 64rem and 1024px diverge at large
     // text. The compensation must follow `--app-sidebar-offset`'s own query.
