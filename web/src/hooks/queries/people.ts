@@ -38,18 +38,23 @@ export function invalidatePersonItemDetails(queryClient: QueryClient, personId: 
   });
 }
 
-const personRefreshObservers = new WeakMap<QueryClient, Map<string, () => void>>();
+const observedPeople = new WeakMap<QueryClient, Set<string>>();
 
 export function observePersonRefresh(queryClient: QueryClient, id: string) {
   const queryKey = personKeys.detail(id);
   if (!queryClient.getQueryCache().find({ queryKey, exact: true })) return;
 
-  const refreshes = personRefreshObservers.get(queryClient) ?? new Map<string, () => void>();
-  personRefreshObservers.set(queryClient, refreshes);
-  refreshes.get(id)?.();
+  const refreshes = observedPeople.get(queryClient) ?? new Set<string>();
+  observedPeople.set(queryClient, refreshes);
+  if (refreshes.has(id)) return;
 
   const startedAt = Date.now();
   let photoUrl = queryClient.getQueryData<Person>(queryKey)?.photo_url;
+  let photoRevision = 0;
+  const readRevisions = new WeakMap<Query, number>();
+  for (const itemQuery of queryClient.getQueryCache().getAll()) {
+    if (itemQuery.state.fetchStatus === "fetching") readRevisions.set(itemQuery, photoRevision);
+  }
   let refreshOnResume = false;
   const observer = new QueryObserver(queryClient, {
     queryKey,
@@ -61,8 +66,27 @@ export function observePersonRefresh(queryClient: QueryClient, id: string) {
   });
   const query = observer.getCurrentQuery();
   const unsubscribeCache = queryClient.getQueryCache().subscribe((event) => {
-    if (event.type === "removed" && event.query === query) stop();
-    else if (
+    if (event.type === "removed" && event.query === query) {
+      stop();
+      return;
+    }
+    if (event.type === "updated" && event.query !== query) {
+      if (event.action.type === "fetch") {
+        readRevisions.set(event.query, photoRevision);
+      } else if (event.action.type === "success" && !event.action.manual) {
+        const revision = readRevisions.get(event.query);
+        readRevisions.delete(event.query);
+        // A dialog or prefetch can finish an old read after the photo invalidation.
+        if (
+          revision !== undefined &&
+          revision < photoRevision &&
+          isPersonItemDetail(event.query, id)
+        ) {
+          void queryClient.invalidateQueries({ predicate: (item) => item === event.query });
+        }
+      }
+    }
+    if (
       event.type === "removed" ||
       (event.query === query &&
         (event.type === "observerAdded" || event.type === "observerRemoved")) ||
@@ -93,6 +117,7 @@ export function observePersonRefresh(queryClient: QueryClient, id: string) {
           (refreshOnResume || result.data.photo_url !== photoUrl)
         ) {
           refreshOnResume = false;
+          if (result.data.photo_url !== photoUrl) photoRevision++;
           photoUrl = result.data.photo_url;
           void invalidatePersonItemDetails(queryClient, id);
         }
@@ -105,7 +130,7 @@ export function observePersonRefresh(queryClient: QueryClient, id: string) {
       observer.destroy();
     }
   }
-  refreshes.set(id, stop);
+  refreshes.add(id);
   updateObservation();
 }
 

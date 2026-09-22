@@ -177,7 +177,7 @@ describe("person refresh and cached item credits", () => {
     expect(fetchMock).toHaveBeenCalledTimes(finalRequests);
   });
 
-  it("replaces an existing observer when the same person is queued again", async () => {
+  it("reuses the observer when the same person is queued again", async () => {
     vi.useFakeTimers();
     const { fetchMock, wrapper } = setup();
     const { result } = renderHook(() => useRefreshPerson(personId, false), { wrapper });
@@ -186,7 +186,7 @@ describe("person refresh and cached item credits", () => {
       await result.current.mutateAsync();
     });
     await act(() => vi.advanceTimersByTimeAsync(3_000));
-    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith(personId))).toHaveLength(3);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith(personId))).toHaveLength(2);
   });
 
   it.each(["cleared", "expired"] as const)(

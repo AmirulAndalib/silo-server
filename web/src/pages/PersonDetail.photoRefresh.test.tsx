@@ -100,8 +100,25 @@ it.each([
     coldNavigation: "prefetch",
     completeBeforeItemLoads: true,
   },
+  {
+    queueDelay: 0,
+    rotateSignature: false,
+    coldNavigation: "prefetch",
+    completeBeforeItemLoads: true,
+    stayOnPersonPage: true,
+    isAdmin: true,
+  },
+  {
+    queueDelay: 0,
+    rotateSignature: false,
+    coldNavigation: "prefetch",
+    completeBeforeItemLoads: true,
+    stayOnPersonPage: true,
+    isAdmin: true,
+    repeatRefresh: true,
+  },
 ])(
-  "observes a photo refresh after $queueDelay ms with signature rotation=$rotateSignature, cold navigation=$coldNavigation, early completion=$completeBeforeItemLoads, admin=$isAdmin, and automatic=$automatic",
+  "observes a photo refresh after $queueDelay ms with signature rotation=$rotateSignature, cold navigation=$coldNavigation, early completion=$completeBeforeItemLoads, admin=$isAdmin, automatic=$automatic, person page open=$stayOnPersonPage, and repeat=$repeatRefresh",
   async ({
     queueDelay,
     rotateSignature,
@@ -109,6 +126,8 @@ it.each([
     completeBeforeItemLoads,
     isAdmin,
     automatic,
+    stayOnPersonPage,
+    repeatRefresh,
   }) => {
     vi.useFakeTimers();
     vi.mocked(useAuth).mockReturnValue({ user: { id: 1 } } as ReturnType<typeof useAuth>);
@@ -178,7 +197,13 @@ it.each([
       vi.mocked(getPerson).mockResolvedValue({ ...person, photo_url: photoUrl });
       await act(() => client.refetchQueries({ queryKey: personKeys.detail(id) }));
     }
-    view.unmount();
+    if (repeatRefresh) {
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Refresh now" }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+    }
+    if (!stayOnPersonPage) view.unmount();
 
     const returned = renderHook(() => useQuery({ queryKey: itemKey, queryFn: readItem }), {
       wrapper: ({ children }: { children: ReactNode }) => (
