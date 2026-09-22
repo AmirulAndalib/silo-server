@@ -75,9 +75,15 @@ it("refreshes cached cast after a person read observes a background photo update
   });
 });
 
-it.each([0, 33_000, 123_000, 660_000])(
-  "observes a queued refresh after returning to the item and waiting %i ms",
-  async (queueDelay) => {
+it.each([
+  { queueDelay: 0, rotateSignature: false },
+  { queueDelay: 33_000, rotateSignature: false },
+  { queueDelay: 123_000, rotateSignature: false },
+  { queueDelay: 660_000, rotateSignature: false },
+  { queueDelay: 33_000, rotateSignature: true },
+])(
+  "observes a queued refresh after $queueDelay ms with signature rotation=$rotateSignature",
+  async ({ queueDelay, rotateSignature }) => {
     vi.useFakeTimers();
     vi.mocked(useAuth).mockReturnValue({ user: { id: 1 } } as ReturnType<typeof useAuth>);
     const id = "9007199254740993";
@@ -131,6 +137,13 @@ it.each([0, 33_000, 123_000, 660_000])(
     );
     await act(() => vi.advanceTimersByTimeAsync(0));
     expect(returned.result.current.data?.cast[0]?.photo_url).toBe(person.photo_url);
+
+    if (rotateSignature) {
+      vi.mocked(getPerson).mockResolvedValue({
+        ...person,
+        photo_url: `${person.photo_url}?X-Amz-Signature=rotated`,
+      });
+    }
 
     await act(() => vi.advanceTimersByTimeAsync(queueDelay));
     expect(returned.result.current.data?.cast[0]?.photo_url).toBe(person.photo_url);

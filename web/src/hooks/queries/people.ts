@@ -50,6 +50,7 @@ function observeQueuedPersonRefresh(queryClient: QueryClient, id: string) {
     refetchInterval: () => (Date.now() - startedAt < 30_000 ? 3_000 : 30_000),
   });
   const unsubscribe = observer.subscribe((result) => {
+    // Presigned URLs can rotate before the job finishes, so a URL change is not completion.
     if (result.isSuccess && result.data.photo_url !== photoUrl) {
       photoUrl = result.data.photo_url;
       void invalidatePersonItemDetails(queryClient, id);
