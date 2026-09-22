@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,17 +25,62 @@ func deviceProfileTokenHash(token string) string {
 }
 
 func (s *DeviceProfileStore) PutForDevice(ctx context.Context, token, deviceID string, profile DeviceProfile) error {
-	if s.pool == nil {
-		s.Put(token+"\x00"+deviceID, profile)
-		return nil
-	}
-	data, err := json.Marshal(profile)
+	data, err := encodeDeviceProfile(profile, deviceID)
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO jellycompat_device_profiles(token_hash,device_id,profile,expires_at) VALUES($1,$2,$3,$4)
- ON CONFLICT(token_hash,device_id) DO UPDATE SET profile=EXCLUDED.profile,expires_at=EXCLUDED.expires_at`, deviceProfileTokenHash(token), deviceID, data, s.now().Add(s.ttl))
+	now := s.now()
+	if s.pool == nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		prefix := token + "\x00"
+		count := 0
+		for key, stored := range s.profiles {
+			if strings.HasPrefix(key, prefix) {
+				if !stored.expiresAt.After(now) {
+					delete(s.profiles, key)
+				} else {
+					count++
+				}
+			}
+		}
+		if _, exists := s.profiles[prefix+deviceID]; !exists && count >= maxDeviceProfilesPerToken {
+			return deviceProfileQuotaError()
+		}
+		s.profiles[prefix+deviceID] = storedDeviceProfile{profile: profile, expiresAt: now.Add(s.ttl)}
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("%w: %w", errDeviceProfileStore, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tokenHash := deviceProfileTokenHash(token)
+	// Serialize the quota check with registration on every API process. An
+	// existing device can still refresh its profile when the token is at capacity.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('jellycompat-device-profiles:' || $1, 0))`, tokenHash); err != nil {
+		return fmt.Errorf("%w: %w", errDeviceProfileStore, err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM jellycompat_device_profiles WHERE token_hash=$1 AND expires_at<=$2`, tokenHash, now); err != nil {
+		return fmt.Errorf("%w: %w", errDeviceProfileStore, err)
+	}
+	var count int
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(bool_or(device_id=$2),false) FROM jellycompat_device_profiles WHERE token_hash=$1`, tokenHash, deviceID).Scan(&count, &exists); err != nil {
+		return fmt.Errorf("%w: %w", errDeviceProfileStore, err)
+	}
+	if !exists && count >= maxDeviceProfilesPerToken {
+		return deviceProfileQuotaError()
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO jellycompat_device_profiles(token_hash,device_id,profile,expires_at) VALUES($1,$2,$3,$4)
+ ON CONFLICT(token_hash,device_id) DO UPDATE SET profile=EXCLUDED.profile,expires_at=EXCLUDED.expires_at`, tokenHash, deviceID, data, now.Add(s.ttl))
+	if err != nil {
+		return fmt.Errorf("%w: %w", errDeviceProfileStore, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("%w: %w", errDeviceProfileStore, err)
 	}
 	return nil

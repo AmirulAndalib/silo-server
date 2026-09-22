@@ -48,6 +48,8 @@ var compatRemoteTranscodeStartTimeout time.Duration
 const (
 	compatRemoteNodeProbeFallbackTimeout = 2 * time.Minute
 	compatToneMapNegotiationTimeout      = 5 * time.Second
+	compatResolution720p                 = "720p"
+	compatResolution1080p                = "1080p"
 )
 
 type playbackInfoRequest struct {
@@ -1067,16 +1069,16 @@ func compatVideoToolboxToneMapBitrateKbps(version catalog.FileVersion, recipe co
 	}
 }
 
-func compatMaxResolutionForBitrateKbps(kbps int) string {
+func compatMaxResolutionForBitrateKbps(kbps int64) string {
 	switch {
 	case kbps <= 0:
 		return ""
 	case kbps < 2000:
 		return "480p"
 	case kbps < 6000:
-		return "720p"
+		return compatResolution720p
 	case kbps < 20000:
-		return "1080p"
+		return compatResolution1080p
 	default:
 		return ""
 	}
@@ -1972,12 +1974,12 @@ func (h *PlaybackHandler) HandleCapabilitiesFull(w http.ResponseWriter, r *http.
 
 	profile, err := decodeDeviceProfile(r.Body)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "BadRequest", "Invalid capabilities payload")
+		writeDeviceProfileRequestError(w, err, "Invalid capabilities payload")
 		return
 	}
 	if profile.HasData() {
 		if err := h.deviceProfiles.PutForDevice(r.Context(), session.Token, compatRequestDeviceID(r), profile); err != nil {
-			writeError(w, 503, "Unavailable", "Device profile storage unavailable")
+			writeDeviceProfileRequestError(w, err, "Invalid capabilities payload")
 			return
 		}
 	}
@@ -2030,11 +2032,7 @@ func (h *PlaybackHandler) HandlePlaybackInfo(w http.ResponseWriter, r *http.Requ
 
 	req, profile, err := h.parsePlaybackRequest(r, session.Token)
 	if err != nil {
-		if errors.Is(err, errDeviceProfileStore) {
-			writeError(w, 503, "Unavailable", "Device profile storage unavailable")
-			return
-		}
-		writeError(w, http.StatusBadRequest, "BadRequest", "Invalid playback request")
+		writeDeviceProfileRequestError(w, err, "Invalid playback request")
 		return
 	}
 	// PlaybackInfo is authorized by the token-derived session. Some clients
@@ -2239,7 +2237,7 @@ func stripCompatNUL(value string) string {
 
 func (h *PlaybackHandler) parsePlaybackRequest(r *http.Request, compatToken string) (playbackInfoRequest, DeviceProfile, error) {
 	var req playbackInfoRequest
-	body, err := io.ReadAll(r.Body)
+	body, err := readDeviceProfileRequest(r.Body)
 	if err != nil {
 		return req, DeviceProfile{}, err
 	}
@@ -2354,7 +2352,15 @@ func (h *PlaybackHandler) buildPlaybackSource(
 		// bandwidth setting. Match profiles against this actual encoder output.
 		targetBitrateKbps = int(maxBitrate*95/100/1000) - 192
 	}
-	canEncodeOutput := profile.supportsTranscodingOutput(version, targetAudioChannels, max(targetBitrateKbps, 0))
+	targetResolution := compatMaxResolutionForBitrateKbps(maxBitrate / 1000)
+	if ceiling, err := strconv.Atoi(strings.TrimSuffix(targetResolution, "p")); err == nil {
+		if height := compatPrimaryVideoTrack(version).Height; height > 0 && height <= ceiling {
+			// FFmpeg scales to an exact height; a bandwidth ceiling must not
+			// enlarge a source already below it.
+			targetResolution = ""
+		}
+	}
+	canEncodeOutput := profile.supportsTranscodingOutput(version, targetAudioChannels, max(targetBitrateKbps, 0), targetResolution)
 	supportsTranscoding := enableTranscoding &&
 		(hlsAudioCopy || transcodeAudio || canEncodeOutput)
 	// Don't offer full video encodes of 4K sources when allow_4k_transcode is
@@ -2370,7 +2376,7 @@ func (h *PlaybackHandler) buildPlaybackSource(
 	return PlaybackMediaSource{
 		CanBurnSubtitle:            enableTranscoding && (maxBitrate <= 0 || targetBitrateKbps >= 64) && (allow4KTranscode || !is4KResolution(version.Resolution)) && canEncodeOutput,
 		TargetBitrateKbps:          max(targetBitrateKbps, 0),
-		TargetResolution:           compatMaxResolutionForBitrateKbps(maxBitrate / 1000),
+		TargetResolution:           targetResolution,
 		TargetAudioChannels:        targetAudioChannels,
 		ID:                         sourceID,
 		FileID:                     version.FileID,

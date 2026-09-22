@@ -89,6 +89,7 @@ type upcomingContractRepo struct {
 	hasFiles           map[string]bool
 	availabilityIDs    []string
 	availabilityErr    error
+	includeTotal       bool
 }
 
 func (r *upcomingContractRepo) HasFilesByIDs(_ context.Context, ids []string) (map[string]bool, error) {
@@ -96,14 +97,19 @@ func (r *upcomingContractRepo) HasFilesByIDs(_ context.Context, ids []string) (m
 	return r.hasFiles, r.availabilityErr
 }
 
-func (r *upcomingContractRepo) ListUpcoming(_ context.Context, since time.Time, seriesID, seasonID string, libraryID int, limit, offset int, filter catalog.AccessFilter) ([]*models.Episode, int, error) {
+func (r *upcomingContractRepo) ListUpcoming(_ context.Context, since time.Time, seriesID, seasonID string, libraryID int, limit, offset int, filter catalog.AccessFilter, includeTotal bool) ([]*models.Episode, int, error) {
 	r.calls++
 	r.seriesID, r.seasonID, r.libraryID = seriesID, seasonID, libraryID
 	r.since = since
 	r.filter = filter
 	r.offset = offset
 	r.limit = limit
-	return []*models.Episode{{ContentID: "future", SeriesID: "s", SeasonNumber: 3, EpisodeNumber: 1, Title: "Tomorrow"}}, 5, nil
+	r.includeTotal = includeTotal
+	total := 0
+	if includeTotal {
+		total = 5
+	}
+	return []*models.Episode{{ContentID: "future", SeriesID: "s", SeasonNumber: 3, EpisodeNumber: 1, Title: "Tomorrow"}}, total, nil
 }
 func TestUpcomingUsesPremiereWindowAndProfileScope(t *testing.T) {
 	codec := NewResourceIDCodec()

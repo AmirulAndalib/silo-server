@@ -129,6 +129,16 @@ scope. Database failures return 503 instead of silently negotiating with a
 profile lost on another API node. Expired registrations are removed in bounded
 batches by the existing hourly cleanup.
 
+Capabilities and `PlaybackInfo` requests accept bodies up to 1 MiB. A stored
+device profile may contain up to 256 KiB of JSON and 1,024 entries total across
+its profile arrays and nested conditions. Larger requests or profiles return
+413. Device IDs longer than 256 bytes return 400.
+
+Each login/API token can register up to 64 active device IDs. Registering a new
+ID at capacity returns 429; an existing ID can still update its profile. Expired
+registrations release their slots when the token next registers a profile.
+The quota is enforced across API processes.
+
 Media requests require a login/API token or an unexpired `PlaySessionId` grant.
 A grant authorizes GET/HEAD for its negotiated item and source; catalog item and
 source IDs alone are not credentials. An invalid explicit token does not fall

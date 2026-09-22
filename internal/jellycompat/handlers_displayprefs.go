@@ -72,6 +72,22 @@ func (h *DisplayPreferencesHandler) HandleGetDisplayPreferences(w http.ResponseW
 		writeCompatUpstreamError(w, err)
 		return
 	}
+	if val == "" {
+		profile, err := store.GetProfile(r.Context(), session.ProfileID)
+		if err != nil {
+			writeCompatUpstreamError(w, err)
+			return
+		}
+		// Older servers stored one document for the account. Keep that
+		// customization available to its primary profile after scoping reads.
+		if profile != nil && profile.IsPrimary {
+			val, err = store.GetJellycompatDisplayPrefs(r.Context(), id, client)
+			if err != nil {
+				writeCompatUpstreamError(w, err)
+				return
+			}
+		}
+	}
 	dto := defaultDisplayPreferences(id, client)
 	if val != "" {
 		if err := json.Unmarshal([]byte(val), &dto); err != nil {

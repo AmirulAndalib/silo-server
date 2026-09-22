@@ -398,10 +398,15 @@ func TestCodecProfileAVCRefFramesConstraint(t *testing.T) {
 	if source.SupportsDirectPlay || source.SupportsDirectStream {
 		t.Fatalf("video copy was allowed unexpectedly: direct=%v stream=%v", source.SupportsDirectPlay, source.SupportsDirectStream)
 	}
-	// The encoder does not freeze a reference-frame target across executors.
-	// Reject rather than promise that an unspecified output meets this ceiling.
+	// Output reference frames depend on the encoder. Optional conditions accept
+	// unknown output facts; the source's eight reference frames cannot reject it.
+	if !source.SupportsTranscoding {
+		t.Fatal("SupportsTranscoding = false for an optional unknown output value")
+	}
+	profile.CodecProfiles[0].Conditions[0].IsRequired = true
+	source = (&PlaybackHandler{codec: NewResourceIDCodec()}).buildPlaybackSource("item", "play", version, profile, playbackInfoRequest{}, true)
 	if source.SupportsTranscoding {
-		t.Fatal("SupportsTranscoding = true for an unenforced reference-frame ceiling")
+		t.Fatal("SupportsTranscoding = true for a required unknown output value")
 	}
 }
 

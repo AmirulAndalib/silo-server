@@ -296,7 +296,8 @@ func compatRecipeMatchesSource(recipe *playback.RecipeCard, source PlaybackMedia
 		recipe.SourceAudioChannels == compatHLSRecipeSourceAudioChannels(source) &&
 		recipe.CopyVideoMPEGTS == source.HLSRemuxMPEGTS &&
 		recipe.SubtitleBurnIn == source.SubtitleBurnIn && (!source.SubtitleBurnIn || (recipe.SubtitleTrackIndex == source.SubtitleTrackIndex && recipe.SubtitleCodec == source.SubtitleCodec)) &&
-		(source.TargetBitrateKbps == 0 || recipe.TargetBitrateKbps == source.TargetBitrateKbps)
+		(source.TargetBitrateKbps == 0 || recipe.TargetBitrateKbps == source.TargetBitrateKbps) &&
+		(source.TargetResolution == "" || recipe.TargetResolution == source.TargetResolution)
 }
 
 // Versioned wrappers put a literal path segment in every byte URL whose
@@ -2591,6 +2592,7 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 		SubtitleTrackIndex:     source.SubtitleTrackIndex,
 		SubtitleCodec:          source.SubtitleCodec,
 		TargetBitrateKbps:      source.TargetBitrateKbps,
+		TargetResolution:       source.TargetResolution,
 		TargetAudioChannels:    source.TargetAudioChannels,
 		TargetCodecVideo:       compatTargetVideoCodec,
 		TargetCodecAudio:       compatTargetAudioCodec,
@@ -2796,7 +2798,9 @@ func compatLiveTranscodeMatchesAudioSource(transcodeSession *playback.TranscodeS
 	return opts.AudioTrackIndex == compatAudioTrackIndexOrDefault(source) &&
 		opts.SourceAudioChannels == compatHLSRecipeSourceAudioChannels(source) &&
 		opts.CopyVideoMPEGTS == source.HLSRemuxMPEGTS &&
-		opts.SubtitleBurnIn == source.SubtitleBurnIn && (!source.SubtitleBurnIn || (opts.SubtitleTrackIndex == source.SubtitleTrackIndex && opts.SubtitleCodec == source.SubtitleCodec))
+		opts.SubtitleBurnIn == source.SubtitleBurnIn && (!source.SubtitleBurnIn || (opts.SubtitleTrackIndex == source.SubtitleTrackIndex && opts.SubtitleCodec == source.SubtitleCodec)) &&
+		(source.TargetBitrateKbps == 0 || opts.TargetBitrateKbps == source.TargetBitrateKbps) &&
+		(source.TargetResolution == "" || opts.TargetResolution == source.TargetResolution)
 }
 
 func shouldGenerateCompatFullManifest(source PlaybackMediaSource, segmentDuration int) bool {

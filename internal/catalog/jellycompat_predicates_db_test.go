@@ -4,12 +4,27 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+type listingCountTracer struct{ counts atomic.Int64 }
+
+func (t *listingCountTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if strings.HasPrefix(data.SQL, "SELECT COUNT(*)") {
+		t.counts.Add(1)
+	}
+	return ctx
+}
+
+func (*listingCountTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 // TestJellycompatPredicatesPostgres runs the actual count/page queries against
 // synthetic catalog and profile state. Set SILO_TEST_DATABASE_URL to a migrated
@@ -345,6 +360,50 @@ func TestJellycompatPredicatesPostgres(t *testing.T) {
 		}
 		if total != 0 || len(items) != 0 {
 			t.Fatalf("denied episodes total=%d items=%v", total, items)
+		}
+	})
+	t.Run("optional listing totals skip count queries", func(t *testing.T) {
+		tracer := &listingCountTracer{}
+		cfg := pool.Config()
+		cfg.ConnConfig.Tracer = tracer
+		tracked, err := pgxpool.NewWithConfig(ctx, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(tracked.Close)
+		personID := time.Now().UnixNano()
+		exec(`INSERT INTO people(id,name) VALUES($1,$2)`, personID, prefix)
+		t.Cleanup(func() {
+			cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, _ = pool.Exec(cleanup, `DELETE FROM item_people WHERE person_id=$1`, personID)
+			_, _ = pool.Exec(cleanup, `DELETE FROM people WHERE id=$1`, personID)
+		})
+		exec(`INSERT INTO item_people(id,content_id,person_id,kind) VALUES($1,$2,$1,1)`, personID, movieIDs[0])
+		for _, includeTotal := range []bool{true, false} {
+			tracer.counts.Store(0)
+			upcoming, total, err := NewEpisodeRepository(tracked).ListUpcoming(ctx, time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC), seriesID, "", libraryID, 1, 1, access, includeTotal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantTotal, wantQueries := 0, int64(0)
+			if includeTotal {
+				wantTotal, wantQueries = 5, 1
+			}
+			if total != wantTotal || tracer.counts.Load() != wantQueries || len(upcoming) != 1 || upcoming[0].ContentID != episodeIDs[0] {
+				t.Fatalf("upcoming includeTotal=%v total=%d counts=%d page=%v", includeTotal, total, tracer.counts.Load(), upcoming)
+			}
+			tracer.counts.Store(0)
+			people, total, err := NewPersonRepository(tracked).SearchVisible(ctx, prefix, false, 1, 0, access, includeTotal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if includeTotal {
+				wantTotal = 1
+			}
+			if total != wantTotal || tracer.counts.Load() != wantQueries || len(people) != 1 || people[0].ID != personID {
+				t.Fatalf("persons includeTotal=%v total=%d counts=%d page=%v", includeTotal, total, tracer.counts.Load(), people)
+			}
 		}
 	})
 }

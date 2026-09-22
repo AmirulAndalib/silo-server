@@ -3,6 +3,7 @@ package jellycompat
 import (
 	"encoding/json"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -239,18 +240,35 @@ func (p DeviceProfile) SupportsDirectStream(version catalog.FileVersion) bool {
 
 // SupportsTranscoding reports whether the client advertises HLS transcoding.
 func (p DeviceProfile) SupportsTranscoding(version catalog.FileVersion) bool {
-	return p.supportsTranscodingOutput(version, 2, 0)
+	return p.supportsTranscodingOutput(version, 2, 0, "")
 }
 
-func (p DeviceProfile) supportsTranscodingOutput(version catalog.FileVersion, channels, videoBitrateKbps int) bool {
+func (p DeviceProfile) supportsTranscodingOutput(version catalog.FileVersion, channels, videoBitrateKbps int, resolution string) bool {
 	output := version
 	output.Container = "ts"
 	output.CodecVideo = compatTargetVideoCodec
 	output.CodecAudio = compatTargetAudioCodec
-	video := compatPrimaryVideoTrack(version)
-	video.Codec = compatTargetVideoCodec
-	video.Profile = ""
-	video.BitDepth = 8
+	output.Bitrate = 0
+	output.HDR = false
+	sourceVideo := compatPrimaryVideoTrack(version)
+	// Source codec levels, reference frames and HDR metadata do not describe
+	// the encoded H264 stream. Profile and level depend on the chosen worker's
+	// encoder; leave them unknown so required conditions remain fail-closed.
+	// Full HDR encodes are separately gated on tone-map availability.
+	video := models.VideoTrack{
+		Codec: compatTargetVideoCodec, BitDepth: 8, VideoRangeType: compatRangeSDR,
+		Width: sourceVideo.Width, Height: sourceVideo.Height,
+		AspectRatio: sourceVideo.AspectRatio, FrameRate: sourceVideo.FrameRate,
+		Interlaced: sourceVideo.Interlaced,
+	}
+	if height, err := strconv.Atoi(strings.TrimSuffix(resolution, "p")); err == nil && height > 0 {
+		video.Height = height
+		video.Width = 0
+		if sourceVideo.Width > 0 && sourceVideo.Height > 0 {
+			// All encoder paths use scale width=-2 with the requested height.
+			video.Width = int(math.Round(float64(sourceVideo.Width)*float64(height)/float64(sourceVideo.Height)/2)) * 2
+		}
+	}
 	if videoBitrateKbps > 0 {
 		video.Bitrate = videoBitrateKbps * 1000
 		output.Bitrate = videoBitrateKbps + 192
@@ -437,7 +455,7 @@ func (p DeviceProfile) SupportsAudioCodecForDirectStreamForAudioStream(version c
 // decodeDeviceProfile extracts a device profile from either a wrapped
 // Jellyfin request body or a direct DeviceProfile payload.
 func decodeDeviceProfile(r io.Reader) (DeviceProfile, error) {
-	body, err := io.ReadAll(r)
+	body, err := readDeviceProfileRequest(r)
 	if err != nil {
 		return DeviceProfile{}, err
 	}

@@ -1097,7 +1097,7 @@ func (r *EpisodeRepository) UpdateStillIfSourceMatches(ctx context.Context, cont
 
 // ListUpcoming returns episodes premiered since the supplied UTC boundary,
 // including future metadata without a local file, within the viewer's scope.
-func (r *EpisodeRepository) ListUpcoming(ctx context.Context, since time.Time, seriesID, seasonID string, libraryID, limit, offset int, filter AccessFilter) ([]*models.Episode, int, error) {
+func (r *EpisodeRepository) ListUpcoming(ctx context.Context, since time.Time, seriesID, seasonID string, libraryID, limit, offset int, filter AccessFilter, includeTotal bool) ([]*models.Episode, int, error) {
 	conditions := []string{"mi.content_id = episodes.series_id", "mi.type = 'series'"}
 	args := []any{since}
 	index := 2
@@ -1120,8 +1120,10 @@ func (r *EpisodeRepository) ListUpcoming(ctx context.Context, since time.Time, s
 		index++
 	}
 	var total int
-	if err := r.pool.QueryRow(ctx, "SELECT COUNT(*) FROM episodes WHERE "+where, args...).Scan(&total); err != nil {
-		return nil, 0, err
+	if includeTotal {
+		if err := r.pool.QueryRow(ctx, "SELECT COUNT(*) FROM episodes WHERE "+where, args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
 	}
 	args = append(args, min(max(limit, 0), 1000), max(offset, 0))
 	rows, err := r.pool.Query(ctx, "SELECT "+episodeColumns+" FROM episodes WHERE "+where+fmt.Sprintf(" ORDER BY air_date, LOWER(title), content_id LIMIT $%d OFFSET $%d", index, index+1), args...)

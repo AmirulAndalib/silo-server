@@ -1247,7 +1247,7 @@ func scanItemPeople(rows pgx.Rows) ([]models.ItemPerson, error) {
 
 // SearchVisible restricts both the page and total to people credited on visible
 // video items. A hidden library's credits never enter the result set.
-func (r *PersonRepository) SearchVisible(ctx context.Context, term string, exact bool, limit, offset int, filter AccessFilter) ([]models.Person, int, error) {
+func (r *PersonRepository) SearchVisible(ctx context.Context, term string, exact bool, limit, offset int, filter AccessFilter, includeTotal bool) ([]models.Person, int, error) {
 	conditions := []string{"ip.person_id = p.id", "mi.type IN ('movie', 'series')"}
 	args := []any{term}
 	argIdx := 2
@@ -1259,8 +1259,10 @@ func (r *PersonRepository) SearchVisible(ctx context.Context, term string, exact
 	}
 	where := nameClause + " AND EXISTS (SELECT 1 FROM item_people ip JOIN media_items mi ON mi.content_id = ip.content_id WHERE " + strings.Join(conditions, " AND ") + ")"
 	var total int
-	if err := r.pool.QueryRow(ctx, "SELECT COUNT(*) FROM people p WHERE "+where, args...).Scan(&total); err != nil {
-		return nil, 0, err
+	if includeTotal {
+		if err := r.pool.QueryRow(ctx, "SELECT COUNT(*) FROM people p WHERE "+where, args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
 	}
 	args = append(args, max(limit, 0), max(offset, 0))
 	query := `SELECT p.id, p.name, p.sort_name, p.bio, p.birth_date, p.death_date, p.birthplace, p.homepage,

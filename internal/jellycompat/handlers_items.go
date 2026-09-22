@@ -2199,7 +2199,7 @@ func (h *ItemsHandler) HandleUpcoming(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	repo, ok := h.episodeRepo.(interface {
-		ListUpcoming(context.Context, time.Time, string, string, int, int, int, catalog.AccessFilter) ([]*models.Episode, int, error)
+		ListUpcoming(context.Context, time.Time, string, string, int, int, int, catalog.AccessFilter, bool) ([]*models.Episode, int, error)
 	})
 	if !ok {
 		writeError(w, 503, "Unavailable", "Episode catalog unavailable")
@@ -2218,7 +2218,7 @@ func (h *ItemsHandler) HandleUpcoming(w http.ResponseWriter, r *http.Request) {
 		query.parentItemID = seriesID
 	}
 	since := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -1)
-	episodes, total, err := repo.ListUpcoming(r.Context(), since, query.parentItemID, query.parentSeasonID, query.parentLibraryID, query.limit, query.startIndex, h.resolveAccessFilter(r.Context(), session))
+	episodes, total, err := repo.ListUpcoming(r.Context(), since, query.parentItemID, query.parentSeasonID, query.parentLibraryID, query.limit, query.startIndex, h.resolveAccessFilter(r.Context(), session), query.enableTotalRecordCount)
 	if err != nil {
 		writeCompatUpstreamError(w, err)
 		return

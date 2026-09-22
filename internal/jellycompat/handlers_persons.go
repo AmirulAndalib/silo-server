@@ -1,6 +1,7 @@
 package jellycompat
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -10,9 +11,13 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
+type personSearchSource interface {
+	SearchVisible(context.Context, string, bool, int, int, catalog.AccessFilter, bool) ([]models.Person, int, error)
+}
+
 // PersonsHandler serves the Jellyfin /Persons endpoints.
 type PersonsHandler struct {
-	personRepo *catalog.PersonRepository
+	personRepo personSearchSource
 	content    ContentService
 	codec      *ResourceIDCodec
 	images     *ImageCache
@@ -49,7 +54,8 @@ func (h *PersonsHandler) HandleGetPersons(w http.ResponseWriter, r *http.Request
 		filter = service.resolveFilter(r.Context(), session)
 	}
 	offset := parsePositiveInt(q.Get("StartIndex"), 0)
-	people, total, err := h.personRepo.SearchVisible(r.Context(), searchTerm, false, limit, offset, filter)
+	includeTotal := parseBool(q.Get("EnableTotalRecordCount"), true)
+	people, total, err := h.personRepo.SearchVisible(r.Context(), searchTerm, false, limit, offset, filter, includeTotal)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
@@ -80,7 +86,7 @@ func (h *PersonsHandler) HandleGetPerson(w http.ResponseWriter, r *http.Request)
 	if service, ok := h.content.(*directContentService); ok {
 		filter = service.resolveFilter(r.Context(), session)
 	}
-	people, _, err := h.personRepo.SearchVisible(r.Context(), name, true, 1, 0, filter)
+	people, _, err := h.personRepo.SearchVisible(r.Context(), name, true, 1, 0, filter, false)
 	if err != nil {
 		writeCompatUpstreamError(w, err)
 		return

@@ -83,6 +83,12 @@ func RunDatedMarkWatchedBatch(t *testing.T, store userstore.UserStore) {
 	}
 	// Mixed targets preserve the explicit date while undated targets retain
 	// ordinary manual-mark timing within the same transaction.
+	// Completed targets are idempotent, so begin a new mark after unmarking.
+	for _, id := range ids {
+		if err := store.ClearProgress(ctx, profile, id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	targets[0].EventAt = nil
 	if _, err := userstore.MarkWatchedBatch(ctx, store, profile, targets, nil); err != nil {
 		t.Fatal(err)
@@ -95,6 +101,9 @@ func RunDatedMarkWatchedBatch(t *testing.T, store userstore.UserStore) {
 		t.Fatalf("mixed batch dates: %v", dates)
 	}
 	// An ordinary mark in a later transaction must not inherit the date flag.
+	if err := store.ClearProgress(ctx, profile, ids[1]); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := userstore.MarkWatchedBatch(ctx, store, profile, []userstore.MarkWatchedTarget{{MediaItemID: ids[1]}}, nil); err != nil {
 		t.Fatal(err)
 	}

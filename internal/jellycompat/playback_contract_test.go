@@ -2,6 +2,7 @@ package jellycompat
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -199,16 +200,17 @@ func TestRemoteTranscodeRetainsNegotiatedCeilings(t *testing.T) {
 	h, _, store := newRemoteTranscodeHandler(t, node.URL, &stubRecipeNodeStore{})
 	source := testRemoteTranscodeSource()
 	source.TargetBitrateKbps = 3608
+	source.TargetResolution = "720p"
 	source.TargetAudioChannels = 1
 	store.Put(PlaybackSession{ID: "play-1", UpstreamSessionID: "upstream-1", MediaSources: []PlaybackMediaSource{source}})
 	if err := h.startRemoteTranscode(t.Context(), "play-1", "upstream-1", source, &models.MediaFile{ID: 42, FilePath: "/media/movie.mkv"}, 0, node.URL); err != nil {
 		t.Fatal(err)
 	}
-	if received.TargetBitrateKbps != 3608 || received.TargetAudioChannels != 1 {
+	if received.TargetBitrateKbps != 3608 || received.TargetResolution != "720p" || received.TargetAudioChannels != 1 {
 		t.Fatalf("request=%+v", received)
 	}
 	persisted, ok := store.Get("play-1")
-	if !ok || persisted.Recipe == nil || persisted.Recipe.TargetBitrateKbps != 3608 || persisted.Recipe.TargetAudioChannels != 1 {
+	if !ok || persisted.Recipe == nil || persisted.Recipe.TargetBitrateKbps != 3608 || persisted.Recipe.TargetResolution != "720p" || persisted.Recipe.TargetAudioChannels != 1 {
 		t.Fatalf("persisted=%+v", persisted)
 	}
 }
@@ -224,6 +226,7 @@ func TestEmbeddedSubtitleBurnInLocalAndRemoteRecipe(t *testing.T) {
 		t.Fatalf("source=%+v", source)
 	}
 	source.TargetBitrateKbps = 3608
+	source.TargetResolution = "720p"
 	source.TargetAudioChannels = 1
 	file := &models.MediaFile{ID: 42, FilePath: filepath.Join(t.TempDir(), "movie.mkv")}
 	if err := os.WriteFile(file.FilePath, []byte("video"), 0600); err != nil {
@@ -232,14 +235,35 @@ func TestEmbeddedSubtitleBurnInLocalAndRemoteRecipe(t *testing.T) {
 	store := NewPlaybackSessionStore(time.Hour, nil)
 	store.Put(PlaybackSession{ID: "play-1", UpstreamSessionID: "upstream-1", MediaSources: []PlaybackMediaSource{source}})
 	h := &PlaybackHandler{playbackStore: store, fileResolver: testCompatFileResolver{file: file}, TranscodeDir: t.TempDir(), FFmpegPath: writeCompatTestFFmpeg(t), tm: playback.NewTranscodeManager()}
+	h.sessionMgr = &testCompatSessionManager{sessions: map[string]*playback.Session{
+		"upstream-1": {ID: "upstream-1", UserID: 7, ProfileID: "profile-1", MediaFileID: source.FileID, PlayMethod: playback.PlayTranscode},
+	}}
 	live, err := h.ensureTranscodeSession(t.Context(), "play-1", "upstream-1", source)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = live.Close() })
 	opts := live.Opts()
-	if !opts.SubtitleBurnIn || opts.SubtitleCodec != "hdmv_pgs_subtitle" || opts.SubtitleTrackIndex != 0 || opts.TargetBitrateKbps != 3608 || opts.TargetAudioChannels != 1 {
+	if !opts.SubtitleBurnIn || opts.SubtitleCodec != "hdmv_pgs_subtitle" || opts.SubtitleTrackIndex != 0 || opts.TargetBitrateKbps != 3608 || opts.TargetResolution != "720p" || opts.TargetAudioChannels != 1 {
 		t.Fatalf("opts=%+v", opts)
+	}
+	persistedLocal, ok := store.Get("play-1")
+	if !ok || persistedLocal.Recipe == nil || persistedLocal.Recipe.TargetResolution != "720p" {
+		t.Fatalf("local recipe lost negotiated resolution: %+v", persistedLocal)
+	}
+	for _, constraint := range []string{"resolution", "bitrate"} {
+		changed := source
+		if constraint == "resolution" {
+			changed.TargetResolution = "480p"
+		} else {
+			changed.TargetBitrateKbps = 1600
+		}
+		if compatRecipeMatchesSource(persistedLocal.Recipe, changed) {
+			t.Fatalf("stale recipe accepted changed %s", constraint)
+		}
+		if stale, err := h.ensureTranscodeSession(t.Context(), "play-1", "upstream-1", changed); stale != nil || !errors.Is(err, errCompatRecipeSourceMismatch) {
+			t.Fatalf("stale runtime reused after changed %s: session=%v err=%v", constraint, stale, err)
+		}
 	}
 	var received transcodenode.TranscodeStartRequest
 	node := fakeTranscodeNode(t, &received)
@@ -248,7 +272,7 @@ func TestEmbeddedSubtitleBurnInLocalAndRemoteRecipe(t *testing.T) {
 	if err := remote.startRemoteTranscode(t.Context(), "play-1", "upstream-1", source, file, 0, node.URL); err != nil {
 		t.Fatal(err)
 	}
-	if !received.SubtitleBurnIn || received.SubtitleCodec != "hdmv_pgs_subtitle" || received.SubtitleTrackIndex != 0 {
+	if !received.SubtitleBurnIn || received.SubtitleCodec != "hdmv_pgs_subtitle" || received.SubtitleTrackIndex != 0 || received.TargetResolution != "720p" {
 		t.Fatalf("remote=%+v", received)
 	}
 	persisted, _ := remoteStore.Get("play-1")
