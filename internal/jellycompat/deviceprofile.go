@@ -11,6 +11,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -244,6 +245,7 @@ func (p DeviceProfile) SupportsTranscoding(version catalog.FileVersion) bool {
 }
 
 func (p DeviceProfile) supportsTranscodingOutput(version catalog.FileVersion, channels, videoBitrateKbps int, resolution string) bool {
+	channels, audioBitrateKbps := playback.ResolveAACOutputV3(channels, 0)
 	output := version
 	output.Container = "ts"
 	output.CodecVideo = compatTargetVideoCodec
@@ -271,10 +273,10 @@ func (p DeviceProfile) supportsTranscodingOutput(version catalog.FileVersion, ch
 	}
 	if videoBitrateKbps > 0 {
 		video.Bitrate = videoBitrateKbps * 1000
-		output.Bitrate = videoBitrateKbps + 192
+		output.Bitrate = videoBitrateKbps + audioBitrateKbps
 	}
 	output.VideoTracks = []models.VideoTrack{video}
-	output.AudioTracks = []models.AudioTrack{{Codec: compatTargetAudioCodec, Channels: channels, Bitrate: 192000}}
+	output.AudioTracks = []models.AudioTrack{{Codec: compatTargetAudioCodec, Channels: channels, Bitrate: audioBitrateKbps * 1000}}
 	audioIndex := len(output.VideoTracks)
 	if !p.codecProfileCompatibility(output, &audioIndex).supportsDirectPlay() {
 		return false
@@ -320,7 +322,7 @@ func (p DeviceProfile) SupportsHLSRemuxForAudioStream(version catalog.FileVersio
 	}
 	audioCodec := compatAudioCodec(version, audioStreamIndex)
 	for _, profile := range p.TranscodingProfiles {
-		if cap, _ := strconv.Atoi(profile.MaxAudioChannels); cap > 0 && (compatAudioTrack(version, audioStreamIndex).Channels <= 0 || compatAudioTrack(version, audioStreamIndex).Channels > cap) {
+		if maxChannels, _ := strconv.Atoi(profile.MaxAudioChannels); maxChannels > 0 && (compatAudioTrack(version, audioStreamIndex).Channels <= 0 || compatAudioTrack(version, audioStreamIndex).Channels > maxChannels) {
 			continue
 		}
 		if !conditionsMatch(profile.Conditions, buildConditionValues(version, audioStreamIndex)) {
@@ -343,11 +345,12 @@ func (p DeviceProfile) SupportsHLSRemuxForAudioStream(version catalog.FileVersio
 }
 
 func (p DeviceProfile) supportsHLSRemuxWithAudioTranscodeForAudioStream(version catalog.FileVersion, audioStreamIndex *int, targetAudioChannels int) bool {
+	targetAudioChannels, audioBitrateKbps := playback.ResolveAACOutputV3(targetAudioChannels, 0)
 	outputVersion := version
 	outputAudio := compatAudioTrack(version, audioStreamIndex)
 	outputAudio.Codec = compatTargetAudioCodec
 	outputAudio.Profile = ""
-	outputAudio.Bitrate = 192_000
+	outputAudio.Bitrate = audioBitrateKbps * 1000
 	outputAudio.Channels = targetAudioChannels
 	outputAudio.Default = true
 	outputVersion.CodecAudio = compatTargetAudioCodec
@@ -369,7 +372,7 @@ func (p DeviceProfile) supportsHLSRemuxWithAudioTranscodeForAudioStream(version 
 		return p.hlsRemuxCodecProfileCompatibility(outputVersion, &outputAudioStreamIndex).supportsDirectPlay()
 	}
 	for _, profile := range p.TranscodingProfiles {
-		if cap, _ := strconv.Atoi(profile.MaxAudioChannels); cap > 0 && cap < targetAudioChannels {
+		if maxChannels, _ := strconv.Atoi(profile.MaxAudioChannels); maxChannels > 0 && maxChannels < targetAudioChannels {
 			continue
 		}
 		if !matchesVideoType(profile.Type) {

@@ -2350,7 +2350,8 @@ func (h *PlaybackHandler) buildPlaybackSource(
 	if maxBitrate > 0 {
 		// Reserve audio and mux overhead; copied video cannot satisfy a lower
 		// bandwidth setting. Match profiles against this actual encoder output.
-		targetBitrateKbps = int(maxBitrate*95/100/1000) - 192
+		_, audioBitrateKbps := playback.ResolveAACOutputV3(targetAudioChannels, 0)
+		targetBitrateKbps = int(maxBitrate*95/100/1000) - audioBitrateKbps
 	}
 	targetResolution := compatMaxResolutionForBitrateKbps(maxBitrate / 1000)
 	if ceiling, err := strconv.Atoi(strings.TrimSuffix(targetResolution, "p")); err == nil {

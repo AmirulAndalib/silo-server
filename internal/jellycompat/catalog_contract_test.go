@@ -185,29 +185,59 @@ type boundedEpisodeContractRepo struct {
 	access             catalog.AccessFilter
 	seriesID, seasonID string
 	seasonNumber       *int
+	includeTotal       bool
 }
 
-func (r *boundedEpisodeContractRepo) BrowseEpisodes(_ context.Context, seriesID, seasonID string, seasonNumber *int, _ string, filters catalog.BrowseFilters, access catalog.AccessFilter) ([]*models.Episode, int, error) {
+func (r *boundedEpisodeContractRepo) BrowseEpisodes(_ context.Context, seriesID, seasonID string, seasonNumber *int, _ string, filters catalog.BrowseFilters, access catalog.AccessFilter, includeTotal bool) ([]*models.Episode, int, error) {
 	r.filters = filters
 	r.access = access
 	r.seriesID = seriesID
 	r.seasonID = seasonID
 	r.seasonNumber = seasonNumber
-	return []*models.Episode{{ContentID: "selected", SeriesID: seriesID, SeasonNumber: 2, EpisodeNumber: 4}}, 6, nil
+	r.includeTotal = includeTotal
+	total := 0
+	if includeTotal {
+		total = 6
+	}
+	return []*models.Episode{{ContentID: "selected", SeriesID: seriesID, SeasonNumber: 2, EpisodeNumber: 4}}, total, nil
 }
 func TestParentEpisodesComposeFiltersBeforePage(t *testing.T) {
-	codec := NewResourceIDCodec()
-	repo := &boundedEpisodeContractRepo{}
-	svc := &countingContentService{seasons: []upstreamSeason{{ContentID: "season2", SeasonNumber: 2, EpisodeCount: 20}}}
-	h := &ItemsHandler{catalogUserState: true, content: svc, episodeRepo: repo, codec: codec, mapper: newMapper(codec, &config.Config{}), userData: &mockUserDataService{}, images: NewImageCache(time.Hour, time.Now), accessFilter: func(context.Context, int, string) catalog.AccessFilter {
-		return catalog.AccessFilter{AllowedLibraryIDs: []int{3}, MaxContentRating: "PG"}
-	}}
-	result := performItemsRequest(t, h, "/Items?ParentId="+codec.EncodeStringID(EncodedIDItem, "series")+"&IncludeItemTypes=Episode&Genres=Drama&Years=2024&IsFavorite=true&IsPlayed=false&StartIndex=3&Limit=1&Season=2")
-	if repo.seriesID != "series" || repo.seasonNumber == nil || *repo.seasonNumber != 2 || repo.filters.IsPlayed == nil || *repo.filters.IsPlayed || !repo.filters.IsFavorite || repo.filters.ProfileID == "" || repo.filters.Offset != 3 || repo.filters.Limit != 1 || len(repo.filters.Genres) != 1 || len(repo.filters.Years) != 1 || repo.access.MaxContentRating != "PG" {
-		t.Fatalf("lost parent predicate: %+v", repo)
-	}
-	if len(result.Items) != 1 || result.TotalRecordCount != 6 || result.StartIndex != 3 {
-		t.Fatalf("incorrect bounded page: %+v", result)
+	for _, tc := range []struct {
+		name, totalParam string
+		includeTotal     bool
+	}{
+		{name: "default", includeTotal: true},
+		{name: "enabled", totalParam: "&EnableTotalRecordCount=true", includeTotal: true},
+		{name: "disabled", totalParam: "&EnableTotalRecordCount=false"},
+	} {
+		for _, route := range []string{"items", "shows"} {
+			t.Run(route+"/"+tc.name, func(t *testing.T) {
+				codec := NewResourceIDCodec()
+				repo := &boundedEpisodeContractRepo{}
+				svc := &countingContentService{seasons: []upstreamSeason{{ContentID: "season2", SeasonNumber: 2, EpisodeCount: 20}}}
+				h := &ItemsHandler{catalogUserState: true, content: svc, episodeRepo: repo, codec: codec, mapper: newMapper(codec, &config.Config{}), userData: &mockUserDataService{}, images: NewImageCache(time.Hour, time.Now), accessFilter: func(context.Context, int, string) catalog.AccessFilter {
+					return catalog.AccessFilter{AllowedLibraryIDs: []int{3}, MaxContentRating: "PG"}
+				}}
+				seriesID := codec.EncodeStringID(EncodedIDItem, "series")
+				params := "IncludeItemTypes=Episode&Genres=Drama&Years=2024&IsFavorite=true&IsPlayed=false&StartIndex=3&Limit=1&Season=2" + tc.totalParam
+				var result queryResultDTO
+				if route == "shows" {
+					result = performEpisodesRequest(t, h, "/Shows/"+seriesID+"/Episodes?"+params, seriesID)
+				} else {
+					result = performItemsRequest(t, h, "/Items?ParentId="+seriesID+"&"+params)
+				}
+				if repo.seriesID != "series" || repo.seasonNumber == nil || *repo.seasonNumber != 2 || repo.filters.IsPlayed == nil || *repo.filters.IsPlayed || !repo.filters.IsFavorite || repo.filters.ProfileID == "" || repo.filters.Offset != 3 || repo.filters.Limit != 1 || len(repo.filters.Genres) != 1 || len(repo.filters.Years) != 1 || repo.access.MaxContentRating != "PG" || repo.includeTotal != tc.includeTotal {
+					t.Fatalf("lost parent predicate or count option: %+v", repo)
+				}
+				wantTotal := 0
+				if tc.includeTotal {
+					wantTotal = 6
+				}
+				if len(result.Items) != 1 || result.TotalRecordCount != wantTotal || result.StartIndex != 3 {
+					t.Fatalf("incorrect bounded page: %+v", result)
+				}
+			})
+		}
 	}
 }
 

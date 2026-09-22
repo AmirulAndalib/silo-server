@@ -1490,7 +1490,7 @@ func appendAudioArgs(args []string, opts TranscodeOpts) []string {
 		// Legacy Dolby Digital; universal AVR support.
 		args = append(args, "-c:a", "ac3", "-b:a", "448k")
 	default:
-		channels, bitrateKbps := resolvedAACOutputV3(opts.TargetAudioChannels, opts.TargetAudioBitrateKbps)
+		channels, bitrateKbps := ResolveAACOutputV3(opts.TargetAudioChannels, opts.TargetAudioBitrateKbps)
 		args = append(args, "-c:a", "aac", "-b:a", strconv.Itoa(bitrateKbps)+"k", "-ac", strconv.Itoa(channels))
 		args = appendAACEncodeFilterArgs(args, opts.SourceAudioChannels, opts.TargetCodecAudio, opts.TargetAudioChannels, channels)
 	}
@@ -1498,7 +1498,10 @@ func appendAudioArgs(args []string, opts TranscodeOpts) []string {
 	return args
 }
 
-func resolvedAACOutputV3(targetChannels, targetBitrateKbps int) (int, int) {
+// ResolveAACOutputV3 returns the encoded channel count and bitrate in kbps,
+// applying the encoder defaults when no bitrate is specified. Negotiation and
+// FFmpeg argument construction must use the same output facts.
+func ResolveAACOutputV3(targetChannels, targetBitrateKbps int) (int, int) {
 	channels := 2
 	if targetChannels == 1 {
 		channels = 1

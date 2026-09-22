@@ -1137,7 +1137,7 @@ func (r *EpisodeRepository) ListUpcoming(ctx context.Context, since time.Time, s
 
 // BrowseEpisodes applies catalog and profile predicates before counting and
 // paging, so a long series only hydrates the selected page.
-func (r *EpisodeRepository) BrowseEpisodes(ctx context.Context, seriesID, seasonID string, seasonNumber *int, startItemID string, filters BrowseFilters, access AccessFilter) ([]*models.Episode, int, error) {
+func (r *EpisodeRepository) BrowseEpisodes(ctx context.Context, seriesID, seasonID string, seasonNumber *int, startItemID string, filters BrowseFilters, access AccessFilter, includeTotal bool) ([]*models.Episode, int, error) {
 	conditions := []string{"e.series_id = $1", "EXISTS (SELECT 1 FROM episode_libraries el WHERE el.episode_id=e.content_id)"}
 	args := []any{seriesID}
 	index := 2
@@ -1198,8 +1198,10 @@ func (r *EpisodeRepository) BrowseEpisodes(ctx context.Context, seriesID, season
 	}
 	from := " FROM episodes e JOIN media_items s ON s.content_id=e.series_id WHERE " + strings.Join(conditions, " AND ")
 	var total int
-	if err := r.pool.QueryRow(ctx, "SELECT COUNT(*)"+from, args...).Scan(&total); err != nil {
-		return nil, 0, err
+	if includeTotal {
+		if err := r.pool.QueryRow(ctx, "SELECT COUNT(*)"+from, args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
 	}
 	args = append(args, min(max(filters.Limit, 0), 1000), max(filters.Offset, 0))
 	pageOrder := strings.ReplaceAll(order, "e.", "episode_page.")

@@ -154,13 +154,16 @@ type configuredParentRepo struct {
 	t     *testing.T
 }
 
-func (r *configuredParentRepo) BrowseEpisodes(_ context.Context, series, season string, number *int, start string, f catalog.BrowseFilters, _ catalog.AccessFilter) ([]*models.Episode, int, error) {
+func (r *configuredParentRepo) BrowseEpisodes(_ context.Context, series, season string, number *int, start string, f catalog.BrowseFilters, _ catalog.AccessFilter, includeTotal bool) ([]*models.Episode, int, error) {
 	r.t.Helper()
 	if series != "series" || season != "season" || start != "start" || number == nil || *number != 2 || f.IsFavorite || f.IsPlayed != nil || f.IsResumable || !slices.Equal(f.Genres, []string{"Drama"}) || !slices.Equal(f.Years, []int{2024}) {
 		r.t.Fatalf("parent constraints lost: %q %q %q %v %+v", series, season, start, number, f)
 	}
+	if includeTotal || f.Limit != compatBrowseChunkLimit+1 {
+		r.t.Fatalf("candidate page must use bounded lookahead without a count: includeTotal=%v limit=%d", includeTotal, f.Limit)
+	}
 	r.calls = append(r.calls, f)
-	return slicePage(r.all, f.Offset, f.Limit), len(r.all), nil
+	return slicePage(r.all, f.Offset, f.Limit), 0, nil
 }
 func (r *configuredParentRepo) GetByIDs(_ context.Context, ids []string) ([]*models.Episode, error) {
 	result := []*models.Episode{}
@@ -172,44 +175,49 @@ func (r *configuredParentRepo) GetByIDs(_ context.Context, ids []string) ([]*mod
 	return result, nil
 }
 func TestConfiguredParentEpisodesCountBeforePaging(t *testing.T) {
-	for _, includeTotal := range []bool{true, false} {
-		t.Run(fmt.Sprintf("total=%v", includeTotal), func(t *testing.T) {
-			store := newJellycompatUserStore(t)
-			repo := &configuredParentRepo{t: t}
-			for i := range 305 {
-				id := fmt.Sprintf("ep-%03d", i)
-				repo.all = append(repo.all, &models.Episode{ContentID: id, SeriesID: "series", SeasonID: "season", SeasonNumber: 2, EpisodeNumber: i + 1})
-				if i == 1 || i == 101 || i == 104 || i == 250 {
-					if err := store.AddFavorite(t.Context(), "p1", id); err != nil {
-						t.Fatal(err)
+	for _, candidates := range []int{200, 305} {
+		for _, includeTotal := range []bool{true, false} {
+			t.Run(fmt.Sprintf("candidates=%d/total=%v", candidates, includeTotal), func(t *testing.T) {
+				store := newJellycompatUserStore(t)
+				repo := &configuredParentRepo{t: t}
+				for i := range candidates {
+					id := fmt.Sprintf("ep-%03d", i)
+					repo.all = append(repo.all, &models.Episode{ContentID: id, SeriesID: "series", SeasonID: "season", SeasonNumber: 2, EpisodeNumber: i + 1})
+					if i == 1 || i == 100 || i == 104 || i == 250 {
+						if err := store.AddFavorite(t.Context(), "p1", id); err != nil {
+							t.Fatal(err)
+						}
 					}
 				}
-			}
-			codec := NewResourceIDCodec()
-			content := configuredParentContent{&directContentService{storeProvider: compatTestUserStoreProvider{store: store}}}
-			h := &ItemsHandler{content: content, episodeRepo: repo, codec: codec, mapper: newMapper(codec, &config.Config{}), userData: &mockUserDataService{}, images: NewImageCache(time.Hour, time.Now)}
-			query := itemsQuery{enableTotalRecordCount: includeTotal, isFavorite: true, isPlayed: new(false), genres: []string{"Drama"}, years: []int{2024}, seasonNumber: new(2), startIndex: 1, limit: 1, startItemID: codec.EncodeStringID(EncodedIDItem, "start")}
-			req := httptest.NewRequest("GET", "/Items", nil)
-			rec := httptest.NewRecorder()
-			h.writeSeriesEpisodesResponse(rec, req, &Session{StreamAppUserID: 1, ProfileID: "p1"}, query, "series", "season", true)
-			if rec.Code != 200 {
-				t.Fatalf("response: %d %s", rec.Code, rec.Body.String())
-			}
-			var result queryResultDTO
-			if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
-				t.Fatal(err)
-			}
-			wantTotal, wantCalls := 0, 2
-			if includeTotal {
-				wantTotal, wantCalls = 4, 4
-			}
-			if result.TotalRecordCount != wantTotal || result.StartIndex != 1 || len(result.Items) != 1 || result.Items[0].ID != codec.EncodeStringID(EncodedIDItem, "ep-101") {
-				t.Fatalf("parent filtered page: %+v", result)
-			}
-			if len(repo.calls) != wantCalls || repo.calls[1].Offset != 100 {
-				t.Fatalf("candidate pagination: %+v", repo.calls)
-			}
-		})
+				codec := NewResourceIDCodec()
+				content := configuredParentContent{&directContentService{storeProvider: compatTestUserStoreProvider{store: store}}}
+				h := &ItemsHandler{content: content, episodeRepo: repo, codec: codec, mapper: newMapper(codec, &config.Config{}), userData: &mockUserDataService{}, images: NewImageCache(time.Hour, time.Now)}
+				query := itemsQuery{enableTotalRecordCount: includeTotal, isFavorite: true, isPlayed: new(false), genres: []string{"Drama"}, years: []int{2024}, seasonNumber: new(2), startIndex: 1, limit: 1, startItemID: codec.EncodeStringID(EncodedIDItem, "start")}
+				req := httptest.NewRequest("GET", "/Items", nil)
+				rec := httptest.NewRecorder()
+				h.writeSeriesEpisodesResponse(rec, req, &Session{StreamAppUserID: 1, ProfileID: "p1"}, query, "series", "season", true)
+				if rec.Code != 200 {
+					t.Fatalf("response: %d %s", rec.Code, rec.Body.String())
+				}
+				var result queryResultDTO
+				if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+					t.Fatal(err)
+				}
+				wantTotal, wantCalls := 0, 2
+				if includeTotal {
+					wantTotal, wantCalls = 4, 4
+					if candidates == 200 {
+						wantTotal, wantCalls = 3, 2
+					}
+				}
+				if result.TotalRecordCount != wantTotal || result.StartIndex != 1 || len(result.Items) != 1 || result.Items[0].ID != codec.EncodeStringID(EncodedIDItem, "ep-100") {
+					t.Fatalf("parent filtered page: %+v", result)
+				}
+				if len(repo.calls) != wantCalls || repo.calls[1].Offset != 100 {
+					t.Fatalf("candidate pagination: %+v", repo.calls)
+				}
+			})
+		}
 	}
 }
 

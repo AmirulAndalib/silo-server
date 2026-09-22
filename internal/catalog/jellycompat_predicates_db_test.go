@@ -248,7 +248,7 @@ func TestJellycompatPredicatesPostgres(t *testing.T) {
 						query.Order = BrowseOrderDescending
 						slices.Reverse(want)
 					}
-					items, total, err := episodes.BrowseEpisodes(ctx, seriesID, "", nil, "", query, access)
+					items, total, err := episodes.BrowseEpisodes(ctx, seriesID, "", nil, "", query, access, true)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -270,7 +270,7 @@ func TestJellycompatPredicatesPostgres(t *testing.T) {
 			query.IsFavorite = false
 			query.IsPlayed = new(completed)
 			query.Offset = 0
-			items, total, err := episodes.BrowseEpisodes(ctx, seriesID, seasonIDs[0], nil, "", query, access)
+			items, total, err := episodes.BrowseEpisodes(ctx, seriesID, seasonIDs[0], nil, "", query, access, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -284,7 +284,7 @@ func TestJellycompatPredicatesPostgres(t *testing.T) {
 		}
 	})
 	t.Run("episode parent numeric season count offset", func(t *testing.T) {
-		items, total, err := episodes.BrowseEpisodes(ctx, seriesID, "", new(1), "", q, access)
+		items, total, err := episodes.BrowseEpisodes(ctx, seriesID, "", new(1), "", q, access, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -296,7 +296,7 @@ func TestJellycompatPredicatesPostgres(t *testing.T) {
 		query := q
 		query.IsPlayed = new(true)
 		query.Offset = 0
-		items, total, err := episodes.BrowseEpisodes(ctx, seriesID, seasonIDs[0], nil, "", query, access)
+		items, total, err := episodes.BrowseEpisodes(ctx, seriesID, seasonIDs[0], nil, "", query, access, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -308,7 +308,7 @@ func TestJellycompatPredicatesPostgres(t *testing.T) {
 		query := q
 		query.ProfileID = profiles[1]
 		query.Offset = 0
-		items, total, err := episodes.BrowseEpisodes(ctx, seriesID, "", nil, "", query, access)
+		items, total, err := episodes.BrowseEpisodes(ctx, seriesID, "", nil, "", query, access, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -319,7 +319,7 @@ func TestJellycompatPredicatesPostgres(t *testing.T) {
 	t.Run("episode negative genre", func(t *testing.T) {
 		query := q
 		query.Genres = []string{"Comedy"}
-		items, total, err := episodes.BrowseEpisodes(ctx, seriesID, "", nil, "", query, access)
+		items, total, err := episodes.BrowseEpisodes(ctx, seriesID, "", nil, "", query, access, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -331,7 +331,7 @@ func TestJellycompatPredicatesPostgres(t *testing.T) {
 		query := q
 		query.Years = []int{2023}
 		query.Offset = 0
-		items, total, err := episodes.BrowseEpisodes(ctx, seriesID, "", nil, "", query, access)
+		items, total, err := episodes.BrowseEpisodes(ctx, seriesID, "", nil, "", query, access, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -343,7 +343,7 @@ func TestJellycompatPredicatesPostgres(t *testing.T) {
 		query := q
 		query.Years = []int{2022}
 		query.Offset = 0
-		items, total, err := episodes.BrowseEpisodes(ctx, seriesID, "", nil, "", query, access)
+		items, total, err := episodes.BrowseEpisodes(ctx, seriesID, "", nil, "", query, access, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -354,7 +354,7 @@ func TestJellycompatPredicatesPostgres(t *testing.T) {
 	t.Run("episode disabled parent library", func(t *testing.T) {
 		scope := access
 		scope.DisabledLibraryIDs = []int{libraryID}
-		items, total, err := episodes.BrowseEpisodes(ctx, seriesID, "", nil, "", q, scope)
+		items, total, err := episodes.BrowseEpisodes(ctx, seriesID, "", nil, "", q, scope, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -403,6 +403,17 @@ func TestJellycompatPredicatesPostgres(t *testing.T) {
 			}
 			if total != wantTotal || tracer.counts.Load() != wantQueries || len(people) != 1 || people[0].ID != personID {
 				t.Fatalf("persons includeTotal=%v total=%d counts=%d page=%v", includeTotal, total, tracer.counts.Load(), people)
+			}
+			tracer.counts.Store(0)
+			page, total, err := NewEpisodeRepository(tracked).BrowseEpisodes(ctx, seriesID, seasonIDs[0], nil, "", q, access, includeTotal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if includeTotal {
+				wantTotal = 2
+			}
+			if total != wantTotal || tracer.counts.Load() != wantQueries || len(page) != 1 || page[0].ContentID != episodeIDs[1] {
+				t.Fatalf("composed episode page includeTotal=%v total=%d counts=%d page=%v", includeTotal, total, tracer.counts.Load(), page)
 			}
 		}
 	})

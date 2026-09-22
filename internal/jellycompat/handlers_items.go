@@ -1760,7 +1760,7 @@ func (h *ItemsHandler) writeSeriesEpisodesResponse(w http.ResponseWriter, r *htt
 	}
 
 	if repo, ok := h.episodeRepo.(interface {
-		BrowseEpisodes(context.Context, string, string, *int, string, catalog.BrowseFilters, catalog.AccessFilter) ([]*models.Episode, int, error)
+		BrowseEpisodes(context.Context, string, string, *int, string, catalog.BrowseFilters, catalog.AccessFilter, bool) ([]*models.Episode, int, error)
 	}); ok && page {
 		filter := h.resolveAccessFilter(r.Context(), session)
 		filter.MaxContentRating = clampMaxContentRating(filter.MaxContentRating, query.maxOfficialRating)
@@ -1789,15 +1789,24 @@ func (h *ItemsHandler) writeSeriesEpisodesResponse(w http.ResponseWriter, r *htt
 			}
 			selected := map[string]*models.Episode{}
 			result, err := content.browseConfiguredUserState(r.Context(), session, filters, query.enableTotalRecordCount, func(page catalog.BrowseFilters) ([]upstreamListItem, bool, error) {
-				episodes, total, err := repo.BrowseEpisodes(r.Context(), seriesID, requestedSeasonID, query.seasonNumber, startID, page, filter)
+				// The configured store counts state matches. One extra catalog row
+				// determines whether another candidate batch exists without counting
+				// the series again for each batch.
+				lookahead := page
+				lookahead.Limit++
+				episodes, _, err := repo.BrowseEpisodes(r.Context(), seriesID, requestedSeasonID, query.seasonNumber, startID, lookahead, filter, false)
 				if err != nil {
 					return nil, false, err
+				}
+				hasMore := len(episodes) > page.Limit
+				if hasMore {
+					episodes = episodes[:page.Limit]
 				}
 				items := make([]upstreamListItem, 0, len(episodes))
 				for _, ep := range episodes {
 					items = append(items, upstreamListItem{ContentID: ep.ContentID})
 				}
-				return items, page.Offset+len(items) < total, nil
+				return items, hasMore, nil
 			})
 			if err != nil {
 				writeCompatUpstreamError(w, err)
@@ -1822,7 +1831,7 @@ func (h *ItemsHandler) writeSeriesEpisodesResponse(w http.ResponseWriter, r *htt
 			h.writeEpisodeModelsPage(w, r, session, query, seriesID, seasons, episodes, false)
 			return
 		}
-		episodes, total, err := repo.BrowseEpisodes(r.Context(), seriesID, requestedSeasonID, query.seasonNumber, startID, filters, filter)
+		episodes, total, err := repo.BrowseEpisodes(r.Context(), seriesID, requestedSeasonID, query.seasonNumber, startID, filters, filter, query.enableTotalRecordCount)
 		if err != nil {
 			writeCompatUpstreamError(w, err)
 			return
