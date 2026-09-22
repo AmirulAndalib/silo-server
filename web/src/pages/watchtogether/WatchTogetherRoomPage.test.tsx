@@ -164,6 +164,8 @@ function connection(
     room: room(),
     suggestions: [],
     closedReason: null,
+    replacementReason: null,
+    rejoinRoom: vi.fn(),
     transportCommand: null,
     serverTimeOffsetMs: 0,
     sendRoomMessage: vi.fn(() => ({ ok: true })),
@@ -567,5 +569,21 @@ describe("WatchTogetherRoomPage", () => {
     renderPage(connection({ room: null, closedReason: "host_left" }));
     expect(screen.getByRole("alert")).toHaveTextContent("The room has ended.");
     expect(JSON.parse(localStorage.getItem("silo.watchParty.recentRooms.v1")!)[0].ended).toBe(true);
+  });
+
+  it("offers explicit rejoin after replacement without ending the room or starting playback", () => {
+    const conn = connection({
+      connectionState: "disconnected",
+      replacementReason: "This profile joined the Watch Party on another device.",
+      room: room({ phase: "playing", selected_content_id: "arrival", selection_revision: 1 }),
+    });
+    renderPage(conn);
+    expect(screen.getByRole("alert")).toHaveTextContent(conn.replacementReason!);
+    expect(state.startPlayback).not.toHaveBeenCalled();
+    expect(JSON.parse(localStorage.getItem("silo.watchParty.recentRooms.v1")!)[0].ended).not.toBe(
+      true,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Rejoin Watch Party" }));
+    expect(conn.rejoinRoom).toHaveBeenCalledOnce();
   });
 });

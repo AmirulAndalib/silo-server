@@ -365,6 +365,7 @@ function WatchPagePlayer({
   }, [contentId, playbackRequestKey]);
 
   useEffect(() => {
+    if (watchTogetherConnection.replacementReason) return;
     const room = watchTogetherConnection.room;
     if (!watchTogetherRoomId || !watchTogetherRoomToken || !room) {
       handledSelectionRevisionRef.current = null;
@@ -401,6 +402,7 @@ function WatchPagePlayer({
     libraryId,
     playbackController,
     watchTogetherConnection.room,
+    watchTogetherConnection.replacementReason,
     watchTogetherRoomId,
     watchTogetherRoomToken,
   ]);

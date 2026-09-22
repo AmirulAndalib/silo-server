@@ -96,6 +96,16 @@ type RoomConnection interface {
 	Close() error
 }
 
+// A socket adapter can deliver a terminal replacement reason before closing.
+// Older adapters retain their existing close behavior.
+func closeReplacedConnection(conn RoomConnection) {
+	if replacement, ok := conn.(interface{ CloseReplaced() error }); ok {
+		_ = replacement.CloseReplaced()
+		return
+	}
+	_ = conn.Close()
+}
+
 type RoomStore interface {
 	CreateRoom(ctx context.Context, room Room) (*Room, error)
 	GetRoomByID(ctx context.Context, roomID string) (*Room, error)
@@ -486,7 +496,7 @@ func (s *Service) connect(
 	s.mu.Unlock()
 
 	if previousConn != nil {
-		afterRoomCommit(ctx, func() { _ = previousConn.Close() })
+		afterRoomCommit(ctx, func() { closeReplacedConnection(previousConn) })
 	}
 	s.sendDispatches(ctx, dispatches)
 	return &Registration{roomID: roomID, memberKey: memberKey, connection: conn, connectionID: connectionID}, snapshot, nil

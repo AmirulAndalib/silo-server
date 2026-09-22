@@ -162,7 +162,7 @@ export default function WatchTogetherRoomPage() {
       (location.state as WatchTogetherRoomLocationState | null)?.suppressAutoStartSelection ?? null;
   }, [location.state]);
   useEffect(() => {
-    if (!room || !roomId || !roomToken) return;
+    if (!room || !roomId || !roomToken || connection.replacementReason) return;
     const suppressed = suppressAutoStartSelectionRef.current;
     if (suppressed) {
       suppressAutoStartSelectionRef.current = null;
@@ -182,7 +182,7 @@ export default function WatchTogetherRoomPage() {
       roomToken,
       restart: true,
     });
-  }, [playbackController, room, roomId, roomToken]);
+  }, [connection.replacementReason, playbackController, room, roomId, roomToken]);
 
   // Vote mode from a detail page: the sheet could not suggest before the
   // room existed, so it hands the item over and the room suggests it once,
@@ -192,7 +192,15 @@ export default function WatchTogetherRoomPage() {
   );
   useEffect(() => {
     const first = suggestFirstRef.current;
-    if (!first || !room || !roomId || !roomToken || room.selection_mode !== "vote") return;
+    if (
+      !first ||
+      !room ||
+      !roomId ||
+      !roomToken ||
+      room.selection_mode !== "vote" ||
+      connection.replacementReason
+    )
+      return;
     suggestFirstRef.current = null;
     const draft = captureSuggestionDraft(roomId, roomToken, {
       content_id: first.content_id,
@@ -359,6 +367,21 @@ export default function WatchTogetherRoomPage() {
         description="Start a new watch party or join another room to keep watching together."
       >
         <Button type="button" onClick={() => navigate("/rooms")}>
+          Back to Watch Party
+        </Button>
+      </RoomTerminalState>
+    );
+  }
+  if (connection.replacementReason) {
+    return (
+      <RoomTerminalState
+        title="Watch Party joined on another device"
+        description={connection.replacementReason}
+      >
+        <Button type="button" onClick={connection.rejoinRoom}>
+          Rejoin Watch Party
+        </Button>
+        <Button type="button" variant="outline" onClick={() => navigate("/rooms")}>
           Back to Watch Party
         </Button>
       </RoomTerminalState>

@@ -52,6 +52,8 @@ export interface WatchTogetherRoomConnectionResult {
   room: WatchTogetherRoomSnapshot | null;
   suggestions: WatchTogetherSuggestion[];
   closedReason: string | null;
+  replacementReason: string | null;
+  rejoinRoom: () => void;
   transportCommand: WatchTogetherTransportCommand | null;
   serverTimeOffsetMs: number;
   sendRoomMessage: (message: Record<string, unknown>) => SendRoomMessageResult;
@@ -116,6 +118,8 @@ export function useWatchTogetherRoomConnection({
   const [room, setRoom] = useState<WatchTogetherRoomSnapshot | null>(null);
   const [suggestions, setSuggestions] = useState<WatchTogetherSuggestion[]>([]);
   const [closedReason, setClosedReason] = useState<string | null>(null);
+  const [replacement, setReplacement] = useState<{ scope: string; reason: string } | null>(null);
+  const [rejoinAttempt, setRejoinAttempt] = useState(0);
   const [transportCommand, setTransportCommand] = useState<WatchTogetherTransportCommand | null>(
     null,
   );
@@ -125,6 +129,24 @@ export function useWatchTogetherRoomConnection({
   // rebind the socket even when room props remain unchanged.
   useOptionalAuth();
   const renderedAuthority = captureProfileRequestContext();
+  // Credential rotation must not let a displaced connection reclaim this profile.
+  const replacementScope = JSON.stringify([
+    roomId,
+    renderedAuthority?.authContextVersion,
+    renderedAuthority?.serverOrigin,
+    renderedAuthority?.profileId,
+  ]);
+  const replacementScopeRef = useRef<string | null>(null);
+  const replacementReason = replacement?.scope === replacementScope ? replacement.reason : null;
+  const rejoinRoom = useCallback(() => {
+    if (replacementScopeRef.current !== replacementScope) return;
+    replacementScopeRef.current = null;
+    setReplacement(null);
+    // A selection may have changed on the winner while this device was away.
+    // Let the fresh room read or socket snapshot choose what playback to enter.
+    setRoom(null);
+    setRejoinAttempt((attempt) => attempt + 1);
+  }, [replacementScope]);
   const socketAuthorityRef = useRef<ReturnType<typeof captureProfileRequestContext>>(null);
   const closedReasonRef = useRef<string | null>(null);
   const socketSnapshotVersion = useRef(0);
@@ -228,6 +250,7 @@ export function useWatchTogetherRoomConnection({
     markClosed,
     roomId,
     roomToken,
+    rejoinAttempt,
     renderedAuthority?.authContextVersion,
     renderedAuthority?.serverOrigin,
     renderedAuthority?.profileId,
@@ -241,9 +264,13 @@ export function useWatchTogetherRoomConnection({
 
     const authority = captureProfileRequestContext();
     if (!authority) return;
+    if (replacementScopeRef.current === replacementScope) return;
     closedReasonRef.current = null;
     let disposed = false;
-    const active = () => !disposed && isCapturedProfileAuthorityActive(authority);
+    const active = () =>
+      !disposed &&
+      replacementScopeRef.current !== replacementScope &&
+      isCapturedProfileAuthorityActive(authority);
     let attempt = 0;
     let reconnectTimer: number | null = null;
     let pingTimer: number | null = null;
@@ -353,6 +380,24 @@ export function useWatchTogetherRoomConnection({
             markClosed(typeof message.reason === "string" ? message.reason : "room_closed");
             socket.close();
             return;
+          case "connection_replaced":
+            replacementScopeRef.current = replacementScope;
+            setReplacement({
+              scope: replacementScope,
+              reason:
+                typeof message.reason === "string" && message.reason
+                  ? message.reason
+                  : "This profile joined the Watch Party on another device.",
+            });
+            if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+            if (pingTimer !== null) window.clearInterval(pingTimer);
+            reconnectTimer = null;
+            pingTimer = null;
+            socketRef.current = null;
+            setTransportCommand(null);
+            setConnectionState("disconnected");
+            socket.close();
+            return;
           case "transport_command": {
             const payload = message.command as WatchTogetherTransportCommand | undefined;
             if (payload) {
@@ -410,6 +455,7 @@ export function useWatchTogetherRoomConnection({
       });
 
       socket.addEventListener("error", () => {
+        if (!active() || socketRef.current !== socket) return;
         socket.close();
       });
     };
@@ -437,6 +483,8 @@ export function useWatchTogetherRoomConnection({
     markClosed,
     roomId,
     roomToken,
+    rejoinAttempt,
+    replacementScope,
     renderedAuthority?.authContextVersion,
     renderedAuthority?.serverOrigin,
     renderedAuthority?.profileId,
@@ -726,6 +774,8 @@ export function useWatchTogetherRoomConnection({
     room,
     suggestions,
     closedReason,
+    replacementReason,
+    rejoinRoom,
     transportCommand,
     serverTimeOffsetMs,
     sendRoomMessage,

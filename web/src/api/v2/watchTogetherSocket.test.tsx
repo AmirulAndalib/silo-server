@@ -70,6 +70,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 it("captures original proof and authority without authentication replay", async () => {
@@ -174,6 +175,103 @@ it("gets a fresh ticket after socket close and preserves ping/message callbacks"
   expect(fetch).toHaveBeenCalledTimes(2);
   expect(RoomSocket.all[1]!.protocols[1]).toBe(`silo.ticket.${"b".repeat(43)}`);
 });
+it("stops replacement reconnects before close, keeps the room, and rejoins only on request", async () => {
+  vi.useFakeTimers();
+  const fetch = vi.fn(async () => ticket());
+  vi.stubGlobal("fetch", fetch);
+  const view = renderHook(() =>
+    useWatchTogetherRoomConnection({ roomId: "room", roomToken: "room-proof" }),
+  );
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  const old = RoomSocket.all[0]!;
+  act(() => old.open());
+  act(() =>
+    old.message({
+      type: "snapshot",
+      room: { room_id: "room", generation: 20, phase: "playing", selected_content_id: "old" },
+    }),
+  );
+  const snapshot = view.result.current.room;
+  // The server can still be finishing its bounded terminal write. The client
+  // stops immediately on the message, without waiting for a close event.
+  const close = vi.spyOn(old, "close").mockImplementation(() => {});
+  const reason = "This profile joined the Watch Party on another device.";
+  act(() => old.message({ type: "connection_replaced", reason }));
+  expect(close).toHaveBeenCalledOnce();
+  expect(view.result.current.replacementReason).toBe(reason);
+  expect(view.result.current.closedReason).toBeNull();
+  expect(view.result.current.room).toBe(snapshot);
+  expect(view.result.current.connectionState).toBe("disconnected");
+  expect(view.result.current.sendRoomMessage({ type: "ping" }).ok).toBe(false);
+  act(() => old.dispatchEvent(new Event("close")));
+  await act(() => vi.advanceTimersByTimeAsync(300_000));
+  expect(fetch).toHaveBeenCalledOnce();
+  // PIN refresh must not undo the displacement.
+  setProfileToken("pin-B");
+  view.rerender();
+  await act(() => vi.advanceTimersByTimeAsync(300_000));
+  expect(fetch).toHaveBeenCalledOnce();
+  act(() => view.result.current.rejoinRoom());
+  expect(view.result.current.room).toBeNull();
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(RoomSocket.all).toHaveLength(2);
+  const current = RoomSocket.all[1]!;
+  act(() => current.open());
+  expect(view.result.current.replacementReason).toBeNull();
+  expect(view.result.current.connectionState).toBe("connected");
+  act(() => {
+    old.message({ type: "connection_replaced", reason });
+    old.message({ type: "room_closed", reason: "host_left" });
+    old.message({ type: "snapshot", room: { room_id: "room", generation: 99 } });
+    old.dispatchEvent(new Event("error"));
+    old.dispatchEvent(new Event("close"));
+  });
+  await act(() => vi.advanceTimersByTimeAsync(10_000));
+  expect(view.result.current.replacementReason).toBeNull();
+  expect(view.result.current.closedReason).toBeNull();
+  expect(view.result.current.room?.generation).not.toBe(99);
+  expect(view.result.current.connectionState).toBe("connected");
+  expect(current.readyState).toBe(RoomSocket.OPEN);
+  expect(RoomSocket.all).toHaveLength(2);
+});
+
+it("renews a healthy five-minute connection and recovers from a transient network failure", async () => {
+  vi.useFakeTimers();
+  const fetch = vi.fn(async () => ticket());
+  vi.stubGlobal("fetch", fetch);
+  const view = renderHook(() =>
+    useWatchTogetherRoomConnection({ roomId: "room", roomToken: "room-proof" }),
+  );
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  act(() => RoomSocket.all[0]!.open());
+  await act(() => vi.advanceTimersByTimeAsync(300_000));
+  expect(RoomSocket.all).toHaveLength(1);
+  expect(RoomSocket.all[0]!.send.mock.calls.length).toBeGreaterThan(1);
+  // The server's ordinary credential lifetime closes the healthy socket.
+  act(() => RoomSocket.all[0]!.close());
+  await act(() => vi.advanceTimersByTimeAsync(500));
+  expect(RoomSocket.all).toHaveLength(2);
+  act(() => RoomSocket.all[1]!.open());
+  act(() => {
+    RoomSocket.all[0]!.message({ type: "connection_replaced" });
+    RoomSocket.all[0]!.dispatchEvent(new Event("error"));
+    RoomSocket.all[0]!.dispatchEvent(new Event("close"));
+  });
+  expect(view.result.current.connectionState).toBe("connected");
+  expect(view.result.current.replacementReason).toBeNull();
+  expect(view.result.current.closedReason).toBeNull();
+  fetch.mockRejectedValueOnce(new TypeError("Network unavailable"));
+  act(() => RoomSocket.all[1]!.dispatchEvent(new Event("error")));
+  await act(() => vi.advanceTimersByTimeAsync(500));
+  expect(RoomSocket.all).toHaveLength(2);
+  await act(() => vi.advanceTimersByTimeAsync(1_000));
+  expect(RoomSocket.all).toHaveLength(3);
+  act(() => RoomSocket.all[2]!.open());
+  expect(view.result.current.connectionState).toBe("connected");
+  expect(view.result.current.replacementReason).toBeNull();
+  expect(view.result.current.closedReason).toBeNull();
+});
+
 it("terminal ticket refusal opens no socket and does not reconnect", async () => {
   const fetch = vi.fn().mockResolvedValue(
     new Response(

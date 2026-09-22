@@ -601,6 +601,8 @@ export function VideoPlayer({
       room: null,
       suggestions: [],
       closedReason: null,
+      replacementReason: null,
+      rejoinRoom: () => {},
       transportCommand: null,
       serverTimeOffsetMs: 0,
       sendRoomMessage: () => ({ ok: false }),
@@ -619,6 +621,8 @@ export function VideoPlayer({
       unvote: async () => {},
       promoteSuggestion: async () => null,
     } satisfies WatchTogetherRoomConnectionResult);
+  const connectionReplacedRef = useRef(false);
+  connectionReplacedRef.current = Boolean(watchTogether.replacementReason);
   const watchTogetherSync = useWatchTogetherPlaybackSync({
     roomConnection: watchTogether,
     sessionId,
@@ -701,6 +705,11 @@ export function VideoPlayer({
     if (!watchTogetherRoomId || watchTogether.closedReason) {
       return;
     }
+    if (watchTogether.replacementReason) {
+      videoRef.current?.pause();
+      setNotice(null);
+      return;
+    }
     if (watchTogether.connectionState === "connected") {
       return;
     }
@@ -712,6 +721,7 @@ export function VideoPlayer({
   }, [
     showWatchTogetherNotice,
     watchTogether.closedReason,
+    watchTogether.replacementReason,
     watchTogether.connectionState,
     watchTogetherRoomId,
   ]);
@@ -877,6 +887,7 @@ export function VideoPlayer({
 
   const handlePlayerSeek = useCallback(
     (seconds: number): boolean | Promise<boolean> => {
+      if (watchTogether.replacementReason) return false;
       if (
         watchTogetherRoomId &&
         !watchTogether.closedReason &&
@@ -1014,7 +1025,13 @@ export function VideoPlayer({
   const wasRoomPlayingRef = useRef(false);
   useEffect(() => {
     const phase = watchTogether.room?.phase;
-    if (!watchTogetherRoomId || watchTogether.closedReason || !phase) return;
+    if (
+      !watchTogetherRoomId ||
+      watchTogether.closedReason ||
+      watchTogether.replacementReason ||
+      !phase
+    )
+      return;
     if (phase === "playing") {
       wasRoomPlayingRef.current = true;
       return;
@@ -1044,6 +1061,7 @@ export function VideoPlayer({
     onExit,
     showWatchTogetherNotice,
     watchTogether.closedReason,
+    watchTogether.replacementReason,
     watchTogether.room?.phase,
     watchTogetherRoomId,
   ]);
@@ -1056,6 +1074,7 @@ export function VideoPlayer({
       setIsLeaving(true);
 
       const exitState = buildExitState();
+      if (watchTogether.replacementReason) exitState.destinationHref = "/rooms";
 
       try {
         await Promise.race([
@@ -1073,7 +1092,7 @@ export function VideoPlayer({
         // room page (WatchPlaybackChrome navigates there when no destination
         // is given). Ending the party is the room page's decision, not a side
         // effect of closing the player.
-        if (action === "minimize" && onMinimize) {
+        if (action === "minimize" && onMinimize && !watchTogether.replacementReason) {
           await onMinimize(exitState);
           return;
         }
@@ -1085,15 +1104,7 @@ export function VideoPlayer({
         }
       }
     },
-    [
-      buildExitState,
-      flushWatchProgress,
-      onExit,
-      onMinimize,
-      resetLeaveState,
-      watchTogether,
-      watchTogetherRoomId,
-    ],
+    [buildExitState, flushWatchProgress, onExit, onMinimize, resetLeaveState, watchTogether],
   );
 
   const handleExit = useCallback(async () => {
@@ -1629,6 +1640,10 @@ export function VideoPlayer({
     const attemptAutoplayWhenReady = () => {
       if (destroyed || playbackStarted || autoplayInFlight) return;
       if (hlsStartupGuardRef.current?.hasFailed()) return;
+      if (connectionReplacedRef.current) {
+        settlePaused();
+        return;
+      }
       // HAVE_FUTURE_DATA means the browser has enough media to advance beyond
       // the current frame. Starting earlier can produce a visible first-frame
       // freeze where audio advances before video begins moving.
@@ -1645,12 +1660,21 @@ export function VideoPlayer({
         () => {
           autoplayInFlight = false;
           if (destroyed) return;
+          if (connectionReplacedRef.current) {
+            video.pause();
+            settlePaused();
+            return;
+          }
           playbackStarted = true;
           cleanupStartupListeners();
         },
         (error: unknown) => {
           autoplayInFlight = false;
           if (destroyed) return;
+          if (connectionReplacedRef.current) {
+            settlePaused();
+            return;
+          }
           // The element is paused now, whatever happens next, so the transport
           // reflects that immediately.
           setPlaying(false);
@@ -1879,7 +1903,13 @@ export function VideoPlayer({
     const video = videoRef.current;
     if (!video) return;
 
-    const onPlay = () => setPlaying(true);
+    const onPlay = () => {
+      if (connectionReplacedRef.current) {
+        video.pause();
+        return;
+      }
+      setPlaying(true);
+    };
     const onPause = () => {
       resetRoomCatchupRate();
       setPlaying(false);
@@ -2487,6 +2517,7 @@ export function VideoPlayer({
   // -- Control callbacks --
   const setPlayback = useCallback(
     (action: "play" | "pause" | "toggle") => {
+      if (watchTogether.replacementReason) return;
       const video = videoRef.current;
       if (!video) return;
       const shouldPlay = action === "toggle" ? video.paused : action === "play";
@@ -3251,7 +3282,10 @@ export function VideoPlayer({
         </div>
       )}
 
-      {!isDetached && watchTogetherRoomId && !watchTogether.closedReason ? (
+      {!isDetached &&
+      watchTogetherRoomId &&
+      !watchTogether.closedReason &&
+      !watchTogether.replacementReason ? (
         <WatchTogetherPanel
           room={watchTogether.room}
           connectionState={watchTogether.connectionState}
@@ -3261,6 +3295,29 @@ export function VideoPlayer({
           onEndRoom={() => void handleEndRoom()}
           onStopPlayback={() => void handleStopRoomPlayback()}
         />
+      ) : null}
+
+      {!isDetached && watchTogetherRoomId && watchTogether.replacementReason ? (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 px-6">
+          <div role="alert" className="max-w-sm text-center text-white">
+            <h2 className="text-lg font-semibold">Watch Party joined on another device</h2>
+            <p className="mt-2 text-sm text-white/70">{watchTogether.replacementReason}</p>
+            <button
+              type="button"
+              onClick={watchTogether.rejoinRoom}
+              className="mt-4 rounded-md bg-white px-4 py-2 text-sm font-medium text-black"
+            >
+              Rejoin Watch Party
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleExit()}
+              className="mt-4 ml-3 rounded-md border border-white/30 px-4 py-2 text-sm font-medium"
+            >
+              Leave Watch Party
+            </button>
+          </div>
+        </div>
       ) : null}
 
       {/* Loading overlay — stays up until the first frame renders */}
