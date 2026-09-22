@@ -901,7 +901,8 @@ type webNPMCommand struct {
 // engines.npm. Upstream enforces it with engine-strict, and releases disagree:
 // 10.11.x requires npm below 11 while 12.x requires npm 11 or later, so the
 // host npm alone cannot build both. A checkout without the field uses the host
-// npm.
+// npm. Node.js is not switched: npm ci enforces engines.node against the host
+// Node.js and reports the required and actual versions in the install error.
 func webInstallNPMCommand(srcDir string) (webNPMCommand, error) {
 	data, err := os.ReadFile(filepath.Join(srcDir, "package.json"))
 	if errors.Is(err, fs.ErrNotExist) {
