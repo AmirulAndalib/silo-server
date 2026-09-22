@@ -81,6 +81,7 @@ interface PlayerControlsProps {
   onQualitySelect: (id: string) => void;
   // Version switching
   versions?: VersionInfo[];
+  versionLocked?: boolean;
   onSwitchVersion?: (fileId: number) => void;
   // PiP
   onTogglePiP?: () => void;
@@ -146,6 +147,7 @@ export function PlayerControls({
   qualityError,
   onQualitySelect,
   versions,
+  versionLocked,
   onSwitchVersion,
   onTogglePiP,
   showPlaybackInfo,
@@ -335,6 +337,7 @@ export function PlayerControls({
               error={qualityError}
               onSelect={onQualitySelect}
               versions={versions}
+              versionLocked={versionLocked}
               onSwitchVersion={onSwitchVersion}
             />
             <button
@@ -510,6 +513,7 @@ export function PlayerControls({
                 error={qualityError}
                 onSelect={onQualitySelect}
                 versions={versions}
+                versionLocked={versionLocked}
                 onSwitchVersion={onSwitchVersion}
               />
 

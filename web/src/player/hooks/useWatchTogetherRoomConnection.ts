@@ -1,3 +1,7 @@
+import {
+  fallbackRoomSource,
+  type SourceFallbackRequest,
+} from "@/api/v2/watchTogetherSourceFallback";
 import { useOptionalAuth } from "@/hooks/useAuth";
 import { mintRoomSocketTicket, roomSocketURL } from "@/api/v2/watchTogetherSocket";
 import type { SuggestionCreationDraft } from "@/api/v2/watchTogetherSuggestionCreate";
@@ -18,7 +22,12 @@ import {
   listWatchTogetherSuggestions,
   promoteWatchTogetherSuggestion,
   selectWatchTogetherRoomItem,
+  stageWatchTogetherRoomItem,
+  startWatchTogetherRoomPlayback,
+  stopWatchTogetherRoomPlayback,
+  updateWatchTogetherRoomSelectionMode,
   type SelectWatchTogetherRoomItemInput,
+  type WatchTogetherSelectionMode,
   unvoteWatchTogetherSuggestion,
   updateWatchTogetherRoomPolicy,
   voteWatchTogetherSuggestion,
@@ -50,6 +59,19 @@ export interface WatchTogetherRoomConnectionResult {
   selectItem: (
     input: SelectWatchTogetherRoomItemInput,
   ) => Promise<WatchTogetherRoomSnapshot | null>;
+  fallbackSource: (input: SourceFallbackRequest) => Promise<WatchTogetherRoomSnapshot | null>;
+  /** Stages content in a host-pick lobby; nothing plays until startPlayback. */
+  stageItem: (input: SelectWatchTogetherRoomItemInput) => Promise<WatchTogetherRoomSnapshot | null>;
+  /** Starts the staged content for everyone. */
+  startPlayback: () => Promise<WatchTogetherRoomSnapshot | null>;
+  /** Stops playback for everyone; the room returns to the lobby, still staged. */
+  stopPlayback: () => Promise<WatchTogetherRoomSnapshot | null>;
+  /** Switches a lobby between host picks and voting. */
+  updateSelectionMode: (
+    mode: WatchTogetherSelectionMode,
+  ) => Promise<WatchTogetherRoomSnapshot | null>;
+  /** Marks this member ready (or not) in the lobby. Sent over the socket and shared across API servers. */
+  setLobbyReady: (ready: boolean) => SendRoomMessageResult;
   closeRoom: () => Promise<void>;
   createSuggestion: (draft: SuggestionCreationDraft) => Promise<void>;
   deleteSuggestion: (suggestionId: string) => Promise<void>;
@@ -105,6 +127,23 @@ export function useWatchTogetherRoomConnection({
   const renderedAuthority = captureProfileRequestContext();
   const socketAuthorityRef = useRef<ReturnType<typeof captureProfileRequestContext>>(null);
   const closedReasonRef = useRef<string | null>(null);
+  const socketSnapshotVersion = useRef(0);
+  const applyHTTPRoomSnapshot = useCallback(
+    (incoming: WatchTogetherRoomSnapshot, socketVersionAtRequest: number) => {
+      if (closedReasonRef.current) return;
+      const receivedSocketSnapshot = socketSnapshotVersion.current !== socketVersionAtRequest;
+      // Runtime-only changes do not advance generation. Preserve the socket's
+      // attachment/readiness when an overlapping HTTP request returns that generation.
+      setRoom((current) =>
+        current?.room_id === incoming.room_id &&
+        (current.generation > incoming.generation ||
+          (receivedSocketSnapshot && current.generation === incoming.generation))
+          ? current
+          : incoming,
+      );
+    },
+    [],
+  );
 
   useEffect(() => {
     closedReasonRef.current = closedReason;
@@ -152,12 +191,13 @@ export function useWatchTogetherRoomConnection({
       }
     }, 0);
     const readAuthority = captureProfileRequestContext();
+    const socketVersionAtRequest = socketSnapshotVersion.current;
     void getWatchTogetherRoom(roomId, roomToken, readAuthority)
       .then((response) => {
         if (cancelled || !readAuthority || !isCapturedProfileAuthorityActive(readAuthority)) {
           return;
         }
-        setRoom(response.room);
+        applyHTTPRoomSnapshot(response.room, socketVersionAtRequest);
       })
       .catch((error: unknown) => {
         if (cancelled || !readAuthority || !isCapturedProfileAuthorityActive(readAuthority)) {
@@ -184,6 +224,7 @@ export function useWatchTogetherRoomConnection({
       window.clearTimeout(resetClosedReasonTimer);
     };
   }, [
+    applyHTTPRoomSnapshot,
     markClosed,
     roomId,
     roomToken,
@@ -283,7 +324,12 @@ export function useWatchTogetherRoomConnection({
           case "snapshot": {
             const payload = message.room as WatchTogetherRoomSnapshot | undefined;
             if (payload) {
-              setRoom(payload);
+              socketSnapshotVersion.current++;
+              setRoom((current) =>
+                current?.room_id === payload.room_id && current.generation > payload.generation
+                  ? current
+                  : payload,
+              );
             }
             return;
           }
@@ -412,6 +458,7 @@ export function useWatchTogetherRoomConnection({
     async (policy: GuestControlPolicy) => {
       if (!roomId) return null;
       const run = ++policyRun.current;
+      const socketVersionAtRequest = socketSnapshotVersion.current;
       const response = await updateWatchTogetherRoomPolicy(roomId, policy, policyAuthority).catch(
         (error: unknown) => {
           if (policyRoom.current !== roomId || policyRun.current !== run) return null;
@@ -421,16 +468,10 @@ export function useWatchTogetherRoomConnection({
       if (!response) return null;
       if (policyRoom.current !== roomId || policyRun.current !== run) return null;
       if (!policyAuthority || !isCapturedProfileAuthorityActive(policyAuthority)) return null;
-      setRoom((current) =>
-        current &&
-        current.room_id === response.room.room_id &&
-        current.generation > response.room.generation
-          ? current
-          : response.room,
-      );
+      applyHTTPRoomSnapshot(response.room, socketVersionAtRequest);
       return response.room;
     },
-    [roomId, policyAuthority],
+    [roomId, policyAuthority, applyHTTPRoomSnapshot],
   );
 
   const selectionAuthority = captureProfileRequestContext();
@@ -448,6 +489,7 @@ export function useWatchTogetherRoomConnection({
     async (input: SelectWatchTogetherRoomItemInput) => {
       if (!roomId) return null;
       const run = ++selectionRun.current;
+      const socketVersionAtRequest = socketSnapshotVersion.current;
       const response = await selectWatchTogetherRoomItem(
         roomId,
         { ...input },
@@ -459,6 +501,31 @@ export function useWatchTogetherRoomConnection({
       if (!response) return null;
       if (selectionRoom.current !== roomId || selectionRun.current !== run) return null;
       if (!selectionAuthority || !isCapturedProfileAuthorityActive(selectionAuthority)) return null;
+      applyHTTPRoomSnapshot(response.room, socketVersionAtRequest);
+      return response.room;
+    },
+    [roomId, selectionAuthority, applyHTTPRoomSnapshot],
+  );
+
+  // Stage, start and mode switch share the selection fencing: one run counter
+  // per action, invalidated when the room changes, and a receipt is published
+  // only under the authority it was captured with.
+  const lobbyAuthority = captureProfileRequestContext();
+  const lobbyRun = useRef(0);
+  const lobbyRoom = useRef(roomId);
+  const invalidateLobby = useCallback(() => {
+    lobbyRun.current++;
+  }, []);
+  useLayoutEffect(() => {
+    lobbyRoom.current = roomId;
+    invalidateLobby();
+    return invalidateLobby;
+  }, [roomId, invalidateLobby]);
+  const publishLobbyReceipt = useCallback(
+    (run: number, response: { room: WatchTogetherRoomSnapshot } | null) => {
+      if (!response) return null;
+      if (lobbyRoom.current !== roomId || lobbyRun.current !== run) return null;
+      if (!lobbyAuthority || !isCapturedProfileAuthorityActive(lobbyAuthority)) return null;
       setRoom((current) =>
         current &&
         current.room_id === response.room.room_id &&
@@ -468,7 +535,63 @@ export function useWatchTogetherRoomConnection({
       );
       return response.room;
     },
-    [roomId, selectionAuthority],
+    [roomId, lobbyAuthority],
+  );
+  const stageItem = useCallback(
+    async (input: SelectWatchTogetherRoomItemInput) => {
+      if (!roomId) return null;
+      const run = ++lobbyRun.current;
+      const response = await stageWatchTogetherRoomItem(roomId, { ...input }, lobbyAuthority).catch(
+        (error: unknown) => {
+          if (lobbyRoom.current !== roomId || lobbyRun.current !== run) return null;
+          throw error;
+        },
+      );
+      return publishLobbyReceipt(run, response);
+    },
+    [roomId, lobbyAuthority, publishLobbyReceipt],
+  );
+  const startPlayback = useCallback(async () => {
+    if (!roomId) return null;
+    const run = ++lobbyRun.current;
+    const response = await startWatchTogetherRoomPlayback(roomId, lobbyAuthority).catch(
+      (error: unknown) => {
+        if (lobbyRoom.current !== roomId || lobbyRun.current !== run) return null;
+        throw error;
+      },
+    );
+    return publishLobbyReceipt(run, response);
+  }, [roomId, lobbyAuthority, publishLobbyReceipt]);
+  const stopPlayback = useCallback(async () => {
+    if (!roomId) return null;
+    const run = ++lobbyRun.current;
+    const response = await stopWatchTogetherRoomPlayback(roomId, lobbyAuthority).catch(
+      (error: unknown) => {
+        if (lobbyRoom.current !== roomId || lobbyRun.current !== run) return null;
+        throw error;
+      },
+    );
+    return publishLobbyReceipt(run, response);
+  }, [roomId, lobbyAuthority, publishLobbyReceipt]);
+  const updateSelectionMode = useCallback(
+    async (mode: WatchTogetherSelectionMode) => {
+      if (!roomId) return null;
+      const run = ++lobbyRun.current;
+      const response = await updateWatchTogetherRoomSelectionMode(
+        roomId,
+        mode,
+        lobbyAuthority,
+      ).catch((error: unknown) => {
+        if (lobbyRoom.current !== roomId || lobbyRun.current !== run) return null;
+        throw error;
+      });
+      return publishLobbyReceipt(run, response);
+    },
+    [roomId, lobbyAuthority, publishLobbyReceipt],
+  );
+  const setLobbyReady = useCallback(
+    (ready: boolean) => sendRoomMessage({ type: "lobby_ready", ready }),
+    [sendRoomMessage],
   );
 
   const closeAuthority = captureProfileRequestContext();
@@ -558,6 +681,7 @@ export function useWatchTogetherRoomConnection({
     async (suggestionId: string) => {
       if (!roomId || !roomToken || promotionRoom.current !== roomId) return null;
       const run = ++promotionRun.current;
+      const socketVersionAtRequest = socketSnapshotVersion.current;
       const response = await promoteWatchTogetherSuggestion(
         roomId,
         roomToken,
@@ -569,16 +693,32 @@ export function useWatchTogetherRoomConnection({
       });
       if (!response || run !== promotionRun.current) return null;
       if (!promotionAuthority || !isCapturedProfileAuthorityActive(promotionAuthority)) return null;
-      setRoom((current) =>
-        current &&
-        current.room_id === response.room.room_id &&
-        current.generation > response.room.generation
-          ? current
-          : response.room,
-      );
+      applyHTTPRoomSnapshot(response.room, socketVersionAtRequest);
       return response.room;
     },
-    [roomId, roomToken, promotionAuthority],
+    [roomId, roomToken, promotionAuthority, applyHTTPRoomSnapshot],
+  );
+
+  const fallbackAuthority = captureProfileRequestContext();
+  const fallbackContextRef = useRef({ roomId, roomToken });
+  useLayoutEffect(() => {
+    fallbackContextRef.current = { roomId, roomToken };
+    return () => {
+      fallbackContextRef.current = { roomId: null, roomToken: null };
+    };
+  }, [roomId, roomToken]);
+  const fallbackSource = useCallback(
+    async (input: SourceFallbackRequest) => {
+      const context = fallbackContextRef.current;
+      if (!roomId || !roomToken || context.roomId !== roomId || context.roomToken !== roomToken)
+        return null;
+      const socketVersionAtRequest = socketSnapshotVersion.current;
+      const response = await fallbackRoomSource(roomId, roomToken, input, fallbackAuthority);
+      if (fallbackContextRef.current !== context) return null;
+      applyHTTPRoomSnapshot(response.room, socketVersionAtRequest);
+      return response.room;
+    },
+    [roomId, roomToken, fallbackAuthority, applyHTTPRoomSnapshot],
   );
 
   return {
@@ -591,6 +731,12 @@ export function useWatchTogetherRoomConnection({
     sendRoomMessage,
     updatePolicy,
     selectItem,
+    fallbackSource,
+    stageItem,
+    startPlayback,
+    stopPlayback,
+    updateSelectionMode,
+    setLobbyReady,
     closeRoom,
     createSuggestion,
     deleteSuggestion,

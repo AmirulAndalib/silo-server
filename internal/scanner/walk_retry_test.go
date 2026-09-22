@@ -50,13 +50,13 @@ func TestWalkDirectoryReadRetries(t *testing.T) {
 				var err error
 				if kind == "audiobooks" {
 					scan := audiobookRootScan{root: root, seenPaths: make(map[string]bool)}
-					err = walkAudiobookDirectories(ctx, root, &scan, make(map[string]bool), readDir)
+					err = walkAudiobookDirectories(ctx, root, &scan, make(map[string]bool), nil, true, readDir)
 					for path := range scan.seenPaths {
 						files = append(files, path)
 					}
 					failures = scan.walkFailures
 				} else {
-					err = walkLogicalTree(ctx, root, root, walkModeFor(kind), make(map[string]struct{}), &files, &failures, readDir)
+					err = walkLogicalTree(ctx, root, root, walkModeFor(kind), make(map[string]struct{}), nil, &files, &failures, readDir)
 				}
 				if outcome == "canceled" {
 					if !errors.Is(err, context.Canceled) || attempts != 1 || len(failures) != 0 {

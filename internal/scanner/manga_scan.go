@@ -40,7 +40,7 @@ func (s *Scanner) scanMangaPaths(ctx context.Context, folder *models.MediaFolder
 	if err != nil {
 		return err
 	}
-	scans, err := collectEbookRootScans(ctx, folder.ID, roots)
+	scans, err := collectEbookRootScans(ctx, folder.ID, roots, folder.Paths)
 	if err != nil {
 		return err
 	}
