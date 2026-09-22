@@ -1473,8 +1473,7 @@ function AmbiguousRootsSection({ libraries }: { libraries: Library[] }) {
     <CollapsibleDiagnosticsSection
       title="Ambiguous Roots"
       description="Scanner roots that stay visible but do not enter unattended metadata matching."
-      count={totalRoots}
-      countPending={countUnknown}
+      count={countUnknown ? undefined : totalRoots}
       isError={loadFailed}
       icon={
         loadFailed ? (
@@ -1858,7 +1857,7 @@ function SkippedRootsSection() {
     <CollapsibleDiagnosticsSection
       title="Troubleshooting"
       description="Roots where the inferred canonical folder lacks embedded provider IDs."
-      count={skippedRoots.length}
+      count={data?.pages[0]?.total}
       icon={<AlertTriangle className="h-4 w-4 text-amber-500" />}
       open={open}
       onOpenChange={setOpen}
@@ -2198,7 +2197,7 @@ function StaleIDsSection() {
     <CollapsibleDiagnosticsSection
       title="Stale External IDs"
       description="Provider IDs no longer resolve; metadata refresh will fail until re-matched. Most recently seen first."
-      count={staleIDs.length}
+      count={stalePages?.pages[0]?.total}
       icon={<Unlink className="h-4 w-4 text-red-400" />}
       iconClassName="bg-red-500/10"
       open={open}

@@ -25,13 +25,12 @@ describe("CollapsibleDiagnosticsSection", () => {
     expect(screen.queryByText("Child content")).not.toBeInTheDocument();
   });
 
-  it("renders an accessible placeholder when countPending is true in both states", () => {
+  it("renders an accessible placeholder when count is undefined in both states", () => {
     const { rerender } = render(
       <CollapsibleDiagnosticsSection
         title="Test Diagnostics"
         description="A test section description"
-        count={0}
-        countPending={true}
+        count={undefined}
         icon={<span>Icon</span>}
         open={false}
         onOpenChange={vi.fn()}
@@ -47,8 +46,7 @@ describe("CollapsibleDiagnosticsSection", () => {
       <CollapsibleDiagnosticsSection
         title="Test Diagnostics"
         description="A test section description"
-        count={0}
-        countPending={true}
+        count={undefined}
         icon={<span>Icon</span>}
         open={true}
         onOpenChange={vi.fn()}

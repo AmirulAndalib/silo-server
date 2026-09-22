@@ -7,13 +7,12 @@ import { cn } from "@/lib/utils";
 /**
  * CollapsibleDiagnosticsSection renders an expandable administrative diagnostics panel
  * displaying a severity icon, title, description, and status count, error indicator, or a
- * placeholder while the count is not loaded yet (never fetched or still loading).
+ * placeholder while the count is not loaded yet.
  */
 export function CollapsibleDiagnosticsSection({
   title,
   description,
   count,
-  countPending,
   isError,
   icon,
   iconClassName,
@@ -23,8 +22,9 @@ export function CollapsibleDiagnosticsSection({
 }: {
   title: string;
   description: string;
-  count: number;
-  countPending?: boolean;
+  /** Undefined until the count has loaded, so an unknown count never reads as 0. */
+  count: number | undefined;
+  /** The count failed to load; takes precedence over an unknown count. */
   isError?: boolean;
   icon: ReactNode;
   iconClassName?: string;
@@ -32,6 +32,15 @@ export function CollapsibleDiagnosticsSection({
   onOpenChange: (open: boolean) => void;
   children: ReactNode;
 }) {
+  const countLabel =
+    count === undefined ? (
+      <>
+        <span aria-hidden="true">&mdash;</span>
+        <span className="sr-only">Count not loaded</span>
+      </>
+    ) : (
+      count
+    );
   return (
     <section className="surface-panel-subtle overflow-hidden rounded-2xl">
       <button
@@ -52,19 +61,7 @@ export function CollapsibleDiagnosticsSection({
           <h2 className="text-sm font-semibold tracking-wide">{title}</h2>
           <p className="text-muted-foreground text-xs leading-relaxed">{description}</p>
         </div>
-        {countPending ? (
-          open ? (
-            <Badge variant="secondary" className="text-[11px] tabular-nums">
-              <span className="sr-only">Count not loaded</span>
-              <span aria-hidden="true">&mdash;</span>
-            </Badge>
-          ) : (
-            <div className="text-muted-foreground text-2xl leading-none font-bold tabular-nums">
-              <span className="sr-only">Count not loaded</span>
-              <span aria-hidden="true">&mdash;</span>
-            </div>
-          )
-        ) : isError ? (
+        {isError ? (
           open ? (
             <Badge variant="destructive" className="text-[11px] tabular-nums">
               <span className="sr-only">Error loading count</span>
@@ -78,16 +75,16 @@ export function CollapsibleDiagnosticsSection({
           )
         ) : open ? (
           <Badge variant="secondary" className="text-[11px] tabular-nums">
-            {count}
+            {countLabel}
           </Badge>
         ) : (
           <div
             className={cn(
               "text-2xl leading-none font-bold tabular-nums",
-              count === 0 && "text-muted-foreground",
+              (count === undefined || count === 0) && "text-muted-foreground",
             )}
           >
-            {count}
+            {countLabel}
           </div>
         )}
         <ChevronDown
