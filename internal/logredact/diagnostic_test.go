@@ -98,6 +98,26 @@ func TestSanitizeJSONPreservesOrdinaryText(t *testing.T) {
 	}
 }
 
+func TestSanitizeJSONPreservesFilePaths(t *testing.T) {
+	for _, value := range []string{
+		"/media/Movies/Foo Bar (2020)/Foo Bar (2020).mkv",
+		"/media/Movies/100% Wolf (2020)/100% Wolf.mkv",
+		"/media/Movies/Amélie (2001)/Amélie.mkv",
+	} {
+		body, err := json.Marshal(map[string]string{"Path": value})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]string
+		if err := json.Unmarshal(SanitizeJSON(body), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got["Path"] != value {
+			t.Errorf("file path changed: got %q, want %q", got["Path"], value)
+		}
+	}
+}
+
 func TestSanitizeJSONRedactsURLFormsWithSpaces(t *testing.T) {
 	for _, value := range []string{
 		"/stream?ApiKey=url-secret&Name=Two Words",
