@@ -136,6 +136,21 @@ func TestRoomSocketV2AdmissionAndCallbacks(t *testing.T) {
 			break
 		}
 	}
+	if err = conn.WriteJSON(map[string]any{"type": "lobby_ready", "ready": true}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, body, err = conn.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(body), `"type":"snapshot"`) {
+			if !strings.Contains(string(body), `"lobby_ready":true`) {
+				t.Fatalf("lobby ready not reflected: %s", body)
+			}
+			break
+		}
+	}
 	again, replay, err := dialer.DialContext(t.Context(), endpoint, nil)
 	if again != nil {
 		_ = again.Close()

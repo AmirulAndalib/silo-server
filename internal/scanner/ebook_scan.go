@@ -71,7 +71,7 @@ func (r *ebookRootScan) failed() bool {
 // logical-tree walker (so symlinked roots and symlinked subdirectories
 // resolve and scan exactly like the video pipeline) and records per-root walk
 // failures. The only error returned is context cancellation.
-func collectEbookRootScans(ctx context.Context, folderID int, roots []string) ([]ebookRootScan, error) {
+func collectEbookRootScans(ctx context.Context, folderID int, roots, libraryRoots []string) ([]ebookRootScan, error) {
 	scans := make([]ebookRootScan, 0, len(roots))
 	visitedPhysicalDirs := make(map[string]struct{})
 	for _, root := range roots {
@@ -95,8 +95,13 @@ func collectEbookRootScans(ctx context.Context, folderID int, roots []string) ([
 				scan.rootErr = fmt.Errorf("root is not a directory after symlink resolution")
 			}
 		}
-		if statErr == nil {
-			if err := walkLogicalTree(ctx, cleanRoot, cleanRoot, walkModeEbook, visitedPhysicalDirs, &scan.files, &scan.walkFailures); err != nil {
+		var rules []ignoreRules
+		var ignored bool
+		if scan.rootErr == nil && !scan.fileOnly {
+			rules, ignored, scan.rootErr = scanRootIgnoreRules(cleanRoot, libraryRoots)
+		}
+		if scan.rootErr == nil && !ignored {
+			if err := walkLogicalTree(ctx, cleanRoot, cleanRoot, walkModeEbook, visitedPhysicalDirs, rules, &scan.files, &scan.walkFailures); err != nil {
 				return nil, err
 			}
 		}
@@ -135,7 +140,7 @@ func (s *Scanner) scanEbookPaths(ctx context.Context, folder *models.MediaFolder
 	if s == nil || folder == nil {
 		return fmt.Errorf("scanEbookPaths: nil scanner or folder")
 	}
-	scans, err := collectEbookRootScans(ctx, folder.ID, roots)
+	scans, err := collectEbookRootScans(ctx, folder.ID, roots, folder.Paths)
 	if err != nil {
 		return err
 	}
