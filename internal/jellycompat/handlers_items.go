@@ -509,10 +509,18 @@ func (h *ItemsHandler) handlePersonItem(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if photoURL != "" {
-		tag := tagValue(photoURL)
-		dto.ImageTags = map[string]string{"Primary": tag}
-		ratio := 2.0 / 3.0
-		dto.PrimaryImageAspectRatio = &ratio
+		// The signed tag authorizes anonymous image GETs, so mint it only for a
+		// viewer with a visible credit; the image route refuses everyone else.
+		err := h.personRepo.EnsureAccessible(r.Context(), personID, h.resolveAccessFilter(r.Context(), session))
+		switch {
+		case err == nil:
+			dto.ImageTags = map[string]string{compatImagePrimary: personPrimaryImageTag(h.mapper.imageTagSigner, routeID, person.PhotoThumbhash)}
+			ratio := 2.0 / 3.0
+			dto.PrimaryImageAspectRatio = &ratio
+		case !errors.Is(err, pgx.ErrNoRows):
+			writeCompatUpstreamError(w, err)
+			return
+		}
 	}
 
 	dto.UserData = &itemUserDataDTO{

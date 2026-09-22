@@ -578,7 +578,7 @@ func TestHandlePersonImageClampsLargeRequestToProfileLadder(t *testing.T) {
 	req = withImageRouteParams(req, routeID, "Primary")
 	rec := httptest.NewRecorder()
 
-	h.handlePersonImage(rec, req, &Session{}, routeID, "Primary", 287)
+	h.handlePersonImage(rec, req, &Session{}, routeID, "Primary", "", 287)
 
 	if got := compatRequestImageSize(req, "Primary"); got != compatLargeImageSize {
 		t.Fatalf("compatRequestImageSize = %q, want %q", got, compatLargeImageSize)

@@ -275,7 +275,7 @@ func NewRouter(deps Dependencies) chi.Router {
 			r.Get("/DisplayPreferences/{displayPreferencesId}", displayPrefsHandler.HandleGetDisplayPreferences)
 			r.Post("/DisplayPreferences/{displayPreferencesId}", displayPrefsHandler.HandleUpdateDisplayPreferences)
 			if deps.PersonRepo != nil {
-				personsHandler := NewPersonsHandler(deps.PersonRepo, deps.ContentService, deps.IDCodec, deps.ImageCache, deps.Config.JellyfinCompat.ServerID)
+				personsHandler := NewPersonsHandler(deps.PersonRepo, deps.ContentService, deps.IDCodec, deps.ImageCache, deps.Config.JellyfinCompat.ServerID, deps.JWTSecret)
 				r.Get("/Persons", personsHandler.HandleGetPersons)
 				r.Get("/Persons/{name}", personsHandler.HandleGetPerson)
 			} else {
