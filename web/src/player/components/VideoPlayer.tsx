@@ -2255,7 +2255,6 @@ export function VideoPlayer({
     timelineOffsetSeconds,
     subtitleDelayMs,
     setASSSubtitleState,
-    videoFit,
   );
   const subtitleLoadState = isASSActive ? assSubtitleState : textSubtitleState;
 

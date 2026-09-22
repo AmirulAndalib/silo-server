@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type JASSUB from "jassub";
-import type { PlayerSubtitleInfo, VideoFitMode } from "../types";
+import type { PlayerSubtitleInfo } from "../types";
 import { isASSCodec } from "../utils/subtitleCodecs";
 import {
   fallbackFontForSubtitle,
@@ -27,6 +27,10 @@ import liberationSansUrl from "../assets/liberation-sans.woff2?url";
  * The existing VTT subtitle pipeline (useSubtitleTracks) handles SRT/VTT;
  * this hook handles ASS/SSA. The two are coordinated by the `isActive`
  * return value — when true, the VTT overlay should be suppressed.
+ *
+ * Keep JASSUB's contain geometry even when the video uses Fill. Cropping its
+ * canvas can hide dialogue in the encoded bars and enlarging the bitmap can
+ * soften text. Positioned signs may therefore lose alignment in Fill mode.
  */
 export function useASSSubtitles(
   videoRef: React.RefObject<HTMLVideoElement | null>,
@@ -36,12 +40,9 @@ export function useASSSubtitles(
   streamOriginSeconds: number,
   subtitleDelayMs: number,
   onLoadState?: (state: "idle" | "loading" | "ready" | "error") => void,
-  videoFit: VideoFitMode = "contain",
 ): { isActive: boolean } {
   const onLoadStateRef = useRef(onLoadState);
   onLoadStateRef.current = onLoadState;
-  const videoFitRef = useRef(videoFit);
-  videoFitRef.current = videoFit;
   const jassubRef = useRef<JASSUB | null>(null);
   const jassubImportRef = useRef<Promise<typeof JASSUB> | null>(null);
   // Effective JASSUB time offset. JASSUB renders the ASS event matching
@@ -200,15 +201,7 @@ export function useASSSubtitles(
       }
 
       jassubRef.current = instance;
-      instance._canvas.classList.toggle("player-ass-fill", videoFitRef.current === "cover");
       await instance.ready;
-      if (cancelled || signal.aborted || jassubRef.current !== instance) return;
-
-      // Fit can change while the subtitle source, fonts, or renderer are still
-      // loading. Re-read it after readiness so the first rendered frame cannot
-      // inherit the mode captured when this effect started.
-      instance._canvas.classList.toggle("player-ass-fill", videoFitRef.current === "cover");
-      await instance.resize(true);
       if (!cancelled && !signal.aborted && jassubRef.current === instance) {
         onLoadStateRef.current?.("ready");
       }
@@ -281,21 +274,6 @@ export function useASSSubtitles(
         }
       });
   }, [effectiveOffset, activeUrl]);
-
-  // JASSUB sizes its canvas as if the video always uses object-fit: contain.
-  // Keep the canvas on the same Fit/Fill path as the video, then ask libass to
-  // repaint after switching modes.
-  useEffect(() => {
-    const instance = jassubRef.current;
-    if (!instance || !activeUrl) return;
-
-    instance._canvas.classList.toggle("player-ass-fill", videoFit === "cover");
-    void instance.resize(true).catch((err) => {
-      if (jassubRef.current === instance) {
-        console.error("[useASSSubtitles] Unable to resize subtitles:", err);
-      }
-    });
-  }, [activeUrl, videoFit]);
 
   // Cleanup on unmount.
   useEffect(() => {

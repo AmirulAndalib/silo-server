@@ -2,7 +2,7 @@ import type { RefObject } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useASSSubtitles } from "./useASSSubtitles";
-import type { PlayerSubtitleInfo, VideoFitMode } from "../types";
+import type { PlayerSubtitleInfo } from "../types";
 
 // Capture the options every JASSUB instance is constructed with, plus the
 // instances themselves so tests can observe later timeOffset updates.
@@ -274,7 +274,7 @@ describe("useASSSubtitles time offset", () => {
 });
 
 describe("useASSSubtitles video fit", () => {
-  it("applies a fit change made before JASSUB finishes initializing", async () => {
+  it("keeps ASS uncropped when Fill is selected while subtitles load", async () => {
     let resolveFetch!: (response: Response) => void;
     vi.mocked(fetch).mockReturnValueOnce(
       new Promise((resolve) => {
@@ -282,37 +282,32 @@ describe("useASSSubtitles video fit", () => {
       }),
     );
     const videoRef = makeVideoRef();
-    const { rerender } = renderHook(
-      ({ videoFit }: { videoFit: VideoFitMode }) =>
-        useASSSubtitles(videoRef, [germanTrack], 6, false, 0, 0, undefined, videoFit),
-      { initialProps: { videoFit: "contain" as VideoFitMode } },
-    );
+    const { rerender } = renderHook(() => useASSSubtitles(videoRef, [germanTrack], 6, false, 0, 0));
     await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
 
-    rerender({ videoFit: "cover" });
+    videoRef.current!.style.objectFit = "cover";
+    rerender();
     await act(async () => {
       resolveFetch(mockFetchResponse(""));
     });
 
     await waitFor(() => expect(instances).toHaveLength(1));
-    expect(instances[0]!._canvas).toHaveClass("player-ass-fill");
-    expect(instances[0]!.resize).toHaveBeenCalledWith(true);
+    expect(instances[0]!._canvas).not.toHaveClass("player-ass-fill");
+    expect(instances[0]!.resize).not.toHaveBeenCalled();
   });
 
-  it("keeps the ASS canvas in sync with Fit and Fill mode", async () => {
+  it("keeps ASS uncropped when the video switches to Fill", async () => {
     const videoRef = makeVideoRef();
-    const { rerender } = renderHook(
-      ({ videoFit }: { videoFit: VideoFitMode }) =>
-        useASSSubtitles(videoRef, [germanTrack], 6, false, 0, 0, undefined, videoFit),
-      { initialProps: { videoFit: "contain" as VideoFitMode } },
-    );
+    const { rerender } = renderHook(() => useASSSubtitles(videoRef, [germanTrack], 6, false, 0, 0));
     await waitFor(() => expect(instances).toHaveLength(1));
     expect(instances[0]!._canvas).not.toHaveClass("player-ass-fill");
 
-    rerender({ videoFit: "cover" });
+    videoRef.current!.style.objectFit = "cover";
+    rerender();
 
-    expect(instances[0]!._canvas).toHaveClass("player-ass-fill");
-    expect(instances[0]!.resize).toHaveBeenCalledWith(true);
+    expect(instances[0]!._canvas).not.toHaveClass("player-ass-fill");
+    expect(instances).toHaveLength(1);
+    expect(instances[0]!.resize).not.toHaveBeenCalled();
   });
 });
 
