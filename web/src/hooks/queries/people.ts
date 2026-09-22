@@ -31,11 +31,11 @@ export function invalidatePersonItemDetails(queryClient: QueryClient, personId: 
   });
 }
 
-const queuedRefreshObservers = new WeakMap<QueryClient, Map<string, () => void>>();
+const personRefreshObservers = new WeakMap<QueryClient, Map<string, () => void>>();
 
-function observeQueuedPersonRefresh(queryClient: QueryClient, id: string) {
-  const refreshes = queuedRefreshObservers.get(queryClient) ?? new Map<string, () => void>();
-  queuedRefreshObservers.set(queryClient, refreshes);
+function observePersonRefresh(queryClient: QueryClient, id: string) {
+  const refreshes = personRefreshObservers.get(queryClient) ?? new Map<string, () => void>();
+  personRefreshObservers.set(queryClient, refreshes);
   refreshes.get(id)?.();
 
   const queryKey = personKeys.detail(id);
@@ -114,6 +114,7 @@ export function usePersonSearch(query: string, limit = 20, enabled = true) {
 type RefreshPersonResult =
   | {
       mode: "admin";
+      id: string;
       person: Person;
     }
   | {
@@ -136,6 +137,7 @@ export function useRefreshPerson(id: string | undefined, isAdmin: boolean) {
       if (isAdmin) {
         return {
           mode: "admin",
+          id,
           person: await adminRefreshPerson(id),
         };
       }
@@ -146,25 +148,29 @@ export function useRefreshPerson(id: string | undefined, isAdmin: boolean) {
       };
     },
     onSuccess: async (result, _variables, personQuery) => {
-      if (result.mode === "admin" && id) {
-        queryClient.setQueryData(personKeys.detail(id), result.person);
-        await Promise.all([
-          queryClient.invalidateQueries({ queryKey: personKeys.detail(id) }),
-          invalidatePersonItemDetails(queryClient, id),
-        ]);
-        toast.success("Person metadata refreshed");
-        return;
-      }
-
-      if (result.mode === "queued" && personQuery) {
-        const refreshedId = result.response.person_id;
-        const current = queryClient.getQueryCache().find({
+      const refreshedId = result.mode === "admin" ? result.id : result.response.person_id;
+      const currentPersonQuery = () =>
+        queryClient.getQueryCache().find({
           queryKey: personKeys.detail(refreshedId),
           exact: true,
         });
-        if (current === personQuery) observeQueuedPersonRefresh(queryClient, refreshedId);
+      if (personQuery && currentPersonQuery() !== personQuery) return;
+
+      if (result.mode === "admin") {
+        queryClient.setQueryData(personKeys.detail(refreshedId), result.person);
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: personKeys.detail(refreshedId) }),
+          invalidatePersonItemDetails(queryClient, refreshedId),
+        ]);
       }
-      toast.success("Person refresh queued");
+
+      // Admin metadata refreshes can still leave an asynchronous photo-cache job.
+      if (personQuery && currentPersonQuery() === personQuery) {
+        observePersonRefresh(queryClient, refreshedId);
+      }
+      toast.success(
+        result.mode === "admin" ? "Person metadata refreshed" : "Person refresh queued",
+      );
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Refresh failed");

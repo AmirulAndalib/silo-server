@@ -12,15 +12,20 @@ import type { ReactNode } from "react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, expect, it, vi } from "vitest";
 
-import { getPerson, refreshPerson } from "@/api/v2/people";
+import { adminRefreshPerson, getPerson, refreshPerson } from "@/api/v2/people";
 import { v2Fixture } from "@/api/v2/testing";
 import { catalogKeys, personKeys } from "@/hooks/queries/keys";
 import { useAuth } from "@/hooks/useAuth";
+import { useIsActingAdmin } from "@/hooks/useIsActingAdmin";
 import PersonDetail from "./PersonDetail";
 
-vi.mock("@/api/v2/people", () => ({ getPerson: vi.fn(), refreshPerson: vi.fn() }));
+vi.mock("@/api/v2/people", () => ({
+  getPerson: vi.fn(),
+  refreshPerson: vi.fn(),
+  adminRefreshPerson: vi.fn(),
+}));
 vi.mock("@/hooks/useAuth", () => ({ useAuth: vi.fn(() => ({ user: null })) }));
-vi.mock("@/hooks/useIsActingAdmin", () => ({ useIsActingAdmin: () => false }));
+vi.mock("@/hooks/useIsActingAdmin", () => ({ useIsActingAdmin: vi.fn(() => false) }));
 vi.mock("@/hooks/queries/catalog", () => ({ useCatalogWindow: () => ({ isLoading: false }) }));
 vi.mock("@/components/ItemGrid", () => ({ default: () => null }));
 
@@ -30,6 +35,7 @@ afterEach(() => {
   for (const client of clients.splice(0)) client.clear();
   vi.useRealTimers();
   vi.clearAllMocks();
+  vi.mocked(useIsActingAdmin).mockReturnValue(false);
 });
 
 it("refreshes cached cast after a person read observes a background photo update", async () => {
@@ -83,6 +89,8 @@ it.each([
   { queueDelay: 33_000, rotateSignature: true },
   { queueDelay: 33_000, rotateSignature: false, coldNavigation: "prefetch" },
   { queueDelay: 33_000, rotateSignature: false, coldNavigation: "mount" },
+  { queueDelay: 33_000, rotateSignature: false, isAdmin: true },
+  { queueDelay: 33_000, rotateSignature: false, coldNavigation: "mount", isAdmin: true },
   {
     queueDelay: 0,
     rotateSignature: false,
@@ -90,10 +98,11 @@ it.each([
     completeBeforeItemLoads: true,
   },
 ])(
-  "observes a queued refresh after $queueDelay ms with signature rotation=$rotateSignature, cold navigation=$coldNavigation, and early completion=$completeBeforeItemLoads",
-  async ({ queueDelay, rotateSignature, coldNavigation, completeBeforeItemLoads }) => {
+  "observes a photo refresh after $queueDelay ms with signature rotation=$rotateSignature, cold navigation=$coldNavigation, early completion=$completeBeforeItemLoads, and admin=$isAdmin",
+  async ({ queueDelay, rotateSignature, coldNavigation, completeBeforeItemLoads, isAdmin }) => {
     vi.useFakeTimers();
     vi.mocked(useAuth).mockReturnValue({ user: { id: 1 } } as ReturnType<typeof useAuth>);
+    vi.mocked(useIsActingAdmin).mockReturnValue(isAdmin ?? false);
     const id = "9007199254740993";
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false, staleTime: 120_000 } },
@@ -115,6 +124,7 @@ it.each([
     client.setQueryData(personKeys.detail(id), person);
     if (!coldNavigation) client.setQueryData(itemKey, item);
     vi.mocked(getPerson).mockResolvedValue(person);
+    vi.mocked(adminRefreshPerson).mockResolvedValue(person);
     vi.mocked(refreshPerson).mockResolvedValue(
       v2Fixture<"POST /api/v2/catalog/people/{id}/refresh">({ status: "queued", person_id: id }),
     );
@@ -128,10 +138,12 @@ it.each([
       </QueryClientProvider>,
     );
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Refresh metadata" }));
+      fireEvent.click(
+        screen.getByRole("button", { name: isAdmin ? "Refresh now" : "Refresh metadata" }),
+      );
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(refreshPerson).toHaveBeenCalledWith(id);
+    expect(isAdmin ? adminRefreshPerson : refreshPerson).toHaveBeenCalledWith(id);
 
     let serverItem = item;
     const photoUrl = "https://images.example.test/new.jpg";

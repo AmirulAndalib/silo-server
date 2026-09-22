@@ -214,29 +214,39 @@ describe("person refresh and cached item credits", () => {
     },
   );
 
-  it("does not start observation when the cache was cleared while queueing", async () => {
-    const { client, fetchMock, wrapper } = setup();
-    let finishQueue!: () => void;
-    const queued = new Promise<Response>((resolve) => {
-      finishQueue = () => resolve(jsonResponse({ status: "queued", person_id: personId }));
-    });
-    fetchMock.mockImplementation(async (input) =>
-      String(input).endsWith("/refresh")
-        ? queued
-        : jsonResponse({ id: personId, name: "Actor", photo_url: oldPhoto }),
-    );
-    const { result } = renderHook(() => useRefreshPerson(personId, false), { wrapper });
-    let request!: Promise<unknown>;
-    act(() => {
-      request = result.current.mutateAsync();
-    });
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    client.clear();
-    await act(async () => {
-      finishQueue();
-      await request;
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(client.getQueryCache().getAll()).toHaveLength(0);
-  });
+  it.each([false, true])(
+    "ignores a refresh completed after cache clearing (admin=%s)",
+    async (isAdmin) => {
+      const { client, fetchMock, wrapper } = setup();
+      let finishQueue!: () => void;
+      const queued = new Promise<Response>((resolve) => {
+        finishQueue = () =>
+          resolve(
+            jsonResponse(
+              isAdmin
+                ? { id: personId, name: "Actor", photo_url: newPhoto }
+                : { status: "queued", person_id: personId },
+            ),
+          );
+      });
+      fetchMock.mockImplementation(async (input) =>
+        String(input).endsWith("/refresh")
+          ? queued
+          : jsonResponse({ id: personId, name: "Actor", photo_url: oldPhoto }),
+      );
+      const { result } = renderHook(() => useRefreshPerson(personId, isAdmin), { wrapper });
+      let request!: Promise<unknown>;
+      act(() => {
+        request = result.current.mutateAsync();
+      });
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      client.clear();
+      await act(async () => {
+        finishQueue();
+        await request;
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(client.getQueryCache().getAll()).toHaveLength(0);
+    },
+  );
 });
