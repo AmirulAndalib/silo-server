@@ -461,10 +461,6 @@ func (h *ItemsHandler) handlePersonItem(w http.ResponseWriter, r *http.Request, 
 		photoURL = compatPresignImage(h.detailSvc, r.Context(), person.PhotoPath, "poster", compatCardImageSize)
 	}
 
-	if photoURL != "" {
-		h.images.RememberSized(routeID, "Primary", photoURL, compatCardImageSize)
-	}
-
 	dto := baseItemDTO{
 		ID:       routeID,
 		Name:     person.Name,
@@ -3512,20 +3508,6 @@ func (h *ItemsHandler) rememberDetailImages(detail upstreamItemDetail) {
 		}
 		if detail.LogoURL != "" {
 			h.images.RememberSized(routeID, "Logo", detail.LogoURL, detailImageSize)
-		}
-	}
-	for _, cast := range detail.Cast {
-		if cast.PhotoURL != "" {
-			if pid, _ := strconv.ParseInt(cast.PersonID, 10, 64); pid > 0 {
-				h.images.RememberSized(h.codec.EncodeIntID(EncodedIDPerson, pid), "Primary", cast.PhotoURL, compatCardImageSize)
-			}
-		}
-	}
-	for _, crew := range detail.Crew {
-		if crew.PhotoURL != "" {
-			if pid, _ := strconv.ParseInt(crew.PersonID, 10, 64); pid > 0 {
-				h.images.RememberSized(h.codec.EncodeIntID(EncodedIDPerson, pid), "Primary", crew.PhotoURL, compatCardImageSize)
-			}
 		}
 	}
 }

@@ -224,11 +224,6 @@ func (h *ImagesHandler) handlePersonImage(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
-	imageSize := compatRequestImageSize(r, imageType)
-	if imageURL, ok := h.images.LookupSized(routeID, imageType, "", imageSize); ok {
-		h.serveImageURL(w, r, imageURL)
-		return
-	}
 	if person == nil {
 		p, err := h.personRepo.Get(r.Context(), personID)
 		if err != nil {
@@ -236,6 +231,14 @@ func (h *ImagesHandler) handlePersonImage(w http.ResponseWriter, r *http.Request
 			return
 		}
 		person = p
+	}
+	// Key the shared cache by the current photo so a replaced photo, which
+	// also rotates the signed tag, never serves the previous photo's URL.
+	cacheRouteID := personImageCacheRouteID(routeID, person.PhotoPath)
+	imageSize := compatRequestImageSize(r, imageType)
+	if imageURL, ok := h.images.LookupSized(cacheRouteID, imageType, "", imageSize); ok {
+		h.serveImageURL(w, r, imageURL)
+		return
 	}
 	// Headshots ride the profile ladder ({500, 300}), not the poster ladder,
 	// which now carries a w780 rung. Resolving them as posters would name a
@@ -247,8 +250,14 @@ func (h *ImagesHandler) handlePersonImage(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "NotFound", "Image not found")
 		return
 	}
-	h.images.RememberSizedUntil(routeID, imageType, imageURL, imageSize, resolvedImage.ExpiresAt)
+	h.images.RememberSizedUntil(cacheRouteID, imageType, imageURL, imageSize, resolvedImage.ExpiresAt)
 	h.serveImageURL(w, r, imageURL)
+}
+
+// personImageCacheRouteID is the ImageCache route key for a person's current
+// photo.
+func personImageCacheRouteID(routeID, photoPath string) string {
+	return routeID + "\x00" + strings.TrimSpace(photoPath)
 }
 
 func (h *ImagesHandler) resolveItemImageURL(ctx context.Context, session *Session, contentID, imageType string, r *http.Request) (catalog.ResolvedImageURL, error) {
