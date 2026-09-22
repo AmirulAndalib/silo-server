@@ -5188,7 +5188,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** One person; viewing queues a provider refresh when one is due. */
+    /** One person; viewing queues a provider refresh when one is due, unless the read is a prefetch. */
     get: operations["getPerson"];
     put?: never;
     post?: never;
@@ -16333,6 +16333,8 @@ export interface components {
       max_sessions_per_account?: number;
       /** @description People search accepts media_scope and filters credits by viewer access */
       people_media_scope?: boolean;
+      /** @description Person reads accept prefetch=true for speculative reads that do not queue a provider refresh */
+      person_prefetch?: boolean;
       /** @enum {string} */
       provider?: "postgres" | "meilisearch";
       /**
@@ -72978,7 +72980,10 @@ export interface operations {
   };
   getPerson: {
     parameters: {
-      query?: never;
+      query?: {
+        /** @description Marks a speculative read, such as warming a cache for a cast list. The read does not queue a provider refresh. */
+        prefetch?: boolean;
+      };
       header: {
         /** @description The household profile acting for this request; it must belong to the authenticated account. */
         "X-Profile-Id": string;

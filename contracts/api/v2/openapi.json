@@ -17316,6 +17316,10 @@
             "description": "People search accepts media_scope and filters credits by viewer access",
             "type": "boolean"
           },
+          "person_prefetch": {
+            "description": "Person reads accept prefetch=true for speculative reads that do not queue a provider refresh",
+            "type": "boolean"
+          },
           "provider": {
             "enum": [
               "postgres",
@@ -111044,6 +111048,17 @@
               "minLength": 1,
               "type": "string"
             }
+          },
+          {
+            "description": "Marks a speculative read, such as warming a cache for a cast list. The read does not queue a provider refresh.",
+            "explode": false,
+            "in": "query",
+            "name": "prefetch",
+            "schema": {
+              "default": false,
+              "description": "Marks a speculative read, such as warming a cache for a cast list. The read does not queue a provider refresh.",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -111153,7 +111168,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "One person; viewing queues a provider refresh when one is due.",
+        "summary": "One person; viewing queues a provider refresh when one is due, unless the read is a prefetch.",
         "tags": [
           "catalog"
         ],
