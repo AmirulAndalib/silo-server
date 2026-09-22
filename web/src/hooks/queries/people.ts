@@ -1,11 +1,26 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { adminRefreshPerson, adminUpdatePerson } from "@/api/v2/people";
-import type { Person, UpdatePersonRequest } from "@/api/types";
+import type { ItemDetail, Person, UpdatePersonRequest } from "@/api/types";
 import { refreshPerson, searchPeople, type PersonRefreshResult } from "@/api/v2/people";
 
 import { personKeys } from "./keys";
+import { isItemDetailQueryKey } from "./mediaSurfaceRefresh";
+
+export function invalidatePersonItemDetails(queryClient: QueryClient, personId: string) {
+  return queryClient.invalidateQueries({
+    predicate: (query) => {
+      const item = query.state.data as ItemDetail | undefined;
+      return (
+        !!item &&
+        isItemDetailQueryKey(query.queryKey, item.content_id) &&
+        (item.cast?.some((credit) => credit.person_id === personId) ||
+          item.crew?.some((credit) => credit.person_id === personId))
+      );
+    },
+  });
+}
 
 export function usePersonSearch(query: string, limit = 20, enabled = true) {
   const normalizedQuery = query.trim();
@@ -53,7 +68,10 @@ export function useRefreshPerson(id: string | undefined, isAdmin: boolean) {
     onSuccess: async (result) => {
       if (result.mode === "admin" && id) {
         queryClient.setQueryData(personKeys.detail(id), result.person);
-        await queryClient.invalidateQueries({ queryKey: personKeys.detail(id) });
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: personKeys.detail(id) }),
+          invalidatePersonItemDetails(queryClient, id),
+        ]);
         toast.success("Person metadata refreshed");
         return;
       }
@@ -84,7 +102,10 @@ export function useUpdatePersonMetadata(id: string | undefined) {
       }
 
       queryClient.setQueryData(personKeys.detail(id), updatedPerson);
-      await queryClient.invalidateQueries({ queryKey: personKeys.detail(id) });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: personKeys.detail(id) }),
+        invalidatePersonItemDetails(queryClient, id),
+      ]);
       toast.success("Person metadata saved");
     },
     onError: (err) => {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, RefreshCw } from "lucide-react";
 
 import { getPerson } from "@/api/v2/people";
@@ -12,7 +12,7 @@ import PageBack from "@/components/PageBack";
 import { Button } from "@/components/ui/button";
 import { useCatalogWindow } from "@/hooks/queries/catalog";
 import { personKeys } from "@/hooks/queries/keys";
-import { useRefreshPerson } from "@/hooks/queries/people";
+import { invalidatePersonItemDetails, useRefreshPerson } from "@/hooks/queries/people";
 import { useAuth } from "@/hooks/useAuth";
 import { useIsActingAdmin } from "@/hooks/useIsActingAdmin";
 import { useDocumentTitle } from "@/hooks/useDocumentTitle";
@@ -24,6 +24,7 @@ type TypeFilter = "all" | "movie" | "series";
 
 export default function PersonDetail() {
   const { id } = useParams<{ id: string }>();
+  const queryClient = useQueryClient();
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
   const [editOpen, setEditOpen] = useState(false);
   const autoRefreshWindowRef = useRef<{ personId: number; until: number } | null>(null);
@@ -54,6 +55,14 @@ export default function PersonDetail() {
   });
 
   useDocumentTitle(person?.name ?? "Person");
+
+  const photoUrl = person?.photo_url;
+  useEffect(() => {
+    // A queued refresh can finish during polling, after the mutation has returned.
+    if (id && photoUrl) {
+      void invalidatePersonItemDetails(queryClient, id);
+    }
+  }, [id, photoUrl, queryClient]);
 
   useEffect(() => {
     if (!person || !user || !isPersonMetadataIncomplete(person)) {
