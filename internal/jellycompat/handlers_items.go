@@ -514,7 +514,7 @@ func (h *ItemsHandler) handlePersonItem(w http.ResponseWriter, r *http.Request, 
 		err := h.personRepo.EnsureAccessible(r.Context(), personID, h.resolveAccessFilter(r.Context(), session))
 		switch {
 		case err == nil:
-			dto.ImageTags = map[string]string{compatImagePrimary: personPrimaryImageTag(h.mapper.imageTagSigner, routeID, person.PhotoThumbhash)}
+			dto.ImageTags = map[string]string{compatImagePrimary: personPrimaryImageTag(h.mapper.imageTagSigner, routeID, person.PhotoPath, person.PhotoThumbhash)}
 			ratio := 2.0 / 3.0
 			dto.PrimaryImageAspectRatio = &ratio
 		case !errors.Is(err, pgx.ErrNoRows):

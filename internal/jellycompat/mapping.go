@@ -264,7 +264,7 @@ func (m *mapper) itemFromDetailWithFields(item upstreamItemDetail, isFavorite bo
 			routeID := m.codec.EncodeIntID(EncodedIDPerson, personID)
 			var primaryTag string
 			if cast.PhotoURL != "" {
-				primaryTag = personPrimaryImageTag(m.imageTagSigner, routeID, cast.PhotoThumbhash)
+				primaryTag = personPrimaryImageTag(m.imageTagSigner, routeID, cast.PhotoPath, cast.PhotoThumbhash)
 			}
 			dto.People = append(dto.People, personDTO{
 				ID:              routeID,
@@ -279,7 +279,7 @@ func (m *mapper) itemFromDetailWithFields(item upstreamItemDetail, isFavorite bo
 			routeID := m.codec.EncodeIntID(EncodedIDPerson, personID)
 			var primaryTag string
 			if crew.PhotoURL != "" {
-				primaryTag = personPrimaryImageTag(m.imageTagSigner, routeID, crew.PhotoThumbhash)
+				primaryTag = personPrimaryImageTag(m.imageTagSigner, routeID, crew.PhotoPath, crew.PhotoThumbhash)
 			}
 			dto.People = append(dto.People, personDTO{
 				ID:              routeID,
@@ -781,18 +781,21 @@ func imageTagSeed(routeID, imageType, size, rawPath, thumbhash string, updatedAt
 // personImageTagSeed is the signed-tag seed for a person headshot. Tags built
 // from it are minted only in responses that already passed a visible-credit
 // check, so a matching tag lets anonymous <img> requests (Jellyfin Web sends no
-// auth on image GETs) load the photo without a session. The thumbhash changes
-// with the photo, so client caches keyed by the tag refresh when it does.
-func personImageTagSeed(routeID, thumbhash string) string {
-	thumbhash = strings.TrimSpace(thumbhash)
-	if thumbhash == "-" {
-		thumbhash = ""
+// auth on image GETs) load the photo without a session. The photo path and
+// thumbhash change with the photo, so a replaced photo gets a new tag and the
+// old one stops authorizing it.
+func personImageTagSeed(routeID, photoPath, thumbhash string) string {
+	normalize := func(v string) string {
+		if v = strings.TrimSpace(v); v == "-" {
+			return ""
+		}
+		return v
 	}
-	return strings.Join([]string{"person", strings.TrimSpace(routeID), "primary", thumbhash}, "\x00")
+	return strings.Join([]string{"person", strings.TrimSpace(routeID), "primary", normalize(photoPath), normalize(thumbhash)}, "\x00")
 }
 
-func personPrimaryImageTag(signer *imageTagSigner, routeID, thumbhash string) string {
-	return signer.Tag(personImageTagSeed(routeID, thumbhash), "")
+func personPrimaryImageTag(signer *imageTagSigner, routeID, photoPath, thumbhash string) string {
+	return signer.Tag(personImageTagSeed(routeID, photoPath, thumbhash), "")
 }
 
 func tagValue(raw string) string {

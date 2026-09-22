@@ -113,7 +113,7 @@ func (h *PersonsHandler) personToDTO(p models.Person) baseItemDTO {
 		Overview: p.Bio,
 	}
 	if p.PhotoPath != "" && p.PhotoPath != "-" {
-		dto.ImageTags = map[string]string{compatImagePrimary: personPrimaryImageTag(h.imageTags, routeID, p.PhotoThumbhash)}
+		dto.ImageTags = map[string]string{compatImagePrimary: personPrimaryImageTag(h.imageTags, routeID, p.PhotoPath, p.PhotoThumbhash)}
 	}
 	return dto
 }

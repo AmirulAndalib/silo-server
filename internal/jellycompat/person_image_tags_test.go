@@ -48,11 +48,11 @@ func TestJellyfinWebPersonPhotoUsesSignedTag(t *testing.T) {
 	detail := m.itemFromDetail(upstreamItemDetail{
 		ContentID: "movie-1", Type: "movie", Title: "Fight Club",
 		Cast: []catalog.CastCredit{
-			{Name: "Brad Pitt", PersonID: "287", PhotoURL: "https://cdn.example.test/287.webp?sig=one", PhotoThumbhash: "thumb-287"},
+			{Name: "Brad Pitt", PersonID: "287", PhotoURL: "https://cdn.example.test/287.webp?sig=one", PhotoThumbhash: "thumb-287", PhotoPath: "tmdb/people/287/profile/original.abc123.webp"},
 			{Name: "No Photo", PersonID: "289"},
 		},
 		Crew: []catalog.CrewCredit{
-			{Name: "Edward Norton", Job: "Producer", PersonID: "288", PhotoURL: "https://cdn.example.test/288.webp?sig=one", PhotoThumbhash: "thumb-288"},
+			{Name: "Edward Norton", Job: "Producer", PersonID: "288", PhotoURL: "https://cdn.example.test/288.webp?sig=one", PhotoThumbhash: "thumb-288", PhotoPath: "tmdb/people/288/profile/original.def456.webp"},
 		},
 	}, false, nil)
 	if len(detail.People) != 3 {
@@ -124,6 +124,20 @@ func TestJellyfinWebPersonPhotoUsesSignedTag(t *testing.T) {
 	people[287] = &models.Person{ID: 287, PhotoPath: "tmdb/people/287/profile/original.new789.webp", PhotoThumbhash: "thumb-287-new"}
 	if rec := request(routeID, castTag, ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("tag for replaced photo = %d", rec.Code)
+	}
+
+	// Without a thumbhash the photo path alone must still rotate the tag.
+	people[288] = &models.Person{ID: 288, PhotoPath: "tmdb/people/288/profile/original.def456.webp", PhotoThumbhash: "-"}
+	noThumbTag := persons.personToDTO(*people[288]).ImageTags["Primary"]
+	if rec := request(otherRouteID, noThumbTag, ""); rec.Code != http.StatusFound {
+		t.Fatalf("tag without thumbhash = %d", rec.Code)
+	}
+	people[288] = &models.Person{ID: 288, PhotoPath: "tmdb/people/288/profile/original.new000.webp", PhotoThumbhash: "-"}
+	if got := persons.personToDTO(*people[288]).ImageTags["Primary"]; got == noThumbTag {
+		t.Fatal("tag did not change when a photo without thumbhash was replaced")
+	}
+	if rec := request(otherRouteID, noThumbTag, ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("tag for replaced photo without thumbhash = %d", rec.Code)
 	}
 
 	h.imageTags = nil

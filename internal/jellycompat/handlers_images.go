@@ -202,7 +202,7 @@ func (h *ImagesHandler) handlePersonImage(w http.ResponseWriter, r *http.Request
 	}
 	var person *models.Person
 	if tag != "" && h.imageTags != nil {
-		if p, err := h.personRepo.Get(r.Context(), personID); err == nil && h.imageTags.Equal(personImageTagSeed(routeID, p.PhotoThumbhash), "", tag) {
+		if p, err := h.personRepo.Get(r.Context(), personID); err == nil && h.imageTags.Equal(personImageTagSeed(routeID, p.PhotoPath, p.PhotoThumbhash), "", tag) {
 			person = p
 		}
 	}
