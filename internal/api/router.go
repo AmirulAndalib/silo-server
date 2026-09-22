@@ -2296,11 +2296,8 @@ func newChiRouter(deps Dependencies) chi.Router {
 	}
 	if adminJobsHandler != nil {
 		v2deps.AdminTaskJobs = adminJobsHandler
-		// Only a store that cannot presign needs the signed streaming route, so
-		// an S3 deployment keeps handing out presigned URLs and never mints a
-		// capability. Both sides share one signer so they cannot disagree.
-		if deps.Config != nil && deps.S3Private == nil {
-			signer := artworkurl.NewJobArtifactSigner(deps.CurrentConfig().Auth.JWTSecret, adminJobArtifactURLTTL)
+		// Both sides share one signer so they cannot disagree.
+		if signer := newAdminJobArtifactSigner(&deps); signer != nil {
 			adminJobsHandler.ArtifactSigner = signer
 			v2deps.AdminJobArtifacts = adminJobsHandler
 			v2deps.AdminJobArtifactSigner = signer
@@ -4463,6 +4460,19 @@ const traktClientIDSettingKey = "watchsync.trakt.client_id"
 // adminJobArtifactURLTTL matches the presigned lifetime an S3 deployment hands
 // out, so the two backends expire a download link on the same schedule.
 const adminJobArtifactURLTTL = 15 * time.Minute
+
+// newAdminJobArtifactSigner returns the signer for the streaming artifact
+// route, or nil when the deployment has no use for it. Only a store that cannot
+// presign needs the route, so an S3 deployment keeps handing out presigned URLs
+// and never mints a capability. A deployment with no operational store has no
+// artifacts to serve, and wiring the route there would advertise downloads
+// through the job capabilities that can never complete.
+func newAdminJobArtifactSigner(deps *Dependencies) *artworkurl.Signer {
+	if deps.Config == nil || deps.S3Private != nil || deps.Blobs.Operational == nil {
+		return nil
+	}
+	return artworkurl.NewJobArtifactSigner(deps.CurrentConfig().Auth.JWTSecret, adminJobArtifactURLTTL)
+}
 
 type traktCollectionAdapter struct {
 	client *metatrakt.Client

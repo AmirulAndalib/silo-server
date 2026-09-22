@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/adminjob"
+	"github.com/Silo-Server/silo-server/internal/blobstore"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/s3client"
 )
 
 // AdminJobArtifactDownload is one job artifact opened for streaming. It lives
@@ -55,6 +57,11 @@ func (h *AdminJobsHandler) OpenAdminJobArtifact(ctx context.Context, id string) 
 		return AdminJobArtifactDownload{}, fmt.Errorf("artifact storage cannot stream")
 	}
 	body, err := streamer.GetObjectStream(ctx, job.ArtifactBucket, job.ArtifactKey)
+	if errors.Is(err, blobstore.ErrNotFound) || errors.Is(err, s3client.ErrNotFound) {
+		// Cleanup or an operator removed the object behind a retained job. That
+		// is permanent, not an outage.
+		return AdminJobArtifactDownload{}, fmt.Errorf("%w: job %s: %w", ErrJobArtifactNotFound, id, err)
+	}
 	if err != nil {
 		return AdminJobArtifactDownload{}, err
 	}

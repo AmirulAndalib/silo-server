@@ -99,6 +99,14 @@ func (h *CatalogSeedHandler) HandleCreateExportJob(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "Catalog export jobs require configured storage")
 		return
 	}
+	// The frozen v1 job projection only presigns, and the streaming artifact
+	// route exists only under v2. On a store that cannot presign, a v1 client
+	// could queue an export it has no way to retrieve, so v1 keeps refusing
+	// exactly as it did before local storage existed.
+	if presigner, ok := h.store.(interface{ SupportsPresign() bool }); ok && !presigner.SupportsPresign() {
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "Catalog export jobs require the private internal S3 bucket")
+		return
+	}
 
 	var req exportCatalogSeedRequest
 	if r.Body != nil && r.ContentLength != 0 {
