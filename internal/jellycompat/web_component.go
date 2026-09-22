@@ -887,9 +887,33 @@ func currentLinkTargetsManagedWebRelease(root string) bool {
 	return webComponentDirectoryReady(targetAbs)
 }
 
-// webNPMRangePattern admits semver ranges only, so an upstream engines value
-// cannot redirect npm exec to a file, Git, or URL package.
-var webNPMRangePattern = regexp.MustCompile(`^[0-9A-Za-z.<>=^~|* -]+$`)
+var (
+	// webNPMComparatorPattern matches one comparator of an npm semver range,
+	// such as >=9.6.4, <11, ^10.x, or 11.0.0-rc.1.
+	webNPMComparatorPattern = regexp.MustCompile(`^(?:<=|>=|<|>|=|~|\^)?v?(?:[0-9]+|[xX*])(?:\.(?:[0-9]+|[xX*])){0,2}(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
+	webNPMOperatorSpacing   = regexp.MustCompile(`(<=|>=|<|>|=|~|\^)\s+`)
+)
+
+// validWebNPMRange reports whether value is shaped like an npm semver range:
+// comparator sets joined by ||, with optional hyphen ranges. It rejects
+// dist-tags and file, Git, or URL specs, so npm exec can only resolve a
+// registry npm release by version. npm still rejects ranges that pass this
+// shape check but are otherwise invalid.
+func validWebNPMRange(value string) bool {
+	for _, set := range strings.Split(webNPMOperatorSpacing.ReplaceAllString(value, "$1"), "||") {
+		// An empty comparator set matches any version, as in npm.
+		fields := strings.Fields(set)
+		for i, field := range fields {
+			if field == "-" && i > 0 && i < len(fields)-1 {
+				continue
+			}
+			if !webNPMComparatorPattern.MatchString(field) {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // webNPMCommand is the npm invocation for one Jellyfin Web checkout.
 type webNPMCommand struct {
@@ -923,7 +947,7 @@ func webInstallNPMCommand(srcDir string) (webNPMCommand, error) {
 	if npmRange == "" {
 		return webNPMCommand{}, nil
 	}
-	if !webNPMRangePattern.MatchString(npmRange) {
+	if !validWebNPMRange(npmRange) {
 		return webNPMCommand{}, fmt.Errorf("unsupported jellyfin-web npm engine range %q", npmRange)
 	}
 	return webNPMCommand{packageSpec: "npm@" + npmRange}, nil
