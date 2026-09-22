@@ -52,6 +52,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/metadata/tmdb"
 	metatrakt "github.com/Silo-Server/silo-server/internal/metadata/trakt"
 	metadatatranslation "github.com/Silo-Server/silo-server/internal/metadata/translation"
+	"github.com/Silo-Server/silo-server/internal/netaccess"
 	"github.com/Silo-Server/silo-server/internal/nodemetrics"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/noderecipe"
@@ -71,6 +72,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/scanqueue"
 	"github.com/Silo-Server/silo-server/internal/secret"
 	"github.com/Silo-Server/silo-server/internal/sections"
+	"github.com/Silo-Server/silo-server/internal/serveridentity"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
@@ -163,13 +165,18 @@ type Dependencies struct {
 	CatalogSearchVectorizer   catalog.CatalogSearchQueryVectorizer
 	// CatalogSearchSettings is the process-lifetime startup snapshot shared by
 	// every native/jellycompat provider and the index maintenance worker.
-	CatalogSearchSettings     *catalog.CatalogSearchSettings
-	RatingsRepo               *catalog.RatingsRepo
-	PersonRepo                *catalog.PersonRepository
-	PersonRefreshQueue        handlers.PersonRefreshQueue
-	PersonRefresher           handlers.PersonRefresher
-	RateLimitMW               *ratelimit.Middleware
-	ClientIPResolver          *clientip.Resolver
+	CatalogSearchSettings *catalog.CatalogSearchSettings
+	RatingsRepo           *catalog.RatingsRepo
+	PersonRepo            *catalog.PersonRepository
+	PersonRefreshQueue    handlers.PersonRefreshQueue
+	PersonRefresher       handlers.PersonRefresher
+	RateLimitMW           *ratelimit.Middleware
+	ClientIPResolver      *clientip.Resolver
+	// NetworkAccess is the ingress-token registry and provider status cache
+	// for network access provider plugins on this host. The token middleware
+	// runs on every native request and connected overlay origins are accepted
+	// by WebSocket handshakes. Nil disables both (tests, worker modes).
+	NetworkAccess             *netaccess.Broker
 	NodeID                    string
 	LogStreamHub              *logstream.Hub
 	RealtimeHub               *notifications.Hub
@@ -193,6 +200,8 @@ type Dependencies struct {
 	MarkerProviderConfig      *markers.ProviderConfigStore
 	MarkerContributionStore   *markers.ContributionStore
 	MarkerContributionService *markers.ContributionService
+	MarkerPopulation          *markers.PopulationService
+	MarkerUpdateNotifier      *playback.MarkerUpdateNotifier
 	WatchProviderService      handlers.WatchProviderService
 	// WatchProviderRegistry is the watchsync registry, used by the admin stats
 	// to list every provider — built-in or plugin-contributed — even when none
@@ -327,6 +336,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 	r := chi.NewRouter()
 
 	useBaseMiddleware(r, deps)
+	if overlay := deps.overlayOrigins(); overlay != nil {
+		handlers.SetWebSocketOverlayOrigins(overlay)
+	}
 
 	// Build the readiness handler with optional S3 check.
 	var s3Checker handlers.S3HealthChecker
@@ -736,12 +748,14 @@ func newChiRouter(deps Dependencies) chi.Router {
 		rootClaimRepo := catalog.NewRootClaimRepository(deps.DB)
 		groupClaimRepo := catalog.NewGroupClaimRepository(deps.DB)
 		literaryRepo := literaryworks.NewRepository(deps.DB)
-		literaryWorkHandler = &handlers.LiteraryWorkHandler{Service: literaryworks.NewService(literaryRepo)}
+		literaryService := literaryworks.NewService(literaryRepo)
+		literaryWorkHandler = &handlers.LiteraryWorkHandler{Service: literaryService}
 		detailSvc = catalog.NewDetailService(itemRepo, episodeRepo, seasonRepo, deps.PersonRepo, fileFetcher)
 		detailSvc.SetFolderRepository(folderRepo)
 		detailSvc.SetRootClaimRepository(rootClaimRepo)
 		detailSvc.SetGroupClaimRepository(groupClaimRepo)
 		detailSvc.SetWorkSummaryProvider(literaryRepo)
+		detailSvc.SetLiteraryWorkLinker(literaryService)
 		detailSvc.SetProbeEnsurer(deps.ProbeEnsurer)
 		detailSvc.SetChapterThumbnailQueuer(deps.ChapterThumbnailQueuer)
 		if deps.ImageResolver != nil {
@@ -762,6 +776,10 @@ func newChiRouter(deps Dependencies) chi.Router {
 		if catalogSearchService != nil {
 			itemsHandler.SetCatalogSearchProvider(catalogSearchService.Provider())
 		}
+		if deps.MarkerPopulation != nil {
+			itemsHandler.MarkerPopulation = deps.MarkerPopulation
+		}
+		itemsHandler.MarkerFileResolver = deps.FileRepo
 		itemsHandler.EventsHub = deps.EventsHub
 		itemsHandler.UserRepo = userRepo
 		if accessGroupStore != nil {
@@ -1210,14 +1228,21 @@ func newChiRouter(deps Dependencies) chi.Router {
 		playbackHandler.CommandTracker = commandTracker
 		playbackHandler.CommandDispatcher = playback.NewCommandDispatcher(deps.SessionMgr, realtimeHub, commandTracker)
 		playbackCommandDispatcher = playbackHandler.CommandDispatcher
-		playbackHandler.IntroAnalyzer = deps.IntroAnalyzer
-		playbackHandler.IntroRepository = deps.IntroRepository
-		playbackHandler.MarkerRegistry = deps.MarkerRegistry
-		playbackHandler.MarkerResolver = deps.MarkerResolver
-		if deps.FileRepo != nil {
-			playbackHandler.MarkerUpserter = deps.FileRepo
+		if deps.IntroAnalyzer != nil {
+			playbackHandler.IntroAnalyzer = deps.IntroAnalyzer
 		}
-		playbackHandler.MarkerUpdateNotifier = playback.NewMarkerUpdateNotifier(deps.SessionMgr, realtimeHub)
+		if deps.IntroRepository != nil {
+			playbackHandler.IntroRepository = deps.IntroRepository
+		}
+		playbackHandler.MarkerRegistry = deps.MarkerRegistry
+		if deps.MarkerPopulation != nil {
+			playbackHandler.MarkerPopulation = deps.MarkerPopulation
+		}
+		if deps.MarkerUpdateNotifier != nil {
+			playbackHandler.MarkerUpdateNotifier = deps.MarkerUpdateNotifier
+		} else {
+			playbackHandler.MarkerUpdateNotifier = playback.NewMarkerUpdateNotifier(deps.SessionMgr, realtimeHub)
+		}
 		// Optimistic remux: a play is never blocked on the H.264 copy-safety
 		// scan, so the scan runs behind the issued plan and the notifier moves
 		// any session that is already stream-copying an unsafe source off that
@@ -1277,6 +1302,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 				watchtogether.NewSuggestionRepository(deps.DB),
 				watchtogether.NewProfileNameResolver(deps.UserStoreProvider),
 			)
+			watchTogetherService.SetPlaybackAttemptStore(playbackHandler.PlanStoreV3)
 			if err := watchTogetherService.SetClusterEventBus(deps.EventBus); err != nil {
 				slog.Warn("watch together cluster synchronization unavailable", "error", err)
 			}
@@ -1285,6 +1311,15 @@ func newChiRouter(deps Dependencies) chi.Router {
 				viewerResolver,
 				roomTokenService,
 			)
+			if deps.UserStoreProvider != nil {
+				watchTogetherHandler.MemberState = watchtogether.NewMemberStateReader(
+					deps.UserStoreProvider,
+					episodeRepo,
+					catalog.NewNextUpRepository(deps.DB, deps.UserStoreProvider),
+				)
+				watchTogetherHandler.Details = detailSvc
+				watchTogetherHandler.MemberStateCatalog = itemRepo
+			}
 		}
 	}
 
@@ -1432,6 +1467,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 		)
 		adminIntroHandler.Settings = settingsRepo
 		adminIntroHandler.FileResolver = deps.FileRepo
+		if deps.MarkerPopulation != nil {
+			adminIntroHandler.OnlineMarkers = deps.MarkerPopulation
+		}
 		if playbackHandler != nil {
 			adminIntroHandler.MarkerUpdateNotifier = playbackHandler.MarkerUpdateNotifier
 		}
@@ -1455,6 +1493,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 			deps.FileRepo, deps.FileRepo, contributor, contributions, notifier, slog.Default(),
 		)
 		markersHandler.BaseContext = deps.AppContext
+		if deps.MarkerPopulation != nil {
+			markersHandler.MarkerPopulation = deps.MarkerPopulation
+		}
 		markersHandler.AuditHistory = deps.FileRepo
 		if itemRepo != nil {
 			markersHandler.Authorizer = &handlers.MediaFileAuthorizer{
@@ -1637,6 +1678,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 		}
 		sections.InstallRecipeDelegate(sectionFetcher)
 		sectionHandler = handlers.NewSectionHandler(sectionRepo, sectionFetcher)
+		if deps.TrendingRefresher != nil {
+			sectionHandler.TrendingRefresher = deps.TrendingRefresher
+		}
 		sectionHandler.CollectionRepo = sectionFetcher.CollectionRepo
 		sectionHandler.FolderRepo = deps.FolderRepo
 		if deps.UserStoreProvider != nil {
@@ -1886,6 +1930,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 			}
 			downloadSvc.SetOfflineDeps(detailSvc, subtitleSource, nil)
 		}
+		if deps.MarkerPopulation != nil {
+			downloadSvc.SetMarkerPopulation(deps.MarkerPopulation)
+		}
 		if deps.ArtifactManager != nil {
 			// Prepare-to-file pipeline (Phase 3): remux/transcode-to-single-file.
 			downloadSvc.SetArtifactManager(deps.ArtifactManager)
@@ -2026,6 +2073,20 @@ func newChiRouter(deps Dependencies) chi.Router {
 	)
 	v2deps := v2Dependencies(deps, authMiddleware, viewerAccessMiddleware, requireActingAdmin, metadataCurationAccess, markerEditAccess, settingsRepo)
 	v2deps.CompatConnectInfo = compatConnectInfoHandler
+	// Server identity is public discovery data, so it reads through the raw
+	// settings repo: a SECRET_KEY rotation must not change who the server is.
+	if deps.DB != nil {
+		v2deps.ServerIdentity = serveridentity.New(catalog.NewServerSettingsRepo(deps.DB))
+	}
+	v2deps.ServerConnections = apiv2.ServerConnections{PublicURL: func() string {
+		if cfg := deps.CurrentConfig(); cfg != nil {
+			return cfg.Server.PublicURL
+		}
+		return ""
+	}}
+	if deps.NetworkAccess != nil {
+		v2deps.ServerConnections.Providers = deps.NetworkAccess.Status
+	}
 	if deps.OpsLogRepo != nil {
 		v2deps.AdminOperationalLogs = deps.OpsLogRepo
 	}
@@ -2040,6 +2101,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 		v2deps.AdminLogsSocket = socket
 		if deps.OnConfigChange != nil {
 			deps.OnConfigChange(func(_, updated *config.Config) { socket.SetPublicOrigin(updated.Server.PublicURL) })
+		}
+		if overlay := deps.overlayOrigins(); overlay != nil {
+			socket.SetOverlayOrigins(overlay)
 		}
 	}
 	if autoscanHandler != nil {
@@ -2143,6 +2207,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 			if deps.OnConfigChange != nil {
 				deps.OnConfigChange(func(_, updated *config.Config) { socket.SetPublicOrigin(updated.Server.PublicURL) })
 			}
+			if overlay := deps.overlayOrigins(); overlay != nil {
+				socket.SetOverlayOrigins(overlay)
+			}
 		}
 		// Raw v2 delivery shares the byte-protocol handlers; fonts use the typed
 		// service. Both retain token-carried reconstruction and deny markers.
@@ -2218,12 +2285,28 @@ func newChiRouter(deps Dependencies) chi.Router {
 		v2deps.WatchTogetherPolicy = watchTogetherHandler
 		v2deps.WatchTogetherJoin = watchTogetherHandler
 		v2deps.WatchTogetherSelection = watchTogetherHandler
+		v2deps.WatchTogetherSourceFallback = watchTogetherHandler
+		v2deps.WatchTogetherStage = watchTogetherHandler
+		v2deps.WatchTogetherStart = watchTogetherHandler
+		v2deps.WatchTogetherStop = watchTogetherHandler
+		v2deps.WatchTogetherSelectionMode = watchTogetherHandler
+		if watchTogetherHandler.MemberState != nil && watchTogetherHandler.MemberStateCatalog != nil {
+			v2deps.WatchTogetherMemberState = watchTogetherHandler
+		}
+		if watchTogetherHandler.MemberState != nil && watchTogetherHandler.Details != nil {
+			v2deps.WatchTogetherPicker = watchTogetherHandler
+		}
+		v2deps.WatchTogetherCapability = watchTogetherHandler
 		v2deps.WatchTogetherCreate = watchTogetherHandler
 		if deps.RedisClient != nil && sessionRepo != nil && userRepo != nil {
 			socket := handlers.NewWatchTogetherSocketV2(watchTogetherHandler, watchtogether.NewRoomSocketCredentialStore(deps.RedisClient), sessionRepo, userRepo, viewerResolver, checkPrimaryProfile, deps.PublicURL)
 			v2deps.WatchTogetherSocket = socket
+			playbackHandler.WatchTogetherAvailable = true
 			if deps.OnConfigChange != nil {
 				deps.OnConfigChange(func(_, updated *config.Config) { socket.SetPublicOrigin(updated.Server.PublicURL) })
+			}
+			if overlay := deps.overlayOrigins(); overlay != nil {
+				socket.SetOverlayOrigins(overlay)
 			}
 		}
 	}
@@ -2236,6 +2319,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 			v2deps.EventsSocket = socket
 			if deps.OnConfigChange != nil {
 				deps.OnConfigChange(func(_, updated *config.Config) { socket.SetPublicOrigin(updated.Server.PublicURL) })
+			}
+			if overlay := deps.overlayOrigins(); overlay != nil {
+				socket.SetOverlayOrigins(overlay)
 			}
 		}
 	}
@@ -2339,6 +2425,11 @@ func newChiRouter(deps Dependencies) chi.Router {
 		v2deps.AdminNodesRead = nodeHandler
 		v2deps.AdminNodeCommands = nodeHandler
 		v2deps.AdminNodeReload = nodeHandler
+		// Network access admin operations fan out to every enabled proxy node
+		// over its bearer routes, the same way force-reload does.
+		if deps.PluginService != nil {
+			deps.PluginService.SetNetworkAccessNodes(nodeHandler)
+		}
 		if deps.DB != nil {
 			nodeHandler.SetConfigurationStore(nodepool.NewAdminConfigurationStore(deps.DB))
 			v2deps.AdminNodeConfiguration = nodeHandler
@@ -2402,6 +2493,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 		v2deps.AdminPluginConfiguration = v2PluginHandler
 		v2deps.AdminPluginLifecycle = v2PluginHandler
 		v2deps.AdminPluginUploads = v2PluginHandler
+	}
+	if deps.PluginService != nil {
+		v2deps.NetworkAccess = deps.PluginService
 	}
 	if deps.TaskManager != nil && deps.DB != nil {
 		v2deps.AdminTasks = deps.TaskManager
@@ -4141,6 +4235,15 @@ func newChiRouter(deps Dependencies) chi.Router {
 	return r
 }
 
+// overlayOrigins returns the source of connected overlay origins the
+// WebSocket handshakes accept, or nil when network access is not wired.
+func (d Dependencies) overlayOrigins() handlers.OverlayOriginSource {
+	if d.NetworkAccess == nil || d.NetworkAccess.Status == nil {
+		return nil
+	}
+	return d.NetworkAccess.Status.ConnectedOrigins
+}
+
 // useBaseMiddleware mounts the middleware chain every native request passes
 // through, in order. It is factored out of NewRouter so a test can drive the
 // real chain over a real socket: re-declaring the stack in a test would let the
@@ -4153,6 +4256,13 @@ func useBaseMiddleware(r chi.Router, deps Dependencies) {
 	// Client IP resolution must run before request logging.
 	if deps.ClientIPResolver != nil {
 		r.Use(clientip.Middleware(deps.ClientIPResolver))
+	}
+
+	// Ingress token from network access provider plugins: validated and
+	// stripped before anything can log or forward it; an unknown token is
+	// refused outright. Requests without it stay on the default access path.
+	if deps.NetworkAccess != nil {
+		r.Use(netaccess.Middleware(deps.NetworkAccess.Registry))
 	}
 
 	r.Use(apimw.RequestLogger(deps.NodeID))
@@ -4638,6 +4748,7 @@ func v2Dependencies(
 	}
 	if settings != nil {
 		out.DemoSettings = settings
+		out.CatalogSettings = settings
 	}
 	if deps.RateLimitMW != nil {
 		out.RateLimit = deps.RateLimitMW.Handler

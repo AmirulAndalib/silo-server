@@ -102,6 +102,14 @@ type Dependencies struct {
 	WatchTogetherPolicy             WatchTogetherPolicyService
 	WatchTogetherJoin               WatchTogetherJoinService
 	WatchTogetherSelection          WatchTogetherSelectionService
+	WatchTogetherSourceFallback     WatchTogetherSourceFallbackService
+	WatchTogetherStage              WatchTogetherStageService
+	WatchTogetherStart              WatchTogetherStartService
+	WatchTogetherStop               WatchTogetherStopService
+	WatchTogetherSelectionMode      WatchTogetherSelectionModeService
+	WatchTogetherMemberState        WatchTogetherMemberStateService
+	WatchTogetherPicker             WatchTogetherPickerService
+	WatchTogetherCapability         WatchTogetherCapabilityService
 	WatchTogetherSuggestions        WatchTogetherSuggestionService
 	AdminSectionSettingsWrite       AdminSectionSettingsWriteService
 	AdminDashboardStats             AdminDashboardStatsService
@@ -134,6 +142,9 @@ type Dependencies struct {
 	AdminLogsSocket                 AdminLogsSocketService
 	PlaybackControlSocket           PlaybackControlSocketService
 	EventsCapability                EventsCapabilityService
+	NetworkAccess                   NetworkAccessService
+	ServerIdentity                  ServerIdentityService
+	ServerConnections               ServerConnections
 	NotificationDestinationCreate   NotificationDestinationCreateService
 	AdminUnmatchedFiles             AdminUnmatchedFilesService
 	AdminCatalogImages              AdminCatalogImagesService
@@ -244,6 +255,9 @@ type Dependencies struct {
 	// DemoSettings reads the demo.enabled setting; nil means demo mode is
 	// never on.
 	DemoSettings apimw.DemoSettingsReader
+	// CatalogSettings reads the server settings catalog reads consult per
+	// request (catalog.scope_versions_to_library); nil means every default.
+	CatalogSettings CatalogSettingsReader
 	// RateLimit is the generic authenticated-route limiter.
 	RateLimit func(http.Handler) http.Handler
 	// CursorSecret keys pagination cursors. It must be shared by every replica
@@ -1005,6 +1019,12 @@ type MediaRequestService interface {
 	BrowseGenre(ctx context.Context, viewer mediarequests.Viewer, slug string, mediaType mediarequests.MediaType, sort string, page int) (*mediarequests.DiscoverBrowseResponse, error)
 }
 
+// CatalogSettingsReader is the slice of the server settings store catalog
+// reads consult.
+type CatalogSettingsReader interface {
+	Get(ctx context.Context, key string) (string, error)
+}
+
 // CatalogAccessService is the slice of *handlers.ItemsHandler every catalog
 // read uses to resolve the viewer's access filter.
 type CatalogAccessService interface {
@@ -1049,7 +1069,7 @@ type MetadataAIService interface {
 // PeopleService is the slice of *handlers.PeopleHandler the people
 // operations use.
 type PeopleService interface {
-	SearchPeople(ctx context.Context, query string, limit int) ([]handlers.PersonView, error)
+	SearchPeopleScoped(ctx context.Context, query string, limit int, mediaScope string, filter mediacatalog.AccessFilter) ([]handlers.PersonView, error)
 	Person(ctx context.Context, id int64) (handlers.PersonView, error)
 	RefreshPerson(ctx context.Context, userID int, id int64) error
 }

@@ -36,6 +36,12 @@ const (
 // nothing about whether any optional step was configured.
 const SetupCompletedSettingKey = "setup.completed"
 
+// CatalogScopeVersionsToLibrarySettingKey makes a library-scoped catalog read
+// (library_id on the v2 item, versions, and episode operations) return only
+// the files stored in that library. Off, the default, keeps every accessible
+// version of an item visible no matter which library it was opened from.
+const CatalogScopeVersionsToLibrarySettingKey = "catalog.scope_versions_to_library"
+
 // Shared server-setting keys used by playback and prepared-download policy
 // readers. Keep them here with the effective admin-setting defaults.
 const (
@@ -102,8 +108,9 @@ var adminSettingDefaults = map[string]string{
 	"metadata.cache_images":                "true",
 	"artwork.storage_backend":              "auto",
 	"artwork.local_path":                   "/var/lib/silo/artwork",
-	"markers.mode":                         "local",
-	"markers.lazy_playback":                "false",
+	"markers.mode":                         "both",
+	"markers.lazy_playback":                "true",
+	"markers.online_storage":               "stored",
 
 	"playback.ffmpeg_path":                           "",
 	playbackTranscodeDirSettingKey:                   DefaultTranscodeDir,
@@ -122,6 +129,7 @@ var adminSettingDefaults = map[string]string{
 	chapterThumbnailSoftwareToneMapKey:               "false",
 	PlaybackTranscodeHardwareToneMapSettingKey:       "false",
 	PlaybackTranscodeSoftwareToneMapSettingKey:       "false",
+	CatalogScopeVersionsToLibrarySettingKey:          "false",
 	"playback.watched_threshold":                     "90",
 	"playback.min_resume_threshold":                  "5",
 	Allow4KTranscodeSettingKey:                       "false",
@@ -344,7 +352,7 @@ func NormalizeAdminSetting(key, raw string) (string, error) {
 	switch key {
 	case "metadata.cache_images", "playback.transcode_enabled",
 		chapterThumbnailSoftwareToneMapKey, PlaybackTranscodeHardwareToneMapSettingKey,
-		PlaybackTranscodeSoftwareToneMapSettingKey,
+		PlaybackTranscodeSoftwareToneMapSettingKey, CatalogScopeVersionsToLibrarySettingKey,
 		Allow4KTranscodeSettingKey, "enable_transcode_throttle", "audiobookshelf_compat.enabled",
 		"jellyfin_compat.enabled", "jellyfin_compat.web_enabled", "recommendations.enabled",
 		"subtitle_ai.enabled", "subtitle_ai.transcribe_enabled", "metadata_ai.enabled",

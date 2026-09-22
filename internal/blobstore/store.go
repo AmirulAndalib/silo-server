@@ -1,8 +1,9 @@
 // Package blobstore stores logical object keys in local or S3 storage. It backs
-// every blob Silo owns: artwork, branding assets, intro/credit markers, chapter
-// thumbnails, downloaded subtitles, diagnostic bundles, job artifacts, and
-// profile avatars. Callers own their key namespaces; see docs/architecture/
-// blob-storage.md for the reserved prefixes that keep them apart.
+// artwork, branding assets, intro/credit markers, chapter thumbnails, and
+// profile avatars. Downloaded subtitles, diagnostic bundles, and job artifacts
+// still use bucket-oriented code and move onto it in later changes. Callers own
+// their key namespaces; see docs/architecture/blob-storage.md for the reserved
+// prefixes that keep them apart.
 package blobstore
 
 import (
