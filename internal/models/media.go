@@ -83,6 +83,7 @@ type MediaFile struct {
 	RecapEnd                     *float64
 	PreviewStart                 *float64
 	PreviewEnd                   *float64
+	MarkerSegments               []MarkerSegment // JSONB; legacy bounds expose the first occurrence per kind
 	MarkersSource                *string
 	MarkersConfidence            *float64
 	IntroMarkersSource           *string
@@ -450,17 +451,18 @@ type AudioTrack struct {
 
 // SubtitleTrack represents an embedded subtitle track stored as JSONB.
 type SubtitleTrack struct {
-	Index           int    `json:"index"`
-	Language        string `json:"language"`
-	Codec           string `json:"codec"`
-	Title           string `json:"title,omitempty"`
-	EmbeddedTitle   string `json:"embedded_title,omitempty"`
-	Resolution      string `json:"resolution,omitempty"`
-	Forced          bool   `json:"forced"`
-	Default         bool   `json:"default"`
-	HearingImpaired bool   `json:"hearing_impaired"`
-	External        bool   `json:"external"`
-	FileName        string `json:"file_name,omitempty"`
+	ContainerTrackID string `json:"container_track_id,omitempty"`
+	Index            int    `json:"index"`
+	Language         string `json:"language"`
+	Codec            string `json:"codec"`
+	Title            string `json:"title,omitempty"`
+	EmbeddedTitle    string `json:"embedded_title,omitempty"`
+	Resolution       string `json:"resolution,omitempty"`
+	Forced           bool   `json:"forced"`
+	Default          bool   `json:"default"`
+	HearingImpaired  bool   `json:"hearing_impaired"`
+	External         bool   `json:"external"`
+	FileName         string `json:"file_name,omitempty"`
 }
 
 // ExternalSubtitle represents a sidecar subtitle file stored as JSONB.
@@ -571,16 +573,19 @@ type AudiobookSeriesMembership struct {
 
 // MediaItem represents a row in the media_items table.
 type MediaItem struct {
-	ContentID                    string // Sonyflake ID (PK)
-	Type                         string // movie, series
-	Title                        string
-	SortTitle                    string
-	DefaultMetadataLanguage      string
-	OriginalTitle                string
-	Year                         int
-	Genres                       []string
-	ContentRating                string // PG-13, TV-MA
-	Runtime                      int    // minutes
+	ContentID               string // Sonyflake ID (PK)
+	Type                    string // movie, series
+	Title                   string
+	SortTitle               string
+	DefaultMetadataLanguage string
+	OriginalTitle           string
+	Year                    int
+	Genres                  []string
+	ContentRating           string // PG-13, TV-MA
+	Runtime                 int    // minutes
+	// AudiobookDurationSeconds is an exact transient duration overlay loaded
+	// from active audiobook file stats for protocol adapters that use seconds.
+	AudiobookDurationSeconds     int
 	Overview                     string
 	Tagline                      string
 	RatingIMDB                   *float64
