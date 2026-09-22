@@ -78,23 +78,33 @@ func (s *Service) handleClusterEvent(event cache.Event) {
 		}
 		s.mu.Lock()
 		live := s.rooms[incoming.RoomID]
-		members := make([]memberState, 0)
+		hasViewers := false
 		if live != nil && live.room.Phase != RoomPhaseEnded {
 			for _, member := range live.members {
 				if member != nil && member.connection != nil {
-					members = append(members, *member)
+					hasViewers = true
+					break
 				}
 			}
 		}
 		s.mu.Unlock()
-		for _, member := range members {
-			memberCtx, memberCancel := context.WithTimeout(context.Background(), 2*time.Second)
-			rows, err := s.suggestions.ListSuggestions(memberCtx, incoming.RoomID, member.userID, member.profileID)
-			memberCancel()
-			if err == nil {
-				s.runDispatches([]snapshotDispatch{{conn: member.connection, payload: map[string]any{clusterMessageTypeKey: suggestionsUpdateType, "suggestions": rows}}})
-			}
+		if !hasViewers {
+			return
 		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		rows, err := s.suggestions.ListSuggestions(ctx, incoming.RoomID, 0, "")
+		cancel()
+		if err != nil {
+			return
+		}
+		s.mu.Lock()
+		if s.rooms[incoming.RoomID] != live {
+			s.mu.Unlock()
+			return
+		}
+		dispatches := s.prepareSuggestionDispatchesLocked(live, rows)
+		s.mu.Unlock()
+		s.runDispatches(dispatches)
 		return
 	}
 	if event.Type != "watch_together_room_state" {

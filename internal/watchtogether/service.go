@@ -2531,6 +2531,9 @@ func winnerFrom(ordered []Suggestion) (Suggestion, error) {
 }
 
 func (s *Service) prepareSuggestionDispatchesLocked(live *liveRoom, suggestions []Suggestion) []snapshotDispatch {
+	if live == nil || live.room.Phase == RoomPhaseEnded {
+		return nil
+	}
 	// Strip voted_by_me from broadcast since it is relative to the requester.
 	// Clients merge vote state from their local knowledge on receipt.
 	broadcast := make([]Suggestion, len(suggestions))
@@ -2547,7 +2550,7 @@ func (s *Service) prepareSuggestionDispatchesLocked(live *liveRoom, suggestions 
 		dispatches = append(dispatches, snapshotDispatch{
 			conn: member.connection,
 			payload: map[string]any{
-				clusterMessageTypeKey: "suggestions_update",
+				clusterMessageTypeKey: suggestionsUpdateType,
 				"suggestions":         broadcast,
 			},
 		})

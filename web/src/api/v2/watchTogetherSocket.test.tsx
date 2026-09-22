@@ -11,7 +11,14 @@ import {
 } from "@/api/client";
 import { mintRoomSocketTicket } from "./watchTogetherSocket";
 import { useWatchTogetherRoomConnection } from "@/player/hooks/useWatchTogetherRoomConnection";
-import { getWatchTogetherRoom, type WatchTogetherRoomSnapshot } from "@/lib/watchTogether";
+import {
+  getWatchTogetherRoom,
+  listWatchTogetherSuggestions,
+  voteWatchTogetherSuggestion,
+  unvoteWatchTogetherSuggestion,
+  type WatchTogetherRoomSnapshot,
+  type WatchTogetherSuggestion,
+} from "@/lib/watchTogether";
 const AuthUpdates = createContext(0);
 vi.mock("@/hooks/useAuth", () => ({ useOptionalAuth: () => useContext(AuthUpdates) }));
 vi.mock("@/lib/watchTogether", async (importOriginal) => ({
@@ -21,6 +28,8 @@ vi.mock("@/lib/watchTogether", async (importOriginal) => ({
     room_access_token: "room-proof",
   })),
   listWatchTogetherSuggestions: vi.fn(async () => ({ suggestions: [] })),
+  voteWatchTogetherSuggestion: vi.fn(),
+  unvoteWatchTogetherSuggestion: vi.fn(),
 }));
 class RoomSocket extends EventTarget {
   static CONNECTING = 0;
@@ -582,4 +591,61 @@ it("accepts an equal-generation HTTP read started after the last socket snapshot
   });
   view.rerender({ proof: "new-proof" });
   await waitFor(() => expect(view.result.current.room?.attached_session_id).toBe("fresh-session"));
+});
+
+it("keeps personalized HTTP votes when common socket rows change tallies or suggestions", async () => {
+  const suggestion = {
+    id: "suggestion-a",
+    room_id: "room",
+    vote_count: 1,
+    voted_by_me: true,
+  } as WatchTogetherSuggestion;
+  vi.mocked(listWatchTogetherSuggestions).mockResolvedValueOnce({ suggestions: [suggestion] });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => ticket()),
+  );
+  const view = renderHook(() =>
+    useWatchTogetherRoomConnection({ roomId: "room", roomToken: "room-proof" }),
+  );
+  await waitFor(() => expect(RoomSocket.all).toHaveLength(1));
+  const socket = RoomSocket.all[0]!;
+  act(() => {
+    socket.open();
+    socket.message({
+      type: "suggestions_update",
+      suggestions: [
+        { ...suggestion, vote_count: 2, voted_by_me: false },
+        { ...suggestion, id: "suggestion-b", voted_by_me: false },
+      ],
+    });
+  });
+  expect(
+    view.result.current.suggestions.map((row) => [row.id, row.vote_count, row.voted_by_me]),
+  ).toEqual([
+    ["suggestion-a", 2, true],
+    ["suggestion-b", 1, false],
+  ]);
+  vi.mocked(unvoteWatchTogetherSuggestion).mockResolvedValueOnce({
+    suggestions: [{ ...suggestion, vote_count: 1, voted_by_me: false }],
+  });
+  await act(() => view.result.current.unvote(suggestion.id));
+  act(() =>
+    socket.message({
+      type: "suggestions_update",
+      suggestions: [{ ...suggestion, vote_count: 2, voted_by_me: false }],
+    }),
+  );
+  expect(view.result.current.suggestions[0]?.voted_by_me).toBe(false);
+  vi.mocked(voteWatchTogetherSuggestion).mockResolvedValueOnce({ suggestions: [suggestion] });
+  await act(() => view.result.current.vote(suggestion.id));
+  act(() =>
+    socket.message({
+      type: "suggestions_update",
+      suggestions: [{ ...suggestion, vote_count: 3, voted_by_me: false }],
+    }),
+  );
+  expect(view.result.current.suggestions[0]).toMatchObject({ vote_count: 3, voted_by_me: true });
+  act(() => socket.message({ type: "suggestions_update", suggestions: [] }));
+  expect(view.result.current.suggestions).toEqual([]);
 });
