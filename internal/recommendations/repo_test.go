@@ -2,6 +2,7 @@ package recommendations
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -282,5 +283,56 @@ func assertQueryTermsInOrder(t *testing.T, query string, terms ...string) {
 			t.Fatalf("query term %q missing or out of order in query:\n%s", term, query)
 		}
 		searchFrom += idx + len(term)
+	}
+}
+
+func TestRecommendationCacheQueriesStoreGlobalRowsAsNull(t *testing.T) {
+	// GlobalCacheUserID is the sentinel the worker/reader pass for global
+	// (non-personalized) rows. It must reach the row as NULL so the users(id)
+	// foreign key added in 20260912231023_user_fk_integrity does not reject it
+	// (issue #1261): no users row has id 0, so a literal 0 fails with 23503.
+	if GlobalCacheUserID != 0 {
+		t.Fatalf("GlobalCacheUserID = %d, expected 0", GlobalCacheUserID)
+	}
+
+	upsert := strings.Join(strings.Fields(upsertRecommendationCacheQuery), " ")
+	// The sentinel is mapped to NULL, and the conflict target is the identity
+	// index (NULLS NOT DISTINCT) so a NULL-owned row still upserts in place.
+	for _, want := range []string{
+		"VALUES (NULLIF($1, 0), $2, $3, $4, $5, $6::timestamptz, NOW())",
+		"ON CONFLICT (user_id, profile_id, rec_type, source_item_id) DO UPDATE",
+	} {
+		if !strings.Contains(upsert, want) {
+			t.Fatalf("upsert query missing %q: %s", want, upsert)
+		}
+	}
+	if strings.Contains(upsert, "VALUES ($1,") {
+		t.Fatalf("upsert must not insert the raw sentinel into user_id: %s", upsert)
+	}
+
+	// Reads must match the stored NULL for global rows and keep an indexable
+	// predicate: IS NOT DISTINCT FROM forces a sequential scan.
+	for _, tc := range []struct {
+		name      string
+		userID    int
+		predicate string
+		args      []any
+	}{
+		{"global", GlobalCacheUserID, "AND user_id IS NULL", []any{"", RecTypePopular, ""}},
+		{"account", 7, "AND user_id = $4", []any{"", RecTypePopular, "", 7}},
+	} {
+		query, args := recommendationCacheLookup(tc.userID, "", RecTypePopular, "")
+		get := strings.Join(strings.Fields(query), " ")
+		if !strings.HasSuffix(get, tc.predicate) || strings.Contains(get, "DISTINCT") {
+			t.Fatalf("%s lookup has wrong owner predicate: %s", tc.name, get)
+		}
+		if fmt.Sprint(args) != fmt.Sprint(tc.args) {
+			t.Fatalf("%s lookup args = %v, want %v", tc.name, args, tc.args)
+		}
+	}
+
+	samplers := strings.Join(strings.Fields(listCachedGenreSamplersQuery), " ")
+	if !strings.Contains(samplers, "WHERE user_id IS NULL AND profile_id = $1") {
+		t.Fatalf("genre sampler query must read NULL-owned global rows: %s", samplers)
 	}
 }
