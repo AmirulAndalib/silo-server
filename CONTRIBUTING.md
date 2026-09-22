@@ -78,7 +78,7 @@ make embed-stub
 go build ./...
 gofmt -l .                      # must print nothing
 go vet ./...
-golangci-lint run --new-from-merge-base="origin/main" ./...
+make lint-changed                   # BASE_REF=origin/<pr-base> when not main
 make test-go
 
 # Web
@@ -93,13 +93,28 @@ make test-web
 # Generated contracts, fixtures, and docs hygiene
 make verify-settings-bindings-all
 make verify-playback-fixtures
+make verify-route-inventory
+make verify-migration-ledger
+make verify-scenario-catalogs
+make verify-offline-routes
+make verify-apiv2-openapi
+make verify-apiv2-contract          # BASE_REF=origin/<pr-base> when not main
+make verify-apiv2-fixtures
+go test -count=1 -run '^TestCommittedArtifactMatchesRouter$' ./internal/apiv2/
 make verify-local-paths
 ```
 
+Touching `internal/apiv2` registrations? Run `make apiv2-openapi` and
+`make apiv2-fixtures` and commit what they write; the gates above fail on a
+stale artifact or fixture tree.
+
 `make lint` runs `golangci-lint` over the whole tree and reports inherited
 findings the repository does not pass yet; CI only gates the lines your branch
-changed, which is what the `--new-from-merge-base` form checks. Do not add to
-the inherited findings.
+changed. `make lint-changed` checks exactly those lines, and it analyzes only
+the packages your branch touched, so it takes seconds where a cold run over
+`./...` takes minutes of every core. Do not add to the inherited findings.
+Never pass `--allow-parallel-runners`: concurrent runs queue behind one
+another on purpose.
 
 Summarize the relevant commands and results in the pull request. Name required
 checks that were skipped or failed, and include short output excerpts only when

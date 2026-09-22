@@ -6,13 +6,14 @@ import { cn } from "@/lib/utils";
 
 /**
  * CollapsibleDiagnosticsSection renders an expandable administrative diagnostics panel
- * displaying a severity icon, title, description, and status count, error indicator, or loading placeholder.
+ * displaying a severity icon, title, description, and status count, error indicator, or a
+ * placeholder while the count is not loaded yet (never fetched or still loading).
  */
 export function CollapsibleDiagnosticsSection({
   title,
   description,
   count,
-  isLoading,
+  countPending,
   isError,
   icon,
   iconClassName,
@@ -23,7 +24,7 @@ export function CollapsibleDiagnosticsSection({
   title: string;
   description: string;
   count: number;
-  isLoading?: boolean;
+  countPending?: boolean;
   isError?: boolean;
   icon: ReactNode;
   iconClassName?: string;
@@ -51,15 +52,15 @@ export function CollapsibleDiagnosticsSection({
           <h2 className="text-sm font-semibold tracking-wide">{title}</h2>
           <p className="text-muted-foreground text-xs leading-relaxed">{description}</p>
         </div>
-        {isLoading ? (
+        {countPending ? (
           open ? (
             <Badge variant="secondary" className="text-[11px] tabular-nums">
-              <span className="sr-only">Loading count</span>
+              <span className="sr-only">Count not loaded</span>
               <span aria-hidden="true">&mdash;</span>
             </Badge>
           ) : (
             <div className="text-muted-foreground text-2xl leading-none font-bold tabular-nums">
-              <span className="sr-only">Loading count</span>
+              <span className="sr-only">Count not loaded</span>
               <span aria-hidden="true">&mdash;</span>
             </div>
           )
