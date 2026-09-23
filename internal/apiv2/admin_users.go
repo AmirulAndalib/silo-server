@@ -18,6 +18,7 @@ type EffectivePolicy struct {
 	MaxPlaybackQuality       string       `json:"max_playback_quality" doc:"Playback ceiling; empty means none" example:"1080p"`
 	MaxStreams               int          `json:"max_streams" doc:"Concurrent stream limit; 0 means unlimited" example:"2"`
 	MaxTranscodes            int          `json:"max_transcodes" doc:"Concurrent transcode limit; 0 means unlimited" example:"0"`
+	MaxStreamBitrateKbps     int          `json:"max_stream_bitrate_kbps" doc:"Per-stream bitrate limit in kbps; 0 means unlimited" example:"0"`
 	TranscodeAllowed         bool         `json:"transcode_allowed" example:"true"`
 	AudioTranscodeAllowed    bool         `json:"audio_transcode_allowed" example:"false"`
 	DownloadAllowed          bool         `json:"download_allowed" example:"true"`
@@ -39,6 +40,7 @@ type AdminUser struct {
 	MaxPlaybackQuality       *string         `json:"max_playback_quality" nullable:"true" doc:"Playback ceiling override; null inherits, empty string means no ceiling" example:"1080p"`
 	MaxStreams               *int            `json:"max_streams" nullable:"true" doc:"Stream limit override; null inherits, 0 means unlimited" example:"2"`
 	MaxTranscodes            *int            `json:"max_transcodes" nullable:"true" doc:"Transcode limit override; null inherits, 0 means unlimited" example:"0"`
+	MaxStreamBitrateKbps     *int            `json:"max_stream_bitrate_kbps" nullable:"true" doc:"Per-stream bitrate override in kbps; null inherits, 0 means unlimited" example:"0"`
 	TranscodeAllowed         *bool           `json:"transcode_allowed" nullable:"true" doc:"Override; null inherits" example:"true"`
 	AudioTranscodeAllowed    *bool           `json:"audio_transcode_allowed" nullable:"true" doc:"Override; null inherits" example:"false"`
 	MaxProfiles              int             `json:"max_profiles" doc:"Household profile limit" example:"5"`
@@ -155,6 +157,7 @@ func adminUserFromView(v handlers.AdminUserView) AdminUser {
 		MaxPlaybackQuality:       v.MaxPlaybackQuality,
 		MaxStreams:               v.MaxStreams,
 		MaxTranscodes:            v.MaxTranscodes,
+		MaxStreamBitrateKbps:     v.MaxStreamBitrateKbps,
 		TranscodeAllowed:         v.TranscodeAllowed,
 		AudioTranscodeAllowed:    v.AudioTranscodeAllowed,
 		MaxProfiles:              v.MaxProfiles,
@@ -166,6 +169,7 @@ func adminUserFromView(v handlers.AdminUserView) AdminUser {
 			MaxPlaybackQuality:       v.EffectivePolicy.MaxPlaybackQuality,
 			MaxStreams:               v.EffectivePolicy.MaxStreams,
 			MaxTranscodes:            v.EffectivePolicy.MaxTranscodes,
+			MaxStreamBitrateKbps:     v.EffectivePolicy.MaxStreamBitrateKbps,
 			TranscodeAllowed:         v.EffectivePolicy.TranscodeAllowed,
 			AudioTranscodeAllowed:    v.EffectivePolicy.AudioTranscodeAllowed,
 			DownloadAllowed:          v.EffectivePolicy.DownloadAllowed,

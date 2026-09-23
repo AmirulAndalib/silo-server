@@ -479,6 +479,11 @@
           "max_playback_quality": {
             "type": "string"
           },
+          "max_stream_bitrate_kbps": {
+            "description": "Per-stream bitrate ceiling in kbps; 0 means unlimited",
+            "format": "int64",
+            "type": "integer"
+          },
           "max_streams": {
             "format": "int64",
             "type": "integer"
@@ -516,6 +521,7 @@
           "audio_transcode_allowed",
           "max_streams",
           "max_transcodes",
+          "max_stream_bitrate_kbps",
           "allowed_permissions",
           "requests_allowed",
           "is_default",
@@ -567,6 +573,11 @@
           },
           "max_playback_quality": {
             "type": "string"
+          },
+          "max_stream_bitrate_kbps": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           },
           "max_streams": {
             "format": "int64",
@@ -650,6 +661,11 @@
           "max_playback_quality": {
             "type": "string"
           },
+          "max_stream_bitrate_kbps": {
+            "description": "Per-stream bitrate ceiling in kbps; 0 means unlimited",
+            "format": "int64",
+            "type": "integer"
+          },
           "max_streams": {
             "format": "int64",
             "type": "integer"
@@ -692,6 +708,7 @@
           "audio_transcode_allowed",
           "max_streams",
           "max_transcodes",
+          "max_stream_bitrate_kbps",
           "allowed_permissions",
           "requests_allowed",
           "is_default",
@@ -817,6 +834,14 @@
             "format": "int64",
             "minimum": 1,
             "type": "integer"
+          },
+          "max_stream_bitrate_kbps": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "max_streams": {
             "format": "int64",
@@ -1010,6 +1035,14 @@
             "format": "int64",
             "minimum": 1,
             "type": "integer"
+          },
+          "max_stream_bitrate_kbps": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "max_streams": {
             "format": "int64",
@@ -14663,6 +14696,17 @@
             "format": "int64",
             "type": "integer"
           },
+          "max_stream_bitrate_kbps": {
+            "description": "Per-stream bitrate override in kbps; null inherits, 0 means unlimited",
+            "examples": [
+              0
+            ],
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "max_streams": {
             "description": "Stream limit override; null inherits, 0 means unlimited",
             "examples": [
@@ -14759,6 +14803,7 @@
           "max_playback_quality",
           "max_streams",
           "max_transcodes",
+          "max_stream_bitrate_kbps",
           "transcode_allowed",
           "audio_transcode_allowed",
           "max_profiles",
@@ -21957,6 +22002,14 @@
             ],
             "type": "string"
           },
+          "max_stream_bitrate_kbps": {
+            "description": "Per-stream bitrate limit in kbps; 0 means unlimited",
+            "examples": [
+              0
+            ],
+            "format": "int64",
+            "type": "integer"
+          },
           "max_streams": {
             "description": "Concurrent stream limit; 0 means unlimited",
             "examples": [
@@ -22007,6 +22060,7 @@
           "max_playback_quality",
           "max_streams",
           "max_transcodes",
+          "max_stream_bitrate_kbps",
           "transcode_allowed",
           "audio_transcode_allowed",
           "download_allowed",

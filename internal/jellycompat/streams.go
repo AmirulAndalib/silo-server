@@ -40,6 +40,9 @@ const (
 	compatPlaybackRouteUnboundCode     = "PlaybackRouteUnbound"
 )
 
+var errServerBitrateScopeUnavailable = errors.New("stream bitrate policy unavailable")
+var errServerBitrateDirectUnavailable = errors.New("direct playback exceeds server bitrate limit")
+
 // compatRouteOutcomeCode maps an unselected route outcome onto the Jellyfin
 // error code the client sees. Exhausted capacity is transient and must stay
 // distinguishable from a policy conflict no retry can ever satisfy.
@@ -439,11 +442,23 @@ func (h *PlaybackHandler) HandleVideoStream(w http.ResponseWriter, r *http.Reque
 		playSession, source, err = h.createStaticPlaySession(r.Context(), session, routeID, mediaSourceID, clientPlaySessionID)
 	}
 	if err != nil {
+		if errors.Is(err, errServerBitrateScopeUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, "PlaybackUnavailable", "The server could not resolve the stream bitrate limit")
+			return
+		}
+		if errors.Is(err, errServerBitrateDirectUnavailable) {
+			writeError(w, http.StatusBadRequest, "PlaybackUnavailable", "This stream exceeds the server bitrate limit; this direct-play request cannot transcode it")
+			return
+		}
 		writeError(w, http.StatusNotFound, "NotFound", "Playback session not found")
 		return
 	}
 	if source == nil {
 		writeError(w, http.StatusBadRequest, "BadRequest", "Media source is required")
+		return
+	}
+	if staticRequest && source.ServerBitrateCapKbps > 0 && !source.SupportsDirectPlay {
+		writeError(w, http.StatusBadRequest, "PlaybackUnavailable", "This stream exceeds the server bitrate limit; this direct-play request cannot transcode it")
 		return
 	}
 	method := "direct"
@@ -3162,9 +3177,13 @@ func (h *PlaybackHandler) createStaticPlaySession(ctx context.Context, session *
 
 	playSessionID := h.codec.EncodeStringID(EncodedIDPlaySession, uuidNewString())
 	sources := make([]PlaybackMediaSource, 0, len(detail.Versions))
+	serverBitrateCapKbps, err := h.serverBitrateCap(ctx, session)
+	if err != nil {
+		return nil, nil, errServerBitrateScopeUnavailable
+	}
 	allow4KTranscode := h.allow4KVideoTranscode(ctx)
 	for _, version := range detail.Versions {
-		source := h.buildPlaybackSource(routeID, playSessionID, version, DeviceProfile{}, playbackInfoRequest{}, allow4KTranscode)
+		source := h.buildPlaybackSource(routeID, playSessionID, version, DeviceProfile{}, playbackInfoRequest{serverBitrateCapKbps: serverBitrateCapKbps}, allow4KTranscode)
 		sources = append(sources, source)
 	}
 
@@ -3179,6 +3198,9 @@ func (h *PlaybackHandler) createStaticPlaySession(ctx context.Context, session *
 	}
 	matched := playbackRouteSource(ps, mediaSourceID, true)
 	if matched != nil {
+		if serverBitrateCapKbps > 0 && !matched.SupportsDirectPlay {
+			return nil, nil, errServerBitrateDirectUnavailable
+		}
 		h.playbackStore.Put(*ps)
 	}
 	return ps, matched, nil

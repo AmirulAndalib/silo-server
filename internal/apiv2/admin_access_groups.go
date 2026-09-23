@@ -33,6 +33,7 @@ type AdminAccessGroup struct {
 	AudioTranscodeAllowed    bool     `json:"audio_transcode_allowed"`
 	MaxStreams               int      `json:"max_streams"`
 	MaxTranscodes            int      `json:"max_transcodes"`
+	MaxStreamBitrateKbps     int      `json:"max_stream_bitrate_kbps" doc:"Per-stream bitrate ceiling in kbps; 0 means unlimited"`
 	AllowedPermissions       []string `json:"allowed_permissions" nullable:"true"`
 	RequestsAllowed          bool     `json:"requests_allowed"`
 	IsDefault                bool     `json:"is_default"`
@@ -73,6 +74,7 @@ type AdminAccessGroupBody struct {
 	AudioTranscodeAllowed    *bool     `json:"audio_transcode_allowed,omitempty"`
 	MaxStreams               *int      `json:"max_streams,omitempty" minimum:"0"`
 	MaxTranscodes            *int      `json:"max_transcodes,omitempty" minimum:"0"`
+	MaxStreamBitrateKbps     *int      `json:"max_stream_bitrate_kbps,omitempty" minimum:"0"`
 	AllowedPermissions       *[]string `json:"allowed_permissions,omitempty" nullable:"true"`
 	RequestsAllowed          *bool     `json:"requests_allowed,omitempty"`
 	IsDefault                *bool     `json:"is_default,omitempty"`
@@ -97,7 +99,7 @@ func adminAccessGroupOf(g *access.Group) AdminAccessGroup {
 			ids = append(ids, IDFromInt(int64(id)))
 		}
 	}
-	return AdminAccessGroup{ID: IDFromInt(g.ID), Name: g.Name, Description: g.Description, LibraryIDs: ids, MaxPlaybackQuality: g.MaxPlaybackQuality, DownloadAllowed: g.DownloadAllowed, DownloadTranscodeAllowed: g.DownloadTranscodeAllowed, TranscodeAllowed: g.TranscodeAllowed, AudioTranscodeAllowed: g.AudioTranscodeAllowed, MaxStreams: g.MaxStreams, MaxTranscodes: g.MaxTranscodes, AllowedPermissions: g.AllowedPermissions, RequestsAllowed: g.RequestsAllowed, IsDefault: g.IsDefault, CreatedAt: NewInstant(g.CreatedAt), UpdatedAt: NewInstant(g.UpdatedAt)}
+	return AdminAccessGroup{ID: IDFromInt(g.ID), Name: g.Name, Description: g.Description, LibraryIDs: ids, MaxPlaybackQuality: g.MaxPlaybackQuality, DownloadAllowed: g.DownloadAllowed, DownloadTranscodeAllowed: g.DownloadTranscodeAllowed, TranscodeAllowed: g.TranscodeAllowed, AudioTranscodeAllowed: g.AudioTranscodeAllowed, MaxStreams: g.MaxStreams, MaxTranscodes: g.MaxTranscodes, MaxStreamBitrateKbps: g.MaxStreamBitrateKbps, AllowedPermissions: g.AllowedPermissions, RequestsAllowed: g.RequestsAllowed, IsDefault: g.IsDefault, CreatedAt: NewInstant(g.CreatedAt), UpdatedAt: NewInstant(g.UpdatedAt)}
 }
 func groupTag(ctx context.Context, g *access.Group) EntityTag {
 	return RenderETag("admin-access-groups/"+strconv.Itoa(claimsFrom(ctx).UserID)+"/"+profileFrom(ctx), strconv.FormatInt(g.ID, 10), g.Revision)

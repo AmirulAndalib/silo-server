@@ -313,6 +313,7 @@ type AdminUserView struct {
 	MaxPlaybackQuality       *string             `json:"max_playback_quality"`
 	MaxStreams               *int                `json:"max_streams"`
 	MaxTranscodes            *int                `json:"max_transcodes"`
+	MaxStreamBitrateKbps     *int                `json:"-"`
 	TranscodeAllowed         *bool               `json:"transcode_allowed"`
 	AudioTranscodeAllowed    *bool               `json:"audio_transcode_allowed"`
 	MaxProfiles              int                 `json:"max_profiles"`
@@ -332,6 +333,7 @@ type EffectivePolicyView struct {
 	MaxPlaybackQuality       string   `json:"max_playback_quality"`
 	MaxStreams               int      `json:"max_streams"`
 	MaxTranscodes            int      `json:"max_transcodes"`
+	MaxStreamBitrateKbps     int      `json:"-"`
 	TranscodeAllowed         bool     `json:"transcode_allowed"`
 	AudioTranscodeAllowed    bool     `json:"audio_transcode_allowed"`
 	DownloadAllowed          bool     `json:"download_allowed"`
@@ -398,6 +400,7 @@ func toAdminUserResponse(u *models.User, group *access.GroupPolicy) AdminUserVie
 		MaxPlaybackQuality:       normalizedQualityPtr(u.MaxPlaybackQuality),
 		MaxStreams:               clonePtr(u.MaxStreams),
 		MaxTranscodes:            clonePtr(u.MaxTranscodes),
+		MaxStreamBitrateKbps:     clonePtr(u.MaxStreamBitrateKbps),
 		TranscodeAllowed:         clonePtr(u.TranscodeAllowed),
 		AudioTranscodeAllowed:    clonePtr(u.AudioTranscodeAllowed),
 		MaxProfiles:              u.MaxProfiles,
@@ -410,6 +413,7 @@ func toAdminUserResponse(u *models.User, group *access.GroupPolicy) AdminUserVie
 			MaxPlaybackQuality:       effective.MaxPlaybackQuality,
 			MaxStreams:               effective.MaxStreams,
 			MaxTranscodes:            effective.MaxTranscodes,
+			MaxStreamBitrateKbps:     effective.MaxStreamBitrateKbps,
 			TranscodeAllowed:         effective.TranscodeAllowed,
 			AudioTranscodeAllowed:    effective.AudioTranscodeAllowed,
 			DownloadAllowed:          effective.DownloadAllowed,

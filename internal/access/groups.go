@@ -26,6 +26,7 @@ type GroupPolicy struct {
 	AudioTranscodeAllowed    bool
 	MaxStreams               int // 0 = no cap
 	MaxTranscodes            int
+	MaxStreamBitrateKbps     int      // 0 = unlimited
 	AllowedPermissions       []string // nil = all assignable
 	RequestsAllowed          bool
 }
@@ -42,6 +43,7 @@ type EffectiveUserPolicy struct {
 	AudioTranscodeAllowed    bool
 	MaxStreams               int
 	MaxTranscodes            int
+	MaxStreamBitrateKbps     int
 	Permissions              []string
 	RequestsAllowed          bool
 }
@@ -62,6 +64,7 @@ func NoGroupPolicy() GroupPolicy {
 		AudioTranscodeAllowed:    true,
 		MaxStreams:               0,
 		MaxTranscodes:            0,
+		MaxStreamBitrateKbps:     0,
 		AllowedPermissions:       nil,
 		RequestsAllowed:          true,
 	}
@@ -113,6 +116,7 @@ func ApplyGroupPolicy(user *models.User, group *GroupPolicy) EffectiveUserPolicy
 		AudioTranscodeAllowed:    inheritBool(user.AudioTranscodeAllowed, base.AudioTranscodeAllowed),
 		MaxStreams:               inheritInt(user.MaxStreams, base.MaxStreams),
 		MaxTranscodes:            inheritInt(user.MaxTranscodes, base.MaxTranscodes),
+		MaxStreamBitrateKbps:     inheritInt(user.MaxStreamBitrateKbps, base.MaxStreamBitrateKbps),
 		Permissions:              cloneStrings(user.Permissions),
 		RequestsAllowed:          inheritBool(user.RequestsAllowed, base.RequestsAllowed),
 	}

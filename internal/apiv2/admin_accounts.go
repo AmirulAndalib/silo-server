@@ -63,6 +63,7 @@ type AdminAccountPolicyInput struct {
 	MaxPlaybackQuality       *string `json:"max_playback_quality,omitempty" nullable:"true"`
 	MaxStreams               *int    `json:"max_streams,omitempty" nullable:"true" minimum:"0"`
 	MaxTranscodes            *int    `json:"max_transcodes,omitempty" nullable:"true" minimum:"0"`
+	MaxStreamBitrateKbps     *int    `json:"max_stream_bitrate_kbps,omitempty" nullable:"true" minimum:"0"`
 	TranscodeAllowed         *bool   `json:"transcode_allowed,omitempty" nullable:"true"`
 	AudioTranscodeAllowed    *bool   `json:"audio_transcode_allowed,omitempty" nullable:"true"`
 	DownloadAllowed          *bool   `json:"download_allowed,omitempty" nullable:"true"`
@@ -114,7 +115,7 @@ type AdminAccountProfilesOutput struct {
 	Body Collection[AdminAccountProfile]
 }
 
-var adminAccountNullable = map[string]bool{groupLibraryIDsField: true, "max_playback_quality": true, "max_streams": true, "max_transcodes": true, "transcode_allowed": true, "audio_transcode_allowed": true, "download_allowed": true, "download_transcode_allowed": true, "requests_allowed": true, "access_group_id": true}
+var adminAccountNullable = map[string]bool{groupLibraryIDsField: true, "max_playback_quality": true, "max_streams": true, "max_transcodes": true, "max_stream_bitrate_kbps": true, "transcode_allowed": true, "audio_transcode_allowed": true, "download_allowed": true, "download_transcode_allowed": true, "requests_allowed": true, "access_group_id": true}
 
 func adminAccountID(id ID) (int, *Problem) {
 	n, err := strconv.Atoi(string(id))
@@ -207,6 +208,7 @@ func (b AdminAccountPolicyInput) model(raw []byte) (models.UpdateUserInput, *Pro
 		MaxPlaybackQuality:       models.Optional[string]{Set: present("max_playback_quality"), Value: b.MaxPlaybackQuality},
 		MaxStreams:               models.Optional[int]{Set: present("max_streams"), Value: b.MaxStreams},
 		MaxTranscodes:            models.Optional[int]{Set: present("max_transcodes"), Value: b.MaxTranscodes},
+		MaxStreamBitrateKbps:     models.Optional[int]{Set: present("max_stream_bitrate_kbps"), Value: b.MaxStreamBitrateKbps},
 		TranscodeAllowed:         models.Optional[bool]{Set: present("transcode_allowed"), Value: b.TranscodeAllowed},
 		AudioTranscodeAllowed:    models.Optional[bool]{Set: present("audio_transcode_allowed"), Value: b.AudioTranscodeAllowed},
 		DownloadAllowed:          models.Optional[bool]{Set: present("download_allowed"), Value: b.DownloadAllowed},
@@ -333,7 +335,7 @@ func (reg *Registry) createAdminAccount(ctx context.Context, in *AdminAccountCre
 	if b.Permissions == nil {
 		permissions = nil
 	}
-	id, err := svc.CreateAdminAccount(ctx, auth.CreateAccountInput{User: models.CreateUserInput{Username: b.Username, Email: b.Email, Password: b.Password, Role: b.Role, Permissions: permissions, MaxProfiles: b.MaxProfiles, LibraryIDs: libraries, AccessGroupID: policy.AccessGroupID.Value, MaxPlaybackQuality: b.MaxPlaybackQuality, MaxStreams: b.MaxStreams, MaxTranscodes: b.MaxTranscodes, TranscodeAllowed: b.TranscodeAllowed, AudioTranscodeAllowed: b.AudioTranscodeAllowed, DownloadAllowed: b.DownloadAllowed, DownloadTranscodeAllowed: b.DownloadTranscodeAllowed, RequestsAllowed: b.RequestsAllowed}, DefaultProfile: auth.DefaultProfileOptions{Enabled: b.CreateDefaultProfile, Name: b.DefaultProfileName}})
+	id, err := svc.CreateAdminAccount(ctx, auth.CreateAccountInput{User: models.CreateUserInput{Username: b.Username, Email: b.Email, Password: b.Password, Role: b.Role, Permissions: permissions, MaxProfiles: b.MaxProfiles, LibraryIDs: libraries, AccessGroupID: policy.AccessGroupID.Value, MaxPlaybackQuality: b.MaxPlaybackQuality, MaxStreams: b.MaxStreams, MaxTranscodes: b.MaxTranscodes, MaxStreamBitrateKbps: b.MaxStreamBitrateKbps, TranscodeAllowed: b.TranscodeAllowed, AudioTranscodeAllowed: b.AudioTranscodeAllowed, DownloadAllowed: b.DownloadAllowed, DownloadTranscodeAllowed: b.DownloadTranscodeAllowed, RequestsAllowed: b.RequestsAllowed}, DefaultProfile: auth.DefaultProfileOptions{Enabled: b.CreateDefaultProfile, Name: b.DefaultProfileName}})
 	if err != nil {
 		return nil, adminAccountError(err)
 	}

@@ -24,6 +24,7 @@ type User struct {
 	AccessPolicyRevision      int64
 	MaxStreams                *int  // nil = inherit; 0 = explicit unlimited
 	MaxTranscodes             *int  // nil = inherit; 0 = explicit unlimited
+	MaxStreamBitrateKbps      *int  // nil = inherit; 0 = explicit unlimited
 	TranscodeAllowed          *bool // nil = inherit
 	AudioTranscodeAllowed     *bool // nil = inherit
 	MaxProfiles               int
@@ -59,6 +60,7 @@ type CreateUserInput struct {
 	MaxPlaybackQuality        *string
 	MaxStreams                *int
 	MaxTranscodes             *int
+	MaxStreamBitrateKbps      *int
 	TranscodeAllowed          *bool
 	AudioTranscodeAllowed     *bool
 	MaxProfiles               *int // nil = use DB default (5); minimum 1
@@ -102,6 +104,7 @@ type UpdateUserInput struct {
 	MaxPlaybackQuality        Optional[string]
 	MaxStreams                Optional[int]
 	MaxTranscodes             Optional[int]
+	MaxStreamBitrateKbps      Optional[int]
 	TranscodeAllowed          Optional[bool]
 	AudioTranscodeAllowed     Optional[bool]
 	MaxProfiles               *int

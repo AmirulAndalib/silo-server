@@ -155,6 +155,7 @@ func (r *ViewerResolver) ResolveFacts(ctx context.Context, input access.ResolveI
 		LibrariesRestricted:       decision.LibrariesRestricted,
 		MaxContentRating:          decision.MaxContentRating,
 		MaxPlaybackQuality:        decision.MaxPlaybackQuality,
+		MaxStreamBitrateKbps:      effective.MaxStreamBitrateKbps,
 		PreferredMetadataLanguage: decision.PreferredMetadataLanguage,
 		MetadataLanguageOverrides: preferences.MetadataLanguageOverrides,
 		PolicyRevision:            user.AccessPolicyRevision,
