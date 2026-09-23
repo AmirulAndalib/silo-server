@@ -2828,7 +2828,12 @@ export function VideoPlayer({
         // repeats corrections that still apply.
         const now = Date.now();
         if (!roomReloadAllowed(reloadBudget, now)) return;
-        const reloadTarget = beginRoomReload(reloadBudget, targetPositionSeconds, now);
+        const reloadTarget = beginRoomReload(
+          reloadBudget,
+          targetPositionSeconds,
+          now,
+          mediaDurationSeconds(backendDurationRef.current, durationRef.current),
+        );
         // Only this reload's own seek counts as its load: an in-stream seek
         // that was taken, or an adopted reanchor. Other stream swaps, such as
         // a subtitle replan, cannot settle it.

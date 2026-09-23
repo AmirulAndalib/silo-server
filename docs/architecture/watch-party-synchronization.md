@@ -12,7 +12,10 @@ A transport command has one identity across the room. Seek readiness is tied to
 that identity and destination, including an attachment during the seek. A new
 selection clears previous attachments and readiness. Readiness considers all
 attached, connected members across API servers. A 10-second waiting deadline
-excludes stragglers so one client cannot hold everyone indefinitely. The
+excludes stragglers so one client cannot hold everyone indefinitely. It applies
+only once at least one member is ready; until then the room keeps waiting,
+because resuming without an audience would only skip content. Past the
+deadline, the first member to become ready resumes the room. The
 shared coordinator checks the persisted command time during reconciliation; it
 does not retain process timers that could outlive a remotely replaced barrier.
 
@@ -76,9 +79,9 @@ miss the scene.
   their last stall, catches up on their own: the room keeps playing and their
   stalls no longer pause it. Buffering also cannot pause the room within 1
   minute of the last buffering pause, whoever stalls. A stall from a viewer with
-  nobody else watching always pauses the room. If that viewer still misses the
-  deadline, the room resumes from wherever they recover instead of skipping
-  ahead.
+  nobody else watching always pauses the room, and the room waits for them past
+  the deadline. A viewer left alone while catching up resumes the room from
+  wherever they recover instead of skipping ahead.
 - Explicit shared actions stay coordinated: start, seek, resume, and a new
   selection. Viewers who are catching up receive every command but do not hold
   those barriers. A new selection clears every viewer's stall history.

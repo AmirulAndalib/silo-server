@@ -1069,7 +1069,9 @@ func (s *Service) finishReadyLocked(
 	member.isBuffering = false
 	member.ignoreWait = false
 
-	dispatches, commandDispatches := s.maybeResumeFromWaitingLocked(ctx, live, false)
+	// Past the deadline, the first viewer to become ready resumes the room.
+	force := s.skipUnreadyMembersLocked(live, s.now())
+	dispatches, commandDispatches := s.maybeResumeFromWaitingLocked(ctx, live, force)
 	if len(commandDispatches) == 0 && live.room.Phase == RoomPhasePlaying && live.room.PlaybackState == RoomPlaybackStatePlaying {
 		commandDispatches = s.syncMemberToRoomLocked(live, member.sessionID)
 		// Until the member reaches that position its reports describe where
@@ -1218,11 +1220,27 @@ func (s *Service) othersWatchingLocked(live *liveRoom, member *memberState) bool
 	return false
 }
 
-// skipUnreadyMembersLocked lets a waiting room resume without the members that
-// missed its deadline. They catch up on their own and, like any viewer who
-// stalls, cannot pause the room again until their stall cooldown passes. Must
-// be called with s.mu held.
-func (s *Service) skipUnreadyMembersLocked(live *liveRoom, now time.Time) {
+// skipUnreadyMembersLocked lets a waiting room that has passed its deadline
+// resume without the members that are still not ready, and reports whether it
+// may. They catch up on their own and, like any viewer who stalls, cannot
+// pause the room again until their stall cooldown passes. While nobody is
+// ready the room keeps waiting: running it without an audience would only
+// skip content for everyone, including a viewer watching alone. Must be called
+// with s.mu held.
+func (s *Service) skipUnreadyMembersLocked(live *liveRoom, now time.Time) bool {
+	if !waitingDeadlineReached(live, now) {
+		return false
+	}
+	anyReady := false
+	for _, member := range live.members {
+		if memberConnected(member) && member.sessionID != "" && member.isReady {
+			anyReady = true
+			break
+		}
+	}
+	if !anyReady {
+		return false
+	}
 	for _, member := range live.members {
 		if !memberConnected(member) || member.sessionID == "" || member.isReady {
 			continue
@@ -1230,6 +1248,7 @@ func (s *Service) skipUnreadyMembersLocked(live *liveRoom, now time.Time) {
 		member.ignoreWait = true
 		member.lastStallAt = now
 	}
+	return true
 }
 
 func (s *Service) HandlePingForConnection(
@@ -1752,11 +1771,12 @@ func (s *Service) waitingDeadline(ctx context.Context, roomID string, epoch int6
 		s.mu.Unlock()
 		return
 	}
-	if _, shared := s.repo.(*Repository); shared && !waitingDeadlineReached(live, s.now()) {
+	// Nobody is ready yet: keep waiting. The first ready member resumes the
+	// room from finishReadyLocked.
+	if !s.skipUnreadyMembersLocked(live, s.now()) {
 		s.mu.Unlock()
 		return
 	}
-	s.skipUnreadyMembersLocked(live, s.now())
 	dispatches, commandDispatches := s.maybeResumeFromWaitingLocked(ctx, live, true)
 	s.mu.Unlock()
 	s.sendDispatches(ctx, dispatches)

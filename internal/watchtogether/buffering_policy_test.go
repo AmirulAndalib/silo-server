@@ -431,22 +431,74 @@ func TestLoneViewerStallAlwaysPausesTheRoom(t *testing.T) {
 	}
 }
 
-// A lone viewer skipped by the deadline was not missing anyone; recovering
-// resumes the room from where they are instead of jumping them ahead.
-func TestLoneViewerRecoveryResumesFromTheirPosition(t *testing.T) {
+// With nobody ready, running the room would only skip content. A lone viewer
+// is waited for past the deadline, and reconnecting finds the room where they
+// stalled.
+func TestLoneViewerIsWaitedForPastTheDeadline(t *testing.T) {
 	f := newBufferingRoom(t)
+	f.s.sessions = &stubSessions{session: &playback.Session{UserID: 7, ProfileID: "host", MediaFileID: 1}}
+	f.s.files = &stubFiles{file: &models.MediaFile{ContentID: "movie-1"}}
 	f.buffer("host")
+	f.now = f.now.Add(waitingResumeDeadline + time.Second)
+	f.s.handleWaitingDeadline(f.repo.room.ID, f.s.rooms[f.repo.room.ID].waitingEpoch)
+	if f.repo.room.PlaybackState != RoomPlaybackStateWaiting || f.member("host").ignoreWait {
+		t.Fatalf("deadline ran the room without its only viewer: state=%s", f.repo.room.PlaybackState)
+	}
+
+	f.s.Disconnect(f.reg("host"), false)
+	conn := new(recordingConn)
+	reg, _, err := f.s.Connect(t.Context(), f.repo.room.ID, 7, "host", conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.conns["host"] = conn
+	if _, err = f.s.AttachSessionForConnection(t.Context(), reg, 7, "host", "host-session"); err != nil {
+		t.Fatal(err)
+	}
+	if command := lastTransport(t, conn); command.PlaybackState != RoomPlaybackStateWaiting || command.PositionSeconds != 100 {
+		t.Fatalf("reconnected lone viewer target = %+v, want the waiting anchor 100", command)
+	}
+	f.now = f.now.Add(20 * time.Second)
+	if snapshot := f.ready("host", 100); snapshot.PlaybackState != RoomPlaybackStatePlaying || f.repo.room.AnchorPositionSeconds != 100 {
+		t.Fatalf("lone viewer's recovery moved the room: %+v", snapshot)
+	}
+}
+
+// A viewer skipped while someone else watched can end up alone. Recovering
+// then resumes the room from where they are instead of jumping them ahead.
+func TestViewerLeftAloneRecoversFromTheirPosition(t *testing.T) {
+	f := newBufferingRoom(t, "guest")
+	f.buffer("host")
+	f.ready("guest", f.repo.room.AnchorPositionSeconds)
 	f.missDeadline()
 	if !f.member("host").ignoreWait {
-		t.Fatal("deadline did not skip the lone viewer")
+		t.Fatal("deadline did not skip the stalled viewer")
 	}
+	f.s.Disconnect(f.reg("guest"), true)
 	f.now = f.now.Add(20 * time.Second)
 	f.ready("host", 100)
 	if f.repo.room.AnchorPositionSeconds != 100 || f.repo.room.PlaybackState != RoomPlaybackStatePlaying {
-		t.Fatalf("lone viewer's recovery jumped the room: anchor=%v state=%s", f.repo.room.AnchorPositionSeconds, f.repo.room.PlaybackState)
+		t.Fatalf("recovery jumped the room: anchor=%v state=%s", f.repo.room.AnchorPositionSeconds, f.repo.room.PlaybackState)
 	}
 	if command := lastTransport(t, f.conns["host"]); command.Action != TransportActionPlay || command.PositionSeconds != 100 {
-		t.Fatalf("lone viewer's recovery target = %+v, want play at 100", command)
+		t.Fatalf("recovery target = %+v, want play at 100", command)
+	}
+}
+
+// Past the deadline, the first viewer to become ready resumes the room.
+func TestFirstReadyViewerResumesARoomPastItsDeadline(t *testing.T) {
+	f := newBufferingRoom(t, "ann", "bob")
+	f.buffer("ann")
+	f.now = f.now.Add(waitingResumeDeadline + time.Second)
+	f.s.handleWaitingDeadline(f.repo.room.ID, f.s.rooms[f.repo.room.ID].waitingEpoch)
+	if f.repo.room.PlaybackState != RoomPlaybackStateWaiting {
+		t.Fatal("room resumed with nobody ready")
+	}
+	if snapshot := f.ready("bob", f.repo.room.AnchorPositionSeconds); snapshot.PlaybackState != RoomPlaybackStatePlaying {
+		t.Fatalf("first ready viewer did not resume the room: %+v", snapshot)
+	}
+	if !f.member("ann").ignoreWait || !f.member("host").ignoreWait {
+		t.Fatal("unready viewers were not skipped")
 	}
 }
 

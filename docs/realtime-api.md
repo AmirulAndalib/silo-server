@@ -400,8 +400,8 @@ acknowledgement once it has executed the latest transport command and its media
 is playable, and retries every 500 ms until its own member entry is `is_ready`.
 The server then clears the viewer's buffering status and, while the room plays,
 sends it a transport command at the room's current position. When nobody else is
-watching, the room's position moves to the viewer's reported position first, so
-the viewer does not skip ahead. A `state_report` within one second of the room's
+watching, for example after the other viewers left, the room's position moves to
+the viewer's reported position first, so the viewer does not skip ahead. A `state_report` within one second of the room's
 position, with a matching pause state, also marks the member ready and clears
 the same status; this covers late joiners and clients that never send
 `ready`. Seek-destination checks apply only while the room is
@@ -413,7 +413,9 @@ omits the ID cannot distinguish consecutive seeks to the same position. Older
 servers ignore these additive request fields. Updated servers advertise
 `watch_party_coordinator_v1` in playback capabilities. The waiting deadline,
 after which members that never became ready stop blocking the room, is 10
-seconds; it is a safety net rather than the expected path.
+seconds; it is a safety net rather than the expected path. It takes effect only
+once at least one attached member is ready, so a room where nobody is ready
+keeps waiting. Past the deadline, the first `ready` resumes the room.
 
 
 ### Room membership and buffering

@@ -195,6 +195,19 @@ describe("room rebuild budget", () => {
     expect(beginRoomReload(budget, 200, 20_000)).toBe(206);
   });
 
+  it("never aims the load-time lead past the end of the media", () => {
+    const budget = createRoomReloadBudget();
+    beginRoomReload(budget, 100, 0);
+    noteRoomReloadLoading(budget);
+    landRoomReload(budget, 8_000);
+    expect(budget.leadSeconds).toBe(8);
+
+    expect(beginRoomReload(budget, 5_995, 60_000, 6_000)).toBe(6_000);
+    expect(beginRoomReload(budget, 5_000, 120_000, 6_000)).toBe(5_008);
+    // A room already past the reported end keeps its own position.
+    expect(beginRoomReload(budget, 6_010, 180_000, 6_000)).toBe(6_010);
+  });
+
   it("does not settle a backward reload on the stream it replaces", () => {
     const budget = createRoomReloadBudget();
     beginRoomReload(budget, 100, 0);

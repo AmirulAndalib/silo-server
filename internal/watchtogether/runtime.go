@@ -348,10 +348,7 @@ func (s *Service) reconcileRoom(ctx context.Context, roomID string) error {
 			s.mu.Unlock()
 			return struct{}{}, s.closeRoom(ctx, roomID, user, profile)
 		}
-		force := waitingDeadlineReached(live, s.now())
-		if force {
-			s.skipUnreadyMembersLocked(live, s.now())
-		}
+		force := s.skipUnreadyMembersLocked(live, s.now())
 		snapshots, commands := s.maybeResumeFromWaitingLocked(ctx, live, force)
 		state := s.runtimeLocked(live)
 		for key, member := range state.Members {

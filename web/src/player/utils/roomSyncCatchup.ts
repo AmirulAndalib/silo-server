@@ -156,13 +156,21 @@ export function roomReloadAllowed(budget: RoomReloadBudget, nowMs: number): bool
   return nowMs >= budget.nextAllowedAtMs;
 }
 
-/** Records a reload toward `roomPositionSeconds` and returns where to aim it. */
+/**
+ * Records a reload toward `roomPositionSeconds` and returns where to aim it.
+ * The load-time lead never aims past the end of the media, which the server
+ * refuses as a seek target.
+ */
 export function beginRoomReload(
   budget: RoomReloadBudget,
   roomPositionSeconds: number,
   nowMs: number,
+  durationSeconds?: number,
 ): number {
-  const targetSeconds = roomPositionSeconds + budget.leadSeconds;
+  let targetSeconds = roomPositionSeconds + budget.leadSeconds;
+  if (durationSeconds !== undefined && durationSeconds > 0) {
+    targetSeconds = Math.min(targetSeconds, Math.max(roomPositionSeconds, durationSeconds));
+  }
   budget.targetSeconds = targetSeconds;
   budget.loadStarted = false;
   budget.startedAtMs = nowMs;
