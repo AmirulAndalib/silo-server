@@ -156,6 +156,7 @@ func (r *ViewerResolver) ResolveFacts(ctx context.Context, input access.ResolveI
 		MaxContentRating:           decision.MaxContentRating,
 		MaxPlaybackQuality:         decision.MaxPlaybackQuality,
 		MaxRemoteStreamBitrateKbps: effective.MaxRemoteStreamBitrateKbps,
+		MaxLocalStreamBitrateKbps:  effective.MaxLocalStreamBitrateKbps,
 		PreferredMetadataLanguage:  decision.PreferredMetadataLanguage,
 		MetadataLanguageOverrides:  preferences.MetadataLanguageOverrides,
 		PolicyRevision:             user.AccessPolicyRevision,

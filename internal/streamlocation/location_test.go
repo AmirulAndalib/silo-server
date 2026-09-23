@@ -34,6 +34,13 @@ func TestIsRemote(t *testing.T) {
 			if got := IsRemote(ctx); got != test.remote {
 				t.Fatalf("IsRemote() = %t, want %t", got, test.remote)
 			}
+			wantCap := 4_000
+			if test.remote {
+				wantCap = 2_000
+			}
+			if got := BitrateCap(ctx, 4_000, 2_000); got != wantCap {
+				t.Fatalf("BitrateCap() = %d, want %d", got, wantCap)
+			}
 		})
 	}
 }

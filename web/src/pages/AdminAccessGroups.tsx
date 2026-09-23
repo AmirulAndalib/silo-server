@@ -324,6 +324,9 @@ function AccessGroupEditor({ initialEditor, onDeleted }: AccessGroupEditorProps)
   const [maxRemoteStreamBitrateKbps, setMaxRemoteStreamBitrateKbps] = useState(
     group.max_remote_stream_bitrate_kbps,
   );
+  const [maxLocalStreamBitrateKbps, setMaxLocalStreamBitrateKbps] = useState(
+    group.max_local_stream_bitrate_kbps,
+  );
   const [permissions, setPermissions] = useState<string[] | null>(group.allowed_permissions);
   const [requestsAllowed, setRequestsAllowed] = useState(group.requests_allowed);
   const [isDefault, setIsDefault] = useState(group.is_default);
@@ -356,6 +359,7 @@ function AccessGroupEditor({ initialEditor, onDeleted }: AccessGroupEditorProps)
       max_streams: maxStreams,
       max_transcodes: maxTranscodes,
       max_remote_stream_bitrate_kbps: maxRemoteStreamBitrateKbps,
+      max_local_stream_bitrate_kbps: maxLocalStreamBitrateKbps,
       allowed_permissions: permissions,
       requests_allowed: requestsAllowed,
       is_default: isDefault,
@@ -455,6 +459,13 @@ function AccessGroupEditor({ initialEditor, onDeleted }: AccessGroupEditorProps)
           hint="0 = unlimited. Applies to new remote streams."
           value={maxRemoteStreamBitrateKbps}
           onChange={setMaxRemoteStreamBitrateKbps}
+        />
+        <LimitField
+          id="group-local-stream-bitrate"
+          label="Max local stream bitrate (kbps)"
+          hint="0 = unlimited. Applies to new local streams."
+          value={maxLocalStreamBitrateKbps}
+          onChange={setMaxLocalStreamBitrateKbps}
         />
       </section>
 

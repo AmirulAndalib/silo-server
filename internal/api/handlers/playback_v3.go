@@ -1624,8 +1624,9 @@ func (h *PlaybackHandler) startPlaybackApplicationV3(r *http.Request, body []byt
 		return playback.DecisionResponseV3{}, playbackOperationError(http.StatusInternalServerError, "internal_error", "Failed to check playback attempt idempotency")
 	}
 	timings.mark("idempotency")
-	if scope, ok := access.GetScope(r.Context()); ok && streamlocation.IsRemote(r.Context()) {
-		r = r.WithContext(withServerBitrateCapV3(r.Context(), scope.MaxRemoteStreamBitrateKbps))
+	if scope, ok := access.GetScope(r.Context()); ok {
+		capKbps := streamlocation.BitrateCap(r.Context(), scope.MaxLocalStreamBitrateKbps, scope.MaxRemoteStreamBitrateKbps)
+		r = r.WithContext(withServerBitrateCapV3(r.Context(), capKbps))
 	}
 	requestedFile, err := h.loadAuthorizedFile(r, req.FileID)
 	if err != nil {

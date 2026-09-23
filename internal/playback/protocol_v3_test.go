@@ -27,6 +27,7 @@ func TestServerFeaturesV3ReturnsCompleteIndependentSlices(t *testing.T) {
 	expected := map[string]struct{}{
 		FeaturePlaybackPlanV3:                    {},
 		FeatureServerRemoteStreamBitratePolicyV3: {},
+		FeatureServerLocalStreamBitratePolicyV3:  {},
 		FeatureNeutralContractV3:                 {},
 		FeatureLayoutPassthrough:                 {},
 		FeatureEmbeddedSubtitlesV3:               {},

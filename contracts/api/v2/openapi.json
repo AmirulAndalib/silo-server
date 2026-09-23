@@ -479,6 +479,11 @@
           "max_playback_quality": {
             "type": "string"
           },
+          "max_local_stream_bitrate_kbps": {
+            "description": "Local per-stream bitrate ceiling in kbps; 0 means unlimited",
+            "format": "int64",
+            "type": "integer"
+          },
           "max_remote_stream_bitrate_kbps": {
             "description": "Remote per-stream bitrate ceiling in kbps; 0 means unlimited",
             "format": "int64",
@@ -522,6 +527,7 @@
           "max_streams",
           "max_transcodes",
           "max_remote_stream_bitrate_kbps",
+          "max_local_stream_bitrate_kbps",
           "allowed_permissions",
           "requests_allowed",
           "is_default",
@@ -573,6 +579,11 @@
           },
           "max_playback_quality": {
             "type": "string"
+          },
+          "max_local_stream_bitrate_kbps": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           },
           "max_remote_stream_bitrate_kbps": {
             "format": "int64",
@@ -661,6 +672,11 @@
           "max_playback_quality": {
             "type": "string"
           },
+          "max_local_stream_bitrate_kbps": {
+            "description": "Local per-stream bitrate ceiling in kbps; 0 means unlimited",
+            "format": "int64",
+            "type": "integer"
+          },
           "max_remote_stream_bitrate_kbps": {
             "description": "Remote per-stream bitrate ceiling in kbps; 0 means unlimited",
             "format": "int64",
@@ -709,6 +725,7 @@
           "max_streams",
           "max_transcodes",
           "max_remote_stream_bitrate_kbps",
+          "max_local_stream_bitrate_kbps",
           "allowed_permissions",
           "requests_allowed",
           "is_default",
@@ -834,6 +851,14 @@
             "format": "int64",
             "minimum": 1,
             "type": "integer"
+          },
+          "max_local_stream_bitrate_kbps": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "max_remote_stream_bitrate_kbps": {
             "format": "int64",
@@ -1035,6 +1060,14 @@
             "format": "int64",
             "minimum": 1,
             "type": "integer"
+          },
+          "max_local_stream_bitrate_kbps": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "max_remote_stream_bitrate_kbps": {
             "format": "int64",
@@ -14696,6 +14729,17 @@
             "format": "int64",
             "type": "integer"
           },
+          "max_local_stream_bitrate_kbps": {
+            "description": "Local per-stream bitrate override in kbps; null inherits, 0 means unlimited",
+            "examples": [
+              0
+            ],
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "max_remote_stream_bitrate_kbps": {
             "description": "Remote per-stream bitrate override in kbps; null inherits, 0 means unlimited",
             "examples": [
@@ -14804,6 +14848,7 @@
           "max_streams",
           "max_transcodes",
           "max_remote_stream_bitrate_kbps",
+          "max_local_stream_bitrate_kbps",
           "transcode_allowed",
           "audio_transcode_allowed",
           "max_profiles",
@@ -22002,6 +22047,14 @@
             ],
             "type": "string"
           },
+          "max_local_stream_bitrate_kbps": {
+            "description": "Local per-stream bitrate limit in kbps; 0 means unlimited",
+            "examples": [
+              0
+            ],
+            "format": "int64",
+            "type": "integer"
+          },
           "max_remote_stream_bitrate_kbps": {
             "description": "Remote per-stream bitrate limit in kbps; 0 means unlimited",
             "examples": [
@@ -22061,6 +22114,7 @@
           "max_streams",
           "max_transcodes",
           "max_remote_stream_bitrate_kbps",
+          "max_local_stream_bitrate_kbps",
           "transcode_allowed",
           "audio_transcode_allowed",
           "download_allowed",
