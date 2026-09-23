@@ -958,18 +958,28 @@ The server admin settings include `artwork.storage_backend` (`auto`, `local`, or
 `/var/lib/silo/artwork`). Artwork storage settings take effect after a server
 restart.
 
-The artwork location can only be chosen before any artwork is stored. The
-first artwork write records the storage identity, and from then on a write that
-would move artwork is rejected with `409` and the problem code
+The first write to the assets store records its storage identity; writes to a
+shared local root count too. At startup, Silo records any configured private
+bucket, even if it is empty. A direct settings write that changes a recorded
+location is rejected with `409` and the problem code
 `artwork_storage_locked`: a change of `artwork.storage_backend`, of
-`artwork.local_path` for a local store, or of `s3.public_endpoint`,
-`s3.public_bucket`, or `s3.public_key_prefix` for an S3 store. Adding a public
-bucket while an `auto` backend is recorded as local is also rejected, since it
-would change what `auto` resolves to. Re-saving the current values is accepted.
-`GET /api/v2/admin/server/status` reports `artwork_storage.locked` so a settings
-form can disable the control. Selecting `s3` without a configured
-`s3.public_bucket`, or clearing the bucket while `s3` is selected, is rejected
-as `invalid_settings`.
+`artwork.local_path` for a local store, of `s3.public_endpoint`,
+`s3.public_bucket`, or `s3.public_key_prefix` for an S3 store, or of
+`s3.private_bucket` on either backend. While a private bucket is configured, its
+`s3.private_endpoint` and `s3.private_key_prefix` are locked too, and the legacy
+`s3.operational_*` aliases count as the keys they fill. When only the private
+bucket is recorded, only its keys are locked. Adding a public bucket
+while an `auto` backend is recorded as local is also rejected, since it would
+change what `auto` resolves to. Re-saving the current values is accepted, and a
+key prefix compares after trimming slashes. Locked locations change through a
+managed storage transition (see `docs/admin-settings-api.md`).
+`GET /api/v2/admin/server/status` reports `artwork_storage.locked` for the
+artwork location and `artwork_storage.private_locked` for the operational
+location. `artwork_storage.status_known` is true only when the server read the
+settings successfully; when false, the lock values must not be used to permit
+location edits.
+Selecting `s3` without a configured `s3.public_bucket`, or clearing the bucket
+while `s3` is selected, is rejected as `invalid_settings`.
 
 `metadata.image_workers` sizes the pool that downloads and encodes provider
 artwork, in parallel encodes. `0`, the default, runs one encode per CPU core.

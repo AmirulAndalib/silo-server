@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -56,6 +57,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/dashmetrics"
 	"github.com/Silo-Server/silo-server/internal/database"
+	"github.com/Silo-Server/silo-server/internal/database/pglock"
 	"github.com/Silo-Server/silo-server/internal/diagnostics"
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	"github.com/Silo-Server/silo-server/internal/ebooks"
@@ -104,6 +106,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/server"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
+	"github.com/Silo-Server/silo-server/internal/storagetransition"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
@@ -634,6 +637,11 @@ func normalizeLoadedConfig(cfg *config.Config) {
 
 // main starts the Silo server or a requested maintenance command.
 func main() {
+	var storageAdmission *pglock.NodeAdmission
+	// The admission session is detached from the pool and lives until process
+	// exit. Worker Stop methods do not all wait for in-flight writes, so closing
+	// the session in a defer could admit another node while this one still has
+	// a writer. Process exit stops those goroutines and closes the socket.
 	if err := telemetry.ConfigureRuntimeMetrics(); err != nil {
 		slog.Warn("runtime metrics configuration failed", "error", err)
 	}
@@ -911,6 +919,34 @@ func main() {
 	var streamTelemetryViewCache *streamtelemetry.ViewCache
 	restartReqCh := make(chan struct{}, 1)
 	var restartRequested atomic.Bool
+	if mode == "integrated" || mode == "api" {
+		// Join the storage writer set before any blob store or worker starts.
+		// A transition owner holds this gate exclusively through its restart;
+		// the config watcher below rereads settings after admission returns.
+		storageAdmission, err = pglock.AdmitNode(appCtx, pool, pglock.StorageNodeAdmissionLockKey)
+		if err != nil {
+			log.Fatalf("storage node admission: %v", err)
+		}
+		go storageAdmission.Monitor(appCtx, time.Second)
+		go func() {
+			// A failed session is replaced while no transition runs; Lost
+			// closes only when this node owned a transition or another node
+			// took ownership while it was out. Either way it must restart.
+			select {
+			case <-storageAdmission.Lost():
+				if appCtx.Err() != nil {
+					return
+				}
+				slog.Error("storage node admission lost to a storage transition; stopping storage writers")
+				appCancel()
+				select {
+				case restartReqCh <- struct{}{}:
+				default:
+				}
+			case <-appCtx.Done():
+			}
+		}()
+	}
 
 	eventBus := cache.NewEventBus(cfg.Redis.URL)
 	if err := eventBus.Subscribe(appCtx, cache.ChannelCatalog, func(event cache.Event) {
@@ -1339,12 +1375,43 @@ func main() {
 	}
 
 	// Step 3: Create S3 clients (if needed).
+	if storageAdmission != nil {
+		if err := storageAdmission.Probe(appCtx); err != nil {
+			log.Fatalf("storage node admission before opening storage: %v", err)
+		}
+	}
 	if needsS3 {
 		configureS3Clients(cfg, &deps)
 	}
 	// Runs after configureS3Clients: an S3 backend takes both buckets from deps.
 	if err := configureBlobStorage(appCtx, mode, cfg, &deps, settingsRepo); err != nil {
 		log.Fatalf("configure blob storage: %v", err)
+	}
+	if storageAdmission != nil {
+		// While a failed admission session is replaced, no blob write may land:
+		// a transition elsewhere could otherwise miss it. Reads keep serving.
+		storageAdmission.SetWriteGate(func(ctx context.Context) (func(), error) {
+			return blobstore.PauseMutations(ctx, deps.Blobs.Assets, deps.Blobs.Operational)
+		})
+		// A node that was out while another node committed a transition must
+		// restart onto the new location instead of rejoining with these stores.
+		assetsIdentity, privateIdentity := deps.Blobs.Assets.Identity(), ""
+		if deps.S3Private != nil {
+			privateIdentity = blobstore.NewS3(deps.S3Private).Identity()
+		}
+		// Read the identity rows under the settings mutation lock, so a commit
+		// already in progress finishes before the check. The rows are plain,
+		// so an unreadable encrypted setting cannot block a rejoin.
+		identityRows := catalog.NewServerSettingsRepo(pool)
+		storageAdmission.SetRejoinCheck(func(ctx context.Context) error {
+			err := identityRows.UpdateAtomic(ctx, func(current map[string]string) (map[string]string, error) {
+				return nil, blobstore.CheckRecordedLocation(current, assetsIdentity, privateIdentity)
+			})
+			if errors.Is(err, blobstore.ErrLocationMoved) {
+				return fmt.Errorf("%w: %w", pglock.ErrStorageMoved, err)
+			}
+			return err
+		})
 	}
 
 	var literaryWorkService *literaryworks.Service
@@ -2753,6 +2820,7 @@ func main() {
 				settingsRepo,
 				brandingReconciler,
 				identity,
+				deps.DB,
 			)
 			taskMgr.Register(reconcileArtwork)
 			go func() {
@@ -3058,6 +3126,26 @@ func main() {
 	// API and the frontend handler.
 	deps.BrandingService = brandingSvc
 	server.Branding = brandingSvc
+	var transitionPrivate blobstore.Store
+	if deps.S3Private != nil {
+		transitionPrivate = deps.Blobs.Operational
+	}
+	storageTransitionSvc := storagetransition.New(deps.DB, settingsRepo, adminjob.NewRepository(deps.DB), deps.Blobs.Assets, transitionPrivate)
+	storageTransitionSvc.SetNodeAdmission(storageAdmission)
+	if brandingSvc != nil {
+		storageTransitionSvc.SetBrandingReconciler(brandingSvc.ReconcileMissingAssets)
+	}
+	if err := storageTransitionSvc.FinalizeCommitted(appCtx); err != nil {
+		log.Fatalf("finalize committed storage transition: %v", err)
+	}
+	deps.StorageTransition = storageTransitionSvc
+	if storageAdmission != nil {
+		// A lock lost during a long startup must stop this process before the
+		// HTTP listeners serve the old location.
+		if err := storageAdmission.Probe(appCtx); err != nil {
+			log.Fatalf("storage node admission before serving: %v", err)
+		}
+	}
 
 	router := api.NewRouter(deps)
 
@@ -3144,6 +3232,8 @@ func main() {
 			deps.RealtimeHub,
 		)
 		adminJobRunner.SetCancelRegistry(adminJobCancelRegistry)
+		adminJobRunner.SetStorageTransitionExecutor(storageTransitionSvc)
+		adminJobRunner.SetStorageTransitionCommitted(deps.RequestServerRestart)
 		adminJobRunner.Start()
 		defer adminJobRunner.Stop()
 
@@ -3367,6 +3457,11 @@ func main() {
 			slog.Info("HTTP server listening", "addr", cfg.Server.Listen)
 			if serveErr := srv.Serve(apiListener); serveErr != nil && serveErr != http.ErrServerClosed {
 				errCh <- fmt.Errorf("HTTP server error: %w", serveErr)
+			}
+		}()
+		go func() {
+			if reconcileErr := storageTransitionSvc.RunPostRestartWork(appCtx); reconcileErr != nil && appCtx.Err() == nil {
+				slog.Error("post-restart storage transition reconciliation paused; it will resume on the next start", "error", reconcileErr)
 			}
 		}()
 		if pluginService != nil {

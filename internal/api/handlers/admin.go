@@ -37,6 +37,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/notifications"
 	"github.com/Silo-Server/silo-server/internal/policy"
+	"github.com/Silo-Server/silo-server/internal/s3client"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
 	"github.com/Silo-Server/silo-server/internal/settingsmigrate"
 	subtitleai "github.com/Silo-Server/silo-server/internal/subtitles/ai"
@@ -1600,6 +1601,8 @@ var machineManagedSettingKeys = map[string]bool{
 	config.ArtworkStorageReconcileCheckpointKey: true,
 	config.ArtworkStorageSweepCheckpointKey:     true,
 	blobstore.IdentitySettingKey:                true,
+	blobstore.OperationalIdentitySettingKey:     true,
+	config.StorageTransitionTargetKey:           true,
 }
 
 // Setting keys that decide where artwork lives. The s3 keys are the canonical
@@ -1611,26 +1614,36 @@ const (
 	s3PublicBucketKey        = "s3.public_bucket"
 	s3PublicKeyPrefixKey     = "s3.public_key_prefix"
 	s3OperationalBucketKey   = "s3.operational_bucket"
+	s3PrivateEndpointKey     = "s3.private_endpoint"
+	s3PrivateBucketKey       = "s3.private_bucket"
+	s3PrivateKeyPrefixKey    = "s3.private_key_prefix"
 )
 
-// artworkStorageLocked reports whether the artwork storage location can still
-// change. The first artwork write records the store identity; after that the
-// catalog's keys live in exactly one place and there is no migrator, so every
-// setting that selects that place is read-only.
+// artworkStorageLocked reports whether a stored location can no longer be
+// written directly. The first artwork write records the assets identity, and
+// startup records any configured private bucket. After either, the settings
+// that select that place change only through a managed transition.
 func artworkStorageLocked(stored map[string]string) bool {
+	return assetsStorageLocked(stored) || strings.TrimSpace(stored[blobstore.OperationalIdentitySettingKey]) != ""
+}
+
+// assetsStorageLocked reports whether the artwork location itself is recorded.
+func assetsStorageLocked(stored map[string]string) bool {
 	return strings.TrimSpace(stored[blobstore.IdentitySettingKey]) != ""
 }
 
 var errArtworkStorageLocked = &APIError{
 	Status:  http.StatusConflict,
 	Code:    "artwork_storage_locked",
-	Message: "artwork storage cannot change once artwork has been stored; the catalog's artwork keys belong to the recorded storage",
+	Message: "recorded storage locations cannot be changed directly; use a managed storage transition",
 }
 
-// artworkIdentityInputs names the effective settings that decide where
-// artwork lives: the resolved backend and, for that backend, the fields the
-// store folds into its identity. The s3 keys are the canonical names; the
-// effective map already applies the legacy operational aliases.
+// artworkIdentityInputs names the effective settings that decide where public
+// artwork and private operational objects live. The S3 keys are canonical; the
+// effective map already applies the legacy operational aliases. A private
+// bucket owns diagnostics, job artifacts, and avatars on either backend, so its
+// location is locked on a local backend too: adding one would otherwise strand
+// what the local root already holds.
 func artworkIdentityInputs(effective map[string]string) (backend string, inputs map[string]string) {
 	backend = strings.ToLower(strings.TrimSpace(effective[artworkStorageBackendKey]))
 	if backend == "" || backend == config.ArtworkBackendAuto {
@@ -1639,14 +1652,25 @@ func artworkIdentityInputs(effective map[string]string) (backend string, inputs 
 			backend = blobstore.BackendS3
 		}
 	}
+	// Compare locations the way the stores name them: endpoint scheme and host
+	// and the bucket are case-insensitive, and a key prefix ignores its
+	// slashes. An edit that only restyles a value is then a plain save.
 	inputs = map[string]string{}
 	switch backend {
 	case blobstore.BackendS3:
-		for _, key := range []string{s3PublicEndpointKey, s3PublicBucketKey, s3PublicKeyPrefixKey} {
-			inputs[key] = strings.TrimSpace(effective[key])
-		}
+		inputs[s3PublicEndpointKey] = blobstore.NormalizeEndpoint(effective[s3PublicEndpointKey])
+		inputs[s3PublicBucketKey] = strings.ToLower(strings.TrimSpace(effective[s3PublicBucketKey]))
+		inputs[s3PublicKeyPrefixKey] = s3client.NormalizeKeyPrefix(effective[s3PublicKeyPrefixKey])
 	default:
 		inputs[artworkLocalPathKey] = strings.TrimSpace(effective[artworkLocalPathKey])
+	}
+	// Without a bucket there is no private location, so a leftover endpoint or
+	// prefix can change freely.
+	privateBucket := strings.ToLower(strings.TrimSpace(effective[s3PrivateBucketKey]))
+	inputs[s3PrivateBucketKey] = privateBucket
+	if privateBucket != "" {
+		inputs[s3PrivateEndpointKey] = blobstore.NormalizeEndpoint(effective[s3PrivateEndpointKey])
+		inputs[s3PrivateKeyPrefixKey] = s3client.NormalizeKeyPrefix(effective[s3PrivateKeyPrefixKey])
 	}
 	return backend, inputs
 }
@@ -1661,6 +1685,16 @@ func rejectArtworkIdentityChange(recorded string, before, after map[string]strin
 	recordedBackend, _, _ := strings.Cut(strings.TrimSpace(recorded), "|")
 	_, beforeInputs := artworkIdentityInputs(before)
 	afterBackend, afterInputs := artworkIdentityInputs(after)
+	if recordedBackend == "" {
+		// Only the private bucket is recorded. The assets location can still
+		// be chosen until the first artwork write.
+		for key, value := range beforeInputs {
+			if strings.HasPrefix(key, "s3.private_") && afterInputs[key] != value {
+				return errArtworkStorageLocked
+			}
+		}
+		return nil
+	}
 	if afterBackend != recordedBackend {
 		return errArtworkStorageLocked
 	}

@@ -101,6 +101,25 @@ and authorized catalog artifact links, while excluding raw request documents,
 storage keys, file paths, and internal error text. Artifact links can expire and
 should be refreshed from the job resource.
 
+Storage-transition jobs include `storage_transition_result` throughout their
+lifecycle. Its `phase` is a fixed status value, `verified_objects` counts
+objects whose destination content was checked in the current copy pass, and
+`failure_category` classifies a failed phase without exposing provider errors,
+bucket names, object keys, or local paths. The count can restart when an
+interrupted pass resumes. A completed copy reports `restart_pending` until the
+new storage is active after restart. The job's raw message and error remain
+available only to internal diagnostics. Legacy administrator-job responses and
+the jobs realtime channel use the same safe storage-transition receipt,
+including the websocket snapshot; they omit the raw request and result
+documents for this job type.
+
 The existing `POST /api/v2/library-jobs/{job_id}/cancel` contract remains intact.
-The administrator task section does not add a generic durable scheduler or change
+`POST /api/v2/admin/jobs/{id}/cancel` (`cancelAdminJob`) requests cancellation
+for storage-transition jobs. Library refresh cancellation uses its separate
+library-job endpoint above. Cancellation retains completed effects and verified
+storage-copy checkpoints. An accepted cancellation returns `202`; an already
+canceled job returns `200`; a succeeded or failed job returns
+`409 job_not_cancelable`. A queued storage-transition cancellation also releases
+its staged target so a later transition can choose a different destination. The
+administrator task section does not add a generic durable scheduler or change
 the retention and dispatch guarantees of existing job owners.
