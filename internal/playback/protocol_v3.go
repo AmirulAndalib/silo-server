@@ -255,6 +255,10 @@ const (
 	TerminalDVConversionUnsupportedV3    = "dv_conversion_unsupported"
 )
 
+// TerminalBitratePolicyUnavailableV3 reports that no route fits the
+// administrator's remote per-stream bitrate limit for this version.
+const TerminalBitratePolicyUnavailableV3 = "bitrate_policy_unavailable"
+
 type SubtitleModeV3 string
 
 const (
