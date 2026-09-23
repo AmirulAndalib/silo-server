@@ -666,6 +666,7 @@ function LimitField({ id, label, hint, value, onChange }: LimitFieldProps) {
         onChange={(event) => {
           const raw = event.target.value;
           if (raw === "") {
+            if (event.target.validity.badInput) return;
             onChange(0);
             return;
           }
