@@ -1141,6 +1141,41 @@ describe("VideoPlayer room catch-up", () => {
     expect(onQualitySelect).toHaveBeenCalledWith("720p", expect.any(Number));
   });
 
+  it("withdraws the lower-quality offer when a replan leaves no lower quality", async () => {
+    const { connection, video, rerenderPlayer } = setup(100);
+    const planWith = (qualities: ReturnType<typeof fixturePlanV3>["available_qualities"]) =>
+      fixturePlanV3({
+        ...directPlan,
+        delivery: "server_remux_progressive",
+        timeline: { ...directPlan.timeline, can_seek_anywhere: false },
+        available_qualities: qualities,
+      });
+    const original = {
+      label: "original",
+      height: 2160,
+      bitrate_kbps: 40_000,
+      preserves_source: true,
+    };
+    rerenderPlayer({
+      watchTogetherConnection: connection,
+      plan: planWith([
+        original,
+        { label: "1080p-medium", height: 1080, bitrate_kbps: 6000, preserves_source: false },
+      ]),
+    });
+    for (let stall = 0; stall < 2; stall++) {
+      Object.defineProperty(video, "readyState", { configurable: true, value: 2 });
+      fireEvent.waiting(video);
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+      fireEvent.canPlay(video);
+    }
+    expect(screen.getByRole("button", { name: "Lower quality" })).toBeInTheDocument();
+
+    rerenderPlayer({ watchTogetherConnection: connection, plan: planWith([original]) });
+    expect(screen.queryByRole("button", { name: "Lower quality" })).not.toBeInTheDocument();
+  });
+
   it("withdraws the lower-quality offer when the viewer picks another quality", async () => {
     const { connection, video, rerenderPlayer } = setup(100);
     const plan = fixturePlanV3({

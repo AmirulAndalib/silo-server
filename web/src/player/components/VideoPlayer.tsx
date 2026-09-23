@@ -3048,6 +3048,12 @@ export function VideoPlayer({
   useEffect(() => {
     lowerQualityChoiceRef.current = () =>
       lowerQualityOption(qualityOptions, activeQualityId, plan.effective_recipe?.bitrate_kbps);
+    // A replan can leave no lower rung; an offer that cannot act is withdrawn.
+    if (!lowerQualityChoiceRef.current()) {
+      setNotice((current) =>
+        current?.actionLabel === LOWER_QUALITY_ACTION_LABEL ? null : current,
+      );
+    }
   }, [activeQualityId, plan.effective_recipe?.bitrate_kbps, qualityOptions]);
 
   // A viewer who keeps stalling in a room cannot keep up at this quality.
