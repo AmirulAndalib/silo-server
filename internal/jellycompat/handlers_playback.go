@@ -33,6 +33,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/streamlocation"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
@@ -349,7 +350,7 @@ type PlaybackHandler struct {
 }
 
 func (h *PlaybackHandler) serverBitrateCap(ctx context.Context, session *Session) (int, error) {
-	if h.ScopeResolver == nil {
+	if h.ScopeResolver == nil || !streamlocation.IsRemote(ctx) {
 		return 0, nil
 	}
 	scope, err := h.ScopeResolver.Resolve(ctx, access.ResolveInput{
@@ -360,7 +361,7 @@ func (h *PlaybackHandler) serverBitrateCap(ctx context.Context, session *Session
 	if err != nil {
 		return 0, err
 	}
-	return scope.MaxStreamBitrateKbps, nil
+	return scope.MaxRemoteStreamBitrateKbps, nil
 }
 
 // recipeNodePutter persists and removes a remote transcode's reconstruction

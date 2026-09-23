@@ -27,7 +27,7 @@ export interface UserPolicyState {
   maxPlaybackQuality: string | null;
   maxStreams: number | null;
   maxTranscodes: number | null;
-  maxStreamBitrateKbps: number | null;
+  maxRemoteStreamBitrateKbps: number | null;
   transcodeAllowed: boolean | null;
   audioTranscodeAllowed: boolean | null;
   downloadAllowed: boolean | null;
@@ -42,7 +42,7 @@ const POLICY_FIELDS = {
   maxPlaybackQuality: "max_playback_quality",
   maxStreams: "max_streams",
   maxTranscodes: "max_transcodes",
-  maxStreamBitrateKbps: "max_stream_bitrate_kbps",
+  maxRemoteStreamBitrateKbps: "max_remote_stream_bitrate_kbps",
   transcodeAllowed: "transcode_allowed",
   audioTranscodeAllowed: "audio_transcode_allowed",
   downloadAllowed: "download_allowed",
@@ -93,7 +93,7 @@ const NO_GROUP_POLICY: PolicyInheritHints = {
   max_playback_quality: "",
   max_streams: 0,
   max_transcodes: 0,
-  max_stream_bitrate_kbps: 0,
+  max_remote_stream_bitrate_kbps: 0,
   transcode_allowed: true,
   audio_transcode_allowed: true,
   download_allowed: true,
@@ -117,7 +117,7 @@ export function policyInheritHints(
     max_playback_quality: group.max_playback_quality,
     max_streams: group.max_streams,
     max_transcodes: group.max_transcodes,
-    max_stream_bitrate_kbps: group.max_stream_bitrate_kbps,
+    max_remote_stream_bitrate_kbps: group.max_remote_stream_bitrate_kbps,
     transcode_allowed: group.transcode_allowed,
     audio_transcode_allowed: group.audio_transcode_allowed,
     download_allowed: group.download_allowed,
@@ -354,10 +354,10 @@ export function PolicyLimitFields({ state, onChange, effective }: PolicyContext)
           effectiveValue={effective?.max_transcodes}
         />
         <LimitPolicyField
-          label="Max stream bitrate (kbps)"
-          value={state.maxStreamBitrateKbps}
-          onValueChange={(maxStreamBitrateKbps) => onChange({ ...state, maxStreamBitrateKbps })}
-          effectiveValue={effective?.max_stream_bitrate_kbps}
+          label="Max remote stream bitrate (kbps)"
+          value={state.maxRemoteStreamBitrateKbps}
+          onValueChange={(maxRemoteStreamBitrateKbps) => onChange({ ...state, maxRemoteStreamBitrateKbps })}
+          effectiveValue={effective?.max_remote_stream_bitrate_kbps}
         />
       </div>
       <div className="grid gap-2 sm:grid-cols-2">

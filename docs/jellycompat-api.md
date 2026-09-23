@@ -87,8 +87,9 @@ Progressive remux evaluates container constraints against its MP4 output;
 direct play evaluates them against the original source container.
 Unknown or excessive source bitrate prevents copying under a client ceiling.
 An automatic VideoToolbox bitrate must not override an explicit client cap.
-The server also applies the account's effective per-stream bitrate limit at
-PlaybackInfo negotiation, before it advertises direct or transcoded sources.
+For remote requests, the server also applies the account's effective remote
+per-stream bitrate limit at PlaybackInfo negotiation, before it advertises
+direct or transcoded sources. Local requests are not subject to this limit.
 A lower client limit wins. Over-limit sources require a compliant video
 transcode; if none is available, PlaybackInfo returns `PlaybackUnavailable`.
 Static direct-play requests without PlaybackInfo cannot transcode an over-limit

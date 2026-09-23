@@ -148,17 +148,17 @@ func (r *ViewerResolver) ResolveFacts(ctx context.Context, input access.ResolveI
 	}
 
 	return access.Scope{
-		UserID:                    user.ID,
-		ProfileID:                 input.ProfileID,
-		AllowedLibraryIDs:         allowed,
-		DisabledLibraryIDs:        disabled,
-		LibrariesRestricted:       decision.LibrariesRestricted,
-		MaxContentRating:          decision.MaxContentRating,
-		MaxPlaybackQuality:        decision.MaxPlaybackQuality,
-		MaxStreamBitrateKbps:      effective.MaxStreamBitrateKbps,
-		PreferredMetadataLanguage: decision.PreferredMetadataLanguage,
-		MetadataLanguageOverrides: preferences.MetadataLanguageOverrides,
-		PolicyRevision:            user.AccessPolicyRevision,
+		UserID:                     user.ID,
+		ProfileID:                  input.ProfileID,
+		AllowedLibraryIDs:          allowed,
+		DisabledLibraryIDs:         disabled,
+		LibrariesRestricted:        decision.LibrariesRestricted,
+		MaxContentRating:           decision.MaxContentRating,
+		MaxPlaybackQuality:         decision.MaxPlaybackQuality,
+		MaxRemoteStreamBitrateKbps: effective.MaxRemoteStreamBitrateKbps,
+		PreferredMetadataLanguage:  decision.PreferredMetadataLanguage,
+		MetadataLanguageOverrides:  preferences.MetadataLanguageOverrides,
+		PolicyRevision:             user.AccessPolicyRevision,
 		// The policy output is tighten-only (merged_profile_verified), so a
 		// custom override may revoke verification but never grant it. ANDing
 		// with the Go-computed fact keeps that invariant even if a policy bug

@@ -35,6 +35,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/settingsresolve"
+	"github.com/Silo-Server/silo-server/internal/streamlocation"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
@@ -1623,8 +1624,8 @@ func (h *PlaybackHandler) startPlaybackApplicationV3(r *http.Request, body []byt
 		return playback.DecisionResponseV3{}, playbackOperationError(http.StatusInternalServerError, "internal_error", "Failed to check playback attempt idempotency")
 	}
 	timings.mark("idempotency")
-	if scope, ok := access.GetScope(r.Context()); ok {
-		r = r.WithContext(withServerBitrateCapV3(r.Context(), scope.MaxStreamBitrateKbps))
+	if scope, ok := access.GetScope(r.Context()); ok && streamlocation.IsRemote(r.Context()) {
+		r = r.WithContext(withServerBitrateCapV3(r.Context(), scope.MaxRemoteStreamBitrateKbps))
 	}
 	requestedFile, err := h.loadAuthorizedFile(r, req.FileID)
 	if err != nil {

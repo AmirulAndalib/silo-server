@@ -11,29 +11,29 @@ import "time"
 // outside internal/access should read these raw — resolve them through
 // access.EffectivePolicyForUser.
 type User struct {
-	ID                        int
-	Email                     string
-	Username                  string
-	PasswordHash              string
-	LocalPasswordLoginEnabled bool
-	Role                      string
-	Permissions               []string
-	Enabled                   bool
-	LibraryIDs                []int   // nil = inherit; non-nil = explicit library list (empty = none)
-	MaxPlaybackQuality        *string // nil = inherit; "" = explicit "no ceiling"
-	AccessPolicyRevision      int64
-	MaxStreams                *int  // nil = inherit; 0 = explicit unlimited
-	MaxTranscodes             *int  // nil = inherit; 0 = explicit unlimited
-	MaxStreamBitrateKbps      *int  // nil = inherit; 0 = explicit unlimited
-	TranscodeAllowed          *bool // nil = inherit
-	AudioTranscodeAllowed     *bool // nil = inherit
-	MaxProfiles               int
-	DownloadAllowed           *bool // nil = inherit
-	DownloadTranscodeAllowed  *bool // nil = inherit
-	RequestsAllowed           *bool // nil = inherit
-	AccessGroupID             *int64
-	CreatedAt                 time.Time
-	UpdatedAt                 time.Time
+	ID                         int
+	Email                      string
+	Username                   string
+	PasswordHash               string
+	LocalPasswordLoginEnabled  bool
+	Role                       string
+	Permissions                []string
+	Enabled                    bool
+	LibraryIDs                 []int   // nil = inherit; non-nil = explicit library list (empty = none)
+	MaxPlaybackQuality         *string // nil = inherit; "" = explicit "no ceiling"
+	AccessPolicyRevision       int64
+	MaxStreams                 *int  // nil = inherit; 0 = explicit unlimited
+	MaxTranscodes              *int  // nil = inherit; 0 = explicit unlimited
+	MaxRemoteStreamBitrateKbps *int  // nil = inherit; 0 = explicit unlimited
+	TranscodeAllowed           *bool // nil = inherit
+	AudioTranscodeAllowed      *bool // nil = inherit
+	MaxProfiles                int
+	DownloadAllowed            *bool // nil = inherit
+	DownloadTranscodeAllowed   *bool // nil = inherit
+	RequestsAllowed            *bool // nil = inherit
+	AccessGroupID              *int64
+	CreatedAt                  time.Time
+	UpdatedAt                  time.Time
 }
 
 // CreateUserInput contains the fields required to create a new user.
@@ -50,24 +50,24 @@ const (
 // Policy pointers: nil = inherit from the access group (stored as NULL);
 // non-nil = explicit override.
 type CreateUserInput struct {
-	Email                     string // required
-	Username                  string // required
-	Password                  string // plaintext, will be bcrypt-hashed
-	LocalPasswordLoginEnabled *bool
-	Role                      string // e.g. "admin", "user"
-	Permissions               []string
-	LibraryIDs                []int
-	MaxPlaybackQuality        *string
-	MaxStreams                *int
-	MaxTranscodes             *int
-	MaxStreamBitrateKbps      *int
-	TranscodeAllowed          *bool
-	AudioTranscodeAllowed     *bool
-	MaxProfiles               *int // nil = use DB default (5); minimum 1
-	DownloadAllowed           *bool
-	DownloadTranscodeAllowed  *bool
-	RequestsAllowed           *bool
-	AccessGroupID             *int64
+	Email                      string // required
+	Username                   string // required
+	Password                   string // plaintext, will be bcrypt-hashed
+	LocalPasswordLoginEnabled  *bool
+	Role                       string // e.g. "admin", "user"
+	Permissions                []string
+	LibraryIDs                 []int
+	MaxPlaybackQuality         *string
+	MaxStreams                 *int
+	MaxTranscodes              *int
+	MaxRemoteStreamBitrateKbps *int
+	TranscodeAllowed           *bool
+	AudioTranscodeAllowed      *bool
+	MaxProfiles                *int // nil = use DB default (5); minimum 1
+	DownloadAllowed            *bool
+	DownloadTranscodeAllowed   *bool
+	RequestsAllowed            *bool
+	AccessGroupID              *int64
 }
 
 // Optional is a tri-state update field: Set=false leaves the column alone,
@@ -93,23 +93,23 @@ func ClearValue[T any]() Optional[T] {
 // value". Optional fields carry the tri-state needed by nullable policy
 // columns (leave / clear to inherit / set override).
 type UpdateUserInput struct {
-	Email                     *string
-	Username                  *string
-	Password                  *string // plaintext, will be bcrypt-hashed if provided
-	LocalPasswordLoginEnabled *bool
-	Role                      *string
-	Permissions               *[]string
-	Enabled                   *bool
-	LibraryIDs                Optional[[]int]
-	MaxPlaybackQuality        Optional[string]
-	MaxStreams                Optional[int]
-	MaxTranscodes             Optional[int]
-	MaxStreamBitrateKbps      Optional[int]
-	TranscodeAllowed          Optional[bool]
-	AudioTranscodeAllowed     Optional[bool]
-	MaxProfiles               *int
-	DownloadAllowed           Optional[bool]
-	DownloadTranscodeAllowed  Optional[bool]
-	RequestsAllowed           Optional[bool]
-	AccessGroupID             Optional[int64]
+	Email                      *string
+	Username                   *string
+	Password                   *string // plaintext, will be bcrypt-hashed if provided
+	LocalPasswordLoginEnabled  *bool
+	Role                       *string
+	Permissions                *[]string
+	Enabled                    *bool
+	LibraryIDs                 Optional[[]int]
+	MaxPlaybackQuality         Optional[string]
+	MaxStreams                 Optional[int]
+	MaxTranscodes              Optional[int]
+	MaxRemoteStreamBitrateKbps Optional[int]
+	TranscodeAllowed           Optional[bool]
+	AudioTranscodeAllowed      Optional[bool]
+	MaxProfiles                *int
+	DownloadAllowed            Optional[bool]
+	DownloadTranscodeAllowed   Optional[bool]
+	RequestsAllowed            Optional[bool]
+	AccessGroupID              Optional[int64]
 }

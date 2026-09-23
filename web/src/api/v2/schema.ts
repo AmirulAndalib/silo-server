@@ -10353,9 +10353,9 @@ export interface components {
       max_playback_quality: string;
       /**
        * Format: int64
-       * @description Per-stream bitrate ceiling in kbps; 0 means unlimited
+       * @description Remote per-stream bitrate ceiling in kbps; 0 means unlimited
        */
-      max_stream_bitrate_kbps: number;
+      max_remote_stream_bitrate_kbps: number;
       /** Format: int64 */
       max_streams: number;
       /** Format: int64 */
@@ -10379,7 +10379,7 @@ export interface components {
       library_ids?: string[] | null;
       max_playback_quality?: string;
       /** Format: int64 */
-      max_stream_bitrate_kbps?: number;
+      max_remote_stream_bitrate_kbps?: number;
       /** Format: int64 */
       max_streams?: number;
       /** Format: int64 */
@@ -10409,9 +10409,9 @@ export interface components {
       max_playback_quality: string;
       /**
        * Format: int64
-       * @description Per-stream bitrate ceiling in kbps; 0 means unlimited
+       * @description Remote per-stream bitrate ceiling in kbps; 0 means unlimited
        */
-      max_stream_bitrate_kbps: number;
+      max_remote_stream_bitrate_kbps: number;
       /** Format: int64 */
       max_streams: number;
       /** Format: int64 */
@@ -10460,7 +10460,7 @@ export interface components {
       /** Format: int64 */
       max_profiles?: number;
       /** Format: int64 */
-      max_stream_bitrate_kbps?: number | null;
+      max_remote_stream_bitrate_kbps?: number | null;
       /** Format: int64 */
       max_streams?: number | null;
       /** Format: int64 */
@@ -10512,7 +10512,7 @@ export interface components {
       /** Format: int64 */
       max_profiles?: number;
       /** Format: int64 */
-      max_stream_bitrate_kbps?: number | null;
+      max_remote_stream_bitrate_kbps?: number | null;
       /** Format: int64 */
       max_streams?: number | null;
       /** Format: int64 */
@@ -15322,10 +15322,10 @@ export interface components {
       max_profiles: number;
       /**
        * Format: int64
-       * @description Per-stream bitrate override in kbps; null inherits, 0 means unlimited
+       * @description Remote per-stream bitrate override in kbps; null inherits, 0 means unlimited
        * @example 0
        */
-      max_stream_bitrate_kbps: number | null;
+      max_remote_stream_bitrate_kbps: number | null;
       /**
        * Format: int64
        * @description Stream limit override; null inherits, 0 means unlimited
@@ -18008,10 +18008,10 @@ export interface components {
       max_playback_quality: string;
       /**
        * Format: int64
-       * @description Per-stream bitrate limit in kbps; 0 means unlimited
+       * @description Remote per-stream bitrate limit in kbps; 0 means unlimited
        * @example 0
        */
-      max_stream_bitrate_kbps: number;
+      max_remote_stream_bitrate_kbps: number;
       /**
        * Format: int64
        * @description Concurrent stream limit; 0 means unlimited

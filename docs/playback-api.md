@@ -85,14 +85,15 @@ version with a potentially different timeline. Omitted or `true` retains the
 existing alternate-version behavior. The choice is persisted with the attempt
 and cannot be relaxed by a replan.
 
-When an administrator sets a positive per-stream bitrate limit, start allows
+When an administrator sets a positive remote-stream bitrate limit, a remote start allows
 the original file only when its probed bitrate fits. Otherwise the server plans
 a lower-bitrate transcode, including an audio and mux-overhead budget. A
 client's lower bandwidth preference still wins. If no compliant encode route
 exists, the decision is terminal with `bitrate_policy_unavailable`; it never
-falls back to the oversized original. The limit is frozen on a new playback
-attempt and reused through replans, so later policy edits do not interrupt it.
-`server_stream_bitrate_policy_v1` in `features` advertises this behavior.
+falls back to the oversized original. Local playback is not subject to this
+remote limit. The limit is frozen on a new playback attempt and reused through
+replans, so later policy edits do not interrupt it.
+`server_remote_stream_bitrate_policy_v1` in `features` advertises this behavior.
 
 The web Watch Party player requires this capability and sends `false`. When a
 source cannot be adapted, `watch_party_source_fallback_v1` allows connected

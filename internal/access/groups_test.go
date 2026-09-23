@@ -10,22 +10,22 @@ import (
 
 func ptr[T any](value T) *T { return &value }
 
-func TestStreamBitratePolicyInheritanceAndOverride(t *testing.T) {
-	group := &GroupPolicy{MaxStreamBitrateKbps: 4_000}
+func TestRemoteStreamBitratePolicyInheritanceAndOverride(t *testing.T) {
+	group := &GroupPolicy{MaxRemoteStreamBitrateKbps: 4_000}
 	user := &models.User{}
-	if got := ApplyGroupPolicy(user, group).MaxStreamBitrateKbps; got != 4_000 {
+	if got := ApplyGroupPolicy(user, group).MaxRemoteStreamBitrateKbps; got != 4_000 {
 		t.Fatalf("inherited bitrate = %d, want 4000", got)
 	}
-	user.MaxStreamBitrateKbps = ptr(2_000)
-	if got := ApplyGroupPolicy(user, group).MaxStreamBitrateKbps; got != 2_000 {
+	user.MaxRemoteStreamBitrateKbps = ptr(2_000)
+	if got := ApplyGroupPolicy(user, group).MaxRemoteStreamBitrateKbps; got != 2_000 {
 		t.Fatalf("tighter override = %d, want 2000", got)
 	}
-	user.MaxStreamBitrateKbps = ptr(0)
-	if got := ApplyGroupPolicy(user, group).MaxStreamBitrateKbps; got != 0 {
+	user.MaxRemoteStreamBitrateKbps = ptr(0)
+	if got := ApplyGroupPolicy(user, group).MaxRemoteStreamBitrateKbps; got != 0 {
 		t.Fatalf("explicit unlimited override = %d, want 0", got)
 	}
-	user.MaxStreamBitrateKbps = nil
-	if got := ApplyGroupPolicy(user, nil).MaxStreamBitrateKbps; got != 0 {
+	user.MaxRemoteStreamBitrateKbps = nil
+	if got := ApplyGroupPolicy(user, nil).MaxRemoteStreamBitrateKbps; got != 0 {
 		t.Fatalf("no-group default = %d, want 0", got)
 	}
 }
