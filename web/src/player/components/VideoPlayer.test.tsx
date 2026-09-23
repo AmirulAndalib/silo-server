@@ -986,6 +986,33 @@ describe("VideoPlayer room catch-up", () => {
     expect(onQualitySelect).toHaveBeenCalledWith("1080p-medium", expect.any(Number));
   });
 
+  it("withdraws the lower-quality offer when the viewer picks another quality", async () => {
+    const { connection, video, rerenderPlayer } = setup(100);
+    const plan = fixturePlanV3({
+      ...directPlan,
+      delivery: "server_remux_progressive",
+      timeline: { ...directPlan.timeline, can_seek_anywhere: false },
+      available_qualities: [
+        { label: "original", height: 2160, bitrate_kbps: 40_000, preserves_source: true },
+        { label: "1080p-medium", height: 1080, bitrate_kbps: 6000, preserves_source: false },
+        { label: "720p", height: 720, bitrate_kbps: 3000, preserves_source: false },
+      ],
+    });
+    rerenderPlayer({ watchTogetherConnection: connection, plan });
+    for (let stall = 0; stall < 2; stall++) {
+      Object.defineProperty(video, "readyState", { configurable: true, value: 2 });
+      fireEvent.waiting(video);
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+      fireEvent.canPlay(video);
+    }
+    expect(screen.getByRole("button", { name: "Lower quality" })).toBeInTheDocument();
+
+    // The offer was computed for Original; after choosing 720p it would raise quality.
+    rerenderPlayer({ watchTogetherConnection: connection, plan, qualityPreference: "720p" });
+    expect(screen.queryByRole("button", { name: "Lower quality" })).not.toBeInTheDocument();
+  });
+
   it("explains a room that kept playing without someone", () => {
     const { connection, rerenderPlayer } = setup(100);
     const bob = {

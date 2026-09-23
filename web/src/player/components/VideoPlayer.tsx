@@ -243,6 +243,7 @@ const MAX_AUTOPLAY_ATTEMPTS = 4;
 // cannot keep up at its current quality and is offered a lower one.
 const ROOM_STALLS_BEFORE_LOWER_QUALITY = 2;
 const ROOM_STALL_WINDOW_MS = 5 * 60_000;
+const LOWER_QUALITY_ACTION_LABEL = "Lower quality";
 
 interface PlaybackNoticeState {
   title?: string;
@@ -3027,10 +3028,12 @@ export function VideoPlayer({
     roomReloadBudgetRef.current = createRoomReloadBudget();
   }, [sessionId, watchTogetherRoomId]);
 
-  // Stall history is judged per quality: choosing another starts over.
+  // Stall history is judged per quality: choosing another starts over, and an
+  // offer computed for the previous quality no longer applies.
   useEffect(() => {
     roomStallTimesRef.current = [];
     lowerQualityOfferedRef.current = false;
+    setNotice((current) => (current?.actionLabel === LOWER_QUALITY_ACTION_LABEL ? null : current));
   }, [activeQualityId, sessionId, watchTogetherRoomId]);
 
   // A viewer who keeps stalling in a room cannot keep up at this quality.
@@ -3052,7 +3055,7 @@ export function VideoPlayer({
       "Your connection is having trouble keeping up with the party.",
       "warning",
       () => handleQualitySelectRef.current(lower.id),
-      "Lower quality",
+      LOWER_QUALITY_ACTION_LABEL,
     );
   }, [
     activeQualityId,
