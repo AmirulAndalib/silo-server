@@ -120,7 +120,7 @@ export const roomReloadMaxLeadSeconds = 10;
 export interface RoomReloadBudget {
   /** Media position the in-flight reload aims at, or null when none runs. */
   targetSeconds: number | null;
-  /** Whether the element has started loading since the reload began. */
+  /** Whether this reload's own seek or reanchor has been taken. */
   loadStarted: boolean;
   startedAtMs: number;
   /** Earliest time the next correction may reload media. */
@@ -171,14 +171,14 @@ export function beginRoomReload(
   return targetSeconds;
 }
 
-/** The element started seeking or loading a new source for the in-flight reload. */
+/** The in-flight reload's seek was taken, or its reanchor adopted. */
 export function noteRoomReloadLoading(budget: RoomReloadBudget): void {
   if (budget.targetSeconds !== null) budget.loadStarted = true;
 }
 
 /**
- * Whether media at `localPositionSeconds` is the in-flight reload playing: a
- * load has started since the reload began, and playback sits at its target.
+ * Whether media at `localPositionSeconds` is the in-flight reload playing: the
+ * reload's own seek was taken, and playback sits at its target.
  * The stream being replaced keeps playing until then and can be on either
  * side of the target, so position alone cannot settle the reload.
  */

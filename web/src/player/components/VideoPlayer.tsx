@@ -645,6 +645,8 @@ export function VideoPlayer({
   connectionReplacedRef.current = Boolean(watchTogether.replacementReason);
   const [roomStallSignal, setRoomStallSignal] = useState(0);
   const noteRoomStall = useCallback(() => {
+    // Once the lower quality is offered, stall history has done its job.
+    if (lowerQualityOfferedRef.current) return;
     roomStallTimesRef.current.push(Date.now());
     setRoomStallSignal((signal) => signal + 1);
   }, []);
@@ -1994,9 +1996,6 @@ export function VideoPlayer({
         watchTogetherSync.reportReady();
       }
     };
-    // A correction's reload has started once the element seeks or loads a
-    // new source; only then can its position settle the reload.
-    const onReloadLoading = () => noteRoomReloadLoading(roomReloadBudgetRef.current);
     const onSeeked = () => {
       const resolved = resolvePendingSeekTime(
         toMediaTime(video.currentTime, timelineOffsetRef.current),
@@ -2091,8 +2090,6 @@ export function VideoPlayer({
     video.addEventListener("pause", onPause);
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("seeked", onSeeked);
-    video.addEventListener("seeking", onReloadLoading);
-    video.addEventListener("loadstart", onReloadLoading);
     video.addEventListener("durationchange", onDurationChange);
     video.addEventListener("progress", onProgress);
     video.addEventListener("volumechange", onVolumeChange);
@@ -2110,8 +2107,6 @@ export function VideoPlayer({
       video.removeEventListener("pause", onPause);
       video.removeEventListener("timeupdate", onTimeUpdate);
       video.removeEventListener("seeked", onSeeked);
-      video.removeEventListener("seeking", onReloadLoading);
-      video.removeEventListener("loadstart", onReloadLoading);
       video.removeEventListener("durationchange", onDurationChange);
       video.removeEventListener("progress", onProgress);
       video.removeEventListener("volumechange", onVolumeChange);
@@ -2833,10 +2828,13 @@ export function VideoPlayer({
         const now = Date.now();
         if (!roomReloadAllowed(reloadBudget, now)) return;
         const reloadTarget = beginRoomReload(reloadBudget, targetPositionSeconds, now);
+        // Only this reload's own seek counts as its load: an in-stream seek
+        // that was taken, or an adopted reanchor. Other stream swaps, such as
+        // a subtitle replan, cannot settle it.
         void Promise.resolve(performPlayerSeekRef.current(reloadTarget)).then((accepted) => {
-          if (!accepted && reloadBudget.targetSeconds === reloadTarget) {
-            abandonRoomReload(reloadBudget, Date.now());
-          }
+          if (reloadBudget.targetSeconds !== reloadTarget) return;
+          if (accepted) noteRoomReloadLoading(reloadBudget);
+          else abandonRoomReload(reloadBudget, Date.now());
         });
       } else if (decision.kind === "seek") {
         performPlayerSeekRef.current(targetPositionSeconds);
