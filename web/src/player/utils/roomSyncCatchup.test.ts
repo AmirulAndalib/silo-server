@@ -195,6 +195,22 @@ describe("room rebuild budget", () => {
     expect(beginRoomReload(budget, 200, 20_000)).toBe(206);
   });
 
+  it("gives every reload its own generation", () => {
+    const budget = createRoomReloadBudget();
+    beginRoomReload(budget, 100, 0);
+    const first = budget.generation;
+    abandonRoomReload(budget, 1_000);
+    beginRoomReload(budget, 100, 40_000);
+    const second = budget.generation;
+    expect(second).not.toBe(first);
+    // Converging does not end an in-flight reload.
+    settleRoomReloads(budget);
+    expect(budget.generation).toBe(second);
+    noteRoomReloadLoading(budget);
+    landRoomReload(budget, 42_000);
+    expect(budget.generation).not.toBe(second);
+  });
+
   it("never aims the load-time lead past the end of the media", () => {
     const budget = createRoomReloadBudget();
     beginRoomReload(budget, 100, 0);

@@ -1001,6 +1001,46 @@ describe("VideoPlayer room catch-up", () => {
     expect(onReanchorSeek).toHaveBeenCalledTimes(1);
   });
 
+  it("ignores a stale reload's completion when a newer reload aims at the same position", async () => {
+    const { connection, video, command, rerenderPlayer, onReanchorSeek } = setup(90);
+    const resolvers: Array<(accepted: boolean) => void> = [];
+    onReanchorSeek.mockImplementation(
+      () => new Promise<boolean>((resolve) => resolvers.push(resolve)) as unknown as boolean,
+    );
+    const correct = async (commandId: string, position: number) => {
+      rerenderPlayer({
+        watchTogetherConnection: {
+          ...connection,
+          transportCommand: {
+            ...command,
+            command_id: commandId,
+            position_seconds: position,
+            execute_at: new Date().toISOString(),
+          },
+        },
+      });
+      await act(() => vi.advanceTimersByTimeAsync(0));
+    };
+    await correct("correction-1", 100);
+    // The first reload goes stale, and a new one aims at the same position.
+    vi.setSystemTime(Date.now() + 31_000);
+    await correct("correction-2", 100);
+    expect(onReanchorSeek).toHaveBeenCalledTimes(2);
+
+    // The first reload's replan completes late; it must not count as the second's load.
+    await act(async () => resolvers[0]!(true));
+    vi.setSystemTime(Date.now() + 2_000);
+    Object.defineProperty(video, "paused", { configurable: true, value: false });
+    Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+    video.currentTime = 100;
+    fireEvent.timeUpdate(video);
+
+    // Had the second reload landed, its 20 s backoff would have ended.
+    vi.setSystemTime(Date.now() + 21_000);
+    await correct("correction-3", 150);
+    expect(onReanchorSeek).toHaveBeenCalledTimes(2);
+  });
+
   it("starts reload pacing over when the viewer picks another quality", async () => {
     const { connection, command, rerenderPlayer, onReanchorSeek } = setup(90);
     const onQualitySelect = vi.fn();
@@ -1060,6 +1100,45 @@ describe("VideoPlayer room catch-up", () => {
     await stall();
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Lower quality" })));
     expect(onQualitySelect).toHaveBeenCalledWith("1080p-medium", expect.any(Number));
+  });
+
+  it("chooses the lower quality from the ladder shown when the viewer accepts", async () => {
+    const { connection, video, rerenderPlayer } = setup(100);
+    const onQualitySelect = vi.fn();
+    const planWith = (qualities: ReturnType<typeof fixturePlanV3>["available_qualities"]) =>
+      fixturePlanV3({
+        ...directPlan,
+        delivery: "server_remux_progressive",
+        timeline: { ...directPlan.timeline, can_seek_anywhere: false },
+        available_qualities: qualities,
+      });
+    rerenderPlayer({
+      watchTogetherConnection: connection,
+      onQualitySelect,
+      plan: planWith([
+        { label: "original", height: 2160, bitrate_kbps: 40_000, preserves_source: true },
+        { label: "1080p-medium", height: 1080, bitrate_kbps: 6000, preserves_source: false },
+        { label: "720p", height: 720, bitrate_kbps: 3000, preserves_source: false },
+      ]),
+    });
+    for (let stall = 0; stall < 2; stall++) {
+      Object.defineProperty(video, "readyState", { configurable: true, value: 2 });
+      fireEvent.waiting(video);
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+      fireEvent.canPlay(video);
+    }
+    // A replan drops 1080p from the ladder while the offer shows.
+    rerenderPlayer({
+      watchTogetherConnection: connection,
+      onQualitySelect,
+      plan: planWith([
+        { label: "original", height: 2160, bitrate_kbps: 40_000, preserves_source: true },
+        { label: "720p", height: 720, bitrate_kbps: 3000, preserves_source: false },
+      ]),
+    });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Lower quality" })));
+    expect(onQualitySelect).toHaveBeenCalledWith("720p", expect.any(Number));
   });
 
   it("withdraws the lower-quality offer when the viewer picks another quality", async () => {

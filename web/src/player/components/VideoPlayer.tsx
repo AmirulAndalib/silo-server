@@ -2834,11 +2834,12 @@ export function VideoPlayer({
           now,
           mediaDurationSeconds(backendDurationRef.current, durationRef.current),
         );
+        const reloadGeneration = reloadBudget.generation;
         // Only this reload's own seek counts as its load: an in-stream seek
         // that was taken, or an adopted reanchor. Other stream swaps, such as
         // a subtitle replan, cannot settle it.
         void Promise.resolve(performPlayerSeekRef.current(reloadTarget)).then((accepted) => {
-          if (reloadBudget.targetSeconds !== reloadTarget) return;
+          if (reloadBudget.generation !== reloadGeneration) return;
           if (accepted) noteRoomReloadLoading(reloadBudget);
           else abandonRoomReload(reloadBudget, Date.now());
         });
@@ -3041,6 +3042,14 @@ export function VideoPlayer({
     setNotice((current) => (current?.actionLabel === LOWER_QUALITY_ACTION_LABEL ? null : current));
   }, [activeQualityId, sessionId, watchTogetherRoomId]);
 
+  const lowerQualityChoiceRef = useRef(() =>
+    lowerQualityOption(qualityOptions, activeQualityId, plan.effective_recipe?.bitrate_kbps),
+  );
+  useEffect(() => {
+    lowerQualityChoiceRef.current = () =>
+      lowerQualityOption(qualityOptions, activeQualityId, plan.effective_recipe?.bitrate_kbps);
+  }, [activeQualityId, plan.effective_recipe?.bitrate_kbps, qualityOptions]);
+
   // A viewer who keeps stalling in a room cannot keep up at this quality.
   // Offer one step down, once per quality; the room's shared source is kept.
   useEffect(() => {
@@ -3049,17 +3058,19 @@ export function VideoPlayer({
     const recent = roomStallTimesRef.current.filter((at) => now - at < ROOM_STALL_WINDOW_MS);
     roomStallTimesRef.current = recent;
     if (recent.length < ROOM_STALLS_BEFORE_LOWER_QUALITY) return;
-    const lower = lowerQualityOption(
-      qualityOptions,
-      activeQualityId,
-      plan.effective_recipe?.bitrate_kbps,
-    );
-    if (!lower) return;
+    if (!lowerQualityOption(qualityOptions, activeQualityId, plan.effective_recipe?.bitrate_kbps)) {
+      return;
+    }
     lowerQualityOfferedRef.current = true;
     showWatchTogetherNotice(
       "Your connection is having trouble keeping up with the party.",
       "warning",
-      () => handleQualitySelectRef.current(lower.id),
+      () => {
+        // A replan can change the ladder while the offer shows; choose the
+        // step down from what is available when the viewer accepts.
+        const lower = lowerQualityChoiceRef.current();
+        if (lower) handleQualitySelectRef.current(lower.id);
+      },
       LOWER_QUALITY_ACTION_LABEL,
     );
   }, [

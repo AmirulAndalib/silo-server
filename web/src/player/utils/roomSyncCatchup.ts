@@ -118,6 +118,11 @@ export const roomReloadStaleMs = 30_000;
 export const roomReloadMaxLeadSeconds = 10;
 
 export interface RoomReloadBudget {
+  /**
+   * Identifies the current reload. A completion from an earlier reload must
+   * not act on a later one, even one aimed at the same position.
+   */
+  generation: number;
   /** Media position the in-flight reload aims at, or null when none runs. */
   targetSeconds: number | null;
   /** Whether this reload's own seek or reanchor has been taken. */
@@ -133,6 +138,7 @@ export interface RoomReloadBudget {
 
 export function createRoomReloadBudget(): RoomReloadBudget {
   return {
+    generation: 0,
     targetSeconds: null,
     loadStarted: false,
     startedAtMs: 0,
@@ -167,6 +173,7 @@ export function beginRoomReload(
   nowMs: number,
   durationSeconds?: number,
 ): number {
+  budget.generation += 1;
   let targetSeconds = roomPositionSeconds + budget.leadSeconds;
   if (durationSeconds !== undefined && durationSeconds > 0) {
     targetSeconds = Math.min(targetSeconds, Math.max(roomPositionSeconds, durationSeconds));
@@ -199,6 +206,7 @@ export function roomReloadLanded(budget: RoomReloadBudget, localPositionSeconds:
 /** The reload is playing: remember its load time and space the next one. */
 export function landRoomReload(budget: RoomReloadBudget, nowMs: number): void {
   if (budget.targetSeconds === null) return;
+  budget.generation += 1;
   budget.leadSeconds = Math.min(
     roomReloadMaxLeadSeconds,
     Math.max(0, (nowMs - budget.startedAtMs) / 1000),
@@ -209,6 +217,7 @@ export function landRoomReload(budget: RoomReloadBudget, nowMs: number): void {
 
 /** The reload was refused or superseded; space the next one. */
 export function abandonRoomReload(budget: RoomReloadBudget, nowMs: number): void {
+  budget.generation += 1;
   budget.targetSeconds = null;
   budget.nextAllowedAtMs = nowMs + roomReloadBackoffMs(budget.attempts);
 }
