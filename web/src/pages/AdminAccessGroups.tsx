@@ -321,6 +321,9 @@ function AccessGroupEditor({ initialEditor, onDeleted }: AccessGroupEditorProps)
   const [audioTranscodeAllowed, setAudioTranscodeAllowed] = useState(group.audio_transcode_allowed);
   const [maxStreams, setMaxStreams] = useState(group.max_streams);
   const [maxTranscodes, setMaxTranscodes] = useState(group.max_transcodes);
+  const [maxRemoteStreamBitrateKbps, setMaxRemoteStreamBitrateKbps] = useState(
+    group.max_remote_stream_bitrate_kbps,
+  );
   const [permissions, setPermissions] = useState<string[] | null>(group.allowed_permissions);
   const [requestsAllowed, setRequestsAllowed] = useState(group.requests_allowed);
   const [isDefault, setIsDefault] = useState(group.is_default);
@@ -352,6 +355,7 @@ function AccessGroupEditor({ initialEditor, onDeleted }: AccessGroupEditorProps)
       audio_transcode_allowed: audioTranscodeAllowed,
       max_streams: maxStreams,
       max_transcodes: maxTranscodes,
+      max_remote_stream_bitrate_kbps: maxRemoteStreamBitrateKbps,
       allowed_permissions: permissions,
       requests_allowed: requestsAllowed,
       is_default: isDefault,
@@ -445,6 +449,13 @@ function AccessGroupEditor({ initialEditor, onDeleted }: AccessGroupEditorProps)
             </SelectContent>
           </Select>
         </div>
+        <LimitField
+          id="group-stream-bitrate"
+          label="Max remote stream bitrate (kbps)"
+          hint="0 = unlimited. Applies to new remote streams."
+          value={maxRemoteStreamBitrateKbps}
+          onChange={setMaxRemoteStreamBitrateKbps}
+        />
       </section>
 
       <section className="surface-panel space-y-3 rounded-2xl border-0 p-5">
@@ -653,8 +664,15 @@ function LimitField({ id, label, hint, value, onChange }: LimitFieldProps) {
         min={0}
         value={value}
         onChange={(event) => {
-          const next = Number.parseInt(event.target.value, 10);
-          onChange(Number.isFinite(next) && next > 0 ? next : 0);
+          const raw = event.target.value;
+          if (raw === "") {
+            if (event.target.validity.badInput) return;
+            onChange(0);
+            return;
+          }
+          if (!/^\d+$/.test(raw)) return;
+          const next = Number(raw);
+          if (Number.isSafeInteger(next)) onChange(next);
         }}
       />
     </div>

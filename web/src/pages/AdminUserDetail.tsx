@@ -368,6 +368,15 @@ function OverviewTab({ user }: { user: AdminUser }) {
             }
           />
           <DetailRow
+            label="Max remote stream bitrate"
+            value={
+              (effective.max_remote_stream_bitrate_kbps === 0
+                ? "Unlimited"
+                : `${effective.max_remote_stream_bitrate_kbps} kbps`) +
+              overridden(user.max_remote_stream_bitrate_kbps !== null)
+            }
+          />
+          <DetailRow
             label="Audio Transcodes"
             value={
               allowed(effective.audio_transcode_allowed) +

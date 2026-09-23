@@ -52,7 +52,7 @@ func NewUserRepository(pool *pgxpool.Pool) *UserRepository {
 // Kept in one place so scanUser stays in sync.
 const allColumns = `id, email, username, password_hash, local_password_login_enabled, role, permissions, enabled,
 	library_ids, max_playback_quality, access_policy_revision,
-	max_streams, max_transcodes, transcode_allowed, audio_transcode_allowed, max_profiles, download_allowed,
+	max_streams, max_transcodes, max_remote_stream_bitrate_kbps, transcode_allowed, audio_transcode_allowed, max_profiles, download_allowed,
 	download_transcode_allowed, requests_allowed, access_group_id, created_at, updated_at`
 
 // scanUser scans a single row into a *models.User.
@@ -72,6 +72,7 @@ func scanUser(row pgx.Row) (*models.User, error) {
 		&u.AccessPolicyRevision,
 		&u.MaxStreams,
 		&u.MaxTranscodes,
+		&u.MaxRemoteStreamBitrateKbps,
 		&u.TranscodeAllowed,
 		&u.AudioTranscodeAllowed,
 		&u.MaxProfiles,
@@ -110,6 +111,7 @@ func scanUsers(rows pgx.Rows) ([]*models.User, error) {
 			&u.AccessPolicyRevision,
 			&u.MaxStreams,
 			&u.MaxTranscodes,
+			&u.MaxRemoteStreamBitrateKbps,
 			&u.TranscodeAllowed,
 			&u.AudioTranscodeAllowed,
 			&u.MaxProfiles,
@@ -163,7 +165,7 @@ func createUser(ctx context.Context, db interface {
 	// means "inherit from the access group" (the columns carry no defaults).
 	cols := []string{
 		"email", "username", "password_hash", "local_password_login_enabled", "role", "permissions",
-		"library_ids", "max_playback_quality", "max_streams", "max_transcodes",
+		"library_ids", "max_playback_quality", "max_streams", "max_transcodes", "max_remote_stream_bitrate_kbps",
 		"transcode_allowed", "audio_transcode_allowed", "download_allowed", "download_transcode_allowed",
 		"requests_allowed",
 	}
@@ -178,6 +180,7 @@ func createUser(ctx context.Context, db interface {
 		normalizeQualityOverride(input.MaxPlaybackQuality),
 		input.MaxStreams,
 		input.MaxTranscodes,
+		input.MaxRemoteStreamBitrateKbps,
 		input.TranscodeAllowed,
 		input.AudioTranscodeAllowed,
 		input.DownloadAllowed,
@@ -384,6 +387,7 @@ func updateUser(ctx context.Context, db interface {
 		},
 		{column: "max_streams", set: input.MaxStreams.Set, value: input.MaxStreams.Value},
 		{column: "max_transcodes", set: input.MaxTranscodes.Set, value: input.MaxTranscodes.Value},
+		{column: "max_remote_stream_bitrate_kbps", set: input.MaxRemoteStreamBitrateKbps.Set, value: input.MaxRemoteStreamBitrateKbps.Value},
 		{column: "transcode_allowed", set: input.TranscodeAllowed.Set, value: input.TranscodeAllowed.Value},
 		{column: "audio_transcode_allowed", set: input.AudioTranscodeAllowed.Set, value: input.AudioTranscodeAllowed.Value},
 		{column: "max_profiles", set: input.MaxProfiles != nil, value: input.MaxProfiles},

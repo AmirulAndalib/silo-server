@@ -43,6 +43,7 @@ const adminUser: AdminUser = {
   max_playback_quality: null,
   max_streams: null,
   max_transcodes: null,
+  max_remote_stream_bitrate_kbps: null,
   transcode_allowed: null,
   audio_transcode_allowed: null,
   max_profiles: 4,
@@ -54,6 +55,7 @@ const adminUser: AdminUser = {
     max_playback_quality: "",
     max_streams: 0,
     max_transcodes: 0,
+    max_remote_stream_bitrate_kbps: 0,
     transcode_allowed: true,
     audio_transcode_allowed: true,
     download_allowed: true,
@@ -448,8 +450,8 @@ describe("AdminUserDetail inherit hints", () => {
     renderUserDetail();
 
     await openLimitsTab(user);
-    // Ungrouped: the no-group layer leaves both ceilings uncapped.
-    expect(screen.getAllByText("Inherited: Unlimited")).toHaveLength(2);
+    // Ungrouped: the no-group layer leaves all three ceilings uncapped.
+    expect(screen.getAllByText("Inherited: Unlimited")).toHaveLength(3);
 
     await selectGuestsGroup(user);
     // The access tab's hints follow the picker straight away.
