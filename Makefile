@@ -246,7 +246,7 @@ verify-apiv2-openapi:
 	@tmp=$$(mktemp -d) && trap 'rm -rf "$$tmp"' EXIT && \
 		go run ./cmd/apiv2-openapi -out "$$tmp/openapi.json" && \
 		cmp -s "$$tmp/openapi.json" $(APIV2_OPENAPI) \
-		|| { diff -u $(APIV2_OPENAPI) "$$tmp/openapi.json"; echo "::error::$(APIV2_OPENAPI) is stale; run make apiv2-openapi"; exit 1; }
+		|| { echo "::error::$(APIV2_OPENAPI) is stale; run make apiv2-openapi"; exit 1; }
 	@echo "$(APIV2_OPENAPI) is current"
 
 # Regenerate the web contract types from the committed OpenAPI artifact.
