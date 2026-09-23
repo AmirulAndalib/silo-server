@@ -236,14 +236,14 @@ function AccessGroupCard({ group, onClick }: { group: AccessGroup; onClick: () =
     <button
       type="button"
       onClick={onClick}
-      className="surface-panel hover:border-ring/40 focus-visible:ring-ring/60 flex flex-col gap-3 rounded-2xl border border-transparent p-5 text-left transition-colors outline-none focus-visible:ring-2"
+      className="surface-panel hover:border-ring/40 focus-visible:ring-ring/60 flex flex-col gap-3 rounded-2xl border border-transparent p-5 text-left outline-none transition-colors focus-visible:ring-2"
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <h2 className="truncate text-base font-semibold tracking-tight">{group.name}</h2>
             {group.is_default && (
-              <span className="border-border text-muted-foreground shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-wide uppercase">
+              <span className="border-border text-muted-foreground shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide">
                 Default
               </span>
             )}
@@ -321,7 +321,9 @@ function AccessGroupEditor({ initialEditor, onDeleted }: AccessGroupEditorProps)
   const [audioTranscodeAllowed, setAudioTranscodeAllowed] = useState(group.audio_transcode_allowed);
   const [maxStreams, setMaxStreams] = useState(group.max_streams);
   const [maxTranscodes, setMaxTranscodes] = useState(group.max_transcodes);
-  const [maxRemoteStreamBitrateKbps, setMaxRemoteStreamBitrateKbps] = useState(group.max_remote_stream_bitrate_kbps);
+  const [maxRemoteStreamBitrateKbps, setMaxRemoteStreamBitrateKbps] = useState(
+    group.max_remote_stream_bitrate_kbps,
+  );
   const [permissions, setPermissions] = useState<string[] | null>(group.allowed_permissions);
   const [requestsAllowed, setRequestsAllowed] = useState(group.requests_allowed);
   const [isDefault, setIsDefault] = useState(group.is_default);

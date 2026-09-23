@@ -356,7 +356,9 @@ export function PolicyLimitFields({ state, onChange, effective }: PolicyContext)
         <LimitPolicyField
           label="Max remote stream bitrate (kbps)"
           value={state.maxRemoteStreamBitrateKbps}
-          onValueChange={(maxRemoteStreamBitrateKbps) => onChange({ ...state, maxRemoteStreamBitrateKbps })}
+          onValueChange={(maxRemoteStreamBitrateKbps) =>
+            onChange({ ...state, maxRemoteStreamBitrateKbps })
+          }
           effectiveValue={effective?.max_remote_stream_bitrate_kbps}
         />
       </div>
