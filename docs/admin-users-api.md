@@ -28,12 +28,11 @@ Omitted update fields preserve their values. Nullable policy overrides accept
 `false`, and zero concurrency limits retain their distinct meanings. Account
 identity and ordinary boolean fields reject null.
 
-`max_remote_stream_bitrate_kbps` is a nullable account override. `null` inherits the
-access group's value; `0` explicitly allows unlimited bitrate. The access
-group field defaults to `0`. Both fields are nonnegative integers in kbps and
-apply to remote playback only. A policy edit changes new playback sessions,
-not streams already playing. Local playback has no administrator bitrate cap
-until the companion local-stream policy is implemented.
+`max_remote_stream_bitrate_kbps` and `max_local_stream_bitrate_kbps` are separate
+nullable account overrides. `null` inherits the corresponding access-group
+value; `0` explicitly allows unlimited bitrate. Both access-group fields
+default to `0`. Values are nonnegative integers in kbps. A policy edit changes
+new playback sessions, not streams already playing.
 
 `POST /api/v2/admin/users` returns 201 with `{ "id": "..." }` and `Location`.
 Default-profile creation, when requested, uses the existing transactional

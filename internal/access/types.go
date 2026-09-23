@@ -10,6 +10,7 @@ type Scope struct {
 	MaxContentRating           string
 	MaxPlaybackQuality         string
 	MaxRemoteStreamBitrateKbps int
+	MaxLocalStreamBitrateKbps  int
 	// PreferredMetadataLanguage is the profile's metadata (presentation)
 	// language; "" inherits the library's metadata language.
 	PreferredMetadataLanguage string

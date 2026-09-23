@@ -1624,8 +1624,9 @@ func (h *PlaybackHandler) startPlaybackApplicationV3(r *http.Request, body []byt
 		return playback.DecisionResponseV3{}, playbackOperationError(http.StatusInternalServerError, "internal_error", "Failed to check playback attempt idempotency")
 	}
 	timings.mark("idempotency")
-	if scope, ok := access.GetScope(r.Context()); ok && streamlocation.IsRemote(r.Context()) {
-		r = r.WithContext(withServerBitrateCapV3(r.Context(), scope.MaxRemoteStreamBitrateKbps))
+	if scope, ok := access.GetScope(r.Context()); ok {
+		capKbps := streamlocation.BitrateCap(r.Context(), scope.MaxLocalStreamBitrateKbps, scope.MaxRemoteStreamBitrateKbps)
+		r = r.WithContext(withServerBitrateCapV3(r.Context(), capKbps))
 	}
 	requestedFile, err := h.loadAuthorizedFile(r, req.FileID)
 	if err != nil {
@@ -5701,7 +5702,7 @@ const (
 // out silently retired that fallback and refused playback outright.
 //
 // bitrate_policy_unavailable belongs here for the same reason: it replaces the
-// 4K and HDR refusals of a version that exceeds the remote bitrate limit, and
+// 4K and HDR refusals of a version that exceeds the stream's bitrate limit, and
 // a lower-bitrate version may fit that limit.
 func terminalAllowsAlternateFileV3(terminal *playback.TerminalV3) bool {
 	if terminal == nil {

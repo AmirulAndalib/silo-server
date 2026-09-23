@@ -23,3 +23,12 @@ func IsRemote(ctx context.Context) bool {
 	}
 	return !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()
 }
+
+// BitrateCap selects the administrator ceiling for this request's network
+// location. The caller persists the selected value with the playback session.
+func BitrateCap(ctx context.Context, localKbps, remoteKbps int) int {
+	if IsRemote(ctx) {
+		return remoteKbps
+	}
+	return localKbps
+}

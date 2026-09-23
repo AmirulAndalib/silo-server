@@ -14,6 +14,7 @@ const (
 	ProtocolV3                               = 3
 	FeaturePlaybackPlanV3                    = "playback_plan_v3"
 	FeatureServerRemoteStreamBitratePolicyV3 = "server_remote_stream_bitrate_policy_v1"
+	FeatureServerLocalStreamBitratePolicyV3  = "server_local_stream_bitrate_policy_v1"
 	FeatureEmbeddedSubtitlesV3               = "embedded_subtitles_v1"
 	FeatureNeutralContractV3                 = "neutral_playback_v3_contract_v1"
 	FeatureLayoutPassthrough                 = "layout_aware_passthrough"
@@ -113,6 +114,7 @@ func ServerFeaturesV3() []string {
 	return []string{
 		FeaturePlaybackPlanV3,
 		FeatureServerRemoteStreamBitratePolicyV3,
+		FeatureServerLocalStreamBitratePolicyV3,
 		FeatureNeutralContractV3,
 		FeatureEmbeddedSubtitlesV3,
 		FeatureLayoutPassthrough,
@@ -256,7 +258,7 @@ const (
 )
 
 // TerminalBitratePolicyUnavailableV3 reports that no route fits the
-// administrator's remote per-stream bitrate limit for this version.
+// administrator's local or remote per-stream bitrate limit for this version.
 const TerminalBitratePolicyUnavailableV3 = "bitrate_policy_unavailable"
 
 type SubtitleModeV3 string

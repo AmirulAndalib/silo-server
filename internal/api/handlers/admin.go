@@ -314,6 +314,7 @@ type AdminUserView struct {
 	MaxStreams                 *int                `json:"max_streams"`
 	MaxTranscodes              *int                `json:"max_transcodes"`
 	MaxRemoteStreamBitrateKbps *int                `json:"-"`
+	MaxLocalStreamBitrateKbps  *int                `json:"-"`
 	TranscodeAllowed           *bool               `json:"transcode_allowed"`
 	AudioTranscodeAllowed      *bool               `json:"audio_transcode_allowed"`
 	MaxProfiles                int                 `json:"max_profiles"`
@@ -334,6 +335,7 @@ type EffectivePolicyView struct {
 	MaxStreams                 int      `json:"max_streams"`
 	MaxTranscodes              int      `json:"max_transcodes"`
 	MaxRemoteStreamBitrateKbps int      `json:"-"`
+	MaxLocalStreamBitrateKbps  int      `json:"-"`
 	TranscodeAllowed           bool     `json:"transcode_allowed"`
 	AudioTranscodeAllowed      bool     `json:"audio_transcode_allowed"`
 	DownloadAllowed            bool     `json:"download_allowed"`
@@ -401,6 +403,7 @@ func toAdminUserResponse(u *models.User, group *access.GroupPolicy) AdminUserVie
 		MaxStreams:                 clonePtr(u.MaxStreams),
 		MaxTranscodes:              clonePtr(u.MaxTranscodes),
 		MaxRemoteStreamBitrateKbps: clonePtr(u.MaxRemoteStreamBitrateKbps),
+		MaxLocalStreamBitrateKbps:  clonePtr(u.MaxLocalStreamBitrateKbps),
 		TranscodeAllowed:           clonePtr(u.TranscodeAllowed),
 		AudioTranscodeAllowed:      clonePtr(u.AudioTranscodeAllowed),
 		MaxProfiles:                u.MaxProfiles,
@@ -414,6 +417,7 @@ func toAdminUserResponse(u *models.User, group *access.GroupPolicy) AdminUserVie
 			MaxStreams:                 effective.MaxStreams,
 			MaxTranscodes:              effective.MaxTranscodes,
 			MaxRemoteStreamBitrateKbps: effective.MaxRemoteStreamBitrateKbps,
+			MaxLocalStreamBitrateKbps:  effective.MaxLocalStreamBitrateKbps,
 			TranscodeAllowed:           effective.TranscodeAllowed,
 			AudioTranscodeAllowed:      effective.AudioTranscodeAllowed,
 			DownloadAllowed:            effective.DownloadAllowed,

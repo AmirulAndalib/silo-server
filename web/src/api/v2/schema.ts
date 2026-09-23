@@ -10350,6 +10350,11 @@ export interface components {
       id: string;
       is_default: boolean;
       library_ids: string[] | null;
+      /**
+       * Format: int64
+       * @description Local per-stream bitrate ceiling in kbps; 0 means unlimited
+       */
+      max_local_stream_bitrate_kbps: number;
       max_playback_quality: string;
       /**
        * Format: int64
@@ -10377,6 +10382,8 @@ export interface components {
       download_transcode_allowed?: boolean;
       is_default?: boolean;
       library_ids?: string[] | null;
+      /** Format: int64 */
+      max_local_stream_bitrate_kbps?: number;
       max_playback_quality?: string;
       /** Format: int64 */
       max_remote_stream_bitrate_kbps?: number;
@@ -10406,6 +10413,11 @@ export interface components {
       id: string;
       is_default: boolean;
       library_ids: string[] | null;
+      /**
+       * Format: int64
+       * @description Local per-stream bitrate ceiling in kbps; 0 means unlimited
+       */
+      max_local_stream_bitrate_kbps: number;
       max_playback_quality: string;
       /**
        * Format: int64
@@ -10456,6 +10468,8 @@ export interface components {
       download_transcode_allowed?: boolean | null;
       email: string;
       library_ids?: string[] | null;
+      /** Format: int64 */
+      max_local_stream_bitrate_kbps?: number | null;
       max_playback_quality?: string | null;
       /** Format: int64 */
       max_profiles?: number;
@@ -10508,6 +10522,8 @@ export interface components {
       email?: string;
       enabled?: boolean;
       library_ids?: string[] | null;
+      /** Format: int64 */
+      max_local_stream_bitrate_kbps?: number | null;
       max_playback_quality?: string | null;
       /** Format: int64 */
       max_profiles?: number;
@@ -15310,6 +15326,12 @@ export interface components {
        */
       library_ids: string[] | null;
       /**
+       * Format: int64
+       * @description Local per-stream bitrate override in kbps; null inherits, 0 means unlimited
+       * @example 0
+       */
+      max_local_stream_bitrate_kbps: number | null;
+      /**
        * @description Playback ceiling override; null inherits, empty string means no ceiling
        * @example 1080p
        */
@@ -18001,6 +18023,12 @@ export interface components {
        *     ]
        */
       library_ids: string[] | null;
+      /**
+       * Format: int64
+       * @description Local per-stream bitrate limit in kbps; 0 means unlimited
+       * @example 0
+       */
+      max_local_stream_bitrate_kbps: number;
       /**
        * @description Playback ceiling; empty means none
        * @example 1080p

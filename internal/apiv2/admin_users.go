@@ -19,6 +19,7 @@ type EffectivePolicy struct {
 	MaxStreams                 int          `json:"max_streams" doc:"Concurrent stream limit; 0 means unlimited" example:"2"`
 	MaxTranscodes              int          `json:"max_transcodes" doc:"Concurrent transcode limit; 0 means unlimited" example:"0"`
 	MaxRemoteStreamBitrateKbps int          `json:"max_remote_stream_bitrate_kbps" minimum:"0" doc:"Remote per-stream bitrate limit in kbps; 0 means unlimited" example:"0"`
+	MaxLocalStreamBitrateKbps  int          `json:"max_local_stream_bitrate_kbps" minimum:"0" doc:"Local per-stream bitrate limit in kbps; 0 means unlimited" example:"0"`
 	TranscodeAllowed           bool         `json:"transcode_allowed" example:"true"`
 	AudioTranscodeAllowed      bool         `json:"audio_transcode_allowed" example:"false"`
 	DownloadAllowed            bool         `json:"download_allowed" example:"true"`
@@ -41,6 +42,7 @@ type AdminUser struct {
 	MaxStreams                 *int            `json:"max_streams" nullable:"true" doc:"Stream limit override; null inherits, 0 means unlimited" example:"2"`
 	MaxTranscodes              *int            `json:"max_transcodes" nullable:"true" doc:"Transcode limit override; null inherits, 0 means unlimited" example:"0"`
 	MaxRemoteStreamBitrateKbps *int            `json:"max_remote_stream_bitrate_kbps" nullable:"true" minimum:"0" doc:"Remote per-stream bitrate override in kbps; null inherits, 0 means unlimited" example:"0"`
+	MaxLocalStreamBitrateKbps  *int            `json:"max_local_stream_bitrate_kbps" nullable:"true" minimum:"0" doc:"Local per-stream bitrate override in kbps; null inherits, 0 means unlimited" example:"0"`
 	TranscodeAllowed           *bool           `json:"transcode_allowed" nullable:"true" doc:"Override; null inherits" example:"true"`
 	AudioTranscodeAllowed      *bool           `json:"audio_transcode_allowed" nullable:"true" doc:"Override; null inherits" example:"false"`
 	MaxProfiles                int             `json:"max_profiles" doc:"Household profile limit" example:"5"`
@@ -158,6 +160,7 @@ func adminUserFromView(v handlers.AdminUserView) AdminUser {
 		MaxStreams:                 v.MaxStreams,
 		MaxTranscodes:              v.MaxTranscodes,
 		MaxRemoteStreamBitrateKbps: v.MaxRemoteStreamBitrateKbps,
+		MaxLocalStreamBitrateKbps:  v.MaxLocalStreamBitrateKbps,
 		TranscodeAllowed:           v.TranscodeAllowed,
 		AudioTranscodeAllowed:      v.AudioTranscodeAllowed,
 		MaxProfiles:                v.MaxProfiles,
@@ -170,6 +173,7 @@ func adminUserFromView(v handlers.AdminUserView) AdminUser {
 			MaxStreams:                 v.EffectivePolicy.MaxStreams,
 			MaxTranscodes:              v.EffectivePolicy.MaxTranscodes,
 			MaxRemoteStreamBitrateKbps: v.EffectivePolicy.MaxRemoteStreamBitrateKbps,
+			MaxLocalStreamBitrateKbps:  v.EffectivePolicy.MaxLocalStreamBitrateKbps,
 			TranscodeAllowed:           v.EffectivePolicy.TranscodeAllowed,
 			AudioTranscodeAllowed:      v.EffectivePolicy.AudioTranscodeAllowed,
 			DownloadAllowed:            v.EffectivePolicy.DownloadAllowed,

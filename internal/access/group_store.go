@@ -27,6 +27,7 @@ type Group struct {
 	MaxStreams                 int
 	MaxTranscodes              int
 	MaxRemoteStreamBitrateKbps int
+	MaxLocalStreamBitrateKbps  int
 	AllowedPermissions         []string
 	RequestsAllowed            bool
 	IsDefault                  bool
@@ -48,6 +49,7 @@ func (g Group) Policy() GroupPolicy {
 		MaxStreams:                 g.MaxStreams,
 		MaxTranscodes:              g.MaxTranscodes,
 		MaxRemoteStreamBitrateKbps: g.MaxRemoteStreamBitrateKbps,
+		MaxLocalStreamBitrateKbps:  g.MaxLocalStreamBitrateKbps,
 		AllowedPermissions:         cloneStrings(g.AllowedPermissions),
 		RequestsAllowed:            g.RequestsAllowed,
 	}
@@ -66,6 +68,7 @@ type CreateGroupInput struct {
 	MaxStreams                 int
 	MaxTranscodes              int
 	MaxRemoteStreamBitrateKbps int
+	MaxLocalStreamBitrateKbps  int
 	AllowedPermissions         []string
 	RequestsAllowed            bool
 	IsDefault                  bool
@@ -84,6 +87,7 @@ type UpdateGroupInput struct {
 	MaxStreams                 *int
 	MaxTranscodes              *int
 	MaxRemoteStreamBitrateKbps *int
+	MaxLocalStreamBitrateKbps  *int
 	AllowedPermissions         *[]string
 	RequestsAllowed            *bool
 	IsDefault                  *bool
@@ -113,7 +117,7 @@ func NewGroupStore(pool *pgxpool.Pool) *GroupStore {
 
 const accessGroupSelectColumns = `g.id, g.name, g.description, g.library_ids, g.max_playback_quality,
 	g.download_allowed, g.download_transcode_allowed, g.transcode_allowed, g.audio_transcode_allowed,
-	g.max_streams, g.max_transcodes, g.max_remote_stream_bitrate_kbps,
+	g.max_streams, g.max_transcodes, g.max_remote_stream_bitrate_kbps, g.max_local_stream_bitrate_kbps,
 	g.allowed_permissions, g.requests_allowed, g.is_default, g.created_at, g.updated_at, g.configuration_revision`
 
 type groupScanner interface {
@@ -135,6 +139,7 @@ func scanGroup(row groupScanner) (*Group, error) {
 		&g.MaxStreams,
 		&g.MaxTranscodes,
 		&g.MaxRemoteStreamBitrateKbps,
+		&g.MaxLocalStreamBitrateKbps,
 		&g.AllowedPermissions,
 		&g.RequestsAllowed,
 		&g.IsDefault,
@@ -161,6 +166,7 @@ func scanGroupPolicy(row groupScanner) (*GroupPolicy, error) {
 		&p.MaxStreams,
 		&p.MaxTranscodes,
 		&p.MaxRemoteStreamBitrateKbps,
+		&p.MaxLocalStreamBitrateKbps,
 		&p.AllowedPermissions,
 		&p.RequestsAllowed,
 	); err != nil {
@@ -240,10 +246,10 @@ func (s *GroupStore) Create(ctx context.Context, input CreateGroupInput) (*Group
 		INSERT INTO access_groups (
 			name, description, library_ids, max_playback_quality,
 			download_allowed, download_transcode_allowed, transcode_allowed, audio_transcode_allowed,
-			max_streams, max_transcodes, max_remote_stream_bitrate_kbps,
+			max_streams, max_transcodes, max_remote_stream_bitrate_kbps, max_local_stream_bitrate_kbps,
 			allowed_permissions, requests_allowed, is_default
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		RETURNING id`,
 		name,
 		input.Description,
@@ -256,6 +262,7 @@ func (s *GroupStore) Create(ctx context.Context, input CreateGroupInput) (*Group
 		input.MaxStreams,
 		input.MaxTranscodes,
 		input.MaxRemoteStreamBitrateKbps,
+		input.MaxLocalStreamBitrateKbps,
 		input.AllowedPermissions,
 		input.RequestsAllowed,
 		input.IsDefault,
@@ -346,6 +353,11 @@ func (s *GroupStore) UpdateConditional(ctx context.Context, id int64, input Upda
 	if input.MaxRemoteStreamBitrateKbps != nil {
 		sets = append(sets, fmt.Sprintf("max_remote_stream_bitrate_kbps = $%d", arg))
 		args = append(args, *input.MaxRemoteStreamBitrateKbps)
+		arg++
+	}
+	if input.MaxLocalStreamBitrateKbps != nil {
+		sets = append(sets, fmt.Sprintf("max_local_stream_bitrate_kbps = $%d", arg))
+		args = append(args, *input.MaxLocalStreamBitrateKbps)
 		arg++
 	}
 	if input.AllowedPermissions != nil {
@@ -477,7 +489,7 @@ func groupPolicyForUser(ctx context.Context, db interface {
 	policy, err := scanGroupPolicy(db.QueryRow(ctx, `
 		SELECT g.id, g.library_ids, g.max_playback_quality, g.download_allowed,
 			g.download_transcode_allowed, g.transcode_allowed, g.audio_transcode_allowed,
-			g.max_streams, g.max_transcodes, g.max_remote_stream_bitrate_kbps,
+			g.max_streams, g.max_transcodes, g.max_remote_stream_bitrate_kbps, g.max_local_stream_bitrate_kbps,
 			g.allowed_permissions, g.requests_allowed
 		FROM users u
 		JOIN access_groups g ON g.id = u.access_group_id

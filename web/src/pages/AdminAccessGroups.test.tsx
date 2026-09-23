@@ -22,6 +22,7 @@ const GROUP = {
   max_streams: 1,
   max_transcodes: 0,
   max_remote_stream_bitrate_kbps: 0,
+  max_local_stream_bitrate_kbps: 0,
   allowed_permissions: [] as string[],
   requests_allowed: false,
   is_default: true,

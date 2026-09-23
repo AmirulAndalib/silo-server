@@ -25,6 +25,7 @@ type User struct {
 	MaxStreams                 *int  // nil = inherit; 0 = explicit unlimited
 	MaxTranscodes              *int  // nil = inherit; 0 = explicit unlimited
 	MaxRemoteStreamBitrateKbps *int  // nil = inherit; 0 = explicit unlimited
+	MaxLocalStreamBitrateKbps  *int  // nil = inherit; 0 = explicit unlimited
 	TranscodeAllowed           *bool // nil = inherit
 	AudioTranscodeAllowed      *bool // nil = inherit
 	MaxProfiles                int
@@ -61,6 +62,7 @@ type CreateUserInput struct {
 	MaxStreams                 *int
 	MaxTranscodes              *int
 	MaxRemoteStreamBitrateKbps *int
+	MaxLocalStreamBitrateKbps  *int
 	TranscodeAllowed           *bool
 	AudioTranscodeAllowed      *bool
 	MaxProfiles                *int // nil = use DB default (5); minimum 1
@@ -105,6 +107,7 @@ type UpdateUserInput struct {
 	MaxStreams                 Optional[int]
 	MaxTranscodes              Optional[int]
 	MaxRemoteStreamBitrateKbps Optional[int]
+	MaxLocalStreamBitrateKbps  Optional[int]
 	TranscodeAllowed           Optional[bool]
 	AudioTranscodeAllowed      Optional[bool]
 	MaxProfiles                *int

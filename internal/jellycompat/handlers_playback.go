@@ -350,7 +350,7 @@ type PlaybackHandler struct {
 }
 
 func (h *PlaybackHandler) serverBitrateCap(ctx context.Context, session *Session) (int, error) {
-	if h.ScopeResolver == nil || !streamlocation.IsRemote(ctx) {
+	if h.ScopeResolver == nil {
 		return 0, nil
 	}
 	scope, err := h.ScopeResolver.Resolve(ctx, access.ResolveInput{
@@ -361,7 +361,7 @@ func (h *PlaybackHandler) serverBitrateCap(ctx context.Context, session *Session
 	if err != nil {
 		return 0, err
 	}
-	return scope.MaxRemoteStreamBitrateKbps, nil
+	return streamlocation.BitrateCap(ctx, scope.MaxLocalStreamBitrateKbps, scope.MaxRemoteStreamBitrateKbps), nil
 }
 
 // recipeNodePutter persists and removes a remote transcode's reconstruction
