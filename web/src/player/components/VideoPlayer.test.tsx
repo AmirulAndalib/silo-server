@@ -26,6 +26,8 @@ const controls = vi.hoisted(() => ({
     activeSubtitleIndex: number | null;
     subtitleTracks: PlayerSubtitleInfo[];
     visible: boolean;
+    onSkip?: { back: () => void; forward: () => void };
+    skipSeconds?: { back: number; forward: number };
     onSurfaceTap?: (event: React.MouseEvent<HTMLElement>) => void;
     isFullscreen?: boolean;
     onFullscreenToggle?: () => void;
@@ -165,6 +167,7 @@ function playerProps(overrides: Partial<Parameters<typeof VideoPlayer>[0]> = {})
     credits: null,
     qualityPreference: "original",
     onExit: vi.fn(),
+    seekIntervals: { back: 10, forward: 30 },
     ...overrides,
   };
 }
@@ -1727,6 +1730,234 @@ describe("VideoPlayer plan failure recovery", () => {
     vi.restoreAllMocks();
   });
 
+  it("uses profile intervals for controls and detached transport, and updates without restarting", async () => {
+    const ready = vi.fn();
+    const { container, rerenderPlayer } = renderPlayer({
+      shouldAutoPlay: false,
+      plan: { ...directPlan, source: { ...directPlan.source, duration_seconds: 1000 } },
+      seekIntervals: { back: 15, forward: 60 },
+      onPlaybackTransportReady: ready,
+    });
+    const video = container.querySelector("video")!;
+    // The element reaching a seek target settles it, as a real timeupdate would.
+    const settleAt = (seconds: number) => {
+      Object.defineProperty(video, "currentTime", { configurable: true, value: seconds });
+      fireEvent.timeUpdate(video);
+    };
+    Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+    settleAt(100);
+    fireEvent.canPlay(video);
+    await waitFor(() => expect(controls.current?.skipSeconds?.forward).toBe(60));
+    act(() => controls.current?.onSkip?.back());
+    expect(playerSeek).toHaveBeenLastCalledWith(85);
+    settleAt(85);
+    act(() => ready.mock.lastCall![0].skipForward());
+    expect(playerSeek).toHaveBeenLastCalledWith(145);
+    settleAt(145);
+    const callsBeforeTick = ready.mock.calls.length;
+    fireEvent.timeUpdate(video);
+    expect(ready.mock.calls.length).toBe(callsBeforeTick);
+    const load = vi.mocked(HTMLMediaElement.prototype.load);
+    load.mockClear();
+    rerenderPlayer({ seekIntervals: { back: 5, forward: 90 } });
+    // An interval change neither reloads media nor re-publishes the transport.
+    expect(ready.mock.calls.length).toBe(callsBeforeTick);
+    act(() => controls.current?.onSkip?.forward());
+    expect(playerSeek).toHaveBeenLastCalledWith(235);
+    expect(load).not.toHaveBeenCalled();
+    settleAt(235);
+    settleAt(998);
+    act(() => ready.mock.lastCall![0].skipForward());
+    expect(playerSeek).toHaveBeenLastCalledWith(1000);
+    settleAt(1000);
+    settleAt(2);
+    act(() => ready.mock.lastCall![0].skipBack());
+    expect(playerSeek).toHaveBeenLastCalledWith(0);
+  });
+
+  it("chains skips from a pending seek instead of the element's stale clock", async () => {
+    const ready = vi.fn();
+    const { container } = renderPlayer({
+      shouldAutoPlay: false,
+      plan: { ...directPlan, source: { ...directPlan.source, duration_seconds: 1000 } },
+      seekIntervals: { back: 15, forward: 60 },
+      onPlaybackTransportReady: ready,
+    });
+    const video = container.querySelector("video")!;
+    Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 100 });
+    fireEvent.canPlay(video);
+    await waitFor(() => expect(ready).toHaveBeenCalled());
+    // Two quick taps before the element catches up: 100 → 160 → 220, not 160 twice.
+    act(() => ready.mock.lastCall![0].skipForward());
+    act(() => ready.mock.lastCall![0].skipForward());
+    expect(playerSeek).toHaveBeenLastCalledWith(220);
+    // A scrub far ahead followed by a skip extends the scrub.
+    act(() => ready.mock.lastCall![0].seekTo(700));
+    act(() => ready.mock.lastCall![0].skipBack());
+    expect(playerSeek).toHaveBeenLastCalledWith(685);
+  });
+
+  it("returns relative skips to the media clock after a reanchor fails", () => {
+    const ready = vi.fn();
+    // The replan is still in flight when it fails.
+    const reanchor = vi.fn((_seconds: number) => new Promise<boolean>(() => {}));
+    const { container, rerenderPlayer } = renderPlayer({
+      shouldAutoPlay: false,
+      plan: {
+        ...directPlan,
+        timeline: { ...directPlan.timeline, can_seek_anywhere: false },
+      },
+      onPlaybackTransportReady: ready,
+      onReanchorSeek: reanchor,
+    });
+    const video = container.querySelector("video")!;
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 100 });
+    Object.defineProperty(video, "seekable", {
+      configurable: true,
+      value: { length: 1, start: () => 0, end: () => 110 },
+    });
+    const transport = ready.mock.lastCall![0];
+    act(() => transport.skipForward());
+    expect(reanchor).toHaveBeenLastCalledWith(130);
+    rerenderPlayer({ replanning: true });
+    rerenderPlayer({ replanning: false, replanError: "Reanchor request failed." });
+    act(() => transport.skipBack());
+    expect(playerSeek).toHaveBeenLastCalledWith(90);
+    expect(reanchor).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns relative skips to the media clock when a replan refuses a reanchor", async () => {
+    const ready = vi.fn();
+    const replans: Array<(accepted: boolean) => void> = [];
+    const reanchor = vi.fn(
+      (_seconds: number) => new Promise<boolean>((resolve) => replans.push(resolve)),
+    );
+    const { container } = renderPlayer({
+      shouldAutoPlay: false,
+      plan: {
+        ...directPlan,
+        timeline: { ...directPlan.timeline, can_seek_anywhere: false },
+      },
+      onPlaybackTransportReady: ready,
+      onReanchorSeek: reanchor,
+    });
+    const video = container.querySelector("video")!;
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 100 });
+    Object.defineProperty(video, "seekable", {
+      configurable: true,
+      value: { length: 1, start: () => 0, end: () => 110 },
+    });
+    const transport = ready.mock.lastCall![0];
+    act(() => transport.skipForward());
+    act(() => transport.skipForward());
+    expect(reanchor).toHaveBeenLastCalledWith(160);
+    // The superseded replan resolving false must not drop the newer target.
+    await act(async () => replans[0]!(false));
+    act(() => transport.skipBack());
+    expect(playerSeek).not.toHaveBeenCalled();
+    expect(reanchor).toHaveBeenLastCalledWith(150);
+    // Refusing the current target releases it without a replan error.
+    await act(async () => replans[2]!(false));
+    act(() => transport.skipBack());
+    expect(playerSeek).toHaveBeenLastCalledWith(90);
+    expect(reanchor).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps rejected local seeks out of the next skip origin", () => {
+    const ready = vi.fn();
+    const { container } = renderPlayer({
+      shouldAutoPlay: false,
+      plan: {
+        ...directPlan,
+        timeline: { ...directPlan.timeline, can_seek_anywhere: false },
+      },
+      onPlaybackTransportReady: ready,
+    });
+    const video = container.querySelector("video")!;
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 100 });
+    Object.defineProperty(video, "seekable", {
+      configurable: true,
+      value: { length: 1, start: () => 0, end: () => 200 },
+    });
+    const transport = ready.mock.lastCall![0];
+    act(() => transport.seekTo(500));
+    act(() => transport.skipForward());
+    expect(playerSeek).toHaveBeenLastCalledWith(130);
+    act(() => transport.seekTo(500));
+    act(() => transport.skipForward());
+    expect(playerSeek.mock.calls).toEqual([[130], [160]]);
+  });
+
+  it("chains accepted room requests while rejected requests preserve the pending target", () => {
+    const ready = vi.fn();
+    const sendRoomMessage = vi.fn((_message: Record<string, unknown>) => ({ ok: true }));
+    const { container } = renderPlayer({
+      shouldAutoPlay: false,
+      onPlaybackTransportReady: ready,
+      watchTogetherConnection: roomConnection({
+        room: {
+          ...roomConnection().room!,
+          playback_state: "paused",
+          is_paused: true,
+          member_count: 1,
+          self_role: "host",
+          self_can_control_transport: true,
+          self_can_manage_room: true,
+        },
+        sendRoomMessage,
+      }),
+    });
+    const video = container.querySelector("video")!;
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 100 });
+    const transport = ready.mock.lastCall![0];
+    sendRoomMessage.mockClear();
+    sendRoomMessage.mockReturnValueOnce({ ok: false });
+    act(() => transport.skipForward());
+    act(() => transport.skipForward());
+    act(() => transport.skipForward());
+    sendRoomMessage.mockReturnValueOnce({ ok: false });
+    act(() => transport.seekTo(500));
+    act(() => transport.skipBack());
+    expect(sendRoomMessage.mock.calls.map(([message]) => message)).toEqual(
+      [130, 130, 160, 500, 150].map((position_seconds) => ({
+        type: "transport_request",
+        action: "seek",
+        position_seconds,
+        is_paused: true,
+      })),
+    );
+    expect(playerSeek).not.toHaveBeenCalled();
+    expect(video.currentTime).toBe(100);
+  });
+
+  it("reanchors configured skips on the media timeline across a remux window boundary", () => {
+    const ready = vi.fn();
+    const reanchor = vi.fn((_seconds: number) => new Promise<boolean>(() => {}));
+    const { container } = renderPlayer({
+      shouldAutoPlay: false,
+      plan: {
+        ...directPlan,
+        timeline: {
+          ...directPlan.timeline,
+          timeline_offset_seconds: 400,
+          can_seek_anywhere: false,
+        },
+      },
+      seekIntervals: { back: 15, forward: 60 },
+      onPlaybackTransportReady: ready,
+      onReanchorSeek: reanchor,
+    });
+    const video = container.querySelector("video")!;
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 10 });
+    act(() => ready.mock.lastCall![0].skipBack());
+    expect(reanchor).toHaveBeenLastCalledWith(395);
+    // The reanchor is still being replanned: the next skip continues from its
+    // target rather than from the element, which still sits at media time 410.
+    act(() => controls.current?.onSkip?.forward());
+    expect(reanchor).toHaveBeenLastCalledWith(455);
+  });
+
   it("toggles play on a mouse single click and fullscreen on a double click", async () => {
     vi.useFakeTimers();
     const pause = vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
@@ -1810,7 +2041,10 @@ describe("VideoPlayer plan failure recovery", () => {
       })),
     );
     try {
-      const { container } = renderPlayer({ shouldAutoPlay: false });
+      const { container } = renderPlayer({
+        shouldAutoPlay: false,
+        seekIntervals: { back: 15, forward: 60 },
+      });
       const video = container.querySelector("video");
       if (!video) throw new Error("expected video element");
       Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
@@ -1835,7 +2069,7 @@ describe("VideoPlayer plan failure recovery", () => {
         controls.current?.onSurfaceTap?.(leftTap);
         controls.current?.onSurfaceTap?.(leftTap);
       });
-      expect(playerSeek).toHaveBeenCalledWith(40);
+      expect(playerSeek).toHaveBeenCalledWith(35);
     } finally {
       vi.useRealTimers();
       vi.unstubAllGlobals();

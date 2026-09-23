@@ -1,8 +1,10 @@
+import { useMediaSkipHandlers } from "../hooks/useMediaSkipHandlers";
+import { skipTarget } from "../utils/skipTarget";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ParsedCue } from "../utils/parseVTT";
 import { resolveSubtitleAutoSelect } from "../utils/subtitleSort";
 import type HlsType from "hls.js";
-import { PlayerControls, SKIP_BACK_SECONDS, SKIP_FORWARD_SECONDS } from "./PlayerControls";
+import { PlayerControls } from "./PlayerControls";
 import { PlaybackInfoOverlay } from "./PlaybackInfoOverlay";
 import { PlaybackNoticeOverlay } from "./PlaybackNoticeOverlay";
 import { IntroSkipButton } from "./IntroSkipButton";
@@ -211,6 +213,8 @@ interface VideoPlayerProps {
   onExit: (state?: PlaybackExitState) => void | Promise<void>;
   onMinimize?: (state?: PlaybackExitState) => void | Promise<void>;
   onEnded?: () => void;
+  /** Profile rewind/fast-forward intervals; the host resolves contract defaults for old servers. */
+  seekIntervals: { back: number; forward: number };
   displayMode?: PlayerDisplayMode;
   onPictureInPictureChange?: (change: PlayerPictureInPictureChange) => void;
   autoEnterPictureInPicture?: boolean;
@@ -339,6 +343,7 @@ export function VideoPlayer({
   onMinimize,
   onEnded,
   displayMode = "foreground",
+  seekIntervals,
   onPictureInPictureChange,
   autoEnterPictureInPicture = false,
   onPlaybackStateChange,
@@ -392,6 +397,13 @@ export function VideoPlayer({
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [pendingSeekTime, setPendingSeekTime] = useState<number | null>(null);
+  // Mirror for synchronous readers (relative skips): a seek whose target the
+  // element has not reached yet — including a reanchor still being replanned —
+  // is the position playback is heading to, so the next skip starts there.
+  const pendingSeekTimeRef = useRef<number | null>(null);
+  useEffect(() => {
+    pendingSeekTimeRef.current = pendingSeekTime;
+  }, [pendingSeekTime]);
   const [duration, setDuration] = useState(propDuration ?? 0);
   const [buffered, setBuffered] = useState<TimeRanges | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -866,6 +878,9 @@ export function VideoPlayer({
   useEffect(() => {
     if (!replanError || replanning) return;
 
+    // A refused reanchor never reaches its target. Resume relative skips from
+    // the surviving stream instead of extending the abandoned request.
+    pendingSeekTimeRef.current = null;
     setPendingSeekTime(null);
     const video = videoRef.current;
     if (video) setCurrentTime(toMediaTime(video.currentTime, timelineOffsetRef.current));
@@ -883,6 +898,21 @@ export function VideoPlayer({
   // Only the progressive/direct routes take this path; HLS seeking is handled
   // against the plan's timeline below.
   const { handleSeek } = useRemuxSeeking(videoRef);
+
+  const rememberPendingSeek = useCallback((seconds: number) => {
+    pendingSeekTimeRef.current = seconds;
+    setPendingSeekTime(seconds);
+  }, []);
+
+  // A refused reanchor never reaches its target. Resume relative skips from
+  // the surviving stream unless a newer seek has already replaced the target.
+  const releasePendingSeek = useCallback((seconds: number) => {
+    if (pendingSeekTimeRef.current !== seconds) return;
+    pendingSeekTimeRef.current = null;
+    setPendingSeekTime(null);
+    const video = videoRef.current;
+    if (video) setCurrentTime(toMediaTime(video.currentTime, timelineOffsetRef.current));
+  }, []);
 
   // Ends an active room catch-up nudge; any seek or local stop returns the
   // element to 1x so a stale rate never survives a context change.
@@ -903,11 +933,11 @@ export function VideoPlayer({
       if (!video) return false;
 
       resetRoomCatchupRate();
-      setPendingSeekTime(seconds);
-      setCurrentTime(seconds);
 
       const nativeSeconds = toPlayerTime(seconds, timelineOffsetRef.current);
       if (canSeekAnywhere || isNativePositionInRanges(video.seekable, nativeSeconds)) {
+        rememberPendingSeek(seconds);
+        setCurrentTime(seconds);
         if (isHlsStream) video.currentTime = nativeSeconds;
         else handleSeek(nativeSeconds);
         return true;
@@ -918,9 +948,33 @@ export function VideoPlayer({
       // The replan decides whether the seek took: a refused or failed replan
       // leaves playback where it was. With no handler the seek is dropped.
       if (!onReanchorSeek) return false;
-      return onReanchorSeek(seconds);
+      rememberPendingSeek(seconds);
+      setCurrentTime(seconds);
+      const accepted = onReanchorSeek(seconds);
+      if (typeof accepted === "boolean") {
+        if (!accepted) releasePendingSeek(seconds);
+        return accepted;
+      }
+      return accepted.then(
+        (ok) => {
+          if (!ok) releasePendingSeek(seconds);
+          return ok;
+        },
+        (error: unknown) => {
+          releasePendingSeek(seconds);
+          throw error;
+        },
+      );
     },
-    [canSeekAnywhere, handleSeek, isHlsStream, onReanchorSeek, resetRoomCatchupRate],
+    [
+      canSeekAnywhere,
+      handleSeek,
+      isHlsStream,
+      onReanchorSeek,
+      releasePendingSeek,
+      rememberPendingSeek,
+      resetRoomCatchupRate,
+    ],
   );
 
   const handlePlayerSeek = useCallback(
@@ -951,8 +1005,9 @@ export function VideoPlayer({
         const result = watchTogetherSync.requestTransport("seek", seconds, video?.paused ?? true);
         if (result.ok) {
           // Hold the requested position in the controls immediately. The media
-          // element still waits for the room's scheduled transport command.
-          setPendingSeekTime(seconds);
+          // element still waits for the room's scheduled transport command, and
+          // a relative skip before then extends this target.
+          rememberPendingSeek(seconds);
           setCurrentTime(seconds);
         }
         return result.ok;
@@ -961,6 +1016,7 @@ export function VideoPlayer({
     },
     [
       performPlayerSeek,
+      rememberPendingSeek,
       sessionId,
       showWatchTogetherNotice,
       watchTogether,
@@ -973,16 +1029,40 @@ export function VideoPlayer({
     performPlayerSeekRef.current = performPlayerSeek;
   }, [performPlayerSeek]);
 
-  // -- Keyboard seek adapter --
-  // Keyboard shortcuts read player-local video.currentTime (e.g., 10) and add
-  // ±10 s. This wrapper remaps that local time back onto the media timeline
-  // before dispatching the seek request.
-  const handleKeyboardSeek = useCallback(
-    (seconds: number) => {
-      handlePlayerSeek(toMediaTime(seconds, timelineOffsetRef.current));
+  // Every relative skip starts on the canonical media timeline, including
+  // remux playback whose HTML media clock starts at a nonzero offset. A seek
+  // still in flight (a reanchor being replanned, a remux reload) is the origin
+  // rather than the element clock, so a skip right after a scrub extends the
+  // scrub instead of snapping back to where the element still is.
+  const handleSkip = useCallback(
+    (direction: "back" | "forward") => {
+      const now =
+        pendingSeekTimeRef.current ??
+        (videoRef.current
+          ? toMediaTime(videoRef.current.currentTime, timelineOffsetRef.current)
+          : currentTimeRef.current);
+      const seconds = direction === "back" ? seekIntervals.back : seekIntervals.forward;
+      handlePlayerSeek(
+        skipTarget(now, durationRef.current, direction === "back" ? -seconds : seconds),
+      );
     },
-    [handlePlayerSeek],
+    [handlePlayerSeek, seekIntervals.back, seekIntervals.forward],
   );
+  const handleSkipRef = useRef(handleSkip);
+  useEffect(() => {
+    handleSkipRef.current = handleSkip;
+  }, [handleSkip]);
+  // One stable pair for every consumer that registers listeners (keyboard,
+  // Media Session, controls), so a time update never re-registers anything.
+  const skipActions = useMemo(
+    () => ({
+      back: () => handleSkipRef.current("back"),
+      forward: () => handleSkipRef.current("forward"),
+    }),
+    [],
+  );
+
+  useMediaSkipHandlers(displayMode !== "postroll", skipActions.back, skipActions.forward);
 
   // -- Watch progress reporting --
   const flushWatchProgress = useWatchProgress(sessionId, videoRef, timelineOffsetRef);
@@ -2687,14 +2767,11 @@ export function VideoPlayer({
         surfaceTapTimerRef.current = null;
         const rect = event?.currentTarget.getBoundingClientRect();
         const relativeX = rect && event ? (event.clientX - rect.left) / rect.width : 0.5;
-        const now = videoRef.current?.currentTime ?? currentTime;
         if (relativeX < 1 / 3) {
-          handlePlayerSeek(Math.max(0, now - SKIP_BACK_SECONDS));
+          handleSkip("back");
           resetControlsTimer();
         } else if (relativeX > 2 / 3) {
-          handlePlayerSeek(
-            Math.min(duration || now + SKIP_FORWARD_SECONDS, now + SKIP_FORWARD_SECONDS),
-          );
+          handleSkip("forward");
           resetControlsTimer();
         } else {
           handlePlayPause();
@@ -2714,11 +2791,9 @@ export function VideoPlayer({
     [
       clearControlsTimer,
       controlsVisible,
-      currentTime,
-      duration,
       handleFullscreenToggle,
       handlePlayPause,
-      handlePlayerSeek,
+      handleSkip,
       isCoarsePointer,
       resetControlsTimer,
       setPlayback,
@@ -2991,7 +3066,7 @@ export function VideoPlayer({
     videoRef,
     containerRef,
     handlePlayPause,
-    handleKeyboardSeek,
+    skipActions,
     toggleCaptions,
     handleTogglePiP,
     displayMode === "foreground",
@@ -3142,6 +3217,8 @@ export function VideoPlayer({
         const maxTime = nextDuration > 0 ? nextDuration : nextCurrentTime + Math.abs(secondsDelta);
         handlePlayerSeekRef.current(Math.max(0, Math.min(maxTime, nextCurrentTime + secondsDelta)));
       },
+      skipBack: skipActions.back,
+      skipForward: skipActions.forward,
       seekTo: (seconds: number) => {
         handlePlayerSeekRef.current(seconds);
       },
@@ -3150,7 +3227,7 @@ export function VideoPlayer({
 
     onPlaybackTransportReady(transport);
     return () => onPlaybackTransportReady(null);
-  }, [onPlaybackTransportReady]);
+  }, [onPlaybackTransportReady, skipActions]);
 
   const executeRealtimeCommand = useCallback(
     async (command: PlaybackRealtimeCommandEnvelope) => {
@@ -3687,6 +3764,8 @@ export function VideoPlayer({
       {!isDetached && isPlayerReady && (
         <PlayerControls
           visible={controlsVisible || markerEditor.editing}
+          skipSeconds={seekIntervals}
+          onSkip={skipActions}
           playing={playing}
           currentTime={currentTime}
           duration={duration}
