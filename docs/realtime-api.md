@@ -464,7 +464,8 @@ The frozen v1 HTTP responses and room socket omit these status fields. The web
 player lists viewer status and names the viewers it is waiting for.
 
 The web player reports buffering after 2 seconds without playable media and
-sends no `state_report` while its element is stalled. Recovery, a changed
+sends no `state_report` while its element is stalled, or while its media is
+unplayable and a readiness acknowledgement is pending. Recovery, a changed
 command/session, pause, a phase change, disconnect, and unmount cancel a pending
 report. The server ignores late buffering reports for paused rooms. A buffering
 report pauses a playing room only when the viewer has not stalled in the last 5

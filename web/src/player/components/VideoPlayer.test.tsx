@@ -816,6 +816,34 @@ describe("VideoPlayer room catch-up", () => {
     },
   );
 
+  it("sends no position reports from paused unplayable media while catching up", async () => {
+    const { connection, video, command, rerenderPlayer } = setup(100);
+    const messages = vi.mocked(connection.sendRoomMessage);
+    rerenderPlayer({
+      watchTogetherConnection: {
+        ...connection,
+        room: { ...connection.room!, playback_state: "paused", self_ignore_wait: true },
+        transportCommand: {
+          ...command,
+          action: "pause" as const,
+          playback_state: "paused" as const,
+          execute_at: new Date(Date.now() + 500).toISOString(),
+        },
+      },
+    });
+    Object.defineProperty(video, "paused", { configurable: true, value: true });
+    Object.defineProperty(video, "readyState", { configurable: true, value: 2 });
+    messages.mockClear();
+    await act(() => vi.advanceTimersByTimeAsync(3_000));
+    // A report matching the paused room would end catching up on the server.
+    expect(messages).not.toHaveBeenCalledWith(expect.objectContaining({ type: "state_report" }));
+    expect(messages).not.toHaveBeenCalledWith(expect.objectContaining({ type: "ready" }));
+
+    Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    expect(messages).toHaveBeenCalledWith(expect.objectContaining({ type: "ready" }));
+  });
+
   it("clears a buffering status left over from a reconnect", async () => {
     const { connection, video, command, rerenderPlayer } = setup(100);
     Object.defineProperty(video, "readyState", { configurable: true, value: 3 });

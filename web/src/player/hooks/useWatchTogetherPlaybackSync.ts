@@ -286,8 +286,13 @@ export function useWatchTogetherPlaybackSync({
 
         // A stalled element reports where it stopped, not a decision. Stay
         // quiet until it plays again so the room neither corrects nor follows
-        // a stream that cannot move.
-        if (!video.paused && video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
+        // a stream that cannot move. While recovery is pending the same holds
+        // when paused: the server would take a report that matches the room
+        // as recovery, and only the guarded ready above may end it.
+        if (
+          (!video.paused || retryReadiness) &&
+          video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA
+        ) {
           return;
         }
 

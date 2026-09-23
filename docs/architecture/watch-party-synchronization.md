@@ -68,7 +68,8 @@ miss the scene.
 - Stalls shorter than 2 seconds stay local. The web player reports buffering
   only after 2 seconds without playable media, and the viewer converges on the
   room by playback rate. It sends no position reports while its element is
-  stalled, because a stalled position is not a decision.
+  stalled, or while its media is unplayable and a readiness acknowledgement is
+  pending, because a stalled position is not a decision.
 - A longer stall pauses the room for at most the 10-second waiting deadline,
   and the overlay names who everyone is waiting for.
 - A viewer who missed the deadline, or who stalls again within 5 minutes of
