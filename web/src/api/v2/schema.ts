@@ -13320,6 +13320,11 @@ export interface components {
       started_at: string;
       /** Format: int64 */
       stream_bitrate_kbps: number | null;
+      /**
+       * @description Local or remote classification used by the server bitrate policy.
+       * @enum {string}
+       */
+      stream_location: "local" | "remote";
       /** Format: int64 */
       target_audio_channels?: number;
       target_audio_codec?: string;
@@ -13364,6 +13369,7 @@ export interface components {
        * @enum {string}
        */
       state: "available" | "disabled" | "not_configured" | "unsupported";
+      stream_location: boolean;
       summary: boolean;
       target_audio_channels: boolean;
       tone_map_mode: boolean;

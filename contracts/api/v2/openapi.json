@@ -8763,6 +8763,14 @@
               "null"
             ]
           },
+          "stream_location": {
+            "description": "Local or remote classification used by the server bitrate policy.",
+            "enum": [
+              "local",
+              "remote"
+            ],
+            "type": "string"
+          },
           "target_audio_channels": {
             "format": "int64",
             "type": "integer"
@@ -8831,6 +8839,7 @@
           "position_seconds",
           "is_paused",
           "has_playback_control",
+          "stream_location",
           "audio_track_index",
           "transcode_audio",
           "stream_bitrate_kbps",
@@ -8895,6 +8904,9 @@
             ],
             "type": "string"
           },
+          "stream_location": {
+            "type": "boolean"
+          },
           "summary": {
             "type": "boolean"
           },
@@ -8932,6 +8944,7 @@
           "client_channel",
           "target_audio_channels",
           "network_access_route",
+          "stream_location",
           "node_routing",
           "output_format",
           "revision",
