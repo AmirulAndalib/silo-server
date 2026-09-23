@@ -5702,7 +5702,7 @@ const (
 // out silently retired that fallback and refused playback outright.
 //
 // bitrate_policy_unavailable belongs here for the same reason: it replaces the
-// 4K and HDR refusals of a version that exceeds the remote bitrate limit, and
+// 4K and HDR refusals of a version that exceeds the stream's bitrate limit, and
 // a lower-bitrate version may fit that limit.
 func terminalAllowsAlternateFileV3(terminal *playback.TerminalV3) bool {
 	if terminal == nil {

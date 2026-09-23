@@ -258,7 +258,7 @@ const (
 )
 
 // TerminalBitratePolicyUnavailableV3 reports that no route fits the
-// administrator's remote per-stream bitrate limit for this version.
+// administrator's local or remote per-stream bitrate limit for this version.
 const TerminalBitratePolicyUnavailableV3 = "bitrate_policy_unavailable"
 
 type SubtitleModeV3 string

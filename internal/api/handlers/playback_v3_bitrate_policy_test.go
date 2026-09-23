@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,9 +14,10 @@ import (
 	"github.com/Silo-Server/silo-server/internal/playback"
 )
 
-// A remote bitrate cap that the requested 4K version cannot meet must still
-// let the start fall back to a version that fits the cap.
-func TestHandleStartPlaybackV3RemoteBitrateCapTriesCompliantAlternate(t *testing.T) {
+// A bitrate cap that the requested 4K version cannot meet must still let the
+// start fall back to a version that fits the cap. The request's location
+// selects the local or remote cap.
+func TestHandleStartPlaybackV3BitrateCapTriesCompliantAlternate(t *testing.T) {
 	source := v3HandlerFixtureFile(t)
 	source.Resolution = "2160p"
 	source.Bitrate = 32_000
@@ -40,19 +42,35 @@ func TestHandleStartPlaybackV3RemoteBitrateCapTriesCompliantAlternate(t *testing
 	handler.PlaybackConfig = playbackTestConfig("", "")
 	handler.ItemAccess = allowAllPlaybackItemAccess{}
 
-	start := v3HandlerStartRequest()
-	start.QualityPreference = "auto"
-	start.ClientPlaybackContext.Deliveries[playback.DeliveryClassHLSV3] = playback.DeliveryCapabilityV3{Enabled: true, SupportedOnDevice: true}
-	ctx := access.SetScope(newAuthorizedPlaybackContext(), access.Scope{UserID: 1, ProfileID: "profile-1", MaxRemoteStreamBitrateKbps: 10_000})
-	ctx = clientip.SetContext(ctx, "203.0.113.7")
-	rr := httptest.NewRecorder()
-	handler.HandleStartPlayback(rr, httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, start))).WithContext(ctx))
-
-	var response playback.DecisionResponseV3
-	if rr.Code != http.StatusCreated || json.Unmarshal(rr.Body.Bytes(), &response) != nil {
-		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	// The other location's cap is too low for any stream, so applying it
+	// instead would refuse playback.
+	tests := []struct {
+		name     string
+		clientIP string
+		scope    access.Scope
+	}{
+		{name: "remote", clientIP: "203.0.113.7", scope: access.Scope{MaxRemoteStreamBitrateKbps: 10_000, MaxLocalStreamBitrateKbps: 100}},
+		{name: "local", clientIP: "192.168.1.20", scope: access.Scope{MaxLocalStreamBitrateKbps: 10_000, MaxRemoteStreamBitrateKbps: 100}},
 	}
-	if response.PlaybackPlan == nil || response.PlaybackPlan.EffectiveMediaFileID != alternate.ID {
-		t.Fatalf("expected the compliant 1080p alternate, got terminal=%#v plan=%#v", response.Terminal, response.PlaybackPlan)
+	for i, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			start := v3HandlerStartRequest()
+			start.PlaybackAttemptID = fmt.Sprintf("bitrate-cap-attempt-%d", i)
+			start.QualityPreference = "auto"
+			start.ClientPlaybackContext.Deliveries[playback.DeliveryClassHLSV3] = playback.DeliveryCapabilityV3{Enabled: true, SupportedOnDevice: true}
+			scope := test.scope
+			scope.UserID, scope.ProfileID = 1, "profile-1"
+			ctx := clientip.SetContext(access.SetScope(newAuthorizedPlaybackContext(), scope), test.clientIP)
+			rr := httptest.NewRecorder()
+			handler.HandleStartPlayback(rr, httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, start))).WithContext(ctx))
+
+			var response playback.DecisionResponseV3
+			if rr.Code != http.StatusCreated || json.Unmarshal(rr.Body.Bytes(), &response) != nil {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			if response.PlaybackPlan == nil || response.PlaybackPlan.EffectiveMediaFileID != alternate.ID {
+				t.Fatalf("expected the compliant 1080p alternate, got terminal=%#v plan=%#v", response.Terminal, response.PlaybackPlan)
+			}
+		})
 	}
 }
