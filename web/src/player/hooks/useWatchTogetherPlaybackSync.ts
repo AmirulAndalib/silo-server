@@ -137,19 +137,25 @@ export function useWatchTogetherPlaybackSync({
     videoRef,
   ]);
 
+  // A new stream, room, selection, phase, or connection starts over.
   useEffect(() => {
     waitingStateRef.current = "idle";
   }, [
     attachedSessionId,
     connectionState,
     roomPhase,
-    readinessAcknowledged,
     room?.room_id,
-    room?.playback_state,
     room?.selection_revision,
     sessionId,
-    transportCommand?.command_id,
   ]);
+
+  // A new command or readiness reset calls for a fresh acknowledgement. A
+  // reported stall stays reported until the media recovers: the snapshot that
+  // marks this viewer buffering must not let a later event for the same
+  // outage report it again.
+  useEffect(() => {
+    if (waitingStateRef.current === "ready") waitingStateRef.current = "idle";
+  }, [readinessAcknowledged, room?.playback_state, transportCommand?.command_id]);
 
   useEffect(() => {
     if (!sessionId || connectionState !== "connected") {

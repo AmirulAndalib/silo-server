@@ -512,6 +512,54 @@ describe("VideoPlayer room catch-up", () => {
     ).toHaveLength(1);
   });
 
+  it("reports one continuous stall once after the room marks this viewer buffering", async () => {
+    const { connection, video, rerenderPlayer } = setup(100);
+    const self = {
+      user_id: 8,
+      profile_id: "guest",
+      display_name: "Me",
+      is_host: false,
+      is_self: true,
+      connected: true,
+    };
+    const withSelf = (member: Record<string, boolean>, ignoreWait = false) => ({
+      ...connection,
+      room: {
+        ...connection.room!,
+        self_ignore_wait: ignoreWait,
+        members: [{ ...self, ...member }],
+      },
+    });
+    rerenderPlayer({ watchTogetherConnection: withSelf({ is_ready: true }) });
+    Object.defineProperty(video, "readyState", { configurable: true, value: 2 });
+    fireEvent.waiting(video);
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+
+    // The room kept playing and now shows this viewer buffering.
+    rerenderPlayer({ watchTogetherConnection: withSelf({ is_buffering: true }, true) });
+    // The browser reports the same outage again.
+    fireEvent.stalled(video);
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+    expect(
+      vi
+        .mocked(connection.sendRoomMessage)
+        .mock.calls.filter(([message]) => message.type === "buffering"),
+    ).toHaveLength(1);
+
+    // After recovery, a new outage is a new stall.
+    Object.defineProperty(video, "readyState", { configurable: true, value: 3 });
+    fireEvent.canPlay(video);
+    rerenderPlayer({ watchTogetherConnection: withSelf({ is_ready: true }) });
+    Object.defineProperty(video, "readyState", { configurable: true, value: 2 });
+    fireEvent.waiting(video);
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+    expect(
+      vi
+        .mocked(connection.sendRoomMessage)
+        .mock.calls.filter(([message]) => message.type === "buffering"),
+    ).toHaveLength(2);
+  });
+
   it("cancels a pending buffering report when the room disconnects", async () => {
     const { connection, video, rerenderPlayer } = setup(100);
     Object.defineProperty(video, "readyState", { configurable: true, value: 2 });
