@@ -64,6 +64,12 @@ type serviceFakeRepo struct {
 	markHistoryStatusErr   error
 	syncRunMu              sync.Mutex
 	scrobbleMu             sync.Mutex
+	// ratingLockBusy simulates another node holding a connection's rating
+	// sync lock; ratingLocks records each lock taken, with whether it waited.
+	ratingLockBusy map[string]bool
+	ratingLocks    []string
+	// upsertRatingErr fails UpsertRatingSyncStates when set.
+	upsertRatingErr error
 }
 
 type scrobbleUpdate struct {
@@ -540,6 +546,9 @@ func (r *serviceFakeRepo) ListRatingSyncStates(_ context.Context, connectionID, 
 }
 
 func (r *serviceFakeRepo) UpsertRatingSyncStates(_ context.Context, states []RatingSyncState) error {
+	if r.upsertRatingErr != nil && len(states) > 0 {
+		return r.upsertRatingErr
+	}
 	for _, state := range states {
 		replaced := false
 		for i := range r.ratingStates {
@@ -561,6 +570,21 @@ func (r *serviceFakeRepo) UpsertRatingSyncStates(_ context.Context, states []Rat
 		}
 	}
 	return nil
+}
+
+func (r *serviceFakeRepo) WithRatingSyncLock(ctx context.Context, connectionID string, wait bool, fn func(context.Context) error) (bool, error) {
+	if r.ratingLockBusy[connectionID] {
+		if wait {
+			return false, context.DeadlineExceeded
+		}
+		return false, nil
+	}
+	mode := "try"
+	if wait {
+		mode = "wait"
+	}
+	r.ratingLocks = append(r.ratingLocks, mode+":"+connectionID)
+	return true, fn(ctx)
 }
 
 func (r *serviceFakeRepo) DeleteRatingSyncStates(_ context.Context, connectionID, providerAccountID string, mediaItemIDs []string) error {

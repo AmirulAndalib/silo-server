@@ -2,7 +2,10 @@ package watchsync
 
 import (
 	"context"
+	"errors"
+	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -675,6 +678,65 @@ func TestSyncRatingsSkipsAmbiguousTombstones(t *testing.T) {
 	}
 }
 
+func TestSyncRatingsResolvesTombstonesWithinTheirKind(t *testing.T) {
+	t.Run("both kinds use the key", func(t *testing.T) {
+		h := newRatingHarness(t)
+		h.store.set(ratingTestMovieA, 4)
+		h.store.set(ratingTestSeries, 3)
+		h.agree(ratingTestMovieA, 4, true)
+		h.agree(ratingTestSeries, 3, true)
+		tombstone := RemoteRating{RemoteFavorite: RemoteFavorite{ProviderItemKey: "tmdb:101", Kind: historyimport.KindSeries, Removed: true}}
+		h.provider.batch = RatingImportBatch{Rows: []RemoteRating{tombstone}}
+		h.sync()
+		if h.store.stars(ratingTestSeries) != 0 || h.store.stars(ratingTestMovieA) != 4 {
+			t.Fatalf("series=%d movie=%d, want only the series rating removed", h.store.stars(ratingTestSeries), h.store.stars(ratingTestMovieA))
+		}
+	})
+	t.Run("only the other kind uses the key", func(t *testing.T) {
+		h := newRatingHarness(t)
+		h.store.set(ratingTestMovieA, 4)
+		h.agree(ratingTestMovieA, 4, true)
+		tombstone := RemoteRating{RemoteFavorite: RemoteFavorite{ProviderItemKey: "tmdb:101", Kind: historyimport.KindSeries, Removed: true}}
+		h.provider.batch = RatingImportBatch{Rows: []RemoteRating{tombstone}}
+		h.sync()
+		if h.store.stars(ratingTestMovieA) != 4 {
+			t.Fatalf("movie=%d, a series tombstone must not remove a movie rating", h.store.stars(ratingTestMovieA))
+		}
+	})
+}
+
+func TestSyncRatingsInvalidRowsKeepTheEmptySnapshotGuard(t *testing.T) {
+	h := newRatingHarness(t)
+	h.store.set(ratingTestMovieA, 4)
+	h.store.set(ratingTestMovieB, 2)
+	h.agree(ratingTestMovieA, 4, true)
+	h.agree(ratingTestMovieB, 2, true)
+	// The only movie row is unusable and names neither title.
+	bad := RemoteRating{RemoteFavorite: RemoteFavorite{ProviderItemKey: "imdb:tt9999", Kind: historyimport.KindMovie, IMDbID: "tt9999"}, Rating: 11}
+	h.provider.batch = RatingImportBatch{Rows: []RemoteRating{bad}, SnapshotKinds: []string{historyimport.KindMovie}}
+	result := h.sync()
+	if h.store.stars(ratingTestMovieA) != 4 || h.store.stars(ratingTestMovieB) != 2 {
+		t.Fatalf("movieA=%d movieB=%d, a snapshot with no usable rows must not remove ratings", h.store.stars(ratingTestMovieA), h.store.stars(ratingTestMovieB))
+	}
+	found := false
+	for _, w := range result.Warnings {
+		found = found || strings.Contains(w, "returned no movie ratings")
+	}
+	if !found {
+		t.Fatalf("warnings = %v, want the empty-snapshot guard reported", result.Warnings)
+	}
+}
+
+func TestDeleteConnectionWithoutAConnectionTakesNoLock(t *testing.T) {
+	h := newRatingHarness(t)
+	if err := h.service.DeleteConnection(context.Background(), h.conn.UserID, "another-profile", h.conn.Provider); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.repo.ratingLocks) != 0 || len(h.repo.connections) != 1 {
+		t.Fatalf("locks=%v connections=%d, want nothing touched", h.repo.ratingLocks, len(h.repo.connections))
+	}
+}
+
 func TestSyncRatingsWatchGateLetsHeldTitlesChange(t *testing.T) {
 	h := newRatingHarness(t)
 	h.provider.gateMovies = true
@@ -747,6 +809,67 @@ func TestPersistConnectionAccountChangeClearsAgreedRatings(t *testing.T) {
 	if len(repo.ratingStates) != 1 {
 		t.Fatal("reconnecting the same account must keep agreed ratings")
 	}
+	// Only the switch waited for the rating sync lock.
+	if !slices.Equal(repo.ratingLocks, []string{"wait:" + ratingTestConnID}) {
+		t.Fatalf("rating sync locks = %v, want one wait by the account switch", repo.ratingLocks)
+	}
+}
+
+func TestDeleteConnectionWaitsForTheRatingSyncLock(t *testing.T) {
+	h := newRatingHarness(t)
+	if err := h.service.DeleteConnection(context.Background(), h.conn.UserID, h.conn.ProfileID, h.conn.Provider); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(h.repo.ratingLocks, []string{"wait:" + ratingTestConnID}) {
+		t.Fatalf("rating sync locks = %v, want the disconnect to wait for the lock", h.repo.ratingLocks)
+	}
+	if len(h.repo.connections) != 0 {
+		t.Fatal("the connection was not deleted")
+	}
+}
+
+func TestSyncRatingsMarksTheProfileStaleWhenBookkeepingFailsAfterAnImport(t *testing.T) {
+	h := newRatingHarness(t)
+	h.provider.batch = RatingImportBatch{Rows: []RemoteRating{h.remoteRow(ratingTestMovieB, 8)}, SnapshotKinds: []string{historyimport.KindMovie}}
+	h.repo.connections[connectionKey(h.conn.Provider, h.conn.UserID, h.conn.ProfileID)] = h.conn
+	// The run's deadline ends right after the import commits.
+	ctx, cancel := context.WithCancel(context.Background())
+	h.repo.upsertRatingErr = context.Canceled
+	h.store.afterWrite = cancel
+	staleCtxErr := errors.New("unset")
+	h.staleCtx = func(ctx context.Context) { staleCtxErr = ctx.Err() }
+	if _, err := h.service.syncRatings(ctx, h.conn, ServerConfig{}, h.provider); err == nil {
+		t.Fatal("want the bookkeeping error")
+	}
+	if staleCtxErr != nil {
+		t.Fatalf("stale mark ran with context error %v, want a live context", staleCtxErr)
+	}
+	if h.store.stars(ratingTestMovieB) != 4 || !h.stale {
+		t.Fatalf("movieB=%d stale=%v, want the committed import to mark recommendations stale", h.store.stars(ratingTestMovieB), h.stale)
+	}
+}
+
+func TestSyncRatingsLeavesRatingsToARunHoldingTheLock(t *testing.T) {
+	h := newRatingHarness(t)
+	h.store.set(ratingTestMovieA, 3)
+	h.provider.batch = RatingImportBatch{Rows: []RemoteRating{h.remoteRow(ratingTestMovieB, 8)}, SnapshotKinds: []string{historyimport.KindMovie}}
+	// Another node is reconciling this connection's ratings.
+	h.repo.ratingLockBusy = map[string]bool{ratingTestConnID: true}
+	result := h.sync()
+	if h.provider.fetches != 0 || len(h.provider.exported) != 0 || h.store.stars(ratingTestMovieB) != 0 {
+		t.Fatalf("a run without the lock touched ratings: fetches=%d exported=%v movieB=%d", h.provider.fetches, h.provider.exported, h.store.stars(ratingTestMovieB))
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "already syncing") {
+		t.Fatalf("warnings = %v, want the skip reported", result.Warnings)
+	}
+	h.repo.ratingLockBusy = nil
+	h.sync()
+	if h.provider.fetches != 1 || h.store.stars(ratingTestMovieB) != 4 {
+		t.Fatalf("fetches=%d movieB=%d, want the next run to sync", h.provider.fetches, h.store.stars(ratingTestMovieB))
+	}
+	if !slices.Contains(h.repo.ratingLocks, "try:"+ratingTestConnID) {
+		t.Fatalf("rating sync locks = %v, want the scheduled run to try the lock", h.repo.ratingLocks)
+	}
 }
 
 // --- harness ---
@@ -761,6 +884,8 @@ type ratingHarness struct {
 	media    map[string]LocalFavorite
 	watched  map[string]bool
 	stale    bool
+	// staleCtx, when set, sees the context the stale mark ran with.
+	staleCtx func(context.Context)
 }
 
 func newRatingHarness(t *testing.T) *ratingHarness {
@@ -790,13 +915,21 @@ func newRatingHarness(t *testing.T) *ratingHarness {
 	h.service = NewService(h.repo, registry).
 		WithMatcher(ratingMatcherStub{media: h.media}).
 		WithUserStoreProvider(ratingHistoryStoreProvider{watched: h.watched}).
-		WithRatingStore(h.store, ratingStalerFunc(func() { h.stale = true }))
+		WithRatingStore(h.store, ratingStalerFunc(func(ctx context.Context) {
+			h.stale = true
+			if h.staleCtx != nil {
+				h.staleCtx(ctx)
+			}
+		}))
 	return h
 }
 
 func (h *ratingHarness) sync() SyncRatingsResult {
 	h.t.Helper()
 	h.provider.exported, h.provider.removed = nil, nil
+	// The sync re-reads the connection under its lock, so it must see the
+	// toggles this test set.
+	h.repo.connections[connectionKey(h.conn.Provider, h.conn.UserID, h.conn.ProfileID)] = h.conn
 	result, err := h.service.syncRatings(context.Background(), h.conn, ServerConfig{}, h.provider)
 	if err != nil {
 		h.t.Fatal(err)
@@ -834,6 +967,8 @@ type fakeRatingStore struct {
 	ratings   map[string]catalog.UserRating
 	conflicts map[string]bool
 	clock     time.Time
+	// afterWrite runs after each applied import write when set.
+	afterWrite func()
 }
 
 func newFakeRatingStore() *fakeRatingStore {
@@ -883,6 +1018,9 @@ func (s *fakeRatingStore) SetIfUnchanged(_ context.Context, _ int, _ string, id 
 		return false, nil
 	}
 	s.ratings[id] = catalog.UserRating{UserID: ratingTestUserID, ProfileID: ratingTestProfileID, MediaItemID: id, Rating: rating, RatedAt: ratedAt}
+	if s.afterWrite != nil {
+		s.afterWrite()
+	}
 	return true, nil
 }
 
@@ -894,10 +1032,10 @@ func (s *fakeRatingStore) DeleteIfUnchanged(_ context.Context, _ int, _ string, 
 	return true, nil
 }
 
-type ratingStalerFunc func()
+type ratingStalerFunc func(context.Context)
 
-func (f ratingStalerFunc) MarkProfileStale(context.Context, int, string) error {
-	f()
+func (f ratingStalerFunc) MarkProfileStale(ctx context.Context, _ int, _ string) error {
+	f(ctx)
 	return nil
 }
 

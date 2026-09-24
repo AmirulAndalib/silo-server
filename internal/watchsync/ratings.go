@@ -24,11 +24,11 @@ import (
 // values, a rating beats a removal and otherwise the newer change wins, with
 // ties going to Silo.
 //
-// Writes are safe without a cross-node lock. Imports are compare-and-set on the
-// local value this run observed, so a concurrent user edit always wins and is
-// reconsidered next run. Provider writes are idempotent desired-state pushes. A
-// stale agreed rating heals on the next run, because equal local and remote
-// values simply rebase.
+// Reconciliation of one connection is serialized across nodes by a database
+// advisory lock (see WithRatingSyncLock). Imports are also compare-and-set on
+// the local value this run observed, so a concurrent user edit always wins and
+// is reconsidered next run. Provider writes are idempotent desired-state
+// pushes.
 
 const (
 	ratingExportBatchSize = 100
@@ -190,6 +190,49 @@ func (s *Service) syncRatings(ctx context.Context, conn Connection, cfg ServerCo
 	if s.ratings == nil {
 		return result, fmt.Errorf("rating store is not configured")
 	}
+	if !ratingSyncEnabled(conn, provider) {
+		return result, nil
+	}
+
+	// One reconciliation per connection at a time across every node: runs
+	// that overlapped would each merge from their own reads and could leave
+	// the agreed ratings older than what the provider holds. A run that finds
+	// the lock held leaves ratings to the one already running.
+	locked, err := s.repo.WithRatingSyncLock(ctx, conn.ID, false, func(ctx context.Context) error {
+		var err error
+		result, err = s.syncRatingsLocked(ctx, conn, cfg, provider)
+		return err
+	})
+	if err == nil && !locked {
+		result.Warnings = append(result.Warnings, "ratings are already syncing for this connection; skipped them in this run")
+	}
+	return result, err
+}
+
+// ratingSyncEnabled reports whether the connection imports or sends ratings
+// that the provider supports.
+func ratingSyncEnabled(conn Connection, provider Provider) bool {
+	caps := provider.Capabilities()
+	_, canImport := provider.(RatingImporter)
+	_, canExport := provider.(RatingExporter)
+	return (conn.ImportRatingsEnabled && canImport && caps.ImportRatings) ||
+		(conn.ExportRatingsEnabled && canExport && caps.ExportRatings)
+}
+
+// syncRatingsLocked is syncRatings under the connection's rating sync lock.
+// It re-reads the connection first: an account switch waits for the lock, so
+// the binding read here holds until the reconciliation ends.
+func (s *Service) syncRatingsLocked(ctx context.Context, conn Connection, cfg ServerConfig, provider Provider) (SyncRatingsResult, error) {
+	var result SyncRatingsResult
+	current, err := s.reloadConnection(ctx, conn)
+	if err != nil {
+		return result, err
+	}
+	if current.ProviderAccountID != conn.ProviderAccountID {
+		result.Warnings = append(result.Warnings, "the connection moved to another provider account before ratings synced; ratings were not applied")
+		return result, nil
+	}
+	conn = current
 	caps := provider.Capabilities()
 	importer, canImport := provider.(RatingImporter)
 	_, canExport := provider.(RatingExporter)
@@ -244,9 +287,8 @@ func (s *Service) syncRatings(ctx context.Context, conn Connection, cfg ServerCo
 		markRemoteUnknown(items)
 	}
 
-	// The provider read can take a while, and the connection can be re-bound
-	// to another account meanwhile (on any node; the sync lock is local). Its
-	// ratings must not be applied to the profile once the account changed.
+	// Account switches wait for the lock, but a binding changed outside that
+	// path during the provider read must still never receive these ratings.
 	if current, err := s.reloadConnection(ctx, conn); err != nil {
 		return result, err
 	} else if current.ProviderAccountID != conn.ProviderAccountID {
@@ -335,37 +377,71 @@ func (s *Service) processLocalRatingEvent(ctx context.Context, event LocalRating
 			s.recordLocalWatchEventError(ctx, conn, err)
 			continue
 		}
-		conn, err = s.refreshConnectionIfNeeded(ctx, provider, cfg, conn)
+		refreshed, err := s.refreshConnectionIfNeeded(ctx, provider, cfg, conn)
 		if err != nil {
 			s.recordLocalWatchEventError(ctx, conn, err)
 			continue
 		}
-		items, _, err := s.loadRatingItems(ctx, conn, event.MediaItemIDs)
+		conn = refreshed
+		// Wait for any reconciliation of this connection to finish, on any
+		// node, so the send works from settled agreed ratings.
+		_, err = s.repo.WithRatingSyncLock(ctx, conn.ID, true, func(ctx context.Context) error {
+			return s.sendLocalRatings(ctx, conn, cfg, provider, event.MediaItemIDs)
+		})
 		if err != nil {
-			s.recordLocalWatchEventError(ctx, conn, err)
-			continue
-		}
-		dropUnsyncedRatingKinds(items, provider)
-		// Only the local side is known here. A removal waits for the scheduled
-		// merge, which can see whether the provider changed the rating since
-		// (a rating beats a removal); a new rating is sent now.
-		for id, item := range items {
-			if item.local == 0 {
-				delete(items, id)
-			}
-		}
-		markRemoteUnknown(items)
-		if _, err := s.reconcileRatings(ctx, conn, cfg, provider, items, false, true, nil); err != nil {
 			if limited, ok := AsRateLimited(err); ok {
 				if deferErr := s.deferRateLimitedConnection(ctx, conn, limited); deferErr != nil {
-					s.recordLocalWatchEventError(ctx, conn, errors.Join(err, deferErr))
+					s.recordRatingEventError(ctx, conn, errors.Join(err, deferErr))
 				}
 				continue
 			}
-			s.recordLocalWatchEventError(ctx, conn, err)
+			s.recordRatingEventError(ctx, conn, err)
 		}
 	}
 	return nil
+}
+
+// recordRatingEventError records a rating event's error on a fresh read of
+// the connection: the reconciliation the event waited for may have saved
+// cursors that a write from the older snapshot would overwrite. The error is
+// only logged when the connection cannot be re-read or changed account.
+func (s *Service) recordRatingEventError(ctx context.Context, conn Connection, err error) {
+	fresh, reloadErr := s.reloadConnection(ctx, conn)
+	if reloadErr != nil || fresh.ProviderAccountID != conn.ProviderAccountID {
+		slog.WarnContext(ctx, "local rating provider event failed", "component", "watchsync", "provider", conn.Provider, "connection_id", conn.ID, "error", err, "reload_error", reloadErr)
+		return
+	}
+	s.recordLocalWatchEventError(ctx, fresh, err)
+}
+
+// sendLocalRatings sends a local rating event's new ratings under the
+// connection's rating sync lock. The connection is re-read first, since it
+// may have moved to another account or stopped sending while this waited.
+func (s *Service) sendLocalRatings(ctx context.Context, conn Connection, cfg ServerConfig, provider Provider, mediaItemIDs []string) error {
+	current, err := s.reloadConnection(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if current.ProviderAccountID != conn.ProviderAccountID || !current.ExportRatingsEnabled {
+		return nil
+	}
+	conn = current
+	items, _, err := s.loadRatingItems(ctx, conn, mediaItemIDs)
+	if err != nil {
+		return err
+	}
+	dropUnsyncedRatingKinds(items, provider)
+	// Only the local side is known here. A removal waits for the scheduled
+	// merge, which can see whether the provider changed the rating since
+	// (a rating beats a removal); a new rating is sent now.
+	for id, item := range items {
+		if item.local == 0 {
+			delete(items, id)
+		}
+	}
+	markRemoteUnknown(items)
+	_, err = s.reconcileRatings(ctx, conn, cfg, provider, items, false, true, nil)
+	return err
 }
 
 // loadRatingItems gathers the profile's movie and series ratings and the
@@ -470,10 +546,20 @@ func (s *Service) resolveRemoteRatings(ctx context.Context, items map[string]*ra
 	for _, kind := range batch.SnapshotKinds {
 		snapshot[kind] = true
 	}
+	// Tombstones resolve by provider key within their kind: the same key (for
+	// example tmdb:101) can name a movie and a series. A tombstone without a
+	// kind resolves by key alone and must then name a single title.
 	byKey := make(map[string][]*ratingItem, len(items))
+	byKindKey := make(map[string][]*ratingItem, len(items))
 	for _, item := range items {
 		if item.stored != nil && item.stored.ProviderItemKey != "" {
-			byKey[item.stored.ProviderItemKey] = append(byKey[item.stored.ProviderItemKey], item)
+			key := item.stored.ProviderItemKey
+			kind := item.stored.Kind
+			if kind == "" {
+				kind = item.identity.Kind
+			}
+			byKey[key] = append(byKey[key], item)
+			byKindKey[kind+"\x00"+key] = append(byKindKey[kind+"\x00"+key], item)
 		}
 	}
 
@@ -488,7 +574,11 @@ func (s *Service) resolveRemoteRatings(ctx context.Context, items map[string]*ra
 	var unresolved []string
 	for _, row := range batch.Rows {
 		if row.Removed {
-			candidates := byKey[strings.TrimSpace(row.ProviderItemKey)]
+			key := strings.TrimSpace(row.ProviderItemKey)
+			candidates := byKey[key]
+			if row.Kind != "" {
+				candidates = byKindKey[row.Kind+"\x00"+key]
+			}
 			if len(candidates) != 1 {
 				warnings = append(warnings, "watch sync provider returned a rating removal that matches no single title")
 				continue
@@ -502,7 +592,6 @@ func (s *Service) resolveRemoteRatings(ctx context.Context, items map[string]*ra
 		}
 		// Record the row's ids before any check, so a row Silo cannot use
 		// still keeps its title from reading as removed.
-		rowsPerKind[row.Kind]++
 		for _, token := range ratingIdentityTokens(row.Kind, row.IMDbID, row.TMDBID, row.TVDBID, row.ProviderItemKey) {
 			seenTokens[token] = true
 		}
@@ -516,6 +605,9 @@ func (s *Service) resolveRemoteRatings(ctx context.Context, items map[string]*ra
 			warnings = append(warnings, fmt.Sprintf("watch sync provider returned an out-of-range rating %d", row.Rating))
 			continue
 		}
+		// Only usable rows show the snapshot is not empty; an invalid row
+		// must not switch off the empty-snapshot guard below.
+		rowsPerKind[row.Kind]++
 		match, reason, err := s.matcher.Match(ctx, row.HistoryRecord())
 		if err != nil {
 			return warnings, err
@@ -684,6 +776,18 @@ func (s *Service) reconcileRatings(
 		}
 	}
 
+	// Imports commit one by one, so recommendations are marked stale once any
+	// applied, even if the bookkeeping after them fails or the run's context
+	// ends; the mark gets a short context of its own.
+	defer func() {
+		if result.imported > 0 && s.ratingStaler != nil {
+			markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if err := s.ratingStaler.MarkProfileStale(markCtx, conn.UserID, conn.ProfileID); err != nil {
+				slog.WarnContext(ctx, "failed to mark profile stale after rating import", "component", "watchsync", "user_id", conn.UserID, "profile_id", conn.ProfileID, "error", err)
+			}
+		}
+	}()
 	for _, item := range items {
 		switch decideRating(item.local, item.remote, item.base, item.localAt, item.remoteAt) {
 		case ratingKeep:
@@ -720,11 +824,6 @@ func (s *Service) reconcileRatings(
 	}
 	if err := s.repo.DeleteRatingSyncStates(ctx, conn.ID, conn.ProviderAccountID, deletes); err != nil {
 		return result, err
-	}
-	if result.imported > 0 && s.ratingStaler != nil {
-		if err := s.ratingStaler.MarkProfileStale(ctx, conn.UserID, conn.ProfileID); err != nil {
-			slog.WarnContext(ctx, "failed to mark profile stale after rating import", "component", "watchsync", "user_id", conn.UserID, "profile_id", conn.ProfileID, "error", err)
-		}
 	}
 	if afterImport != nil {
 		if err := afterImport(); err != nil {

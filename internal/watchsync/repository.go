@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -52,6 +53,7 @@ type Repository interface {
 	DeleteRatingSyncStates(ctx context.Context, connectionID, providerAccountID string, mediaItemIDs []string) error
 	ClearRatingSyncStates(ctx context.Context, connectionID, keepAccountID string) error
 	UpdateRatingCursors(ctx context.Context, connectionID, providerAccountID string, remove []string, set map[string]string) error
+	WithRatingSyncLock(ctx context.Context, connectionID string, wait bool, fn func(context.Context) error) (bool, error)
 	ListScrobbleConnections(ctx context.Context, userID int, profileID string) ([]Connection, error)
 	UpsertScrobbleSession(ctx context.Context, event ScrobbleEvent, connectionID string, action string) error
 	PrepareConfirmedScrobbleStop(ctx context.Context, event ScrobbleEvent, connectionID string, staleBefore time.Time) (confirmedStopPreparation, time.Time, error)
@@ -113,6 +115,28 @@ const listItemStateColumns = `
 type PostgresRepository struct {
 	pool   *pgxpool.Pool
 	cipher *secret.Cipher
+	// ratingLockSlots admits one caller per connection on this node to the
+	// rating sync lock, so waiters cannot pile up database sessions.
+	ratingLockSlots sync.Map
+	// ratingLockSessions caps the lock sessions this node holds at once
+	// across all connections; see ratingLockSessionLimit.
+	ratingLockSessionsOnce sync.Once
+	ratingLockSessions     chan struct{}
+}
+
+// maxRatingLockSessions bounds the database sessions one node opens for
+// rating sync locks, which sit outside the pool's own limit.
+const maxRatingLockSessions = 4
+
+// ratingLockSessionLimit returns the semaphore of lock sessions, sized to at
+// most maxRatingLockSessions and never more than the pool's own size, so a
+// small deployment adds at most as many sessions as it configured.
+func (r *PostgresRepository) ratingLockSessionLimit() chan struct{} {
+	r.ratingLockSessionsOnce.Do(func() {
+		limit := min(maxRatingLockSessions, max(1, int(r.pool.Config().MaxConns)))
+		r.ratingLockSessions = make(chan struct{}, limit)
+	})
+	return r.ratingLockSessions
 }
 
 func NewPostgresRepository(pool *pgxpool.Pool, cipher *secret.Cipher) *PostgresRepository {
@@ -837,6 +861,88 @@ func (r *PostgresRepository) DeleteRatingSyncStates(ctx context.Context, connect
 		return fmt.Errorf("delete rating sync states: %w", err)
 	}
 	return nil
+}
+
+// ratingSyncLockClass namespaces the advisory locks that serialize rating
+// reconciliation, so they cannot collide with other advisory locks.
+const ratingSyncLockClass = 0x57535254
+
+// WithRatingSyncLock runs fn while holding a cluster-wide advisory lock for the
+// connection's rating reconciliation. Every node runs the scheduled sync, so
+// without it two runs could interleave their reads and writes and leave the
+// agreed ratings describing an older state than the provider holds.
+//
+// With wait false it reports false when the lock is held elsewhere; with wait
+// true it blocks until the lock is free or ctx ends. The lock lives on its own
+// database session opened outside the pool, so holding it never takes a pool
+// connection that fn needs, even in a one-connection pool. On this node only
+// one caller per connection holds or waits for that session, and at most
+// ratingLockSessionLimit sessions are open at once. Closing the session
+// releases the lock, including when a node dies.
+func (r *PostgresRepository) WithRatingSyncLock(ctx context.Context, connectionID string, wait bool, fn func(context.Context) error) (bool, error) {
+	slotValue, _ := r.ratingLockSlots.LoadOrStore(connectionID, make(chan struct{}, 1))
+	slot, ok := slotValue.(chan struct{})
+	if !ok {
+		return false, fmt.Errorf("rating sync lock slot has type %T", slotValue)
+	}
+	if wait {
+		select {
+		case slot <- struct{}{}:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	} else {
+		select {
+		case slot <- struct{}{}:
+		default:
+			return false, nil
+		}
+	}
+	defer func() { <-slot }()
+
+	// A try that finds every session in use reports the lock as busy rather
+	// than waiting, so a scheduled sync moves on to its next connection.
+	sessions := r.ratingLockSessionLimit()
+	if wait {
+		select {
+		case sessions <- struct{}{}:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	} else {
+		select {
+		case sessions <- struct{}{}:
+		default:
+			return false, nil
+		}
+	}
+	defer func() { <-sessions }()
+
+	session, err := pgx.ConnectConfig(ctx, r.pool.Config().ConnConfig)
+	if err != nil {
+		return false, fmt.Errorf("open rating sync lock session: %w", err)
+	}
+	// Closing the session releases the lock, whatever state a canceled
+	// lock call left it in.
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = session.Close(closeCtx)
+	}()
+	if wait {
+		if _, err := session.Exec(ctx, `SELECT pg_advisory_lock($1, hashtext($2))`, int32(ratingSyncLockClass), connectionID); err != nil {
+			return false, fmt.Errorf("wait for rating sync lock: %w", err)
+		}
+	} else {
+		var locked bool
+		if err := session.QueryRow(ctx, `SELECT pg_try_advisory_lock($1, hashtext($2))`, int32(ratingSyncLockClass), connectionID).Scan(&locked); err != nil {
+			return false, fmt.Errorf("try rating sync lock: %w", err)
+		}
+		if !locked {
+			return false, nil
+		}
+	}
+	return true, fn(ctx)
 }
 
 // ClearRatingSyncStates forgets a connection's agreed ratings with every
