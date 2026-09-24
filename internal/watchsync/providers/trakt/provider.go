@@ -101,6 +101,8 @@ func (p *Provider) Capabilities() watchsync.Capabilities {
 		ExportWatchlist:  true,
 		RemoveWatchlist:  true,
 		ScrobblePlayback: true,
+		ImportRatings:    true,
+		ExportRatings:    true,
 	}
 }
 
