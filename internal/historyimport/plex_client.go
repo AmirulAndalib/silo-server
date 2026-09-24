@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -341,27 +342,53 @@ func (c *PlexClient) FetchWatchlist(ctx context.Context, accountToken string) ([
 	var firstErr error
 	unresolved := 0
 	attempted := 0
+	failureStreak := 0
+	gaveUp := false
+	unreached := 0
 	for i := range allItems {
 		if hasMatchablePlexGuid(allItems[i].Guid) {
 			continue
 		}
 		attempted++
+		if gaveUp {
+			// The lookup gave up below; still count what it never asked about so
+			// the warning names every item that stays unmatched.
+			unreached++
+			unresolved++
+			continue
+		}
 		detail, err := c.fetchWatchlistItemMetadata(ctx, base, accountToken, allItems[i].RatingKey)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 		if err != nil || detail == nil {
 			unresolved++
+			// A 404 means that one entry is gone; anything else (auth, outage,
+			// timeout) repeats on every remaining entry, so stop asking.
+			if err != nil && !isPlexHTTPStatus(err, http.StatusNotFound) {
+				failureStreak++
+				gaveUp = failureStreak >= plexMetadataFailureStreakLimit
+			} else {
+				failureStreak = 0
+			}
 			continue
 		}
+		failureStreak = 0
 		allItems[i].Guid, allItems[i].Year = applyPlexMetadataFallback(
 			allItems[i].Guid, allItems[i].Year, detail)
 		if !hasMatchablePlexGuid(allItems[i].Guid) {
 			unresolved++
 		}
 	}
+	// Giving up on the last unresolved item skipped nothing, so it is not an
+	// early stop the run has to explain.
+	aborted := unreached > 0
+	if aborted {
+		slog.WarnContext(ctx, "plex history import: giving up on watchlist metadata after repeated failures",
+			"component", "historyimport", "unreached", unreached, "attempted", attempted, "error", firstErr)
+	}
 	if unresolved > 0 {
-		warnings = append(warnings, plexUnresolvedIDsWarning("watchlist", "items", unresolved, attempted, firstErr))
+		warnings = append(warnings, plexUnresolvedIDsWarning("watchlist", "items", unresolved, attempted, firstErr, aborted))
 	}
 	return allItems, warnings, nil
 }
