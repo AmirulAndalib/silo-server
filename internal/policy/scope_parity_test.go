@@ -271,7 +271,7 @@ func decisionToAccessScope(input ScopeInput, decision ScopeDecision) access.Scop
 		AllowedLibraryIDs:         allowed,
 		DisabledLibraryIDs:        disabled,
 		LibrariesRestricted:       decision.LibrariesRestricted,
-		MaxContentRating:          decision.MaxContentRating,
+		MaxContentRating:          access.StricterCeiling(decision.MaxContentRating, decision.MaxContentRatingOverride),
 		MaxPlaybackQuality:        decision.MaxPlaybackQuality,
 		PreferredMetadataLanguage: decision.PreferredMetadataLanguage,
 		PolicyRevision:            decision.PolicyRevision,
