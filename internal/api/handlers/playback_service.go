@@ -180,7 +180,7 @@ func (h *PlaybackHandler) PlaybackCapabilities(ctx context.Context, userID int, 
 		return view, playbackOperationError(http.StatusConflict, "capability_not_configured", "Playback installation identity is not configured")
 	}
 	view.InstallationID = h.InstallationID
-	view.Features = append(playback.ServerFeaturesV3(), "sequenced_progress_v1", "fixed_media_file_v1", "marker_segments_v1")
+	view.Features = append(playback.NativeServerFeaturesV3(), "sequenced_progress_v1", "fixed_media_file_v1", "marker_segments_v1")
 	if h.WatchTogetherAvailable {
 		view.Features = append(view.Features, "watch_party_source_fallback_v1", "watch_party_coordinator_v1")
 	}
@@ -197,6 +197,94 @@ func (h *PlaybackHandler) PlaybackCapabilities(ctx context.Context, userID int, 
 // The application pipeline still uses private request-based routing helpers.
 // This request contains only caller facts; it is never dispatched to an HTTP
 // handler and never carries credentials, a body stream, or a response writer.
+// nativeAPIV2ContextKey marks a request that arrived through /api/v2.
+type nativeAPIV2ContextKey struct{}
+
+// WithNativeAPIV2 marks ctx as serving /api/v2. The playback and stream
+// handlers are shared with the frozen /api/v1 routes, and contract additions
+// made after that freeze (subrip_sidecar_v1) apply only under this mark.
+func WithNativeAPIV2(ctx context.Context) context.Context {
+	return context.WithValue(ctx, nativeAPIV2ContextKey{}, true)
+}
+
+func isNativeAPIV2(ctx context.Context) bool {
+	native, _ := ctx.Value(nativeAPIV2ContextKey{}).(bool)
+	return native
+}
+
+// serverFeaturesForRequestV3 is the feature list a decision advertises on the
+// surface the request arrived through. The decision is persisted as the
+// attempt's StartResponse, so a /api/v2 decision also records durably that
+// this server offered subrip_sidecar_v1 to the attempt.
+func serverFeaturesForRequestV3(ctx context.Context) []string {
+	if isNativeAPIV2(ctx) {
+		return playback.NativeServerFeaturesV3()
+	}
+	return playback.ServerFeaturesV3()
+}
+
+// attemptNegotiatedSubRipV3 reports whether an attempt negotiated original SRT.
+// The SRT representation its current plan published decides when there is
+// one. With no SRT published yet, the attempt negotiated it only if the client
+// sent subrip_sidecar_v1 and a /api/v2 decision of this server offered it. The
+// stored token alone is not enough: a server that predates the feature stored
+// it verbatim for any client, on either surface, and never offered it.
+func attemptNegotiatedSubRipV3(record *playback.AttemptRecordV3) bool {
+	if published, original := playback.PublishedSubRipRepresentationV3(record.CurrentPlan.Subtitle.Inventory); published {
+		return original
+	}
+	return playback.HasFeatureV3(record.NormalizedRequest.ClientFeatures, playback.FeatureSubripSidecarV3) &&
+		playback.HasFeatureV3(record.StartResponse.ServerFeatures, playback.FeatureSubripSidecarV3)
+}
+
+// requireAttemptAPISurfaceV3 keeps an attempt on the API surface that
+// negotiated its SRT representation. /api/v1 must not continue an attempt that
+// negotiated original SRT: v1 would replay or replan its .srt?original=1 URLs,
+// including ones for tracks that appear later, on a route that serves WebVTT
+// for them. And a start retried through /api/v2 with subrip_sidecar_v1 must
+// not replay an attempt negotiated without it, which would break the feature's
+// promise. requested is the retried start's feature list; replans pass nil
+// because a replan keeps the negotiated representation anyway. The error
+// reuses the existing playback_attempt_reused code so /api/v1 gains no new
+// contract.
+func requireAttemptAPISurfaceV3(ctx context.Context, record *playback.AttemptRecordV3, requested []string) error {
+	if record == nil {
+		return nil
+	}
+	negotiated := attemptNegotiatedSubRipV3(record)
+	switch {
+	case !isNativeAPIV2(ctx) && negotiated:
+		return playbackOperationError(http.StatusConflict, "playback_attempt_reused", "The playback attempt belongs to an /api/v2 session")
+	case isNativeAPIV2(ctx) && !negotiated && playback.HasFeatureV3(requested, playback.FeatureSubripSidecarV3):
+		return playbackOperationError(http.StatusConflict, "playback_attempt_reused", "The playback attempt was negotiated without subrip_sidecar_v1")
+	}
+	return nil
+}
+
+// replanSubtitleFeaturesV3 returns the client features a replan attaches its
+// subtitle artifact with: subrip_sidecar_v1 present exactly when the attempt
+// negotiated original SRT. Every replan, not only a seek reanchor, keeps that
+// representation for the attempt's lifetime.
+func replanSubtitleFeaturesV3(record *playback.AttemptRecordV3, clientFeatures []string) []string {
+	if record == nil {
+		return clientFeatures
+	}
+	features := playback.WithoutFeatureV3(clientFeatures, playback.FeatureSubripSidecarV3)
+	if attemptNegotiatedSubRipV3(record) {
+		features = append(features, playback.FeatureSubripSidecarV3)
+	}
+	return features
+}
+
+// withNativeServerFeaturesV3 advertises the /api/v2-only features on a
+// decision the shared start/replan application produced.
+func withNativeServerFeaturesV3(response playback.DecisionResponseV3) playback.DecisionResponseV3 {
+	if len(response.ServerFeatures) > 0 {
+		response.ServerFeatures = playback.NativeServerFeaturesV3()
+	}
+	return response
+}
+
 func playbackCallerRequest(ctx context.Context, caller PlaybackCaller) *http.Request {
 	headers := make(http.Header)
 	headers.Set(deviceIDHeader, caller.DeviceID)
@@ -207,7 +295,7 @@ func playbackCallerRequest(ctx context.Context, caller PlaybackCaller) *http.Req
 	headers.Set("X-Silo-Client-Version", caller.ClientVersion)
 	headers.Set("X-Silo-Client-Build", caller.ClientBuild)
 	headers.Set("X-Silo-Client-Channel", caller.ClientChannel)
-	return (&http.Request{Header: headers, RemoteAddr: caller.RemoteAddr, URL: &url.URL{}}).WithContext(ctx)
+	return (&http.Request{Header: headers, RemoteAddr: caller.RemoteAddr, URL: &url.URL{}}).WithContext(WithNativeAPIV2(ctx))
 }
 
 // playbackCallerSessionRequest is playbackCallerRequest with the routed
@@ -229,7 +317,8 @@ func (h *PlaybackHandler) StartPlaybackV2(ctx context.Context, caller PlaybackCa
 	if err != nil {
 		return playback.DecisionResponseV3{}, playbackOperationError(http.StatusBadRequest, "bad_request", "Invalid playback request")
 	}
-	return h.startPlaybackApplicationV3(playbackCallerRequest(ctx, caller), body)
+	response, err := h.startPlaybackApplicationV3(playbackCallerRequest(ctx, caller), body)
+	return withNativeServerFeaturesV3(response), err
 }
 
 // ApplyProgressV2 is POST /api/v2/playback/{session_id}/progress. The sample
@@ -606,7 +695,7 @@ func (h *PlaybackHandler) ReplanPlaybackV2(ctx context.Context, caller PlaybackC
 	if errors.Is(err, playback.ErrAttemptStoppedV3) {
 		return playback.DecisionResponseV3{}, playbackSessionNotFoundOperationError()
 	}
-	return response, err
+	return withNativeServerFeaturesV3(response), err
 }
 
 // ReportRouteEventV2 is POST /api/v2/playback/route-events. The event is
