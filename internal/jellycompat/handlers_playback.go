@@ -348,6 +348,9 @@ type PlaybackHandler struct {
 	// compatLocalTranscodeReady is a test seam invoked after manifest readiness
 	// and before lifecycle-locked publication. Production leaves it nil.
 	compatLocalTranscodeReady func(*playback.TranscodeSession)
+	// compatAutoTranscodePipeline is a test seam for the hw_accel=auto
+	// fallback pipeline; nil uses playback.NewAutoTranscodePipeline.
+	compatAutoTranscodePipeline func(context.Context, playback.TranscodeOpts) *playback.AutoTranscodePipeline
 }
 
 func (h *PlaybackHandler) serverBitrateCap(ctx context.Context, session *Session) (int, error) {
@@ -773,7 +776,13 @@ func (h *PlaybackHandler) remoteTranscodeStartTimeout(request transcodenode.Tran
 		return compatRemoteTranscodeStartTimeout
 	}
 	if request.ToneMapMode == "" {
-		return 20 * time.Second
+		timeout := 20 * time.Second
+		if request.RequireReady || request.AutoFallbackReady {
+			// The node answers only after its first manifest, which under
+			// hw_accel=auto can follow an early exit on each safer path.
+			timeout += transcodenode.TranscodeStartReadyMaxDuration
+		}
+		return timeout
 	}
 	timeout := playback.NormalizeProbeRequestTimeout(nodeProbeTimeoutMillis, h.toneMapCapabilityTimeout()) + playback.ManifestStartupTimeout
 	if request.ToneMapPreflightRequired {
@@ -1446,6 +1455,16 @@ func (h *PlaybackHandler) remoteDispatchHWAccel(nodeURL string) string {
 	return node.EffectiveHWAccel(h.HWAccel)
 }
 
+// compatRemoteAutoFallbackEligible reports a video transcode dispatched with
+// hw_accel=auto and no tone map. The node can fall back to a safer path for
+// it, but only while it waits for the first manifest, and only the node knows
+// whether its live hardware enables that fallback.
+func compatRemoteAutoFallbackEligible(request transcodenode.TranscodeStartRequest) bool {
+	return request.ToneMapMode == "" &&
+		!strings.EqualFold(strings.TrimSpace(request.TargetCodecVideo), compatCopyCodec) &&
+		strings.EqualFold(strings.TrimSpace(request.HWAccel), "auto")
+}
+
 // startRemoteTranscode submits a frozen compatibility recipe to a selected node.
 func (h *PlaybackHandler) startRemoteTranscode(
 	ctx context.Context,
@@ -1649,6 +1668,9 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 	if !compatHLSTranscodesAudio(source) {
 		reqBody.TargetCodecAudio = compatCopyCodec
 	}
+	// Jellyfin-compat remote starts are not otherwise waited on. Let the node
+	// wait only when its live auto pipeline can fall back.
+	reqBody.AutoFallbackReady = compatRemoteAutoFallbackEligible(reqBody)
 
 	dispatch := func(request transcodenode.TranscodeStartRequest) (transcodenode.TranscodeStartResponse, int, bool, error) {
 		body, err := json.Marshal(request)
@@ -1851,6 +1873,9 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		TargetAudioChannels:    reqBody.TargetAudioChannels,
 		TotalDuration:          reqBody.TotalDuration,
 		ThrottleSeconds:        reqBody.ThrottleSeconds,
+		// Record the decode path the node executed so a reconstruct keeps
+		// it; an older node omits the field.
+		SoftwareVideoDecode: reqBody.SoftwareVideoDecode || nodeResponse.SoftwareVideoDecode,
 	}
 	toneMapRecipe.apply(&opts)
 	opts.HWAccel = strings.TrimSpace(nodeResponse.HWAccel)
