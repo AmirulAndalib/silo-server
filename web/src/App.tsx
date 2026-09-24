@@ -44,7 +44,6 @@ import { useSettingValuesRealtime } from "@/hooks/queries/settingValues";
 import Layout from "@/components/Layout";
 import Home from "@/pages/Home";
 import Login from "@/pages/Login";
-import Catalog from "@/pages/Catalog";
 import { useRequestFeatureStatus } from "@/hooks/queries/useRequests";
 import { OnboardingGate } from "@/components/onboarding/OnboardingGate";
 import TasteSeedGate from "@/components/TasteSeedGate";
@@ -66,6 +65,7 @@ import { buildLegacyWebhookSyncRedirectTarget } from "@/lib/webhookSync";
 import { toast } from "sonner";
 import { prewarmCodecDetection } from "@/player/hooks/useCodecDetection";
 import { prefetchRouteChunks, type RouteChunkImport } from "@/lib/routeChunkPrefetch";
+import { importCatalog } from "@/pages/catalogRoute";
 
 // Hot routes keep their import factory in a named binding so the idle warm-up
 // below can pull the chunk before the user navigates. See HOT_ROUTE_CHUNKS.
@@ -80,6 +80,7 @@ const OAuthComplete = lazy(() => import("@/pages/OAuthComplete"));
 const ActivateDevice = lazy(() => import("@/pages/ActivateDevice"));
 const SetupWizard = lazy(() => import("@/pages/SetupWizard"));
 const Profiles = lazy(() => import("@/pages/Profiles"));
+const Catalog = lazy(importCatalog);
 const LibraryPage = lazy(importLibraryPage);
 const ItemDetail = lazy(importItemDetail);
 const EbookReader = lazy(() => import("@/pages/EbookReader"));
@@ -150,12 +151,14 @@ const ProfileCustomizeHome = lazy(() => import("@/pages/ProfileCustomizeHome"));
 
 /**
  * Routes a browsing session reaches within the first few interactions. Home
- * links straight into item details, the sidebar into libraries, and item pages
- * into people and recommendations, so paying their chunk cost while the app is
- * idle is cheaper than paying it inside a navigation.
+ * links straight into item details and, through search and "see all", the
+ * catalog; the sidebar leads into libraries, and item pages into people and
+ * recommendations. Paying their chunk cost while the app is idle is cheaper
+ * than paying it inside a navigation.
  */
 const HOT_ROUTE_CHUNKS: readonly RouteChunkImport[] = [
   importItemDetail,
+  importCatalog,
   importLibraryPage,
   importPersonDetail,
   importRecommendations,

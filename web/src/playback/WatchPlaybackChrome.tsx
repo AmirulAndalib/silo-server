@@ -24,6 +24,7 @@ import {
   getProfileToken,
   refreshAuthentication,
 } from "@/api/client";
+import { LocalErrorBoundary } from "@/components/LocalErrorBoundary";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { useDocumentTitle } from "@/hooks/useDocumentTitle";
@@ -51,7 +52,6 @@ import type {
   PlayerPictureInPictureChange,
 } from "@/player/types";
 import { useSeriesEpisodes } from "@/player/hooks/useSeriesEpisodes";
-import { PlayingNextScreen } from "@/player/components/PlayingNextScreen";
 import { formatTime } from "@/player/components/SeekBar";
 import { storage } from "@/utils/storage";
 import { WatchPlaybackControllerContext } from "./watchPlaybackContext";
@@ -78,6 +78,24 @@ import { markPlaybackIntent } from "@/player/first-frame";
 const WatchPage = lazy(() =>
   import("@/player/components/WatchPage").then((module) => ({ default: module.WatchPage })),
 );
+
+// The post-roll screen animates with framer-motion, which is too large to load
+// on every launch for a screen that only appears at the end of an episode. The
+// host fetches it once an episode is playing, well before post-roll can begin.
+const importPlayingNextScreen = () => import("@/player/components/PlayingNextScreen");
+const PlayingNextScreen = lazy(() =>
+  importPlayingNextScreen().then((module) => ({ default: module.PlayingNextScreen })),
+);
+
+let playingNextScreenPrefetched = false;
+
+function prefetchPlayingNextScreen() {
+  if (playingNextScreenPrefetched) return;
+  playingNextScreenPrefetched = true;
+  // Nothing to report here: post-roll imports the chunk again when it renders,
+  // and its error boundary handles a failure.
+  importPlayingNextScreen().catch(() => undefined);
+}
 
 function normalizeWatchPlaybackRequest(
   input: WatchPlaybackStartInput | WatchRouteRequest,
@@ -896,6 +914,10 @@ export function WatchPlaybackHost() {
       if (!requestKeyValue) return;
       updatePlaybackSnapshot(requestKeyValue, snapshot);
 
+      // Only series episodes reach post-roll. Waiting until the episode plays
+      // keeps the screen's download out of the way of the first frame.
+      if (seriesIdRef.current && snapshot.playing) prefetchPlayingNextScreen();
+
       // Enter post-roll early when approaching end of a series episode.
       // Fires regardless of whether a next episode exists so the end-of-
       // series case still gets a graceful overlay instead of an HLS tail loop.
@@ -929,6 +951,17 @@ export function WatchPlaybackHost() {
     setPostRollVideoEnded(false);
     controller.syncRouteRequest(activeRequest);
   }, [activeRequest, controller]);
+
+  // Without the post-roll screen, whose chunk failed to load, act as if the
+  // viewer dismissed it: back to the full player while the episode still plays,
+  // or on to the detail page once it has ended.
+  const handlePostRollUnavailable = useCallback(() => {
+    if (postRollVideoEnded) {
+      handlePostRollClose();
+    } else {
+      handleReturnFromPostRoll();
+    }
+  }, [postRollVideoEnded, handlePostRollClose, handleReturnFromPostRoll]);
 
   if (!request) {
     return null;
@@ -1050,20 +1083,24 @@ export function WatchPlaybackHost() {
         />
       </Suspense>
       {isPostRoll && (
-        <PlayingNextScreen
-          seriesId={activeItem.series_id}
-          seriesTitle={activeItem.series_title}
-          nextEpisode={nextEpisodeRef ?? undefined}
-          continueWatchingItems={continueWatchingItems}
-          videoEnded={postRollVideoEnded}
-          onPlayNow={
-            nextEpisodeRef
-              ? (trigger) => handleNavigateEpisode(nextEpisodeRef.contentId, trigger)
-              : undefined
-          }
-          onPlayItem={(contentId: string) => handleNavigateEpisode(contentId, "viewer")}
-          onClose={handlePostRollClose}
-        />
+        <LocalErrorBoundary onError={handlePostRollUnavailable}>
+          <Suspense fallback={null}>
+            <PlayingNextScreen
+              seriesId={activeItem.series_id}
+              seriesTitle={activeItem.series_title}
+              nextEpisode={nextEpisodeRef ?? undefined}
+              continueWatchingItems={continueWatchingItems}
+              videoEnded={postRollVideoEnded}
+              onPlayNow={
+                nextEpisodeRef
+                  ? (trigger) => handleNavigateEpisode(nextEpisodeRef.contentId, trigger)
+                  : undefined
+              }
+              onPlayItem={(contentId: string) => handleNavigateEpisode(contentId, "viewer")}
+              onClose={handlePostRollClose}
+            />
+          </Suspense>
+        </LocalErrorBoundary>
       )}
     </PlayerConfigProvider>
   );
