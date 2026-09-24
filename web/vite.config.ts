@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { brotliCompressSync, constants, gzipSync } from "node:zlib";
-import { defineConfig, loadEnv, type Plugin } from "vite";
+import { defineConfig, loadEnv, transformWithEsbuild, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
@@ -38,6 +38,72 @@ function precompressStaticAssets(): Plugin {
   };
 }
 
+const THEME_BOOT_SOURCE = "src/themeBoot.js";
+
+/**
+ * Loads src/themeBoot.js as a classic, render-blocking script at the top of
+ * <head>, so <html> carries the cached theme before first paint.
+ *
+ * It cannot be an ordinary entry: Vite bundles only module scripts, and those
+ * run after the document is parsed, by which time the shell may already have
+ * painted. It cannot be inline either, because the server's CSP
+ * (internal/server/frontend.go) allows scripts from 'self' only. So the build
+ * emits it as a content-hashed /assets/ file, cached immutably like every
+ * other asset, and the dev server serves the source file.
+ */
+function themeBootScript(): Plugin {
+  let base = "/";
+  let isBuild = false;
+  let builtFileName: string | undefined;
+  return {
+    name: "theme-boot-script",
+    configResolved(config) {
+      base = config.base;
+      isBuild = config.command === "build";
+    },
+    generateBundle: {
+      // Must run before vite:build-html's generateBundle, which applies the
+      // transformIndexHtml hook below, so the hashed name is known by then.
+      order: "pre",
+      async handler() {
+        // Emitted assets skip the build's minifier, so minify it here: the
+        // file sits on the render-blocking path and its source is half comment.
+        const { code } = await transformWithEsbuild(
+          readFileSync(path.resolve(__dirname, THEME_BOOT_SOURCE), "utf8"),
+          THEME_BOOT_SOURCE,
+          { minify: true },
+        );
+        const referenceId = this.emitFile({
+          type: "asset",
+          name: path.basename(THEME_BOOT_SOURCE),
+          source: code,
+        });
+        builtFileName = this.getFileName(referenceId);
+      },
+    },
+    transformIndexHtml: {
+      order: "post",
+      handler: () => {
+        // The source path works only on the dev server. In a built shell it
+        // falls through to the SPA fallback, which the browser refuses to run
+        // as a script, so the cached theme would silently stop painting.
+        if (isBuild && builtFileName === undefined) {
+          throw new Error(
+            "theme-boot-script: index.html was transformed before the boot script was emitted",
+          );
+        }
+        return [
+          {
+            tag: "script",
+            attrs: { src: base + (builtFileName ?? THEME_BOOT_SOURCE) },
+            injectTo: "head-prepend",
+          },
+        ];
+      },
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const apiProxyTarget = env.VITE_API_PROXY_TARGET || "http://localhost:8090";
@@ -67,10 +133,15 @@ export default defineConfig(({ mode }) => {
   ).version;
 
   return {
-    plugins: [react(), tailwindcss(), precompressStaticAssets()],
+    plugins: [react(), tailwindcss(), themeBootScript(), precompressStaticAssets()],
     define: {
       // Reported in X-Silo-Client-Version on every v2 request (src/api/v2/request.ts).
       __SILO_WEB_VERSION__: JSON.stringify(webVersion),
+    },
+    build: {
+      // A font inlined into the CSS downloads for everyone, defeating the
+      // unicode-range subsets in src/fonts.css, so fonts always stay files.
+      assetsInlineLimit: (filePath: string) => (/\.woff2?$/.test(filePath) ? false : undefined),
     },
     worker: {
       format: "es",
