@@ -240,7 +240,9 @@ function guardRedirectTarget(base: string, location: ReturnType<typeof useLocati
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user, loading, setupLoading } = useAuth();
   const location = useLocation();
-  if (loading || setupLoading) {
+  // Setup status only decides where a signed-out visitor goes; a restored
+  // session does not wait for it.
+  if (loading || (setupLoading && !user)) {
     return (
       <div className="p-8" role="status" aria-live="polite">
         <span className="sr-only">Loading application</span>
@@ -254,7 +256,7 @@ function RequireAuth({ children }: { children: ReactNode }) {
 
 function SetupGate({ children }: { children: ReactNode }) {
   const { user, setupLoading, setupRequired } = useAuth();
-  if (setupLoading) {
+  if (setupLoading && !user) {
     return (
       <div className="p-8" role="status" aria-live="polite">
         <span className="sr-only">Loading application</span>
@@ -330,18 +332,27 @@ function TasteSeedGate({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
-/** Clears user-scoped query caches on profile switch or logout. */
-function QueryCacheManager() {
+/**
+ * Clears user-scoped query caches on profile switch or sign-out. An account
+ * change clears in AuthProvider, before the new account renders.
+ */
+export function QueryCacheManager() {
   const { user, profile } = useAuth();
   const qc = useQueryClient();
+  const hadUser = useRef(false);
   const prevProfileId = useRef(profile?.id);
 
   useEffect(() => {
     if (!user) {
-      qc.clear();
+      // Only a real sign-out drops the cache. Boot starts with no user while
+      // the session restores, and clearing then would discard the reads the
+      // shell already started and send them again.
+      if (hadUser.current) qc.clear();
+      hadUser.current = false;
       prevProfileId.current = undefined;
       return;
     }
+    hadUser.current = true;
     if (prevProfileId.current && prevProfileId.current !== profile?.id) {
       qc.removeQueries({ queryKey: ["favorites"] });
       qc.removeQueries({ queryKey: ["watchlist"] });
