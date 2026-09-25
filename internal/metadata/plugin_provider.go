@@ -261,6 +261,9 @@ func (p *PluginProvider) GetMetadata(ctx context.Context, req MetadataRequest) (
 	}
 
 	advisoryAge, advisorySource := advisoryFromPluginMetadata(response.GetItem().GetMetadata())
+	if !models.AdvisoryAgeApplies(req.ContentType) {
+		advisoryAge, advisorySource = 0, ""
+	}
 
 	return &MetadataResult{
 		HasMetadata:          true,
@@ -619,7 +622,7 @@ var advisoryAgeSources = map[string]string{
 // bare numeric certification.
 const maxAdvisoryAge = 21
 
-// advisoryFromPluginMetadata reads a display-only advisory age out of the
+// advisoryFromPluginMetadata reads an advisory age out of the
 // free-form plugin metadata Struct. MetadataItem has no typed advisory fields
 // yet, so plugins carry the pair under these two keys; typed proto fields
 // remain a later additive option.
