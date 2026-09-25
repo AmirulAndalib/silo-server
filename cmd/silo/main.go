@@ -3402,6 +3402,7 @@ func main() {
 
 			if deps.FileRepo != nil {
 				compatDeps.FileResolver = deps.FileRepo
+				compatDeps.MediaSourceOwners = deps.FileRepo
 			}
 
 			compatDeps.SubtitleRepo = subtitles.NewPgRepository(deps.DB, deps.SecretCipher)
