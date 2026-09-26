@@ -11,9 +11,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AdminUsers from "./AdminUsers";
 
 vi.mock("@/hooks/useAuth", () => ({
-  useAuth: () => ({ beginImpersonation: mocks.beginImpersonation }),
+  useAuth: () => ({ beginImpersonation: mocks.beginImpersonation, user: mocks.viewer }),
 }));
 vi.mock("@/hooks/queries/admin/users", () => ({
+  useViewerIsOwner: (id?: number) => mocks.users.some((u) => u.id === id && u.is_owner),
   useAdminUserCapabilities: () => ({ data: { available: mocks.available, default_profile: true } }),
   useImpersonateUser: () => ({ mutateAsync: mocks.impersonate, reset: vi.fn(), isPending: false }),
   useAdminUsers: () => ({ data: mocks.users, isLoading: false }),
@@ -25,6 +26,8 @@ vi.mock("@/hooks/queries/admin/users", () => ({
 const mocks = vi.hoisted(() => ({
   useAdminServerSettings: vi.fn(),
   users: [] as AdminUser[],
+  /** The signed-in account. */
+  viewer: { id: 1 } as { id: number } | null,
   update: vi.fn(),
   create: vi.fn(),
   reads: 0,
@@ -230,6 +233,7 @@ const adminUser: AdminUser = {
   requests_allowed: null,
   password_login: true,
   password_change_required: false,
+  is_owner: false,
   effective_policy: {
     library_ids: null,
     max_playback_quality: "",
@@ -305,9 +309,33 @@ describe("AdminUsers row actions", () => {
     setProfileId("owner");
     setProfileToken(null);
     mocks.users = [adminUser];
+    mocks.viewer = { id: 1 };
     mocks.available = true;
     mocks.impersonate.mockReset();
     mocks.beginImpersonation.mockReset();
+  });
+
+  const owner = { ...adminUser, id: 1, username: "founder", role: "admin", is_owner: true };
+
+  it("keeps another admin off the owner's account", () => {
+    mocks.users = [adminUser, owner];
+    mocks.viewer = { id: 8 };
+    renderPage();
+    const row = screen.getByRole("link", { name: "founder" }).closest("tr")!;
+    expect(within(row).getByText("Owner")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit founder" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete founder" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "View as user: founder" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Edit taylor" })).toBeInTheDocument();
+  });
+
+  it("lets the owner edit itself and view as another admin, but not delete itself", () => {
+    mocks.users = [owner, { ...adminUser, id: 8, username: "admin", role: "admin" }];
+    renderPage();
+    expect(screen.getByRole("button", { name: "View as user: admin" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Edit founder" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete founder" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "View as user: founder" })).toBeNull();
   });
 
   it("offers View as user only for enabled non-admin accounts", () => {
@@ -378,6 +406,25 @@ describe("AdminUsers row actions", () => {
     expect(mocks.impersonate).toHaveBeenCalledTimes(1);
     expect(mocks.impersonate.mock.calls[0]![0].id).toBe(7);
     expect(screen.getByTestId("location")).toHaveTextContent("/profiles");
+  });
+
+  it("lets the owner view as another admin after confirmation", async () => {
+    const user = userEvent.setup();
+    mocks.users = [
+      { ...adminUser, id: 1, username: "founder", role: "admin", is_owner: true },
+      { ...adminUser, id: 8, username: "admin", role: "admin" },
+    ];
+    mocks.impersonate.mockImplementation(async ({ profileContext }) => ({
+      session: {},
+      profileContext,
+    }));
+    renderPage();
+    await user.click(screen.getByRole("button", { name: "View as user: admin" }));
+    const dialog = screen.getByRole("alertdialog");
+    expect(within(dialog).getByText(/run as this admin, with their access/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "View as user" }));
+    await waitFor(() => expect(mocks.beginImpersonation).toHaveBeenCalledWith({}, "/admin/users"));
+    expect(mocks.impersonate.mock.calls[0]![0].id).toBe(8);
   });
 
   it("preserves the current session when starting View as user fails", async () => {

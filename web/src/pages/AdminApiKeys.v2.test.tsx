@@ -4,7 +4,13 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { v2, V2ProblemError } from "@/api/v2/request";
 import AdminApiKeys from "./AdminApiKeys";
-const state = vi.hoisted(() => ({ profile: "owner" }));
+const state = vi.hoisted(() => ({
+  profile: "owner",
+  viewer: 2,
+  users: [{ id: 2, username: "Admin", is_owner: false }],
+  usersPending: false,
+  usersFailed: false,
+}));
 vi.mock("@/api/v2/request", async (original) => ({
   ...(await original<typeof import("@/api/v2/request")>()),
   v2: vi.fn(),
@@ -21,10 +27,15 @@ vi.mock("@/api/client", async (original) => ({
   isCapturedProfileAuthorityActive: (c: { profileId: string }) => c.profileId === state.profile,
 }));
 vi.mock("@/hooks/useAuth", () => ({
-  useAuth: () => ({ user: { id: 2 }, profile: { id: state.profile } }),
+  useAuth: () => ({ user: { id: state.viewer }, profile: { id: state.profile } }),
 }));
 vi.mock("@/hooks/queries/admin/users", () => ({
-  useAdminUsers: () => ({ data: [{ id: 2, username: "Admin" }] }),
+  useAdminUsers: () =>
+    state.usersPending
+      ? { data: undefined, isPending: true, isError: false }
+      : state.usersFailed
+        ? { data: undefined, isPending: false, isError: true }
+        : { data: state.users, isPending: false, isError: false },
 }));
 const row = {
   id: "7",
@@ -68,6 +79,10 @@ function mount() {
 beforeEach(() => {
   HTMLElement.prototype.scrollIntoView = vi.fn();
   state.profile = "owner";
+  state.viewer = 2;
+  state.users = [{ id: 2, username: "Admin", is_owner: false }];
+  state.usersPending = false;
+  state.usersFailed = false;
   vi.mocked(v2).mockImplementation(baseline);
 });
 afterEach(() => {
@@ -219,4 +234,34 @@ it("labels the key's tier as a rate limit and shows each option's limits", async
     ),
   );
   expect(within(dialog).getByRole("button", { name: "Save rate limit" })).toBeTruthy();
+});
+
+it("offers the Owner's keys only to the Owner", async () => {
+  state.users = [
+    { id: 2, username: "Admin", is_owner: true },
+    { id: 3, username: "Other", is_owner: false },
+  ];
+  state.viewer = 3;
+  mount();
+  await screen.findByText("Automation");
+  expect(screen.queryByRole("button", { name: "Edit rate limit for Automation" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Revoke API key Automation" })).toBeNull();
+  cleanup();
+
+  state.viewer = 2;
+  mount();
+  await screen.findByText("Automation");
+  expect(screen.getByRole("button", { name: "Edit rate limit for Automation" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Revoke API key Automation" })).toBeEnabled();
+});
+
+it.each([
+  ["loads", "usersPending"],
+  ["fails to load", "usersFailed"],
+] as const)("offers no key actions while the account list %s", async (_, flag) => {
+  state[flag] = true;
+  mount();
+  await screen.findByText("Automation");
+  expect(screen.queryByRole("button", { name: "Edit rate limit for Automation" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Revoke API key Automation" })).toBeNull();
 });
