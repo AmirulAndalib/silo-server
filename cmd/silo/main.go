@@ -83,6 +83,7 @@ import (
 	// builtin registry on import; buildProviders resolves their seeded chain
 	// entries in-process (no gRPC).
 	_ "github.com/Silo-Server/silo-server/internal/metadata/nfo"
+	"github.com/Silo-Server/silo-server/internal/metadata/tmdb"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/nodemetrics"
@@ -2904,15 +2905,20 @@ func main() {
 		if watchProviderService != nil {
 			taskMgr.Register(tasks.NewSyncWatchProvidersTask(watchProviderService))
 		}
+		// The TMDB client lets a submission started here pick up a TVDB ID
+		// added on TMDB after the request was created.
 		requestReconcileSvc := mediarequests.NewService(
 			mediarequests.NewRepository(deps.DB, deps.SecretCipher),
-			nil,
+			tmdb.NewClient(cfg.TMDBAPIKey, 40),
 			mediarequests.NewCatalogPresence(
 				catalog.NewItemRepository(deps.DB),
 				catalog.NewProviderIDRepository(deps.DB),
 			),
 		)
 		requestReconcileSvc.SetRequesterIdentityResolver(plugins.RequesterIdentityFromLookup(plugins.NewPgUserIdentityLookup(deps.DB)))
+		if metadataService != nil {
+			requestReconcileSvc.SetTVDBIDResolver(metadataService)
+		}
 		api.AttachRequestRouter(requestReconcileSvc, pluginService)
 		requestReconcileSvc.SetGroupPolicyProvider(accessGroupStore)
 		if userStoreProvider != nil {
