@@ -1155,6 +1155,7 @@ export default function AdminSections() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
           <RecipeConfigDrawer
             libraryCollectionsOnly
+            libraryScoped={scope === "library"}
             def={pickedRecipe.def}
             preset={pickedRecipe.preset}
             onCancel={() => setPickedRecipe(null)}

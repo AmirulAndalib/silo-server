@@ -16,6 +16,8 @@ export interface AddPayload {
 
 interface Props {
   libraryCollectionsOnly?: boolean;
+  /** The section is created on a library page; see RecipeParamFieldsProps. */
+  libraryScoped?: boolean;
   def: RecipeDefinition;
   preset: GalleryPreset;
   /** Close the drawer without saving. Used by the bottom Cancel button. */
@@ -39,6 +41,7 @@ export default function RecipeConfigDrawer({
   showBulkApply = true,
   showEnabled = true,
   libraryCollectionsOnly = false,
+  libraryScoped = false,
 }: Props) {
   const [title, setTitle] = useState(preset.display_name);
   const [params, setParams] = useState<Record<string, unknown>>({ ...preset.default_params });
@@ -121,6 +124,7 @@ export default function RecipeConfigDrawer({
           params={params}
           onChange={setParams}
           libraryCollectionsOnly={libraryCollectionsOnly}
+          libraryScoped={libraryScoped}
         />
       </div>
 
