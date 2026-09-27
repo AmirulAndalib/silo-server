@@ -3040,6 +3040,53 @@ func TestPlanPlaybackV3PublishesAvailableQualities(t *testing.T) {
 	}
 }
 
+// Cropped encodes sit a few pixels under the nominal class size. They must
+// land in the class the scanner labels them with, or the ladder drops the
+// same-class rungs (a 1918x872 "1080p" file offered no 1080p rungs).
+func TestSourceLadderHeightV3MatchesScannerBuckets(t *testing.T) {
+	cases := []struct {
+		width, height, want int
+	}{
+		{0, 0, 0},
+		{720, 404, 480},
+		{854, 480, 480},
+		{1276, 532, 720},
+		{1280, 720, 720},
+		{1918, 872, 1080},
+		{1920, 800, 1080},
+		{1440, 1080, 1080},
+		{1920, 1080, 1080},
+		{3836, 1600, 2160},
+		{3840, 2160, 2160},
+	}
+	for _, tc := range cases {
+		if got := sourceLadderHeightV3(SourceDescriptorV3{Width: tc.width, Height: tc.height}); got != tc.want {
+			t.Errorf("sourceLadderHeightV3(%dx%d) = %d, want %d", tc.width, tc.height, got, tc.want)
+		}
+	}
+}
+
+func TestAvailableQualitiesV3CroppedSourceKeepsSameClassRungs(t *testing.T) {
+	source := SourceDescriptorV3{VideoCodec: "h264", Width: 1918, Height: 872, BitrateKbps: 10_858, DynamicRange: DynamicRangeSDRV3}
+	qualities := availableQualitiesV3(PlannerInputV3{
+		Request:  validStartRequestV3(),
+		Settings: PlannerSettingsV3{TranscodeEnabled: true},
+	}, source)
+	labels := make([]string, 0, len(qualities))
+	for _, quality := range qualities {
+		labels = append(labels, quality.Label)
+	}
+	want := []string{
+		QualityOriginalV3,
+		QualityRung1080pHighV3, QualityRung1080pMediumV3, QualityRung1080pLowV3,
+		QualityRung720pHighV3, QualityRung720pMediumV3, QualityRung720pLowV3,
+		"480p",
+	}
+	if !reflect.DeepEqual(labels, want) {
+		t.Fatalf("labels = %v, want %v", labels, want)
+	}
+}
+
 func TestAvailableQualitiesV3UnknownSourceHeightPublishesNoFixedRungs(t *testing.T) {
 	request := validStartRequestV3()
 	qualities := availableQualitiesV3(PlannerInputV3{

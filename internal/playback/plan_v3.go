@@ -1662,20 +1662,23 @@ func ladderRungForLabelV3(label string) (ladderRungV3, bool) {
 	return ladderRungV3{}, false
 }
 
-// sourceLadderHeightV3 classifies cinema-aspect encodes by width as well as
-// height. A 3840x1540 source is still a 4K source for menu purposes.
+// sourceLadderHeightV3 classifies a source by the smallest class whose bounds
+// contain both dimensions, the same buckets the scanner uses for a file's
+// resolution label (scanner.mapResolution). Cropped and cinema-aspect encodes
+// therefore land in the class the catalog shows: 1918x872 is 1080p and
+// 3840x1540 is 2160p.
 func sourceLadderHeightV3(source SourceDescriptorV3) int {
 	switch {
-	case source.Width >= 3840 || source.Height >= 2160:
-		return 2160
-	case source.Width >= 1920 || source.Height >= 1080:
-		return 1080
-	case source.Width >= 1280 || source.Height >= 720:
-		return 720
-	case source.Width > 0 || source.Height > 0:
-		return 480
-	default:
+	case source.Width <= 0 && source.Height <= 0:
 		return 0
+	case source.Width <= 854 && source.Height <= 480:
+		return 480
+	case source.Width <= 1280 && source.Height <= 962:
+		return 720
+	case source.Width <= 2560 && source.Height <= 1440:
+		return 1080
+	default:
+		return 2160
 	}
 }
 
