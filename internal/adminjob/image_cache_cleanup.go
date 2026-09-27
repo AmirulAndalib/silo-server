@@ -45,7 +45,9 @@ func NewImageCacheCleanupExecutor(store blobstore.Store) *ImageCacheCleanupExecu
 // reports the index of the next one and the counts so far; a failed delete is
 // logged and skipped. It returns the index of the first prefix it did not
 // finish. When ctx ends, Execute stops there and returns ctx's error, so a
-// later call resumes at the interrupted prefix.
+// later call resumes at the interrupted prefix. A prefix whose delete was
+// running when ctx ended counts as unfinished even if the store reported
+// success, because the store may have stopped partway through it.
 func (e *ImageCacheCleanupExecutor) Execute(
 	ctx context.Context,
 	req ImageCacheCleanupRequest,
@@ -64,16 +66,17 @@ func (e *ImageCacheCleanupExecutor) Execute(
 		}
 		prefix := req.Prefixes[index]
 		n, err := e.store.DeletePrefix(ctx, prefix)
-		switch {
-		case err == nil:
-			deleted.DeletedPrefixes++
-			deleted.DeletedS3Objects += n
-		case ctx.Err() != nil:
+		deleted.DeletedS3Objects += n
+		if ctxErr := ctx.Err(); ctxErr != nil {
 			// After the deadline every remaining delete fails at once; stop
-			// instead of logging and skipping each of them.
-			return index, deleted, ctx.Err()
-		default:
+			// instead of logging and skipping each of them. The S3 client's
+			// per-object fallback logs such failures and still returns nil.
+			return index, deleted, ctxErr
+		}
+		if err != nil {
 			slog.WarnContext(ctx, "image cache cleanup: s3 delete failed", "component", "adminjob", "prefix", prefix, "error", err)
+		} else {
+			deleted.DeletedPrefixes++
 		}
 		if progress != nil {
 			progress(index+1, deleted)

@@ -75,6 +75,28 @@ func TestImageCacheCleanupStopsAtFirstContextError(t *testing.T) {
 	}
 }
 
+// A store can report success for a prefix it stopped deleting partway when the
+// context ended. That prefix must be retried, and the objects it did delete
+// still counted.
+func TestImageCacheCleanupRetriesAPrefixInterruptedByTheDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	store := &cleanupStore{deleteFn: func(ctx context.Context, call int, _ string) (int, error) {
+		if call == 1 {
+			cancel()
+			return 3, nil
+		}
+		return 1, nil
+	}}
+	next, deleted, err := NewImageCacheCleanupExecutor(store).Execute(ctx, ImageCacheCleanupRequest{Prefixes: cleanupPrefixes(5)}, 0, nil)
+	if !errors.Is(err, context.Canceled) || next != 1 {
+		t.Fatalf("Execute = %d, %v, want 1, context.Canceled", next, err)
+	}
+	if deleted.DeletedPrefixes != 1 || deleted.DeletedS3Objects != 4 {
+		t.Fatalf("deleted %+v, want 1 finished prefix and 4 objects", deleted)
+	}
+}
+
 func TestImageCacheCleanupResumesAtStart(t *testing.T) {
 	prefixes := cleanupPrefixes(5)
 	store := &cleanupStore{}
