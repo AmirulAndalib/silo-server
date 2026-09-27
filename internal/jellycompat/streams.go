@@ -134,11 +134,13 @@ const (
 	compatAudioV2PathSegment   = "audio-v2"
 	compatRemuxV1PathSegment   = "remux-v1"
 	compatRemuxTSV1PathSegment = "remux-ts-v1"
+	compatRemuxDVV1PathSegment = "remux-dv-v1"
 )
 
 type compatAudioV2RouteContextKey struct{}
 type compatRemuxV1RouteContextKey struct{}
 type compatRemuxTSV1RouteContextKey struct{}
+type compatRemuxDVV1RouteContextKey struct{}
 
 func withCompatAudioV2Route(r *http.Request) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), compatAudioV2RouteContextKey{}, true))
@@ -167,6 +169,15 @@ func isCompatRemuxTSV1Route(r *http.Request) bool {
 	return marked
 }
 
+func withCompatRemuxDVV1Route(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), compatRemuxDVV1RouteContextKey{}, true))
+}
+
+func isCompatRemuxDVV1Route(r *http.Request) bool {
+	marked, _ := r.Context().Value(compatRemuxDVV1RouteContextKey{}).(bool)
+	return marked
+}
+
 func validateCompatAudioV2Route(w http.ResponseWriter, r *http.Request, required bool) bool {
 	if isCompatAudioV2Route(r) == required {
 		return true
@@ -185,6 +196,14 @@ func validateCompatRemuxV1Route(w http.ResponseWriter, r *http.Request, required
 
 func validateCompatRemuxTSV1Route(w http.ResponseWriter, r *http.Request, required bool) bool {
 	if isCompatRemuxTSV1Route(r) == required {
+		return true
+	}
+	writeError(w, http.StatusNotFound, "NotFound", "Playback route not found")
+	return false
+}
+
+func validateCompatRemuxDVV1Route(w http.ResponseWriter, r *http.Request, required bool) bool {
+	if isCompatRemuxDVV1Route(r) == required {
 		return true
 	}
 	writeError(w, http.StatusNotFound, "NotFound", "Playback route not found")
@@ -228,6 +247,9 @@ func compatHLSUsesAudioCopyV1(source PlaybackMediaSource) bool {
 }
 
 func compatHLSRoutePathSegment(source PlaybackMediaSource) string {
+	if compatHLSUsesRemuxDVV1Route(source) {
+		return compatRemuxDVV1PathSegment
+	}
 	if source.HLSRemuxMPEGTS {
 		return compatRemuxTSV1PathSegment
 	}
@@ -241,11 +263,20 @@ func compatHLSRoutePathSegment(source PlaybackMediaSource) string {
 }
 
 func compatHLSUsesAudioV2Route(source PlaybackMediaSource) bool {
-	return !source.HLSRemuxMPEGTS && compatHLSRequiresAudioV2(source)
+	return !source.HLSRemuxMPEGTS && !compatHLSUsesRemuxDVV1Route(source) && compatHLSRequiresAudioV2(source)
 }
 
 func compatHLSUsesRemuxV1Route(source PlaybackMediaSource) bool {
-	return !source.HLSRemuxMPEGTS && compatHLSUsesAudioCopyV1(source)
+	return !source.HLSRemuxMPEGTS && !compatHLSUsesRemuxDVV1Route(source) && compatHLSUsesAudioCopyV1(source)
+}
+
+// compatHLSUsesRemuxDVV1Route gives the Dolby Vision strip its own route. A
+// binary that predates the strip keeps the session field but ignores it and
+// would copy Dolby Vision to a client that rejected it; it has no handler for
+// this segment, so it answers 404 instead. The segment subsumes remux-v1 and
+// audio-v2, which every binary serving it also implements.
+func compatHLSUsesRemuxDVV1Route(source PlaybackMediaSource) bool {
+	return source.DVStripToHDR10 && compatHLSCopiesVideo(source)
 }
 
 func compatHLSCopiesVideo(source PlaybackMediaSource) bool {
@@ -262,7 +293,7 @@ func compatHLSUsesFMP4(source PlaybackMediaSource) bool {
 func compatWebOSDVMPEGTS(userAgent string, source PlaybackMediaSource) bool {
 	ua := strings.ToLower(userAgent)
 	if (!strings.Contains(ua, "web0s") && !strings.Contains(ua, "webos")) ||
-		source.SupportsDirectPlay || !compatHLSCopiesVideo(source) {
+		source.SupportsDirectPlay || !compatHLSCopiesVideo(source) || source.DVStripToHDR10 {
 		return false
 	}
 	video := compatPrimaryVideoTrack(source.Version)
@@ -349,6 +380,18 @@ func (h *PlaybackHandler) HandleRemuxTSV1HLSManifest(w http.ResponseWriter, r *h
 
 func (h *PlaybackHandler) HandleRemuxTSV1HLSSegment(w http.ResponseWriter, r *http.Request) {
 	h.HandleHLSSegment(w, withCompatRemuxTSV1Route(r))
+}
+
+func (h *PlaybackHandler) HandleRemuxDVV1MasterManifest(w http.ResponseWriter, r *http.Request) {
+	h.HandleMasterManifest(w, withCompatRemuxDVV1Route(r))
+}
+
+func (h *PlaybackHandler) HandleRemuxDVV1HLSManifest(w http.ResponseWriter, r *http.Request) {
+	h.HandleHLSManifest(w, withCompatRemuxDVV1Route(r))
+}
+
+func (h *PlaybackHandler) HandleRemuxDVV1HLSSegment(w http.ResponseWriter, r *http.Request) {
+	h.HandleHLSSegment(w, withCompatRemuxDVV1Route(r))
 }
 
 // errUpstreamReplaced signals that a concurrent request attached a different
@@ -707,7 +750,10 @@ func (h *PlaybackHandler) HandleMasterManifest(w http.ResponseWriter, r *http.Re
 	if !validateCompatRemuxV1Route(w, r, compatHLSUsesRemuxV1Route(*source)) {
 		return
 	}
-	if !validateCompatRemuxTSV1Route(w, r, source.HLSRemuxMPEGTS) {
+	if !validateCompatRemuxDVV1Route(w, r, compatHLSUsesRemuxDVV1Route(*source)) {
+		return
+	}
+	if !validateCompatRemuxTSV1Route(w, r, source.HLSRemuxMPEGTS && !compatHLSUsesRemuxDVV1Route(*source)) {
 		return
 	}
 	// Attach BEFORE ensureUpstreamPlayback below: this route can start a
@@ -984,7 +1030,10 @@ func (h *PlaybackHandler) HandleHLSManifest(w http.ResponseWriter, r *http.Reque
 	if !validateCompatRemuxV1Route(w, r, compatHLSUsesRemuxV1Route(*source)) {
 		return
 	}
-	if !validateCompatRemuxTSV1Route(w, r, source.HLSRemuxMPEGTS) {
+	if !validateCompatRemuxDVV1Route(w, r, compatHLSUsesRemuxDVV1Route(*source)) {
+		return
+	}
+	if !validateCompatRemuxTSV1Route(w, r, source.HLSRemuxMPEGTS && !compatHLSUsesRemuxDVV1Route(*source)) {
 		return
 	}
 	if !h.requireCompatChildHLSRoute(w, playSession, *source) {
@@ -1052,7 +1101,10 @@ func (h *PlaybackHandler) HandleHLSSegment(w http.ResponseWriter, r *http.Reques
 	if !validateCompatRemuxV1Route(w, r, compatHLSUsesRemuxV1Route(*source)) {
 		return
 	}
-	if !validateCompatRemuxTSV1Route(w, r, source.HLSRemuxMPEGTS) {
+	if !validateCompatRemuxDVV1Route(w, r, compatHLSUsesRemuxDVV1Route(*source)) {
+		return
+	}
+	if !validateCompatRemuxTSV1Route(w, r, source.HLSRemuxMPEGTS && !compatHLSUsesRemuxDVV1Route(*source)) {
 		return
 	}
 	if !h.requireCompatChildHLSRoute(w, playSession, *source) {
@@ -2744,7 +2796,7 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 	}
 	if compatHLSCopiesVideo(source) {
 		opts.TargetCodecVideo = compatCopyCodec
-		opts.VideoSampleEntry = playback.VideoSampleEntryForDVCopy(file.PrimaryDVProfile())
+		opts.VideoSampleEntry, opts.VideoBitstreamFilter = compatCopyVideoRecipe(source, file.PrimaryDVProfile())
 		opts.CopyVideoMPEGTS = source.HLSRemuxMPEGTS
 	}
 	if !compatHLSTranscodesAudio(source) {
@@ -3582,6 +3634,10 @@ func generateCompatCopyVideoMasterManifest(source PlaybackMediaSource, routeItem
 
 func generateCompatCopyVideoMasterManifestForVariant(source PlaybackMediaSource, variantURL string) []byte {
 	video := compatPrimaryVideoTrack(source.Version)
+	if source.DVStripToHDR10 {
+		// The variant carries the HDR10 base layer, not the Dolby Vision source.
+		video = compatPrimaryVideoTrack(compatHDR10BaseVersion(source.Version))
+	}
 	audio := compatAudioTrack(source.Version, effectiveCompatAudioStreamIndex(source))
 
 	bandwidth := source.Version.Bitrate * 1000
