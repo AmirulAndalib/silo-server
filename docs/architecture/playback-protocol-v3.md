@@ -1282,9 +1282,10 @@ A rung below the source resolution class is always useful. At the source's own
 class, a rung is published only when it undercuts the source bitrate; a 25.2
 Mbps 4K file therefore offers 4K Medium and 4K Low but not a pointless 40 Mbps
 4K High encode. A source's class is the smallest one whose bounds hold both
-dimensions (480p up to 854x480, 720p up to 1280x962, 1080p up to 2560x1440,
-2160p above), the same buckets the scanner uses for the catalog's resolution
-label. Cropped and cinema-aspect encodes therefore keep their labelled class: a
+dimensions: 480p up to 854x480, 720p up to 1280x962, and 1080p up to
+2560x1440. These match the scanner's buckets for the catalog's resolution
+label. Anything larger is 2160p, the ladder's top class, including sources the
+scanner labels 4320p. Cropped and cinema-aspect encodes therefore keep their labelled class: a
 1918x872 file is 1080p, and a 3840x1540 UHD source retains its native
 dimensions on a 4K bitrate step instead of being upscaled to 2160 lines.
 
