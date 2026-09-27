@@ -198,7 +198,7 @@ func TestAnalyzeEpisodeForPlaybackKeepsSettledCreditsSeason(t *testing.T) {
 	season := cachedCreditsSeason(t, analyzer, repo, 4)
 	target := season[1]
 	repo.episodeCandidates = map[string][]Candidate{target.EpisodeID: {target}}
-	repo.seasonState = &SeasonState{InputSignature: InputSignature(season), Status: seasonStatusNotFound}
+	repo.seasonState = &SeasonState{InputSignature: creditsInputSignature(season), Status: seasonStatusNotFound}
 
 	summary, err := analyzer.AnalyzeEpisodeForPlayback(context.Background(), target.EpisodeID, EpisodeMarkerKinds{Credits: true})
 	if err != nil {
@@ -341,7 +341,7 @@ func TestCreditsTailWithoutAudioIsNotDecodedAgain(t *testing.T) {
 	if extractor.creditsExtractCalls != 2 {
 		t.Fatalf("credits extractions = %d, want each file decoded once", extractor.creditsExtractCalls)
 	}
-	if artifact := repo.artifacts[1]; artifact.Status != ArtifactUnusable || artifact.Detail != creditsFingerprintDetailNoAudio {
+	if artifact := repo.artifact(1, ArtifactKindCreditsFingerprint); artifact.Status != ArtifactUnusable || artifact.Detail != creditsFingerprintDetailNoAudio {
 		t.Fatalf("artifact = %+v, want unusable with no audio", artifact)
 	}
 }

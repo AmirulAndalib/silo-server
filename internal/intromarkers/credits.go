@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"sort"
+	"strings"
 )
 
 // Credits detection bounds, validated against frame-checked episodes and
@@ -18,10 +20,15 @@ const (
 	episodeCreditsTailSeconds    = 450.0
 	episodeCreditsTailFraction   = 0.4
 	episodeCreditsMaximumSeconds = 450.0
+	// episodeCreditsVideoEOFSeconds is how far before the end of an episode
+	// credits placed by video alone may end. An earlier text run was a dark
+	// letterboxed scene or a title card inside the story.
+	episodeCreditsVideoEOFSeconds = 120.0
 
-	movieCreditsTailSeconds    = 900.0
-	movieCreditsTailFraction   = 0.25
-	movieCreditsMaximumSeconds = 900.0
+	movieCreditsTailSeconds     = 900.0
+	movieCreditsTailFraction    = 0.25
+	movieCreditsMaximumSeconds  = 900.0
+	movieCreditsVideoEOFSeconds = 180.0
 )
 
 // Credits confidences. Chapter credits are authoritative; a copy to another
@@ -40,22 +47,27 @@ type creditsLimits struct {
 	tailFraction float64
 	minSeconds   float64
 	maxSeconds   float64
+	// videoEOFSeconds bounds how far before the end of the file credits
+	// placed by video alone may end.
+	videoEOFSeconds float64
 }
 
 func creditsLimitsFor(isMovie bool) creditsLimits {
 	if isMovie {
 		return creditsLimits{
-			tailSeconds:  movieCreditsTailSeconds,
-			tailFraction: movieCreditsTailFraction,
-			minSeconds:   creditsMinimumSeconds,
-			maxSeconds:   movieCreditsMaximumSeconds,
+			tailSeconds:     movieCreditsTailSeconds,
+			tailFraction:    movieCreditsTailFraction,
+			minSeconds:      creditsMinimumSeconds,
+			maxSeconds:      movieCreditsMaximumSeconds,
+			videoEOFSeconds: movieCreditsVideoEOFSeconds,
 		}
 	}
 	return creditsLimits{
-		tailSeconds:  episodeCreditsTailSeconds,
-		tailFraction: episodeCreditsTailFraction,
-		minSeconds:   creditsMinimumSeconds,
-		maxSeconds:   episodeCreditsMaximumSeconds,
+		tailSeconds:     episodeCreditsTailSeconds,
+		tailFraction:    episodeCreditsTailFraction,
+		minSeconds:      creditsMinimumSeconds,
+		maxSeconds:      episodeCreditsMaximumSeconds,
+		videoEOFSeconds: episodeCreditsVideoEOFSeconds,
 	}
 }
 
@@ -109,12 +121,33 @@ func creditsFingerprintKey() ArtifactKey {
 }
 
 // CreditsAnalysisConfigHash keys credits season analysis state: the credits
-// fingerprint key plus CreditsBehaviorVersion. It never equals an intro
-// analysis hash, so the two kinds keep separate season state.
-func CreditsAnalysisConfigHash() string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("credits:%s:%d",
+// fingerprint key, the tail key when the analysis ran tail passes, and
+// CreditsBehaviorVersion. A group settled without tail passes, while ffmpeg
+// lacked what they need, is analyzed again once they can run. It never
+// equals an intro analysis hash, so the two kinds keep separate season state.
+func CreditsAnalysisConfigHash(creditsTail bool) string {
+	tailHash := "none"
+	if creditsTail {
+		tailHash = creditsTailKey().ConfigHash
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("credits:%s:%s:%d",
 		creditsFingerprintKey().ConfigHash,
+		tailHash,
 		CreditsBehaviorVersion,
 	)))
 	return hex.EncodeToString(sum[:])[:16]
+}
+
+// creditsInputSignature is InputSignature plus whether each file's probe
+// metadata rules out its tail pass. A probe repair that fills in a missing
+// or misread video codec changes it, so a settled group is analyzed again.
+func creditsInputSignature(candidates []Candidate) string {
+	parts := make([]string, 0, len(candidates)+1)
+	for _, c := range candidates {
+		parts = append(parts, fmt.Sprintf("%d:%s", c.FileID, tailUnusableBeforeSampling(c)))
+	}
+	sort.Strings(parts)
+	parts = append(parts, InputSignature(candidates))
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:])
 }

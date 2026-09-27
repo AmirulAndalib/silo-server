@@ -181,7 +181,10 @@ func (h *AdminIntroHandler) refreshLocalEpisodeMarkers(ctx context.Context, epis
 			"fingerprints_computed", summary.FingerprintsComputed,
 			"credits_chapter_markers_written", summary.CreditsChapterMarkersWritten,
 			"credits_audio_markers_written", summary.CreditsAudioMarkersWritten,
+			"credits_audio_video_markers_written", summary.CreditsAudioVideoMarkersWritten,
+			"credits_video_markers_written", summary.CreditsVideoMarkersWritten,
 			"credits_fingerprints_computed", summary.CreditsFingerprintsComputed,
+			"credits_tail_scans_computed", summary.CreditsTailScansComputed,
 			"errors", len(summary.Errors))
 		h.notifyEpisodeMarkerUpdates(h.baseContext, episodeID, action)
 	}()
