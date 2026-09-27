@@ -1156,6 +1156,7 @@ export default function AdminSections() {
           <RecipeConfigDrawer
             libraryCollectionsOnly
             libraryScoped={scope === "library"}
+            libraries={librariesList}
             def={pickedRecipe.def}
             preset={pickedRecipe.preset}
             onCancel={() => setPickedRecipe(null)}

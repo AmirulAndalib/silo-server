@@ -18,6 +18,10 @@ describe("sectionLibraryFilterIds", () => {
     ).toEqual([4, 6, 2]);
   });
 
+  it("treats a non-empty filter_library_ids as set even without usable IDs, like the backend", () => {
+    expect(sectionLibraryFilterIds({ filter_library_ids: [0], library_ids: [3] })).toEqual([]);
+  });
+
   it("falls back to query-definition library_ids only without a flat key", () => {
     expect(sectionLibraryFilterIds({ library_ids: [17], media_scope: "manga" })).toEqual([17]);
     expect(sectionLibraryFilterIds({ library_ids: [17], filter_library_ids: [3] })).toEqual([3]);
@@ -34,8 +38,29 @@ describe("withSectionLibraryFilterIds", () => {
       { generated_source: "home_library_recent", filter_library_id: 2 },
       [4, 2],
     );
-    expect(next).toEqual({ generated_source: "home_library_recent", filter_library_ids: [4, 2] });
+    expect(next).toEqual({
+      generated_source: "home_library_recent",
+      generated_library_id: 2,
+      filter_library_ids: [4, 2],
+    });
     expect(sectionLibraryFilterIds(next)).toEqual([4, 2]);
+  });
+
+  it("stops treating a generated row as its library's once that library is deselected", () => {
+    expect(
+      withSectionLibraryFilterIds(
+        {
+          generated_source: "home_library_recent",
+          filter_library_id: 2,
+          generated_library_id: null,
+        },
+        [4],
+      ),
+    ).toEqual({
+      generated_source: "home_library_recent",
+      generated_library_id: null,
+      filter_library_ids: [4],
+    });
   });
 
   it("clears both flat keys when all libraries are selected", () => {

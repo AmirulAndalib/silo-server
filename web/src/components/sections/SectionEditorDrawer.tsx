@@ -206,14 +206,14 @@ export function buildAdminSectionPayload({
     delete base.filter_library_ids;
     delete base.order;
     config = { ...base, ...queryDefinitionToSectionConfig(queryDefinition) };
-  } else if (recipeParams && LIBRARY_FILTER_SECTION_TYPES.has(sectionType)) {
-    // The library picker owns the filter keys; keeping the old ones from base
-    // would re-add a replaced filter_library_id.
-    delete base.filter_library_id;
-    delete base.filter_library_ids;
-    delete base.library_ids;
-    config = { ...base, ...recipeParams };
   } else {
+    if (recipeParams && LIBRARY_FILTER_SECTION_TYPES.has(sectionType)) {
+      // The library picker owns the filter keys; keeping the old ones from base
+      // would re-add a replaced filter_library_id.
+      delete base.filter_library_id;
+      delete base.filter_library_ids;
+      delete base.library_ids;
+    }
     config = { ...base, ...recipeParams };
   }
 
@@ -239,6 +239,8 @@ type ProfileDrawerProps = {
   section: SettingsSectionEntry | null;
   libraries: Array<{ id: number; name: string }>;
   recipeCatalog?: RecipeCatalogResponse;
+  /** The profile is editing a library page's sections; see RecipeParamFieldsProps. */
+  libraryScoped?: boolean;
   onSave: (section: SettingsSectionEntry) => void | Promise<void>;
 };
 
@@ -609,7 +611,10 @@ export default function SectionEditorDrawer(props: SectionEditorDrawerProps) {
               def={recipeDef}
               params={recipeParams}
               onChange={setRecipeParams}
-              libraryScoped={props.mode === "admin" && props.scope === "library"}
+              libraryScoped={
+                props.mode === "admin" ? props.scope === "library" : Boolean(props.libraryScoped)
+              }
+              libraries={props.mode === "admin" ? props.libraries : undefined}
             />
           ) : null}
         </div>

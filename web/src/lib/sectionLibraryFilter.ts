@@ -19,10 +19,13 @@ function positiveIds(value: unknown): number[] {
 }
 
 function flatFilterIds(config: Record<string, unknown>): number[] | null {
+  // Like the backend, any non-empty filter_library_ids array counts as set,
+  // even when none of its entries is a usable ID.
+  const hasList = Array.isArray(config.filter_library_ids) && config.filter_library_ids.length > 0;
   const ids = positiveIds(config.filter_library_ids);
   const single = config.filter_library_id;
   const hasSingle = typeof single === "number" && Number.isInteger(single);
-  if (ids.length === 0 && !hasSingle) return null;
+  if (!hasList && !hasSingle) return null;
   if (hasSingle && single > 0 && !ids.includes(single)) ids.push(single);
   return ids;
 }
@@ -40,7 +43,9 @@ export function sectionLibraryFilterIds(config: Record<string, unknown>): number
  * Returns a copy of config filtered to libraryIds ([] means all libraries).
  * A query-definition config keeps its shape so its media_scope still applies;
  * any other config is written to filter_library_ids, and the legacy
- * filter_library_id is removed so it cannot widen the new selection.
+ * filter_library_id is removed so it cannot widen the new selection. A
+ * generated row whose library is still selected keeps that library as
+ * generated_library_id, so it still follows the library's renames and deletion.
  */
 export function withSectionLibraryFilterIds(
   config: Record<string, unknown>,
@@ -52,6 +57,16 @@ export function withSectionLibraryFilterIds(
     if (ids.length > 0) next.library_ids = ids;
     else delete next.library_ids;
     return next;
+  }
+  const legacy = config.filter_library_id;
+  if (
+    typeof legacy === "number" &&
+    ids.includes(legacy) &&
+    typeof config.generated_source === "string" &&
+    config.generated_source !== "" &&
+    config.generated_library_id == null
+  ) {
+    next.generated_library_id = legacy;
   }
   delete next.filter_library_id;
   if (ids.length > 0) next.filter_library_ids = ids;

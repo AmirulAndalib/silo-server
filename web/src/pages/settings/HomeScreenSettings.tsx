@@ -572,6 +572,7 @@ export default function HomeScreenSettings() {
         section={drawerSection}
         libraries={libraries ?? []}
         recipeCatalog={recipeCatalog}
+        libraryScoped={scope === "library"}
         onSave={handleDrawerSave}
       />
 
@@ -592,6 +593,7 @@ export default function HomeScreenSettings() {
             preset={pickedRecipe.preset}
             showBulkApply={false}
             showEnabled={false}
+            libraryScoped={scope === "library"}
             onCancel={() => setPickedRecipe(null)}
             onBackToGallery={() => {
               setPickedRecipe(null);
