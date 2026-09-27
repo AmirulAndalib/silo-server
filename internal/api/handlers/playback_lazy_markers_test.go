@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -30,11 +32,13 @@ type fakePlaybackIntroAnalyzer struct {
 	onCall  func()
 	summary intromarkers.RunSummary
 	err     error
+	kinds   []intromarkers.EpisodeMarkerKinds
 }
 
-func (a *fakePlaybackIntroAnalyzer) AnalyzeEpisode(context.Context, string) (intromarkers.RunSummary, error) {
+func (a *fakePlaybackIntroAnalyzer) AnalyzeEpisodeForPlayback(_ context.Context, _ string, kinds intromarkers.EpisodeMarkerKinds) (intromarkers.RunSummary, error) {
 	a.mu.Lock()
 	a.calls++
+	a.kinds = append(a.kinds, kinds)
 	a.mu.Unlock()
 	if a.onCall != nil {
 		a.onCall()
@@ -59,6 +63,12 @@ func (a *fakePlaybackIntroAnalyzer) callCount() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.calls
+}
+
+func (a *fakePlaybackIntroAnalyzer) requestedKinds() []intromarkers.EpisodeMarkerKinds {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]intromarkers.EpisodeMarkerKinds(nil), a.kinds...)
 }
 
 type fakePlaybackIntroEligibility struct {
@@ -136,15 +146,15 @@ func TestMaybeQueueLazyPlaybackMarkersGates(t *testing.T) {
 			eligible: true,
 		},
 		{
-			name: "intro already present",
+			name: "intro and credits already present",
 			lazy: "true",
 			mode: "local",
 			file: func() *models.MediaFile {
 				file := lazyMarkerTestFile()
-				start := 10.0
-				end := 60.0
-				file.IntroStart = &start
-				file.IntroEnd = &end
+				start, end := 10.0, 60.0
+				creditsStart, creditsEnd := 1700.0, 1800.0
+				file.IntroStart, file.IntroEnd = &start, &end
+				file.CreditsStart, file.CreditsEnd = &creditsStart, &creditsEnd
 				return file
 			}(),
 			eligible: true,
@@ -241,6 +251,52 @@ func TestMaybeQueueLazyPlaybackMarkersLocalModeRunsAnalyzerAndEmitsUpdate(t *tes
 	}
 	if got := analyzer.callCount(); got != 1 {
 		t.Fatalf("AnalyzeEpisode calls = %d, want 1", got)
+	}
+}
+
+// Local analysis also finds credits, so an episode whose intro is known still
+// runs it while its credits are missing, for credits only.
+func TestMaybeQueueLazyPlaybackMarkersRunsLocalForMissingCredits(t *testing.T) {
+	file := lazyMarkerTestFile()
+	start, end := 10.0, 60.0
+	file.IntroStart, file.IntroEnd = &start, &end
+	online := models.MarkerSourceOnline
+	file.IntroMarkersSource = &online
+	analyzer := &fakePlaybackIntroAnalyzer{started: make(chan struct{}, 1)}
+	handler := newLazyMarkerTestHandler(file, analyzer, nil)
+
+	handler.maybeQueueLazyPlaybackMarkers(context.Background(), &playback.Session{ID: "session-1"}, file)
+
+	select {
+	case <-analyzer.started:
+	case <-time.After(time.Second):
+		t.Fatal("AnalyzeEpisode did not start for an episode without credits")
+	}
+	want := intromarkers.EpisodeMarkerKinds{Credits: true}
+	if got := analyzer.requestedKinds(); len(got) != 1 || got[0] != want {
+		t.Fatalf("requested kinds = %+v, want [%+v]", got, want)
+	}
+}
+
+func TestMissingLocalMarkersPerKind(t *testing.T) {
+	marker := func(v float64) *float64 { return &v }
+	type kinds = intromarkers.EpisodeMarkerKinds
+	cases := []struct {
+		name      string
+		file      *models.MediaFile
+		isEpisode bool
+		want      kinds
+	}{
+		{"episode without markers", &models.MediaFile{}, true, kinds{Intro: true, Credits: true}},
+		{"episode with only an intro", &models.MediaFile{IntroStart: marker(0), IntroEnd: marker(60)}, true, kinds{Credits: true}},
+		{"episode with only credits", &models.MediaFile{CreditsStart: marker(1700), CreditsEnd: marker(1800)}, true, kinds{Intro: true}},
+		{"episode with both", &models.MediaFile{IntroStart: marker(0), IntroEnd: marker(60), CreditsStart: marker(1700), CreditsEnd: marker(1800)}, true, kinds{}},
+		{"movie without markers", &models.MediaFile{}, false, kinds{}},
+	}
+	for _, tc := range cases {
+		if got := missingLocalMarkers(tc.file, tc.isEpisode); got != tc.want {
+			t.Errorf("%s: missingLocalMarkers = %+v, want %+v", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -398,4 +454,193 @@ func lazyMarkerTestFile() *models.MediaFile {
 		MediaFolderID: 7,
 		Duration:      1800,
 	}
+}
+
+// onDemandOverlayRun plays file with on-demand online markers and local
+// analysis both enabled. The online lookup returns view (an in-memory overlay,
+// never saved); local analysis stores afterLocal. It returns every marker
+// update players were sent and the kinds local analysis was asked for.
+type onDemandOverlayRun struct {
+	storage    string
+	file       *models.MediaFile
+	view       func(*models.MediaFile) *models.MediaFile
+	afterLocal func(*models.MediaFile) *models.MediaFile
+}
+
+func (r onDemandOverlayRun) run(t *testing.T) ([]*models.MediaFile, *fakePlaybackIntroAnalyzer) {
+	t.Helper()
+	var notified []*models.MediaFile
+	var analyzer *fakePlaybackIntroAnalyzer
+	synctest.Test(t, func(t *testing.T) {
+		resolver := &fakePlaybackMarkerFileResolver{file: r.file}
+		analyzer = &fakePlaybackIntroAnalyzer{onCall: func() {
+			if r.afterLocal != nil {
+				stored, _ := resolver.GetByID(context.Background(), r.file.ID)
+				resolver.setFile(r.afterLocal(stored))
+			}
+		}}
+		notifier := fakePlaybackMarkerNotifier{ch: make(chan *models.MediaFile, 16)}
+		handler := NewPlaybackHandler(playback.NewSessionManager(0, 0), resolver)
+		handler.SettingsRepo = testPlaybackSettingsRepo{values: map[string]string{
+			markers.SettingLazyPlayback:  "true",
+			markers.SettingMode:          "both",
+			markers.SettingOnlineStorage: r.storage,
+		}}
+		handler.IntroRepository = fakePlaybackIntroEligibility{eligible: true}
+		handler.IntroAnalyzer = analyzer
+		handler.MarkerUpdateNotifier = notifier
+		handler.MarkerLazyContext = t.Context()
+		handler.MarkerRegistry = markers.NewRegistry(slog.Default())
+		if err := handler.MarkerRegistry.Register(fakePlaybackMarkerProvider{}); err != nil {
+			t.Fatal(err)
+		}
+		handler.MarkerPopulation = playbackMarkerPopulationFunc(func(ctx context.Context, file *models.MediaFile) (*models.MediaFile, bool, error) {
+			stored, _ := resolver.GetByID(ctx, file.ID)
+			return r.view(stored), true, nil
+		})
+
+		handler.maybeQueueLazyPlaybackMarkers(t.Context(), &playback.Session{ID: "session-1"}, r.file)
+		synctest.Wait()
+		close(notifier.ch)
+		for file := range notifier.ch {
+			notified = append(notified, file)
+		}
+	})
+	return notified, analyzer
+}
+
+func withMarker(file *models.MediaFile, kind string, start, end float64, source string) *models.MediaFile {
+	next := *file
+	next.MarkerSegments = append(slices.Clone(file.MarkerSegments), models.MarkerSegment{Kind: kind, StartSeconds: start, EndSeconds: end})
+	switch kind {
+	case models.MarkerSegmentIntro:
+		next.IntroStart, next.IntroEnd, next.IntroMarkersSource = &start, &end, &source
+	case models.MarkerSegmentCredits:
+		next.CreditsStart, next.CreditsEnd, next.CreditsMarkersSource = &start, &end, &source
+	}
+	return &next
+}
+
+// firstSegment returns the notified range of kind, or nil when the update
+// would clear it.
+func firstSegment(file *models.MediaFile, kind string) *models.MarkerSegment {
+	for _, segment := range models.EffectiveMarkerSegments(file) {
+		if segment.Kind == kind {
+			return &segment
+		}
+	}
+	return nil
+}
+
+func assertSegment(t *testing.T, label string, file *models.MediaFile, kind string, start, end float64) {
+	t.Helper()
+	got := firstSegment(file, kind)
+	if got == nil || got.StartSeconds != start || got.EndSeconds != end {
+		t.Fatalf("%s: %s = %+v, want %v-%v", label, kind, got, start, end)
+	}
+}
+
+func assertRequestedKinds(t *testing.T, analyzer *fakePlaybackIntroAnalyzer, want intromarkers.EpisodeMarkerKinds) {
+	t.Helper()
+	if got := analyzer.requestedKinds(); len(got) != 1 || got[0] != want {
+		t.Fatalf("local analysis kinds = %+v, want [%+v]", got, want)
+	}
+}
+
+// An on-demand online intro is never saved. Every update players get keeps it,
+// local analysis is asked only for the missing credits, and the final update
+// carries the online intro with the local credits. The setting is read the way
+// the marker lookup reads it, whatever its case.
+func TestOnDemandPlaybackMarkersKeepOnlineIntroWhileLocalFindsCredits(t *testing.T) {
+	for _, storage := range []string{"on_demand", " ON_DEMAND "} {
+		t.Run(storage, func(t *testing.T) {
+			notified, analyzer := onDemandOverlayRun{
+				storage: storage,
+				file:    lazyMarkerTestFile(),
+				view: func(stored *models.MediaFile) *models.MediaFile {
+					return withMarker(stored, models.MarkerSegmentIntro, 20, 80, models.MarkerSourceOnline)
+				},
+				afterLocal: func(stored *models.MediaFile) *models.MediaFile {
+					return withMarker(stored, models.MarkerSegmentCredits, 1700, 1780, models.MarkerSourceScanner)
+				},
+			}.run(t)
+
+			assertRequestedKinds(t, analyzer, intromarkers.EpisodeMarkerKinds{Credits: true})
+			if len(notified) < 2 {
+				t.Fatalf("marker updates = %d, want the online update and the local one", len(notified))
+			}
+			for i, file := range notified {
+				assertSegment(t, fmt.Sprintf("update %d", i), file, models.MarkerSegmentIntro, 20, 80)
+			}
+			final := notified[len(notified)-1]
+			assertSegment(t, "final update", final, models.MarkerSegmentCredits, 1700, 1780)
+			if final.IntroMarkersSource == nil || *final.IntroMarkersSource != models.MarkerSourceOnline {
+				t.Fatalf("final intro source = %v, want online", final.IntroMarkersSource)
+			}
+		})
+	}
+}
+
+// Online credits without an intro send local analysis after the intro only,
+// and the final update keeps the online credits.
+func TestOnDemandPlaybackMarkersKeepOnlineCreditsWhileLocalFindsIntro(t *testing.T) {
+	notified, analyzer := onDemandOverlayRun{
+		storage: "on_demand",
+		file:    lazyMarkerTestFile(),
+		view: func(stored *models.MediaFile) *models.MediaFile {
+			return withMarker(stored, models.MarkerSegmentCredits, 1700, 1780, models.MarkerSourceOnline)
+		},
+		afterLocal: func(stored *models.MediaFile) *models.MediaFile {
+			return withMarker(stored, models.MarkerSegmentIntro, 12, 75, models.MarkerSourceScanner)
+		},
+	}.run(t)
+
+	assertRequestedKinds(t, analyzer, intromarkers.EpisodeMarkerKinds{Intro: true})
+	for i, file := range notified {
+		assertSegment(t, fmt.Sprintf("update %d", i), file, models.MarkerSegmentCredits, 1700, 1780)
+	}
+	assertSegment(t, "final update", notified[len(notified)-1], models.MarkerSegmentIntro, 12, 75)
+}
+
+// A manual marker saved while local analysis ran outranks the online overlay.
+func TestOnDemandPlaybackMarkersKeepManualMarkersOverOnline(t *testing.T) {
+	notified, _ := onDemandOverlayRun{
+		storage: "on_demand",
+		file:    lazyMarkerTestFile(),
+		view: func(stored *models.MediaFile) *models.MediaFile {
+			return withMarker(stored, models.MarkerSegmentIntro, 20, 80, models.MarkerSourceOnline)
+		},
+		afterLocal: func(stored *models.MediaFile) *models.MediaFile {
+			edited := withMarker(stored, models.MarkerSegmentIntro, 5, 45, models.MarkerSourceManual)
+			return withMarker(edited, models.MarkerSegmentCredits, 1700, 1780, models.MarkerSourceScanner)
+		},
+	}.run(t)
+
+	final := notified[len(notified)-1]
+	assertSegment(t, "final update", final, models.MarkerSegmentIntro, 5, 45)
+	assertSegment(t, "final update", final, models.MarkerSegmentCredits, 1700, 1780)
+}
+
+// Stored mode saves what the lookup found, so the stored row stays the whole
+// answer: nothing from the lookup is laid over it.
+func TestStoredPlaybackMarkersUseStoredRowOnly(t *testing.T) {
+	notified, analyzer := onDemandOverlayRun{
+		storage: "stored",
+		file:    lazyMarkerTestFile(),
+		view: func(stored *models.MediaFile) *models.MediaFile {
+			// The lookup's intro did not reach the stored row (cleared in
+			// between), so later reloads do not carry it.
+			return withMarker(stored, models.MarkerSegmentIntro, 20, 80, models.MarkerSourceOnline)
+		},
+		afterLocal: func(stored *models.MediaFile) *models.MediaFile {
+			return withMarker(stored, models.MarkerSegmentCredits, 1700, 1780, models.MarkerSourceScanner)
+		},
+	}.run(t)
+
+	assertRequestedKinds(t, analyzer, intromarkers.EpisodeMarkerKinds{Intro: true, Credits: true})
+	final := notified[len(notified)-1]
+	if got := firstSegment(final, models.MarkerSegmentIntro); got != nil {
+		t.Fatalf("final intro = %+v, want the stored row without the lookup's intro", got)
+	}
+	assertSegment(t, "final update", final, models.MarkerSegmentCredits, 1700, 1780)
 }
