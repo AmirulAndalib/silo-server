@@ -39,13 +39,26 @@ export function sectionLibraryFilterIds(config: Record<string, unknown>): number
   return flatFilterIds(config) ?? positiveIds(config.library_ids);
 }
 
+// The library a generated row belongs to, read in the backend's order
+// (generated_library_id, then filter_library_id; see
+// parseGeneratedHomeLibraryRecentConfig in internal/sections/generated.go).
+function generatedOwnerId(config: Record<string, unknown>): number | null {
+  if (typeof config.generated_source !== "string" || config.generated_source === "") return null;
+  for (const id of [config.generated_library_id, config.filter_library_id]) {
+    if (typeof id === "number" && Number.isInteger(id) && id > 0) return id;
+  }
+  return null;
+}
+
 /**
  * Returns a copy of config filtered to libraryIds ([] means all libraries).
  * A query-definition config keeps its shape so its media_scope still applies;
  * any other config is written to filter_library_ids, and the legacy
- * filter_library_id is removed so it cannot widen the new selection. A
- * generated row whose library is still selected keeps that library as
- * generated_library_id, so it still follows the library's renames and deletion.
+ * filter_library_id is removed so it cannot widen the new selection.
+ *
+ * A generated row keeps its library as generated_library_id while that library
+ * is selected, or all libraries are, so it still follows the library's renames
+ * and deletion. A selection that leaves the library out ends that ownership.
  */
 export function withSectionLibraryFilterIds(
   config: Record<string, unknown>,
@@ -53,23 +66,23 @@ export function withSectionLibraryFilterIds(
 ): Record<string, unknown> {
   const ids = positiveIds(libraryIds);
   const next = { ...config };
+  const owner = generatedOwnerId(config);
+  if (owner !== null) {
+    next.generated_library_id = ids.length === 0 || ids.includes(owner) ? owner : null;
+  }
   if (flatFilterIds(config) === null && usesQueryDefinitionShape(config)) {
     if (ids.length > 0) next.library_ids = ids;
     else delete next.library_ids;
     return next;
   }
-  const legacy = config.filter_library_id;
-  if (
-    typeof legacy === "number" &&
-    ids.includes(legacy) &&
-    typeof config.generated_source === "string" &&
-    config.generated_source !== "" &&
-    config.generated_library_id == null
-  ) {
-    next.generated_library_id = legacy;
-  }
   delete next.filter_library_id;
-  if (ids.length > 0) next.filter_library_ids = ids;
-  else delete next.filter_library_ids;
+  if (ids.length > 0) {
+    next.filter_library_ids = ids;
+  } else {
+    // Without a flat key the backend falls back to library_ids, so a stale
+    // one would keep the row filtered.
+    delete next.filter_library_ids;
+    delete next.library_ids;
+  }
   return next;
 }

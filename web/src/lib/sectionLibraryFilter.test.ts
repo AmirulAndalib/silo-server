@@ -63,6 +63,57 @@ describe("withSectionLibraryFilterIds", () => {
     });
   });
 
+  it("ends a generated row's ownership when a selection leaves its library out", () => {
+    expect(
+      withSectionLibraryFilterIds(
+        {
+          generated_source: "home_library_recent",
+          generated_library_id: 2,
+          filter_library_ids: [2],
+        },
+        [4],
+      ),
+    ).toEqual({
+      generated_source: "home_library_recent",
+      generated_library_id: null,
+      filter_library_ids: [4],
+    });
+    expect(
+      withSectionLibraryFilterIds(
+        {
+          generated_source: "home_library_recent",
+          generated_library_id: 2,
+          library_ids: [2],
+          media_scope: "series",
+        },
+        [4],
+      ),
+    ).toEqual({
+      generated_source: "home_library_recent",
+      generated_library_id: null,
+      library_ids: [4],
+      media_scope: "series",
+    });
+  });
+
+  it("keeps a generated row's library when all libraries are selected", () => {
+    expect(
+      withSectionLibraryFilterIds(
+        { generated_source: "home_library_recent", filter_library_id: 2 },
+        [],
+      ),
+    ).toEqual({ generated_source: "home_library_recent", generated_library_id: 2 });
+  });
+
+  it("drops a stale library_ids when clearing a flat filter, keeping other fields", () => {
+    const next = withSectionLibraryFilterIds(
+      { filter_library_ids: [3], library_ids: [17], sort: { field: "added_at" } },
+      [],
+    );
+    expect(next).toEqual({ sort: { field: "added_at" } });
+    expect(sectionLibraryFilterIds(next)).toEqual([]);
+  });
+
   it("clears both flat keys when all libraries are selected", () => {
     expect(
       withSectionLibraryFilterIds({ filter_library_id: 2, filter_library_ids: [4] }, []),
