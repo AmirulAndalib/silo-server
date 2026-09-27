@@ -1,20 +1,26 @@
 # Intro detection
 
 The daily "Detect markers on this server" task finds intros and end credits in
-series libraries with marker detection enabled. Code lives in
+episodes of series and mixed libraries with marker detection enabled, then end
+credits in movies of movie and mixed libraries with it enabled. Code lives in
 `internal/intromarkers`; its ffmpeg runs, capability check, and concurrency
 limit come from `internal/mediasample` (see [media sampling](media-sampling.md)).
-Credits detection is described [below](#credits).
+Credits detection is described [below](#credits), and movies
+[after it](#movie-credits).
 
 Every API server runs the task manager, so the task takes a PostgreSQL
 advisory lock before it analyzes anything. While one server holds it, a run on
 another server succeeds without analyzing and records `skipped` in its result
 data. The admin UI does not show that result data yet, so a skipped run
 appears there as a completed run. A server whose ffmpeg cannot compute
-Chromaprint fingerprints runs its chapter-only pass without the lock, so it
-never makes a server that can compare season groups skip. If ffmpeg's
-capability listing itself fails, the task keeps the lock. Analysis started
-from playback or for a single item does not take the lock.
+Chromaprint fingerprints runs its chapter-only episode pass without the lock,
+so it never makes a server that can compare season groups skip. It then tries
+the lock for the movie pass, which needs no Chromaprint: if it gets the lock
+it analyzes movies under it, and if another server holds it, it skips the
+movies, which the lock holder analyzes. A single server without Chromaprint
+therefore still analyzes movies. If ffmpeg's capability listing itself fails,
+the task keeps the lock for the whole run. Analysis started from playback or
+for a single item does not take the lock.
 
 ## Pipeline
 
@@ -237,6 +243,72 @@ Credits versions and caches:
   `credits-video:v1` (12). Like Chromaprint intros, the latest
   `credits-audio:` result of one version replaces the stored one even at a
   lower confidence.
+
+## Movie credits
+
+Movies get local end credits, never intros, on a best-effort basis. A movie
+has no season to compare audio with, so its credits come from chapters and
+video alone. In validation, video found credits in 30 of 42 movies with known
+credits: 13 within five seconds early to ten seconds late, 13 later than that,
+and 4 early, all of which were checked against frames and cut no story. The
+web UI labels the library switch "Detect credits markers (best effort)" for
+movie libraries and leaves it off for new ones; series and mixed libraries
+default to on. Mixed libraries cover both episodes and movies.
+
+A movie file is analyzed when its item is a movie, it is not an episode or an
+extra, it is not a part of a multi-part film, it is at least 1200 seconds
+long, it is not missing, and its library is enabled, of type movies or mixed,
+with marker detection on. Credits from a higher-priority source, such as an
+online provider or a manual edit, are left alone.
+
+- **Chapters.** A credits chapter, by the episode title rules without
+  `Ending`, which in a movie is as likely the story's ending, places the
+  credits (`credits-chapter:v1`). It needs no ffmpeg.
+- **Tail pass.** Otherwise the movie's tail window, its last 900 seconds or
+  last quarter when that is shorter, is sampled every three seconds: the
+  keyframe at or before each time, with the episode tail pass's statistics
+  and no audio (a `mediasample` `Samples` request). Thinning episode
+  keyframes to one per three or four seconds left their accuracy unchanged,
+  and in Matroska, MP4, and AVI files only the sampled stretches are read;
+  other containers, such as MPEG-TS, read the whole tail for its keyframes
+  (see [media sampling](media-sampling.md)). The result is stored
+  as a `credits_tail` artifact with its own `config_hash`, so it never shares
+  a key with an episode tail, under the same statuses and backoff. A usable
+  tail is stored only after the credits placed from it are written, or none
+  are found, so a movie whose analysis is canceled or fails before then
+  keeps no complete tail and stays eligible for the next scheduled run.
+- **Placing.** Keyframes are classified and grouped into runs as for
+  episodes, and the last cluster of runs is the credits (`credits-video:v1`).
+  It must end within 180 seconds of the end of the file and last 15 to 900
+  seconds. Its start moves back over true black, then to the end of a
+  silence between the story and the credits: for movies ffmpeg reads only
+  the audio from ten seconds before to two seconds after the start video
+  placed, and a silence cut off at the start of that read is not used. The
+  silence read is not cached. Guards are the episode guards with the movie
+  bounds.
+
+The scheduled run analyzes movies after episodes, under the same cluster
+lock and ffmpeg limit. It lists movies whose movie tail is not stored for the
+file as it is now (complete, unusable, or failed on this server and still
+backing off), never-analyzed files first, then the newest; files retried
+after a failure come last. Once a movie's tail is stored, the run does not
+look at it again until the file changes; admin refresh and playback place its
+credits again from the stored tail. As for episodes, a tail ruled out by probe
+metadata (no video, or an all-intra codec) is decided on every analysis and
+never stored, and an unusable row an earlier build stored that way does not
+keep a movie out. Such movies, like movies whose credits come from a chapter,
+are listed on every run, but analyzing them reads no artifact and runs no
+ffmpeg. The run lists movies 200 at a time, each page starting after the
+last movie of the one before in that order, so a movie analyzed in this run
+that is still eligible is not listed again in it. The run starts no new
+movie, and lists no further page, once 60 minutes have passed since it
+started listing movies, and then reports `movie_budget_exhausted`; the
+remaining movies wait for the next run. Run summaries count
+`movies_considered` (the movies the run listed) and
+`movie_credits_markers_written`; the credits tail counters include movies.
+
+Playback analysis of a movie without credits analyzes that file alone, with
+playback priority. Admin refresh of a movie analyzes each of its files.
 
 ## Measuring accuracy
 

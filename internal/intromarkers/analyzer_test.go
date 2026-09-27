@@ -19,6 +19,7 @@ type fakeIntroRepository struct {
 	episodeCandidates  map[string][]Candidate
 	groupCandidates    map[string][]Candidate
 	backfillCandidates []Candidate
+	movieCandidates    []Candidate
 	fingerprints       map[int]*Fingerprint
 	seasonState        *SeasonState
 	upsertedStates     []SeasonState
@@ -28,6 +29,7 @@ type fakeIntroRepository struct {
 	artifacts          map[artifactSlot]Artifact
 	artifactFailures   []ArtifactFailure
 	groupListCalls     int
+	movieListCalls     int
 	// seasonStateHash, when set, is the only analysis hash seasonState
 	// answers for.
 	seasonStateHash string
@@ -65,6 +67,47 @@ func (f *fakeIntroRepository) ListChapterSilenceBackfillCandidates(context.Conte
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]Candidate(nil), f.backfillCandidates...), nil
+}
+
+// ListMovieCandidates pages movieCandidates in order; its cursor holds only
+// the last file's ID.
+func (f *fakeIntroRepository) ListMovieCandidates(_ context.Context, _ string, after *movieCandidateCursor, limit int) ([]Candidate, *movieCandidateCursor, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.movieListCalls++
+	start := 0
+	if after != nil {
+		for i, candidate := range f.movieCandidates {
+			if candidate.FileID == after.fileID {
+				start = i + 1
+			}
+		}
+	}
+	page := append([]Candidate(nil), f.movieCandidates[start:min(len(f.movieCandidates), start+limit)]...)
+	if len(page) == 0 {
+		return nil, nil, nil
+	}
+	return page, &movieCandidateCursor{fileID: page[len(page)-1].FileID}, nil
+}
+
+func (f *fakeIntroRepository) ListMovieCandidatesForItem(_ context.Context, contentID string) ([]Candidate, error) {
+	return f.movieCandidatesWhere(func(c Candidate) bool { return c.ContentID == contentID }), nil
+}
+
+func (f *fakeIntroRepository) ListMovieCandidatesForFile(_ context.Context, fileID int) ([]Candidate, error) {
+	return f.movieCandidatesWhere(func(c Candidate) bool { return c.FileID == fileID }), nil
+}
+
+func (f *fakeIntroRepository) movieCandidatesWhere(keep func(Candidate) bool) []Candidate {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []Candidate
+	for _, candidate := range f.movieCandidates {
+		if keep(candidate) {
+			out = append(out, candidate)
+		}
+	}
+	return out
 }
 
 func (f *fakeIntroRepository) LoadSilenceRefinementAttempt(_ context.Context, fileID int) (*SilenceRefinementAttempt, error) {

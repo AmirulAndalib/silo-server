@@ -25,7 +25,12 @@ type markerAnalysisRunner interface {
 	// error matching mediasample.ErrUnsupported means ffmpeg lacks Chromaprint;
 	// any other error means the check itself failed.
 	Preflight(ctx context.Context) error
+	// Run analyzes episodes, then movies.
 	Run(ctx context.Context, progress intromarkers.ProgressFunc) (intromarkers.RunSummary, error)
+	// RunEpisodes analyzes episodes only.
+	RunEpisodes(ctx context.Context, progress intromarkers.ProgressFunc) (intromarkers.RunSummary, error)
+	// RunMovies analyzes movies only.
+	RunMovies(ctx context.Context, progress intromarkers.ProgressFunc) (intromarkers.RunSummary, error)
 }
 
 // detectMarkersAdvisoryLock spells "SILOMRKR".
@@ -35,9 +40,12 @@ const detectMarkersAdvisoryLock int64 = 0x53494C4F4D524B52
 // process runs the task manager, so an advisory lock keeps one analysis pass
 // running across the cluster; the other servers skip their run instead of
 // repeating the same ffmpeg work. A server whose ffmpeg cannot fingerprint
-// runs its chapter-only pass without the lock, so it never makes a capable
-// server skip. Playback-time and per-item analysis do not go through this
-// task and are not serialized by it.
+// runs its chapter-only episode pass without the lock, so it never makes a
+// capable server skip, then takes the lock for a movie-only pass, which
+// needs no Chromaprint, and skips the movies when another server holds the
+// lock, since that server runs them. Playback-time
+// and per-item analysis do not go through this task and are not serialized
+// by it.
 type DetectIntroMarkersTask struct {
 	analyzer markerAnalysisRunner
 	settings MarkerSettingsReader
@@ -99,21 +107,20 @@ func (t *DetectIntroMarkersTask) Execute(ctx context.Context, progress taskmanag
 		progress.Report(100, fmt.Sprintf("Marker population skipped; mode is %s", mode))
 		return nil
 	}
-	lock := t.lock
 	if err := t.analyzer.Preflight(ctx); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
 		// Only a capability listing that lacks Chromaprint proves this server
 		// can only read chapters; leave the lock to a server that can also
-		// compare season groups. A failed listing proves nothing and Run probes
-		// again, so keep the lock.
-		if errors.Is(err, mediasample.ErrUnsupported) {
-			lock = nil
+		// compare season groups. A failed listing proves nothing and Run
+		// probes again, so keep the lock. Without a lock, Run covers both.
+		if errors.Is(err, mediasample.ErrUnsupported) && t.lock != nil {
+			return t.executeChapterOnly(ctx, progress)
 		}
 	}
-	if lock != nil {
-		release, acquired, err := lock.TryAcquire(ctx)
+	if t.lock != nil {
+		release, acquired, err := t.lock.TryAcquire(ctx)
 		if err != nil {
 			return fmt.Errorf("claiming marker detection: %w", err)
 		}
@@ -132,11 +139,48 @@ func (t *DetectIntroMarkersTask) Execute(ctx context.Context, progress taskmanag
 	summary, err := t.analyzer.Run(ctx, func(percent float64, message string) {
 		progress.Report(percent, message)
 	})
-	if data, marshalErr := json.Marshal(summary); marshalErr == nil {
-		progress.SetResultData(data)
-	}
+	setDetectMarkersSummary(progress, summary)
 	if err != nil {
 		return fmt.Errorf("detecting markers: %w", err)
 	}
 	return nil
+}
+
+const detectMarkersMoviesElsewhere = "Marker detection completed; another server is checking movies"
+
+// executeChapterOnly runs the episode pass of a server that cannot
+// fingerprint without the lock, then the movie pass under it. Episodes take
+// the first 85 percent of the progress bar, movies the rest.
+func (t *DetectIntroMarkersTask) executeChapterOnly(ctx context.Context, progress taskmanager.ProgressReporter) error {
+	summary, err := t.analyzer.RunEpisodes(ctx, func(percent float64, message string) {
+		progress.Report(percent*0.85, message)
+	})
+	setDetectMarkersSummary(progress, summary)
+	if err != nil {
+		return fmt.Errorf("detecting markers: %w", err)
+	}
+	release, acquired, err := t.lock.TryAcquire(ctx)
+	if err != nil {
+		return fmt.Errorf("claiming marker detection: %w", err)
+	}
+	if !acquired {
+		progress.Report(100, detectMarkersMoviesElsewhere)
+		return nil
+	}
+	defer release()
+	movies, err := t.analyzer.RunMovies(ctx, func(percent float64, message string) {
+		progress.Report(85+percent*0.15, message)
+	})
+	summary.Merge(movies)
+	setDetectMarkersSummary(progress, summary)
+	if err != nil {
+		return fmt.Errorf("detecting markers: %w", err)
+	}
+	return nil
+}
+
+func setDetectMarkersSummary(progress taskmanager.ProgressReporter, summary intromarkers.RunSummary) {
+	if data, err := json.Marshal(summary); err == nil {
+		progress.SetResultData(data)
+	}
 }

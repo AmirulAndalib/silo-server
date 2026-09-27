@@ -143,7 +143,7 @@ func (a *Analyzer) ensureCreditsInputs(ctx context.Context, candidates []Candida
 				if stored {
 					storedArtifact = &artifact
 				}
-				tail, state := a.creditsTailArtifact(storedArtifact, candidate)
+				tail, state := a.creditsTailArtifact(storedArtifact, candidate, episodeTailSpec(candidate))
 				switch {
 				case tail != nil:
 					addTail(candidate, tail, false)
@@ -203,7 +203,7 @@ func (a *Analyzer) ensureCreditsInputs(ctx context.Context, candidates []Candida
 				if tailErr == nil && len(sample.Tail.Frames) == 0 {
 					tailErr = errNoTailFrames
 				}
-				tail, err := a.settleCreditsTail(ctx, candidate, sample.Tail, tailErr)
+				tail, err := a.settleCreditsTail(ctx, candidate, episodeTailSpec(candidate), sample.Tail, tailErr)
 				if err != nil {
 					setErr(err)
 					return
@@ -250,10 +250,23 @@ func (a *Analyzer) ensureCreditsInputs(ctx context.Context, candidates []Candida
 	return inputs, firstErr
 }
 
+// creditsTailSpec is where a file's tail pass is kept: its artifact key and
+// the window it covers. Episodes and movies sample different windows in
+// different ways, so their tails never share a key.
+type creditsTailSpec struct {
+	key    ArtifactKey
+	window fingerprintWindow
+}
+
+// episodeTailSpec locates an episode's tail pass.
+func episodeTailSpec(candidate Candidate) creditsTailSpec {
+	return creditsTailSpec{key: creditsTailKey(), window: tailWindow(candidate)}
+}
+
 // creditsTailArtifact interprets a candidate's stored tail artifact: the
 // decoded tail when it is ready, and the artifact's state.
-func (a *Analyzer) creditsTailArtifact(artifact *Artifact, candidate Candidate) (*creditsTail, ArtifactState) {
-	window := tailWindow(candidate)
+func (a *Analyzer) creditsTailArtifact(artifact *Artifact, candidate Candidate, spec creditsTailSpec) (*creditsTail, ArtifactState) {
+	window := spec.window
 	state := artifact.State(window.identity(candidate), a.nodeName(), time.Now())
 	if state == ArtifactSkipped && artifact.Status == ArtifactUnusable && metadataTailDetail(artifact.Detail) {
 		// Stored by an earlier build from probe metadata the candidate
@@ -274,63 +287,80 @@ func (a *Analyzer) creditsTailArtifact(artifact *Artifact, candidate Candidate) 
 	return &tail, ArtifactReady
 }
 
-// settleCreditsTail stores the outcome of a tail pass and returns the tail
-// when it can be classified. A permanent failure, or a tail with too many or
-// too few keyframes, is stored as unusable; any other failure is recorded so
-// this server backs off.
 // errNoTailFrames fails a tail pass that exited cleanly without any parsed
 // keyframe statistics.
 var errNoTailFrames = errors.New("credits tail pass parsed no keyframes")
 
-func (a *Analyzer) settleCreditsTail(ctx context.Context, candidate Candidate, tail creditsTail, sampleErr error) (*creditsTail, error) {
+// settleCreditsTail stores the outcome of a tail pass and returns the tail
+// when it can be classified.
+func (a *Analyzer) settleCreditsTail(ctx context.Context, candidate Candidate, spec creditsTailSpec, tail creditsTail, sampleErr error) (*creditsTail, error) {
+	usable, err := a.settleUnusableCreditsTail(ctx, candidate, spec, tail, sampleErr)
+	if err != nil || !usable {
+		return nil, err
+	}
+	if err := a.storeCreditsTail(ctx, candidate, spec, tail); err != nil {
+		return nil, err
+	}
+	return &tail, nil
+}
+
+// settleUnusableCreditsTail stores the outcome of a tail pass that cannot be
+// classified and reports whether the tail can be. A permanent failure, or a
+// tail with too many or too few keyframes, is stored as unusable; any other
+// failure is recorded so this server backs off. A usable tail is left for
+// the caller to store.
+func (a *Analyzer) settleUnusableCreditsTail(ctx context.Context, candidate Candidate, spec creditsTailSpec, tail creditsTail, sampleErr error) (bool, error) {
 	if sampleErr != nil {
 		reason := mediasample.Classify(sampleErr)
 		a.logger.WarnContext(ctx, "credits tail pass failed", "file_id", candidate.FileID, "path", candidate.FilePath, "reason", reason, "error", sampleErr)
 		if reason.Permanent() {
-			return nil, a.storeCreditsTailUnusable(ctx, candidate, string(reason))
+			return false, a.storeCreditsTailUnusable(ctx, candidate, spec, string(reason))
 		}
 		if err := a.repo.RecordArtifactFailure(ctx, ArtifactFailure{
 			MediaFileID:      candidate.FileID,
-			ArtifactKey:      creditsTailKey(),
-			ArtifactIdentity: tailWindow(candidate).identity(candidate),
+			ArtifactKey:      spec.key,
+			ArtifactIdentity: spec.window.identity(candidate),
 			RecordedBy:       a.nodeName(),
 			Error:            sampleErr.Error(),
 			At:               time.Now().UTC(),
 		}); err != nil {
 			a.logger.WarnContext(ctx, "credits tail failure record failed", "file_id", candidate.FileID, "error", err)
 		}
-		return nil, nil
+		return false, nil
 	}
-	window := tailWindow(candidate)
-	if detail := tailUnusableAfterSampling(len(tail.Frames), window); detail != "" {
-		return nil, a.storeCreditsTailUnusable(ctx, candidate, detail)
+	if detail := tailUnusableAfterSampling(len(tail.Frames), spec.window); detail != "" {
+		return false, a.storeCreditsTailUnusable(ctx, candidate, spec, detail)
 	}
+	return true, nil
+}
+
+// storeCreditsTail stores a usable tail pass as the candidate's complete
+// tail artifact.
+func (a *Analyzer) storeCreditsTail(ctx context.Context, candidate Candidate, spec creditsTailSpec, tail creditsTail) error {
+	window := spec.window
 	payload, err := encodeCreditsTail(tail, window.Start, len(creditsBlackThresholds))
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if err := a.repo.UpsertArtifact(ctx, Artifact{
+	return a.repo.UpsertArtifact(ctx, Artifact{
 		MediaFileID:           candidate.FileID,
-		ArtifactKey:           creditsTailKey(),
+		ArtifactKey:           spec.key,
 		ArtifactIdentity:      window.identity(candidate),
 		Status:                ArtifactComplete,
 		PayloadFormat:         creditsTailFormat,
 		SampleDurationSeconds: window.duration(),
 		ItemCount:             len(tail.Frames),
 		Payload:               payload,
-	}); err != nil {
-		return nil, err
-	}
-	return &tail, nil
+	})
 }
 
 // storeCreditsTailUnusable records why the candidate's decoded tail cannot
 // be classified, so it is not decoded again until the file changes.
-func (a *Analyzer) storeCreditsTailUnusable(ctx context.Context, candidate Candidate, detail string) error {
+func (a *Analyzer) storeCreditsTailUnusable(ctx context.Context, candidate Candidate, spec creditsTailSpec, detail string) error {
 	return a.repo.UpsertArtifact(ctx, Artifact{
 		MediaFileID:      candidate.FileID,
-		ArtifactKey:      creditsTailKey(),
-		ArtifactIdentity: tailWindow(candidate).identity(candidate),
+		ArtifactKey:      spec.key,
+		ArtifactIdentity: spec.window.identity(candidate),
 		Status:           ArtifactUnusable,
 		Detail:           detail,
 	})

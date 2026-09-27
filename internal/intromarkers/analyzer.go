@@ -24,6 +24,16 @@ type Analyzer struct {
 	// tailSampler runs credits tail passes. Nil leaves credits to chapters
 	// and audio.
 	tailSampler creditsTailSampler
+	// movieSampler runs movie tail passes. Nil leaves movie credits to
+	// chapters.
+	movieSampler movieTailSampler
+	// movieBudget bounds how long a scheduled run starts new movies; zero
+	// means movieCreditsRunBudget. now, when set, replaces time.Now for it.
+	movieBudget time.Duration
+	now         func() time.Time
+	// moviePageSize is how many movies a scheduled run lists at a time;
+	// zero means movieCandidatePageSize.
+	moviePageSize int
 	// node names this server in recorded silence refinement failures, which
 	// only defer retries on the server that recorded them.
 	node string
@@ -44,6 +54,8 @@ type Analyzer struct {
 	lookupSlots chan struct{}
 	// tailWarnOnce logs once that ffmpeg cannot run the credits tail pass.
 	tailWarnOnce sync.Once
+	// movieWarnOnce logs once that ffmpeg cannot run the movie tail pass.
+	movieWarnOnce sync.Once
 }
 
 // maxConcurrentFingerprintLookups caps the database connections fingerprint
@@ -66,6 +78,9 @@ type introRepository interface {
 	ListCandidatesForEpisode(ctx context.Context, episodeID string) ([]Candidate, error)
 	ListCandidatesForGroup(ctx context.Context, mediaFolderID int, seasonID, analysisGroupKey string) ([]Candidate, error)
 	ListChapterSilenceBackfillCandidates(ctx context.Context, limit int, cfg Config, node string) ([]Candidate, error)
+	ListMovieCandidates(ctx context.Context, node string, after *movieCandidateCursor, limit int) ([]Candidate, *movieCandidateCursor, error)
+	ListMovieCandidatesForItem(ctx context.Context, contentID string) ([]Candidate, error)
+	ListMovieCandidatesForFile(ctx context.Context, fileID int) ([]Candidate, error)
 	LoadSilenceRefinementAttempt(ctx context.Context, fileID int) (*SilenceRefinementAttempt, error)
 	UpsertSilenceRefinementAttempt(ctx context.Context, attempt SilenceRefinementAttempt) error
 	PatchMarker(ctx context.Context, patch MarkerPatch) (bool, error)
@@ -100,6 +115,7 @@ func NewAnalyzer(repo *Repository, config Config, logger *slog.Logger) *Analyzer
 		repo:               repo,
 		extractor:          extractor,
 		tailSampler:        extractor,
+		movieSampler:       extractor,
 		refiner:            NewSilenceBoundaryRefiner(config),
 		chromaprintRefiner: NewDialogueBoundaryRefiner(config),
 		config:             config,
@@ -244,7 +260,33 @@ func (a *Analyzer) Preflight(ctx context.Context) error {
 	return a.extractor.Preflight(ctx)
 }
 
+// Run analyzes every library with marker detection enabled: episodes for
+// intros and credits, then movies for credits within the movie budget.
 func (a *Analyzer) Run(ctx context.Context, progress ProgressFunc) (RunSummary, error) {
+	return a.run(ctx, progress, runPasses{episodes: true, movies: true})
+}
+
+// RunEpisodes analyzes the episodes of every library with marker detection
+// enabled, as Run does, and leaves movies alone. A server without
+// Chromaprint runs it outside the cluster lock, then RunMovies under it, so
+// the movie pass stays on one server.
+func (a *Analyzer) RunEpisodes(ctx context.Context, progress ProgressFunc) (RunSummary, error) {
+	return a.run(ctx, progress, runPasses{episodes: true})
+}
+
+// RunMovies analyzes the movies of every library with marker detection
+// enabled for credits within the movie budget, as Run does after the
+// episodes, and leaves episodes alone.
+func (a *Analyzer) RunMovies(ctx context.Context, progress ProgressFunc) (RunSummary, error) {
+	return a.run(ctx, progress, runPasses{movies: true})
+}
+
+// runPasses selects the passes of a scheduled run.
+type runPasses struct {
+	episodes, movies bool
+}
+
+func (a *Analyzer) run(ctx context.Context, progress ProgressFunc, passes runPasses) (RunSummary, error) {
 	report := func(percent float64, message string) {
 		if progress != nil {
 			progress(percent, message)
@@ -258,10 +300,50 @@ func (a *Analyzer) Run(ctx context.Context, progress ProgressFunc) (RunSummary, 
 	}
 	summary.LibrariesScanned = libraries
 	if libraries == 0 {
-		report(100, "No series libraries with marker detection enabled")
+		report(100, "No libraries with marker detection enabled")
 		return summary, nil
 	}
 
+	if !passes.movies {
+		episodeSummary, err := a.runEpisodes(ctx, report)
+		mergeRunSummary(&summary, episodeSummary)
+		return summary, err
+	}
+
+	// With both passes, episodes take the first 85 percent of the progress
+	// bar and movies the rest.
+	moviesFrom := 0.0
+	if passes.episodes {
+		moviesFrom = 85
+		episodeSummary, err := a.runEpisodes(ctx, func(percent float64, message string) {
+			report(percent*moviesFrom/100, message)
+		})
+		mergeRunSummary(&summary, episodeSummary)
+		if err != nil {
+			return summary, err
+		}
+	}
+
+	report(moviesFrom, "Checking movies for credits")
+	movieSummary, err := a.runMovies(ctx, func(done int, budgetUsed float64) {
+		report(moviesFrom+budgetUsed*(100-moviesFrom), fmt.Sprintf("Checked %d movies for credits", done))
+	})
+	mergeRunSummary(&summary, movieSummary)
+	if err != nil {
+		return summary, err
+	}
+	if summary.MovieBudgetExhausted {
+		report(100, "Marker detection completed; remaining movies wait for the next run")
+		return summary, nil
+	}
+	report(100, "Marker detection completed")
+	return summary, nil
+}
+
+// runEpisodes analyzes the episodes of every enabled library, reporting
+// progress from 0 to 100.
+func (a *Analyzer) runEpisodes(ctx context.Context, report ProgressFunc) (RunSummary, error) {
+	summary := RunSummary{}
 	candidates, err := a.repo.ListEligibleCandidates(ctx)
 	if err != nil {
 		return summary, err
@@ -338,8 +420,7 @@ func (a *Analyzer) Run(ctx context.Context, progress ProgressFunc) (RunSummary, 
 	if err != nil {
 		return summary, err
 	}
-
-	report(100, "Marker detection completed")
+	report(100, "Episode marker detection completed")
 	return summary, nil
 }
 
@@ -1260,6 +1341,15 @@ func distinctFingerprintEpisodeCount(inputs []fingerprintInput) int {
 	return len(seen)
 }
 
+// Merge adds src's counts to s, as when one task runs RunEpisodes and
+// RunMovies. Both passes count the same libraries, so s keeps the larger
+// library count rather than their sum.
+func (s *RunSummary) Merge(src RunSummary) {
+	libraries := max(s.LibrariesScanned, src.LibrariesScanned)
+	mergeRunSummary(s, src)
+	s.LibrariesScanned = libraries
+}
+
 func mergeRunSummary(dst *RunSummary, src RunSummary) {
 	dst.LibrariesScanned += src.LibrariesScanned
 	dst.FilesConsidered += src.FilesConsidered
@@ -1302,4 +1392,9 @@ func mergeRunSummary(dst *RunSummary, src RunSummary) {
 	dst.CreditsTailUnusable += src.CreditsTailUnusable
 	dst.CreditsAudioVideoMarkersWritten += src.CreditsAudioVideoMarkersWritten
 	dst.CreditsVideoMarkersWritten += src.CreditsVideoMarkersWritten
+	dst.MoviesConsidered += src.MoviesConsidered
+	dst.MovieCreditsMarkersWritten += src.MovieCreditsMarkersWritten
+	if src.MovieBudgetExhausted {
+		dst.MovieBudgetExhausted = true
+	}
 }

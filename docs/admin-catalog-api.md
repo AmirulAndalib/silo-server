@@ -219,21 +219,32 @@ replay. No additional optimistic concurrency or request replay receipt is
 introduced. Existing native viewers and Jellyfin reads remain separate from
 these curation actions.
 
-## Episode marker analysis
+## Episode and movie marker analysis
 
 `POST /api/v2/admin/items/{id}/refresh-markers` and
 `POST /api/v2/admin/items/{id}/redetect-intro` require acting-administrator
-authorization. Both retain the existing local episode analyzer.
-`refresh-markers` finds intros and end credits; `redetect-intro`, like the v1
-routes, finds intros only. The episode must exist, have media files, and
-belong to a library with intro detection enabled. Marker settings must allow
-local analysis; off and online-only modes return `409`. Unconfigured
-dependencies return `503`.
+authorization. Both run the existing local analyzer. `refresh-markers` finds an
+episode's intros and end credits, or a movie's end credits. Movie credits are
+best effort, and movies never get local intros. `redetect-intro`, like the v1
+routes, finds episode intros only and answers any other item, a movie
+included, with `400`. For local analysis the item must exist, have media
+files, and have at least one in a library with marker detection enabled: a
+series or mixed library for an episode, a movie or mixed library for a movie.
+`refresh-markers` answers an item that is neither an episode nor a movie with
+`400`. Marker settings must allow local analysis; off and online-only modes
+return `409`. Unconfigured dependencies return `503`.
+
+`GET /api/v2/admin/markers/capabilities` tells a client whether it can send a
+movie to `refresh-markers`: `movie_credits: true` means the server accepts movie
+IDs there and looks for their credits locally. Servers without the field
+analyze episodes only and answer a movie with `400`. The document describes the
+build; marker settings and library switches still decide whether an item is
+analyzed.
 
 Both return `202` with `status: "queued"` or `status: "already_running"`.
 These statuses acknowledge process-local background work. There is no persisted
 job, job Location, cluster-wide exclusion, or restart recovery promise. Active
-work is coalesced by episode ID within the process. Successful analysis retains
+work is coalesced by item ID within the process. Successful analysis retains
 the existing marker-update notifications.
 
 Both operations are non-retryable. The web re-detection action disables mutation

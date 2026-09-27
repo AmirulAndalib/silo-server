@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,15 +23,28 @@ type fakeIntroAnalyzer struct {
 	release chan struct{}
 	summary intromarkers.RunSummary
 	err     error
-	// kinds receives the kinds of each analysis.
+	// kinds receives the kinds of each episode analysis.
 	kinds chan intromarkers.EpisodeMarkerKinds
+	// movies receives the content IDs of movie analyses.
+	movies chan string
+}
+
+func (f *fakeIntroAnalyzer) AnalyzeMovie(ctx context.Context, contentID string) (intromarkers.RunSummary, error) {
+	if f.movies != nil {
+		f.movies <- contentID
+	}
+	return f.analyze(ctx, "")
 }
 
 func (f *fakeIntroAnalyzer) AnalyzeEpisodeKinds(ctx context.Context, episodeID string, kinds intromarkers.EpisodeMarkerKinds) (intromarkers.RunSummary, error) {
 	if f.kinds != nil {
 		f.kinds <- kinds
 	}
-	if f.started != nil {
+	return f.analyze(ctx, episodeID)
+}
+
+func (f *fakeIntroAnalyzer) analyze(ctx context.Context, episodeID string) (intromarkers.RunSummary, error) {
+	if f.started != nil && episodeID != "" {
 		f.started <- episodeID
 	}
 	if f.release != nil {
@@ -49,11 +64,11 @@ func (f *fakeIntroAnalyzer) AnalyzeEpisodeKinds(ctx context.Context, episodeID s
 }
 
 type fakeIntroEligibility struct {
-	result *intromarkers.EpisodeIntroEligibility
+	result *intromarkers.MarkerItemEligibility
 	err    error
 }
 
-func (f fakeIntroEligibility) EpisodeIntroEligibility(context.Context, string) (*intromarkers.EpisodeIntroEligibility, error) {
+func (f fakeIntroEligibility) MarkerItemEligibility(context.Context, string) (*intromarkers.MarkerItemEligibility, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -76,6 +91,18 @@ type fakeAdminIntroFileResolver struct {
 	files  []*models.MediaFile
 	err    error
 	called chan string
+	// byContent answers GetByContentID.
+	byContent map[string][]*models.MediaFile
+}
+
+func (f fakeAdminIntroFileResolver) GetByContentID(_ context.Context, contentID string) ([]*models.MediaFile, error) {
+	if f.called != nil {
+		f.called <- contentID
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.byContent[contentID], nil
 }
 
 func (f fakeAdminIntroFileResolver) GetByEpisodeID(_ context.Context, episodeID string) ([]*models.MediaFile, error) {
@@ -132,8 +159,8 @@ func TestAdminMarkerRefreshOnlineDoesNotRequireLocalDetection(t *testing.T) {
 // analysis, which now finds credits.
 func TestAdminMarkerRefreshBothRunsLocalForMissingCredits(t *testing.T) {
 	analyzer := &fakeIntroAnalyzer{started: make(chan string, 1)}
-	handler := NewAdminIntroHandler(analyzer, fakeIntroEligibility{result: &intromarkers.EpisodeIntroEligibility{
-		EpisodeID: "ep1", HasMediaFiles: true, IntroDetectionEnabled: true,
+	handler := NewAdminIntroHandler(analyzer, fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+		ItemID: "ep1", HasMediaFiles: true, IntroDetectionEnabled: true,
 	}}, t.Context(), nil)
 	handler.Settings = fakeMarkerSettings{values: map[string]string{markers.SettingMode: string(markers.ModeBoth)}}
 	handler.FileResolver = fakeAdminIntroFileResolver{files: []*models.MediaFile{{ID: 42, EpisodeID: "ep1"}}}
@@ -171,8 +198,8 @@ func TestAdminIntroRedetectQueuesAndDedupsInFlightEpisode(t *testing.T) {
 	}
 	handler := NewAdminIntroHandler(
 		analyzer,
-		fakeIntroEligibility{result: &intromarkers.EpisodeIntroEligibility{
-			EpisodeID:             "ep1",
+		fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+			ItemID:                "ep1",
 			HasMediaFiles:         true,
 			IntroDetectionEnabled: true,
 		}},
@@ -225,8 +252,8 @@ func TestAdminIntroRedetectRejectsModesWithoutLocalAnalysis(t *testing.T) {
 			analyzer := &fakeIntroAnalyzer{started: make(chan string, 1), release: make(chan struct{})}
 			handler := NewAdminIntroHandler(
 				analyzer,
-				fakeIntroEligibility{result: &intromarkers.EpisodeIntroEligibility{
-					EpisodeID:             "ep1",
+				fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+					ItemID:                "ep1",
 					HasMediaFiles:         true,
 					IntroDetectionEnabled: true,
 				}},
@@ -252,10 +279,10 @@ func TestAdminIntroRedetectRejectsModesWithoutLocalAnalysis(t *testing.T) {
 	}
 }
 
-func TestAdminIntroRedetectRejectsNonEpisode(t *testing.T) {
+func TestAdminIntroRedetectRejectsItemsOtherThanEpisodesAndMovies(t *testing.T) {
 	handler := NewAdminIntroHandler(
 		&fakeIntroAnalyzer{started: make(chan string, 1), release: make(chan struct{})},
-		fakeIntroEligibility{err: intromarkers.ErrEpisodeNotFound},
+		fakeIntroEligibility{err: intromarkers.ErrMarkerItemNotFound},
 		context.Background(),
 		nil,
 	)
@@ -264,7 +291,7 @@ func TestAdminIntroRedetectRejectsNonEpisode(t *testing.T) {
 	router.Post("/admin/items/{id}/redetect-intro", handler.HandleRedetectEpisodeIntro)
 
 	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/admin/items/movie1/redetect-intro", nil))
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/admin/items/series1/redetect-intro", nil))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -273,8 +300,8 @@ func TestAdminIntroRedetectRejectsNonEpisode(t *testing.T) {
 func TestAdminIntroRedetectRejectsIntroDisabledLibrary(t *testing.T) {
 	handler := NewAdminIntroHandler(
 		&fakeIntroAnalyzer{started: make(chan string, 1), release: make(chan struct{})},
-		fakeIntroEligibility{result: &intromarkers.EpisodeIntroEligibility{
-			EpisodeID:             "ep1",
+		fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+			ItemID:                "ep1",
 			HasMediaFiles:         true,
 			IntroDetectionEnabled: false,
 		}},
@@ -296,8 +323,8 @@ func TestAdminIntroRedetectRejectsEpisodeWithoutMediaFiles(t *testing.T) {
 	analyzer := &fakeIntroAnalyzer{started: make(chan string, 1), release: make(chan struct{})}
 	handler := NewAdminIntroHandler(
 		analyzer,
-		fakeIntroEligibility{result: &intromarkers.EpisodeIntroEligibility{
-			EpisodeID:             "ep1",
+		fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+			ItemID:                "ep1",
 			HasMediaFiles:         false,
 			IntroDetectionEnabled: false,
 		}},
@@ -324,8 +351,8 @@ func TestAdminIntroRedetectRejectsEpisodeWithoutMediaFiles(t *testing.T) {
 func TestAdminIntroRedetectRejectsMissingSettings(t *testing.T) {
 	handler := NewAdminIntroHandler(
 		&fakeIntroAnalyzer{started: make(chan string, 1), release: make(chan struct{})},
-		fakeIntroEligibility{result: &intromarkers.EpisodeIntroEligibility{
-			EpisodeID:             "ep1",
+		fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+			ItemID:                "ep1",
 			HasMediaFiles:         true,
 			IntroDetectionEnabled: true,
 		}},
@@ -348,8 +375,8 @@ func TestAdminIntroRedetectNotifiesMarkedFilesAfterAnalyzerSuccess(t *testing.T)
 	analyzer := &fakeIntroAnalyzer{started: make(chan string, 1)}
 	handler := NewAdminIntroHandler(
 		analyzer,
-		fakeIntroEligibility{result: &intromarkers.EpisodeIntroEligibility{
-			EpisodeID:             "ep1",
+		fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+			ItemID:                "ep1",
 			HasMediaFiles:         true,
 			IntroDetectionEnabled: true,
 		}},
@@ -401,8 +428,8 @@ func TestAdminIntroRedetectDoesNotNotifyFilesStillMissingMarkers(t *testing.T) {
 	resolverCalled := make(chan string, 1)
 	handler := NewAdminIntroHandler(
 		analyzer,
-		fakeIntroEligibility{result: &intromarkers.EpisodeIntroEligibility{
-			EpisodeID:             "ep1",
+		fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+			ItemID:                "ep1",
 			HasMediaFiles:         true,
 			IntroDetectionEnabled: true,
 		}},
@@ -441,8 +468,8 @@ func TestAdminIntroRedetectNotificationReloadFailureDoesNotFailRequest(t *testin
 	resolverCalled := make(chan string, 1)
 	handler := NewAdminIntroHandler(
 		analyzer,
-		fakeIntroEligibility{result: &intromarkers.EpisodeIntroEligibility{
-			EpisodeID:             "ep1",
+		fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+			ItemID:                "ep1",
 			HasMediaFiles:         true,
 			IntroDetectionEnabled: true,
 		}},
@@ -479,12 +506,343 @@ func decodeRedetectStatus(t *testing.T, rec *httptest.ResponseRecorder) string {
 	return response.Status
 }
 
+// A v2 refresh-markers of a movie in local mode runs the movie analysis and
+// notifies the movie's own files that have markers, not its extras.
+func TestAdminIntroRefreshAnalyzesMovieCredits(t *testing.T) {
+	start, end := 6500.0, 7000.0
+	analyzer := &fakeIntroAnalyzer{started: make(chan string, 1), movies: make(chan string, 1)}
+	handler := NewAdminIntroHandler(analyzer, fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+		ItemID: "movie1", Kind: intromarkers.MarkerItemMovie, HasMediaFiles: true, IntroDetectionEnabled: true,
+	}}, context.Background(), nil)
+	handler.Settings = fakeMarkerSettings{values: map[string]string{markers.SettingMode: string(markers.ModeLocal)}}
+	handler.FileResolver = fakeAdminIntroFileResolver{byContent: map[string][]*models.MediaFile{"movie1": {
+		{ID: 1, ContentID: "movie1", CreditsStart: &start, CreditsEnd: &end},
+		{ID: 2, ContentID: "movie1", ExtraID: "extra1", CreditsStart: &start, CreditsEnd: &end},
+	}}}
+	notifier := fakeAdminIntroMarkerNotifier{ch: make(chan *models.MediaFile, 2)}
+	handler.MarkerUpdateNotifier = notifier
+
+	status, err := handler.RefreshEpisodeMarkers(t.Context(), "movie1", "refresh-v2")
+	if err != nil || status != "queued" {
+		t.Fatalf("refresh: status=%q err=%v", status, err)
+	}
+	select {
+	case id := <-analyzer.movies:
+		if id != "movie1" {
+			t.Fatalf("analyzed movie %q, want movie1", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("movie analysis did not run")
+	}
+	select {
+	case id := <-analyzer.started:
+		t.Fatalf("episode analysis ran for %q", id)
+	case notified := <-notifier.ch:
+		if notified.ID != 1 {
+			t.Fatalf("notified file %d, want the movie's own file 1", notified.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected a marker update for the movie file")
+	}
+	select {
+	case notified := <-notifier.ch:
+		t.Fatalf("unexpected notification for file %d", notified.ID)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+// In both mode, a movie without online credits runs local movie analysis;
+// one whose online refresh found credits does not.
+func TestAdminMarkerRefreshBothRunsLocalForMovieWithoutCredits(t *testing.T) {
+	for _, online := range []bool{false, true} {
+		analyzer := &fakeIntroAnalyzer{movies: make(chan string, 1)}
+		handler := NewAdminIntroHandler(analyzer, fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+			ItemID: "movie1", Kind: intromarkers.MarkerItemMovie, HasMediaFiles: true, IntroDetectionEnabled: true,
+		}}, t.Context(), nil)
+		handler.Settings = fakeMarkerSettings{values: map[string]string{markers.SettingMode: string(markers.ModeBoth)}}
+		handler.FileResolver = fakeAdminIntroFileResolver{byContent: map[string][]*models.MediaFile{"movie1": {{ID: 7, ContentID: "movie1"}}}}
+		refreshed := make(chan int, 1)
+		handler.OnlineMarkers = markerRefreshFunc(func(_ context.Context, file *models.MediaFile) (*models.MediaFile, bool, error) {
+			refreshed <- file.ID
+			if !online {
+				return file, false, nil
+			}
+			start, end := 6500.0, 7000.0
+			withCredits := *file
+			withCredits.CreditsStart, withCredits.CreditsEnd = &start, &end
+			return &withCredits, true, nil
+		})
+		status, err := handler.RefreshEpisodeMarkers(t.Context(), "movie1", "refresh-v2")
+		if err != nil || status != "queued" {
+			t.Fatalf("online=%t refresh: status=%q err=%v", online, status, err)
+		}
+		if id := <-refreshed; id != 7 {
+			t.Fatalf("online=%t refreshed file %d, want 7", online, id)
+		}
+		select {
+		case id := <-analyzer.movies:
+			if online {
+				t.Fatalf("local analysis ran for %q although online credits were found", id)
+			}
+		case <-time.After(100 * time.Millisecond):
+			if !online {
+				t.Fatal("local analysis did not run for a movie without credits")
+			}
+		}
+	}
+}
+
+// An online refresh that changes a movie's markers tells active playback,
+// in online mode and in both mode when no local analysis follows; one that
+// changes nothing does not.
+func TestAdminMarkerRefreshNotifiesOnlineMovieChanges(t *testing.T) {
+	for _, tc := range []struct {
+		mode    markers.Mode
+		changed bool
+	}{{markers.ModeOnline, true}, {markers.ModeBoth, true}, {markers.ModeOnline, false}} {
+		analyzer := &fakeIntroAnalyzer{movies: make(chan string, 1)}
+		handler := NewAdminIntroHandler(analyzer, fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+			ItemID: "movie1", Kind: intromarkers.MarkerItemMovie, HasMediaFiles: true, IntroDetectionEnabled: true,
+		}}, t.Context(), nil)
+		handler.Settings = fakeMarkerSettings{values: map[string]string{markers.SettingMode: string(tc.mode)}}
+		handler.FileResolver = fakeAdminIntroFileResolver{byContent: map[string][]*models.MediaFile{"movie1": {{ID: 7, ContentID: "movie1"}}}}
+		notifier := fakeAdminIntroMarkerNotifier{ch: make(chan *models.MediaFile, 2)}
+		handler.MarkerUpdateNotifier = notifier
+		done := make(chan struct{})
+		handler.OnlineMarkers = markerRefreshFunc(func(_ context.Context, file *models.MediaFile) (*models.MediaFile, bool, error) {
+			defer close(done)
+			start, end := 6500.0, 7000.0
+			withCredits := *file
+			withCredits.CreditsStart, withCredits.CreditsEnd = &start, &end
+			return &withCredits, tc.changed, nil
+		})
+		status, err := handler.RefreshEpisodeMarkers(t.Context(), "movie1", "refresh-v2")
+		if err != nil || status != "queued" {
+			t.Fatalf("%s: refresh: status=%q err=%v", tc.mode, status, err)
+		}
+		<-done
+		if !tc.changed {
+			waitForRefreshIdle(t, handler, "movie1")
+			if len(notifier.ch) != 0 {
+				t.Fatalf("%s: notified although the online refresh changed nothing", tc.mode)
+			}
+			continue
+		}
+		select {
+		case notified := <-notifier.ch:
+			if notified.ID != 7 || notified.CreditsStart == nil || *notified.CreditsStart != 6500 {
+				t.Fatalf("%s: notified %+v, want file 7 with the online credits", tc.mode, notified)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s: no marker update for the online credits", tc.mode)
+		}
+		waitForRefreshIdle(t, handler, "movie1")
+		if len(analyzer.movies) != 0 || len(notifier.ch) != 0 {
+			t.Fatalf("%s: %d local analyses, %d more updates; want none", tc.mode, len(analyzer.movies), len(notifier.ch))
+		}
+	}
+}
+
+// stagedMovieFiles serves a movie's stored files: before, until local
+// analysis has run, and after from then on.
+type stagedMovieFiles struct {
+	mu            sync.Mutex
+	analyzed      bool
+	before, after []*models.MediaFile
+}
+
+func (s *stagedMovieFiles) GetByContentID(context.Context, string) ([]*models.MediaFile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.analyzed {
+		return append([]*models.MediaFile(nil), s.after...), nil
+	}
+	return append([]*models.MediaFile(nil), s.before...), nil
+}
+
+func (s *stagedMovieFiles) GetByEpisodeID(context.Context, string) ([]*models.MediaFile, error) {
+	return nil, nil
+}
+
+// stagingAnalyzer marks the staged files analyzed when a movie analysis runs.
+type stagingAnalyzer struct {
+	*fakeIntroAnalyzer
+	files *stagedMovieFiles
+}
+
+func (a stagingAnalyzer) AnalyzeMovie(ctx context.Context, contentID string) (intromarkers.RunSummary, error) {
+	a.files.mu.Lock()
+	a.files.analyzed = true
+	a.files.mu.Unlock()
+	return a.fakeIntroAnalyzer.AnalyzeMovie(ctx, contentID)
+}
+
+// With on-demand online storage, a refresh of a two-version movie that finds
+// online credits for one version and runs local analysis for the other keeps
+// the first version's unsaved online credits in the update sent after the
+// analysis, instead of a stored snapshot without them.
+func TestAdminMarkerRefreshKeepsOnDemandOverlayAfterLocalAnalysis(t *testing.T) {
+	introStart, introEnd := 0.0, 90.0
+	manual := models.MarkerSourceManual
+	withIntro := &models.MediaFile{ID: 1, ContentID: "movie1", IntroStart: &introStart, IntroEnd: &introEnd, IntroMarkersSource: &manual}
+	localStart, localEnd := 6400.0, 6900.0
+	scanner := models.MarkerSourceScanner
+	files := &stagedMovieFiles{
+		before: []*models.MediaFile{withIntro, {ID: 2, ContentID: "movie1"}},
+		after: []*models.MediaFile{withIntro, {
+			ID: 2, ContentID: "movie1", CreditsStart: &localStart, CreditsEnd: &localEnd, CreditsMarkersSource: &scanner,
+		}},
+	}
+	analyzer := stagingAnalyzer{fakeIntroAnalyzer: &fakeIntroAnalyzer{movies: make(chan string, 1)}, files: files}
+	handler := NewAdminIntroHandler(analyzer, fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+		ItemID: "movie1", Kind: intromarkers.MarkerItemMovie, HasMediaFiles: true, IntroDetectionEnabled: true,
+	}}, t.Context(), nil)
+	handler.Settings = fakeMarkerSettings{values: map[string]string{
+		markers.SettingMode:          string(markers.ModeBoth),
+		markers.SettingOnlineStorage: string(markers.OnlineStorageOnDemand),
+	}}
+	handler.FileResolver = files
+	notifier := fakeAdminIntroMarkerNotifier{ch: make(chan *models.MediaFile, 8)}
+	handler.MarkerUpdateNotifier = notifier
+	handler.OnlineMarkers = markerRefreshFunc(func(_ context.Context, file *models.MediaFile) (*models.MediaFile, bool, error) {
+		if file.ID != 1 {
+			return file, false, nil
+		}
+		start, end := 6500.0, 7000.0
+		online := models.MarkerSourceOnline
+		view := *file
+		view.CreditsStart, view.CreditsEnd, view.CreditsMarkersSource = &start, &end, &online
+		return &view, true, nil
+	})
+
+	status, err := handler.RefreshEpisodeMarkers(t.Context(), "movie1", "refresh-v2")
+	if err != nil || status != "queued" {
+		t.Fatalf("refresh: status=%q err=%v", status, err)
+	}
+	select {
+	case <-analyzer.movies:
+	case <-time.After(time.Second):
+		t.Fatal("local analysis did not run for the version without online credits")
+	}
+	waitForRefreshIdle(t, handler, "movie1")
+	close(notifier.ch)
+	last := map[int]*models.MediaFile{}
+	for notified := range notifier.ch {
+		last[notified.ID] = notified
+	}
+	if got := last[1]; got == nil || got.CreditsStart == nil || *got.CreditsStart != 6500 || got.IntroEnd == nil {
+		t.Fatalf("last update for version 1 lacks its manual intro or online credits at 6500: %v", markerSummary(got))
+	}
+	if got := last[2]; got == nil || got.CreditsStart == nil || *got.CreditsStart != 6400 {
+		t.Fatalf("last update for version 2 lacks its local credits at 6400: %v", markerSummary(got))
+	}
+}
+
+// markerSummary describes a file's intro and credits for a test failure.
+func markerSummary(file *models.MediaFile) string {
+	if file == nil {
+		return "no update"
+	}
+	value := func(v *float64) string {
+		if v == nil {
+			return "none"
+		}
+		return strconv.FormatFloat(*v, 'f', -1, 64)
+	}
+	return "intro_end=" + value(file.IntroEnd) + " credits_start=" + value(file.CreditsStart)
+}
+
+// waitForRefreshIdle waits until no refresh of itemID is in flight.
+func waitForRefreshIdle(t *testing.T, handler *AdminIntroHandler, itemID string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, running := handler.inFlight.Load(itemID); !running {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("refresh of %s still running", itemID)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// An item that is neither an episode nor a movie, such as an audiobook, has
+// no marker files to refresh online, even though it owns media files.
+func TestAdminMarkerRefreshOnlineRejectsItemsOtherThanEpisodesAndMovies(t *testing.T) {
+	handler := NewAdminIntroHandler(nil, fakeIntroEligibility{err: intromarkers.ErrMarkerItemNotFound}, t.Context(), nil)
+	handler.Settings = fakeMarkerSettings{values: map[string]string{markers.SettingMode: string(markers.ModeOnline)}}
+	handler.FileResolver = fakeAdminIntroFileResolver{byContent: map[string][]*models.MediaFile{"book1": {{ID: 9, ContentID: "book1"}}}}
+	handler.OnlineMarkers = markerRefreshFunc(func(_ context.Context, file *models.MediaFile) (*models.MediaFile, bool, error) {
+		t.Errorf("refreshed file %d of an item that is not an episode or a movie", file.ID)
+		return file, false, nil
+	})
+	status, err := handler.RefreshEpisodeMarkers(t.Context(), "book1", "refresh-v2")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusConflict {
+		t.Fatalf("refresh: status=%q err=%v, want 409", status, err)
+	}
+}
+
+// The v2 redetect-intro operation analyzes episode intros only, so a movie,
+// which never gets intros, is rejected with the message it had before
+// movies were analyzed, and never analyzed.
+func TestAdminIntroV2RedetectRejectsMovies(t *testing.T) {
+	analyzer := &fakeIntroAnalyzer{movies: make(chan string, 1)}
+	handler := NewAdminIntroHandler(analyzer, fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+		ItemID: "movie1", Kind: intromarkers.MarkerItemMovie, HasMediaFiles: true, IntroDetectionEnabled: true,
+	}}, context.Background(), nil)
+	handler.Settings = fakeMarkerSettings{values: map[string]string{markers.SettingMode: string(markers.ModeLocal)}}
+	status, err := handler.RefreshEpisodeMarkers(t.Context(), "movie1", "redetect")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadRequest || apiErr.Message != episodeMarkerMessages.wrongKind {
+		t.Fatalf("redetect: status=%q err=%v, want 400 %q", status, err, episodeMarkerMessages.wrongKind)
+	}
+	select {
+	case id := <-analyzer.movies:
+		t.Fatalf("redetect analyzed movie %q", id)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+// The frozen /api/v1 endpoints analyze episodes only: a movie is rejected
+// with the original message and never analyzed.
+func TestAdminIntroV1RejectsMovies(t *testing.T) {
+	analyzer := &fakeIntroAnalyzer{movies: make(chan string, 2)}
+	handler := NewAdminIntroHandler(analyzer, fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+		ItemID: "movie1", Kind: intromarkers.MarkerItemMovie, HasMediaFiles: true, IntroDetectionEnabled: true,
+	}}, context.Background(), nil)
+	handler.Settings = fakeMarkerSettings{values: map[string]string{markers.SettingMode: string(markers.ModeLocal)}}
+	router := chi.NewRouter()
+	router.Post("/admin/items/{id}/refresh-markers", handler.HandleRefreshEpisodeMarkers)
+	router.Post("/admin/items/{id}/redetect-intro", handler.HandleRedetectEpisodeIntro)
+
+	for _, path := range []string{"/admin/items/movie1/refresh-markers", "/admin/items/movie1/redetect-intro"} {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+		var body struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s: decode %q: %v", path, rec.Body.String(), err)
+		}
+		if rec.Code != http.StatusBadRequest || body.Message != "Item must be an episode" {
+			t.Fatalf("%s: got %d %q, want 400 \"Item must be an episode\"", path, rec.Code, body.Message)
+		}
+	}
+	select {
+	case id := <-analyzer.movies:
+		t.Fatalf("v1 analyzed movie %q", id)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
 // The frozen v1 routes and v2 redetect-intro analyze episode intros only,
 // never credits; v2 refresh-markers in local mode analyzes both.
 func TestAdminIntroEndpointsKeepTheirAnalysisScope(t *testing.T) {
 	localHandler := func(analyzer *fakeIntroAnalyzer) *AdminIntroHandler {
-		handler := NewAdminIntroHandler(analyzer, fakeIntroEligibility{result: &intromarkers.EpisodeIntroEligibility{
-			EpisodeID: "ep1", HasMediaFiles: true, IntroDetectionEnabled: true,
+		handler := NewAdminIntroHandler(analyzer, fakeIntroEligibility{result: &intromarkers.MarkerItemEligibility{
+			ItemID: "ep1", Kind: intromarkers.MarkerItemEpisode, HasMediaFiles: true, IntroDetectionEnabled: true,
 		}}, context.Background(), nil)
 		handler.Settings = fakeMarkerSettings{values: map[string]string{markers.SettingMode: string(markers.ModeLocal)}}
 		handler.FileResolver = fakeAdminIntroFileResolver{}
