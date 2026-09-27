@@ -2,6 +2,7 @@ package mediasample
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -68,13 +69,34 @@ type statsGraph struct {
 //	crop=trunc(iw*CW/2)*2:trunc(ih*CH/2)*2,scale=W:-2:flags=area,format=yuv420p,
 //	blackframe=amount=0:threshold=T1,…,signalstats,metadata=print
 //
-// Every blackframe reports every frame (amount=0), and metadata=print logs
-// each frame's time and the statistics the filters before it attached.
-func buildStatsGraph(stats StatsOutput) statsGraph {
-	filters := []string{
-		fmt.Sprintf("crop=trunc(iw*%s/2)*2:trunc(ih*%s/2)*2", formatShare(stats.CropWidth), formatShare(stats.CropHeight)),
-		fmt.Sprintf("scale=%d:-2:flags=area", stats.Width),
-		"format=yuv420p",
+// for frames decoded on accel: in software when accel is empty. Every
+// blackframe reports every frame (amount=0), and metadata=print logs each
+// frame's time and the statistics the filters before it attached.
+//
+// VideoToolbox surfaces of a source with bitDepth bits are downloaded first
+// (videoToolboxDownloadFilter). VAAPI surfaces, which QSV decodes into too,
+// are instead scaled on the GPU as a whole and converted to 8-bit NV12 there,
+// which a 10-bit source's P010 surface needs before the download, and the
+// crop follows:
+//
+//	scale_vaapi=w=SW:h=-2:format=nv12,hwdownload,format=nv12,crop=…,format=yuv420p,…
+//
+// SW is the even width whose crop keeps about W pixels, so the measured
+// picture has about the size the software chain gives it.
+func buildStatsGraph(stats StatsOutput, accel string, bitDepth int) statsGraph {
+	crop := fmt.Sprintf("crop=trunc(iw*%s/2)*2:trunc(ih*%s/2)*2", formatShare(stats.CropWidth), formatShare(stats.CropHeight))
+	software := []string{crop, fmt.Sprintf("scale=%d:-2:flags=area", stats.Width), "format=yuv420p"}
+	// A download holds two filters, which count as two positions.
+	var filters []string
+	switch accel {
+	case "":
+		filters = software
+	case hwAccelVideoToolbox:
+		filters = append(strings.Split(videoToolboxDownloadFilter(bitDepth), ","), software...)
+	default:
+		filters = []string{fmt.Sprintf("scale_vaapi=w=%d:h=-2:format=nv12", gpuScaleWidth(stats))}
+		filters = append(filters, strings.Split(hwDownloadFilter, ",")...)
+		filters = append(filters, crop, "format=yuv420p")
 	}
 	graph := statsGraph{}
 	for _, threshold := range stats.BlackThresholds {
@@ -86,6 +108,22 @@ func buildStatsGraph(stats StatsOutput) statsGraph {
 	filters = append(filters, filterMetadata+"=print")
 	graph.filter = strings.Join(filters, ",")
 	return graph
+}
+
+// statsGraph returns the stats chain of attempt, whose hardware decodes on
+// accel.
+func (r Request) statsGraph(attempt Attempt, accel string) statsGraph {
+	if !attempt.Hardware {
+		accel = ""
+	}
+	return buildStatsGraph(*r.Stats, accel, r.VideoBitDepth)
+}
+
+// gpuScaleWidth is the even width the GPU scales a picture to so that its
+// StatsOutput crop is about Width pixels wide: Width / CropWidth, rounded to
+// the nearest even number (534 for a 0.9 crop to 480).
+func gpuScaleWidth(stats StatsOutput) int {
+	return 2 * int(math.Round(float64(stats.Width)/stats.CropWidth/2))
 }
 
 // formatShare prints a crop share as ffmpeg expressions take it.

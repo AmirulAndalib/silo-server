@@ -122,6 +122,7 @@ func creditsTailRequest(ctx context.Context, candidate Candidate, window fingerp
 			Width:           tailWidth,
 			BlackThresholds: creditsBlackThresholds,
 		}
+		req.VideoBitDepth = mediasample.VideoBitDepthHint(candidate.VideoBitDepth)
 	}
 	if candidate.hasAudio() {
 		req.Audio = &mediasample.AudioOutput{
@@ -170,7 +171,7 @@ func (e *ChromaprintExtractor) SampleCreditsTail(ctx context.Context, candidate 
 		return creditsTailSample{}, fmt.Errorf("file %d has no tail window", candidate.FileID)
 	}
 	req := creditsTailRequest(ctx, candidate, window, fingerprint)
-	runner := analysisRunner(e.config)
+	runner := e.tailRunner(ctx, &req)
 	result, err := runner.Run(ctx, req)
 	if err != nil && req.Audio != nil && req.Stats != nil && mediasample.Classify(err) == mediasample.ReasonNoStream {
 		// ffmpeg fails the whole run when any output lacks its stream, and
@@ -183,6 +184,7 @@ func (e *ChromaprintExtractor) SampleCreditsTail(ctx context.Context, candidate 
 	if err != nil {
 		return creditsTailSample{}, fmt.Errorf("sampling the credits tail of file %d: %w", candidate.FileID, err)
 	}
+	e.logTailDecoder(ctx, candidate, req, result)
 	sample := creditsTailSample{Tail: creditsTail{Frames: result.Frames, Silences: result.Silences}}
 	if fingerprint && candidate.hasAudio() {
 		key := creditsFingerprintKey()

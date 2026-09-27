@@ -55,10 +55,15 @@ func TestValidate(t *testing.T) {
 		{name: "zero silence minimum", modify: func(r *Request) { r.Audio.Silence = &SilenceParams{NoiseDB: -50} }},
 		{name: "negative threads", modify: func(r *Request) { r.Threads = -1 }},
 		{name: "too many threads", modify: func(r *Request) { r.Threads = 65 }},
+		{name: "10-bit source", modify: func(r *Request) { r.VideoBitDepth = 10 }, ok: true},
+		{name: "negative bit depth", modify: func(r *Request) { r.VideoBitDepth = -1 }},
+		{name: "bit depth too high", modify: func(r *Request) { r.VideoBitDepth = 17 }},
 		{name: "too many attempts", modify: func(r *Request) { r.Attempts = make([]Attempt, 5) }},
 		{name: "negative timeout", modify: func(r *Request) { r.Attempts = []Attempt{{TimeoutSeconds: -1}} }},
 		{name: "timeout past a day", modify: func(r *Request) { r.Attempts = []Attempt{{TimeoutSeconds: 1e12}} }},
-		{name: "hardware attempt", modify: func(r *Request) { r.Stats = validStats(); r.Attempts = []Attempt{{Hardware: true}} }},
+		{name: "hardware attempt without video", modify: func(r *Request) { r.Attempts = []Attempt{{Hardware: true}, {}} }},
+		{name: "stats on hardware", modify: func(r *Request) { r.Stats = validStats(); r.Attempts = []Attempt{{Hardware: true}, {}} }, ok: true},
+		{name: "samples on hardware", modify: func(r *Request) { samplesMode(3, 6)(r); r.Attempts = []Attempt{{Hardware: true}, {}} }, ok: true},
 		{name: "frame image", modify: atMode(42.5, &ImageOutput{}), ok: true},
 		{name: "frame image at zero", modify: atMode(0, &ImageOutput{Width: 320, ToneMap: &ToneMap{}}), ok: true},
 		{name: "frame image on hardware", modify: func(r *Request) {
@@ -117,6 +122,26 @@ func TestValidate(t *testing.T) {
 
 // samplesMode replaces a request's window and audio with samples at the
 // given times and a stats output.
+// TestVideoBitDepthHintKeepsProbedRequestsValid covers a probe reporting an
+// implausible depth, such as 32 for a raw float source: the hint drops it to
+// unknown, so the request still validates and software can decode it.
+func TestVideoBitDepthHintKeepsProbedRequestsValid(t *testing.T) {
+	for _, test := range []struct{ probed, want int }{
+		{-1, 0}, {0, 0}, {8, 8}, {10, 10}, {16, 16}, {17, 0}, {32, 0},
+	} {
+		got := VideoBitDepthHint(test.probed)
+		if got != test.want {
+			t.Errorf("VideoBitDepthHint(%d) = %d, want %d", test.probed, got, test.want)
+		}
+		req := validRequest()
+		req.Stats = validStats()
+		req.VideoBitDepth = got
+		if err := req.Validate(); err != nil {
+			t.Errorf("request with probed depth %d: %v", test.probed, err)
+		}
+	}
+}
+
 func samplesMode(seconds ...float64) func(*Request) {
 	return func(r *Request) {
 		r.Window, r.Audio, r.Stats = nil, nil, validStats()

@@ -35,6 +35,13 @@ type Request struct {
 	Attempts []Attempt `json:"attempts,omitempty"`
 	// Threads caps ffmpeg's decoder threads. Zero leaves ffmpeg's default.
 	Threads int `json:"threads,omitempty"`
+	// VideoBitDepth is the bit depth of the input's first video stream, zero
+	// when unknown. A hardware attempt on VideoToolbox needs it to download
+	// the decoded surfaces, whose format follows the source's depth; an
+	// unknown depth is taken as 8 bits. Validate accepts 0..16; callers pass
+	// a probed depth through VideoBitDepthHint so an implausible probe value
+	// becomes unknown instead of invalidating the request.
+	VideoBitDepth int `json:"video_bit_depth,omitempty"`
 	// Background marks work nobody is waiting on. On Linux its ffmpeg runs at
 	// the lowest CPU priority (nice 19) and in the idle I/O class; elsewhere it
 	// runs like any other request.
@@ -108,8 +115,9 @@ type StatsOutput struct {
 
 // Attempt is one decode attempt.
 type Attempt struct {
-	// Hardware decodes on the Runner's configured hardware (see hwdecode.go).
-	// Only Images offer it so far; Validate rejects it for other outputs.
+	// Hardware decodes video on the Runner's configured hardware (see
+	// hwdecode.go). It needs a video output (Images or Stats); audio always
+	// decodes in software.
 	Hardware bool `json:"hardware,omitempty"`
 	// TimeoutSeconds bounds the attempt. Zero means only the caller's context
 	// bounds it.
@@ -126,7 +134,19 @@ const (
 	maxStatsWidth     = 3840
 	maxBlackLevels    = 8
 	maxSamples        = 10000
+	maxVideoBitDepth  = 16
 )
+
+// VideoBitDepthHint returns a probed video bit depth as a Request's
+// VideoBitDepth: the depth itself when it is 1..16, else zero (unknown). The
+// depth only picks the VideoToolbox download format, so a value outside that
+// range must not stop a request that software can still decode.
+func VideoBitDepthHint(depth int) int {
+	if depth < 1 || depth > maxVideoBitDepth {
+		return 0
+	}
+	return depth
+}
 
 // Validate reports whether the request can be run.
 func (r Request) Validate() error {
@@ -187,6 +207,9 @@ func (r Request) Validate() error {
 	if r.Threads < 0 || r.Threads > maxThreads {
 		return fmt.Errorf("threads %d is outside 0..%d", r.Threads, maxThreads)
 	}
+	if r.VideoBitDepth < 0 || r.VideoBitDepth > maxVideoBitDepth {
+		return fmt.Errorf("video bit depth %d is outside 0..%d", r.VideoBitDepth, maxVideoBitDepth)
+	}
 	if len(r.Attempts) > maxAttempts {
 		return fmt.Errorf("request has %d attempts, at most %d are allowed", len(r.Attempts), maxAttempts)
 	}
@@ -194,8 +217,8 @@ func (r Request) Validate() error {
 		if !finite(attempt.TimeoutSeconds) || attempt.TimeoutSeconds < 0 || attempt.TimeoutSeconds > maxAttemptSeconds {
 			return fmt.Errorf("attempt %d timeout must be between 0 and %d seconds", i+1, maxAttemptSeconds)
 		}
-		if attempt.Hardware && r.Images == nil {
-			return fmt.Errorf("attempt %d asks for hardware decode, which only images offer yet", i+1)
+		if attempt.Hardware && r.Images == nil && r.Stats == nil {
+			return fmt.Errorf("attempt %d asks for hardware decode without a video output", i+1)
 		}
 	}
 	return nil
