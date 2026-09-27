@@ -33,7 +33,7 @@ const remoteCatalogImportTimeout = 10 * time.Minute
 
 const (
 	// imageCacheCleanupMaxStalledClaims bounds how long a cleanup keeps
-	// yielding without finishing a prefix, e.g. while storage writes are
+	// yielding without deleting anything, e.g. while storage writes are
 	// fenced or a delete hangs: twelve slices, an hour by default.
 	imageCacheCleanupMaxStalledClaims = 12
 	// A cleanup job's row carries every prefix, so each progress event
@@ -674,14 +674,16 @@ func (r *Runner) executeImageCacheCleanup(job *models.AdminJob) {
 		}
 		r.publishJobByID(finishCtx, notifications.TypeJobCompleted, job.ID)
 	case errors.Is(err, context.DeadlineExceeded):
-		if next == start {
+		// A prefix cut off by the deadline may still have lost objects;
+		// that is progress, and the next claim deletes the rest.
+		if next == start && deleted.DeletedS3Objects == 0 {
 			result.StalledClaims = earlier.StalledClaims + 1
 			if result.StalledClaims >= imageCacheCleanupMaxStalledClaims {
 				r.failJobWithResult(job.ID, next, total, "Image cache cleanup failed",
-					fmt.Sprintf("no cached image prefix finished in %d consecutive claims of %s", result.StalledClaims, slice), result)
+					fmt.Sprintf("no cached image deleted in %d consecutive claims of %s", result.StalledClaims, slice), result)
 				return
 			}
-			slog.Warn("admin jobs: image cache cleanup finished no prefix this claim", "job_id", job.ID,
+			slog.Warn("admin jobs: image cache cleanup deleted nothing this claim", "job_id", job.ID,
 				"prefix_index", next, "stalled_claims", result.StalledClaims)
 		}
 		message := fmt.Sprintf("Cleaning cached images %d/%d", next, total)

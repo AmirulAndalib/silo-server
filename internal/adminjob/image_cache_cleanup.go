@@ -22,7 +22,7 @@ type ImageCacheCleanupResult struct {
 	LibraryName      string `json:"library_name"`
 	DeletedPrefixes  int    `json:"deleted_prefixes"`
 	DeletedS3Objects int    `json:"deleted_s3_objects"`
-	// StalledClaims counts consecutive claims that finished no prefix.
+	// StalledClaims counts consecutive claims that deleted nothing.
 	StalledClaims int `json:"stalled_claims,omitempty"`
 }
 

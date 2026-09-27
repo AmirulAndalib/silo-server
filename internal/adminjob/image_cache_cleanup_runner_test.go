@@ -131,7 +131,7 @@ func TestImageCacheCleanupFailsAfterConsecutiveStalledClaims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failed.Status != StatusFailed || !strings.Contains(failed.ErrorMessage, "no cached image prefix finished") {
+	if failed.Status != StatusFailed || !strings.Contains(failed.ErrorMessage, "no cached image deleted") {
 		t.Fatalf("status=%s error=%q, want failed with no progress", failed.Status, failed.ErrorMessage)
 	}
 	want := slices.Repeat(prefixes[:1], imageCacheCleanupMaxStalledClaims)
@@ -172,6 +172,40 @@ func TestImageCacheCleanupProgressResetsStalledClaims(t *testing.T) {
 	}
 	if got := imageCacheCleanupResultOf(t, current); got.DeletedPrefixes != 3 || got.StalledClaims != 0 {
 		t.Fatalf("final result %+v, want 3 prefixes and no stalled claims", got)
+	}
+}
+
+// A prefix too large to delete within one slice keeps losing objects each
+// claim. That is progress, so the job does not fail as stalled.
+func TestImageCacheCleanupFinishesAPrefixThatOutlastsSlices(t *testing.T) {
+	r := lifecycleRepo(t)
+	job := queueImageCacheCleanupJob(t, r, cleanupPrefixes(3))
+	claims := imageCacheCleanupMaxStalledClaims + 1
+	store := &cleanupStore{deleteFn: func(ctx context.Context, call int, _ string) (int, error) {
+		if call < claims { // prefix 0 is cut off after deleting one object
+			<-ctx.Done()
+			return 1, nil
+		}
+		return 1, nil
+	}}
+	runner := imageCacheCleanupRunner(r, store, 100*time.Millisecond)
+
+	var current *models.AdminJob
+	for claim := 0; claim <= claims; claim++ {
+		runner.runNext()
+		var err error
+		if current, err = r.GetByID(t.Context(), job.ID); err != nil {
+			t.Fatal(err)
+		}
+		if current.Status != StatusQueued {
+			break
+		}
+	}
+	if current.Status != StatusCompleted {
+		t.Fatalf("status=%s error=%q, want completed", current.Status, current.ErrorMessage)
+	}
+	if got := imageCacheCleanupResultOf(t, current); got.DeletedPrefixes != 3 || got.DeletedS3Objects != claims+3 || got.StalledClaims != 0 {
+		t.Fatalf("final result %+v, want 3 prefixes, %d objects and no stalled claims", got, claims+3)
 	}
 }
 
