@@ -3108,11 +3108,27 @@ func TestSourceLadderHeightV3MatchesScannerBuckets(t *testing.T) {
 		{1920, 1080, 1080},
 		{3836, 1600, 2160},
 		{3840, 2160, 2160},
+		{7680, 3200, 4320},
+		{7680, 4320, 4320},
 	}
 	for _, tc := range cases {
 		if got := sourceLadderHeightV3(SourceDescriptorV3{Width: tc.width, Height: tc.height}); got != tc.want {
 			t.Errorf("sourceLadderHeightV3(%dx%d) = %d, want %d", tc.width, tc.height, got, tc.want)
 		}
+	}
+}
+
+// An 8K source is above every rung, so a 4K rung must scale it to 2160 lines
+// rather than keep 4320 lines as a same-class rung would.
+func TestCompoundRungQualityResultV3Scales8KToFourK(t *testing.T) {
+	rung, ok := ladderRungForLabelV3(QualityRung2160pMediumV3)
+	if !ok {
+		t.Fatal("2160p-medium rung missing")
+	}
+	source := SourceDescriptorV3{VideoCodec: "hevc", Width: 7680, Height: 4320, BitrateKbps: 80_000}
+	got := compoundRungQualityResultV3(rung, source, 0, nil)
+	if got.Height != 2160 || got.Label != "2160p" || !got.RequiresTranscode {
+		t.Fatalf("8K on 4K Medium = %+v, want a 2160-line transcode", got)
 	}
 }
 
