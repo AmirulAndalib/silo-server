@@ -3352,6 +3352,8 @@ func main() {
 			SecretCipher:         dataCipher,
 			ClientIPResolver:     ipResolver,
 			IngressTokens:        networkAccess.Registry,
+			ActivityLogWriter:    deps.ActivityLogWriter,
+			NodeID:               deps.NodeID,
 			StreamTelemetry:      streamTelemetryRegistry,
 			NodePlanner:          deps.NodePlanner,
 			JWTSecret:            cfg.Auth.JWTSecret,
