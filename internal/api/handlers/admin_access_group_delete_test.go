@@ -102,7 +102,10 @@ func TestDeleteAdminAccessGroupRevokesAndNotifiesMovedMembers(t *testing.T) {
 	revoked := map[int]bool{}
 	for i, sql := range store.tx.statements {
 		if strings.Contains(sql, "UPDATE auth_sessions SET revoked_at") {
-			revoked[store.tx.args[i][0].(int)] = true
+			// One set-based UPDATE revokes every moved member.
+			for _, userID := range store.tx.args[i][0].([]int) {
+				revoked[userID] = true
+			}
 		}
 	}
 	if !revoked[7] || !revoked[9] || len(revoked) != 2 {
