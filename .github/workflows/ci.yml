@@ -302,6 +302,9 @@ jobs:
       - name: Test taste cluster replacement against Postgres
         run: go test -race -count=1 -run '^TestUpsertTasteClusters.*Postgres$' ./internal/recommendations/
 
+      - name: Test Jellyfin detail preferences against Postgres
+        run: go test -race -count=1 -run '^TestCompatDetailServiceResolvesViewerSubtitleDefaultsPostgres$' ./cmd/silo/
+
       - name: Test image cache cleanup resumption against Postgres
         run: go test -race -count=1 -run '^(TestImageCacheCleanup|TestRequeuedImageCacheCleanup|TestJobOutcomeIsRecorded)' ./internal/adminjob/
 
