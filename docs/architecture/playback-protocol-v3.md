@@ -1248,7 +1248,9 @@ compute rungs.
 The source rung is always present, labelled `original`, with
 `preserves_source: true`. Transcode rungs are added below the source resolution
 class, plus at the same class when they reduce bitrate, and only when HLS is
-available to the client, transcoding is enabled, and 4K transcoding is permitted
+available to the client, transcoding is enabled, the viewer's account may
+transcode video (`transcode_allowed`; admission still enforces it), and 4K
+transcoding is permitted
 for a 4K-or-higher source. A source falls under that policy when its catalog
 resolution label reads `2160p`, `4k`, `uhd`, `4320p`, or `8k` (case- and
 whitespace-insensitive), its probed width is at least 3840, or its probed height

@@ -16,6 +16,10 @@ type PlannerSettingsV3 struct {
 	Allow4KTranscode       bool
 	HardwareToneMapEnabled bool
 	SoftwareToneMapEnabled bool
+	// ViewerTranscodeDisabled reflects the viewer's account policy. Session
+	// admission enforces it; the planner only uses it to stop advertising
+	// quality rungs the viewer cannot start.
+	ViewerTranscodeDisabled bool
 }
 
 const (
@@ -763,7 +767,7 @@ func availableQualitiesForRouteV3(input PlannerInputV3, source SourceDescriptorV
 		// probe metadata cannot prove that any advertised rung avoids upscaling.
 		return qualities
 	}
-	if !deliveryAvailableV3(input.Request, DeliveryClassHLSV3) || !input.Settings.TranscodeEnabled {
+	if !deliveryAvailableV3(input.Request, DeliveryClassHLSV3) || !input.Settings.TranscodeEnabled || input.Settings.ViewerTranscodeDisabled {
 		return qualities
 	}
 	if is4KSourceV3(input.EffectiveFile, source) && !input.Settings.Allow4KTranscode {
