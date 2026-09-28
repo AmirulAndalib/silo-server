@@ -8,6 +8,7 @@ import {
   type SettingsBaseline,
 } from "@/api/v2/adminSettingsSnapshot";
 import { jellyfinCompatStatusKey } from "@/api/v2/jellyfinStatusCache";
+import { PASSWORD_RESET_CAPABILITY_KEY } from "@/hooks/queries/passwordReset";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   captureProfileRequestContext,
@@ -213,6 +214,18 @@ export function useUpdateServerSettings(displayed?: SettingsValues) {
           // The user-facing Connect Apps card reads the same settings and
           // caches them for minutes, so it has to drop its copy too.
           queryClient.invalidateQueries({ queryKey: compatKeys.all }),
+        );
+      }
+      if (keys.includes("server.public_url")) {
+        // Invitation and reset links are built on the public URL, so the
+        // capability answers that gate them change with it.
+        invalidations.push(
+          queryClient.invalidateQueries({
+            queryKey: adminKeys.users(),
+            predicate: (query) => query.queryKey.at(-1) === "capabilities",
+          }),
+          // Self-service reset also needs the public URL.
+          queryClient.invalidateQueries({ queryKey: PASSWORD_RESET_CAPABILITY_KEY }),
         );
       }
       if (keys.some((key) => key.startsWith("catalog.search."))) {
