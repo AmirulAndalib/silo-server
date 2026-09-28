@@ -14,6 +14,7 @@ import type { SettingsSectionEntry, SectionOverride } from "@/api/types";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -49,6 +50,15 @@ import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { toast } from "sonner";
 import { v2, V2ProblemError } from "@/api/v2/request";
 import { useOptionalAuth } from "@/hooks/useAuth";
+import {
+  useEffectiveSettings,
+  useSetSettingValue,
+  type SettingIdentity,
+} from "@/hooks/queries/settingValues";
+import { SETTING_KEYS } from "@/lib/settingsContract";
+
+const PROFILE_SCOPE: SettingIdentity = { scope: "profile" };
+const HOME_PREFERENCE_KEYS = [SETTING_KEYS.HOME_HIDE_WATCHED_ITEMS] as const;
 
 interface RemovedSystemOverride {
   id: string;
@@ -236,6 +246,10 @@ export default function HomeScreenSettings() {
   const saveMutation = useSaveProfileOverrides();
   const resetMutation = useResetProfileOverrides();
   const canEditSections = canMutateSectionSettings(settingsQuery, rawOverridesQuery);
+  const homePreferences = useEffectiveSettings({ keys: HOME_PREFERENCE_KEYS });
+  const saveHomePreference = useSetSettingValue();
+  const hideWatchedItems =
+    homePreferences.data?.[SETTING_KEYS.HOME_HIDE_WATCHED_ITEMS]?.value === true;
   const activeSelectionValue = scopeValue;
   const activeSelectionRef = useRef(activeSelectionValue);
   const latestSaveAttemptRef = useRef(0);
@@ -461,6 +475,17 @@ export default function HomeScreenSettings() {
     saveOverrides(next);
   }
 
+  function handleHideWatchedItemsChange(enabled: boolean) {
+    saveHomePreference.mutate(
+      {
+        key: SETTING_KEYS.HOME_HIDE_WATCHED_ITEMS,
+        value: enabled,
+        identity: PROFILE_SCOPE,
+      },
+      { onError: () => toast.error("Failed to save Home preference") },
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div className="space-y-3">
@@ -501,6 +526,29 @@ export default function HomeScreenSettings() {
         variant="destructive"
         onConfirm={handleConfirmDelete}
       />
+
+      <SettingsGroup
+        title="Home preferences"
+        description="Choose how this profile's Home screen handles completed media."
+      >
+        <div className="flex items-center justify-between gap-4">
+          <div className="space-y-0.5">
+            <Label htmlFor="hide-watched-home" className="text-sm font-medium">
+              Hide watched items
+            </Label>
+            <p className="text-muted-foreground text-[13px] leading-relaxed">
+              Remove watched items from ordinary Home sections. Featured and watch-history sections
+              keep them.
+            </p>
+          </div>
+          <Switch
+            id="hide-watched-home"
+            checked={hideWatchedItems}
+            disabled={homePreferences.isLoading || saveHomePreference.isPending}
+            onCheckedChange={handleHideWatchedItemsChange}
+          />
+        </div>
+      </SettingsGroup>
 
       <SettingsGroup
         title="Scope"
