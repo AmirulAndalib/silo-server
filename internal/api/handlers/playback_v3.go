@@ -295,7 +295,7 @@ func (e *transportErrorV3) Error() string {
 func (h *PlaybackHandler) transformationRegistryV3(ctx context.Context) *playback.TransformationRegistryV3 {
 	h.v3RegistryMu.Lock()
 	defer h.v3RegistryMu.Unlock()
-	if h.v3Registry != nil {
+	if !h.v3Registry.NeedsRefresh(time.Now()) {
 		return h.v3Registry
 	}
 	probe := playback.ProbeTransformationRegistryWithToneMapV3Result
@@ -3827,7 +3827,7 @@ func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *play
 	previousTransportID := remoteTransportID(session)
 	return preparedTransportV3{
 		url:              url,
-		hwAccel:          ts.Opts().HWAccel,
+		hwAccel:          ts.Opts().EffectiveEncoderHWAccel(),
 		toneMapMode:      ts.Opts().ToneMapMode,
 		routingWorkload:  routingWorkloadV3(result),
 		routingExecution: noderouting.ExecutionAPI,
@@ -4018,7 +4018,7 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 		card.RoutingEgress = string(noderouting.EgressProxy)
 		card.RoutingEgressNodeID = nodePlan.ProxyNode.ID
 	}
-	confirmedHWAccel := card.HWAccel
+	confirmedHWAccel := card.EffectiveEncoderHWAccel()
 	url := fmt.Sprintf("/playback/transcode/%s/master.m3u8", session.ID)
 	// Either URL builder only returns an absolute proxy URL when a proxy was
 	// planned and its authority (a signed token, or a stored grant) could
@@ -4141,6 +4141,9 @@ func remoteTranscodeRecipeCardV3(session *playback.Session, file *models.MediaFi
 	hw := firstNonEmptyHandlerV3(strings.TrimSpace(nodeResp.HWAccel), strings.TrimSpace(req.HWAccel))
 	card := playback.NewRecipeCard(session.UserID, session.ProfileID, file.ID, nodeURL, playback.TranscodeOpts{InputPath: req.InputPath, SessionID: session.ID, TranscodeTransportID: transportID, SourceVideoCodec: req.SourceVideoCodec, SourceVideoProfile: req.SourceVideoProfile, SourceVideoBitDepth: req.SourceVideoBitDepth, SourceAudioChannels: req.SourceAudioChannels, SoftwareVideoDecode: req.SoftwareVideoDecode || nodeResp.SoftwareVideoDecode, ToneMapPolicy: req.ToneMapPolicy, ToneMapMode: req.ToneMapMode, ToneMapSourceKind: req.ToneMapSourceKind, ToneMapFilter: toneMapFilter, ToneMapRecipeVersion: req.ToneMapRecipeVersion, ToneMapPreflightRequired: req.ToneMapPreflightRequired, ToneMapSourceRevision: req.ToneMapSourceRevision, VideoBitstreamFilter: req.VideoBitstreamFilter, VideoSampleEntry: req.VideoSampleEntry, SeekSeconds: req.SeekSeconds, StreamOriginSeconds: req.StreamOriginSeconds, CopySeekAnchorResolved: req.CopySeekAnchorResolved, StartSegmentNumber: req.StartSegmentNumber, TargetResolution: req.TargetResolution, TargetCodecVideo: req.TargetCodecVideo, TargetCodecAudio: req.TargetCodecAudio, TargetAudioChannels: req.TargetAudioChannels, TargetAudioBitrateKbps: req.TargetAudioBitrateKbps, TargetBitrateKbps: req.TargetBitrateKbps, SegmentDuration: req.SegmentDuration, HWAccel: hw, AudioTrackIndex: req.AudioTrackIndex, SubtitleTrackIndex: req.SubtitleTrackIndex, SubtitleBurnIn: req.SubtitleBurnIn, SubtitleCodec: req.SubtitleCodec, TotalDuration: req.TotalDuration, ThrottleSeconds: req.ThrottleSeconds})
 	card.ToneMapDVConfigPresent = req.ToneMapDVConfigPresent
+	if encoderHWAccel := strings.TrimSpace(nodeResp.EncoderHWAccel); encoderHWAccel != "" {
+		card.EncoderHWAccel = encoderHWAccel
+	}
 	card.ToneMapDVBLCompatIDPresent = req.ToneMapDVBLCompatIDPresent
 	card.ToneMapDVBLPresent = req.ToneMapDVBLPresent
 	card.ToneMapDVRPUPresent = req.ToneMapDVRPUPresent
@@ -6085,12 +6088,13 @@ func (h *PlaybackHandler) plannerSettingsV3Result(ctx context.Context) (settings
 	viewerTranscodeDisabled := h.viewerTranscodeDisabledV3(ctx)
 	defer func() { settings.ViewerTranscodeDisabled = <-viewerTranscodeDisabled }()
 	if h.SettingsRepo != nil {
-		var values [3]string
-		var errs [3]error
+		var values [4]string
+		var errs [4]error
 		keys := [...]string{
 			config.Allow4KTranscodeSettingKey,
 			config.PlaybackTranscodeHardwareToneMapSettingKey,
 			config.PlaybackTranscodeSoftwareToneMapSettingKey,
+			config.PlaybackAllowHEVCEncodingSettingKey,
 		}
 		var group sync.WaitGroup
 		group.Add(len(keys))
@@ -6110,9 +6114,13 @@ func (h *PlaybackHandler) plannerSettingsV3Result(ctx context.Context) (settings
 		if errs[2] != nil {
 			return settings, fmt.Errorf("load software tone-map setting: %w", errs[2])
 		}
+		if errs[3] != nil {
+			return settings, fmt.Errorf("load HEVC encoding setting: %w", errs[3])
+		}
 		settings.Allow4KTranscode = strings.EqualFold(values[0], "true")
 		settings.HardwareToneMapEnabled = strings.EqualFold(values[1], "true")
 		settings.SoftwareToneMapEnabled = strings.EqualFold(values[2], "true")
+		settings.AllowHEVCEncoding = strings.EqualFold(values[3], "true")
 	}
 	return settings, nil
 }
@@ -6591,8 +6599,16 @@ func videoBitstreamFilterForPlanV3(plan *playback.PlanV3) string {
 	return ""
 }
 
+const playbackVideoCodecHEVC = "hevc"
+
 func videoSampleEntryForPlanV3(plan *playback.PlanV3) string {
-	if plan == nil || plan.Delivery != playback.DeliveryRemuxHLSV3 {
+	if plan == nil {
+		return ""
+	}
+	if plan.Delivery == playback.DeliveryTranscodeHLSV3 && plan.EffectiveRecipe.VideoCodec == playbackVideoCodecHEVC && plan.EffectiveRecipe.VideoSampleEntry == playback.VideoSampleEntryHVC1 {
+		return playback.VideoSampleEntryHVC1
+	}
+	if plan.Delivery != playback.DeliveryRemuxHLSV3 {
 		return ""
 	}
 	if plan.EffectiveRecipe.VideoSampleEntry != "" {

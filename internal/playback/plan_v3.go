@@ -14,6 +14,7 @@ import (
 type PlannerSettingsV3 struct {
 	TranscodeEnabled       bool
 	Allow4KTranscode       bool
+	AllowHEVCEncoding      bool
 	HardwareToneMapEnabled bool
 	SoftwareToneMapEnabled bool
 	// ViewerTranscodeDisabled reflects the viewer's account policy. Session
@@ -1034,13 +1035,20 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 	if hlsRegistry == nil || !hlsRegistry.Available(TransformationVideoToH264V3) || !hlsRegistry.Available(TransformationAudioToAACV3) {
 		return terminalPlannerResultV3("conversion_tool_unavailable", "The required validated H.264/AAC conversion toolchain is unavailable.", true)
 	}
+	targetVideoCodec := transcodeCodecH264
+	if input.Settings.AllowHEVCEncoding && hlsRegistry.Available(TransformationVideoToHEVCV3) && hlsHEVCOutputSupportedV3(input.Request, quality, source) {
+		targetVideoCodec = transcodeCodecHEVC
+	}
 	if source.DynamicRange != "" && source.DynamicRange != DynamicRangeSDRV3 {
 		base.AvailableQualities = availableQualitiesForRouteV3(input, source)
 	}
 	plan := base
 	plan.Delivery = DeliveryTranscodeHLSV3
 	plan.Stream = StreamV3{Protocol: StreamHLSV3, Container: containerHLSV3, MIMEType: "application/vnd.apple.mpegurl", Headers: map[string]string{}, HeaderRefresh: HeaderRefreshNoneV3}
-	plan.EffectiveRecipe.VideoCodec = "h264"
+	plan.EffectiveRecipe.VideoCodec = targetVideoCodec
+	if targetVideoCodec == transcodeCodecHEVC {
+		plan.EffectiveRecipe.VideoSampleEntry = VideoSampleEntryHVC1
+	}
 	plan.EffectiveRecipe.AudioCodec = "aac"
 	plan.EffectiveRecipe.Width = intPointerV3(quality.Width)
 	plan.EffectiveRecipe.Height = intPointerV3(quality.Height)
@@ -1063,7 +1071,7 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 	plan.EffectiveRecipe.AudioChannels = intPointerV3(targetAudioChannels)
 	plan.EffectiveRecipe.AudioLayout = audioLayout
 	plan.Transformations = append(plan.Transformations,
-		TransformationV3{Name: TransformationVideoToH264V3, Executor: ExecutorServerV3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, ValidatedClaims: []string{ClaimH264DecodeV3}},
+		videoTransformationForTargetV3(targetVideoCodec),
 		TransformationV3{Name: TransformationAudioToAACV3, Executor: ExecutorServerV3, RecipeVersion: TransformationAudioToAACRecipeVersionV3, ValidatedClaims: []string{ClaimAudioDecodeV3}},
 	)
 	toneMapPolicy := toneMapRecipe.policy
@@ -1107,10 +1115,75 @@ func planVideoTranscodeV3(input PlannerInputV3, base PlanV3, source SourceDescri
 		return terminalPlannerResultV3("adaptation_unavailable", "The HLS delivery cannot decode the planned transcode recipe.", false)
 	}
 	finalizePlanIdentityV3(&plan, input.Request.PlaybackAttemptID, input.Request.ClientPlaybackContext.Output.OutputContextID)
+	// A failed HEVC attempt does not exhaust the H.264 route. Rebuild the
+	// candidate before checking exhaustion so recovery can downgrade codecs on
+	// the same HLS delivery without changing source/remux behavior.
+	if targetVideoCodec == transcodeCodecHEVC && planAttemptedV3(plan, input.Request.ClientPlaybackContext.Output.OutputContextID, input.AttemptedKeys) {
+		targetVideoCodec = transcodeCodecH264
+		plan.EffectiveRecipe.VideoCodec = targetVideoCodec
+		plan.EffectiveRecipe.VideoSampleEntry = ""
+		if !replaceVideoTransformationV3(&plan, targetVideoCodec) || !deliverySupportsPlanV3(input.Request, DeliveryClassHLSV3, plan) {
+			return terminalPlannerResultV3("adaptation_unavailable", "The HLS delivery cannot decode the H.264 fallback recipe.", false)
+		}
+		finalizePlanIdentityV3(&plan, input.Request.PlaybackAttemptID, input.Request.ClientPlaybackContext.Output.OutputContextID)
+	}
 	if planAttemptedV3(plan, input.Request.ClientPlaybackContext.Output.OutputContextID, input.AttemptedKeys) {
 		return terminalPlannerResultV3("adaptation_exhausted", "All compatible playback recipes have already failed for this output route.", false)
 	}
-	return PlannerResultV3{Plan: &plan, PlayMethod: PlayTranscode, TranscodeAudio: true, TargetVideoCodec: "h264", TargetAudioCodec: "aac", SourceAudioChannels: stereoDownmixSourceChannelsV3(source.AudioChannels, targetAudioChannels, true), TargetAudioChannels: targetAudioChannels, TargetAudioBitrateKbps: targetAudioBitrateKbps, TargetResolution: quality.Label, TargetBitrateKbps: quality.BitrateKbps, SubtitleTrackIndex: subtitle.SelectedIndex, SubtitleTransportTrackIndex: subtitle.TransportIndex, SubtitleBurnIn: subtitle.RequiresBurn, SubtitleCodec: subtitle.Codec, DownloadedSubtitleID: subtitle.DownloadedSubtitleID, ToneMapPolicy: toneMapPolicy, ToneMapMode: toneMapMode, ToneMapSourceKind: toneMapSourceKind, ToneMapRecipeVersion: toneMapRecipeVersionV3(toneMapOK), ToneMapPreflightRequired: toneMapResolution.PreflightRequired, ToneMapSourceRevision: toneMapRevision}
+	return PlannerResultV3{Plan: &plan, PlayMethod: PlayTranscode, TranscodeAudio: true, TargetVideoCodec: targetVideoCodec, TargetAudioCodec: "aac", SourceAudioChannels: stereoDownmixSourceChannelsV3(source.AudioChannels, targetAudioChannels, true), TargetAudioChannels: targetAudioChannels, TargetAudioBitrateKbps: targetAudioBitrateKbps, TargetResolution: quality.Label, TargetBitrateKbps: quality.BitrateKbps, SubtitleTrackIndex: subtitle.SelectedIndex, SubtitleTransportTrackIndex: subtitle.TransportIndex, SubtitleBurnIn: subtitle.RequiresBurn, SubtitleCodec: subtitle.Codec, DownloadedSubtitleID: subtitle.DownloadedSubtitleID, ToneMapPolicy: toneMapPolicy, ToneMapMode: toneMapMode, ToneMapSourceKind: toneMapSourceKind, ToneMapRecipeVersion: toneMapRecipeVersionV3(toneMapOK), ToneMapPreflightRequired: toneMapResolution.PreflightRequired, ToneMapSourceRevision: toneMapRevision}
+}
+
+func videoTransformationForTargetV3(codec string) TransformationV3 {
+	if codec == transcodeCodecHEVC {
+		return TransformationV3{Name: TransformationVideoToHEVCV3, Executor: ExecutorServerV3, RecipeVersion: TransformationVideoToHEVCRecipeVersionV3, ValidatedClaims: []string{ClaimHEVCDecodeV3}}
+	}
+	return TransformationV3{Name: TransformationVideoToH264V3, Executor: ExecutorServerV3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, ValidatedClaims: []string{ClaimH264DecodeV3}}
+}
+
+func replaceVideoTransformationV3(plan *PlanV3, codec string) bool {
+	if plan == nil {
+		return false
+	}
+	for i, transformation := range plan.Transformations {
+		if transformation.Name == TransformationVideoToH264V3 || transformation.Name == TransformationVideoToHEVCV3 {
+			plan.Transformations[i] = videoTransformationForTargetV3(codec)
+			return true
+		}
+	}
+	return false
+}
+
+const hevcMainProfileV3 = "main"
+
+// hlsHEVCOutputSupportedV3 requires the selected HLS executor to name HEVC
+// explicitly and verifies its detailed decoder can handle this server's Main
+// 8-bit SDR output at the chosen dimensions and bitrate. Flat codec lists are
+// insufficient here: they can describe source copy support without proving
+// the fMP4 transcode decoder that will receive this recipe.
+func hlsHEVCOutputSupportedV3(request StartRequestV3, quality QualityResultV3, source SourceDescriptorV3) bool {
+	delivery, ok := request.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3]
+	if !ok || !delivery.Enabled || !delivery.SupportedOnDevice || !containsFoldV3(delivery.VideoCodecs, transcodeCodecHEVC) {
+		return false
+	}
+	output := source
+	output.VideoCodec = transcodeCodecHEVC
+	output.VideoProfile = hevcMainProfileV3
+	output.BitDepth = 8
+	output.Width = quality.Width
+	output.Height = quality.Height
+	output.BitrateKbps = quality.BitrateKbps
+	output.DynamicRange = DynamicRangeSDRV3
+	// The FFmpeg HEVC recipe does not currently pin -level:v, so it must not
+	// claim a level to an exact decoder with a bounded level list. A level-bound
+	// client stays on H.264 until the target level is selected, frozen, and
+	// enforced as part of the executable HEVC recipe.
+	for _, decoder := range request.Capabilities.VideoDecode {
+		if strings.EqualFold(decoder.Codec, transcodeCodecHEVC) && len(decoder.Levels) > 0 {
+			return false
+		}
+	}
+	ok, _ = videoEligibleV3(output, request)
+	return ok
 }
 
 // applySubtitleDecisionV3 changes the delivery-specific subtitle policy without

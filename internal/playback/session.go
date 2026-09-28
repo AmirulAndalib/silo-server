@@ -777,20 +777,33 @@ func (m *SessionManager) RollbackReconstructedToneMap(expected *Session) bool {
 	return true
 }
 
-// ConfirmReconstructedToneMap publishes the executor selected by a successful
+// CaptureReconstructedExecution records the session incarnation and stream
+// revision before a runtime rebuild. The pointer is only an ownership token.
+func (m *SessionManager) CaptureReconstructedExecution(sessionID string) (*Session, uint64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	current := m.sessions[sessionID]
+	if current == nil {
+		return nil, 0
+	}
+	return current, current.streamRevision
+}
+
+// ConfirmReconstructedExecution publishes the executors selected by a successful
 // runtime reconstruction only while expected still owns the session ID. It
 // returns the current session so callers yield to a concurrent legitimate
 // successor instead of overwriting it with stale execution facts.
-func (m *SessionManager) ConfirmReconstructedToneMap(expected *Session, mode tonemap.Mode) *Session {
+func (m *SessionManager) ConfirmReconstructedExecution(expected *Session, revision uint64, mode tonemap.Mode, encoderHWAccel string) *Session {
 	if expected == nil || expected.ID == "" {
 		return nil
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current := m.sessions[expected.ID]
-	if current == expected {
-		if current.ToneMapMode != mode {
+	if current == expected && current.streamRevision == revision {
+		if current.ToneMapMode != mode || current.TranscodeHWAccel != encoderHWAccel {
 			current.ToneMapMode = mode
+			current.TranscodeHWAccel = encoderHWAccel
 			current.streamRevision++
 		}
 		m.touchSessionLocked(current)

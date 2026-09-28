@@ -1727,29 +1727,50 @@ func TestBuildFFmpegArgs_VideoToolboxHi10PDecodesInSoftware(t *testing.T) {
 	}
 }
 
-func TestBuildFFmpegArgs_VideoToolboxHEVCKeepsSourceBitDepth(t *testing.T) {
+func TestBuildFFmpegArgs_VideoToolboxHEVCForcesMain8Bit(t *testing.T) {
 	args := buildFFmpegArgs(TranscodeOpts{
-		InputPath:        "/media/movie.mkv",
-		OutputDir:        "/tmp/out",
-		SessionID:        "session-vt-hevc",
-		FFmpegPath:       videoToolboxTestFFmpeg(t),
-		SourceVideoCodec: "hevc",
-		TargetCodecVideo: "hevc",
-		TargetCodecAudio: "copy",
-		SegmentDuration:  2,
-		HWAccel:          "videotoolbox",
-		TargetResolution: "1080p",
+		InputPath:           "/media/movie.mkv",
+		OutputDir:           "/tmp/out",
+		SessionID:           "session-vt-hevc",
+		FFmpegPath:          videoToolboxTestFFmpeg(t),
+		SourceVideoCodec:    "hevc",
+		SourceVideoProfile:  "Main 10",
+		SourceVideoBitDepth: 10,
+		TargetCodecVideo:    "hevc",
+		TargetCodecAudio:    "copy",
+		SegmentDuration:     2,
+		HWAccel:             "videotoolbox",
+		TargetResolution:    "1080p",
 	})
 
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "-c:v hevc_videotoolbox") {
 		t.Fatalf("videotoolbox args should use hevc_videotoolbox encoder: %s", joined)
 	}
-	if strings.Contains(joined, "-pix_fmt") {
-		t.Fatalf("videotoolbox hevc must not force a pixel format (HDR10 passthrough): %s", joined)
+	if !strings.Contains(joined, "-pix_fmt yuv420p -profile:v main") {
+		t.Fatalf("videotoolbox HEVC must force Main 8-bit output: %s", joined)
 	}
 	if !strings.Contains(joined, "-b:v 6000k -maxrate 6000k -bufsize 12000k") {
 		t.Fatalf("uncapped videotoolbox hevc should use the portable default bitrate: %s", joined)
+	}
+}
+
+func TestBuildFFmpegArgs_VideoToolboxHEVCHardwareToneMapKeepsNV12(t *testing.T) {
+	args := buildFFmpegArgs(TranscodeOpts{
+		InputPath: "/media/hdr.mkv", OutputDir: t.TempDir(), SessionID: "session-vt-hevc-tonemap",
+		FFmpegPath: videoToolboxTestFFmpeg(t), SourceVideoCodec: "hevc", SourceVideoProfile: "Main 10", SourceVideoBitDepth: 10,
+		TargetCodecVideo: "hevc", TargetCodecAudio: "aac", SegmentDuration: 2, TargetResolution: "1080p",
+		HWAccel: transcodeHWVideoToolbox, ToneMapPolicy: tonemap.PolicyHardwareThenSoftware,
+		ToneMapMode: tonemap.ModeHardware, ToneMapSourceKind: tonemap.SourcePQ, ToneMapFilter: tonemap.HardwareFilterVideoToolbox,
+		ToneMapRecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3,
+	})
+
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-c:v hevc_videotoolbox") || !strings.Contains(joined, "hwdownload,format=p010le,format=nv12") {
+		t.Fatalf("hardware tone-map HEVC must encode its NV12 output: %s", joined)
+	}
+	if strings.Contains(joined, "-pix_fmt") || strings.Contains(joined, "-profile:v") {
+		t.Fatalf("hardware tone-map HEVC must not override its NV12 output: %s", joined)
 	}
 }
 

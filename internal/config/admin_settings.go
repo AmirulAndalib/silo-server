@@ -60,6 +60,7 @@ const (
 // readers. Keep them here with the effective admin-setting defaults.
 const (
 	Allow4KTranscodeSettingKey               = "allow_4k_transcode"
+	PlaybackAllowHEVCEncodingSettingKey      = "playback.allow_hevc_encoding"
 	DownloadLocalTranscodeFallbackSettingKey = "download.local_transcode_fallback"
 )
 
@@ -142,6 +143,7 @@ var adminSettingDefaults = map[string]string{
 	playbackSegmentRetentionSettingKey:               "600",
 	"playback.hw_accel":                              "auto",
 	"playback.transcode_enabled":                     "true",
+	PlaybackAllowHEVCEncodingSettingKey:              "false",
 	PlaybackRoutingDirectPlayEgressSettingKey:        string(PlaybackEgressPreferProxy),
 	PlaybackRoutingRemuxExecutionSettingKey:          string(PlaybackExecutionPreferTranscode),
 	PlaybackRoutingRemuxEgressSettingKey:             string(PlaybackEgressPreferProxy),
@@ -384,7 +386,7 @@ func NormalizeAdminSetting(key, raw string) (string, error) {
 	value := strings.TrimSpace(raw)
 
 	switch key {
-	case "metadata.cache_images", "playback.transcode_enabled",
+	case "metadata.cache_images", "playback.transcode_enabled", PlaybackAllowHEVCEncodingSettingKey,
 		chapterThumbnailSoftwareToneMapKey, PlaybackTranscodeHardwareToneMapSettingKey,
 		PlaybackTranscodeSoftwareToneMapSettingKey, CatalogScopeVersionsToLibrarySettingKey,
 		Allow4KTranscodeSettingKey, "enable_transcode_throttle", "audiobookshelf_compat.enabled",

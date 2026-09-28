@@ -30,6 +30,7 @@ import {
 // actually touches.
 const TRANSCODING_ESSENTIAL_KEYS = [
   "playback.transcode_enabled",
+  "playback.allow_hevc_encoding",
   "playback.hw_accel",
   "allow_4k_transcode",
 ];
@@ -330,6 +331,13 @@ export default function PlaybackSettings() {
             value={hwAccel}
             onChange={(v) => form.setValue("playback.hw_accel", v)}
             restartRequired={restartKeys.has("playback.hw_accel")}
+          />
+          <SettingField
+            label="Allow HEVC encoding"
+            type="toggle"
+            description="Use HEVC for clients that support HEVC over HLS. Other clients keep H.264."
+            value={form.getValue("playback.allow_hevc_encoding")}
+            onChange={(v) => form.setValue("playback.allow_hevc_encoding", v)}
           />
           <SettingField
             label="Allow 4K transcoding"
