@@ -60,6 +60,35 @@ release event's episode key:
 - `next_up` notifies only when the episode is at or beyond the profile's
   `next_expected_episode_key`.
 - Suppress when `last_notified_episode_key >= episode_key`.
+- `continue_watching` and `next_up` follow Home. The interest recompute
+  clears them for a series the profile removed from that surface:
+  - An active series drop clears both until the profile watches the series
+    again.
+  - A per-card Continue Watching dismissal clears `continue_watching` while
+    the dismissed episode's progress is unchanged. As on Home, an in-progress
+    episode no longer counts once a later episode of the series was completed
+    more recently.
+  - A per-card Next Up dismissal clears `next_up` while the dismissed episode
+    is still the card Home would show: the first episode after the most
+    recently completed one that has a present file and that the profile has
+    not started (by Home's Postgres progress test, or by the profile's own
+    store).
+
+  Favorites and watchlist are unaffected. The progression cursor is kept, so
+  `next_up` resumes from the right episode once a removal lapses. Every
+  removal or restore queues a recompute, and a second one ten minutes later.
+  Resuming playback can lift a removal without changing any progress state,
+  so a progress write queues one too when it is the row's first write since
+  the profile's last Home change on this node, or when it lands more than
+  ten minutes after the row's stamp, by its own stamp or by the clock (a new
+  watch session, or a late import).
+
+  The Home-change marker and the second recompute live in the memory of the
+  node that handled the removal. A resume handled by another node within ten
+  minutes waits for that second recompute, and if the node restarts first,
+  for the daily interest rebuild. A release fanned out in that window is
+  judged on the stale interest. Evaluating Home removals at fanout time would
+  close the gap.
 - Profile-level notification preferences are a hard gate: a reason disabled
   in preferences can never match, so no delivery row is created and no
   channel — including webhooks — ever sees the event. Per-webhook reason
