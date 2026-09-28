@@ -1359,13 +1359,9 @@ func compoundRungQualityResultV3(rung ladderRungV3, source SourceDescriptorV3, c
 	if width == 0 {
 		width, _ = dimensionsFromResolutionV3(resolutionLabelV3(height))
 	}
-	targetLabel := resolutionLabelV3(height)
-	if sameResolutionClass && source.Height > 0 && source.Height != rung.Height {
-		// The transcoder treats an unknown exact-height label as "do not scale",
-		// which preserves the source's cinema crop while still applying the
-		// selected bitrate and tone-map recipe.
-		targetLabel = strconv.Itoa(source.Height) + "p"
-	}
+	// Keep the clamped height exact. The transcoder leaves non-ladder heights
+	// unscaled, preserving the source crop even on a lower-class rung.
+	targetLabel := strconv.Itoa(height) + "p"
 	return QualityResultV3{
 		Label:             targetLabel,
 		Width:             width,

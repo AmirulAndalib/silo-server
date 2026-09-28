@@ -167,6 +167,56 @@ func TestResolveQualityPolicyV3CompoundRung(t *testing.T) {
 	}
 }
 
+func TestPlanPlaybackV3CroppedRungKeepsEncoderHeight(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		width, height             int
+		rung                      string
+		wantWidth, wantHeight     int
+		wantResolution, wantScale string
+	}{
+		{"cropped 1080p on 720p rung", 1918, 700, QualityRung720pMediumV3, 1918, 700, "700p", ""},
+		{"cropped 720p on 480p rung", 1024, 436, "480p", 1024, 436, "436p", ""},
+		{"same class crop", 1918, 872, QualityRung1080pMediumV3, 1918, 872, "872p", ""},
+		{"lower resolution", 1920, 1080, QualityRung720pMediumV3, 1280, 720, "720p", "scale=-2:720"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := bitratePolicyFixtureV3()
+			input.EffectiveFile.VideoTracks[0].Width = tc.width
+			input.EffectiveFile.VideoTracks[0].Height = tc.height
+			input.Request.QualityPreference = tc.rung
+			result := PlanPlaybackV3(input)
+			if result.Plan == nil || result.PlayMethod != PlayTranscode {
+				t.Fatalf("expected a transcode plan: %s", ExplainPlannerResultV3(result))
+			}
+			advertised := false
+			for _, quality := range result.Plan.AvailableQualities {
+				if quality.Label == tc.rung {
+					advertised = true
+				}
+			}
+			if !advertised {
+				t.Fatalf("selected rung %q is missing from the menu", tc.rung)
+			}
+			recipe := result.Plan.EffectiveRecipe
+			if optionalValueV3(recipe.Width) != tc.wantWidth || optionalValueV3(recipe.Height) != tc.wantHeight {
+				t.Fatalf("recipe dimensions = %dx%d, want %dx%d", optionalValueV3(recipe.Width), optionalValueV3(recipe.Height), tc.wantWidth, tc.wantHeight)
+			}
+			if result.TargetResolution != tc.wantResolution {
+				t.Errorf("encoder target = %q, want %q", result.TargetResolution, tc.wantResolution)
+			}
+			args := appendVideoFilterArgs(nil, TranscodeOpts{TargetResolution: result.TargetResolution})
+			var wantArgs []string
+			if tc.wantScale != "" {
+				wantArgs = []string{"-vf", tc.wantScale}
+			}
+			if !reflect.DeepEqual(args, wantArgs) {
+				t.Errorf("encoder filter args = %v, want %v", args, wantArgs)
+			}
+		})
+	}
+}
+
 func TestReplanRequestV3OperationDefaultsAndValidates(t *testing.T) {
 	start := validStartRequestV3()
 	request := ReplanRequestV3{
