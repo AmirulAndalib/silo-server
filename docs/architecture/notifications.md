@@ -16,6 +16,14 @@ saw it. Availability is a one-way fact: file churn (quality upgrades,
 re-downloads) does not re-notify, and libraries emit no events until their
 initial availability seeding completes.
 
+Availability is recorded when a file links to an episode or item, which can
+happen long after the file arrived: a file can sit in the library unmatched
+until a parser fix or metadata correction. Content added more than 14 days
+before it became available is therefore recorded without a release event. The added time is the catalog's: `episode_libraries.first_seen_at`
+(taken from the earliest linked file) for episodes, and the earliest present
+file in the library for flat items. The window leaves room for new episodes
+whose metadata lands a few days after the file.
+
 Event kinds:
 
 - `episode` — carries series/episode identity and fans out to interested
