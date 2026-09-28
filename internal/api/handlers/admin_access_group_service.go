@@ -75,14 +75,8 @@ func (h *AccessGroupHandler) DeleteAdminAccessGroup(ctx context.Context, id int6
 	if !ok {
 		return s.DeleteConditional(ctx, id, guard)
 	}
-	moved, err := mover.DeleteMovingMembers(ctx, id, guard, func(ctx context.Context, tx pgx.Tx, userIDs []int) error {
-		for _, userID := range userIDs {
-			if err := auth.RevokeSignInsInTransaction(ctx, tx, userID); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	// Set-based, so the group-writer lock is not held for per-member statements.
+	moved, err := mover.DeleteMovingMembers(ctx, id, guard, auth.RevokeSignInsForUsersInTransaction)
 	if err != nil {
 		return err
 	}

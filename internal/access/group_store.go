@@ -482,7 +482,7 @@ func (s *GroupStore) DeleteMovingMembers(ctx context.Context, id int64, guard Gr
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("beginning access group delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	if err = lockGroupWriters(ctx, tx); err != nil {
