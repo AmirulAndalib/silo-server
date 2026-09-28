@@ -1,6 +1,6 @@
 ---
 title: Silo Wiki
-description: User-facing Silo documentation written in Markdown for in-repo use and Wiki.js sync.
+description: Legacy operator pages that are moving to the user manual on siloserver.org.
 summary: Index of digestible Silo docs by audience and subject.
 tags:
   - silo
@@ -15,9 +15,12 @@ related: []
 
 # Silo Wiki
 
-This directory is the repo-local home for user-digestible Silo documentation. Pages here
-should stay portable Markdown so they can render cleanly in GitHub and sync into Wiki.js without
-rewriting.
+> [!IMPORTANT]
+> This directory takes no new pages or sections. Guides for installing, configuring, and running
+> Silo live in the [user manual](https://siloserver.org/docs), whose source is
+> [Silo-Server/siloserver.org](https://github.com/Silo-Server/siloserver.org). Send new operator
+> and user guides there. The pages below remain until they move to the manual; correct one only
+> when a code change makes it wrong.
 
 ## Sections
 
@@ -51,12 +54,10 @@ rewriting.
 
 ## Editing Rules
 
-- Keep pages in `docs/wiki/` digestible for the intended audience.
-- Prefer updating existing pages over creating duplicates.
-- Use YAML frontmatter and portable Markdown.
-- Add `## Source References` sections instead of copying code into docs.
-- Reserve `docs/wiki/` for end-user and operator docs. Keep architecture material in
-  `docs/architecture/`.
-- When a page is added, replace the matching `No pages yet.` line with bullet entries in this form:
-  `- [Page Title](section/file.md) - one-line summary`
-- When a section already has pages, append a new bullet instead of adding prose.
+- Do not add pages or sections here. New operator and user guides go to the user manual.
+- Correct an existing page when a code change makes it wrong, and open a
+  [siloserver.org](https://github.com/Silo-Server/siloserver.org) issue if the manual needs the
+  same fix.
+- Keep architecture material in `docs/architecture/`.
+- Use YAML frontmatter, portable Markdown, and `## Source References` sections instead of copied
+  code.

@@ -19,7 +19,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a>
-  · <a href="docs/wiki/index.md">Documentation</a>
+  · <a href="https://siloserver.org/docs">Documentation</a>
   · <a href="docs/release-versioning.md">Builds &amp; releases</a>
   · <a href="https://discord.gg/siloserver">Discord</a>
   · <a href="#supporting-silo">Support Silo</a>
@@ -120,7 +120,7 @@ defines each tag and the SemVer contract.
 
 ## Documentation
 
-- [Documentation index](docs/wiki/index.md) — user and operator guides
+- [User manual](https://siloserver.org/docs) — installing, configuring, and running Silo
 - [Development guide](DEVELOPMENT.md) — source setup, builds, tests, migrations
 - [Settings API](docs/settings-api.md), [Downloads API](docs/downloads-api.md), and [Apple Push Display Token](docs/notifications-push-api.md) — client contracts
 
