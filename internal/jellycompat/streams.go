@@ -2394,6 +2394,21 @@ func (h *PlaybackHandler) handlePlaybackReport(w http.ResponseWriter, r *http.Re
 			}
 		}
 	}
+	// An ID-less Stopped report can't end the play (see below): it may be a
+	// stale stop from an earlier play of the same item. It must not touch the
+	// pause state either, since a paused session's long idle grace is what
+	// keeps a really-paused play alive (#1454 review). Mark it instead, which
+	// only hides it from the live admin view until its next progress report.
+	if stop && unidentified && h.sessionMgr != nil {
+		if marker, ok := h.sessionMgr.(interface{ MarkStopReported(string) error }); ok {
+			if err := marker.MarkStopReported(playSession.UpstreamSessionID); err == nil {
+				h.syncSessionsNow(context.WithoutCancel(r.Context()), "compat_unidentified_stop")
+			} else if !errors.Is(err, playback.ErrSessionNotFound) {
+				slog.WarnContext(r.Context(), "jellycompat could not mark an unidentified stop", "component", "jellycompat",
+					"play_session_id", playSession.ID, "error", err)
+			}
+		}
+	}
 	if progressUpdated && !stop && previousSession != nil && previousSession.IsPaused != req.IsPaused {
 		updatedSession := *previousSession
 		updatedSession.Position = positionSeconds
