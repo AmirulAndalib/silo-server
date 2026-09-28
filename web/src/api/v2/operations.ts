@@ -151,6 +151,7 @@ export const v2Operations = {
   "GET /api/v2/admin/logs/audit": "listAdminAuditLogs",
   "GET /api/v2/admin/logs/ws": "connectAdminLogsSocket",
   "GET /api/v2/admin/logs/ws/capabilities": "getAdminLogsSocketCapabilities",
+  "GET /api/v2/admin/markers/capabilities": "getAdminMarkerCapabilities",
   "GET /api/v2/admin/markers/files/{fileId}/history": "listAdminFileMarkerHistory",
   "GET /api/v2/admin/markers/history": "listAdminMarkerHistory",
   "GET /api/v2/admin/markers/items/{id}/history": "listAdminItemMarkerHistory",
@@ -500,6 +501,7 @@ export const v2Operations = {
   "POST /api/v2/admin/collections": "createAdminCollection",
   "POST /api/v2/admin/collections/import/mdblist": "importAdminMDBList",
   "POST /api/v2/admin/collections/import/tmdb": "importAdminTMDB",
+  "POST /api/v2/admin/collections/import/tmdb-list": "importAdminTMDBList",
   "POST /api/v2/admin/collections/import/trakt": "importAdminTrakt",
   "POST /api/v2/admin/collections/preview": "previewAdminCollection",
   "POST /api/v2/admin/collections/template-bundles/{bundle_id}/apply":
@@ -527,6 +529,7 @@ export const v2Operations = {
   "POST /api/v2/admin/items/{id}/metadata-translation/jobs/{job_id}/cancel":
     "cancelAdminMetadataTranslation",
   "POST /api/v2/admin/items/{id}/redetect-intro": "redetectAdminEpisodeIntro",
+  "POST /api/v2/admin/items/{id}/redetect-markers": "redetectAdminItemMarkers",
   "POST /api/v2/admin/items/{id}/refresh-markers": "refreshAdminEpisodeMarkers",
   "POST /api/v2/admin/items/{id}/refresh-metadata": "refreshAdminItemMetadata",
   "POST /api/v2/admin/items/{id}/split": "splitAdminItem",
@@ -622,6 +625,7 @@ export const v2Operations = {
   "POST /api/v2/collections/groups": "createCollectionGroup",
   "POST /api/v2/collections/import/mdblist": "importMDBListCollection",
   "POST /api/v2/collections/import/tmdb": "importTMDBCollection",
+  "POST /api/v2/collections/import/tmdb-list": "importTMDBListCollection",
   "POST /api/v2/collections/import/trakt": "importTraktCollection",
   "POST /api/v2/collections/preview": "previewCollection",
   "POST /api/v2/collections/{id}/sync": "syncCollection",

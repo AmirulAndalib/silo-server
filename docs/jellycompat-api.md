@@ -128,6 +128,21 @@ its owning series and takes precedence over the path series and numeric season.
 Episode SQL queries default to 24 rows and cap each page at 1,000. Clients should
 page using `TotalRecordCount` and `StartIndex`.
 
+`/Items?ParentId={boxSetId}` lists a collection's members (movies, series, and
+the episodes of episode-scoped smart collections) in collection order unless
+`SortBy` is sent. Members get the same detail fields, such as `MediaSources` and
+`Path`, as they do when listed from their library. Episode-scoped smart
+collections honor `SortBy` over their own members; catalog and user-state
+filters on them are not supported yet and return no episodes.
+
+`Recursive=true` together with `Filters=IsNotFolder`, or with an
+`IncludeItemTypes` that names `Episode` but not `Series` or `Season`, returns the
+collection's playable leaves for Play all and Shuffle: movies and episodes, with
+member series expanded to the episodes that have a live file in a library the
+profile may access. Regular seasons come first, then specials. `SortBy=Random`
+shuffles the leaves; other sorts keep collection order. Other recursive
+requests list the members.
+
 `EnableImages=false`, `EnableImageTypes`, `ImageTypeLimit`, and
 `EnableUserData=false` control item response presentation. Fields requiring
 real detail are hydrated from the catalog; list responses no longer invent
@@ -155,10 +170,10 @@ request disables Primary images.
 | `GET /Items/{id}/ThemeSongs`, `/ThemeVideos` | Local theme songs for a visible owner; theme videos remain empty. |
 | `GET /Persons`, `/Persons/{name}` | People with credits in movies or series visible to the current profile. `/Persons` accepts Jellyfin 12's `StartIndex`, `NameStartsWith`, `NameLessThan`, and `NameStartsWithOrGreater` (lowercased name comparisons) and a library or movie/series `ParentId`; other parents match nobody. Pages without `SearchTerm` hold up to 100 people; searches stay capped at 20. Person photo tags are signed and appear only in responses that passed this visibility check. `GET /Items/{personId}/Images/Primary` accepts a matching signed `tag` without authentication, as Jellyfin Web sends image requests without credentials; otherwise the session must see a credit for the person. Either check runs before cached artwork is used. |
 
-These changes do not implement every advanced query option. Random and compound
-sorts, full `IsMissing` semantics, multiple person-ID predicates, populated tag
-facets, and the `Tags`, `StudioIds`, and `HasSubtitles` item filters remain
-outside this subset.
+These changes do not implement every advanced query option. Compound sorts,
+full `IsMissing` semantics, multiple person-ID predicates, populated tag facets,
+and the `Tags`, `StudioIds`, and `HasSubtitles` item filters remain outside this
+subset.
 
 ## Playback negotiation and media
 
@@ -257,6 +272,13 @@ layer (HEVC profile 5, AV1 profile 10), a client whose device profile lists
 variant, listed before the `hvc1` fallback. MPEG-TS remuxes keep the single
 variant. Audio and subtitle streams carry `LocalizedLanguage`, and audio
 streams carry `LocalizedOriginal`, in English.
+
+HEVC Dolby Vision Profile 8 with a proven HDR10 base layer and no enhancement
+layer can use HLS fMP4 remux when a positive video-range condition names both
+`DOVI` and `HDR10`. The source retains its `DOVIWithHDR10` metadata and Dolby
+Vision bitstream. Explicit exclusions and all other codec, audio, sample-entry,
+resolution, and level constraints remain enforced. HDR10-only clients do not
+gain this Dolby Vision-preserving route. Original-file direct play is unchanged.
 
 When a client's `VideoRangeType` conditions reject a Dolby Vision stream with
 an HDR10 base layer (HEVC profile 7, or profile 8 with compatibility ID 1) but
@@ -426,3 +448,18 @@ Themes do not create playback sessions or update watched state.
 
 See [local theme songs](catalog-api.md#local-theme-songs-v2) for file conventions,
 ownership, inheritance, and routing.
+
+## HEVC video encoding
+
+`playback.allow_hevc_encoding` enables HEVC output for negotiated HLS
+transcoding profiles that explicitly accept HEVC in fragmented MP4. The selected
+codec is preserved in the playback source, FFmpeg recipe, and restart recovery.
+Encoded HEVC playlists and segments use `/Videos/{id}/hevc-v1/...`; older
+API instances reject these routes during rolling upgrades instead of serving
+H.264 bytes for the negotiated HEVC stream.
+H.264 remains the fallback when the setting is disabled or the client profile
+cannot accept HEVC output, or no executor allowed by routing policy supports
+the complete HEVC recipe. Required audio conversion and tone mapping must be
+available on that same executor. Negotiation reads workers' stored capability
+reports; execution checks the selected worker again. Existing HEVC direct-play
+and remux routes are unchanged.
