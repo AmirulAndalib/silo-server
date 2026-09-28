@@ -380,14 +380,15 @@ function AccessGroupEditor({ initialEditor, onSaved, onDeleted }: AccessGroupEdi
   const destination = defaultGroupName
     ? `the default group, ${defaultGroupName},`
     : "the default group";
-  const deleteDescription =
-    memberCount === 0
-      ? "This group has no members. This can't be undone."
-      : `${
-          memberCount === undefined
-            ? "Its members"
-            : `${memberCount} ${memberCount === 1 ? "member" : "members"}`
-        } will move to ${destination} and be signed out so their new access applies. Settings they override on their own account are unchanged. This can't be undone.`;
+  // The count is cached and can be stale (an account may have joined since the
+  // list loaded), so a zero never drops the move and sign-out warning.
+  const movers =
+    memberCount === undefined
+      ? "Its members"
+      : memberCount === 0
+        ? "Any members (none when this list last loaded)"
+        : `${memberCount} ${memberCount === 1 ? "member" : "members"}`;
+  const deleteDescription = `${movers} will move to ${destination} and be signed out so their new access applies. Settings they override on their own account are unchanged. This can't be undone.`;
 
   // Draft state, keyed by group id via the parent's selection so switching
   // groups remounts this component with fresh initial values.
