@@ -128,6 +128,21 @@ its owning series and takes precedence over the path series and numeric season.
 Episode SQL queries default to 24 rows and cap each page at 1,000. Clients should
 page using `TotalRecordCount` and `StartIndex`.
 
+`/Items?ParentId={boxSetId}` lists a collection's members (movies, series, and
+the episodes of episode-scoped smart collections) in collection order unless
+`SortBy` is sent. Members get the same detail fields, such as `MediaSources` and
+`Path`, as they do when listed from their library. Episode-scoped smart
+collections honor `SortBy` over their own members; catalog and user-state
+filters on them are not supported yet and return no episodes.
+
+`Recursive=true` together with `Filters=IsNotFolder`, or with an
+`IncludeItemTypes` that names `Episode` but not `Series` or `Season`, returns the
+collection's playable leaves for Play all and Shuffle: movies and episodes, with
+member series expanded to the episodes that have a live file in a library the
+profile may access. Regular seasons come first, then specials. `SortBy=Random`
+shuffles the leaves; other sorts keep collection order. Other recursive
+requests list the members.
+
 `EnableImages=false`, `EnableImageTypes`, `ImageTypeLimit`, and
 `EnableUserData=false` control item response presentation. Fields requiring
 real detail are hydrated from the catalog; list responses no longer invent
@@ -155,10 +170,10 @@ request disables Primary images.
 | `GET /Items/{id}/ThemeSongs`, `/ThemeVideos` | Local theme songs for a visible owner; theme videos remain empty. |
 | `GET /Persons`, `/Persons/{name}` | People with credits in movies or series visible to the current profile. `/Persons` accepts Jellyfin 12's `StartIndex`, `NameStartsWith`, `NameLessThan`, and `NameStartsWithOrGreater` (lowercased name comparisons) and a library or movie/series `ParentId`; other parents match nobody. Pages without `SearchTerm` hold up to 100 people; searches stay capped at 20. Person photo tags are signed and appear only in responses that passed this visibility check. `GET /Items/{personId}/Images/Primary` accepts a matching signed `tag` without authentication, as Jellyfin Web sends image requests without credentials; otherwise the session must see a credit for the person. Either check runs before cached artwork is used. |
 
-These changes do not implement every advanced query option. Random and compound
-sorts, full `IsMissing` semantics, multiple person-ID predicates, populated tag
-facets, and the `Tags`, `StudioIds`, and `HasSubtitles` item filters remain
-outside this subset.
+These changes do not implement every advanced query option. Compound sorts,
+full `IsMissing` semantics, multiple person-ID predicates, populated tag facets,
+and the `Tags`, `StudioIds`, and `HasSubtitles` item filters remain outside this
+subset.
 
 ## Playback negotiation and media
 
