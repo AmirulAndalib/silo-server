@@ -1,8 +1,62 @@
 import { describe, expect, it } from "vitest";
 import { buildAdminSectionPayload, buildProfileSectionSaveEntry } from "./SectionEditorDrawer";
 import { queryDefinitionFromSectionConfig } from "@/api/types";
+import { withSectionLibraryFilterIds } from "@/lib/sectionLibraryFilter";
 
 describe("SectionEditorDrawer payload builders", () => {
+  describe.each(["recently_added", "recently_released"])("%s ownership", (sectionType) => {
+    it.each([
+      { name: "the original library is reselected", ids: [2], owner: 2 },
+      { name: "all libraries are selected", ids: [], owner: 2 },
+      { name: "the original library stays excluded", ids: [4], owner: null },
+    ])("uses the final selection when $name", ({ ids, owner }) => {
+      for (const filter of [
+        { filter_library_id: 2 },
+        { library_ids: [2], media_scope: "series" },
+      ]) {
+        const config = {
+          ...filter,
+          generated_source: "home_library_recent",
+          generated_library_id: 2,
+        };
+        const draft = withSectionLibraryFilterIds(config, [4]);
+        const recipeParams = withSectionLibraryFilterIds(draft, ids);
+        const input = {
+          section: {
+            id: "1",
+            scope: "home",
+            library_id: null,
+            section_type: sectionType,
+            title: "Recent in TV",
+            item_limit: 20,
+            featured: false,
+            enabled: true,
+            hidden: false,
+            is_custom: false,
+            customized: false,
+            position: 0,
+            created_at: "",
+            updated_at: "",
+            config,
+          },
+          scope: "home",
+          currentLibraryId: null,
+          sectionType,
+          title: "Recent in TV",
+          itemLimit: 20,
+          featured: false,
+          enabled: true,
+          queryDefinition: queryDefinitionFromSectionConfig(),
+          selectedCollectionId: "",
+          recipeParams,
+        };
+        const expectedConfig = { ...recipeParams, generated_library_id: owner };
+        expect(buildAdminSectionPayload(input).config).toEqual(expectedConfig);
+        expect(buildProfileSectionSaveEntry(input).config).toEqual(expectedConfig);
+      }
+    });
+  });
+
   it("preserves continue listening config for admin sections", () => {
     const payload = buildAdminSectionPayload({
       section: null,

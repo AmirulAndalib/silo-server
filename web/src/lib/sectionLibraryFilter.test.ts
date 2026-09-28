@@ -46,7 +46,7 @@ describe("withSectionLibraryFilterIds", () => {
     expect(sectionLibraryFilterIds(next)).toEqual([4, 2]);
   });
 
-  it("stops treating a generated row as its library's once that library is deselected", () => {
+  it("keeps the legacy owner while its library is deselected in the draft", () => {
     expect(
       withSectionLibraryFilterIds(
         {
@@ -58,12 +58,12 @@ describe("withSectionLibraryFilterIds", () => {
       ),
     ).toEqual({
       generated_source: "home_library_recent",
-      generated_library_id: null,
+      generated_library_id: 2,
       filter_library_ids: [4],
     });
   });
 
-  it("ends a generated row's ownership when a selection leaves its library out", () => {
+  it("keeps the owner in both config shapes when a draft leaves its library out", () => {
     expect(
       withSectionLibraryFilterIds(
         {
@@ -75,7 +75,7 @@ describe("withSectionLibraryFilterIds", () => {
       ),
     ).toEqual({
       generated_source: "home_library_recent",
-      generated_library_id: null,
+      generated_library_id: 2,
       filter_library_ids: [4],
     });
     expect(
@@ -90,7 +90,7 @@ describe("withSectionLibraryFilterIds", () => {
       ),
     ).toEqual({
       generated_source: "home_library_recent",
-      generated_library_id: null,
+      generated_library_id: 2,
       library_ids: [4],
       media_scope: "series",
     });

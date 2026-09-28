@@ -51,14 +51,13 @@ function generatedOwnerId(config: Record<string, unknown>): number | null {
 }
 
 /**
- * Returns a copy of config filtered to libraryIds ([] means all libraries).
+ * Returns a draft config filtered to libraryIds ([] means all libraries).
  * A query-definition config keeps its shape so its media_scope still applies;
  * any other config is written to filter_library_ids, and the legacy
  * filter_library_id is removed so it cannot widen the new selection.
  *
- * A generated row keeps its library as generated_library_id while that library
- * is selected, or all libraries are, so it still follows the library's renames
- * and deletion. A selection that leaves the library out ends that ownership.
+ * Keep the generated owner throughout the draft so a temporary deselection can
+ * be undone. finalizeSectionLibraryFilter decides ownership when saving.
  */
 export function withSectionLibraryFilterIds(
   config: Record<string, unknown>,
@@ -68,7 +67,7 @@ export function withSectionLibraryFilterIds(
   const next = { ...config };
   const owner = generatedOwnerId(config);
   if (owner !== null) {
-    next.generated_library_id = ids.length === 0 || ids.includes(owner) ? owner : null;
+    next.generated_library_id = owner;
   }
   if (flatFilterIds(config) === null && usesQueryDefinitionShape(config)) {
     if (ids.length > 0) next.library_ids = ids;
@@ -85,4 +84,15 @@ export function withSectionLibraryFilterIds(
     delete next.library_ids;
   }
   return next;
+}
+
+/** Detaches a generated row only when its saved selection excludes its library. */
+export function finalizeSectionLibraryFilter(
+  config: Record<string, unknown>,
+): Record<string, unknown> {
+  const owner = generatedOwnerId(config);
+  const ids = sectionLibraryFilterIds(config);
+  return owner !== null && ids.length > 0 && !ids.includes(owner)
+    ? { ...config, generated_library_id: null }
+    : { ...config };
 }

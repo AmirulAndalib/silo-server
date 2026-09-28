@@ -26,7 +26,10 @@ import LibraryMultiSelect from "@/components/LibraryMultiSelect";
 import { CollectionSearchableSelect } from "@/components/CollectionSearchableSelect";
 import RecipeParamFields from "@/components/RecipeGallery/RecipeParamFields";
 import { SECTION_TYPES, FILTER_SECTION_TYPES, sectionTypeLabel } from "@/lib/sectionTypes";
-import { LIBRARY_FILTER_SECTION_TYPES } from "@/lib/sectionLibraryFilter";
+import {
+  finalizeSectionLibraryFilter,
+  LIBRARY_FILTER_SECTION_TYPES,
+} from "@/lib/sectionLibraryFilter";
 import {
   matchRecipePreset,
   type Category,
@@ -147,7 +150,7 @@ export function buildProfileSectionSaveEntry({
   } else if (recipeParams && LIBRARY_FILTER_SECTION_TYPES.has(sectionType)) {
     // The params start from the section config and the library picker owns the
     // filter keys, so restoring the old filter_library_id would widen the selection.
-    config = { ...recipeParams };
+    config = finalizeSectionLibraryFilter(recipeParams);
   } else {
     config = preserveGeneratedSectionMetadata(section?.config, recipeParams ?? {});
   }
@@ -206,14 +209,14 @@ export function buildAdminSectionPayload({
     delete base.filter_library_ids;
     delete base.order;
     config = { ...base, ...queryDefinitionToSectionConfig(queryDefinition) };
+  } else if (recipeParams && LIBRARY_FILTER_SECTION_TYPES.has(sectionType)) {
+    // The library picker owns the filter keys; keeping the old ones from base
+    // would re-add a replaced filter_library_id.
+    delete base.filter_library_id;
+    delete base.filter_library_ids;
+    delete base.library_ids;
+    config = finalizeSectionLibraryFilter({ ...base, ...recipeParams });
   } else {
-    if (recipeParams && LIBRARY_FILTER_SECTION_TYPES.has(sectionType)) {
-      // The library picker owns the filter keys; keeping the old ones from base
-      // would re-add a replaced filter_library_id.
-      delete base.filter_library_id;
-      delete base.filter_library_ids;
-      delete base.library_ids;
-    }
     config = { ...base, ...recipeParams };
   }
 
