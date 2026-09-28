@@ -48,6 +48,15 @@ func (r *ReleaseRepository) MarkLibrarySeeded(ctx context.Context, libraryID int
 // availability inserts.
 const availabilityReturning = ` RETURNING episode_id, series_id, season_number, episode_number, episode_key, available_at`
 
+// newReleaseWindow bounds how long after content was added to a library it
+// can still become a release. Availability is recorded when a file links to
+// an episode or item, which can happen long after the file arrived: a file
+// that sat in the library unmatched until a parser fix or metadata correction
+// is not news when it finally matches, so such content is recorded silently.
+// The window leaves room for new episodes whose metadata lands a few days
+// after the file.
+const newReleaseWindow = 14 * 24 * time.Hour
+
 // availabilityOrdinalGuard excludes episode rows whose ordinals cannot fold
 // into an int4 episode_key; without the season upper bound the key expression
 // overflows in Postgres and aborts the whole insert. Must stay in sync with
@@ -243,10 +252,25 @@ func (r *ReleaseRepository) recordItemAvailability(ctx context.Context, k flatIt
 
 	events := 0
 	if emitEvents && len(inserted) > 0 {
+		ids := make([]string, len(inserted))
+		for i, row := range inserted {
+			ids[i] = row.ItemID
+		}
+		addedEarlier, err := itemsAddedBeforeWindow(ctx, tx, libraryID, ids)
+		if err != nil {
+			return 0, 0, err
+		}
+		releases := make([]newItem, 0, len(inserted))
+		for _, row := range inserted {
+			if _, ok := addedEarlier[row.ItemID]; !ok {
+				releases = append(releases, row)
+			}
+		}
+
 		const chunkSize = 500
-		for start := 0; start < len(inserted); start += chunkSize {
-			end := min(start+chunkSize, len(inserted))
-			chunk := inserted[start:end]
+		for start := 0; start < len(releases); start += chunkSize {
+			end := min(start+chunkSize, len(releases))
+			chunk := releases[start:end]
 
 			var sb strings.Builder
 			sb.WriteString(`
@@ -339,7 +363,21 @@ func (r *ReleaseRepository) recordAvailability(ctx context.Context, libraryID in
 
 	events := 0
 	if emitEvents && len(inserted) > 0 {
-		events, err = insertReleaseEvents(ctx, tx, libraryID, inserted)
+		ids := make([]string, len(inserted))
+		for i, row := range inserted {
+			ids[i] = row.EpisodeID
+		}
+		addedEarlier, err := episodesAddedBeforeWindow(ctx, tx, libraryID, ids)
+		if err != nil {
+			return 0, 0, err
+		}
+		releases := make([]newAvailability, 0, len(inserted))
+		for _, row := range inserted {
+			if _, ok := addedEarlier[row.EpisodeID]; !ok {
+				releases = append(releases, row)
+			}
+		}
+		events, err = insertReleaseEvents(ctx, tx, libraryID, releases)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -349,6 +387,49 @@ func (r *ReleaseRepository) recordAvailability(ctx context.Context, libraryID in
 		return 0, 0, fmt.Errorf("commit availability tx: %w", err)
 	}
 	return len(inserted), events, nil
+}
+
+// episodesAddedBeforeWindow returns the episodes whose library membership
+// began before newReleaseWindow. episode_libraries.first_seen_at is the
+// catalog's added time: the scanner takes it from the earliest linked file,
+// not from when the link was made. An episode without a membership row is
+// treated as new.
+func episodesAddedBeforeWindow(ctx context.Context, tx pgx.Tx, libraryID int, episodeIDs []string) (map[string]struct{}, error) {
+	return collectIDSet(ctx, tx, `
+		SELECT episode_id FROM episode_libraries
+		WHERE media_folder_id = $1 AND episode_id = ANY($2)
+		  AND first_seen_at < now() - ($3 * interval '1 second')`,
+		libraryID, episodeIDs, newReleaseWindow.Seconds())
+}
+
+// itemsAddedBeforeWindow returns the flat items whose earliest present file
+// in the library appeared before newReleaseWindow. Library membership is not
+// used: a late match creates the media_item_libraries row with the match
+// time. An item without a present file is treated as new.
+func itemsAddedBeforeWindow(ctx context.Context, tx pgx.Tx, libraryID int, itemIDs []string) (map[string]struct{}, error) {
+	return collectIDSet(ctx, tx, `
+		SELECT content_id FROM media_files
+		WHERE media_folder_id = $1 AND content_id = ANY($2)
+		  AND episode_id IS NULL AND missing_since IS NULL
+		GROUP BY content_id
+		HAVING min(created_at) < now() - ($3 * interval '1 second')`,
+		libraryID, itemIDs, newReleaseWindow.Seconds())
+}
+
+func collectIDSet(ctx context.Context, tx pgx.Tx, query string, args ...any) (map[string]struct{}, error) {
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("find content added before the release window: %w", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("scan content added before the release window: %w", err)
+	}
+	set := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		set[id] = struct{}{}
+	}
+	return set, nil
 }
 
 func insertReleaseEvents(ctx context.Context, tx pgx.Tx, libraryID int, rows []newAvailability) (int, error) {
